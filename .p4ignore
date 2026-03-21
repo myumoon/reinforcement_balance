@@ -1,0 +1,24 @@
+# Compiled/Intermediate
+ReinBalance/Binaries/
+ReinBalance/Intermediate/
+ReinBalance/DerivedDataCache/
+ReinBalance/Saved/
+
+# IDE
+.vs/
+.idea/
+*.sln
+*.suo
+*.sdf
+*.opensdf
+*.vcxproj
+*.vcxproj.*
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Git (P4と併用する場合)
+.git/
+.gitignore
+.gitattributes

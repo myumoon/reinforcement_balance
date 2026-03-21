@@ -7,7 +7,7 @@ ReinBalance/DerivedDataCache/
 ReinBalance/Saved/
 
 # ====================
-# アセット（DVC で管理）
+# アセット（Perforce で管理）
 # ====================
 ReinBalance/Content/
 

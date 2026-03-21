@@ -44,3 +44,12 @@ Public: Core, CoreUObject, Engine, InputCore, EnhancedInput
 - エディタ: Modeling Tools Editor Mode プラグイン有効
 - デフォルトマップ: `/Engine/Maps/Templates/OpenWorld`
 - PCH モード: UseExplicitOrSharedPCHs
+
+### ルール
+
+- モジュールなどをインポートする場合はバージョンを固定してください
+
+### その他制約
+
+- 返答は日本語で返答してください
+
