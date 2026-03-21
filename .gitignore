@@ -1,0 +1,26 @@
+# ====================
+# UE5 ビルド生成物
+# ====================
+ReinBalance/Binaries/
+ReinBalance/Intermediate/
+ReinBalance/DerivedDataCache/
+ReinBalance/Saved/
+
+# ====================
+# アセット（DVC で管理）
+# ====================
+ReinBalance/Content/
+
+# ====================
+# IDE / エディタ
+# ====================
+ReinBalance/.vs/
+ReinBalance/.vsconfig
+ReinBalance/*.sln
+.idea/
+
+# ====================
+# OS 生成ファイル
+# ====================
+Thumbs.db
+.DS_Store
