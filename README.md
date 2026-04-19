@@ -1,8 +1,11 @@
 # ReinBalance
 
 バランスゲームの強化学習をUE5で行うためのプロジェクト。
+Python (Stable-Baselines3) で訓練し、ONNX モデルを UE5 (NNERuntimeORT) で推論する。
 
 ## 環境要件
+
+### UE5 / C++
 
 | ツール | バージョン |
 |--------|-----------|
@@ -12,60 +15,143 @@
 | .NET Framework | 4.6.2 |
 | Perforce (P4V) | DVCS版 |
 
+### Python 訓練環境
+
+| ツール | バージョン |
+|--------|-----------|
+| Python | 3.11 |
+| pyenv-win | 最新版（Pythonバージョン管理） |
+
 ## ディレクトリ構成
 
 ```
-├── ReinBalance/              # UE5 プロジェクトルート
-│   ├── Config/               # エンジン設定
-│   ├── Content/              # ゲームアセット（P4で管理）
-│   └── Source/               # C++ ソースコード
-│       ├── ReinBalance/      # メインモジュール
+├── ReinBalance/
+│   ├── Config/                        # エンジン設定
+│   ├── Content/Models/                # 訓練済み ONNX モデル
+│   ├── Plugins/
+│   │   └── PythonTrainingComm/        # UE5↔Python HTTP 通信プラグイン
+│   └── Source/
+│       ├── ReinBalance/               # Runtime モジュール
+│       ├── ReinBalanceEditor/         # Editor モジュール（訓練サービス）
 │       ├── ReinBalance.Target.cs
 │       └── ReinBalanceEditor.Target.cs
-├── Documents/                # ドキュメント
-├── .p4ignore                 # Perforce除外設定
-└── .gitignore                # Git除外設定
+├── Tools/
+│   └── Training/                      # Python 訓練スクリプト
+│       ├── envs/                      # gymnasium 環境ラッパー
+│       ├── requirements.txt           # バージョン固定
+│       ├── setup.bat                  # Windows セットアップ
+│       ├── setup.sh                   # WSL/Linux セットアップ
+│       ├── train.py                   # 訓練エントリーポイント
+│       └── export_onnx.py             # ONNX 変換スクリプト
+├── Documents/                         # 設計ドキュメント
+├── .p4ignore
+└── .gitignore
 ```
+
+## セットアップ
+
+### 1. リポジトリのクローン
+
+```cmd
+git clone <リポジトリURL>
+cd ue5_reinforcement_balance
+```
+
+### 2. アセットの配置
+
+Google Drive から最終リビジョンのアセットをダウンロードし、`ReinBalance/Content/` に配置してください。
+
+https://drive.google.com/drive/folders/1K9mLsr1hXK57hIaL_xIgReT3TTyspMxE?usp=drive_link
+
+### 3. UE5 ビルド
+
+```powershell
+# エディタビルド（通常はこちら）
+"<UE5_INSTALL_DIR>/Engine/Build/BatchFiles/Build.bat" ReinBalanceEditor Win64 Development -Project="<PROJECT_ROOT>/ReinBalance/ReinBalance.uproject"
+
+# ゲームビルド
+"<UE5_INSTALL_DIR>/Engine/Build/BatchFiles/Build.bat" ReinBalance Win64 Development -Project="<PROJECT_ROOT>/ReinBalance/ReinBalance.uproject"
+```
+
+- `<UE5_INSTALL_DIR>`: 例 `C:\Program Files\Epic Games\UE_5.4`
+- `<PROJECT_ROOT>`: このリポジトリのルートパス
+
+Visual Studio からビルドする場合は `ReinBalance/ReinBalance.sln` を開いてください。
+
+### 4. Python 訓練環境のセットアップ
+
+#### Python 3.11 のインストール（初回のみ）
+
+[pyenv-win](https://github.com/pyenv-win/pyenv-win) を使ってバージョンを固定することを推奨します。
+
+```powershell
+# pyenv-win のインストール（PowerShell）
+Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/pyenv-win/pyenv-win/master/pyenv-win/install-pyenv-win.ps1" -OutFile "./install-pyenv-win.ps1"; & "./install-pyenv-win.ps1"
+```
+
+コマンドプロンプトを再起動後：
+
+```cmd
+pyenv install 3.11.9
+```
+
+#### venv の構築
+
+```cmd
+cd Tools\Training
+setup.bat
+```
+
+#### 動作確認（UE5 なし）
+
+```cmd
+.venv\Scripts\activate.bat
+python train.py --dry-run
+```
+
+`--dry-run` はスタブ環境を使用するため UE5 の起動は不要です。
+
+## 訓練の実行
+
+1. UE5 エディタでテストレベルを開き、Play In Editor (PIE) を開始する
+2. 別のコマンドプロンプトで訓練スクリプトを実行する
+
+```cmd
+cd Tools\Training
+.venv\Scripts\activate.bat
+python train.py
+```
+
+3. 訓練完了後、ONNX モデルに変換する
+
+```cmd
+python export_onnx.py
+```
+
+変換されたモデルは `ReinBalance/Content/Models/balance_model.onnx` に保存されます。
 
 ## ソース管理
 
 Git と Perforce を併用しています。
 
-| 管理対象 | ツール                                    |
-|----------|----------------------------------------|
-| ソースコード・設定ファイル | Git                                    |
-| アセット（Content/） | Perforce(最終リビジョン分をGoogleDriveに配置) |
-
-## アセット
-
-Google Drive に最終リビジョン分のアセットを配置しています。
-Content/フォルダに配置してください。
-
-https://drive.google.com/drive/folders/1K9mLsr1hXK57hIaL_xIgReT3TTyspMxE?usp=drive_link
-
-## ビルド
-
-### コマンドラインからビルド
-
-```powershell
-"<UE5_INSTALL_DIR>/Engine/Build/BatchFiles/Build.bat" ReinBalance Win64 Development -Project="<PROJECT_ROOT>/ReinBalance/ReinBalance.uproject"
-```
-
-- `<UE5_INSTALL_DIR>`: UE5 のインストールディレクトリ（例: `C:\Program Files\Epic Games\UE_5.4`）
-- `<PROJECT_ROOT>`: このリポジトリのルートパス
-
-### Visual Studio からビルド
-
-`ReinBalance/ReinBalance.sln` を開いてビルドしてください。
+| 管理対象 | ツール |
+|----------|--------|
+| ソースコード・設定ファイル・訓練スクリプト | Git |
+| アセット（Content/） | Perforce（最終リビジョンを Google Drive に配置） |
+| 訓練済み ONNX モデル（Content/Models/） | Git |
 
 ## エンジン設定
 
 - **グラフィックス**: DX12 / Shader Model 6
 - **入力**: Enhanced Input System
-- **プラグイン**: Modeling Tools Editor Mode
+- **プラグイン**: NNERuntimeORT（推論）、PythonTrainingComm（訓練通信）
+- **タイムステップ**: 固定 60fps（訓練安定化のため）
 - **デフォルトマップ**: `/Engine/Maps/Templates/OpenWorld`
-- **PCH**: UseExplicitOrSharedPCHs
 
 ## モジュール依存関係
 
-`Core`, `CoreUObject`, `Engine`, `InputCore`, `EnhancedInput`
+| モジュール | 種別 | 依存 |
+|-----------|------|------|
+| ReinBalance | Runtime | Core, CoreUObject, Engine, InputCore, EnhancedInput |
+| ReinBalanceEditor | Editor | ReinBalance, PythonTrainingComm |
+| PythonTrainingComm | Editor Plugin | HTTPServer, HTTP, Json |
