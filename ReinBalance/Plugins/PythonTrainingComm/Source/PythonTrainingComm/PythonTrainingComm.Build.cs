@@ -11,11 +11,11 @@ public class PythonTrainingComm : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"HTTPServer",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			"HTTPServer",
 			"HTTP",
 			"Json",
 			"JsonUtilities",
