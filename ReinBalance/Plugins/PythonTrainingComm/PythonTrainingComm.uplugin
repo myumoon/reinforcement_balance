@@ -1,0 +1,18 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "PythonTrainingComm",
+	"Description": "UE5 と Python 訓練スクリプト間の HTTP 通信基盤プラグイン",
+	"Category": "AI",
+	"CreatedBy": "ReinBalance",
+	"CanContainContent": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "PythonTrainingComm",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}

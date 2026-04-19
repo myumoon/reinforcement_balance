@@ -1,0 +1,12 @@
+/NOLOGO
+/errorReport:prompt
+/MACHINE:x64
+/SUBSYSTEM:WINDOWS
+/DEF
+/NAME:"UnrealEditor-PythonTrainingComm.dll"
+/IGNORE:4221
+/NODEFAULTLIB
+"D:\prog\0_myprogram\.worktrees\feature-python-training-env\ReinBalance\Intermediate\Build\Win64\x64\ReinBalanceEditor\Development\UnrealEd\SharedPCH.UnrealEd.Project.ValApi.Cpp20.h.obj"
+"D:\prog\0_myprogram\.worktrees\feature-python-training-env\ReinBalance\Plugins\PythonTrainingComm\Intermediate\Build\Win64\x64\UnrealEditor\Development\PythonTrainingComm\Module.PythonTrainingComm.cpp.obj"
+"D:\prog\0_myprogram\.worktrees\feature-python-training-env\ReinBalance\Plugins\PythonTrainingComm\Intermediate\Build\Win64\x64\UnrealEditor\Development\PythonTrainingComm\Default.rc2.res"
+/OUT:"D:\prog\0_myprogram\.worktrees\feature-python-training-env\ReinBalance\Plugins\PythonTrainingComm\Intermediate\Build\Win64\x64\UnrealEditor\Development\PythonTrainingComm\UnrealEditor-PythonTrainingComm.lib"

@@ -1,0 +1,9 @@
+{
+	"RemapUnityFiles": 
+	{
+		"Module.PythonTrainingComm.cpp.obj": [
+			"HttpEnvServerBase.cpp.obj",
+			"PythonTrainingCommModule.cpp.obj"
+		]
+	}
+}
