@@ -5,11 +5,24 @@ ReinBalance/Binaries/
 ReinBalance/Intermediate/
 ReinBalance/DerivedDataCache/
 ReinBalance/Saved/
+ReinBalance/Plugins/*/Binaries/
+ReinBalance/Plugins/*/Intermediate/
 
 # ====================
-# アセット（Perforce で管理）
+# アセット（Perforce で管理）、Models/ を除く
 # ====================
-ReinBalance/Content/
+ReinBalance/Content/*
+!ReinBalance/Content/Models/
+
+# ====================
+# Python 訓練環境
+# ====================
+Tools/Training/.venv/
+Tools/Training/models/
+
+# ====================
+# IDE / エディタ
+# ====================
 
 # ====================
 # IDE / エディタ

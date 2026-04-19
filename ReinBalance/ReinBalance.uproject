@@ -8,6 +8,11 @@
 			"Name": "ReinBalance",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "ReinBalanceEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
 		}
 	],
 	"Plugins": [
@@ -20,10 +25,14 @@
 		},
 		{
 			"Name": "LearningAgents",
-			"Enabled": true
+			"Enabled": false
 		},
 		{
 			"Name": "NNERuntimeORT",
+			"Enabled": true
+		},
+		{
+			"Name": "PythonTrainingComm",
 			"Enabled": true
 		}
 	]
