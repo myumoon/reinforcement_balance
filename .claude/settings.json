@@ -1,6 +1,11 @@
 {
   "permissions": {
     "allow": [
+      "Read(*)",
+      "Write(ReinBalance/Source/*)",
+      "Edit(ReinBalance/Source/*)",
+      "Write(ReinBalance.uproject)",
+      "Edit(ReinBalance.uproject)",
       "Bash(git:*)",
       "Bash(python3:*)",
       "Bash(.venv/bin/pip install:*)",
