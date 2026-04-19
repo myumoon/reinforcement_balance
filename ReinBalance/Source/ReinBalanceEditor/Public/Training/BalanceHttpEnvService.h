@@ -32,5 +32,5 @@ protected:
 
 private:
 	class FBalanceEnvServer;
-	TUniquePtr<FBalanceEnvServer> EnvServer;
+	TUniquePtr<FHttpEnvServerBase> EnvServer;
 };

@@ -2,8 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "IHttpEnvServer.h"
-#include "HttpServerModule.h"
-#include "HttpRouteHandle.h"
+#include "IHttpRouter.h"
 
 /**
  * FHttpServerModule を使った HTTP 環境サーバーの基底クラス。
