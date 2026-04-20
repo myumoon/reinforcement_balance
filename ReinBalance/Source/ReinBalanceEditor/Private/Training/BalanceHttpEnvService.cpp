@@ -1,34 +1,39 @@
 #include "Training/BalanceHttpEnvService.h"
 #include "HttpEnvServerBase.h"
+#include "Kismet/GameplayStatics.h"
 
-/**
- * BalancePole 固有の HTTP サーバー実装。
- *
- * ProcessStep / ProcessReset でゲーム物理を操作する。
- * 現段階では ABalanceCart が未実装のためスタブ観測値を返す。
- * ABalanceCart 実装後に TODO 箇所を置き換える。
- */
 class ABalanceHttpEnvService::FBalanceEnvServer : public FHttpEnvServerBase
 {
 public:
+	explicit FBalanceEnvServer(ABalanceCart* InCart) : Cart(InCart) {}
+
 	virtual FEnvResetResult ProcessReset(TOptional<int32> Seed) override
 	{
-		// TODO: ABalanceCart を取得して物理リセットを行い実際の観測値を返す
 		FEnvResetResult Result;
-		Result.Obs = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+		if (Cart)
+		{
+			Cart->ResetState(Seed);
+			Result.Obs = Cart->GetObservation();
+		}
 		return Result;
 	}
 
 	virtual FEnvStepResult ProcessStep(float Force) override
 	{
-		// TODO: ABalanceCart に力を加え、物理ティック後の観測値・報酬・終了フラグを返す
 		FEnvStepResult Result;
-		Result.Obs = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
-		Result.Reward = 1.f;
-		Result.bDone = false;
-		Result.bTruncated = false;
+		if (Cart)
+		{
+			Cart->PhysicsStep(Force);
+			Result.Obs       = Cart->GetObservation();
+			Result.Reward    = Cart->GetReward();
+			Result.bDone     = Cart->IsDone();
+			Result.bTruncated = false;
+		}
 		return Result;
 	}
+
+private:
+	ABalanceCart* Cart; // non-owning、PIE セッション中は有効
 };
 
 ABalanceHttpEnvService::ABalanceHttpEnvService()
@@ -39,7 +44,21 @@ ABalanceHttpEnvService::ABalanceHttpEnvService()
 void ABalanceHttpEnvService::BeginPlay()
 {
 	Super::BeginPlay();
-	EnvServer = MakeUnique<FBalanceEnvServer>();
+
+	// BalanceCart が未設定の場合はレベルから自動検索
+	if (!BalanceCart)
+	{
+		BalanceCart = Cast<ABalanceCart>(
+			UGameplayStatics::GetActorOfClass(GetWorld(), ABalanceCart::StaticClass()));
+	}
+
+	if (!BalanceCart)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("ABalanceHttpEnvService: ABalanceCart が見つかりません。レベルに配置してください。"));
+	}
+
+	EnvServer = TUniquePtr<FHttpEnvServerBase>(new FBalanceEnvServer(BalanceCart.Get()));
 	EnvServer->StartServer(static_cast<uint32>(ServerPort));
 }
 

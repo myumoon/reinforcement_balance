@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "HttpEnvServerBase.h"
+#include "BalanceCart.h"
 #include "BalanceHttpEnvService.generated.h"
 
 /**
@@ -10,9 +11,7 @@
  *
  * このアクターを PIE レベルに配置すると BeginPlay で HTTP サーバーが起動し、
  * Python 側から /reset・/step・/close を受け付ける。
- *
- * 物理操作の実装は後続フェーズ（ABalanceCart 実装後）に追加する。
- * 現フェーズではインフラ検証用のスタブ観測値を返す。
+ * BalanceCart を参照して物理操作を行う。
  */
 UCLASS()
 class REINBALANCEEDITOR_API ABalanceHttpEnvService : public AActor
@@ -24,6 +23,10 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "Training")
 	int32 ServerPort = 8765;
+
+	/** レベルに配置した ABalanceCart をここに設定する。未設定時は自動検索。 */
+	UPROPERTY(EditAnywhere, Category = "Training")
+	TObjectPtr<ABalanceCart> BalanceCart;
 
 protected:
 	virtual void BeginPlay() override;
