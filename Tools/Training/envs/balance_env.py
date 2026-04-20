@@ -25,6 +25,7 @@ class BalanceEnv(gym.Env):
         super().__init__()
         self.base_url = f"http://{host}:{port}"
         self.connect_timeout = connect_timeout
+        self.session = requests.Session()
 
         self.observation_space = gym.spaces.Box(
             low=self._OBS_LOW, high=self._OBS_HIGH, dtype=np.float32
@@ -35,14 +36,14 @@ class BalanceEnv(gym.Env):
         super().reset(seed=seed)
         self._wait_for_server()
         payload = {"seed": seed}
-        resp = requests.post(f"{self.base_url}/reset", json=payload, timeout=10)
+        resp = self.session.post(f"{self.base_url}/reset", json=payload, timeout=10)
         resp.raise_for_status()
         obs = np.array(resp.json()["obs"], dtype=np.float32)
         return obs, {}
 
     def step(self, action):
         force = float(np.clip(action, -1.0, 1.0))
-        resp = requests.post(f"{self.base_url}/step", json={"force": force}, timeout=10)
+        resp = self.session.post(f"{self.base_url}/step", json={"force": force}, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         obs = np.array(data["obs"], dtype=np.float32)
@@ -50,16 +51,17 @@ class BalanceEnv(gym.Env):
 
     def close(self):
         try:
-            requests.post(f"{self.base_url}/close", json={}, timeout=5)
+            self.session.post(f"{self.base_url}/close", json={}, timeout=5)
         except Exception:
             pass
+        self.session.close()
         super().close()
 
     def _wait_for_server(self):
         deadline = time.time() + self.connect_timeout
         while time.time() < deadline:
             try:
-                requests.post(f"{self.base_url}/reset", json={"seed": None}, timeout=1)
+                self.session.post(f"{self.base_url}/reset", json={"seed": None}, timeout=1)
                 return
             except (requests.ConnectionError, requests.Timeout):
                 time.sleep(0.1)
