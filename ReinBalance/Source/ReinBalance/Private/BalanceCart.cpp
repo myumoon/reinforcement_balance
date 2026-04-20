@@ -1,16 +1,47 @@
 #include "BalanceCart.h"
 #include "Components/StaticMeshComponent.h"
+#include "UObject/ConstructorHelpers.h"
 
 ABalanceCart::ABalanceCart()
 {
 	PrimaryActorTick.bCanEverTick = true;
 
+	// カート本体: Cube (100cm) を (200 x 50 x 40 cm) にスケール
 	CartMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("CartMesh"));
 	RootComponent = CartMesh;
 	CartMesh->SetSimulatePhysics(false);
+	{
+		static ConstructorHelpers::FObjectFinder<UStaticMesh> Asset(
+			TEXT("/Engine/BasicShapes/Cube.Cube"));
+		if (Asset.Succeeded())
+		{
+			CartMesh->SetStaticMesh(Asset.Object);
+			CartMesh->SetRelativeScale3D(FVector(2.0f, 0.5f, 0.4f));
+		}
+	}
 
+	// PolePivot: カート天面（関節）を回転軸とする中間コンポーネント
+	// CartMesh のスケール Z=0.4 のため、天面の親ローカル座標 = 100/2 / 0.4 = 125 → 50 (補正済み)
+	// 世界座標の天面高さ = 0.4 * 50 = 20 cm ✓
+	PolePivot = CreateDefaultSubobject<USceneComponent>(TEXT("PolePivot"));
+	PolePivot->SetupAttachment(RootComponent);
+	PolePivot->SetRelativeLocation(FVector(0.f, 0.f, 50.f));
+
+	// ポール: Cylinder (100cm 高, 径 100cm) を (10cm 径, 100cm 高) にスケール
+	// PolePivot 基準で 50cm 上にオフセット → ポール下端が関節位置と一致
 	PoleMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PoleMesh"));
-	PoleMesh->SetupAttachment(RootComponent);
+	PoleMesh->SetupAttachment(PolePivot);
+	PoleMesh->SetSimulatePhysics(false);
+	{
+		static ConstructorHelpers::FObjectFinder<UStaticMesh> Asset(
+			TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+		if (Asset.Succeeded())
+		{
+			PoleMesh->SetStaticMesh(Asset.Object);
+			PoleMesh->SetRelativeScale3D(FVector(0.1f, 0.1f, 1.0f));
+			PoleMesh->SetRelativeLocation(FVector(0.f, 0.f, 50.f));
+		}
+	}
 }
 
 void ABalanceCart::BeginPlay()
@@ -136,9 +167,10 @@ void ABalanceCart::UpdateVisuals() const
 	{
 		CartMesh->SetRelativeLocation(FVector(CartPos * 100.f, 0.f, 0.f));
 	}
-	if (PoleMesh)
+	// PolePivot を Pitch 回転 → ポール下端（関節）を軸に傾く
+	if (PolePivot)
 	{
-		PoleMesh->SetRelativeRotation(
+		PolePivot->SetRelativeRotation(
 			FRotator(FMath::RadiansToDegrees(PoleAngle), 0.f, 0.f));
 	}
 }

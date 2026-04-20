@@ -3,6 +3,7 @@
 使い方:
   python train.py               # UE5 に接続して訓練
   python train.py --dry-run     # UE5 なしでパイプライン確認
+  python train.py --resume models/balance_model.zip  # 既存モデルを継続訓練
   python train.py --help
 """
 
@@ -11,6 +12,7 @@ import sys
 from pathlib import Path
 
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
 
 
@@ -21,6 +23,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--total-steps", type=int, default=500_000)
     p.add_argument("--output", type=Path, default=Path("models/balance_model"))
+    p.add_argument("--resume", type=Path, default=None,
+                   help="再開する既存モデルのパス (.zip 拡張子は省略可)")
+    p.add_argument("--checkpoint-freq", type=int, default=10_000,
+                   help="チェックポイント保存間隔 (ステップ数, デフォルト: 10000)")
     return p.parse_args()
 
 
@@ -39,14 +45,31 @@ def main() -> None:
         )
         print(f"[INFO] Connecting to UE5 server at {args.host}:{args.port} ...")
 
-    model = PPO("MlpPolicy", env, verbose=1)
-    model.learn(total_timesteps=args.total_steps)
-
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    model.save(str(args.output))
-    print(f"[INFO] Model saved to {args.output}.zip")
 
-    env.close()
+    if args.resume:
+        resume_path = str(args.resume)
+        print(f"[INFO] Resuming from {resume_path}")
+        model = PPO.load(resume_path, env=env)
+    else:
+        model = PPO("MlpPolicy", env, verbose=1)
+
+    checkpoint_cb = CheckpointCallback(
+        save_freq=max(args.checkpoint_freq // (env.num_envs or 1), 1),
+        save_path=str(args.output.parent),
+        name_prefix=args.output.name,
+        verbose=1,
+    )
+
+    try:
+        model.learn(total_timesteps=args.total_steps, callback=checkpoint_cb,
+                    reset_num_timesteps=args.resume is None)
+    except KeyboardInterrupt:
+        print("\n[INFO] 訓練を中断しました。モデルを保存します...")
+    finally:
+        model.save(str(args.output))
+        print(f"[INFO] Model saved to {args.output}.zip")
+        env.close()
 
 
 if __name__ == "__main__":
