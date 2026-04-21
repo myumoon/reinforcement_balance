@@ -21,20 +21,17 @@ class BalanceEnv(gym.Env):
         dtype=np.float32,
     )
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8765, connect_timeout: int = 30):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8765, connect_timeout: int = 120):
         super().__init__()
         self.base_url = f"http://{host}:{port}"
         self.connect_timeout = connect_timeout
         self.session = requests.Session()
-
-        self.observation_space = gym.spaces.Box(
-            low=self._OBS_LOW, high=self._OBS_HIGH, dtype=np.float32
-        )
-        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+        self._server_connected = False  # 初回接続済みフラグ
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
-        self._wait_for_server()
+        if not self._server_connected:
+            self._wait_for_server()  # PIE 起動待機（初回のみ）
         payload = {"seed": seed}
         resp = self.session.post(f"{self.base_url}/reset", json=payload, timeout=10)
         resp.raise_for_status()
@@ -58,11 +55,25 @@ class BalanceEnv(gym.Env):
         super().close()
 
     def _wait_for_server(self):
+        """PIE 起動を待機する。接続が確立したら _server_connected を True にする。"""
+        print(f"[INFO] UE5 サーバー ({self.base_url}) を待機中...")
+        print(f"[INFO] UE5 エディタで PIE (▶) を開始してください。"
+              f"(タイムアウト: {self.connect_timeout}s)")
         deadline = time.time() + self.connect_timeout
+        last_print = time.time()
         while time.time() < deadline:
             try:
                 self.session.post(f"{self.base_url}/reset", json={"seed": None}, timeout=1)
+                self._server_connected = True
+                print("[INFO] UE5 サーバーに接続しました。")
                 return
             except (requests.ConnectionError, requests.Timeout):
+                if time.time() - last_print >= 5.0:
+                    remaining = max(0, int(deadline - time.time()))
+                    print(f"[INFO] 待機中... (残り約 {remaining}s)")
+                    last_print = time.time()
                 time.sleep(0.1)
-        raise TimeoutError(f"UE5 server not available at {self.base_url}")
+        raise TimeoutError(
+            f"UE5 サーバーが起動しませんでした ({self.base_url})\n"
+            f"  → UE5 エディタで PIE (▶) を開始してから再実行してください。"
+        )
