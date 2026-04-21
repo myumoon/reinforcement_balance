@@ -3,7 +3,8 @@
 使い方:
   python train.py               # UE5 に接続して訓練
   python train.py --dry-run     # UE5 なしでパイプライン確認
-  python train.py --resume models/balance_model.zip  # 既存モデルを継続訓練
+  python train.py --resume models/balance_model     # 既存モデルを継続訓練
+  python train.py --resume models/balance_model.zip # .zip 付きでも可
   python train.py --help
 """
 
@@ -16,15 +17,23 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
 
 
+def _strip_zip(path: Path) -> Path:
+    """SB3 が .zip を自動付加するため、ユーザーが指定した .zip 拡張子を除去する。"""
+    if path.suffix.lower() == ".zip":
+        return path.with_suffix("")
+    return path
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--dry-run", action="store_true", help="UE5 なしでスタブ環境を使用")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--total-steps", type=int, default=500_000)
-    p.add_argument("--output", type=Path, default=Path("models/balance_model"))
+    p.add_argument("--output", type=Path, default=Path("models/balance_model"),
+                   help="保存先パス (.zip 拡張子は省略・付加どちらでも可)")
     p.add_argument("--resume", type=Path, default=None,
-                   help="再開する既存モデルのパス (.zip 拡張子は省略可)")
+                   help="再開する既存モデルのパス (.zip 拡張子は省略・付加どちらでも可)")
     p.add_argument("--checkpoint-freq", type=int, default=10_000,
                    help="チェックポイント保存間隔 (ステップ数, デフォルト: 10000)")
     return p.parse_args()
@@ -32,6 +41,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    # .zip 拡張子を正規化（SB3 が自動付加するため除去）
+    output = _strip_zip(args.output)
 
     if args.dry_run:
         from envs.balance_env_stub import DummyBalanceEnv
@@ -45,7 +57,7 @@ def main() -> None:
         )
         print(f"[INFO] Connecting to UE5 server at {args.host}:{args.port} ...")
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
 
     if args.resume:
         resume_path = str(args.resume)
@@ -56,8 +68,8 @@ def main() -> None:
 
     checkpoint_cb = CheckpointCallback(
         save_freq=max(args.checkpoint_freq // (env.num_envs or 1), 1),
-        save_path=str(args.output.parent),
-        name_prefix=args.output.name,
+        save_path=str(output.parent),
+        name_prefix=output.name,
         verbose=1,
     )
 
@@ -67,8 +79,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[INFO] 訓練を中断しました。モデルを保存します...")
     finally:
-        model.save(str(args.output))
-        print(f"[INFO] Model saved to {args.output}.zip")
+        model.save(str(output))
+        print(f"[INFO] Model saved to {output}.zip")
         env.close()
 
 
