@@ -20,8 +20,7 @@ ABalanceCart::ABalanceCart()
 		}
 	}
 
-	// PolePivot1: カート天面（Z=20cm world）を関節とする中間コンポーネント
-	// CartMesh スケール Z=0.4 のため parent-local Z = 20/0.4 = 50
+	// 関節1: カート天面 (CartMesh スケール Z=0.4 → parent-local Z=50 が世界座標 Z=20cm)
 	PolePivot = CreateDefaultSubobject<USceneComponent>(TEXT("PolePivot"));
 	PolePivot->SetupAttachment(RootComponent);
 	PolePivot->SetRelativeLocation(FVector(0.f, 0.f, 50.f));
@@ -41,12 +40,13 @@ ABalanceCart::ABalanceCart()
 		}
 	}
 
-	// PolePivot2: Y 方向 +15cm (parent-local +30) にオフセット
+	// 関節2: PolePivot の子として PolePivot ローカル Z=100cm に配置。
+	// PolePivot が回転するとポール1先端へ自動追従する。
 	PolePivot2 = CreateDefaultSubobject<USceneComponent>(TEXT("PolePivot2"));
-	PolePivot2->SetupAttachment(RootComponent);
-	PolePivot2->SetRelativeLocation(FVector(0.f, 30.f, 50.f));
+	PolePivot2->SetupAttachment(PolePivot);
+	PolePivot2->SetRelativeLocation(FVector(0.f, 0.f, 100.f));
 
-	// ポール2: 全長 50cm（PoleHalfLength2=0.25m）に対応、スケール Z=0.5
+	// ポール2: 全長 50cm に対応 (スケール Z=0.5)、pivot から 25cm 上にオフセット
 	PoleMesh2 = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PoleMesh2"));
 	PoleMesh2->SetupAttachment(PolePivot2);
 	PoleMesh2->SetSimulatePhysics(false);
@@ -91,20 +91,40 @@ void ABalanceCart::PhysicsStep(float NormalizedForce)
 
 	const float Force = FMath::Clamp(NormalizedForce, -1.f, 1.f) * MaxForceNewtons;
 
-	const float PrevCartVel = CartVel;
+	const float PrevCartVel    = CartVel;
+	const float PrevPoleAngVel = PoleAngVel;
 	Integrate(Force);
 
 	if (NumPoles >= 2)
 	{
-		// カート加速度をポール1の積分結果から近似して取得
-		const float CartAccel = (CartVel - PrevCartVel) / PhysicsDt;
-		IntegratePole2(CartAccel);
-	}
+		// ポール1積分結果から加速度を近似（差分）
+		const float CartAccel    = (CartVel    - PrevCartVel)    / PhysicsDt;
+		const float PoleAngAccel = (PoleAngVel - PrevPoleAngVel) / PhysicsDt;
 
-	const float MaxAngleRad = FMath::DegreesToRadians(MaxPoleAngleDegrees);
-	bEpisodeDone = FMath::Abs(CartPos)  > MaxCartPositionMeters
-	            || FMath::Abs(PoleAngle) > MaxAngleRad
-	            || (NumPoles >= 2 && FMath::Abs(PoleAngle2) > MaxAngleRad);
+		// ポール1先端の 2D 加速度 (X: 水平, Z: 垂直)
+		// 先端位置 = (CartPos + 2L1*sin(θ1), 2L1*cos(θ1)) を 2 階微分
+		const float CosT1 = FMath::Cos(PoleAngle);
+		const float SinT1 = FMath::Sin(PoleAngle);
+		const float TipAccelX = CartAccel
+			+ 2.f * PoleHalfLength * (PoleAngAccel * CosT1 - PoleAngVel * PoleAngVel * SinT1);
+		const float TipAccelZ = -2.f * PoleHalfLength
+			* (PoleAngAccel * SinT1 + PoleAngVel * PoleAngVel * CosT1);
+
+		IntegratePole2(TipAccelX, TipAccelZ);
+
+		// 終了条件: ポール2先端がカート関節基準で MinTipHeightMeters を下回ったら終了
+		const float TipZ = 2.f * PoleHalfLength  * FMath::Cos(PoleAngle)
+		                 + 2.f * PoleHalfLength2 * FMath::Cos(PoleAngle2);
+		bEpisodeDone = FMath::Abs(CartPos) > MaxCartPositionMeters
+		            || TipZ < MinTipHeightMeters;
+	}
+	else
+	{
+		// NumPoles=1: 後方互換の角度閾値判定
+		const float MaxAngleRad = FMath::DegreesToRadians(MaxPoleAngleDegrees);
+		bEpisodeDone = FMath::Abs(CartPos)   > MaxCartPositionMeters
+		            || FMath::Abs(PoleAngle) > MaxAngleRad;
+	}
 }
 
 void ABalanceCart::ResetState(TOptional<int32> Seed)
@@ -125,8 +145,9 @@ void ABalanceCart::ResetState(TOptional<int32> Seed)
 
 	if (NumPoles >= 2)
 	{
-		PoleAngle2  = RandStream.FRandRange(-0.05f, 0.05f);
-		PoleAngVel2 = RandStream.FRandRange(-0.05f, 0.05f);
+		// ポール2は ポール1に対する相対角度で初期化（直列構造の自然な初期状態）
+		PoleAngle2  = PoleAngle  + RandStream.FRandRange(-0.05f, 0.05f);
+		PoleAngVel2 = PoleAngVel + RandStream.FRandRange(-0.05f, 0.05f);
 	}
 	else
 	{
@@ -139,7 +160,11 @@ void ABalanceCart::ResetState(TOptional<int32> Seed)
 
 TArray<float> ABalanceCart::GetObservation() const
 {
-	return { CartPos, CartVel, PoleAngle, PoleAngVel, PoleAngle2, PoleAngVel2 };
+	// obs[4], obs[5] は関節角度・関節角速度（ポール1に対する相対値）
+	return { CartPos, CartVel,
+	         PoleAngle,  PoleAngVel,
+	         PoleAngle2  - PoleAngle,   // θ2_rel
+	         PoleAngVel2 - PoleAngVel }; // θ̇2_rel
 }
 
 bool ABalanceCart::IsDone() const
@@ -155,7 +180,6 @@ float ABalanceCart::GetReward() const
 void ABalanceCart::Integrate(float Force)
 {
 	// Barto et al. (1983) CartPole 運動方程式を RK4 で積分
-	// 参考: https://coneural.org/florian/papers/05_cart_pole.pdf
 	const float Dt = PhysicsDt;
 
 	auto Deriv = [&](float X, float Xd, float Th, float Thd,
@@ -202,20 +226,22 @@ void ABalanceCart::Integrate(float Force)
 	PoleAngVel += Dt / 6.f * (Thdd1 + 2.f*Thdd2 + 2.f*Thdd3 + Thdd4);
 }
 
-void ABalanceCart::IntegratePole2(float CartAccel)
+void ABalanceCart::IntegratePole2(float TipAccelX, float TipAccelZ)
 {
-	// カートが外部加速度 CartAccel で駆動される場合のポール単体方程式
-	// θ̈ = (g·sin(θ) - a·cos(θ)) / (L · 4/3)
-	// ポール質量が CartMass に比べ十分小さい前提の近似式
+	// ポール2: 外部加速度 (TipAccelX, TipAccelZ) で駆動されるピボット上の倒立振子
+	// ラグランジュ方程式から導出:
+	//   (4/3)·L·θ̈ = (g + az)·sin(θ) - ax·cos(θ)
+	// ここで θ は鉛直からの絶対角度、az は垂直加速度（上向き正）
 	const float Dt = PhysicsDt;
 	const float L  = PoleHalfLength2;
 
 	auto F = [&](float Th) -> float
 	{
-		return (Gravity * FMath::Sin(Th) - CartAccel * FMath::Cos(Th)) / (L * 4.f / 3.f);
+		return ((Gravity + TipAccelZ) * FMath::Sin(Th) - TipAccelX * FMath::Cos(Th))
+		       / (L * 4.f / 3.f);
 	};
 
-	// RK4: 状態 [θ, θ̇]
+	// RK4: 状態 [θ2, θ̇2]
 	const float k1_pos = PoleAngVel2;
 	const float k1_vel = F(PoleAngle2);
 
@@ -245,8 +271,9 @@ void ABalanceCart::UpdateVisuals() const
 	}
 	if (PolePivot2 && NumPoles >= 2)
 	{
+		// PolePivot2 は PolePivot の子なので、相対角度を設定すると世界角度 = θ2_abs になる
 		PolePivot2->SetRelativeRotation(
-			FRotator(FMath::RadiansToDegrees(PoleAngle2), 0.f, 0.f));
+			FRotator(FMath::RadiansToDegrees(PoleAngle2 - PoleAngle), 0.f, 0.f));
 	}
 }
 

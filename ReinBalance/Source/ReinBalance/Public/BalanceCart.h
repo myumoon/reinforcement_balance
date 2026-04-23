@@ -6,14 +6,21 @@
 #include "BalanceCart.generated.h"
 
 /**
- * カート + N 本ポールの CartPole 物理シミュレーターアクター。
+ * カート + 直列ポール（最大2本）の物理シミュレーターアクター。
  *
- * UE5 物理エンジンは使用せず、Barto et al. (1983) の解析的な運動方程式を
- * RK4 で積分する。NumPoles で 1〜2 本を切り替え可能。
+ * 構造: カート -- 関節1 -- ポール1 -- 関節2 -- ポール2
  *
- * 観測値は常に 6 次元 [CartPos, CartVel, Angle1, AngVel1, Angle2, AngVel2]。
- * NumPoles=1 のとき後 2 要素は 0。obs 次元を固定することで
- * --resume による転移学習（1本 → 2本）がそのまま動作する。
+ * UE5 物理エンジンを使用せず解析的に積分する。
+ *   - ポール1: Barto et al. (1983) の完全連成 RK4
+ *   - ポール2: ポール1先端の 2D 加速度を外部入力とした RK4
+ *
+ * 観測値は常に 6 次元（obs 次元固定 → --resume 転移学習がそのまま動作）。
+ *   [0] CartPos  (m)
+ *   [1] CartVel  (m/s)
+ *   [2] θ1       (rad, 鉛直からの絶対角度)
+ *   [3] θ̇1       (rad/s)
+ *   [4] θ2_rel   (rad, ポール1 に対する関節角度 = θ2_abs - θ1)  ← NumPoles=1 時は 0
+ *   [5] θ̇2_rel   (rad/s, 関節角速度 = θ̇2 - θ̇1)                ← NumPoles=1 時は 0
  */
 UCLASS()
 class REINBALANCE_API ABalanceCart : public AActor
@@ -29,7 +36,7 @@ public:
 	/** 初期状態にリセットする。Seed が未指定の場合はランダム。 */
 	void ResetState(TOptional<int32> Seed);
 
-	/** 観測値 6 次元 [CartPos(m), CartVel(m/s), Angle1(rad), AngVel1(rad/s), Angle2(rad), AngVel2(rad/s)] */
+	/** 観測値 6 次元を返す（コメント参照） */
 	TArray<float> GetObservation() const;
 
 	/** エピソード終了判定 */
@@ -47,7 +54,7 @@ public:
 	// --- 物理パラメータ（エディタで調整可能）---
 
 	UPROPERTY(EditAnywhere, Category = "Balance|Physics")
-	float CartMass = 1.0f;            // kg
+	float CartMass = 1.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Balance|Physics")
 	float PoleMass = 0.1f;            // kg（両ポール共通）
@@ -56,16 +63,21 @@ public:
 	float PoleHalfLength = 0.5f;      // m（ポール1 全長の半分）
 
 	UPROPERTY(EditAnywhere, Category = "Balance|Physics")
-	float PoleHalfLength2 = 0.25f;    // m（ポール2 全長の半分、短い方）
+	float PoleHalfLength2 = 0.25f;    // m（ポール2 全長の半分）
 
 	UPROPERTY(EditAnywhere, Category = "Balance|Physics")
-	float MaxForceNewtons = 10.0f;    // N
+	float MaxForceNewtons = 10.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Balance|Physics")
 	float MaxCartPositionMeters = 4.8f;
 
+	/** NumPoles=1 時のポール倒れ判定角度 */
 	UPROPERTY(EditAnywhere, Category = "Balance|Physics")
 	float MaxPoleAngleDegrees = 60.0f;
+
+	/** NumPoles=2 時: ポール2先端がこの高さ (m, カート関節基準) を下回ったら終了 */
+	UPROPERTY(EditAnywhere, Category = "Balance|Physics")
+	float MinTipHeightMeters = 0.5f;
 
 protected:
 	virtual void BeginPlay() override;
@@ -73,12 +85,11 @@ protected:
 	virtual void Tick(float DeltaTime) override;
 
 private:
-	// 物理状態（SI 単位系）
-	float CartPos    = 0.f;  // m
-	float CartVel    = 0.f;  // m/s
-	float PoleAngle  = 0.f;  // rad
-	float PoleAngVel = 0.f;  // rad/s
-	float PoleAngle2  = 0.f;
+	float CartPos    = 0.f;
+	float CartVel    = 0.f;
+	float PoleAngle  = 0.f;  // rad, 絶対角度
+	float PoleAngVel = 0.f;
+	float PoleAngle2  = 0.f; // rad, 絶対角度（内部計算用）
 	float PoleAngVel2 = 0.f;
 
 	bool bEpisodeDone = false;
@@ -88,11 +99,14 @@ private:
 
 	FRandomStream RandStream;
 
-	/** ポール1 + カートの完全連成 RK4 積分 */
 	void Integrate(float Force);
 
-	/** ポール2 の RK4 積分（カート加速度を外部入力として扱う） */
-	void IntegratePole2(float CartAccel);
+	/**
+	 * ポール2 の RK4 積分。
+	 * @param TipAccelX  ポール1先端の水平加速度 (m/s²)
+	 * @param TipAccelZ  ポール1先端の垂直加速度 (m/s²)
+	 */
+	void IntegratePole2(float TipAccelX, float TipAccelZ);
 
 	void UpdateVisuals() const;
 	void ApplyPole2Visibility(bool bVisible);
@@ -106,7 +120,7 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> PoleMesh;
 
-	/** ポール2 の関節（カート天面、Y 方向に +15cm オフセット） */
+	/** 関節2: PolePivot の子として配置 → ポール1が傾くと先端へ追従 */
 	UPROPERTY(VisibleAnywhere, Category = "Components")
 	TObjectPtr<USceneComponent> PolePivot2;
 
