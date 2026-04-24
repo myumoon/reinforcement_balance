@@ -28,6 +28,11 @@ class BalanceEnv(gym.Env):
         self.session = requests.Session()
         self._server_connected = False  # 初回接続済みフラグ
 
+        self.observation_space = gym.spaces.Box(
+            low=self._OBS_LOW, high=self._OBS_HIGH, dtype=np.float32
+        )
+        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         if not self._server_connected:
