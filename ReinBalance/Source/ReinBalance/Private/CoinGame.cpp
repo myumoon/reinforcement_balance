@@ -1,5 +1,5 @@
 #include "CoinGame.h"
-#include "Misc/MD5.h"
+#include "Misc/SecureHash.h"
 
 ACoinGame::ACoinGame()
 {
@@ -30,14 +30,14 @@ TArray<FObsSegment> ACoinGame::GetObsSchema() const
 FString ACoinGame::GetObsSchemaHash() const
 {
 	FString Schema = FString::Printf(TEXT("NumCoinObs=%d,MaxEnemyObs=%d"), NumCoinObs, MaxEnemyObs);
-	return FMD5::HashAnsiString(TCHAR_TO_ANSI(*Schema));
+	return FMD5::HashAnsiString(*Schema);
 }
 
 void ACoinGame::ResetState(TOptional<int32> Seed)
 {
-	ensureMsgf(NumCoins <= MaxNumCoins,
-		TEXT("ACoinGame: NumCoins=%d が上限 MaxNumCoins=%d を超えています"),
-		NumCoins, MaxNumCoins);
+	ensureMsgf(NumCoins <= NumCoinObs,
+		TEXT("ACoinGame: NumCoins=%d が上限 NumCoinObs=%d を超えています"),
+		NumCoins, NumCoinObs);
 	if (Seed.IsSet())
 		RandStream.Initialize(Seed.GetValue());
 	else

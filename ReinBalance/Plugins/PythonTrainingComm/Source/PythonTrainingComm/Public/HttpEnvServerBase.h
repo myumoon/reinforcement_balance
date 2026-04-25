@@ -30,6 +30,13 @@ public:
 	 */
 	virtual void Tick() override;
 
+	/**
+	 * Jsonレスポンスを作成する
+	 * @param Json レスポンスボディの JSON 文字列（例: {"obs":[0.0,1.0],"reward":1.0,"done":false}）
+	 * @return レスポンス
+	 */
+	static TUniquePtr<FHttpServerResponse> MakeJsonResponse(const FString& Json);
+
 protected:
 	// HTTP ハンドラ（ワーカースレッド）
 	bool HandleReset(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
@@ -62,6 +69,4 @@ private:
 	// 保留中のコールバック（GameThread で結果が出たら呼ぶ）
 	TOptional<FHttpResultCallback> PendingResetCallback;
 	TOptional<FHttpResultCallback> PendingStepCallback;
-
-	static TUniquePtr<FHttpServerResponse> MakeJsonResponse(const FString& Json);
 };

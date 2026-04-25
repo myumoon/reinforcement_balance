@@ -111,10 +111,6 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CoinGame|Config")
 	int32 NumCoins = 3;
 
-	/** 観測ベクトルに含める最近傍コイン数（変更すると観測次元が変わりモデルの再訓練が必要） */
-	UPROPERTY(EditAnywhere, Category = "CoinGame|Config")
-	int32 NumCoinObs = 3;
-
 	/** 敵スポーン間隔 [秒] */
 	UPROPERTY(EditAnywhere, Category = "CoinGame|Config")
 	float EnemySpawnInterval = 10.f;
@@ -157,8 +153,13 @@ protected:
 	virtual void BeginPlay() override;
 
 private:
+	// 観測に含めるコインの数
+	static constexpr int32 NumCoinObs = 100;
+	
+	// 最大敵数
 	static constexpr int32 MaxEnemyObs = 20;
-	static constexpr int32 MaxNumCoins = 100;
+	
+	// フレームレート
 	static constexpr float PhysicsDt   = 1.f / 60.f;
 
 	struct FEnemyState

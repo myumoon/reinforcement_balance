@@ -18,6 +18,7 @@ public class ReinBalanceEditor : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"UnrealEd",
+			"HTTPServer", // CoinHttpEnvService で FHttpPath / FHttpRouteHandle を使用
 		});
 	}
 }
