@@ -2,13 +2,14 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Components/StaticMeshComponent.h"
 #include "CoinGame.generated.h"
 
 /**
  * コイン収集 + 敵回避ゲームの物理・ゲームロジックアクター。
  *
  * 2D XY 平面上でプレイヤーがコインを集めながら敵を避ける。
- * UE5 物理エンジンは使用せず解析的に積分する。
+ * UE5 物理エンジンは使用せず、解析的に積分する。
  *
  * 行動: 離散5方向 (0=+Y, 1=-Y, 2=-X, 3=+X, 4=静止)
  * 観測: 116次元
@@ -93,6 +94,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CoinGame|Physics")
 	float EnemyPredictTime = 0.75f;
 
+	// ---- ビジュアル ----
+
+	/** シミュレーション座標（m）→ UE5 単位（cm）の変換スケール
+	 *  デフォルト 50: FieldHalfSize=10m → 視覚フィールド 1000×1000 UE単位 */
+	UPROPERTY(EditAnywhere, Category = "CoinGame|Visual")
+	float SimToUE = 50.f;
+
 protected:
 	virtual void BeginPlay() override;
 
@@ -118,6 +126,35 @@ private:
 	bool  bDone      = false;
 
 	FRandomStream RandStream;
+
+	// ---- ビジュアルコンポーネント ----
+
+	UPROPERTY(VisibleAnywhere, Category = "Components")
+	TObjectPtr<UStaticMeshComponent> PlayerMesh;
+
+	UPROPERTY(VisibleAnywhere, Category = "Components")
+	TArray<TObjectPtr<UStaticMeshComponent>> CoinMeshComponents;
+
+	/** 動的に生成・破棄される敵メッシュ（GC 防止のため UPROPERTY） */
+	UPROPERTY()
+	TArray<TObjectPtr<UStaticMeshComponent>> EnemyMeshComponents;
+
+	/** キャッシュされたアセット参照 */
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> ConeMeshAsset;
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> SphereMeshAsset;
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> CubeMeshAsset;
+	UPROPERTY()
+	TObjectPtr<UMaterial> BaseMaterialAsset;
+
+	void SetupVisuals();
+	void UpdateVisuals();
+	UStaticMeshComponent* CreateEnemyVisual(int32 EnemyIndex, int32 Type);
+	class UMaterialInstanceDynamic* CreateColorMaterial(const FLinearColor& Color);
+
+	// ---- シミュレーション内部 ----
 
 	FVector2D RandomInsideField();
 	FVector2D RandomOnEdge();

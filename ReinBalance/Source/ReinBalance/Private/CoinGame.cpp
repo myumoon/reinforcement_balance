@@ -1,15 +1,142 @@
 #include "CoinGame.h"
+#include "Engine/StaticMesh.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInstanceDynamic.h"
+
+// ---- コンストラクタ ----
 
 ACoinGame::ACoinGame()
 {
 	PrimaryActorTick.bCanEverTick = false;
+
+	USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
+	SetRootComponent(SceneRoot);
+
+	PlayerMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PlayerMesh"));
+	PlayerMesh->SetupAttachment(SceneRoot);
+	PlayerMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 }
+
+// ---- ビジュアル ----
 
 void ACoinGame::BeginPlay()
 {
 	Super::BeginPlay();
+	SetupVisuals();
 	ResetState(TOptional<int32>());
 }
+
+void ACoinGame::SetupVisuals()
+{
+	// エンジン標準アセットをロード
+	ConeMeshAsset   = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cone.Cone"));
+	SphereMeshAsset = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+	CubeMeshAsset   = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	BaseMaterialAsset = LoadObject<UMaterial>(nullptr,
+		TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+
+	// プレイヤー: 緑のコーン（XY平面に伏せて速度方向を向く）
+	if (ConeMeshAsset)
+	{
+		PlayerMesh->SetStaticMesh(ConeMeshAsset);
+		PlayerMesh->SetRelativeScale3D(FVector(0.6f, 0.6f, 0.6f));
+		// Pitch=-90° でコーンを XY 平面に倒す（頂点が +X 方向を向く）
+		PlayerMesh->SetRelativeRotation(FRotator(-90.f, 0.f, 0.f));
+	}
+	UMaterialInstanceDynamic* PlayerMat = CreateColorMaterial(FLinearColor(0.f, 0.8f, 0.f, 1.f));
+	if (PlayerMat) PlayerMesh->SetMaterial(0, PlayerMat);
+
+	// コイン: 黄色の球
+	for (int32 i = 0; i < NumCoins; ++i)
+	{
+		UStaticMeshComponent* CoinComp = NewObject<UStaticMeshComponent>(this,
+			*FString::Printf(TEXT("CoinMesh_%d"), i));
+		CoinComp->RegisterComponent();
+		CoinComp->AttachToComponent(RootComponent,
+			FAttachmentTransformRules::KeepRelativeTransform);
+		CoinComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		if (SphereMeshAsset) CoinComp->SetStaticMesh(SphereMeshAsset);
+		CoinComp->SetRelativeScale3D(FVector(0.4f, 0.4f, 0.4f));
+		UMaterialInstanceDynamic* Mat =
+			CreateColorMaterial(FLinearColor(1.f, 0.85f, 0.f, 1.f));
+		if (Mat) CoinComp->SetMaterial(0, Mat);
+		CoinMeshComponents.Add(CoinComp);
+	}
+}
+
+UMaterialInstanceDynamic* ACoinGame::CreateColorMaterial(const FLinearColor& Color)
+{
+	if (!BaseMaterialAsset) return nullptr;
+	UMaterialInstanceDynamic* Mat =
+		UMaterialInstanceDynamic::Create(BaseMaterialAsset, this);
+	if (Mat) Mat->SetVectorParameterValue(TEXT("Color"), Color);
+	return Mat;
+}
+
+UStaticMeshComponent* ACoinGame::CreateEnemyVisual(int32 EnemyIndex, int32 Type)
+{
+	UStaticMeshComponent* Comp = NewObject<UStaticMeshComponent>(this,
+		*FString::Printf(TEXT("EnemyMesh_%d_%d"), EnemyIndex, Type));
+	Comp->RegisterComponent();
+	Comp->AttachToComponent(RootComponent,
+		FAttachmentTransformRules::KeepRelativeTransform);
+	Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	if (CubeMeshAsset) Comp->SetStaticMesh(CubeMeshAsset);
+
+	// 形状（上から見た形で種類を識別）と色を設定
+	FLinearColor Color;
+	FVector Scale;
+	switch (Type)
+	{
+		case 0: // A: 遅い直進追跡 → 赤・正方形
+			Color = FLinearColor(1.f, 0.f, 0.f, 1.f);
+			Scale = FVector(0.5f, 0.5f, 0.4f);
+			break;
+		case 1: // B: 速い直進追跡 → オレンジ・縦長四角
+			Color = FLinearColor(1.f, 0.4f, 0.f, 1.f);
+			Scale = FVector(0.4f, 0.8f, 0.4f);
+			break;
+		case 2: // C: 予測追跡 → 赤紫・横長四角
+			Color = FLinearColor(0.7f, 0.f, 0.5f, 1.f);
+			Scale = FVector(0.8f, 0.4f, 0.4f);
+			break;
+		default:
+			Color = FLinearColor::White;
+			Scale = FVector(0.5f, 0.5f, 0.4f);
+	}
+	Comp->SetRelativeScale3D(Scale);
+	UMaterialInstanceDynamic* Mat = CreateColorMaterial(Color);
+	if (Mat) Comp->SetMaterial(0, Mat);
+	return Comp;
+}
+
+void ACoinGame::UpdateVisuals()
+{
+	// プレイヤー: 速度方向にコーンを向ける
+	PlayerMesh->SetRelativeLocation(
+		FVector(PlayerPos.X * SimToUE, PlayerPos.Y * SimToUE, 0.f));
+	if (!PlayerVel.IsNearlyZero(0.01f))
+	{
+		const float Yaw = FMath::RadiansToDegrees(FMath::Atan2(PlayerVel.Y, PlayerVel.X));
+		PlayerMesh->SetRelativeRotation(FRotator(-90.f, Yaw, 0.f));
+	}
+
+	// コイン
+	for (int32 i = 0; i < CoinMeshComponents.Num() && i < CoinPositions.Num(); ++i)
+	{
+		CoinMeshComponents[i]->SetRelativeLocation(
+			FVector(CoinPositions[i].X * SimToUE, CoinPositions[i].Y * SimToUE, 0.f));
+	}
+
+	// 敵
+	for (int32 i = 0; i < EnemyMeshComponents.Num() && i < Enemies.Num(); ++i)
+	{
+		EnemyMeshComponents[i]->SetRelativeLocation(
+			FVector(Enemies[i].Pos.X * SimToUE, Enemies[i].Pos.Y * SimToUE, 0.f));
+	}
+}
+
+// ---- ゲームロジック ----
 
 void ACoinGame::ResetState(TOptional<int32> Seed)
 {
@@ -25,10 +152,19 @@ void ACoinGame::ResetState(TOptional<int32> Seed)
 	for (FVector2D& Coin : CoinPositions)
 		Coin = RandomInsideField();
 
+	// 敵メッシュを破棄してリセット
+	for (TObjectPtr<UStaticMeshComponent>& Comp : EnemyMeshComponents)
+	{
+		if (Comp) Comp->DestroyComponent();
+	}
+	EnemyMeshComponents.Empty();
 	Enemies.Empty();
+
 	SpawnTimer = EnemySpawnInterval;
 	LastReward = 0.f;
 	bDone      = false;
+
+	UpdateVisuals();
 }
 
 void ACoinGame::PhysicsStep(int32 ActionIdx)
@@ -66,10 +202,12 @@ void ACoinGame::PhysicsStep(int32 ActionIdx)
 	if (CheckEnemyCollisions())
 	{
 		bDone = true;
+		UpdateVisuals();
 		return;
 	}
 
 	LastReward += 0.01f;
+	UpdateVisuals();
 }
 
 TArray<float> ACoinGame::GetObservation() const
@@ -89,10 +227,10 @@ TArray<float> ACoinGame::GetObservation() const
 	Obs.Add(PlayerVel.Y);
 
 	// 3. 壁への距離 (4) : 上/下/左/右
-	Obs.Add((HN - PlayerPos.Y) / HN); // 上 (+Y 壁)
-	Obs.Add((HN + PlayerPos.Y) / HN); // 下 (-Y 壁)
-	Obs.Add((HN + PlayerPos.X) / HN); // 左 (-X 壁)
-	Obs.Add((HN - PlayerPos.X) / HN); // 右 (+X 壁)
+	Obs.Add((HN - PlayerPos.Y) / HN);
+	Obs.Add((HN + PlayerPos.Y) / HN);
+	Obs.Add((HN + PlayerPos.X) / HN);
+	Obs.Add((HN - PlayerPos.X) / HN);
 
 	// 4. 現在の敵数 (1)
 	Obs.Add(static_cast<float>(Enemies.Num()) / static_cast<float>(MaxEnemyObs));
@@ -100,8 +238,7 @@ TArray<float> ACoinGame::GetObservation() const
 	// 5. 次スポーンまでの残り時間 (1)
 	Obs.Add(FMath::Clamp(SpawnTimer / EnemySpawnInterval, 0.f, 1.f));
 
-	// 6. コイン相対位置 dx,dy × NumCoinObs=3 (6)
-	// 距離近い順にソート
+	// 6. コイン相対位置 dx,dy × NumCoinObs=3 (6)  ─ 近い順
 	TArray<int32> CoinIdx;
 	CoinIdx.Reserve(CoinPositions.Num());
 	for (int32 i = 0; i < CoinPositions.Num(); ++i) CoinIdx.Add(i);
@@ -147,8 +284,7 @@ TArray<float> ACoinGame::GetObservation() const
 		if (Slot < EnemyIdx.Num())
 		{
 			const FEnemyState& E = Enemies[EnemyIdx[Slot]];
-			Obs.Add(E.Vel.X);
-			Obs.Add(E.Vel.Y);
+			Obs.Add(E.Vel.X); Obs.Add(E.Vel.Y);
 		}
 		else { Obs.Add(0.f); Obs.Add(0.f); }
 	}
@@ -169,6 +305,8 @@ TArray<float> ACoinGame::GetObservation() const
 
 float ACoinGame::GetReward() const { return LastReward; }
 bool  ACoinGame::IsDone()   const { return bDone; }
+
+// ---- 内部ユーティリティ ----
 
 FVector2D ACoinGame::RandomInsideField()
 {
@@ -197,6 +335,10 @@ void ACoinGame::SpawnEnemy()
 	Enemy.Vel  = FVector2D::ZeroVector;
 	Enemy.Type = RandStream.RandRange(0, 2);
 	Enemies.Add(Enemy);
+
+	// ビジュアルを生成（BaseMaterialAsset がロード済みの場合のみ）
+	UStaticMeshComponent* Visual = CreateEnemyVisual(Enemies.Num() - 1, Enemy.Type);
+	EnemyMeshComponents.Add(Visual);
 }
 
 void ACoinGame::UpdateEnemies()
@@ -207,9 +349,9 @@ void ACoinGame::UpdateEnemies()
 		float Speed;
 		switch (E.Type)
 		{
-			case 1:  Target = PlayerPos;                               Speed = EnemySpeedB; break;
+			case 1:  Target = PlayerPos;                                Speed = EnemySpeedB; break;
 			case 2:  Target = PlayerPos + PlayerVel * EnemyPredictTime; Speed = EnemySpeedC; break;
-			default: Target = PlayerPos;                               Speed = EnemySpeedA; break;
+			default: Target = PlayerPos;                                Speed = EnemySpeedA; break;
 		}
 		E.Vel  = (Target - E.Pos).GetSafeNormal() * Speed;
 		E.Pos += E.Vel * PhysicsDt;
