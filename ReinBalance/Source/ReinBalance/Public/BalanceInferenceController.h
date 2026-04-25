@@ -1,9 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "GameFramework/Actor.h"
-#include "NNEModelData.h"
-#include "NNERuntimeCPU.h"
+#include "InferenceControllerBase.h"
 #include "BalanceCart.h"
 #include "BalanceInferenceController.generated.h"
 
@@ -18,31 +16,17 @@
  *   4. PIE (▶) を開始すると自動で推論・制御が始まる
  */
 UCLASS()
-class REINBALANCE_API ABalanceInferenceController : public AActor
+class REINBALANCE_API ABalanceInferenceController : public AInferenceControllerBase
 {
 	GENERATED_BODY()
 
 public:
-	ABalanceInferenceController();
-
-	/** ONNX モデルデータアセット (Content Browser からインポートした UNNEModelData) */
-	UPROPERTY(EditAnywhere, Category = "Inference")
-	TObjectPtr<UNNEModelData> ModelData;
-
 	/** 制御対象の ABalanceCart アクター */
 	UPROPERTY(EditAnywhere, Category = "Inference")
 	TObjectPtr<ABalanceCart> Cart;
 
-	/** エピソード終了時に自動でリセットするか */
-	UPROPERTY(EditAnywhere, Category = "Inference")
-	bool bAutoReset = true;
-
 protected:
+	virtual uint32 GetObsDim() const override { return 6; }
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
-
-private:
-	TSharedPtr<UE::NNE::IModelCPU> NNEModel;
-	TSharedPtr<UE::NNE::IModelInstanceCPU> NNEModelInstance;
-	bool bModelReady = false;
 };

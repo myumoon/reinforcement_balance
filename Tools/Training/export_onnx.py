@@ -2,6 +2,7 @@
 
 使い方:
   python export_onnx.py --model models/balance_model --output models/balance_model.onnx
+  python export_onnx.py --model models/coin_model    --output models/coin_model.onnx
   # 出力ファイルを UE5 の Content Browser にドラッグ&ドロップでインポートする
 """
 
@@ -18,7 +19,8 @@ class _DeterministicActor(torch.nn.Module):
 
     SB3 の ActorCriticPolicy.forward() は (actions, values, log_prob) を返すが、
     UE5 NNE 推論では値関数・log_prob は不要なので除外し、入出力を 1 テンソルに絞る。
-    deterministic=True で平均アクション (Gaussian の mean) を返す。
+    - 連続行動: deterministic=True で平均アクション (Gaussian の mean) を返す
+    - 離散行動: argmax インデックスを float32 にキャストして返す（NNE は float32 のみ受け付けるため）
     """
 
     def __init__(self, policy):
@@ -26,7 +28,8 @@ class _DeterministicActor(torch.nn.Module):
         self.policy = policy
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.policy._predict(obs, deterministic=True)
+        action = self.policy._predict(obs, deterministic=True)
+        return action.float()  # 離散 (int64) も float32 に統一
 
 
 def export(model_path: Path, output_path: Path) -> None:

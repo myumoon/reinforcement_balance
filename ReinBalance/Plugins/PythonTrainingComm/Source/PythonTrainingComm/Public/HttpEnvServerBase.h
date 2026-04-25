@@ -30,11 +30,24 @@ public:
 	 */
 	virtual void Tick() override;
 
+	/**
+	 * Jsonレスポンスを作成する
+	 * @param Json レスポンスボディの JSON 文字列（例: {"obs":[0.0,1.0],"reward":1.0,"done":false}）
+	 * @return レスポンス
+	 */
+	static TUniquePtr<FHttpServerResponse> MakeJsonResponse(const FString& Json);
+
 protected:
 	// HTTP ハンドラ（ワーカースレッド）
 	bool HandleReset(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleStep(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleClose(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
+
+	/** 派生クラスが追加ルートを登録するフック（StartServer 末尾で呼ばれる） */
+	virtual void RegisterAdditionalRoutes(TSharedPtr<IHttpRouter> Router) {}
+
+	/** 派生クラスが追加ルートを解除するフック（StopServer 冒頭で呼ばれる） */
+	virtual void UnregisterAdditionalRoutes(TSharedPtr<IHttpRouter> Router) {}
 
 private:
 	TSharedPtr<IHttpRouter> HttpRouter;
@@ -44,7 +57,7 @@ private:
 
 	// HTTP スレッド → GameThread
 	struct FResetRequest { TOptional<int32> Seed; FHttpResultCallback Callback; };
-	struct FStepRequest  { float Force; FHttpResultCallback Callback; };
+	struct FStepRequest  { TArray<float> Action; FHttpResultCallback Callback; };
 
 	TQueue<FResetRequest, EQueueMode::Mpsc> ResetQueue;
 	TQueue<FStepRequest,  EQueueMode::Mpsc> ActionQueue;
@@ -56,6 +69,4 @@ private:
 	// 保留中のコールバック（GameThread で結果が出たら呼ぶ）
 	TOptional<FHttpResultCallback> PendingResetCallback;
 	TOptional<FHttpResultCallback> PendingStepCallback;
-
-	static TUniquePtr<FHttpServerResponse> MakeJsonResponse(const FString& Json);
 };
