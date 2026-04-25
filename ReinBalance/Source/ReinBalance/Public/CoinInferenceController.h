@@ -26,7 +26,11 @@ public:
 	TObjectPtr<ACoinGame> CoinGame;
 
 protected:
-	virtual uint32 GetObsDim() const override { return 116; }
+	virtual uint32 GetObsDim() const override
+	{
+		// BeginPlay でCoinGame の null チェック済みの状態で呼ばれる
+		return CoinGame ? static_cast<uint32>(CoinGame->GetObsDim()) : 116u;
+	}
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 };

@@ -75,7 +75,7 @@ void ACoinGame::PhysicsStep(int32 ActionIdx)
 TArray<float> ACoinGame::GetObservation() const
 {
 	TArray<float> Obs;
-	Obs.Reserve(116);
+	Obs.Reserve(GetObsDim());
 
 	const float HN = FieldHalfSize;
 	const float DN = FieldHalfSize * 2.f;
@@ -162,7 +162,7 @@ TArray<float> ACoinGame::GetObservation() const
 		else { Obs.Add(0.f); }
 	}
 
-	return Obs; // 116 次元
+	return Obs;
 }
 
 float ACoinGame::GetReward() const { return LastReward; }

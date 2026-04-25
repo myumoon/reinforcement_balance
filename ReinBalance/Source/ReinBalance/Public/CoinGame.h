@@ -11,16 +11,17 @@
  * ビジュアル表示は ACoinGameView が担う。
  *
  * 行動: 離散5方向 (0=+Y, 1=-Y, 2=-X, 3=+X, 4=静止)
- * 観測: 116次元
- *   [0-1]    プレイヤー位置 (x,y) / FieldHalfSize
- *   [2-3]    プレイヤー速度 (vx,vy)
- *   [4-7]    壁距離 (上/下/左/右) / FieldHalfSize
- *   [8]      現在の敵数 / MaxEnemyObs
- *   [9]      次スポーンまでの残り時間 (0~1)
- *   [10-15]  コイン相対位置 dx,dy × 3  / (FieldHalfSize*2)
- *   [16-55]  敵相対位置  dx,dy × 20   / (FieldHalfSize*2)
- *   [56-95]  敵速度      vx,vy × 20
- *   [96-115] 敵の種類スカラー × 20  (A=0.0, B=0.5, C=1.0)
+ * 観測: GetObsDim() 次元 = 10 + NumCoinObs*2 + MaxEnemyObs*5
+ *   [0-1]                  プレイヤー位置 (x,y) / FieldHalfSize
+ *   [2-3]                  プレイヤー速度 (vx,vy)
+ *   [4-7]                  壁距離 (上/下/左/右) / FieldHalfSize
+ *   [8]                    現在の敵数 / MaxEnemyObs
+ *   [9]                    次スポーンまでの残り時間 (0~1)
+ *   [10 .. 10+N*2-1]       コイン相対位置 dx,dy × NumCoinObs  / (FieldHalfSize*2)
+ *   [10+N*2 .. +M*2-1]     敵相対位置  dx,dy × MaxEnemyObs=20 / (FieldHalfSize*2)
+ *   [.. +M*2]              敵速度      vx,vy × MaxEnemyObs=20
+ *   [.. +M]                敵の種類スカラー × MaxEnemyObs=20  (A=0.0, B=0.5, C=1.0)
+ * ※ NumCoinObs を変更すると観測次元が変わるため、モデルの再訓練が必要
  */
 UCLASS()
 class REINBALANCE_API ACoinGame : public AActor
@@ -36,8 +37,11 @@ public:
 	/** 状態をリセットする。Seed 未指定の場合はランダム。 */
 	void ResetState(TOptional<int32> Seed);
 
-	/** 観測値 116 次元を返す */
+	/** 観測ベクトルを返す（次元数は GetObsDim() に一致） */
 	TArray<float> GetObservation() const;
+
+	/** 観測次元数を返す: 10 + NumCoinObs*2 + MaxEnemyObs*5 */
+	int32 GetObsDim() const { return 10 + NumCoinObs * 2 + MaxEnemyObs * 5; }
 
 	/** ステップ報酬を返す */
 	float GetReward() const;
@@ -86,9 +90,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CoinGame|Config")
 	float FieldHalfSize = 10.f;
 
-	/** コインの枚数（観測次元に影響するため 3 を推奨） */
+	/** フィールド上のコイン枚数（上限なし） */
 	UPROPERTY(EditAnywhere, Category = "CoinGame|Config")
 	int32 NumCoins = 3;
+
+	/** 観測ベクトルに含める最近傍コイン数（変更すると観測次元が変わりモデルの再訓練が必要） */
+	UPROPERTY(EditAnywhere, Category = "CoinGame|Config")
+	int32 NumCoinObs = 3;
 
 	/** 敵スポーン間隔 [秒] */
 	UPROPERTY(EditAnywhere, Category = "CoinGame|Config")
@@ -133,7 +141,6 @@ protected:
 
 private:
 	static constexpr int32 MaxEnemyObs = 20;
-	static constexpr int32 NumCoinObs  = 3;
 	static constexpr float PhysicsDt   = 1.f / 60.f;
 
 	struct FEnemyState
