@@ -19,12 +19,15 @@ class CoinEnv(BaseUE5Env):
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8766, connect_timeout: int = 120):
         super().__init__(host=host, port=port, connect_timeout=connect_timeout)
-        # observation_space は _on_server_connected() で /obs_schema から設定する
-        self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32  # 仮; 接続後に上書き
-        )
         self.action_space = gym.spaces.Discrete(_NUM_ACTIONS)
         self._expected_schema_hash: str | None = None
+
+        # SB3 が env をラップする前に observation_space を確定させる必要があるため、
+        # __init__ 時点でサーバーに接続して /obs_schema から正しい shape を取得する
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32  # 仮; 直後に上書き
+        )
+        self._wait_for_server()
 
     def _on_server_connected(self):
         """接続後に /obs_schema を取得して observation_space を確定する。"""
