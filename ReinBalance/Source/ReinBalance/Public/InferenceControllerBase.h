@@ -34,8 +34,12 @@ protected:
 	/** BeginPlay でモデルをロードする。派生クラスは Super::BeginPlay() を呼ぶこと。 */
 	virtual void BeginPlay() override;
 
-	/** モデルの観測次元（派生クラスで必須実装） */
-	virtual uint32 GetObsDim() const = 0;
+	/** モデルの観測次元（派生クラスでオーバーライド必須） */
+	virtual uint32 GetObsDim() const
+	{
+		checkNoEntry(); // 派生クラスで必ずオーバーライドすること
+		return 0;
+	}
 
 	/** モデルの出力次元（デフォルト 1） */
 	virtual uint32 GetActionDim() const { return 1; }
