@@ -69,6 +69,16 @@ public:
 	{
 		return Enemies.IsValidIndex(i) ? Enemies[i].Type : 0;
 	}
+	
+	// ---- 報酬設定 ----
+	
+	/** 生存報酬 */
+	UPROPERTY(EditAnywhere, Category = "CoinGame|Train")
+	float AliveReward = 0.001f;
+	
+	/** コイン獲得報酬 */
+	UPROPERTY(EditAnywhere, Category = "CoinGame|Train")
+	float CoinReward = 5.0f;
 
 	// ---- フィールド設定 ----
 

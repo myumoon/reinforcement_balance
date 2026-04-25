@@ -69,7 +69,7 @@ void ACoinGame::PhysicsStep(int32 ActionIdx)
 		return;
 	}
 
-	LastReward += 0.01f;
+	LastReward += AliveReward;
 }
 
 TArray<float> ACoinGame::GetObservation() const
@@ -223,7 +223,7 @@ void ACoinGame::CheckCoinCollections()
 	{
 		if (FVector2D::DistSquared(PlayerPos, Coin) < RadSq)
 		{
-			LastReward += 1.0f;
+			LastReward += CoinReward;
 			Coin = RandomInsideField();
 		}
 	}

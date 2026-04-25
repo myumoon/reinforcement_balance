@@ -74,6 +74,7 @@ private:
 	void LoadAssets();
 	void SetupPlayerMesh();
 	void SetupCoinMeshes();
+	void SyncCoinMeshes();
 	void SyncEnemyMeshes();
 	void UpdatePositions();
 

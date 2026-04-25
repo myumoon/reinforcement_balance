@@ -40,6 +40,7 @@ void ACoinGameView::Tick(float DeltaTime)
 	Super::Tick(DeltaTime);
 	if (!Game) return;
 
+	SyncCoinMeshes();  // BeginPlay 順序ずれによる未生成コインを補完
 	SyncEnemyMeshes(); // 敵数の変化（スポーン・リセット）に追従
 	UpdatePositions(); // 全オブジェクトの位置を同期
 }
@@ -87,6 +88,30 @@ void ACoinGameView::SetupCoinMeshes()
 }
 
 // ---- Tick 内処理 ----
+
+void ACoinGameView::SyncCoinMeshes()
+{
+	const int32 GameCount   = Game->GetCoinCount();
+	const int32 VisualCount = CoinMeshComponents.Num();
+	if (VisualCount >= GameCount) return;
+
+	// BeginPlay 順序の問題などでコインメッシュが未生成の場合に追加
+	for (int32 i = VisualCount; i < GameCount; ++i)
+	{
+		UStaticMeshComponent* Comp = NewObject<UStaticMeshComponent>(this,
+			*FString::Printf(TEXT("CoinMesh_%d"), i));
+		Comp->RegisterComponent();
+		Comp->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepRelativeTransform);
+		Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		if (SphereMeshAsset) Comp->SetStaticMesh(SphereMeshAsset);
+		Comp->SetRelativeScale3D(FVector(0.4f, 0.4f, 0.4f));
+
+		UMaterialInstanceDynamic* Mat =
+			CreateColorMaterial(FLinearColor(1.f, 0.85f, 0.f, 1.f));
+		if (Mat) Comp->SetMaterial(0, Mat);
+		CoinMeshComponents.Add(Comp);
+	}
+}
 
 void ACoinGameView::SyncEnemyMeshes()
 {
