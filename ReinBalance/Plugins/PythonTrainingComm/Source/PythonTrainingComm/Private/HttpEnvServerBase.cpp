@@ -32,6 +32,8 @@ void FHttpEnvServerBase::StartServer(uint32 Port)
 		FHttpPath(TEXT("/close")), EHttpServerRequestVerbs::VERB_POST,
 		FHttpRequestHandler::CreateRaw(this, &FHttpEnvServerBase::HandleClose));
 
+	RegisterAdditionalRoutes(HttpRouter);
+
 	HttpModule.StartAllListeners();
 	UE_LOG(LogTemp, Log, TEXT("PythonTrainingComm: HTTP server started on port %d"), Port);
 }
@@ -40,6 +42,7 @@ void FHttpEnvServerBase::StopServer()
 {
 	if (HttpRouter)
 	{
+		UnregisterAdditionalRoutes(HttpRouter);
 		HttpRouter->UnbindRoute(ResetRoute);
 		HttpRouter->UnbindRoute(StepRoute);
 		HttpRouter->UnbindRoute(CloseRoute);
@@ -63,7 +66,9 @@ void FHttpEnvServerBase::Tick()
 				ObsStr += FString::SanitizeFloat(Result.Obs[i]);
 				if (i < Result.Obs.Num() - 1) ObsStr += TEXT(",");
 			}
-			FString Json = FString::Printf(TEXT("{\"obs\":[%s]}"), *ObsStr);
+			FString Json = FString::Printf(
+				TEXT("{\"obs\":[%s],\"obs_schema_hash\":\"%s\"}"),
+				*ObsStr, *Result.ObsSchemaHash);
 			Req.Callback(MakeJsonResponse(Json));
 		}
 	}

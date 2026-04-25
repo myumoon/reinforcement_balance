@@ -13,11 +13,56 @@ public:
 		if (Game)
 		{
 			Game->ResetState(Seed);
-			Result.Obs = Game->GetObservation();
+			Result.Obs            = Game->GetObservation();
+			Result.ObsSchemaHash  = Game->GetObsSchemaHash();
 		}
 		return Result;
 	}
 
+protected:
+	virtual void RegisterAdditionalRoutes(TSharedPtr<IHttpRouter> Router) override
+	{
+		ObsSchemaRoute = Router->BindRoute(
+			FHttpPath(TEXT("/obs_schema")), EHttpServerRequestVerbs::VERB_GET,
+			FHttpRequestHandler::CreateRaw(this, &FCoinEnvServer::HandleObsSchema));
+	}
+
+	virtual void UnregisterAdditionalRoutes(TSharedPtr<IHttpRouter> Router) override
+	{
+		if (Router) Router->UnbindRoute(ObsSchemaRoute);
+	}
+
+private:
+	bool HandleObsSchema(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+	{
+		if (!Game)
+		{
+			OnComplete(MakeJsonResponse(TEXT("{\"error\":\"game not set\"}")));
+			return true;
+		}
+
+		TArray<FObsSegment> Schema = Game->GetObsSchema();
+
+		FString SegmentsStr;
+		for (int32 i = 0; i < Schema.Num(); ++i)
+		{
+			SegmentsStr += FString::Printf(TEXT("{\"name\":\"%s\",\"dim\":%d}"),
+				*Schema[i].Name, Schema[i].Dim);
+			if (i < Schema.Num() - 1) SegmentsStr += TEXT(",");
+		}
+
+		FString Json = FString::Printf(
+			TEXT("{\"segments\":[%s],\"total_dim\":%d,\"obs_schema_hash\":\"%s\"}"),
+			*SegmentsStr, Game->GetObsDim(), *Game->GetObsSchemaHash());
+
+		OnComplete(MakeJsonResponse(Json));
+		return true;
+	}
+
+	FHttpRouteHandle ObsSchemaRoute;
+	ACoinGame* Game; // non-owning、PIE セッション中は有効
+
+public:
 	virtual FEnvStepResult ProcessStep(const TArray<float>& Action) override
 	{
 		FEnvStepResult Result;
@@ -34,9 +79,6 @@ public:
 		}
 		return Result;
 	}
-
-private:
-	ACoinGame* Game; // non-owning、PIE セッション中は有効
 };
 
 ACoinHttpEnvService::ACoinHttpEnvService()

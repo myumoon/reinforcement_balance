@@ -28,7 +28,9 @@ class BaseUE5Env(gym.Env):
             self._wait_for_server()
         resp = self.session.post(f"{self.base_url}/reset", json={"seed": seed}, timeout=10)
         resp.raise_for_status()
-        obs = np.array(resp.json()["obs"], dtype=np.float32)
+        data = resp.json()
+        self._on_reset(data)
+        obs = np.array(data["obs"], dtype=np.float32)
         return obs, {}
 
     def step(self, action):
@@ -51,6 +53,14 @@ class BaseUE5Env(gym.Env):
         """行動を /step リクエストの JSON ペイロードに変換する。派生クラスでオーバーライド。"""
         raise NotImplementedError
 
+    def _on_server_connected(self):
+        """サーバー接続完了時に呼ばれるフック。派生クラスでオーバーライド可能。"""
+        pass
+
+    def _on_reset(self, data: dict):
+        """/reset レスポンス受信時に呼ばれるフック。派生クラスでオーバーライド可能。"""
+        pass
+
     def _wait_for_server(self):
         """PIE 起動を待機し、接続が確立したら _server_connected を True にする。"""
         print(f"[INFO] UE5 サーバー ({self.base_url}) を待機中...")
@@ -63,6 +73,7 @@ class BaseUE5Env(gym.Env):
                 self.session.post(f"{self.base_url}/reset", json={"seed": None}, timeout=1)
                 self._server_connected = True
                 print("[INFO] UE5 サーバーに接続しました。")
+                self._on_server_connected()
                 return
             except (requests.ConnectionError, requests.Timeout):
                 if time.time() - last_print >= 5.0:

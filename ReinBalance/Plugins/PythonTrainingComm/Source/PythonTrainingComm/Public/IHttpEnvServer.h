@@ -17,6 +17,7 @@ struct FEnvStepResult
 struct FEnvResetResult
 {
 	TArray<float> Obs;
+	FString       ObsSchemaHash; // 観測スキーマのハッシュ（Python 側の不一致検出用）
 };
 
 /**

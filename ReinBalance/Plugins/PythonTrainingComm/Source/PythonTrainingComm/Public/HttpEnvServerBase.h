@@ -36,6 +36,12 @@ protected:
 	bool HandleStep(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleClose(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 
+	/** 派生クラスが追加ルートを登録するフック（StartServer 末尾で呼ばれる） */
+	virtual void RegisterAdditionalRoutes(TSharedPtr<IHttpRouter> Router) {}
+
+	/** 派生クラスが追加ルートを解除するフック（StopServer 冒頭で呼ばれる） */
+	virtual void UnregisterAdditionalRoutes(TSharedPtr<IHttpRouter> Router) {}
+
 private:
 	TSharedPtr<IHttpRouter> HttpRouter;
 	FHttpRouteHandle ResetRoute;

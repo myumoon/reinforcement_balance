@@ -23,6 +23,13 @@
  *   [.. +M]                敵の種類スカラー × MaxEnemyObs=20  (A=0.0, B=0.5, C=1.0)
  * ※ NumCoinObs を変更すると観測次元が変わるため、モデルの再訓練が必要
  */
+/** 観測ベクトルの各セグメントを表す構造体。GetObsSchema() で取得する。 */
+struct FObsSegment
+{
+	FString Name;
+	int32   Dim;
+};
+
 UCLASS()
 class REINBALANCE_API ACoinGame : public AActor
 {
@@ -40,8 +47,18 @@ public:
 	/** 観測ベクトルを返す（次元数は GetObsDim() に一致） */
 	TArray<float> GetObservation() const;
 
+	/** 観測ベクトルのセグメント定義を返す。/obs_schema エンドポイントや検証に使用。 */
+	TArray<FObsSegment> GetObsSchema() const;
+
 	/** 観測次元数を返す: 10 + NumCoinObs*2 + MaxEnemyObs*5 */
 	int32 GetObsDim() const { return 10 + NumCoinObs * 2 + MaxEnemyObs * 5; }
+
+	/**
+	 * 観測スキーマのハッシュ文字列を返す。
+	 * obs次元に影響するパラメータ（NumCoinObs, MaxEnemyObs）から生成する。
+	 * NumCoins はフィールド上の枚数のみに影響するためハッシュに含めない。
+	 */
+	FString GetObsSchemaHash() const;
 
 	/** ステップ報酬を返す */
 	float GetReward() const;
@@ -141,6 +158,7 @@ protected:
 
 private:
 	static constexpr int32 MaxEnemyObs = 20;
+	static constexpr int32 MaxNumCoins = 100;
 	static constexpr float PhysicsDt   = 1.f / 60.f;
 
 	struct FEnemyState

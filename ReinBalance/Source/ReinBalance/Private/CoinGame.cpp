@@ -1,4 +1,5 @@
 #include "CoinGame.h"
+#include "Misc/MD5.h"
 
 ACoinGame::ACoinGame()
 {
@@ -11,8 +12,32 @@ void ACoinGame::BeginPlay()
 	ResetState(TOptional<int32>());
 }
 
+TArray<FObsSegment> ACoinGame::GetObsSchema() const
+{
+	return {
+		{ TEXT("player_pos"),    2             },
+		{ TEXT("player_vel"),    2             },
+		{ TEXT("wall_dist"),     4             },
+		{ TEXT("enemy_count"),   1             },
+		{ TEXT("spawn_timer"),   1             },
+		{ TEXT("coin_rel_pos"),  NumCoinObs*2  },
+		{ TEXT("enemy_rel_pos"), MaxEnemyObs*2 },
+		{ TEXT("enemy_vel"),     MaxEnemyObs*2 },
+		{ TEXT("enemy_type"),    MaxEnemyObs   },
+	};
+}
+
+FString ACoinGame::GetObsSchemaHash() const
+{
+	FString Schema = FString::Printf(TEXT("NumCoinObs=%d,MaxEnemyObs=%d"), NumCoinObs, MaxEnemyObs);
+	return FMD5::HashAnsiString(TCHAR_TO_ANSI(*Schema));
+}
+
 void ACoinGame::ResetState(TOptional<int32> Seed)
 {
+	ensureMsgf(NumCoins <= MaxNumCoins,
+		TEXT("ACoinGame: NumCoins=%d が上限 MaxNumCoins=%d を超えています"),
+		NumCoins, MaxNumCoins);
 	if (Seed.IsSet())
 		RandStream.Initialize(Seed.GetValue());
 	else
