@@ -2,25 +2,24 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "Components/StaticMeshComponent.h"
 #include "CoinGame.generated.h"
 
 /**
- * コイン収集 + 敵回避ゲームの物理・ゲームロジックアクター。
+ * コイン収集 + 敵回避ゲームの物理・ゲームロジックアクター（ビジュアルなし）。
  *
- * 2D XY 平面上でプレイヤーがコインを集めながら敵を避ける。
- * UE5 物理エンジンは使用せず、解析的に積分する。
+ * 2D XY 平面上でプレイヤーがコインを集めながら敵を避ける純粋シミュレーター。
+ * ビジュアル表示は ACoinGameView が担う。
  *
  * 行動: 離散5方向 (0=+Y, 1=-Y, 2=-X, 3=+X, 4=静止)
  * 観測: 116次元
- *   [0-1]   プレイヤー位置 (x,y) / FieldHalfSize
- *   [2-3]   プレイヤー速度 (vx,vy)
- *   [4-7]   壁距離 (上/下/左/右) / FieldHalfSize
- *   [8]     現在の敵数 / MaxEnemyObs
- *   [9]     次スポーンまでの残り時間 (0~1)
- *   [10-15] コイン相対位置 dx,dy × 3  / (FieldHalfSize*2)
- *   [16-55] 敵相対位置  dx,dy × 20   / (FieldHalfSize*2)
- *   [56-95] 敵速度      vx,vy × 20
+ *   [0-1]    プレイヤー位置 (x,y) / FieldHalfSize
+ *   [2-3]    プレイヤー速度 (vx,vy)
+ *   [4-7]    壁距離 (上/下/左/右) / FieldHalfSize
+ *   [8]      現在の敵数 / MaxEnemyObs
+ *   [9]      次スポーンまでの残り時間 (0~1)
+ *   [10-15]  コイン相対位置 dx,dy × 3  / (FieldHalfSize*2)
+ *   [16-55]  敵相対位置  dx,dy × 20   / (FieldHalfSize*2)
+ *   [56-95]  敵速度      vx,vy × 20
  *   [96-115] 敵の種類スカラー × 20  (A=0.0, B=0.5, C=1.0)
  */
 UCLASS()
@@ -45,6 +44,31 @@ public:
 
 	/** エピソード終了判定（敵接触） */
 	bool IsDone() const;
+
+	// ---- ビュー向け状態アクセサー ----
+
+	FVector2D GetPlayerPos() const { return PlayerPos; }
+	FVector2D GetPlayerVel() const { return PlayerVel; }
+
+	int32     GetCoinCount()      const { return CoinPositions.Num(); }
+	FVector2D GetCoinPos(int32 i) const
+	{
+		return CoinPositions.IsValidIndex(i) ? CoinPositions[i] : FVector2D::ZeroVector;
+	}
+
+	int32     GetEnemyCount()       const { return Enemies.Num(); }
+	FVector2D GetEnemyPos(int32 i)  const
+	{
+		return Enemies.IsValidIndex(i) ? Enemies[i].Pos : FVector2D::ZeroVector;
+	}
+	FVector2D GetEnemyVel(int32 i)  const
+	{
+		return Enemies.IsValidIndex(i) ? Enemies[i].Vel : FVector2D::ZeroVector;
+	}
+	int32     GetEnemyType(int32 i) const
+	{
+		return Enemies.IsValidIndex(i) ? Enemies[i].Type : 0;
+	}
 
 	// ---- フィールド設定 ----
 
@@ -94,13 +118,6 @@ public:
 	UPROPERTY(EditAnywhere, Category = "CoinGame|Physics")
 	float EnemyPredictTime = 0.75f;
 
-	// ---- ビジュアル ----
-
-	/** シミュレーション座標（m）→ UE5 単位（cm）の変換スケール
-	 *  デフォルト 50: FieldHalfSize=10m → 視覚フィールド 1000×1000 UE単位 */
-	UPROPERTY(EditAnywhere, Category = "CoinGame|Visual")
-	float SimToUE = 50.f;
-
 protected:
 	virtual void BeginPlay() override;
 
@@ -126,35 +143,6 @@ private:
 	bool  bDone      = false;
 
 	FRandomStream RandStream;
-
-	// ---- ビジュアルコンポーネント ----
-
-	UPROPERTY(VisibleAnywhere, Category = "Components")
-	TObjectPtr<UStaticMeshComponent> PlayerMesh;
-
-	UPROPERTY(VisibleAnywhere, Category = "Components")
-	TArray<TObjectPtr<UStaticMeshComponent>> CoinMeshComponents;
-
-	/** 動的に生成・破棄される敵メッシュ（GC 防止のため UPROPERTY） */
-	UPROPERTY()
-	TArray<TObjectPtr<UStaticMeshComponent>> EnemyMeshComponents;
-
-	/** キャッシュされたアセット参照 */
-	UPROPERTY()
-	TObjectPtr<UStaticMesh> ConeMeshAsset;
-	UPROPERTY()
-	TObjectPtr<UStaticMesh> SphereMeshAsset;
-	UPROPERTY()
-	TObjectPtr<UStaticMesh> CubeMeshAsset;
-	UPROPERTY()
-	TObjectPtr<UMaterial> BaseMaterialAsset;
-
-	void SetupVisuals();
-	void UpdateVisuals();
-	UStaticMeshComponent* CreateEnemyVisual(int32 EnemyIndex, int32 Type);
-	class UMaterialInstanceDynamic* CreateColorMaterial(const FLinearColor& Color);
-
-	// ---- シミュレーション内部 ----
 
 	FVector2D RandomInsideField();
 	FVector2D RandomOnEdge();
