@@ -1,39 +1,45 @@
-"""SB3 PPO による BalancePole 訓練スクリプト。
+"""SB3 PPO による BalancePole / CoinGame 訓練スクリプト。
 
 使い方:
-  python train.py               # UE5 に接続して訓練
-  python train.py --dry-run     # UE5 なしでパイプライン確認
-  python train.py --resume models/balance_model     # 既存モデルを継続訓練
-  python train.py --resume models/balance_model.zip # .zip 付きでも可
+  python train.py                          # BalancePole (UE5 接続)
+  python train.py --game coin              # CoinGame    (UE5 接続)
+  python train.py --dry-run               # BalancePole スタブ
+  python train.py --game coin --dry-run   # CoinGame    スタブ
+  python train.py --resume models/balance_model
   python train.py --help
 """
 
 import argparse
-import sys
 from pathlib import Path
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
 
+_GAME_DEFAULTS = {
+    "balance": {"port": 8765, "output": "models/balance_model"},
+    "coin":    {"port": 8766, "output": "models/coin_model"},
+}
+
 
 def _strip_zip(path: Path) -> Path:
     """SB3 が .zip を自動付加するため、ユーザーが指定した .zip 拡張子を除去する。"""
-    if path.suffix.lower() == ".zip":
-        return path.with_suffix("")
-    return path
+    return path.with_suffix("") if path.suffix.lower() == ".zip" else path
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
+    p.add_argument("--game", choices=["balance", "coin"], default="balance",
+                   help="訓練対象のゲーム (default: balance)")
     p.add_argument("--dry-run", action="store_true", help="UE5 なしでスタブ環境を使用")
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--port", type=int, default=None,
+                   help="サーバーポート（未指定時はゲーム別デフォルト: balance=8765, coin=8766）")
     p.add_argument("--total-steps", type=int, default=500_000)
-    p.add_argument("--output", type=Path, default=Path("models/balance_model"),
-                   help="保存先パス (.zip 拡張子は省略・付加どちらでも可)")
+    p.add_argument("--output", type=Path, default=None,
+                   help="保存先パス（未指定時はゲーム別デフォルト）")
     p.add_argument("--resume", type=Path, default=None,
-                   help="再開する既存モデルのパス (.zip 拡張子は省略・付加どちらでも可)")
+                   help="再開する既存モデルのパス（.zip 拡張子は省略・付加どちらでも可）")
     p.add_argument("--checkpoint-freq", type=int, default=10_000,
                    help="チェックポイント保存間隔 (ステップ数, デフォルト: 10000)")
     return p.parse_args()
@@ -42,26 +48,38 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # .zip 拡張子を正規化（SB3 が自動付加するため除去）
-    output = _strip_zip(args.output)
+    defaults = _GAME_DEFAULTS[args.game]
+    port   = args.port   if args.port   is not None else defaults["port"]
+    output = _strip_zip(args.output if args.output is not None else Path(defaults["output"]))
 
     if args.dry_run:
-        from envs.balance_env_stub import DummyBalanceEnv
-        env = make_vec_env(DummyBalanceEnv, n_envs=4)
-        print("[dry-run] Using DummyBalanceEnv (no UE5 connection)")
+        if args.game == "coin":
+            from envs.coin_env_stub import DummyCoinEnv
+            env = make_vec_env(DummyCoinEnv, n_envs=4)
+        else:
+            from envs.balance_env_stub import DummyBalanceEnv
+            env = make_vec_env(DummyBalanceEnv, n_envs=4)
+        print(f"[dry-run] game={args.game} スタブ環境で実行")
     else:
-        from envs.balance_env import BalanceEnv
-        env = make_vec_env(
-            lambda: BalanceEnv(host=args.host, port=args.port),
-            n_envs=1,
-        )
-        print(f"[INFO] Connecting to UE5 server at {args.host}:{args.port} ...")
+        if args.game == "coin":
+            from envs.coin_env import CoinEnv
+            env = make_vec_env(
+                lambda: CoinEnv(host=args.host, port=port),
+                n_envs=1,
+            )
+        else:
+            from envs.balance_env import BalanceEnv
+            env = make_vec_env(
+                lambda: BalanceEnv(host=args.host, port=port),
+                n_envs=1,
+            )
+        print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{port} に接続...")
 
     output.parent.mkdir(parents=True, exist_ok=True)
 
     if args.resume:
-        resume_path = str(args.resume)
-        print(f"[INFO] Resuming from {resume_path}")
+        resume_path = str(_strip_zip(args.resume))
+        print(f"[INFO] {resume_path} から再開")
         model = PPO.load(resume_path, env=env)
     else:
         model = PPO("MlpPolicy", env, verbose=1)

@@ -18,11 +18,12 @@ public:
 		return Result;
 	}
 
-	virtual FEnvStepResult ProcessStep(float Force) override
+	virtual FEnvStepResult ProcessStep(const TArray<float>& Action) override
 	{
 		FEnvStepResult Result;
 		if (Cart)
 		{
+			const float Force = Action.Num() > 0 ? FMath::Clamp(Action[0], -1.f, 1.f) : 0.f;
 			Cart->PhysicsStep(Force);
 			Result.Obs       = Cart->GetObservation();
 			Result.Reward    = Cart->GetReward();

@@ -73,7 +73,7 @@ void FHttpEnvServerBase::Tick()
 		FStepRequest Req;
 		if (ActionQueue.Dequeue(Req))
 		{
-			FEnvStepResult Result = ProcessStep(Req.Force);
+			FEnvStepResult Result = ProcessStep(Req.Action);
 
 			FString ObsStr;
 			for (int32 i = 0; i < Result.Obs.Num(); ++i)
@@ -113,21 +113,23 @@ bool FHttpEnvServerBase::HandleReset(const FHttpServerRequest& Request, const FH
 
 bool FHttpEnvServerBase::HandleStep(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
-	float Force = 0.f;
+	TArray<float> Action;
 	FString Body(UTF8_TO_TCHAR(reinterpret_cast<const char*>(Request.Body.GetData())));
 	TSharedPtr<FJsonObject> JsonObj;
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
 	if (FJsonSerializer::Deserialize(Reader, JsonObj) && JsonObj.IsValid())
 	{
-		double ForceVal;
-		if (JsonObj->TryGetNumberField(TEXT("force"), ForceVal))
+		const TArray<TSharedPtr<FJsonValue>>* ActionArr;
+		if (JsonObj->TryGetArrayField(TEXT("action"), ActionArr))
 		{
-			Force = static_cast<float>(ForceVal);
+			for (const TSharedPtr<FJsonValue>& Val : *ActionArr)
+			{
+				Action.Add(static_cast<float>(Val->AsNumber()));
+			}
 		}
 	}
-	Force = FMath::Clamp(Force, -1.f, 1.f);
 
-	ActionQueue.Enqueue({Force, OnComplete});
+	ActionQueue.Enqueue({MoveTemp(Action), OnComplete});
 	return true; // 非同期応答
 }
 
