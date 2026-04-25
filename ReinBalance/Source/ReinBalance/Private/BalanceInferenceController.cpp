@@ -23,8 +23,7 @@ void ABalanceInferenceController::BeginPlay()
 	}
 
 	// NNERuntimeORT ランタイムを取得
-	TWeakInterfacePtr<INNERuntimeCPU> Runtime =
-		UE::NNE::GetRuntime<INNERuntimeCPU>(TEXT("NNERuntimeORT"));
+	TWeakInterfacePtr<INNERuntimeCPU> Runtime = UE::NNE::GetRuntime<INNERuntimeCPU>(FString("NNERuntimeORTCpu"));
 	if (!Runtime.IsValid())
 	{
 		UE_LOG(LogTemp, Error, TEXT("[Inference] NNERuntimeORT が見つかりません。プラグインが有効か確認してください。"));
