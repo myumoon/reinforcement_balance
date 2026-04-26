@@ -96,9 +96,14 @@ def _call_llm(client, model_name: str, prompt: str, backend: str) -> str:
 
 def _fetch_obs_schema(host: str, port: int) -> dict:
     url = f"http://{host}:{port}/obs_schema"
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.ConnectionError:
+        print(f"[ERROR] UE5 サーバー ({host}:{port}) に接続できませんでした。")
+        print(f"[ERROR] UE5 エディタで PIE (▶) を起動してから再実行してください。")
+        sys.exit(1)
 
 
 def _build_obs_layout(schema: dict) -> tuple[str, dict[str, int]]:
