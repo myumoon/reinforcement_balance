@@ -28,6 +28,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 # CoinGame の固定報酬パラメータ（C++ 側の定数と一致させること）
 _ALIVE_REWARD = 0.001
 _COIN_REWARD = 5.0
+_STATE_FILENAME = "state.json"
 
 _DEFAULT_STEPS = 50_000
 _DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
@@ -294,6 +295,34 @@ class _EurekaMetricsCallback(BaseCallback):
 
 
 # ---------------------------------------------------------------------------
+# 状態の保存・読み込み（再開用）
+# ---------------------------------------------------------------------------
+
+def _save_state(run_dir: Path, next_iter: int, prev_metrics: dict | None,
+                best_iter: int, best_coins: float) -> None:
+    state = {
+        "next_iter": next_iter,
+        "prev_metrics": prev_metrics,
+        "best_iter": best_iter,
+        "best_coins": best_coins,
+    }
+    (run_dir / _STATE_FILENAME).write_text(
+        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _load_state(run_dir: Path) -> dict | None:
+    path = run_dir / _STATE_FILENAME
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return None
+
+
+def _is_credit_error(e: Exception) -> bool:
+    return "credit balance" in str(e).lower()
+
+
+# ---------------------------------------------------------------------------
 # メインループ
 # ---------------------------------------------------------------------------
 
@@ -320,12 +349,27 @@ def main() -> None:
     from envs.coin_env import CoinEnv
     env = CoinEnv(host=args.host, port=args.port)
 
-    prev_metrics: dict | None = None
-    best_coins = -1.0
-    best_iter = -1
+    # 再開状態の読み込み
+    state = _load_state(run_dir)
+    if state:
+        start_iter = state["next_iter"]
+        prev_metrics = state.get("prev_metrics")
+        best_iter = state.get("best_iter", -1)
+        best_coins = state.get("best_coins", -1.0)
+        print(f"[INFO] 前回の状態を検出: イテレーション {start_iter} から再開します。")
+    else:
+        start_iter = 1
+        prev_metrics = None
+        best_coins = -1.0
+        best_iter = -1
+
+    if start_iter > args.iterations:
+        print(f"[INFO] 全イテレーション ({args.iterations}) 完了済みです。")
+        env.close()
+        return
 
     try:
-        for i in range(1, args.iterations + 1):
+        for i in range(start_iter, args.iterations + 1):
             iter_dir = run_dir / f"iter_{i:03d}"
             iter_dir.mkdir(exist_ok=True)
             print(f"\n{'=' * 60}")
@@ -335,7 +379,17 @@ def main() -> None:
             # --- LLM に報酬関数を生成させる ---
             prompt = _build_prompt(obs_layout_str, offsets, prev_metrics, i)
             print("[INFO] LLM に報酬関数を生成中...")
-            llm_response = _call_llm(client, model_name, prompt, args.llm)
+            try:
+                llm_response = _call_llm(client, model_name, prompt, args.llm)
+            except Exception as e:
+                if _is_credit_error(e):
+                    _save_state(run_dir, i, prev_metrics, best_iter, best_coins)
+                    print(f"\n[ERROR] クレジット残高が不足しています。")
+                    print(f"[INFO]  https://console.anthropic.com/settings/billing でクレジットを追加してください。")
+                    print(f"[INFO]  追加後、以下のコマンドで再開できます:")
+                    print(f"[INFO]    python eureka_loop.py --iterations {args.iterations} --run-name {run_name}")
+                    return
+                raise
 
             # レスポンス保存
             (iter_dir / "llm_response.txt").write_text(llm_response, encoding="utf-8")
@@ -399,11 +453,17 @@ def main() -> None:
 
             prev_metrics = metrics
 
+            # イテレーション完了後に状態を保存（次回再開用）
+            _save_state(run_dir, i + 1, prev_metrics, best_iter, best_coins)
+
     except KeyboardInterrupt:
         print("\n[INFO] ループを中断しました。")
 
     finally:
         env.close()
+
+    # 正常完了時は state.json を削除
+    (run_dir / _STATE_FILENAME).unlink(missing_ok=True)
 
     # --- サマリー ---
     print(f"\n{'=' * 60}")
