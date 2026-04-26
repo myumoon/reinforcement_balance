@@ -5,3 +5,4 @@ onnx==1.16.1
 onnxruntime==1.18.1
 numpy==1.26.4
 requests==2.32.3
+anthropic

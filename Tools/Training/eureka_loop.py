@@ -1,0 +1,413 @@
+"""EUREKA型報酬シェーピングループ。
+
+LLMが報酬シェーピング関数を反復的に生成・改良し、
+コイン取得と敵回避を両立するAIを育てる。
+
+使い方:
+  python eureka_loop.py --iterations 5
+  python eureka_loop.py --iterations 10 --run-name approach_shaping
+  python eureka_loop.py --llm openai --model gpt-4o --iterations 3
+  python eureka_loop.py --help
+"""
+
+import argparse
+import datetime
+import importlib.util
+import json
+import re
+import shutil
+import sys
+from pathlib import Path
+from typing import Callable
+
+import numpy as np
+import requests
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
+
+# CoinGame の固定報酬パラメータ（C++ 側の定数と一致させること）
+_ALIVE_REWARD = 0.001
+_COIN_REWARD = 5.0
+
+_DEFAULT_STEPS = 50_000
+_DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
+_DEFAULT_OPENAI_MODEL = "gpt-4o"
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="EUREKA型報酬シェーピングループ")
+    p.add_argument("--iterations", type=int, default=5, help="ループ回数（default: 5）")
+    p.add_argument("--run-name", default=None,
+                   help="保存ディレクトリ名（未指定時はタイムスタンプ自動生成）")
+    p.add_argument("--llm", choices=["anthropic", "openai"], default="anthropic",
+                   help="LLMバックエンド（default: anthropic）")
+    p.add_argument("--model", default=None,
+                   help="LLMモデル名（未指定時: anthropic=claude-opus-4-6, openai=gpt-4o）")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8766)
+    p.add_argument("--output-dir", default="eureka_results",
+                   help="結果保存の親ディレクトリ（default: eureka_results）")
+    return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# LLM クライアント
+# ---------------------------------------------------------------------------
+
+def _build_llm_client(backend: str, model_override: str | None):
+    if backend == "anthropic":
+        import anthropic
+        client = anthropic.Anthropic()
+        model_name = model_override or _DEFAULT_ANTHROPIC_MODEL
+    else:
+        try:
+            from openai import OpenAI
+        except ImportError:
+            print("[ERROR] openai パッケージがインストールされていません。pip install openai")
+            sys.exit(1)
+        client = OpenAI()
+        model_name = model_override or _DEFAULT_OPENAI_MODEL
+    return client, model_name
+
+
+def _call_llm(client, model_name: str, prompt: str, backend: str) -> str:
+    if backend == "anthropic":
+        response = client.messages.create(
+            model=model_name,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text
+    else:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.choices[0].message.content
+
+
+# ---------------------------------------------------------------------------
+# obs スキーマ
+# ---------------------------------------------------------------------------
+
+def _fetch_obs_schema(host: str, port: int) -> dict:
+    url = f"http://{host}:{port}/obs_schema"
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _build_obs_layout(schema: dict) -> tuple[str, dict[str, int]]:
+    """obs レイアウト文字列と各セグメントの開始インデックス dict を返す。"""
+    lines = []
+    offsets: dict[str, int] = {}
+    offset = 0
+    for seg in schema["segments"]:
+        name = seg["name"]
+        dim = seg["dim"]
+        offsets[name] = offset
+        if dim == 1:
+            lines.append(f"  obs[{offset}]         = {name}")
+        else:
+            lines.append(f"  obs[{offset}:{offset + dim}] = {name}  (dim={dim})")
+        offset += dim
+    lines.append(f"  合計: {schema['total_dim']} 次元")
+    return "\n".join(lines), offsets
+
+
+# ---------------------------------------------------------------------------
+# プロンプト生成
+# ---------------------------------------------------------------------------
+
+def _build_prompt(obs_layout_str: str, offsets: dict[str, int],
+                  prev_metrics: dict | None, iteration: int) -> str:
+    metrics_section = (
+        "なし（初回）"
+        if prev_metrics is None
+        else json.dumps(prev_metrics, ensure_ascii=False, indent=2)
+    )
+
+    coin_i = offsets.get("coin_rel_pos", 10)
+    enemy_r_i = offsets.get("enemy_rel_pos", coin_i + 200)
+    enemy_v_i = offsets.get("enemy_vel", enemy_r_i + 40)
+    enemy_t_i = offsets.get("enemy_type", enemy_v_i + 40)
+
+    nearest_note = (
+        f"  obs[{coin_i}], obs[{coin_i + 1}]           = 最近コインへの相対位置 (dx, dy)\n"
+        f"  obs[{enemy_r_i}], obs[{enemy_r_i + 1}]         = 最近敵への相対位置 (dx, dy)\n"
+        f"  obs[{enemy_v_i}], obs[{enemy_v_i + 1}]         = 最近敵の速度 (vx, vy)\n"
+        f"  obs[{enemy_t_i}]               = 最近敵の種類 (0.0=遅い直進, 0.5=速い直進, 1.0=予測追跡)"
+    )
+
+    return f"""あなたは強化学習の報酬設計エキスパートです。
+
+## ゲーム概要
+2D フィールド（±10m の正方形）でプレイヤーがコインを収集しながら敵を回避するゲームです。
+- プレイヤーは離散5方向（上/下/左/右/静止）で移動
+- コインを取ると得点、敵に当たるとエピソード終了
+- 敵はフィールド外周からスポーンし、プレイヤーに向かって移動する
+
+## 観測ベクトル（obs）レイアウト
+{obs_layout_str}
+
+## 最近傍エンティティの obs インデックス（先頭要素 = 最近傍、距離近い順にソート済み）
+{nearest_note}
+
+  ※ dx, dy はフィールド幅 (20m) で正規化済み。値域 [-1, 1]
+  ※ 壁距離 wall_dist は FieldHalfSize (10m) で正規化済み。値域 [0, 1]
+
+## 固定報酬（C++ 側、変更不可）
+- AliveReward = {_ALIVE_REWARD} / step（生存毎ステップ）
+- CoinReward = {_COIN_REWARD} / 枚（コイン取得時）
+
+## 前回イテレーション {iteration - 1} のメトリクス
+{metrics_section}
+
+## 課題
+前回の訓練でエージェントはコインを取らず敵から逃げるだけの挙動を示した。
+「コインを取りながら敵からも逃げる」複合行動を引き出す報酬シェーピングを設計してほしい。
+
+## タスク
+以下のフォーマットで回答してください。
+
+### 1. reward_fn.py のコード
+```python
+import numpy as np
+
+def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) -> float:
+    \"\"\"追加の報酬シェーピング関数。必ず np.clip で [-1.0, 1.0] の範囲に収めること。\"\"\"
+    # ここに実装
+    shaped = 0.0
+    return float(np.clip(shaped, -1.0, 1.0))
+```
+
+### 2. 推奨訓練ステップ数
+整数で記載してください（例: 100000）
+
+### 3. 設計の意図
+この報酬関数で何を解決しようとしているか（1〜3行）
+"""
+
+
+# ---------------------------------------------------------------------------
+# レスポンス解析
+# ---------------------------------------------------------------------------
+
+def _extract_reward_fn_code(text: str) -> str | None:
+    match = re.search(r"```python\n(.*?)```", text, re.DOTALL)
+    return match.group(1).strip() if match else None
+
+
+def _extract_steps(text: str) -> int:
+    # "### 2." 直後の数値行を探す
+    m = re.search(r"###\s*2[^\n]*\n+([0-9][0-9_,]*)", text)
+    if not m:
+        m = re.search(r"ステップ[数]?[：:\s]*([0-9][0-9_,]+)", text)
+    if m:
+        raw = m.group(1).replace("_", "").replace(",", "")
+        try:
+            val = int(raw)
+            if 1_000 <= val <= 10_000_000:
+                return val
+        except ValueError:
+            pass
+    return _DEFAULT_STEPS
+
+
+def _validate_code(code: str) -> bool:
+    try:
+        compile(code, "<reward_fn>", "exec")
+        return True
+    except SyntaxError as e:
+        print(f"[WARN] 生成コードに構文エラー: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# 動的ロード
+# ---------------------------------------------------------------------------
+
+def _load_reward_fn(path: Path) -> Callable:
+    spec = importlib.util.spec_from_file_location("_eureka_reward_fn", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.reward_shaping
+
+
+# ---------------------------------------------------------------------------
+# メトリクスコールバック
+# ---------------------------------------------------------------------------
+
+class _EurekaMetricsCallback(BaseCallback):
+    """エピソードごとに base_reward / shaped_reward を集計するコールバック。"""
+
+    def __init__(self):
+        super().__init__(verbose=0)
+        self._ep_base = 0.0
+        self._ep_shaped = 0.0
+        self._ep_len = 0
+        self.episode_base_rewards: list[float] = []
+        self.episode_shaped_rewards: list[float] = []
+        self.episode_lengths: list[int] = []
+
+    def _on_step(self) -> bool:
+        info = self.locals["infos"][0]
+        self._ep_base += info.get("base_reward", 0.0)
+        self._ep_shaped += info.get("shaped_reward", 0.0)
+        self._ep_len += 1
+
+        if self.locals["dones"][0]:
+            self.episode_base_rewards.append(self._ep_base)
+            self.episode_shaped_rewards.append(self._ep_shaped)
+            self.episode_lengths.append(self._ep_len)
+            self._ep_base = 0.0
+            self._ep_shaped = 0.0
+            self._ep_len = 0
+        return True
+
+    def get_metrics(self) -> dict:
+        n = len(self.episode_base_rewards)
+        if n == 0:
+            return {"episodes": 0}
+        mean_base = sum(self.episode_base_rewards) / n
+        mean_shaped = sum(self.episode_shaped_rewards) / n
+        mean_len = sum(self.episode_lengths) / n
+        # coins ≈ (base_sum - AliveReward * episode_length) / CoinReward
+        mean_coins = max(0.0, (mean_base - _ALIVE_REWARD * mean_len) / _COIN_REWARD)
+        return {
+            "episodes": n,
+            "episode_reward_mean": round(mean_base + mean_shaped, 4),
+            "base_reward_mean": round(mean_base, 4),
+            "shaped_reward_mean": round(mean_shaped, 4),
+            "episode_length_mean": round(mean_len, 1),
+            "coins_per_episode": round(mean_coins, 3),
+        }
+
+
+# ---------------------------------------------------------------------------
+# メインループ
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    args = _parse_args()
+
+    # 出力ディレクトリ
+    run_name = args.run_name or datetime.datetime.now().strftime("coin_%Y%m%d_%H%M%S")
+    run_dir = Path(args.output_dir) / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[INFO] 保存先: {run_dir}")
+
+    # LLM クライアント
+    client, model_name = _build_llm_client(args.llm, args.model)
+    print(f"[INFO] LLM: {args.llm} / {model_name}")
+
+    # obs_schema 取得（UE5 が起動している必要がある）
+    print(f"[INFO] obs_schema を取得中 ({args.host}:{args.port})...")
+    schema = _fetch_obs_schema(args.host, args.port)
+    obs_layout_str, offsets = _build_obs_layout(schema)
+    print(f"[INFO] obs_schema 取得完了: total_dim={schema['total_dim']}")
+
+    # 環境作成（_wait_for_server は __init__ 内で済んでいる）
+    from envs.coin_env import CoinEnv
+    env = CoinEnv(host=args.host, port=args.port)
+
+    prev_metrics: dict | None = None
+    best_coins = -1.0
+    best_iter = -1
+
+    try:
+        for i in range(1, args.iterations + 1):
+            iter_dir = run_dir / f"iter_{i:03d}"
+            iter_dir.mkdir(exist_ok=True)
+            print(f"\n{'=' * 60}")
+            print(f"[EUREKA] イテレーション {i}/{args.iterations}")
+            print(f"{'=' * 60}")
+
+            # --- LLM に報酬関数を生成させる ---
+            prompt = _build_prompt(obs_layout_str, offsets, prev_metrics, i)
+            print("[INFO] LLM に報酬関数を生成中...")
+            llm_response = _call_llm(client, model_name, prompt, args.llm)
+
+            # レスポンス保存
+            (iter_dir / "llm_response.txt").write_text(llm_response, encoding="utf-8")
+
+            # コード・ステップ数を抽出
+            reward_fn_code = _extract_reward_fn_code(llm_response)
+            recommended_steps = _extract_steps(llm_response)
+
+            if reward_fn_code is None or not _validate_code(reward_fn_code):
+                print("[WARN] 有効なコードブロックが得られませんでした。シェーピングなしで訓練します。")
+                reward_fn_code = (
+                    "import numpy as np\n\n"
+                    "def reward_shaping(obs, prev_obs, base_reward):\n"
+                    "    return 0.0\n"
+                )
+
+            print(f"[INFO] 推奨ステップ数: {recommended_steps:,}")
+
+            # reward_fn.py 保存
+            reward_fn_path = iter_dir / "reward_fn.py"
+            reward_fn_path.write_text(reward_fn_code, encoding="utf-8")
+            print(f"[INFO] reward_fn.py 保存: {reward_fn_path}")
+
+            # 動的ロード & セット
+            try:
+                env._reward_fn = _load_reward_fn(reward_fn_path)
+                print("[INFO] reward_fn をロードしました。")
+            except Exception as e:
+                print(f"[ERROR] reward_fn のロードに失敗: {e}")
+                env._reward_fn = None
+
+            # --- PPO 訓練 ---
+            model = PPO("MlpPolicy", env, verbose=1)
+            metrics_cb = _EurekaMetricsCallback()
+
+            print(f"[INFO] 訓練開始: {recommended_steps:,} steps")
+            model.learn(total_timesteps=recommended_steps, callback=metrics_cb,
+                        reset_num_timesteps=True)
+
+            # --- メトリクス収集・保存 ---
+            metrics = metrics_cb.get_metrics()
+            print(f"[INFO] metrics: {metrics}")
+            (iter_dir / "metrics.json").write_text(
+                json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+            # --- モデル保存 ---
+            model.save(str(iter_dir / "model"))
+            print(f"[INFO] モデル保存: {iter_dir / 'model.zip'}")
+
+            # --- best 更新 ---
+            coins = metrics.get("coins_per_episode", 0.0)
+            if coins > best_coins:
+                best_coins = coins
+                best_iter = i
+                best_dir = run_dir / "best"
+                best_dir.mkdir(exist_ok=True)
+                shutil.copy(reward_fn_path, best_dir / "reward_fn.py")
+                shutil.copy(iter_dir / "metrics.json", best_dir / "metrics.json")
+                print(f"[INFO] best 更新: coins_per_episode={coins:.3f} (iter {i})")
+
+            prev_metrics = metrics
+
+    except KeyboardInterrupt:
+        print("\n[INFO] ループを中断しました。")
+
+    finally:
+        env.close()
+
+    # --- サマリー ---
+    print(f"\n{'=' * 60}")
+    print(f"[EUREKA] 完了  ({args.iterations} イテレーション)")
+    if best_iter >= 0:
+        print(f"  最良イテレーション: iter_{best_iter:03d}  coins/ep={best_coins:.3f}")
+        print(f"  best/reward_fn.py: {run_dir / 'best' / 'reward_fn.py'}")
+    print(f"{'=' * 60}")
+
+
+if __name__ == "__main__":
+    main()
