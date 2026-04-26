@@ -142,11 +142,29 @@ def _build_prompt(obs_layout_str: str, offsets: dict[str, int],
     enemy_v_i = offsets.get("enemy_vel", enemy_r_i + 40)
     enemy_t_i = offsets.get("enemy_type", enemy_v_i + 40)
 
+    num_coin_obs  = (enemy_r_i - coin_i) // 2
+    max_enemy_obs = (enemy_v_i - enemy_r_i) // 2
+
     nearest_note = (
         f"  obs[{coin_i}], obs[{coin_i + 1}]           = 最近コインへの相対位置 (dx, dy)\n"
         f"  obs[{enemy_r_i}], obs[{enemy_r_i + 1}]         = 最近敵への相対位置 (dx, dy)\n"
         f"  obs[{enemy_v_i}], obs[{enemy_v_i + 1}]         = 最近敵の速度 (vx, vy)\n"
-        f"  obs[{enemy_t_i}]               = 最近敵の種類 (0.0=遅い直進, 0.5=速い直進, 1.0=予測追跡)"
+        f"  obs[{enemy_t_i}]               = 最近敵の種類 (0.0=遅い直進, 0.5=速い直進, 1.0=予測追跡)\n"
+        f"\n"
+        f"## 複数エンティティへのアクセス（i=0が最近傍、距離昇順）\n"
+        f"\n"
+        f"コイン（最大 {num_coin_obs} 枚、存在しないスロットは 0 埋め）:\n"
+        f"  obs[{coin_i} + i*2]     = i番目コインの dx  (i = 0 〜 {num_coin_obs - 1})\n"
+        f"  obs[{coin_i} + i*2 + 1] = i番目コインの dy\n"
+        f"\n"
+        f"敵（最大 {max_enemy_obs} 体、存在しないスロットは 0 埋め）:\n"
+        f"  obs[{enemy_r_i} + i*2]     = i番目敵の dx  (i = 0 〜 {max_enemy_obs - 1})\n"
+        f"  obs[{enemy_r_i} + i*2 + 1] = i番目敵の dy\n"
+        f"  obs[{enemy_v_i} + i*2]     = i番目敵の vx\n"
+        f"  obs[{enemy_v_i} + i*2 + 1] = i番目敵の vy\n"
+        f"  obs[{enemy_t_i} + i]       = i番目敵の種類 (0.0=遅い直進, 0.5=速い直進, 1.0=予測追跡)\n"
+        f"\n"
+        f"  ※ obs[8] * {max_enemy_obs} で現在の実際の敵数（正規化前）が得られる"
     )
 
     return f"""あなたは強化学習の報酬設計エキスパートです。
