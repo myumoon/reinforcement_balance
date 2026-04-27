@@ -1,12 +1,12 @@
-"""EUREKA型報酬シェーピングループ。
+"""EUREKA型報酬シェーピングループ（汎用エンジン）。
 
-LLMが報酬シェーピング関数を反復的に生成・改良し、
-コイン取得と敵回避を両立するAIを育てる。
+LLMが報酬シェーピング関数を反復的に生成・改良する汎用ループ。
+ゲーム固有の処理は --game-config で指定する設定ファイルに委譲する。
 
 使い方:
-  python eureka_loop.py --iterations 5
-  python eureka_loop.py --iterations 10 --run-name approach_shaping
-  python eureka_loop.py --llm openai --model gpt-4o --iterations 3
+  python eureka_loop.py --game-config games/coin_eureka_config.py --iterations 5
+  python eureka_loop.py --game-config games/coin_eureka_config.py --iterations 10 --run-name my_run
+  python eureka_loop.py --game-config games/coin_eureka_config.py --llm openai --model gpt-4o --iterations 3
   python eureka_loop.py --help
 """
 
@@ -21,13 +21,9 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
-import requests
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
-# CoinGame の固定報酬パラメータ（C++ 側の定数と一致させること）
-_ALIVE_REWARD = 0.001
-_COIN_REWARD = 5.0
 _STATE_FILENAME = "state.json"
 
 _DEFAULT_STEPS = 50_000
@@ -41,6 +37,8 @@ _DEFAULT_OPENAI_MODEL = "gpt-4o"
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="EUREKA型報酬シェーピングループ")
+    p.add_argument("--game-config", required=True,
+                   help="ゲーム設定ファイルのパス（例: games/coin_eureka_config.py）")
     p.add_argument("--iterations", type=int, default=5, help="ループ回数（default: 5）")
     p.add_argument("--run-name", default=None,
                    help="保存ディレクトリ名（未指定時はタイムスタンプ自動生成）")
@@ -61,8 +59,26 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--patience", type=int, default=3,
                    help="改善なしN回で早期終了（default: 3）")
     p.add_argument("--delta", type=float, default=0.05,
-                   help="改善とみなす coins_per_episode の最小増加量（default: 0.05）")
+                   help="改善とみなす primary_metric の最小増加量（default: 0.05）")
     return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# ゲーム設定の動的ロード
+# ---------------------------------------------------------------------------
+
+def _load_game_config(path_str: str):
+    path = Path(path_str)
+    if not path.exists():
+        print(f"[ERROR] --game-config ファイルが見つかりません: {path}")
+        sys.exit(1)
+    spec = importlib.util.spec_from_file_location("_eureka_game_config_mod", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    if not hasattr(mod, "create_config"):
+        print(f"[ERROR] {path} に create_config() 関数が定義されていません。")
+        sys.exit(1)
+    return mod.create_config()
 
 
 # ---------------------------------------------------------------------------
@@ -102,135 +118,6 @@ def _call_llm(client, model_name: str, prompt: str, backend: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# obs スキーマ
-# ---------------------------------------------------------------------------
-
-def _fetch_obs_schema(host: str, port: int) -> dict:
-    url = f"http://{host}:{port}/obs_schema"
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.exceptions.ConnectionError:
-        print(f"[ERROR] UE5 サーバー ({host}:{port}) に接続できませんでした。")
-        print(f"[ERROR] UE5 エディタで PIE (▶) を起動してから再実行してください。")
-        sys.exit(1)
-
-
-def _build_obs_layout(schema: dict) -> tuple[str, dict[str, int]]:
-    """obs レイアウト文字列と各セグメントの開始インデックス dict を返す。"""
-    lines = []
-    offsets: dict[str, int] = {}
-    offset = 0
-    for seg in schema["segments"]:
-        name = seg["name"]
-        dim = seg["dim"]
-        offsets[name] = offset
-        if dim == 1:
-            lines.append(f"  obs[{offset}]         = {name}")
-        else:
-            lines.append(f"  obs[{offset}:{offset + dim}] = {name}  (dim={dim})")
-        offset += dim
-    lines.append(f"  合計: {schema['total_dim']} 次元")
-    return "\n".join(lines), offsets
-
-
-# ---------------------------------------------------------------------------
-# プロンプト生成
-# ---------------------------------------------------------------------------
-
-def _build_prompt(obs_layout_str: str, offsets: dict[str, int],
-                  prev_metrics: dict | None, iteration: int) -> str:
-    metrics_section = (
-        "なし（初回）"
-        if prev_metrics is None
-        else json.dumps(prev_metrics, ensure_ascii=False, indent=2)
-    )
-
-    coin_i = offsets.get("coin_rel_pos", 10)
-    enemy_r_i = offsets.get("enemy_rel_pos", coin_i + 200)
-    enemy_v_i = offsets.get("enemy_vel", enemy_r_i + 40)
-    enemy_t_i = offsets.get("enemy_type", enemy_v_i + 40)
-
-    num_coin_obs  = (enemy_r_i - coin_i) // 2
-    max_enemy_obs = (enemy_v_i - enemy_r_i) // 2
-
-    nearest_note = (
-        f"  obs[{coin_i}], obs[{coin_i + 1}]           = 最近コインへの相対位置 (dx, dy)\n"
-        f"  obs[{enemy_r_i}], obs[{enemy_r_i + 1}]         = 最近敵への相対位置 (dx, dy)\n"
-        f"  obs[{enemy_v_i}], obs[{enemy_v_i + 1}]         = 最近敵の速度 (vx, vy)\n"
-        f"  obs[{enemy_t_i}]               = 最近敵の種類 (0.0=遅い直進, 0.5=速い直進, 1.0=予測追跡)\n"
-        f"\n"
-        f"## 複数エンティティへのアクセス（i=0が最近傍、距離昇順）\n"
-        f"\n"
-        f"コイン（最大 {num_coin_obs} 枚、存在しないスロットは 0 埋め）:\n"
-        f"  obs[{coin_i} + i*2]     = i番目コインの dx  (i = 0 〜 {num_coin_obs - 1})\n"
-        f"  obs[{coin_i} + i*2 + 1] = i番目コインの dy\n"
-        f"\n"
-        f"敵（最大 {max_enemy_obs} 体、存在しないスロットは 0 埋め）:\n"
-        f"  obs[{enemy_r_i} + i*2]     = i番目敵の dx  (i = 0 〜 {max_enemy_obs - 1})\n"
-        f"  obs[{enemy_r_i} + i*2 + 1] = i番目敵の dy\n"
-        f"  obs[{enemy_v_i} + i*2]     = i番目敵の vx\n"
-        f"  obs[{enemy_v_i} + i*2 + 1] = i番目敵の vy\n"
-        f"  obs[{enemy_t_i} + i]       = i番目敵の種類 (0.0=遅い直進, 0.5=速い直進, 1.0=予測追跡)\n"
-        f"\n"
-        f"  ※ obs[8] * {max_enemy_obs} で現在の実際の敵数（正規化前）が得られる"
-    )
-
-    return f"""あなたは強化学習の報酬設計エキスパートです。
-
-## ゲーム概要
-2D フィールド（±10m の正方形）でプレイヤーがコインを収集しながら敵を回避するゲームです。
-- プレイヤーは離散5方向（上/下/左/右/静止）で移動
-- コインを取ると得点、敵に当たるとエピソード終了
-- 敵はフィールド外周からスポーンし、プレイヤーに向かって移動する
-
-## 観測ベクトル（obs）レイアウト
-{obs_layout_str}
-
-## 最近傍エンティティの obs インデックス（先頭要素 = 最近傍、距離近い順にソート済み）
-{nearest_note}
-
-  ※ dx, dy はフィールド幅 (20m) で正規化済み。値域 [-1, 1]
-  ※ 壁距離 wall_dist は FieldHalfSize (10m) で正規化済み。値域 [0, 1]
-
-## 固定報酬（C++ 側、変更不可）
-- AliveReward = {_ALIVE_REWARD} / step（生存毎ステップ）
-- CoinReward = {_COIN_REWARD} / 枚（コイン取得時）
-
-## 前回イテレーション {iteration - 1} のメトリクス
-{metrics_section}
-
-## 課題
-前回の訓練の結果から課題を判断して箇条書きで記載。
-
-## タスク
-以下のフォーマットで回答してください。
-
-### 1. reward_fn.py のコード
-```python
-import numpy as np
-
-def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) -> float:
-    \"\"\"追加の報酬シェーピング関数。必ず np.clip で [-1.0, 1.0] の範囲に収めること。\"\"\"
-    # ここに実装
-    shaped = 0.0
-    return float(np.clip(shaped, -1.0, 1.0))
-```
-
-**スケールの注意:** 1ステップあたりの shaped_reward は [-0.01, 0.01] 程度を目安にしてください。
-エピソード長は約1,000〜1,500 step のため、合計が base_reward（数〜十数程度）を大きく超えると
-学習信号が壊れます。大きな定数ペナルティは避け、差分ベースの小さな報酬を推奨します。
-
-### 2. 推奨訓練ステップ数
-50,000〜200,000 の範囲で整数を記載してください（例: 100000）
-
-### 3. 設計の意図
-この報酬関数で何を解決しようとしているか（1〜3行）
-"""
-
-
-# ---------------------------------------------------------------------------
 # レスポンス解析
 # ---------------------------------------------------------------------------
 
@@ -240,7 +127,6 @@ def _extract_reward_fn_code(text: str) -> str | None:
 
 
 def _extract_steps(text: str) -> int:
-    # "### 2." 直後の数値行を探す
     m = re.search(r"###\s*2[^\n]*\n+([0-9][0-9_,]*)", text)
     if not m:
         m = re.search(r"ステップ[数]?[：:\s]*([0-9][0-9_,]+)", text)
@@ -284,9 +170,10 @@ class _EurekaMetricsCallback(BaseCallback):
 
     _RECENT_WINDOW = 20  # プラトー判定に使う直近エピソード数
 
-    def __init__(self, eval_freq: int = 10_000, min_steps: int = 30_000,
-                 patience: int = 3, delta: float = 0.05):
+    def __init__(self, compute_metric: Callable, eval_freq: int = 10_000,
+                 min_steps: int = 30_000, patience: int = 3, delta: float = 0.05):
         super().__init__(verbose=0)
+        self._compute_metric = compute_metric
         self.eval_freq = eval_freq
         self.min_steps = min_steps
         self.patience = patience
@@ -317,21 +204,22 @@ class _EurekaMetricsCallback(BaseCallback):
             self._ep_shaped = 0.0
             self._ep_len = 0
 
-        # プラトー検出チェック
         if (self.num_timesteps >= self.min_steps and
                 self.num_timesteps - self._last_check_step >= self.eval_freq and
                 len(self.episode_base_rewards) >= self._RECENT_WINDOW):
             self._last_check_step = self.num_timesteps
-            current_coins = self._get_recent_coins()
+            recent_base = self.episode_base_rewards[-self._RECENT_WINDOW:]
+            recent_len  = self.episode_lengths[-self._RECENT_WINDOW:]
+            current = self._compute_metric(recent_base, recent_len)
 
-            if self._check_history and current_coins <= max(self._check_history) + self.delta:
+            if self._check_history and current <= max(self._check_history) + self.delta:
                 self._no_improve_count += 1
             else:
                 self._no_improve_count = 0
-            self._check_history.append(current_coins)
+            self._check_history.append(current)
 
             print(f"[INFO] プラトーチェック ({self.num_timesteps:,} steps): "
-                  f"coins/ep={current_coins:.3f}, "
+                  f"metric={current:.3f}, "
                   f"改善なし={self._no_improve_count}/{self.patience}")
 
             if self._no_improve_count >= self.patience:
@@ -340,28 +228,22 @@ class _EurekaMetricsCallback(BaseCallback):
 
         return True
 
-    def _get_recent_coins(self) -> float:
-        recent_base = self.episode_base_rewards[-self._RECENT_WINDOW:]
-        recent_len  = self.episode_lengths[-self._RECENT_WINDOW:]
-        mean_base = sum(recent_base) / len(recent_base)
-        mean_len  = sum(recent_len)  / len(recent_len)
-        return max(0.0, (mean_base - _ALIVE_REWARD * mean_len) / _COIN_REWARD)
-
-    def get_metrics(self) -> dict:
+    def get_metrics(self, game_config) -> dict:
         n = len(self.episode_base_rewards)
         if n == 0:
             return {"episodes": 0}
-        mean_base = sum(self.episode_base_rewards) / n
+        mean_base   = sum(self.episode_base_rewards) / n
         mean_shaped = sum(self.episode_shaped_rewards) / n
-        mean_len = sum(self.episode_lengths) / n
-        mean_coins = max(0.0, (mean_base - _ALIVE_REWARD * mean_len) / _COIN_REWARD)
+        mean_len    = sum(self.episode_lengths) / n
+        primary     = game_config.compute_primary_metric(
+            self.episode_base_rewards, self.episode_lengths)
         return {
             "episodes": n,
             "episode_reward_mean": round(mean_base + mean_shaped, 4),
             "base_reward_mean": round(mean_base, 4),
             "shaped_reward_mean": round(mean_shaped, 4),
             "episode_length_mean": round(mean_len, 1),
-            "coins_per_episode": round(mean_coins, 3),
+            game_config.primary_metric_name: round(primary, 3),
         }
 
 
@@ -370,12 +252,12 @@ class _EurekaMetricsCallback(BaseCallback):
 # ---------------------------------------------------------------------------
 
 def _save_state(run_dir: Path, next_iter: int, prev_metrics: dict | None,
-                best_iter: int, best_coins: float) -> None:
+                best_iter: int, best_primary: float) -> None:
     state = {
         "next_iter": next_iter,
         "prev_metrics": prev_metrics,
         "best_iter": best_iter,
-        "best_coins": best_coins,
+        "best_primary": best_primary,
     }
     (run_dir / _STATE_FILENAME).write_text(
         json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -400,8 +282,11 @@ def _is_credit_error(e: Exception) -> bool:
 def main() -> None:
     args = _parse_args()
 
+    # ゲーム設定ロード
+    game_config = _load_game_config(args.game_config)
+
     # 出力ディレクトリ
-    run_name = args.run_name or datetime.datetime.now().strftime("coin_%Y%m%d_%H%M%S")
+    run_name = args.run_name or datetime.datetime.now().strftime("run_%Y%m%d_%H%M%S")
     run_dir = Path(args.output_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"[INFO] 保存先: {run_dir}")
@@ -410,29 +295,25 @@ def main() -> None:
     client, model_name = _build_llm_client(args.llm, args.model)
     print(f"[INFO] LLM: {args.llm} / {model_name}")
 
-    # obs_schema 取得（UE5 が起動している必要がある）
-    print(f"[INFO] obs_schema を取得中 ({args.host}:{args.port})...")
-    schema = _fetch_obs_schema(args.host, args.port)
-    obs_layout_str, offsets = _build_obs_layout(schema)
-    print(f"[INFO] obs_schema 取得完了: total_dim={schema['total_dim']}")
+    # ゲーム設定の初期化（obs_schema 取得など）
+    game_config.setup(args.host, args.port)
 
-    # 環境作成（_wait_for_server は __init__ 内で済んでいる）
-    from envs.coin_env import CoinEnv
-    env = CoinEnv(host=args.host, port=args.port)
+    # 環境作成
+    env = game_config.make_env(args.host, args.port)
 
     # 再開状態の読み込み
     state = _load_state(run_dir)
     if state:
-        start_iter = state["next_iter"]
+        start_iter   = state["next_iter"]
         prev_metrics = state.get("prev_metrics")
-        best_iter = state.get("best_iter", -1)
-        best_coins = state.get("best_coins", -1.0)
+        best_iter    = state.get("best_iter", -1)
+        best_primary = state.get("best_primary", -1.0)
         print(f"[INFO] 前回の状態を検出: イテレーション {start_iter} から再開します。")
     else:
-        start_iter = 1
+        start_iter   = 1
         prev_metrics = None
-        best_coins = -1.0
-        best_iter = -1
+        best_primary = -1.0
+        best_iter    = -1
 
     if start_iter > args.iterations:
         print(f"[INFO] 全イテレーション ({args.iterations}) 完了済みです。")
@@ -448,17 +329,18 @@ def main() -> None:
             print(f"{'=' * 60}")
 
             # --- LLM に報酬関数を生成させる ---
-            prompt = _build_prompt(obs_layout_str, offsets, prev_metrics, i)
+            prompt = game_config.build_prompt(prev_metrics, i)
             print("[INFO] LLM に報酬関数を生成中...")
             try:
                 llm_response = _call_llm(client, model_name, prompt, args.llm)
             except Exception as e:
                 if _is_credit_error(e):
-                    _save_state(run_dir, i, prev_metrics, best_iter, best_coins)
+                    _save_state(run_dir, i, prev_metrics, best_iter, best_primary)
                     print(f"\n[ERROR] クレジット残高が不足しています。")
                     print(f"[INFO]  https://console.anthropic.com/settings/billing でクレジットを追加してください。")
                     print(f"[INFO]  追加後、以下のコマンドで再開できます:")
-                    print(f"[INFO]    python eureka_loop.py --iterations {args.iterations} --run-name {run_name}")
+                    print(f"[INFO]    python eureka_loop.py --game-config {args.game_config} "
+                          f"--iterations {args.iterations} --run-name {run_name}")
                     return
                 raise
 
@@ -495,6 +377,7 @@ def main() -> None:
             # --- PPO 訓練 ---
             model = PPO("MlpPolicy", env, verbose=1)
             metrics_cb = _EurekaMetricsCallback(
+                compute_metric=game_config.compute_primary_metric,
                 eval_freq=args.eval_freq,
                 min_steps=args.min_steps,
                 patience=args.patience,
@@ -506,7 +389,7 @@ def main() -> None:
                         reset_num_timesteps=True)
 
             # --- メトリクス収集・保存 ---
-            metrics = metrics_cb.get_metrics()
+            metrics = metrics_cb.get_metrics(game_config)
             print(f"[INFO] metrics: {metrics}")
             (iter_dir / "metrics.json").write_text(
                 json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -517,20 +400,21 @@ def main() -> None:
             print(f"[INFO] モデル保存: {iter_dir / 'model.zip'}")
 
             # --- best 更新 ---
-            coins = metrics.get("coins_per_episode", 0.0)
-            if coins > best_coins:
-                best_coins = coins
+            primary = game_config.compute_primary_metric(
+                metrics_cb.episode_base_rewards, metrics_cb.episode_lengths)
+            if primary > best_primary:
+                best_primary = primary
                 best_iter = i
                 best_dir = run_dir / "best"
                 best_dir.mkdir(exist_ok=True)
                 shutil.copy(reward_fn_path, best_dir / "reward_fn.py")
                 shutil.copy(iter_dir / "metrics.json", best_dir / "metrics.json")
-                print(f"[INFO] best 更新: coins_per_episode={coins:.3f} (iter {i})")
+                print(f"[INFO] best 更新: {game_config.primary_metric_name}={primary:.3f} (iter {i})")
 
             prev_metrics = metrics
 
             # イテレーション完了後に状態を保存（次回再開用）
-            _save_state(run_dir, i + 1, prev_metrics, best_iter, best_coins)
+            _save_state(run_dir, i + 1, prev_metrics, best_iter, best_primary)
 
     except KeyboardInterrupt:
         print("\n[INFO] ループを中断しました。")
@@ -545,7 +429,8 @@ def main() -> None:
     print(f"\n{'=' * 60}")
     print(f"[EUREKA] 完了  ({args.iterations} イテレーション)")
     if best_iter >= 0:
-        print(f"  最良イテレーション: iter_{best_iter:03d}  coins/ep={best_coins:.3f}")
+        print(f"  最良イテレーション: iter_{best_iter:03d}  "
+              f"{game_config.primary_metric_name}={best_primary:.3f}")
         print(f"  best/reward_fn.py: {run_dir / 'best' / 'reward_fn.py'}")
     print(f"{'=' * 60}")
 
