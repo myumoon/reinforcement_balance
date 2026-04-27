@@ -52,6 +52,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--port", type=int, default=8766)
     p.add_argument("--output-dir", default="eureka_results",
                    help="結果保存の親ディレクトリ（default: eureka_results）")
+    p.add_argument("--max-steps", type=int, default=200_000,
+                   help="1イテレーションの最大ステップ数（LLMの推奨値の上限, default: 200000）")
+    p.add_argument("--min-steps", type=int, default=30_000,
+                   help="早期終了チェックを開始する最小ステップ数（default: 30000）")
+    p.add_argument("--eval-freq", type=int, default=10_000,
+                   help="プラトー判定の評価間隔・ステップ数（default: 10000）")
+    p.add_argument("--patience", type=int, default=3,
+                   help="改善なしN回で早期終了（default: 3）")
+    p.add_argument("--delta", type=float, default=0.05,
+                   help="改善とみなす coins_per_episode の最小増加量（default: 0.05）")
     return p.parse_args()
 
 
@@ -210,7 +220,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
 ```
 
 ### 2. 推奨訓練ステップ数
-整数で記載してください（例: 100000）
+50,000〜200,000 の範囲で整数を記載してください（例: 100000）
 
 ### 3. 設計の意図
 この報酬関数で何を解決しようとしているか（1〜3行）
@@ -267,16 +277,28 @@ def _load_reward_fn(path: Path) -> Callable:
 # ---------------------------------------------------------------------------
 
 class _EurekaMetricsCallback(BaseCallback):
-    """エピソードごとに base_reward / shaped_reward を集計するコールバック。"""
+    """エピソードごとに base_reward / shaped_reward を集計し、プラトー検出で早期終了するコールバック。"""
 
-    def __init__(self):
+    _RECENT_WINDOW = 20  # プラトー判定に使う直近エピソード数
+
+    def __init__(self, eval_freq: int = 10_000, min_steps: int = 30_000,
+                 patience: int = 3, delta: float = 0.05):
         super().__init__(verbose=0)
+        self.eval_freq = eval_freq
+        self.min_steps = min_steps
+        self.patience = patience
+        self.delta = delta
+
         self._ep_base = 0.0
         self._ep_shaped = 0.0
         self._ep_len = 0
         self.episode_base_rewards: list[float] = []
         self.episode_shaped_rewards: list[float] = []
         self.episode_lengths: list[int] = []
+
+        self._check_history: list[float] = []
+        self._no_improve_count = 0
+        self._last_check_step = 0
 
     def _on_step(self) -> bool:
         info = self.locals["infos"][0]
@@ -291,7 +313,36 @@ class _EurekaMetricsCallback(BaseCallback):
             self._ep_base = 0.0
             self._ep_shaped = 0.0
             self._ep_len = 0
+
+        # プラトー検出チェック
+        if (self.num_timesteps >= self.min_steps and
+                self.num_timesteps - self._last_check_step >= self.eval_freq and
+                len(self.episode_base_rewards) >= self._RECENT_WINDOW):
+            self._last_check_step = self.num_timesteps
+            current_coins = self._get_recent_coins()
+
+            if self._check_history and current_coins <= max(self._check_history) + self.delta:
+                self._no_improve_count += 1
+            else:
+                self._no_improve_count = 0
+            self._check_history.append(current_coins)
+
+            print(f"[INFO] プラトーチェック ({self.num_timesteps:,} steps): "
+                  f"coins/ep={current_coins:.3f}, "
+                  f"改善なし={self._no_improve_count}/{self.patience}")
+
+            if self._no_improve_count >= self.patience:
+                print("[INFO] プラトー検出: 早期終了します")
+                return False
+
         return True
+
+    def _get_recent_coins(self) -> float:
+        recent_base = self.episode_base_rewards[-self._RECENT_WINDOW:]
+        recent_len  = self.episode_lengths[-self._RECENT_WINDOW:]
+        mean_base = sum(recent_base) / len(recent_base)
+        mean_len  = sum(recent_len)  / len(recent_len)
+        return max(0.0, (mean_base - _ALIVE_REWARD * mean_len) / _COIN_REWARD)
 
     def get_metrics(self) -> dict:
         n = len(self.episode_base_rewards)
@@ -300,7 +351,6 @@ class _EurekaMetricsCallback(BaseCallback):
         mean_base = sum(self.episode_base_rewards) / n
         mean_shaped = sum(self.episode_shaped_rewards) / n
         mean_len = sum(self.episode_lengths) / n
-        # coins ≈ (base_sum - AliveReward * episode_length) / CoinReward
         mean_coins = max(0.0, (mean_base - _ALIVE_REWARD * mean_len) / _COIN_REWARD)
         return {
             "episodes": n,
@@ -412,9 +462,9 @@ def main() -> None:
             # レスポンス保存
             (iter_dir / "llm_response.txt").write_text(llm_response, encoding="utf-8")
 
-            # コード・ステップ数を抽出
+            # コード・ステップ数を抽出（LLMの推奨値を max_steps で上限クランプ）
             reward_fn_code = _extract_reward_fn_code(llm_response)
-            recommended_steps = _extract_steps(llm_response)
+            recommended_steps = min(_extract_steps(llm_response), args.max_steps)
 
             if reward_fn_code is None or not _validate_code(reward_fn_code):
                 print("[WARN] 有効なコードブロックが得られませんでした。シェーピングなしで訓練します。")
@@ -441,9 +491,14 @@ def main() -> None:
 
             # --- PPO 訓練 ---
             model = PPO("MlpPolicy", env, verbose=1)
-            metrics_cb = _EurekaMetricsCallback()
+            metrics_cb = _EurekaMetricsCallback(
+                eval_freq=args.eval_freq,
+                min_steps=args.min_steps,
+                patience=args.patience,
+                delta=args.delta,
+            )
 
-            print(f"[INFO] 訓練開始: {recommended_steps:,} steps")
+            print(f"[INFO] 訓練開始: {recommended_steps:,} steps (上限: {args.max_steps:,})")
             model.learn(total_timesteps=recommended_steps, callback=metrics_cb,
                         reset_num_timesteps=True)
 
