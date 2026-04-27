@@ -157,6 +157,19 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
         mean_len  = sum(episode_lengths) / len(episode_lengths)
         return max(0.0, (mean_base - _ALIVE_REWARD * mean_len) / _COIN_REWARD)
 
+    def make_model(self, env):
+        from stable_baselines3 import PPO
+        from entity_attention_extractor import EntityAttentionExtractor
+        policy_kwargs = dict(
+            features_extractor_class=EntityAttentionExtractor,
+            features_extractor_kwargs=dict(
+                features_dim=128,
+                offsets=self._offsets,
+            ),
+            net_arch=[64, 64],
+        )
+        return PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, verbose=1)
+
     @property
     def primary_metric_name(self) -> str:
         return "coins_per_episode"

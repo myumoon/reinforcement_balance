@@ -35,6 +35,15 @@ class EurekaGameConfig(ABC):
             return 0.0
         return sum(episode_base_rewards) / len(episode_base_rewards)
 
+    def make_model(self, env):
+        """PPO モデルを生成して返す。
+
+        デフォルト実装: MlpPolicy [64, 64]。
+        カスタムネットワーク（エンティティアテンションなど）を使う場合は override する。
+        """
+        from stable_baselines3 import PPO
+        return PPO("MlpPolicy", env, verbose=1)
+
     @property
     def primary_metric_name(self) -> str:
         """compute_primary_metric が返す指標の名前（ログ表示用）。"""

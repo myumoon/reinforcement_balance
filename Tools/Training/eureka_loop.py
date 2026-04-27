@@ -375,7 +375,7 @@ def main() -> None:
                 env._reward_fn = None
 
             # --- PPO 訓練 ---
-            model = PPO("MlpPolicy", env, verbose=1)
+            model = game_config.make_model(env)
             metrics_cb = _EurekaMetricsCallback(
                 compute_metric=game_config.compute_primary_metric,
                 eval_freq=args.eval_freq,

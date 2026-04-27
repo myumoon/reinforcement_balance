@@ -1,0 +1,105 @@
+"""エンティティアテンション特徴抽出器。
+
+コインと敵をそれぞれ個別エンティティとして処理し、
+学習されたアテンション（注目度）で重み付け集約する。
+MlpPolicy の「310次元一括処理」より obs の構造を活かした表現学習が可能。
+"""
+
+import torch
+import torch.nn as nn
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+
+
+class EntityAttentionExtractor(BaseFeaturesExtractor):
+    """コインゲーム用エンティティアテンション特徴抽出器。
+
+    obs レイアウト:
+      obs[0        : coin_i]      = self_info    (通常10次元)
+      obs[coin_i   : enemy_r_i]   = coin_rel_pos (100枚 × 2: dx,dy)
+      obs[enemy_r_i: enemy_v_i]   = enemy_rel_pos (20体 × 2: dx,dy)
+      obs[enemy_v_i: enemy_t_i]   = enemy_vel     (20体 × 2: vx,vy)
+      obs[enemy_t_i:]             = enemy_type    (20体 × 1: 0.0/0.5/1.0)
+
+    Args:
+        observation_space: gymnasium の観測空間（SB3 が渡す）
+        features_dim: 出力特徴量の次元数（default: 128）
+        offsets: obs_schema から得たセグメント開始インデックス dict
+    """
+
+    _EMBED_DIM = 32
+
+    def __init__(self, observation_space, features_dim: int = 128,
+                 offsets: dict | None = None):
+        super().__init__(observation_space, features_dim)
+        offsets = offsets or {}
+
+        # セグメントのインデックス境界
+        self._coin_i    = offsets.get("coin_rel_pos", 10)
+        self._enemy_r_i = offsets.get("enemy_rel_pos", self._coin_i + 200)
+        self._enemy_v_i = offsets.get("enemy_vel",     self._enemy_r_i + 40)
+        self._enemy_t_i = offsets.get("enemy_type",    self._enemy_v_i + 40)
+
+        self._self_dim    = self._coin_i
+        self._num_coins   = (self._enemy_r_i - self._coin_i) // 2
+        self._num_enemies = (self._enemy_v_i - self._enemy_r_i) // 2
+
+        e = self._EMBED_DIM
+
+        # コインエンコーダ: 2 (dx,dy) → embed_dim（エンティティ間で重み共有）
+        self.coin_encoder = nn.Sequential(
+            nn.Linear(2, e), nn.ReLU(),
+            nn.Linear(e, e), nn.ReLU(),
+        )
+
+        # 敵エンコーダ: 5 (dx,dy,vx,vy,type) → embed_dim（エンティティ間で重み共有）
+        self.enemy_encoder = nn.Sequential(
+            nn.Linear(5, e), nn.ReLU(),
+            nn.Linear(e, e), nn.ReLU(),
+        )
+
+        # アテンションクエリベクトル（学習パラメータ）
+        self.coin_query  = nn.Parameter(torch.randn(e))
+        self.enemy_query = nn.Parameter(torch.randn(e))
+
+        # 集約後の線形層: (self_dim + embed*2) → features_dim
+        self.final = nn.Sequential(
+            nn.Linear(self._self_dim + e + e, features_dim),
+            nn.ReLU(),
+        )
+
+    @staticmethod
+    def _attend(enc: torch.Tensor, query: torch.Tensor) -> torch.Tensor:
+        """スケール済みドット積アテンションで entity を集約する。
+
+        Args:
+            enc:   [B, N, embed_dim]
+            query: [embed_dim]
+        Returns:
+            [B, embed_dim]
+        """
+        scale = enc.shape[-1] ** 0.5
+        scores  = (enc * query).sum(-1) / scale          # [B, N]
+        weights = torch.softmax(scores, dim=1).unsqueeze(-1)  # [B, N, 1]
+        return (enc * weights).sum(dim=1)                 # [B, embed_dim]
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        B = obs.shape[0]
+
+        # セグメント分割
+        self_info = obs[:, :self._self_dim]
+        coins = obs[:, self._coin_i:self._enemy_r_i].reshape(B, self._num_coins, 2)
+        e_pos  = obs[:, self._enemy_r_i:self._enemy_v_i].reshape(B, self._num_enemies, 2)
+        e_vel  = obs[:, self._enemy_v_i:self._enemy_t_i].reshape(B, self._num_enemies, 2)
+        e_type = obs[:, self._enemy_t_i:].reshape(B, self._num_enemies, 1)
+        enemies = torch.cat([e_pos, e_vel, e_type], dim=-1)  # [B, 20, 5]
+
+        # エンティティ単位でエンコード
+        coin_enc  = self.coin_encoder(coins)    # [B, 100, 32]
+        enemy_enc = self.enemy_encoder(enemies) # [B,  20, 32]
+
+        # アテンションで集約
+        coin_agg  = self._attend(coin_enc,  self.coin_query)   # [B, 32]
+        enemy_agg = self._attend(enemy_enc, self.enemy_query)  # [B, 32]
+
+        combined = torch.cat([self_info, coin_agg, enemy_agg], dim=-1)
+        return self.final(combined)
