@@ -42,6 +42,8 @@ def parse_args() -> argparse.Namespace:
                    help="再開する既存モデルのパス（.zip 拡張子は省略・付加どちらでも可）")
     p.add_argument("--checkpoint-freq", type=int, default=10_000,
                    help="チェックポイント保存間隔 (ステップ数, デフォルト: 10000)")
+    p.add_argument("--entity-attention", action="store_true",
+                   help="エンティティアテンション特徴抽出器を使用 (--game coin 専用, --resume 時は無視)")
     return p.parse_args()
 
 
@@ -80,7 +82,22 @@ def main() -> None:
     if args.resume:
         resume_path = str(_strip_zip(args.resume))
         print(f"[INFO] {resume_path} から再開")
+        if args.entity_attention:
+            print("[INFO] --entity-attention は --resume 時は無視されます（保存済みモデルのアーキテクチャを使用）")
         model = PPO.load(resume_path, env=env)
+    elif args.entity_attention:
+        if args.game != "coin":
+            print("[WARN] --entity-attention はコインゲーム専用です。MlpPolicy を使用します。")
+            model = PPO("MlpPolicy", env, verbose=1)
+        else:
+            from entity_attention_extractor import EntityAttentionExtractor
+            policy_kwargs = dict(
+                features_extractor_class=EntityAttentionExtractor,
+                features_extractor_kwargs=dict(features_dim=128),
+                net_arch=[64, 64],
+            )
+            print("[INFO] EntityAttentionExtractor を使用します")
+            model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, verbose=1)
     else:
         model = PPO("MlpPolicy", env, verbose=1)
 
