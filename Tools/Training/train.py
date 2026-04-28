@@ -6,10 +6,12 @@
   python train.py --dry-run               # BalancePole スタブ
   python train.py --game coin --dry-run   # CoinGame    スタブ
   python train.py --resume models/balance_model
+  python train.py --game coin --reward-fn eureka_results/my_run/best/reward_fn.py
   python train.py --help
 """
 
 import argparse
+import importlib.util
 from pathlib import Path
 
 from stable_baselines3 import PPO
@@ -20,6 +22,15 @@ _GAME_DEFAULTS = {
     "balance": {"port": 8765, "output": "models/balance_model"},
     "coin":    {"port": 8766, "output": "models/coin_model"},
 }
+
+
+def _load_reward_fn(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"--reward-fn ファイルが見つかりません: {path}")
+    spec = importlib.util.spec_from_file_location("_reward_fn_mod", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.reward_shaping
 
 
 def _strip_zip(path: Path) -> Path:
@@ -44,6 +55,8 @@ def parse_args() -> argparse.Namespace:
                    help="チェックポイント保存間隔 (ステップ数, デフォルト: 10000)")
     p.add_argument("--entity-attention", action="store_true",
                    help="エンティティアテンション特徴抽出器を使用 (--game coin 専用, --resume 時は無視)")
+    p.add_argument("--reward-fn", type=Path, default=None,
+                   help="報酬シェーピング関数のパス (例: eureka_results/my_run/best/reward_fn.py, --game coin 専用)")
     return p.parse_args()
 
 
@@ -53,6 +66,17 @@ def main() -> None:
     defaults = _GAME_DEFAULTS[args.game]
     port   = args.port   if args.port   is not None else defaults["port"]
     output = _strip_zip(args.output if args.output is not None else Path(defaults["output"]))
+
+    # --reward-fn の事前チェック
+    reward_fn = None
+    if args.reward_fn:
+        if args.game != "coin":
+            print("[WARN] --reward-fn はコインゲーム専用です。無視します。")
+        elif args.dry_run:
+            print("[WARN] --reward-fn は --dry-run 時は無視されます。")
+        else:
+            reward_fn = _load_reward_fn(args.reward_fn)
+            print(f"[INFO] 報酬シェーピング関数をロード: {args.reward_fn}")
 
     if args.dry_run:
         if args.game == "coin":
@@ -65,10 +89,11 @@ def main() -> None:
     else:
         if args.game == "coin":
             from envs.coin_env import CoinEnv
-            env = make_vec_env(
-                lambda: CoinEnv(host=args.host, port=port),
-                n_envs=1,
-            )
+            def _make_coin_env():
+                e = CoinEnv(host=args.host, port=port)
+                e._reward_fn = reward_fn
+                return e
+            env = make_vec_env(_make_coin_env, n_envs=1)
         else:
             from envs.balance_env import BalanceEnv
             env = make_vec_env(
