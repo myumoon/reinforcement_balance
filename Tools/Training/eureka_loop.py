@@ -105,11 +105,12 @@ def _build_llm_client(backend: str, model_override: str | None):
     return client, model_name
 
 
-def _call_llm(client, model_name: str, prompt: str, backend: str) -> str:
+def _call_llm(client, model_name: str, prompt: str, backend: str,
+              max_tokens: int = 4096) -> str:
     if backend == "anthropic":
         response = client.messages.create(
             model=model_name,
-            max_tokens=2048,
+            max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
         return response.content[0].text
@@ -450,7 +451,8 @@ def main() -> None:
             prompt = game_config.build_prompt(prev_metrics, i, prev_review_findings)
             print("[INFO] LLM に報酬関数を生成中...")
             try:
-                llm_response = _call_llm(client, model_name, prompt, args.llm)
+                llm_response = _call_llm(client, model_name, prompt, args.llm,
+                                         max_tokens=8192)
             except Exception as e:
                 if _is_credit_error(e):
                     _save_state(run_dir, i, prev_metrics, best_iter, best_primary,
