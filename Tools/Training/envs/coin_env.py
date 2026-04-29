@@ -20,14 +20,19 @@ class CoinEnv(BaseUE5Env):
 
     _reward_fn に reward_shaping(obs, prev_obs, base_reward) -> float を設定すると
     EUREKA型報酬シェーピングが有効になる。None のときは base_reward をそのまま返す。
+
+    reward_scale はモデルに渡す前に base_reward に乗じるスケール係数。
+    info["base_reward"] には元のスケールを記録するためメトリクス計算には影響しない。
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8766, connect_timeout: int = 120):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8766, connect_timeout: int = 120,
+                 reward_scale: float = 1.0):
         super().__init__(host=host, port=port, connect_timeout=connect_timeout)
         self.action_space = gym.spaces.Discrete(_NUM_ACTIONS)
         self._expected_schema_hash: str | None = None
         self._reward_fn: Callable | None = None
         self._prev_obs: np.ndarray | None = None
+        self.reward_scale = reward_scale
 
         # SB3 が env をラップする前に observation_space を確定させる必要があるため、
         # __init__ 時点でサーバーに接続して /obs_schema から正しい shape を取得する
@@ -81,9 +86,10 @@ class CoinEnv(BaseUE5Env):
                 print(f"[WARN] reward_fn エラー: {e}")
                 shaped = 0.0
 
+        # info には元のスケールの base_reward を記録（コイン枚数などのメトリクス計算用）
         info = {"base_reward": base_reward, "shaped_reward": shaped}
         self._prev_obs = obs
-        return obs, base_reward + shaped, done, truncated, info
+        return obs, base_reward * self.reward_scale + shaped, done, truncated, info
 
     def _action_to_payload(self, action) -> dict:
         return {"action": [float(int(action))]}

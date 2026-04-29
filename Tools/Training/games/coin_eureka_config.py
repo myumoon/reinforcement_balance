@@ -57,7 +57,9 @@ class CoinEurekaConfig(EurekaGameConfig):
 
     def make_env(self, host: str, port: int):
         from envs.coin_env import CoinEnv
-        return CoinEnv(host=host, port=port)
+        # reward_scale=0.2 でコイン報酬を 5.0→1.0 相当にスケール。
+        # info["base_reward"] は元のスケールを保持するためメトリクス計算は正確なまま。
+        return CoinEnv(host=host, port=port, reward_scale=0.2)
 
     def build_prompt(self, prev_metrics: dict | None, iteration: int) -> str:
         metrics_section = (
