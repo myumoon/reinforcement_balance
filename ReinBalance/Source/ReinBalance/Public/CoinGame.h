@@ -154,7 +154,7 @@ protected:
 
 private:
 	// 観測に含めるコインの数
-	static constexpr int32 NumCoinObs = 100;
+	static constexpr int32 NumCoinObs = 20;
 	
 	// 最大敵数
 	static constexpr int32 MaxEnemyObs = 20;
