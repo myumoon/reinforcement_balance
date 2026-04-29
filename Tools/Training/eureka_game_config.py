@@ -50,6 +50,14 @@ class EurekaGameConfig(ABC):
         """
         return {}
 
+    def build_game_context(self) -> str:
+        """レビュープロンプト用のゲームコンテキストを返す（任意 override）。
+
+        ゲームルール・物理定数・固定報酬など reward_fn 設計に必要な情報を返す。
+        build_prompt() のメトリクス・タスク指示セクションは含めない。
+        """
+        return ""
+
     def make_model(self, env):
         """PPO モデルを生成して返す。
 

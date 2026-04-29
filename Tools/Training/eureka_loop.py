@@ -62,6 +62,8 @@ def _parse_args() -> argparse.Namespace:
                    help="改善とみなす primary_metric の最小増加量（default: 0.05）")
     p.add_argument("--no-vec-normalize", action="store_true",
                    help="VecNormalize による観測・報酬の正規化を無効化する")
+    p.add_argument("--no-review", action="store_true",
+                   help="reward_fn のレビュー＆改訂ステップをスキップする")
     return p.parse_args()
 
 
@@ -150,6 +152,60 @@ def _validate_code(code: str) -> bool:
     except SyntaxError as e:
         print(f"[WARN] 生成コードに構文エラー: {e}")
         return False
+
+
+def _build_review_prompt(reward_fn_code: str, game_context: str) -> str:
+    ctx_section = (
+        f"## ゲームコンテキスト\n{game_context}\n\n---\n\n"
+        if game_context.strip()
+        else ""
+    )
+    return f"""あなたは強化学習の報酬設計レビュアーです。
+以下のゲームコンテキストをもとに reward_fn.py を評価してください。
+コードの修正は不要です。問題点のフィードバックのみを返してください。
+
+{ctx_section}## レビュー対象の reward_fn.py
+```python
+{reward_fn_code}
+```
+
+上記のゲームルール・物理定数・固定報酬をもとに reward_fn.py を評価し、
+問題点を箇条書きで返してください。問題がなければ「問題なし」と記載してください。
+コードブロックは出力しないでください。
+"""
+
+
+def _build_revision_prompt(reward_fn_code: str, review_text: str,
+                            original_prompt: str) -> str:
+    return f"""以下は、あなたが生成した reward_fn.py とそれに対するレビュアーのフィードバックです。
+レビュー意見が正しいかどうかを判断し、妥当な指摘があれば修正した最終版を返してください。
+不正確な指摘は無視して構いません。
+
+## 元の生成プロンプト（参考）
+{original_prompt}
+
+## あなたが生成した初版 reward_fn.py
+```python
+{reward_fn_code}
+```
+
+## レビュアーのフィードバック
+{review_text}
+
+## レスポンス形式
+
+### 判断
+（レビュー意見の妥当性を評価し、修正方針を説明。修正不要なら理由を記載）
+
+### 最終 reward_fn.py
+```python
+import numpy as np
+
+def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) -> float:
+    shaped = 0.0
+    return float(np.clip(shaped, -1.0, 1.0))
+```
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +448,29 @@ def main() -> None:
                     "def reward_shaping(obs, prev_obs, base_reward):\n"
                     "    return 0.0\n"
                 )
+            else:
+                # レビュー＆改訂ステップ（--no-review で無効化可能）
+                if not args.no_review:
+                    # Step A: レビュアー LLM がフィードバックのみ返す（コードは書かない）
+                    print("[INFO] reward_fn をレビュー中...")
+                    game_context = game_config.build_game_context()
+                    review_prompt = _build_review_prompt(reward_fn_code, game_context)
+                    review_response = _call_llm(client, model_name, review_prompt, args.llm)
+                    (iter_dir / "review_response.txt").write_text(review_response, encoding="utf-8")
+
+                    # Step B: 生成 LLM がレビュー意見を判断して最終版を実装
+                    print("[INFO] レビュー意見をもとに改訂中...")
+                    revision_prompt = _build_revision_prompt(reward_fn_code, review_response, prompt)
+                    revision_response = _call_llm(client, model_name, revision_prompt, args.llm)
+                    (iter_dir / "revision_response.txt").write_text(revision_response, encoding="utf-8")
+
+                    revised_code = _extract_reward_fn_code(revision_response)
+                    if revised_code is not None and _validate_code(revised_code):
+                        (iter_dir / "reward_fn_original.py").write_text(reward_fn_code, encoding="utf-8")
+                        reward_fn_code = revised_code
+                        print("[INFO] 改訂済みコードを採用しました")
+                    else:
+                        print("[WARN] 改訂後のコード抽出に失敗。初版コードを使用します")
 
             print(f"[INFO] 推奨ステップ数: {recommended_steps:,}")
 
