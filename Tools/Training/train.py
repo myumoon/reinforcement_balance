@@ -15,7 +15,7 @@ import importlib.util
 from pathlib import Path
 
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
 
@@ -43,6 +43,79 @@ _PPO_KWARGS = dict(
     max_grad_norm=0.5,
     verbose=1,
 )
+
+
+def _get_raw_env(env):
+    """VecEnv ラッパーチェーンを辿って生の環境（CoinEnv）を返す。"""
+    inner = env
+    while hasattr(inner, "venv"):
+        inner = inner.venv
+    return inner.envs[0] if hasattr(inner, "envs") else inner
+
+
+class _AnnealingShapingCallback(BaseCallback):
+    """shaped_reward を線形アニーリングするコールバック。
+
+    |shaped_reward_mean| / base_reward_mean の比率を check_freq ステップごとに計算し、
+    比率が anneal_threshold を下回ったら anneal_steps かけて shaping_weight を 1.0→0.0 に減衰する。
+    """
+
+    def __init__(self, raw_env, anneal_threshold: float, anneal_steps: int,
+                 check_freq: int, min_steps: int):
+        super().__init__(verbose=0)
+        self._raw_env = raw_env
+        self.anneal_threshold = anneal_threshold
+        self.anneal_steps = anneal_steps
+        self.check_freq = check_freq
+        self.min_steps = min_steps
+
+        self._ep_base = 0.0
+        self._ep_shaped = 0.0
+        self._sum_base = 0.0
+        self._sum_shaped = 0.0
+        self._ep_count = 0
+        self._last_check = 0
+        self._anneal_start_step: int | None = None
+
+    def _on_step(self) -> bool:
+        info = self.locals["infos"][0]
+        self._ep_base   += info.get("base_reward",   0.0)
+        self._ep_shaped += info.get("shaped_reward", 0.0)
+
+        if self.locals["dones"][0]:
+            self._sum_base   += self._ep_base
+            self._sum_shaped += abs(self._ep_shaped)
+            self._ep_count   += 1
+            self._ep_base = self._ep_shaped = 0.0
+
+        # check_freq ステップごとに比率を計算してアニーリングをトリガー
+        if (self.num_timesteps >= self.min_steps
+                and self.num_timesteps - self._last_check >= self.check_freq
+                and self._ep_count > 0):
+            self._last_check = self.num_timesteps
+            mean_base   = self._sum_base   / self._ep_count
+            mean_shaped = self._sum_shaped / self._ep_count
+            ratio = mean_shaped / max(mean_base, 1e-8)
+            self._sum_base = self._sum_shaped = 0.0
+            self._ep_count = 0
+            print(f"[INFO] シェーピング比率: {ratio:.3f} "
+                  f"(|shaped|={mean_shaped:.4f} / base={mean_base:.4f})")
+
+            if ratio < self.anneal_threshold and self._anneal_start_step is None:
+                self._anneal_start_step = self.num_timesteps
+                print(f"[INFO] shaped_reward アニーリング開始 "
+                      f"(ratio={ratio:.3f} < {self.anneal_threshold})")
+
+        # アニーリング中: shaping_weight を線形減衰
+        if self._anneal_start_step is not None:
+            progress = (self.num_timesteps - self._anneal_start_step) / self.anneal_steps
+            weight = max(0.0, 1.0 - progress)
+            self._raw_env.shaping_weight = weight
+            if weight == 0.0 and self._raw_env._reward_fn is not None:
+                self._raw_env._reward_fn = None
+                print("[INFO] shaped_reward アニーリング完了 → reward_fn を無効化")
+
+        return True
 
 
 def _load_reward_fn(path: Path):
@@ -82,6 +155,14 @@ def parse_args() -> argparse.Namespace:
                    help="base_reward に乗じるスケール係数 (--game coin 専用, default: 0.2)")
     p.add_argument("--no-vec-normalize", action="store_true",
                    help="VecNormalize による観測・報酬の正規化を無効化する")
+    p.add_argument("--anneal-threshold", type=float, default=0.1,
+                   help="|shaped|/base の比率がこれを下回ったらアニーリング開始 (default: 0.1, --reward-fn 専用)")
+    p.add_argument("--anneal-steps", type=int, default=50_000,
+                   help="アニーリングにかけるステップ数 (default: 50000)")
+    p.add_argument("--anneal-check-freq", type=int, default=5_000,
+                   help="比率のチェック間隔・ステップ数 (default: 5000)")
+    p.add_argument("--anneal-min-steps", type=int, default=50_000,
+                   help="アニーリングチェックを開始する最小ステップ数 (default: 50000)")
     return p.parse_args()
 
 
@@ -174,8 +255,21 @@ def main() -> None:
         verbose=1,
     )
 
+    callbacks = [checkpoint_cb]
+    if reward_fn is not None and args.game == "coin":
+        anneal_cb = _AnnealingShapingCallback(
+            raw_env=_get_raw_env(env),
+            anneal_threshold=args.anneal_threshold,
+            anneal_steps=args.anneal_steps,
+            check_freq=args.anneal_check_freq,
+            min_steps=args.anneal_min_steps,
+        )
+        callbacks.append(anneal_cb)
+        print(f"[INFO] シェーピングアニーリング有効 "
+              f"(threshold={args.anneal_threshold}, anneal_steps={args.anneal_steps:,})")
+
     try:
-        model.learn(total_timesteps=args.total_steps, callback=checkpoint_cb,
+        model.learn(total_timesteps=args.total_steps, callback=callbacks,
                     reset_num_timesteps=args.resume is None)
     except KeyboardInterrupt:
         print("\n[INFO] 訓練を中断しました。モデルを保存します...")
