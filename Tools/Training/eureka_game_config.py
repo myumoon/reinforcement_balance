@@ -3,6 +3,13 @@
 from abc import ABC, abstractmethod
 
 
+def _linear_schedule(initial_value: float):
+    """PPO 学習率の線形減衰スケジュール（訓練終了時に 0 になる）。"""
+    def func(progress_remaining: float) -> float:
+        return progress_remaining * initial_value
+    return func
+
+
 class EurekaGameConfig(ABC):
     """ゲーム固有の処理を外部から注入するためのインターフェース。
 
@@ -38,11 +45,22 @@ class EurekaGameConfig(ABC):
     def make_model(self, env):
         """PPO モデルを生成して返す。
 
-        デフォルト実装: MlpPolicy [64, 64]。
+        デフォルト実装: MlpPolicy [64, 64] + 改善済みハイパーパラメータ。
         カスタムネットワーク（エンティティアテンションなど）を使う場合は override する。
         """
         from stable_baselines3 import PPO
-        return PPO("MlpPolicy", env, verbose=1)
+        return PPO(
+            "MlpPolicy", env,
+            learning_rate=_linear_schedule(3e-4),
+            n_steps=4096,
+            batch_size=256,
+            n_epochs=10,
+            clip_range=0.1,
+            ent_coef=0.01,
+            vf_coef=0.5,
+            max_grad_norm=0.5,
+            verbose=1,
+        )
 
     @property
     def primary_metric_name(self) -> str:

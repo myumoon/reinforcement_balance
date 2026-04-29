@@ -24,6 +24,26 @@ _GAME_DEFAULTS = {
 }
 
 
+def _linear_schedule(initial_value: float):
+    """PPO 学習率の線形減衰スケジュール（訓練終了時に 0 になる）。"""
+    def func(progress_remaining: float) -> float:
+        return progress_remaining * initial_value
+    return func
+
+
+_PPO_KWARGS = dict(
+    learning_rate=_linear_schedule(3e-4),
+    n_steps=4096,
+    batch_size=256,
+    n_epochs=10,
+    clip_range=0.1,
+    ent_coef=0.01,
+    vf_coef=0.5,
+    max_grad_norm=0.5,
+    verbose=1,
+)
+
+
 def _load_reward_fn(path: Path):
     if not path.exists():
         raise FileNotFoundError(f"--reward-fn ファイルが見つかりません: {path}")
@@ -115,7 +135,7 @@ def main() -> None:
     elif args.entity_attention:
         if args.game != "coin":
             print("[WARN] --entity-attention はコインゲーム専用です。MlpPolicy を使用します。")
-            model = PPO("MlpPolicy", env, verbose=1)
+            model = PPO("MlpPolicy", env, **_PPO_KWARGS)
         else:
             from entity_attention_extractor import EntityAttentionExtractor
             policy_kwargs = dict(
@@ -124,9 +144,9 @@ def main() -> None:
                 net_arch=[64, 64],
             )
             print("[INFO] EntityAttentionExtractor を使用します")
-            model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, verbose=1)
+            model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, **_PPO_KWARGS)
     else:
-        model = PPO("MlpPolicy", env, verbose=1)
+        model = PPO("MlpPolicy", env, **_PPO_KWARGS)
 
     checkpoint_cb = CheckpointCallback(
         save_freq=max(args.checkpoint_freq // (env.num_envs or 1), 1),

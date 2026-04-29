@@ -162,6 +162,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     def make_model(self, env):
         from stable_baselines3 import PPO
         from entity_attention_extractor import EntityAttentionExtractor
+        from eureka_game_config import _linear_schedule
         policy_kwargs = dict(
             features_extractor_class=EntityAttentionExtractor,
             features_extractor_kwargs=dict(
@@ -170,7 +171,19 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
             ),
             net_arch=[64, 64],
         )
-        return PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, verbose=1)
+        return PPO(
+            "MlpPolicy", env,
+            policy_kwargs=policy_kwargs,
+            learning_rate=_linear_schedule(3e-4),
+            n_steps=4096,
+            batch_size=256,
+            n_epochs=10,
+            clip_range=0.1,
+            ent_coef=0.01,
+            vf_coef=0.5,
+            max_grad_norm=0.5,
+            verbose=1,
+        )
 
     @property
     def primary_metric_name(self) -> str:
