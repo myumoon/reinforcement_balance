@@ -60,57 +60,55 @@ class CoinEurekaConfig(EurekaGameConfig):
         return CoinEnv(host=host, port=port)
 
     # ------------------------------------------------------------------ #
-    # セクション別テキスト生成                                               #
+    # プロンプトセクション（本文のみ。タイトルは _titled_section() で付与）    #
     # ------------------------------------------------------------------ #
 
-    def _section_game_overview(self) -> str:
-        return """\
-## ゲーム概要
-2D フィールド（±10m の正方形）でプレイヤーがコインを収集しながら敵を回避するゲームです。
-- プレイヤーは離散5方向（上/下/左/右/静止）で移動
-- コインを取ると得点、敵に当たるとエピソード終了
-- 敵はフィールド外周からスポーンし、プレイヤーに向かって移動する"""
-
-    def _section_game_objective(self) -> str:
-        return """\
-## ゲームの目標（最重要）
-このゲームの**最優先目標**は「1エピソードでコインをできるだけ多く取得すること」です。
-- 敵を避けることは目標ではなく手段（死ぬとエピソード終了してコインが取れなくなる）
-- 壁際に留まるのは最悪の戦略（コインを取れず敵にも当たりやすい）
-- **評価指標: coins_per_episode**（1エピソードのコイン取得枚数）を最大化することが目的
-- shaped_reward はコインへの積極的な接近を強く後押しすること
-- 敵回避は「死を避ける」最小限のペナルティに留め、コイン接近を妨げない設計にすること"""
-
-    def _section_obs(self) -> str:
+    def _prompt_section_game_overview(self) -> str:
         return (
-            f"## 観測ベクトル（obs）レイアウト\n"
-            f"{self._obs_layout_str}\n\n"
-            f"## 最近傍エンティティの obs インデックス（先頭要素 = 最近傍、距離近い順にソート済み）\n"
+            "2D フィールド（±10m の正方形）でプレイヤーがコインを収集しながら敵を回避するゲームです。\n"
+            "- プレイヤーは離散5方向（上/下/左/右/静止）で移動\n"
+            "- コインを取ると得点、敵に当たるとエピソード終了\n"
+            "- 敵はフィールド外周からスポーンし、プレイヤーに向かって移動する"
+        )
+
+    def _prompt_section_game_objective(self) -> str:
+        return (
+            "このゲームの**最優先目標**は「1エピソードでコインをできるだけ多く取得すること」です。\n"
+            "- 敵を避けることは目標ではなく手段（死ぬとエピソード終了してコインが取れなくなる）\n"
+            "- 壁際に留まるのは最悪の戦略（コインを取れず敵にも当たりやすい）\n"
+            "- **評価指標: coins_per_episode**（1エピソードのコイン取得枚数）を最大化することが目的\n"
+            "- shaped_reward はコインへの積極的な接近を強く後押しすること\n"
+            "- 敵回避は「死を避ける」最小限のペナルティに留め、コイン接近を妨げない設計にすること"
+        )
+
+    def _prompt_section_obs_layout(self) -> str:
+        return self._obs_layout_str
+
+    def _prompt_section_obs_index(self) -> str:
+        return (
             f"{self.obs_index_description()}\n\n"
             f"  ※ dx, dy はフィールド幅 (20m) で正規化済み。値域 [-1, 1]\n"
             f"  ※ 壁距離 wall_dist は FieldHalfSize (10m) で正規化済み。値域 [0, 1]"
         )
 
-    def _section_fixed_rewards(self) -> str:
+    def _prompt_section_fixed_rewards(self) -> str:
         return (
-            f"## 固定報酬（C++ 側、変更不可）\n"
             f"- AliveReward = {_ALIVE_REWARD} / step（生存毎ステップ）\n"
             f"- CoinReward = {_COIN_REWARD} / 枚（コイン取得時）"
         )
 
-    def _section_physics(self) -> str:
-        return """\
-## ゲームの物理定数（distance threshold の設計に必ず参照すること）
-- コイン収集半径: 1.0m = 正規化値 **0.05**（この距離以内で自動収集）
-- 敵衝突半径:   0.6m = 正規化値 0.03
-- プレイヤー最大速度: 約 2.5m/s → 1ステップ(1/60s)あたり約 **0.0021 normalized**
-- 敵スポーン間隔: 10秒 ≈ 600ステップごとに1体
-- 敵の速度: 遅い直進=1.0m/s、速い直進=2.5m/s、予測追跡=1.5m/s
-  （予測追跡はプレイヤーの移動先を予測して追跡するため最も危険）"""
-
-    def _section_scale_constraints(self) -> str:
+    def _prompt_section_physics(self) -> str:
         return (
-            f"## スケール制約（reward_fn 設計上の上限）\n"
+            "- コイン収集半径: 1.0m = 正規化値 **0.05**（この距離以内で自動収集）\n"
+            "- 敵衝突半径:   0.6m = 正規化値 0.03\n"
+            "- プレイヤー最大速度: 約 2.5m/s → 1ステップ(1/60s)あたり約 **0.0021 normalized**\n"
+            "- 敵スポーン間隔: 10秒 ≈ 600ステップごとに1体\n"
+            "- 敵の速度: 遅い直進=1.0m/s、速い直進=2.5m/s、予測追跡=1.5m/s\n"
+            "  （予測追跡はプレイヤーの移動先を予測して追跡するため最も危険）"
+        )
+
+    def _prompt_section_scale_constraints(self) -> str:
+        return (
             f"- コイン接近報酬は 1ステップあたり [-0.05, 0.05] 程度まで。大きな定数ペナルティは避け差分ベースを推奨\n"
             f"- 敵ペナルティは定数 -0.005 以下に留め、コイン接近を阻害しないこと\n"
             f"- 近接ボーナスの閾値は 0.05〜0.10 normalized（収集半径の1〜2倍）以内にすること\n"
@@ -140,7 +138,7 @@ class CoinEurekaConfig(EurekaGameConfig):
             f"  obs[{enemy_v_i}], obs[{enemy_v_i + 1}]         = 最近敵の速度 (vx, vy)\n"
             f"  obs[{enemy_t_i}]               = 最近敵の種類 (0.0=遅い直進, 0.5=速い直進, 1.0=予測追跡)\n"
             f"\n"
-            f"## 複数エンティティへのアクセス（i=0が最近傍、距離昇順）\n"
+            f"**複数エンティティへのアクセス（i=0が最近傍、距離昇順）**\n"
             f"\n"
             f"コイン（最大 {num_coin_obs} 枚、存在しないスロットは 0 埋め）:\n"
             f"  obs[{coin_i} + i*2]     = i番目コインの dx  (i = 0 〜 {num_coin_obs - 1})\n"
@@ -173,15 +171,22 @@ class CoinEurekaConfig(EurekaGameConfig):
     # ------------------------------------------------------------------ #
 
     def build_game_context(self) -> str:
-        """レビュアー向けゲームコンテキスト。各セクションメソッドを組み合わせて構築する。"""
+        """レビュアー向けゲームコンテキスト。各セクションメソッドを _titled_section() で組み合わせて構築する。"""
         return "\n\n".join([
-            self._section_game_overview(),
-            self._section_game_objective(),
-            self._section_obs(),
-            self._section_fixed_rewards(),
-            self._section_physics(),
-            self._section_scale_constraints(),
-            f"## メトリクスの各パラメーターの意味\n{self.metrics_description()}",
+            self._titled_section("ゲーム概要", self._prompt_section_game_overview()),
+            self._titled_section("ゲームの目標（最重要）", self._prompt_section_game_objective()),
+            self._titled_section("観測ベクトル（obs）レイアウト", self._prompt_section_obs_layout()),
+            self._titled_section(
+                "最近傍エンティティの obs インデックス（先頭要素 = 最近傍、距離近い順にソート済み）",
+                self._prompt_section_obs_index(),
+            ),
+            self._titled_section("固定報酬（C++ 側、変更不可）", self._prompt_section_fixed_rewards()),
+            self._titled_section(
+                "ゲームの物理定数（distance threshold の設計に必ず参照すること）",
+                self._prompt_section_physics(),
+            ),
+            self._titled_section("スケール制約（reward_fn 設計上の上限）", self._prompt_section_scale_constraints()),
+            self._titled_section("メトリクスの各パラメーターの意味", self.metrics_description()),
         ])
 
     def build_prompt(self, prev_metrics: dict | None, iteration: int) -> str:
@@ -209,7 +214,7 @@ class CoinEurekaConfig(EurekaGameConfig):
             f"    shaped = 0.0\n"
             f"    return float(np.clip(shaped, -1.0, 1.0))\n"
             f"```\n\n"
-            f"{self._section_scale_constraints()}\n\n"
+            f"{self._titled_section('スケール制約（reward_fn 設計上の上限）', self._prompt_section_scale_constraints())}\n\n"
             f"### 2. 推奨訓練ステップ数\n"
             f"50,000〜200,000 の範囲で整数を記載してください（例: 100000）\n\n"
             f"### 3. 設計の意図\n"
@@ -217,11 +222,18 @@ class CoinEurekaConfig(EurekaGameConfig):
         )
         return "\n\n".join([
             "あなたは強化学習の報酬設計エキスパートです。",
-            self._section_game_overview(),
-            self._section_game_objective(),
-            self._section_obs(),
-            self._section_fixed_rewards(),
-            self._section_physics(),
+            self._titled_section("ゲーム概要", self._prompt_section_game_overview()),
+            self._titled_section("ゲームの目標（最重要）", self._prompt_section_game_objective()),
+            self._titled_section("観測ベクトル（obs）レイアウト", self._prompt_section_obs_layout()),
+            self._titled_section(
+                "最近傍エンティティの obs インデックス（先頭要素 = 最近傍、距離近い順にソート済み）",
+                self._prompt_section_obs_index(),
+            ),
+            self._titled_section("固定報酬（C++ 側、変更不可）", self._prompt_section_fixed_rewards()),
+            self._titled_section(
+                "ゲームの物理定数（distance threshold の設計に必ず参照すること）",
+                self._prompt_section_physics(),
+            ),
             metrics_section,
             "## 課題\n前回の訓練の結果から課題を判断して箇条書きで記載。",
             task_section,

@@ -50,6 +50,15 @@ class EurekaGameConfig(ABC):
         """
         return {}
 
+    @staticmethod
+    def _titled_section(title: str, body: str) -> str:
+        """'## タイトル\\n本文' 形式のセクション文字列を返す。
+
+        サブクラスの _prompt_section_xxx() は本文のみ返し、
+        このメソッドでタイトルを付与して使う。
+        """
+        return f"## {title}\n{body}"
+
     def build_game_context(self) -> str:
         """レビュープロンプト用のゲームコンテキストを返す（任意 override）。
 
