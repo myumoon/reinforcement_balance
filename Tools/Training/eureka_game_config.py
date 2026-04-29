@@ -42,6 +42,14 @@ class EurekaGameConfig(ABC):
             return 0.0
         return sum(episode_base_rewards) / len(episode_base_rewards)
 
+    def compute_extra_metrics(self, episode_base_rewards: list[float],
+                              episode_lengths: list[int]) -> dict:
+        """プロンプトに追加するゲーム固有の補助メトリクスを返す。
+
+        デフォルト実装は空 dict。ゲーム固有の指標がある場合は override する。
+        """
+        return {}
+
     def make_model(self, env):
         """PPO モデルを生成して返す。
 

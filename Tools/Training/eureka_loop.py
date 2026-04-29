@@ -262,6 +262,8 @@ class _EurekaMetricsCallback(BaseCallback):
         mean_len    = sum(self.episode_lengths) / n
         primary     = game_config.compute_primary_metric(
             self.episode_base_rewards, self.episode_lengths)
+        extra = game_config.compute_extra_metrics(
+            self.episode_base_rewards, self.episode_lengths)
         return {
             "episodes": n,
             "episode_reward_mean": round(mean_base + mean_shaped, 4),
@@ -269,6 +271,7 @@ class _EurekaMetricsCallback(BaseCallback):
             "shaped_reward_mean": round(mean_shaped, 4),
             "episode_length_mean": round(mean_len, 1),
             game_config.primary_metric_name: round(primary, 3),
+            **extra,
         }
 
 

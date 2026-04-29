@@ -165,6 +165,20 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
         mean_len  = sum(episode_lengths) / len(episode_lengths)
         return max(0.0, (mean_base - _ALIVE_REWARD * mean_len) / _COIN_REWARD)
 
+    def compute_extra_metrics(self, episode_base_rewards: list[float],
+                              episode_lengths: list[int]) -> dict:
+        import statistics
+        coins_list = [
+            max(0.0, (r - _ALIVE_REWARD * l) / _COIN_REWARD)
+            for r, l in zip(episode_base_rewards, episode_lengths)
+        ]
+        return {
+            f"{self.primary_metric_name}_std": round(
+                statistics.stdev(coins_list) if len(coins_list) > 1 else 0.0, 3),
+            "episode_length_min": min(episode_lengths),
+            "episode_length_max": max(episode_lengths),
+        }
+
     def make_model(self, env):
         from stable_baselines3 import PPO
         from entity_attention_extractor import EntityAttentionExtractor
