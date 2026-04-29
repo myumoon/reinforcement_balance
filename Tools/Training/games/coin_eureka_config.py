@@ -152,7 +152,7 @@ class CoinEurekaConfig(EurekaGameConfig):
 
         return (
             f"  obs[{enemy_count_i}]  = 敵数 / {max_enemy_obs}（0.0=敵なし、1.0=最大{max_enemy_obs}体同時出現）\n"
-            f"  obs[{coins_collected_i}]  = このエピソードで収集したコイン累計数 / NumCoins\n"
+            f"  obs[{coins_collected_i}]  = このエピソードで収集したコイン累計数（生値: 0, 1, 2, ...）\n"
             f"            コイン収集検出: obs[{coins_collected_i}] > prev_obs[{coins_collected_i}]\n"
             f"            base_reward >= 4.0 より確実な収集イベント判定に使用できる\n"
             f"  obs[{spawn_timer_i}] = スポーンタイマー / 10.0（値域 0〜1）\n"

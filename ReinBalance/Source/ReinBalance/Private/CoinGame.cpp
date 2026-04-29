@@ -124,8 +124,8 @@ TArray<float> ACoinGame::GetObservation() const
 	// 4. 現在の敵数 (1)
 	Obs.Add(static_cast<float>(Enemies.Num()) / static_cast<float>(MaxEnemyObs));
 
-	// 5. エピソード内コイン収集累計数 (1)
-	Obs.Add(static_cast<float>(CoinsCollected) / static_cast<float>(NumCoins));
+	// 5. エピソード内コイン収集累計数 (1)  ─ 生値 (0, 1, 2, ...), VecNormalize に委ねる
+	Obs.Add(static_cast<float>(CoinsCollected));
 
 	// 6. 次スポーンまでの残り時間 (1)
 	Obs.Add(FMath::Clamp(SpawnTimer / EnemySpawnInterval, 0.f, 1.f));

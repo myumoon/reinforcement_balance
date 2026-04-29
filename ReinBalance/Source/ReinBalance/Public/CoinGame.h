@@ -16,7 +16,7 @@
  *   [2-3]                  プレイヤー速度 (vx,vy)
  *   [4-7]                  壁距離 (上/下/左/右) / FieldHalfSize
  *   [8]                    現在の敵数 / MaxEnemyObs
- *   [9]                    エピソード内コイン収集累計数 / NumCoins
+ *   [9]                    エピソード内コイン収集累計数（生値: 0, 1, 2, ...）
  *   [10]                   次スポーンまでの残り時間 (0~1)
  *   [11 .. 11+N*2-1]       コイン相対位置 dx,dy × NumCoinObs  / (FieldHalfSize*2)
  *   [11+N*2 .. +M*2-1]     敵相対位置  dx,dy × MaxEnemyObs=20 / (FieldHalfSize*2)
