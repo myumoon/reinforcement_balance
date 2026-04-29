@@ -133,6 +133,11 @@ class CoinEurekaConfig(EurekaGameConfig):
         max_enemy_obs = (enemy_v_i - enemy_r_i) // 2
 
         return (
+            f"  obs[8]  = 敵数 / {max_enemy_obs}（0.0=敵なし、1.0=最大{max_enemy_obs}体同時出現）\n"
+            f"  obs[9]  = スポーンタイマー / 10.0（値域 0〜1）\n"
+            f"            1.0 = スポーン直後（次の敵出現まで約10秒≈600ステップ）\n"
+            f"            0.0 = スポーン直前（まもなく敵出現）\n"
+            f"\n"
             f"  obs[{coin_i}], obs[{coin_i + 1}]           = 最近コインへの相対位置 (dx, dy)\n"
             f"  obs[{enemy_r_i}], obs[{enemy_r_i + 1}]         = 最近敵への相対位置 (dx, dy)\n"
             f"  obs[{enemy_v_i}], obs[{enemy_v_i + 1}]         = 最近敵の速度 (vx, vy)\n"
@@ -150,8 +155,6 @@ class CoinEurekaConfig(EurekaGameConfig):
             f"  obs[{enemy_v_i} + i*2]     = i番目敵の vx\n"
             f"  obs[{enemy_v_i} + i*2 + 1] = i番目敵の vy\n"
             f"  obs[{enemy_t_i} + i]       = i番目敵の種類 (0.0=遅い直進, 0.5=速い直進, 1.0=予測追跡)\n"
-            f"\n"
-            f"  ※ obs[8] * {max_enemy_obs} で現在の実際の敵数（正規化前）が得られる"
         )
 
     def metrics_description(self) -> str:
