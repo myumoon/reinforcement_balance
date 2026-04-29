@@ -27,7 +27,8 @@ class EurekaGameConfig(ABC):
         ...
 
     @abstractmethod
-    def build_prompt(self, prev_metrics: dict | None, iteration: int) -> str:
+    def build_prompt(self, prev_metrics: dict | None, iteration: int,
+                     prev_review: str | None = None) -> str:
         """LLM へのプロンプト文字列を生成して返す。"""
         ...
 

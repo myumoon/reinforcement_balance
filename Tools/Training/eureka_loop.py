@@ -145,6 +145,21 @@ def _extract_steps(text: str) -> int:
     return _DEFAULT_STEPS
 
 
+def _extract_revision_judgment(revision_text: str) -> str | None:
+    """revision_response から ### 判断 セクションのテキストを抽出する。"""
+    m = re.search(r"###\s*判断\s*\n(.*?)(?=\n###|\Z)", revision_text, re.DOTALL)
+    return m.group(1).strip() if m else None
+
+
+def _build_review_findings(review_response: str, revision_response: str) -> str:
+    """次イテレーションのプロンプトに渡す前回レビュー知見テキストを構築する。"""
+    parts = [f"### レビュアーが指摘した問題点\n{review_response.strip()}"]
+    judgment = _extract_revision_judgment(revision_response)
+    if judgment:
+        parts.append(f"### 生成LLMの判断（修正・棄却した内容）\n{judgment}")
+    return "\n\n".join(parts)
+
+
 def _validate_code(code: str) -> bool:
     try:
         compile(code, "<reward_fn>", "exec")
@@ -345,12 +360,14 @@ class _EurekaMetricsCallback(BaseCallback):
 # ---------------------------------------------------------------------------
 
 def _save_state(run_dir: Path, next_iter: int, prev_metrics: dict | None,
-                best_iter: int, best_primary: float) -> None:
+                best_iter: int, best_primary: float,
+                prev_review_findings: str | None = None) -> None:
     state = {
         "next_iter": next_iter,
         "prev_metrics": prev_metrics,
         "best_iter": best_iter,
         "best_primary": best_primary,
+        "prev_review_findings": prev_review_findings,
     }
     (run_dir / _STATE_FILENAME).write_text(
         json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -403,16 +420,18 @@ def main() -> None:
     # 再開状態の読み込み
     state = _load_state(run_dir)
     if state:
-        start_iter   = state["next_iter"]
-        prev_metrics = state.get("prev_metrics")
-        best_iter    = state.get("best_iter", -1)
-        best_primary = state.get("best_primary", -1.0)
+        start_iter           = state["next_iter"]
+        prev_metrics         = state.get("prev_metrics")
+        best_iter            = state.get("best_iter", -1)
+        best_primary         = state.get("best_primary", -1.0)
+        prev_review_findings = state.get("prev_review_findings")
         print(f"[INFO] 前回の状態を検出: イテレーション {start_iter} から再開します。")
     else:
-        start_iter   = 1
-        prev_metrics = None
-        best_primary = -1.0
-        best_iter    = -1
+        start_iter           = 1
+        prev_metrics         = None
+        best_primary         = -1.0
+        best_iter            = -1
+        prev_review_findings = None
 
     if start_iter > args.iterations:
         print(f"[INFO] 全イテレーション ({args.iterations}) 完了済みです。")
@@ -428,13 +447,14 @@ def main() -> None:
             print(f"{'=' * 60}")
 
             # --- LLM に報酬関数を生成させる ---
-            prompt = game_config.build_prompt(prev_metrics, i)
+            prompt = game_config.build_prompt(prev_metrics, i, prev_review_findings)
             print("[INFO] LLM に報酬関数を生成中...")
             try:
                 llm_response = _call_llm(client, model_name, prompt, args.llm)
             except Exception as e:
                 if _is_credit_error(e):
-                    _save_state(run_dir, i, prev_metrics, best_iter, best_primary)
+                    _save_state(run_dir, i, prev_metrics, best_iter, best_primary,
+                                prev_review_findings)
                     print(f"\n[ERROR] クレジット残高が不足しています。")
                     print(f"[INFO]  https://console.anthropic.com/settings/billing でクレジットを追加してください。")
                     print(f"[INFO]  追加後、以下のコマンドで再開できます:")
@@ -480,6 +500,9 @@ def main() -> None:
                         print("[INFO] 改訂済みコードを採用しました")
                     else:
                         print("[WARN] 改訂後のコード抽出に失敗。初版コードを使用します")
+
+                    # 次イテレーションへ引き継ぐレビュー知見を構築
+                    prev_review_findings = _build_review_findings(review_response, revision_response)
 
             print(f"[INFO] 推奨ステップ数: {recommended_steps:,}")
 
@@ -541,7 +564,8 @@ def main() -> None:
             prev_metrics = metrics
 
             # イテレーション完了後に状態を保存（次回再開用）
-            _save_state(run_dir, i + 1, prev_metrics, best_iter, best_primary)
+            _save_state(run_dir, i + 1, prev_metrics, best_iter, best_primary,
+                        prev_review_findings)
 
     except KeyboardInterrupt:
         print("\n[INFO] ループを中断しました。")

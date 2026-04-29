@@ -189,7 +189,8 @@ class CoinEurekaConfig(EurekaGameConfig):
             self._titled_section("メトリクスの各パラメーターの意味", self.metrics_description()),
         ])
 
-    def build_prompt(self, prev_metrics: dict | None, iteration: int) -> str:
+    def build_prompt(self, prev_metrics: dict | None, iteration: int,
+                     prev_review: str | None = None) -> str:
         metrics_value = (
             "なし（初回）"
             if prev_metrics is None
@@ -220,7 +221,7 @@ class CoinEurekaConfig(EurekaGameConfig):
             f"### 3. 設計の意図\n"
             f"この報酬関数で何を解決しようとしているか（1〜3行）"
         )
-        return "\n\n".join([
+        items = [
             "あなたは強化学習の報酬設計エキスパートです。",
             self._titled_section("ゲーム概要", self._prompt_section_game_overview()),
             self._titled_section("ゲームの目標（最重要）", self._prompt_section_game_objective()),
@@ -235,9 +236,12 @@ class CoinEurekaConfig(EurekaGameConfig):
                 self._prompt_section_physics(),
             ),
             metrics_section,
-            "## 課題\n前回の訓練の結果から課題を判断して箇条書きで記載。",
-            task_section,
-        ])
+        ]
+        if prev_review is not None:
+            items.append(self._titled_section("前回レビューで指摘された設計上の問題", prev_review))
+        items.append("## 課題\n前回の訓練の結果から課題を判断して箇条書きで記載。")
+        items.append(task_section)
+        return "\n\n".join(items)
 
     # ------------------------------------------------------------------ #
     # メトリクス計算                                                        #
