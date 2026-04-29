@@ -20,18 +20,23 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
       obs[enemy_v_i: enemy_t_i]   = enemy_vel     (20体 × 2: vx,vy)
       obs[enemy_t_i:]             = enemy_type    (20体 × 1: 0.0/0.5/1.0)
 
+    use_polar=True のとき、コイン・敵の位置と速度ベクトルを (dx,dy) → (r, θ) に変換する。
+    距離 r が直接特徴として現れるため、アテンションが距離ベースの優先度を学びやすくなる。
+
     Args:
         observation_space: gymnasium の観測空間（SB3 が渡す）
         features_dim: 出力特徴量の次元数（default: 128）
         offsets: obs_schema から得たセグメント開始インデックス dict
+        use_polar: True のとき位置・速度ベクトルを極座標に変換（default: True）
     """
 
     _EMBED_DIM = 32
 
     def __init__(self, observation_space, features_dim: int = 128,
-                 offsets: dict | None = None):
+                 offsets: dict | None = None, use_polar: bool = True):
         super().__init__(observation_space, features_dim)
         offsets = offsets or {}
+        self.use_polar = use_polar
 
         # セグメントのインデックス境界
         self._coin_i    = offsets.get("coin_rel_pos", 10)
@@ -82,6 +87,22 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         weights = torch.softmax(scores, dim=1).unsqueeze(-1)  # [B, N, 1]
         return (enc * weights).sum(dim=1)                 # [B, embed_dim]
 
+    @staticmethod
+    def _to_polar(xy: torch.Tensor) -> torch.Tensor:
+        """直交座標 (dx, dy) を極座標 (r, θ) に変換する。
+
+        距離 r が直接の特徴になるため、アテンション学習で距離ベースの
+        優先度付けが容易になる。
+
+        Args:
+            xy: [B, N, 2]  (dx, dy)
+        Returns:
+            [B, N, 2]  (r ∈ [0, √2],  θ ∈ [-π, π])
+        """
+        r     = torch.norm(xy, dim=-1, keepdim=True)
+        theta = torch.atan2(xy[..., 1:2], xy[..., 0:1])
+        return torch.cat([r, theta], dim=-1)
+
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         B = obs.shape[0]
 
@@ -91,6 +112,13 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         e_pos  = obs[:, self._enemy_r_i:self._enemy_v_i].reshape(B, self._num_enemies, 2)
         e_vel  = obs[:, self._enemy_v_i:self._enemy_t_i].reshape(B, self._num_enemies, 2)
         e_type = obs[:, self._enemy_t_i:].reshape(B, self._num_enemies, 1)
+
+        # 極座標変換（use_polar=True のとき位置・速度ベクトルを (dx,dy) → (r,θ) に変換）
+        if self.use_polar:
+            coins = self._to_polar(coins)
+            e_pos = self._to_polar(e_pos)
+            e_vel = self._to_polar(e_vel)
+
         enemies = torch.cat([e_pos, e_vel, e_type], dim=-1)  # [B, 20, 5]
 
         # エンティティ単位でエンコード

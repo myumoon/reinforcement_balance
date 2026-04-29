@@ -159,10 +159,10 @@ def main() -> None:
             from entity_attention_extractor import EntityAttentionExtractor
             policy_kwargs = dict(
                 features_extractor_class=EntityAttentionExtractor,
-                features_extractor_kwargs=dict(features_dim=128),
+                features_extractor_kwargs=dict(features_dim=128, use_polar=True),
                 net_arch=[64, 64],
             )
-            print("[INFO] EntityAttentionExtractor を使用します")
+            print("[INFO] EntityAttentionExtractor を使用します (use_polar=True)")
             model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, **_PPO_KWARGS)
     else:
         model = PPO("MlpPolicy", env, **_PPO_KWARGS)
