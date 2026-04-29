@@ -154,22 +154,31 @@ def _validate_code(code: str) -> bool:
         return False
 
 
-def _build_review_prompt(reward_fn_code: str, game_context: str) -> str:
+def _build_review_prompt(reward_fn_code: str, game_context: str,
+                         prev_metrics: dict | None) -> str:
     ctx_section = (
         f"## ゲームコンテキスト\n{game_context}\n\n---\n\n"
         if game_context.strip()
         else ""
     )
+    metrics_section = (
+        "なし（初回）"
+        if prev_metrics is None
+        else json.dumps(prev_metrics, ensure_ascii=False, indent=2)
+    )
     return f"""あなたは強化学習の報酬設計レビュアーです。
-以下のゲームコンテキストをもとに reward_fn.py を評価してください。
+以下のゲームコンテキストと前回の訓練メトリクスをもとに reward_fn.py を評価してください。
 コードの修正は不要です。問題点のフィードバックのみを返してください。
 
-{ctx_section}## レビュー対象の reward_fn.py
+{ctx_section}## 前回の訓練メトリクス
+{metrics_section}
+
+## レビュー対象の reward_fn.py
 ```python
 {reward_fn_code}
 ```
 
-上記のゲームルール・物理定数・固定報酬をもとに reward_fn.py を評価し、
+上記のゲームルール・物理定数・固定報酬・前回メトリクスをもとに reward_fn.py を評価し、
 問題点を箇条書きで返してください。問題がなければ「問題なし」と記載してください。
 コードブロックは出力しないでください。
 """
@@ -454,7 +463,7 @@ def main() -> None:
                     # Step A: レビュアー LLM がフィードバックのみ返す（コードは書かない）
                     print("[INFO] reward_fn をレビュー中...")
                     game_context = game_config.build_game_context()
-                    review_prompt = _build_review_prompt(reward_fn_code, game_context)
+                    review_prompt = _build_review_prompt(reward_fn_code, game_context, prev_metrics)
                     review_response = _call_llm(client, model_name, review_prompt, args.llm)
                     (iter_dir / "review_response.txt").write_text(review_response, encoding="utf-8")
 
