@@ -238,9 +238,14 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
 # ---------------------------------------------------------------------------
 
 def _wrap_vec_normalize(raw_env):
-    """raw gym.Env を DummyVecEnv でラップし、さらに VecNormalize で包む。"""
+    """raw gym.Env を Monitor → DummyVecEnv → VecNormalize の順にラップする。
+
+    Monitor を先に適用しないと SB3 の ep_info_buffer が更新されず、
+    rollout/ セクション (ep_rew_mean, ep_len_mean) がログに出力されない。
+    """
+    from stable_baselines3.common.monitor import Monitor
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-    vec_env = DummyVecEnv([lambda: raw_env])
+    vec_env = DummyVecEnv([lambda: Monitor(raw_env)])
     return VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
 
