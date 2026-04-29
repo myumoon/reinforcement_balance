@@ -236,9 +236,10 @@ def main() -> None:
             model = PPO("MlpPolicy", env, **_PPO_KWARGS)
         else:
             from entity_attention_extractor import EntityAttentionExtractor
+            offsets = getattr(_get_raw_env(env), "_offsets", {})
             policy_kwargs = dict(
                 features_extractor_class=EntityAttentionExtractor,
-                features_extractor_kwargs=dict(features_dim=128, use_polar=True),
+                features_extractor_kwargs=dict(features_dim=128, offsets=offsets, use_polar=True),
                 net_arch=[64, 64],
             )
             print("[INFO] EntityAttentionExtractor を使用します (use_polar=True)")

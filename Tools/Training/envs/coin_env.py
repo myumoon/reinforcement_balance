@@ -50,6 +50,12 @@ class CoinEnv(BaseUE5Env):
         total_dim = schema["total_dim"]
         self._expected_schema_hash = schema["obs_schema_hash"]
 
+        offset = 0
+        self._offsets: dict[str, int] = {}
+        for seg in schema["segments"]:
+            self._offsets[seg["name"]] = offset
+            offset += seg["dim"]
+
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(total_dim,), dtype=np.float32
         )
