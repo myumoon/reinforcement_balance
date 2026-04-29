@@ -126,6 +126,14 @@ class CoinEurekaConfig(EurekaGameConfig):
 - AliveReward = {_ALIVE_REWARD} / step（生存毎ステップ）
 - CoinReward = {_COIN_REWARD} / 枚（コイン取得時）
 
+## ゲームの物理定数（distance threshold の設計に必ず参照すること）
+- コイン収集半径: 1.0m = 正規化値 **0.05**（この距離以内で自動収集）
+- 敵衝突半径:   0.6m = 正規化値 0.03
+- プレイヤー最大速度: 約 2.5m/s → 1ステップ(1/60s)あたり約 **0.0021 normalized**
+- 敵スポーン間隔: 10秒 ≈ 600ステップごとに1体
+- 敵の速度: 遅い直進=1.0m/s、速い直進=2.5m/s、予測追跡=1.5m/s
+  （予測追跡はプレイヤーの移動先を予測して追跡するため最も危険）
+
 ## 前回イテレーション {iteration - 1} のメトリクス
 （base_reward = C++固定報酬のみ（AliveReward+CoinReward）、shaped_reward = reward_fn の出力、episode_length の単位はステップ数）
 {metrics_section}
@@ -150,6 +158,12 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
 **スケールの注意:** コイン接近報酬は 1ステップあたり [-0.05, 0.05] 程度まで許容します。
 敵ペナルティは定数 -0.005 以下に留め、コイン接近を阻害しないこと。
 大きな定数ペナルティは避け、差分ベースの報酬を推奨します。
+
+**距離閾値の注意:**
+- 近接ボーナスの閾値は 0.05〜0.10 normalized（収集半径の1〜2倍）以内にすること
+  0.15（3m）以上はコインを取らず近くで滞在するだけの戦略を誘発する
+- 1エピソードの近接ボーナス合計が CoinReward({_COIN_REWARD}) を超えないよう係数を設定すること
+  例: 0.003/step × 1500step = 4.5 < {_COIN_REWARD}
 
 ### 2. 推奨訓練ステップ数
 50,000〜200,000 の範囲で整数を記載してください（例: 100000）
