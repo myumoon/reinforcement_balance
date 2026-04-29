@@ -42,6 +42,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--iterations", type=int, default=5, help="ループ回数（default: 5）")
     p.add_argument("--run-name", default=None,
                    help="保存ディレクトリ名（未指定時はタイムスタンプ自動生成）")
+    p.add_argument("--resume", metavar="RUN_NAME", default=None,
+                   help="前回中断したランを再開する（state.json が必要）。--run-name と排他")
     p.add_argument("--llm", choices=["anthropic", "openai"], default="anthropic",
                    help="LLMバックエンド（default: anthropic）")
     p.add_argument("--model", default=None,
@@ -402,9 +404,22 @@ def main() -> None:
     game_config = _load_game_config(args.game_config)
 
     # 出力ディレクトリ
-    run_name = args.run_name or datetime.datetime.now().strftime("run_%Y%m%d_%H%M%S")
-    run_dir = Path(args.output_dir) / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if args.resume and args.run_name:
+        print("[ERROR] --resume と --run-name は同時に指定できません。")
+        return
+
+    if args.resume:
+        run_name = args.resume
+        run_dir = Path(args.output_dir) / run_name
+        if not (run_dir / _STATE_FILENAME).exists():
+            print(f"[ERROR] {run_dir / _STATE_FILENAME} が見つかりません。再開できません。")
+            print(f"[INFO]  新規開始する場合は --run-name {run_name} を使用してください。")
+            return
+    else:
+        run_name = args.run_name or datetime.datetime.now().strftime("run_%Y%m%d_%H%M%S")
+        run_dir = Path(args.output_dir) / run_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+
     print(f"[INFO] 保存先: {run_dir}")
 
     # LLM クライアント
@@ -466,7 +481,7 @@ def main() -> None:
                     print(f"[INFO]  https://console.anthropic.com/settings/billing でクレジットを追加してください。")
                     print(f"[INFO]  追加後、以下のコマンドで再開できます:")
                     print(f"[INFO]    python eureka_loop.py --game-config {args.game_config} "
-                          f"--iterations {args.iterations} --run-name {run_name}")
+                          f"--iterations {args.iterations} --resume {run_name}")
                     return
                 raise
 
