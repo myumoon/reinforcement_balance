@@ -127,6 +127,7 @@ class CoinEurekaConfig(EurekaGameConfig):
 - CoinReward = {_COIN_REWARD} / 枚（コイン取得時）
 
 ## 前回イテレーション {iteration - 1} のメトリクス
+（base_reward = C++固定報酬のみ（AliveReward+CoinReward）、shaped_reward = reward_fn の出力、episode_length の単位はステップ数）
 {metrics_section}
 
 ## 課題
