@@ -151,8 +151,6 @@ def parse_args() -> argparse.Namespace:
                    help="エンティティアテンション特徴抽出器を使用 (--game coin 専用, --resume 時は無視)")
     p.add_argument("--reward-fn", type=Path, default=None,
                    help="報酬シェーピング関数のパス (例: eureka_results/my_run/best/reward_fn.py, --game coin 専用)")
-    p.add_argument("--reward-scale", type=float, default=0.2,
-                   help="base_reward に乗じるスケール係数 (--game coin 専用, default: 0.2)")
     p.add_argument("--no-vec-normalize", action="store_true",
                    help="VecNormalize による観測・報酬の正規化を無効化する")
     p.add_argument("--anneal-threshold", type=float, default=0.1,
@@ -196,7 +194,7 @@ def main() -> None:
         if args.game == "coin":
             from envs.coin_env import CoinEnv
             def _make_coin_env():
-                e = CoinEnv(host=args.host, port=port, reward_scale=args.reward_scale)
+                e = CoinEnv(host=args.host, port=port)
                 e._reward_fn = reward_fn
                 return e
             env = make_vec_env(_make_coin_env, n_envs=1)
