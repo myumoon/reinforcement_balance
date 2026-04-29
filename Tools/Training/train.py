@@ -50,7 +50,12 @@ def _get_raw_env(env):
     inner = env
     while hasattr(inner, "venv"):
         inner = inner.venv
-    return inner.envs[0] if hasattr(inner, "envs") else inner
+    if hasattr(inner, "envs"):
+        inner = inner.envs[0]
+    # gymnasium.Wrapper (Monitor等) は _ 始まりの属性をフォワードしないため unwrapped で剥がす
+    if hasattr(inner, "unwrapped"):
+        inner = inner.unwrapped
+    return inner
 
 
 class _AnnealingShapingCallback(BaseCallback):

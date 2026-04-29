@@ -169,7 +169,9 @@ def _get_raw_env(env):
     while hasattr(inner, "venv"):
         inner = inner.venv
     if hasattr(inner, "envs"):
-        return inner.envs[0]
+        inner = inner.envs[0]
+    if hasattr(inner, "unwrapped"):
+        inner = inner.unwrapped
     return inner
 
 
