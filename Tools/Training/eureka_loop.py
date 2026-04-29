@@ -595,8 +595,7 @@ def main() -> None:
     finally:
         env.close()
 
-    # 正常完了時は state.json を削除
-    (run_dir / _STATE_FILENAME).unlink(missing_ok=True)
+
 
     # --- サマリー ---
     print(f"\n{'=' * 60}")
