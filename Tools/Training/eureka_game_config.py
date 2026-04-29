@@ -58,6 +58,13 @@ class EurekaGameConfig(ABC):
         """
         return ""
 
+    def metrics_description(self) -> str:
+        """メトリクスの各パラメーターの意味を返す（任意 override）。
+
+        build_prompt() とレビュープロンプトの両方で共通利用する。
+        """
+        return ""
+
     def make_model(self, env):
         """PPO モデルを生成して返す。
 

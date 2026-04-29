@@ -135,7 +135,10 @@ class CoinEurekaConfig(EurekaGameConfig):
   （予測追跡はプレイヤーの移動先を予測して追跡するため最も危険）
 
 ## 前回イテレーション {iteration - 1} のメトリクス
-（base_reward = C++固定報酬のみ（AliveReward+CoinReward）、shaped_reward = reward_fn の出力、episode_length の単位はステップ数）
+### 各パラメーターの意味
+{self.metrics_description()}
+
+### 値
 {metrics_section}
 
 ## 課題
@@ -171,6 +174,18 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
 ### 3. 設計の意図
 この報酬関数で何を解決しようとしているか（1〜3行）
 """
+
+    def metrics_description(self) -> str:
+        """メトリクスの各パラメーターの意味を返す。build_prompt() とレビューで共通利用。"""
+        return (
+            f"- base_reward: C++固定報酬のみ（AliveReward={_ALIVE_REWARD}/step + CoinReward={_COIN_REWARD}/枚）\n"
+            f"- shaped_reward: reward_fn の出力（シェーピング報酬）\n"
+            f"- episode_length: エピソードの長さ（ステップ数）\n"
+            f"- coins_per_episode: 1エピソードのコイン取得枚数\n"
+            f"  = (base_reward - AliveReward × episode_length) / CoinReward\n"
+            f"- coins_per_episode_std: コイン取得枚数の標準偏差\n"
+            f"- episode_length_min / episode_length_max: エピソード長の最小・最大"
+        )
 
     def build_game_context(self) -> str:
         """コインゲームのルール・物理定数・報酬構造をレビュアー向けに返す。"""
@@ -209,6 +224,9 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
   0.15（3m）以上はコインを取らず近くで滞在するだけの戦略を誘発する
 - 1エピソードの近接ボーナス合計が CoinReward({_COIN_REWARD}) を超えないよう係数を設定すること
   例: 0.003/step × 1500step = 4.5 < {_COIN_REWARD}
+
+## メトリクスの各パラメーターの意味
+{self.metrics_description()}
 """
 
     def compute_primary_metric(self, episode_base_rewards: list[float],
