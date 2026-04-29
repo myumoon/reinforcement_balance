@@ -81,9 +81,6 @@ class CoinEurekaConfig(EurekaGameConfig):
             "- 敵回避は「死を避ける」最小限のペナルティに留め、コイン接近を妨げない設計にすること"
         )
 
-    def _prompt_section_obs_layout(self) -> str:
-        return self._obs_layout_str
-
     def _prompt_section_obs_index(self) -> str:
         return (
             f"{self.obs_index_description()}\n\n"
@@ -106,15 +103,9 @@ class CoinEurekaConfig(EurekaGameConfig):
             "- 敵の速度: 遅い直進=1.0m/s、速い直進=2.5m/s、予測追跡=1.5m/s\n"
             "  （予測追跡はプレイヤーの移動先を予測して追跡するため最も危険）\n"
             "\n"
-            "**コイン切り替わりスパイク（差分報酬設計上の重要な注意点）**\n"
-            "- コイン収集の瞬間、obs の coins_collected スロットが増加し、\n"
-            "  obs[coin_rel_pos] が次の最近傍コインに切り替わる\n"
-            "- このとき prev_coin_dist と coin_dist が全く別のコインを指すため、\n"
-            "  差分 (prev_coin_dist - coin_dist) が大きな負値になる（負のスパイク）\n"
-            "- **推奨スキップ条件**: `obs[coins_collected_i] > prev_obs[coins_collected_i]`\n"
-            "  （base_reward >= 4.0 より確実。coins_collected のインデックスは obs レイアウト参照）\n"
-            "- さらに念のため `abs(prev_coin_dist - coin_dist) > 0.03` でも除外すると安全\n"
-            "  （プレイヤー最大移動 0.0021/step に対し 0.03 以上は明らかに切り替わり）"
+            "**コイン切り替わりスパイク**（差分報酬使用時の注意）\n"
+            "- コイン収集時に obs[coin_rel_pos] が次の最近傍コインへ切り替わり、差分が大きな負値になる\n"
+            "- スキップ条件: `obs[coins_collected_i] > prev_obs[coins_collected_i]`（coins_collected 増加）または `abs(Δcoin_dist) > 0.03`"
         )
 
     def _prompt_section_scale_constraints(self) -> str:
@@ -127,8 +118,7 @@ class CoinEurekaConfig(EurekaGameConfig):
             f"  例: 0.003/step × 1500step = 4.5 < {_COIN_REWARD}\n"
             f"- **【最重要】1エピソードの shaped_reward 累計が CoinReward({_COIN_REWARD}) を大幅に下回るよう設計すること**\n"
             f"  超えると「コインを取らず接近するだけ」の局所最適が発生し coins_per_episode が低いまま固定される\n"
-            f"  目安: 係数 × 最大差分(0.0021) × 期待エピソード長 ≪ {_COIN_REWARD}\n"
-            f"  例: 係数10 × 0.0021 × 1000step = 21.0 → 超過。係数5以下に抑えること\n"
+            f"  目安: 係数 × 0.0021 × 期待エピソード長 ≪ {_COIN_REWARD}（例: 係数5・1000stepで10.5）\n"
             f"  metrics で shaped_reward_mean > coins_per_episode × {_COIN_REWARD} なら局所最適の兆候"
         )
 
@@ -152,12 +142,8 @@ class CoinEurekaConfig(EurekaGameConfig):
 
         return (
             f"  obs[{enemy_count_i}]  = 敵数 / {max_enemy_obs}（0.0=敵なし、1.0=最大{max_enemy_obs}体同時出現）\n"
-            f"  obs[{coins_collected_i}]  = このエピソードで収集したコイン累計数（生値: 0, 1, 2, ...）\n"
-            f"            コイン収集検出: obs[{coins_collected_i}] > prev_obs[{coins_collected_i}]\n"
-            f"            base_reward >= 4.0 より確実な収集イベント判定に使用できる\n"
-            f"  obs[{spawn_timer_i}] = スポーンタイマー / 10.0（値域 0〜1）\n"
-            f"            1.0 = スポーン直後（次の敵出現まで約10秒≈600ステップ）\n"
-            f"            0.0 = スポーン直前（まもなく敵出現）\n"
+            f"  obs[{coins_collected_i}]  = コイン累計収集数（生値）。収集検出: obs[{coins_collected_i}] > prev_obs[{coins_collected_i}]（base_reward>=4.0 より確実）\n"
+            f"  obs[{spawn_timer_i}] = スポーンタイマー [0,1]（1.0=スポーン直後/600step, 0.0=次スポーン直前）\n"
             f"\n"
             f"  obs[{coin_i}], obs[{coin_i + 1}]           = 最近コインへの相対位置 (dx, dy)\n"
             f"  obs[{enemy_r_i}], obs[{enemy_r_i + 1}]         = 最近敵への相対位置 (dx, dy)\n"
@@ -202,9 +188,8 @@ class CoinEurekaConfig(EurekaGameConfig):
         return "\n\n".join([
             self._titled_section("ゲーム概要", self._prompt_section_game_overview()),
             self._titled_section("ゲームの目標（最重要）", self._prompt_section_game_objective()),
-            self._titled_section("観測ベクトル（obs）レイアウト", self._prompt_section_obs_layout()),
             self._titled_section(
-                "最近傍エンティティの obs インデックス（先頭要素 = 最近傍、距離近い順にソート済み）",
+                "obs インデックス一覧（コイン・敵スロットは距離近い順にソート済み）",
                 self._prompt_section_obs_index(),
             ),
             self._titled_section("固定報酬（C++ 側、変更不可）", self._prompt_section_fixed_rewards()),
@@ -216,8 +201,26 @@ class CoinEurekaConfig(EurekaGameConfig):
             self._titled_section("メトリクスの各パラメーターの意味", self.metrics_description()),
         ])
 
-    def build_prompt(self, prev_metrics: dict | None, iteration: int,
-                     prev_review: str | None = None) -> str:
+    def _build_prompt_static(self) -> str:
+        """生成プロンプトの静的プレフィックス（Anthropic キャッシュ対象）。"""
+        return "\n\n".join([
+            "あなたは強化学習の報酬設計エキスパートです。",
+            self._titled_section("ゲーム概要", self._prompt_section_game_overview()),
+            self._titled_section("ゲームの目標（最重要）", self._prompt_section_game_objective()),
+            self._titled_section(
+                "obs インデックス一覧（コイン・敵スロットは距離近い順にソート済み）",
+                self._prompt_section_obs_index(),
+            ),
+            self._titled_section("固定報酬（C++ 側、変更不可）", self._prompt_section_fixed_rewards()),
+            self._titled_section(
+                "ゲームの物理定数（distance threshold の設計に必ず参照すること）",
+                self._prompt_section_physics(),
+            ),
+        ])
+
+    def _build_prompt_dynamic(self, prev_metrics: dict | None, iteration: int,
+                               prev_review: str | None = None) -> str:
+        """生成プロンプトの動的サフィックス（メトリクス・前回レビュー・タスク指示）。"""
         metrics_value = (
             "なし（初回）"
             if prev_metrics is None
@@ -248,27 +251,31 @@ class CoinEurekaConfig(EurekaGameConfig):
             f"### 3. 設計の意図\n"
             f"この報酬関数で何を解決しようとしているか（1〜3行）"
         )
-        items = [
-            "あなたは強化学習の報酬設計エキスパートです。",
-            self._titled_section("ゲーム概要", self._prompt_section_game_overview()),
-            self._titled_section("ゲームの目標（最重要）", self._prompt_section_game_objective()),
-            self._titled_section("観測ベクトル（obs）レイアウト", self._prompt_section_obs_layout()),
-            self._titled_section(
-                "最近傍エンティティの obs インデックス（先頭要素 = 最近傍、距離近い順にソート済み）",
-                self._prompt_section_obs_index(),
-            ),
-            self._titled_section("固定報酬（C++ 側、変更不可）", self._prompt_section_fixed_rewards()),
-            self._titled_section(
-                "ゲームの物理定数（distance threshold の設計に必ず参照すること）",
-                self._prompt_section_physics(),
-            ),
-            metrics_section,
-        ]
+        items = [metrics_section]
         if prev_review is not None:
             items.append(self._titled_section("前回レビューで指摘された設計上の問題", prev_review))
         items.append("## 課題\n前回の訓練の結果から課題を判断して箇条書きで記載。")
         items.append(task_section)
         return "\n\n".join(items)
+
+    def build_prompt_parts(self, prev_metrics: dict | None, iteration: int,
+                           prev_review: str | None = None) -> tuple[str, str]:
+        return self._build_prompt_static(), self._build_prompt_dynamic(prev_metrics, iteration, prev_review)
+
+    def build_prompt(self, prev_metrics: dict | None, iteration: int,
+                     prev_review: str | None = None) -> str:
+        static, dynamic = self.build_prompt_parts(prev_metrics, iteration, prev_review)
+        return static + "\n\n" + dynamic
+
+    def build_constraints_hint(self) -> str:
+        """改訂プロンプト用の制約ヒント（scale_constraints + physics）。"""
+        return "\n\n".join([
+            self._titled_section("スケール制約（reward_fn 設計上の上限）", self._prompt_section_scale_constraints()),
+            self._titled_section(
+                "ゲームの物理定数（distance threshold の設計に必ず参照すること）",
+                self._prompt_section_physics(),
+            ),
+        ])
 
     # ------------------------------------------------------------------ #
     # メトリクス計算                                                        #

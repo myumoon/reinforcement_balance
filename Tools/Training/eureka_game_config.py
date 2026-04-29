@@ -32,6 +32,22 @@ class EurekaGameConfig(ABC):
         """LLM へのプロンプト文字列を生成して返す。"""
         ...
 
+    def build_prompt_parts(self, prev_metrics: dict | None, iteration: int,
+                           prev_review: str | None = None) -> tuple[str, str]:
+        """Anthropic プロンプトキャッシュ用の (静的プレフィックス, 動的サフィックス) を返す。
+
+        デフォルト実装: 静的部分なし（キャッシュ無効）。
+        ゲーム固有の静的プレフィックスがある場合は override する。
+        """
+        return "", self.build_prompt(prev_metrics, iteration, prev_review)
+
+    def build_constraints_hint(self) -> str:
+        """改訂プロンプト用の制約ヒント文字列を返す（任意 override）。
+
+        デフォルト実装: 空文字（制約ヒントなし）。
+        """
+        return ""
+
     def compute_primary_metric(self, episode_base_rewards: list[float],
                                episode_lengths: list[int]) -> float:
         """最良イテレーション判定に使うスカラー値（大きいほど良い）。
