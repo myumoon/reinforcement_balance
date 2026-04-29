@@ -59,13 +59,8 @@ class CoinEurekaConfig(EurekaGameConfig):
         from envs.coin_env import CoinEnv
         return CoinEnv(host=host, port=port)
 
-    def build_prompt(self, prev_metrics: dict | None, iteration: int) -> str:
-        metrics_section = (
-            "なし（初回）"
-            if prev_metrics is None
-            else json.dumps(prev_metrics, ensure_ascii=False, indent=2)
-        )
-
+    def obs_index_description(self) -> str:
+        """最近傍エンティティの obs インデックス説明を返す。build_prompt() と build_game_context() で共通利用。"""
         offsets = self._offsets
         coin_i    = offsets.get("coin_rel_pos", 10)
         enemy_r_i = offsets.get("enemy_rel_pos", coin_i + 200)
@@ -75,7 +70,7 @@ class CoinEurekaConfig(EurekaGameConfig):
         num_coin_obs  = (enemy_r_i - coin_i) // 2
         max_enemy_obs = (enemy_v_i - enemy_r_i) // 2
 
-        nearest_note = (
+        return (
             f"  obs[{coin_i}], obs[{coin_i + 1}]           = 最近コインへの相対位置 (dx, dy)\n"
             f"  obs[{enemy_r_i}], obs[{enemy_r_i + 1}]         = 最近敵への相対位置 (dx, dy)\n"
             f"  obs[{enemy_v_i}], obs[{enemy_v_i + 1}]         = 最近敵の速度 (vx, vy)\n"
@@ -96,6 +91,15 @@ class CoinEurekaConfig(EurekaGameConfig):
             f"\n"
             f"  ※ obs[8] * {max_enemy_obs} で現在の実際の敵数（正規化前）が得られる"
         )
+
+    def build_prompt(self, prev_metrics: dict | None, iteration: int) -> str:
+        metrics_section = (
+            "なし（初回）"
+            if prev_metrics is None
+            else json.dumps(prev_metrics, ensure_ascii=False, indent=2)
+        )
+
+        nearest_note = self.obs_index_description()
 
         return f"""あなたは強化学習の報酬設計エキスパートです。
 
@@ -204,6 +208,12 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
 
 ## 観測ベクトル（obs）レイアウト
 {self._obs_layout_str}
+
+## 最近傍エンティティの obs インデックス（先頭要素 = 最近傍、距離近い順にソート済み）
+{self.obs_index_description()}
+
+  ※ dx, dy はフィールド幅 (20m) で正規化済み。値域 [-1, 1]
+  ※ 壁距離 wall_dist は FieldHalfSize (10m) で正規化済み。値域 [0, 1]
 
 ## 固定報酬（C++ 側、変更不可）
 - AliveReward = {_ALIVE_REWARD} / step（生存毎ステップ）
