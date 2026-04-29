@@ -104,7 +104,17 @@ class CoinEurekaConfig(EurekaGameConfig):
             "- プレイヤー最大速度: 約 2.5m/s → 1ステップ(1/60s)あたり約 **0.0021 normalized**\n"
             "- 敵スポーン間隔: 10秒 ≈ 600ステップごとに1体\n"
             "- 敵の速度: 遅い直進=1.0m/s、速い直進=2.5m/s、予測追跡=1.5m/s\n"
-            "  （予測追跡はプレイヤーの移動先を予測して追跡するため最も危険）"
+            "  （予測追跡はプレイヤーの移動先を予測して追跡するため最も危険）\n"
+            "\n"
+            "**コイン切り替わりスパイク（差分報酬設計上の重要な注意点）**\n"
+            "- コイン収集の瞬間、obs の coins_collected スロットが増加し、\n"
+            "  obs[coin_rel_pos] が次の最近傍コインに切り替わる\n"
+            "- このとき prev_coin_dist と coin_dist が全く別のコインを指すため、\n"
+            "  差分 (prev_coin_dist - coin_dist) が大きな負値になる（負のスパイク）\n"
+            "- **推奨スキップ条件**: `obs[coins_collected_i] > prev_obs[coins_collected_i]`\n"
+            "  （base_reward >= 4.0 より確実。coins_collected のインデックスは obs レイアウト参照）\n"
+            "- さらに念のため `abs(prev_coin_dist - coin_dist) > 0.03` でも除外すると安全\n"
+            "  （プレイヤー最大移動 0.0021/step に対し 0.03 以上は明らかに切り替わり）"
         )
 
     def _prompt_section_scale_constraints(self) -> str:
@@ -114,7 +124,12 @@ class CoinEurekaConfig(EurekaGameConfig):
             f"- 近接ボーナスの閾値は 0.05〜0.10 normalized（収集半径の1〜2倍）以内にすること\n"
             f"  0.15（3m）以上はコインを取らず近くで滞在するだけの戦略を誘発する\n"
             f"- 1エピソードの近接ボーナス合計が CoinReward({_COIN_REWARD}) を超えないよう係数を設定すること\n"
-            f"  例: 0.003/step × 1500step = 4.5 < {_COIN_REWARD}"
+            f"  例: 0.003/step × 1500step = 4.5 < {_COIN_REWARD}\n"
+            f"- **【最重要】1エピソードの shaped_reward 累計が CoinReward({_COIN_REWARD}) を大幅に下回るよう設計すること**\n"
+            f"  超えると「コインを取らず接近するだけ」の局所最適が発生し coins_per_episode が低いまま固定される\n"
+            f"  目安: 係数 × 最大差分(0.0021) × 期待エピソード長 ≪ {_COIN_REWARD}\n"
+            f"  例: 係数10 × 0.0021 × 1000step = 21.0 → 超過。係数5以下に抑えること\n"
+            f"  metrics で shaped_reward_mean > coins_per_episode × {_COIN_REWARD} なら局所最適の兆候"
         )
 
     # ------------------------------------------------------------------ #
@@ -124,7 +139,10 @@ class CoinEurekaConfig(EurekaGameConfig):
     def obs_index_description(self) -> str:
         """最近傍エンティティの obs インデックス説明を返す。"""
         offsets = self._offsets
-        coin_i    = offsets.get("coin_rel_pos", 10)
+        enemy_count_i     = offsets.get("enemy_count", 8)
+        coins_collected_i = offsets.get("coins_collected", 9)
+        spawn_timer_i     = offsets.get("spawn_timer", 10)
+        coin_i    = offsets.get("coin_rel_pos", 11)
         enemy_r_i = offsets.get("enemy_rel_pos", coin_i + 200)
         enemy_v_i = offsets.get("enemy_vel", enemy_r_i + 40)
         enemy_t_i = offsets.get("enemy_type", enemy_v_i + 40)
@@ -133,8 +151,11 @@ class CoinEurekaConfig(EurekaGameConfig):
         max_enemy_obs = (enemy_v_i - enemy_r_i) // 2
 
         return (
-            f"  obs[8]  = 敵数 / {max_enemy_obs}（0.0=敵なし、1.0=最大{max_enemy_obs}体同時出現）\n"
-            f"  obs[9]  = スポーンタイマー / 10.0（値域 0〜1）\n"
+            f"  obs[{enemy_count_i}]  = 敵数 / {max_enemy_obs}（0.0=敵なし、1.0=最大{max_enemy_obs}体同時出現）\n"
+            f"  obs[{coins_collected_i}]  = このエピソードで収集したコイン累計数 / NumCoins\n"
+            f"            コイン収集検出: obs[{coins_collected_i}] > prev_obs[{coins_collected_i}]\n"
+            f"            base_reward >= 4.0 より確実な収集イベント判定に使用できる\n"
+            f"  obs[{spawn_timer_i}] = スポーンタイマー / 10.0（値域 0〜1）\n"
             f"            1.0 = スポーン直後（次の敵出現まで約10秒≈600ステップ）\n"
             f"            0.0 = スポーン直前（まもなく敵出現）\n"
             f"\n"
@@ -165,6 +186,9 @@ class CoinEurekaConfig(EurekaGameConfig):
             f"- episode_length: エピソードの長さ（ステップ数）\n"
             f"- coins_per_episode: 1エピソードのコイン取得枚数\n"
             f"  = (base_reward - AliveReward × episode_length) / CoinReward\n"
+            f"- coins_per_step: コイン取得効率（coins_per_episode の合計 / 総ステップ数）\n"
+            f"  episode_length が変動しても比較しやすい効率指標。高いほど良い\n"
+            f"  ⚠ shaped_reward_mean > coins_per_episode × {_COIN_REWARD} なら局所最適の兆候\n"
             f"- coins_per_episode_std: コイン取得枚数の標準偏差\n"
             f"- episode_length_min / episode_length_max: エピソード長の最小・最大"
         )
@@ -265,11 +289,14 @@ class CoinEurekaConfig(EurekaGameConfig):
             max(0.0, (r - _ALIVE_REWARD * l) / _COIN_REWARD)
             for r, l in zip(episode_base_rewards, episode_lengths)
         ]
+        total_steps = sum(episode_lengths)
+        coins_per_step = sum(coins_list) / total_steps if total_steps > 0 else 0.0
         return {
             f"{self.primary_metric_name}_std": round(
                 statistics.stdev(coins_list) if len(coins_list) > 1 else 0.0, 3),
             "episode_length_min": min(episode_lengths),
             "episode_length_max": max(episode_lengths),
+            "coins_per_step": round(coins_per_step, 5),
         }
 
     def make_model(self, env):
