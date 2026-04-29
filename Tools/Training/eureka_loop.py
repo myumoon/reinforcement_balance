@@ -60,6 +60,8 @@ def _parse_args() -> argparse.Namespace:
                    help="改善なしN回で早期終了（default: 3）")
     p.add_argument("--delta", type=float, default=0.05,
                    help="改善とみなす primary_metric の最小増加量（default: 0.05）")
+    p.add_argument("--no-vec-normalize", action="store_true",
+                   help="VecNormalize による観測・報酬の正規化を無効化する")
     return p.parse_args()
 
 
@@ -148,6 +150,27 @@ def _validate_code(code: str) -> bool:
     except SyntaxError as e:
         print(f"[WARN] 生成コードに構文エラー: {e}")
         return False
+
+
+# ---------------------------------------------------------------------------
+# VecNormalize ユーティリティ
+# ---------------------------------------------------------------------------
+
+def _wrap_vec_normalize(raw_env):
+    """raw gym.Env を DummyVecEnv でラップし、さらに VecNormalize で包む。"""
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    vec_env = DummyVecEnv([lambda: raw_env])
+    return VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+
+
+def _get_raw_env(env):
+    """VecEnv ラッパーチェーンを辿って最初の生環境を返す。"""
+    inner = env
+    while hasattr(inner, "venv"):
+        inner = inner.venv
+    if hasattr(inner, "envs"):
+        return inner.envs[0]
+    return inner
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +322,13 @@ def main() -> None:
     game_config.setup(args.host, args.port)
 
     # 環境作成
-    env = game_config.make_env(args.host, args.port)
+    raw_env = game_config.make_env(args.host, args.port)
+    if args.no_vec_normalize:
+        env = raw_env
+        print("[INFO] VecNormalize 無効")
+    else:
+        env = _wrap_vec_normalize(raw_env)
+        print("[INFO] VecNormalize 有効 (norm_obs=True, norm_reward=True, clip_obs=10.0)")
 
     # 再開状態の読み込み
     state = _load_state(run_dir)
@@ -366,13 +395,14 @@ def main() -> None:
             reward_fn_path.write_text(reward_fn_code, encoding="utf-8")
             print(f"[INFO] reward_fn.py 保存: {reward_fn_path}")
 
-            # 動的ロード & セット
+            # 動的ロード & セット（VecNormalize ラッパーを通じて生の環境にセット）
             try:
-                env._reward_fn = _load_reward_fn(reward_fn_path)
+                fn = _load_reward_fn(reward_fn_path)
+                _get_raw_env(env)._reward_fn = fn
                 print("[INFO] reward_fn をロードしました。")
             except Exception as e:
                 print(f"[ERROR] reward_fn のロードに失敗: {e}")
-                env._reward_fn = None
+                _get_raw_env(env)._reward_fn = None
 
             # --- PPO 訓練 ---
             model = game_config.make_model(env)
@@ -395,9 +425,13 @@ def main() -> None:
                 json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
             )
 
-            # --- モデル保存 ---
+            # --- モデル・VecNormalize 保存 ---
             model.save(str(iter_dir / "model"))
             print(f"[INFO] モデル保存: {iter_dir / 'model.zip'}")
+            from stable_baselines3.common.vec_env import VecNormalize as _VN
+            if isinstance(env, _VN):
+                env.save(str(iter_dir / "vec_normalize.pkl"))
+                print(f"[INFO] VecNormalize 統計保存: {iter_dir / 'vec_normalize.pkl'}")
 
             # --- best 更新 ---
             primary = game_config.compute_primary_metric(

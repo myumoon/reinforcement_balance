@@ -17,6 +17,7 @@ from pathlib import Path
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import VecNormalize
 
 _GAME_DEFAULTS = {
     "balance": {"port": 8765, "output": "models/balance_model"},
@@ -79,6 +80,8 @@ def parse_args() -> argparse.Namespace:
                    help="報酬シェーピング関数のパス (例: eureka_results/my_run/best/reward_fn.py, --game coin 専用)")
     p.add_argument("--reward-scale", type=float, default=0.2,
                    help="base_reward に乗じるスケール係数 (--game coin 専用, default: 0.2)")
+    p.add_argument("--no-vec-normalize", action="store_true",
+                   help="VecNormalize による観測・報酬の正規化を無効化する")
     return p.parse_args()
 
 
@@ -126,6 +129,22 @@ def main() -> None:
 
     output.parent.mkdir(parents=True, exist_ok=True)
 
+    # VecNormalize 適用
+    # - 新規訓練: 正規化統計を初期化
+    # - 再開: 既存の統計ファイルがあればロード。なければ VecNormalize を無効化（互換性維持）
+    vecnorm_path = output.parent / (output.name + "_vecnorm.pkl")
+    if not args.no_vec_normalize:
+        if args.resume and not vecnorm_path.exists():
+            print("[WARN] VecNormalize 統計ファイルが見つかりません。--no-vec-normalize なしで再開するには"
+                  f" {vecnorm_path} が必要です。VecNormalize を無効化します。")
+        elif args.resume and vecnorm_path.exists():
+            env = VecNormalize.load(str(vecnorm_path), env)
+            env.training = True
+            print(f"[INFO] VecNormalize 統計をロード: {vecnorm_path}")
+        else:
+            env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+            print("[INFO] VecNormalize を有効化しました (norm_obs=True, norm_reward=True)")
+
     if args.resume:
         resume_path = str(_strip_zip(args.resume))
         print(f"[INFO] {resume_path} から再開")
@@ -163,6 +182,9 @@ def main() -> None:
     finally:
         model.save(str(output))
         print(f"[INFO] Model saved to {output}.zip")
+        if isinstance(env, VecNormalize):
+            env.save(str(vecnorm_path))
+            print(f"[INFO] VecNormalize 統計を保存: {vecnorm_path}")
         env.close()
 
 
