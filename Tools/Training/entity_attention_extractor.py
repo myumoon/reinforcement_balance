@@ -28,15 +28,19 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         features_dim: 出力特徴量の次元数（default: 128）
         offsets: obs_schema から得たセグメント開始インデックス dict
         use_polar: True のとき位置・速度ベクトルを極座標に変換（default: True）
+        dist_alpha: 距離バイアスの強さ。スコアから alpha * r を減算することで
+                    近いエンティティほど高スコアになる帰納バイアスを与える（default: 1.0）
     """
 
     _EMBED_DIM = 32
 
     def __init__(self, observation_space, features_dim: int = 128,
-                 offsets: dict | None = None, use_polar: bool = True):
+                 offsets: dict | None = None, use_polar: bool = True,
+                 dist_alpha: float = 1.0):
         super().__init__(observation_space, features_dim)
         offsets = offsets or {}
         self.use_polar = use_polar
+        self.dist_alpha = dist_alpha
 
         # セグメントのインデックス境界
         self._coin_i    = offsets.get("coin_rel_pos", 10)
@@ -73,22 +77,27 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         )
 
     @staticmethod
-    def _attend(enc: torch.Tensor, query: torch.Tensor) -> torch.Tensor:
+    def _attend(enc: torch.Tensor, query: torch.Tensor,
+                dist_bias: torch.Tensor | None = None) -> torch.Tensor:
         """スケール済みドット積アテンションで entity を集約する。
 
         Args:
-            enc:   [B, N, embed_dim]
-            query: [embed_dim]
+            enc:       [B, N, embed_dim]
+            query:     [embed_dim]
+            dist_bias: [B, N] 距離 * alpha（近いほどスコアを上げるため減算する）
         Returns:
             [B, embed_dim]
         """
         scale = enc.shape[-1] ** 0.5
-        scores  = (enc * query).sum(-1) / scale          # [B, N]
+        scores = (enc * query).sum(-1) / scale       # [B, N]
+        if dist_bias is not None:
+            scores = scores - dist_bias              # 近いエンティティ（小さい r）ほど高スコア
         weights = torch.softmax(scores, dim=1).unsqueeze(-1)  # [B, N, 1]
-        return (enc * weights).sum(dim=1)                 # [B, embed_dim]
+        return (enc * weights).sum(dim=1)            # [B, embed_dim]
 
     @staticmethod
-    def _attend_weights(enc: torch.Tensor, query: torch.Tensor) -> torch.Tensor:
+    def _attend_weights(enc: torch.Tensor, query: torch.Tensor,
+                        dist_bias: torch.Tensor | None = None) -> torch.Tensor:
         """アテンション重みのみを返す（可視化・デバッグ用）。
 
         Returns:
@@ -96,6 +105,8 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         """
         scale = enc.shape[-1] ** 0.5
         scores = (enc * query).sum(-1) / scale  # [B, N]
+        if dist_bias is not None:
+            scores = scores - dist_bias
         return torch.softmax(scores, dim=1)
 
     def get_attention_weights(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -116,10 +127,16 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         e_vel  = obs[:, self._enemy_v_i:self._enemy_t_i].reshape(B, self._num_enemies, 2)
         e_type = obs[:, self._enemy_t_i:].reshape(B, self._num_enemies, 1)
 
+        coin_dist  = torch.norm(coins, dim=-1)
+        enemy_dist = torch.norm(e_pos,  dim=-1)
+
         if self.use_polar:
             coins = self._to_polar(coins)
             e_pos = self._to_polar(e_pos)
             e_vel = self._to_polar(e_vel)
+
+        coin_bias  = self.dist_alpha * coin_dist
+        enemy_bias = self.dist_alpha * enemy_dist
 
         enemies = torch.cat([e_pos, e_vel, e_type], dim=-1)
 
@@ -127,8 +144,8 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         enemy_enc = self.enemy_encoder(enemies)
 
         return (
-            self._attend_weights(coin_enc,  self.coin_query),
-            self._attend_weights(enemy_enc, self.enemy_query),
+            self._attend_weights(coin_enc,  self.coin_query,  coin_bias),
+            self._attend_weights(enemy_enc, self.enemy_query, enemy_bias),
         )
 
     @staticmethod
@@ -157,11 +174,17 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         e_vel  = obs[:, self._enemy_v_i:self._enemy_t_i].reshape(B, self._num_enemies, 2)
         e_type = obs[:, self._enemy_t_i:].reshape(B, self._num_enemies, 1)
 
-        # 極座標変換（use_polar=True のとき位置・速度ベクトルを (dx,dy) → (r,θ) に変換）
+        # 極座標変換前（直交座標のまま）に距離を計算
+        coin_dist  = torch.norm(coins, dim=-1)   # [B, num_coins]
+        enemy_dist = torch.norm(e_pos,  dim=-1)  # [B, num_enemies]
+
         if self.use_polar:
             coins = self._to_polar(coins)
             e_pos = self._to_polar(e_pos)
             e_vel = self._to_polar(e_vel)
+
+        coin_bias  = self.dist_alpha * coin_dist   # [B, num_coins]
+        enemy_bias = self.dist_alpha * enemy_dist  # [B, num_enemies]
 
         enemies = torch.cat([e_pos, e_vel, e_type], dim=-1)  # [B, 20, 5]
 
@@ -169,9 +192,9 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         coin_enc  = self.coin_encoder(coins)    # [B, 100, 32]
         enemy_enc = self.enemy_encoder(enemies) # [B,  20, 32]
 
-        # アテンションで集約
-        coin_agg  = self._attend(coin_enc,  self.coin_query)   # [B, 32]
-        enemy_agg = self._attend(enemy_enc, self.enemy_query)  # [B, 32]
+        # アテンションで集約（距離バイアス付き）
+        coin_agg  = self._attend(coin_enc,  self.coin_query,  coin_bias)   # [B, 32]
+        enemy_agg = self._attend(enemy_enc, self.enemy_query, enemy_bias)  # [B, 32]
 
         combined = torch.cat([self_info, coin_agg, enemy_agg], dim=-1)
         return self.final(combined)

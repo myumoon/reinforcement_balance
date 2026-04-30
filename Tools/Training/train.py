@@ -157,6 +157,8 @@ def parse_args() -> argparse.Namespace:
                    help="チェックポイント保存間隔 (ステップ数, デフォルト: 10000)")
     p.add_argument("--entity-attention", action="store_true",
                    help="エンティティアテンション特徴抽出器を使用 (--game coin 専用, --resume 時は無視)")
+    p.add_argument("--dist-alpha", type=float, default=1.0,
+                   help="距離バイアスの強さ (--entity-attention 専用, default: 1.0)")
     p.add_argument("--reward-fn", type=Path, default=None,
                    help="報酬シェーピング関数のパス (例: eureka_results/my_run/best/reward_fn.py, --game coin 専用)")
     p.add_argument("--no-vec-normalize", action="store_true",
@@ -253,10 +255,13 @@ def main() -> None:
             offsets = getattr(_get_raw_env(env), "_offsets", {})
             policy_kwargs = dict(
                 features_extractor_class=EntityAttentionExtractor,
-                features_extractor_kwargs=dict(features_dim=128, offsets=offsets, use_polar=True),
+                features_extractor_kwargs=dict(
+                    features_dim=128, offsets=offsets,
+                    use_polar=True, dist_alpha=args.dist_alpha,
+                ),
                 net_arch=[64, 64],
             )
-            print("[INFO] EntityAttentionExtractor を使用します (use_polar=True)")
+            print(f"[INFO] EntityAttentionExtractor を使用します (use_polar=True, dist_alpha={args.dist_alpha})")
             model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, **ppo_kwargs)
     else:
         model = PPO("MlpPolicy", env, **ppo_kwargs)

@@ -316,6 +316,7 @@ class CoinEurekaConfig(EurekaGameConfig):
                 features_dim=128,
                 offsets=self._offsets,
                 use_polar=True,
+                dist_alpha=1.0,
             ),
             net_arch=[64, 64],
         )
