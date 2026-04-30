@@ -43,7 +43,9 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         self.dist_alpha = dist_alpha
 
         # セグメントのインデックス境界
-        self._coin_i    = offsets.get("coin_rel_pos", 10)
+        # "coin_rel_pos" (CoinGame) と "item_rel_pos" (Survivors) の両方を受け付ける
+        self._coin_i    = offsets.get("coin_rel_pos",
+                          offsets.get("item_rel_pos", 10))
         self._enemy_r_i = offsets.get("enemy_rel_pos", self._coin_i + 200)
         self._enemy_v_i = offsets.get("enemy_vel",     self._enemy_r_i + 40)
         self._enemy_t_i = offsets.get("enemy_type",    self._enemy_v_i + 40)
@@ -51,6 +53,8 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         self._self_dim    = self._coin_i
         self._num_coins   = (self._enemy_r_i - self._coin_i) // 2
         self._num_enemies = (self._enemy_v_i - self._enemy_r_i) // 2
+        # enemy_type は num_enemies 分だけ。後続に enemy_hp 等があっても切り捨てる
+        self._enemy_t_end = self._enemy_t_i + self._num_enemies
 
         e = self._EMBED_DIM
 
@@ -125,7 +129,7 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         coins  = obs[:, self._coin_i:self._enemy_r_i].reshape(B, self._num_coins, 2)
         e_pos  = obs[:, self._enemy_r_i:self._enemy_v_i].reshape(B, self._num_enemies, 2)
         e_vel  = obs[:, self._enemy_v_i:self._enemy_t_i].reshape(B, self._num_enemies, 2)
-        e_type = obs[:, self._enemy_t_i:].reshape(B, self._num_enemies, 1)
+        e_type = obs[:, self._enemy_t_i:self._enemy_t_end].reshape(B, self._num_enemies, 1)
 
         coin_dist  = torch.norm(coins, dim=-1)
         enemy_dist = torch.norm(e_pos,  dim=-1)
@@ -172,7 +176,7 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         coins = obs[:, self._coin_i:self._enemy_r_i].reshape(B, self._num_coins, 2)
         e_pos  = obs[:, self._enemy_r_i:self._enemy_v_i].reshape(B, self._num_enemies, 2)
         e_vel  = obs[:, self._enemy_v_i:self._enemy_t_i].reshape(B, self._num_enemies, 2)
-        e_type = obs[:, self._enemy_t_i:].reshape(B, self._num_enemies, 1)
+        e_type = obs[:, self._enemy_t_i:self._enemy_t_end].reshape(B, self._num_enemies, 1)
 
         # 極座標変換前（直交座標のまま）に距離を計算
         coin_dist  = torch.norm(coins, dim=-1)   # [B, num_coins]
