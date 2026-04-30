@@ -229,13 +229,16 @@ def main() -> None:
     # - 再開: 既存の統計ファイルがあればロード。なければ VecNormalize を無効化（互換性維持）
     vecnorm_path = output.parent / (output.name + "_vecnorm.pkl")
     if not args.no_vec_normalize:
-        if args.resume and not vecnorm_path.exists():
-            print("[WARN] VecNormalize 統計ファイルが見つかりません。--no-vec-normalize なしで再開するには"
-                  f" {vecnorm_path} が必要です。VecNormalize を無効化します。")
-        elif args.resume and vecnorm_path.exists():
-            env = VecNormalize.load(str(vecnorm_path), env)
-            env.training = True
-            print(f"[INFO] VecNormalize 統計をロード: {vecnorm_path}")
+        if args.resume:
+            resume_vecnorm = _strip_zip(args.resume).parent / (_strip_zip(args.resume).name + "_vecnorm.pkl")
+            load_path = vecnorm_path if vecnorm_path.exists() else (resume_vecnorm if resume_vecnorm.exists() else None)
+            if load_path is None:
+                print("[WARN] VecNormalize 統計ファイルが見つかりません。VecNormalize を無効化します。"
+                      f" (探索: {vecnorm_path}, {resume_vecnorm})")
+            else:
+                env = VecNormalize.load(str(load_path), env)
+                env.training = True
+                print(f"[INFO] VecNormalize 統計をロード: {load_path}")
         else:
             env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
             print("[INFO] VecNormalize を有効化しました (norm_obs=True, norm_reward=True)")
