@@ -1,12 +1,15 @@
-"""SB3 PPO による BalancePole / CoinGame 訓練スクリプト。
+"""SB3 PPO による BalancePole / CoinGame / Survivors 訓練スクリプト。
 
 使い方:
-  python train.py                          # BalancePole (UE5 接続)
-  python train.py --game coin              # CoinGame    (UE5 接続)
-  python train.py --dry-run               # BalancePole スタブ
-  python train.py --game coin --dry-run   # CoinGame    スタブ
+  python train.py                              # BalancePole (UE5 接続)
+  python train.py --game coin                  # CoinGame    (UE5 接続)
+  python train.py --game survivors             # Survivors   (UE5 接続)
+  python train.py --dry-run                    # BalancePole スタブ
+  python train.py --game coin --dry-run        # CoinGame    スタブ
+  python train.py --game survivors --dry-run   # Survivors   スタブ
   python train.py --resume models/balance_model
   python train.py --game coin --reward-fn eureka_results/my_run/best/reward_fn.py
+  python train.py --game survivors --reward-fn eureka_results/my_run/best/reward_fn.py
   python train.py --help
 """
 
@@ -20,8 +23,9 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
 
 _GAME_DEFAULTS = {
-    "balance": {"port": 8765, "output": "models/balance_model"},
-    "coin":    {"port": 8766, "output": "models/coin_model"},
+    "balance":   {"port": 8765, "output": "models/balance_model"},
+    "coin":      {"port": 8766, "output": "models/coin_model"},
+    "survivors": {"port": 8767, "output": "models/survivors_model"},
 }
 
 
@@ -142,12 +146,12 @@ def _strip_zip(path: Path) -> Path:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--game", choices=["balance", "coin"], default="balance",
+    p.add_argument("--game", choices=["balance", "coin", "survivors"], default="balance",
                    help="訓練対象のゲーム (default: balance)")
     p.add_argument("--dry-run", action="store_true", help="UE5 なしでスタブ環境を使用")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=None,
-                   help="サーバーポート（未指定時はゲーム別デフォルト: balance=8765, coin=8766）")
+                   help="サーバーポート（未指定時はゲーム別デフォルト: balance=8765, coin=8766, survivors=8767）")
     p.add_argument("--total-steps", type=int, default=500_000)
     p.add_argument("--output", type=Path, default=None,
                    help="保存先パス（未指定時はゲーム別デフォルト）")
@@ -156,11 +160,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint-freq", type=int, default=10_000,
                    help="チェックポイント保存間隔 (ステップ数, デフォルト: 10000)")
     p.add_argument("--entity-attention", action="store_true",
-                   help="エンティティアテンション特徴抽出器を使用 (--game coin 専用, --resume 時は無視)")
+                   help="エンティティアテンション特徴抽出器を使用 (--game coin/survivors 専用, --resume 時は無視)")
     p.add_argument("--dist-alpha", type=float, default=1.0,
                    help="距離バイアスの強さ (--entity-attention 専用, default: 1.0)")
     p.add_argument("--reward-fn", type=Path, default=None,
-                   help="報酬シェーピング関数のパス (例: eureka_results/my_run/best/reward_fn.py, --game coin 専用)")
+                   help="報酬シェーピング関数のパス (例: eureka_results/my_run/best/reward_fn.py, --game coin/survivors 専用)")
     p.add_argument("--no-vec-normalize", action="store_true",
                    help="VecNormalize による観測・報酬の正規化を無効化する")
     p.add_argument("--anneal-threshold", type=float, default=0.1,
@@ -190,8 +194,8 @@ def main() -> None:
     # --reward-fn の事前チェック
     reward_fn = None
     if args.reward_fn:
-        if args.game != "coin":
-            print("[WARN] --reward-fn はコインゲーム専用です。無視します。")
+        if args.game not in ("coin", "survivors"):
+            print("[WARN] --reward-fn はコイン/サバイバーズゲーム専用です。無視します。")
         elif args.dry_run:
             print("[WARN] --reward-fn は --dry-run 時は無視されます。")
         else:
@@ -202,6 +206,9 @@ def main() -> None:
         if args.game == "coin":
             from envs.coin_env_stub import DummyCoinEnv
             env = make_vec_env(DummyCoinEnv, n_envs=4)
+        elif args.game == "survivors":
+            from envs.survivors_env_stub import DummySurvivorsEnv
+            env = make_vec_env(DummySurvivorsEnv, n_envs=4)
         else:
             from envs.balance_env_stub import DummyBalanceEnv
             env = make_vec_env(DummyBalanceEnv, n_envs=4)
@@ -214,6 +221,13 @@ def main() -> None:
                 e._reward_fn = reward_fn
                 return e
             env = make_vec_env(_make_coin_env, n_envs=1)
+        elif args.game == "survivors":
+            from envs.survivors_env import SurvivorsEnv
+            def _make_survivors_env():
+                e = SurvivorsEnv(host=args.host, port=port)
+                e._reward_fn = reward_fn
+                return e
+            env = make_vec_env(_make_survivors_env, n_envs=1)
         else:
             from envs.balance_env import BalanceEnv
             env = make_vec_env(
@@ -250,8 +264,8 @@ def main() -> None:
             print("[INFO] --entity-attention は --resume 時は無視されます（保存済みモデルのアーキテクチャを使用）")
         model = PPO.load(resume_path, env=env)
     elif args.entity_attention:
-        if args.game != "coin":
-            print("[WARN] --entity-attention はコインゲーム専用です。MlpPolicy を使用します。")
+        if args.game not in ("coin", "survivors"):
+            print("[WARN] --entity-attention はコイン/サバイバーズゲーム専用です。MlpPolicy を使用します。")
             model = PPO("MlpPolicy", env, **ppo_kwargs)
         else:
             from entity_attention_extractor import EntityAttentionExtractor
@@ -277,7 +291,7 @@ def main() -> None:
     )
 
     callbacks = [checkpoint_cb]
-    if reward_fn is not None and args.game == "coin":
+    if reward_fn is not None and args.game in ("coin", "survivors"):
         anneal_cb = _AnnealingShapingCallback(
             raw_env=_get_raw_env(env),
             anneal_threshold=args.anneal_threshold,
