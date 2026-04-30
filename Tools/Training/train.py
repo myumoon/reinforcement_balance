@@ -166,11 +166,15 @@ def parse_args() -> argparse.Namespace:
                    help="比率のチェック間隔・ステップ数 (default: 5000)")
     p.add_argument("--anneal-min-steps", type=int, default=50_000,
                    help="アニーリングチェックを開始する最小ステップ数 (default: 50000)")
+    p.add_argument("--ent-coef", type=float, default=0.01,
+                   help="PPO エントロピー係数 (default: 0.01)")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef}
 
     defaults = _GAME_DEFAULTS[args.game]
     port   = args.port   if args.port   is not None else defaults["port"]
@@ -238,7 +242,7 @@ def main() -> None:
     elif args.entity_attention:
         if args.game != "coin":
             print("[WARN] --entity-attention はコインゲーム専用です。MlpPolicy を使用します。")
-            model = PPO("MlpPolicy", env, **_PPO_KWARGS)
+            model = PPO("MlpPolicy", env, **ppo_kwargs)
         else:
             from entity_attention_extractor import EntityAttentionExtractor
             offsets = getattr(_get_raw_env(env), "_offsets", {})
@@ -248,9 +252,9 @@ def main() -> None:
                 net_arch=[64, 64],
             )
             print("[INFO] EntityAttentionExtractor を使用します (use_polar=True)")
-            model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, **_PPO_KWARGS)
+            model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, **ppo_kwargs)
     else:
-        model = PPO("MlpPolicy", env, **_PPO_KWARGS)
+        model = PPO("MlpPolicy", env, **ppo_kwargs)
 
     checkpoint_cb = CheckpointCallback(
         save_freq=max(args.checkpoint_freq // (env.num_envs or 1), 1),
