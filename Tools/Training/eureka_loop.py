@@ -49,7 +49,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--model", default=None,
                    help="LLMモデル名（未指定時: anthropic=claude-opus-4-6, openai=gpt-4o）")
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8766)
+    p.add_argument("--port", type=int, default=None,
+                   help="サーバーポート（未指定時はゲーム設定のデフォルト: coin=8766, survivors=8767）")
     p.add_argument("--output-dir", default="eureka_results",
                    help="結果保存の親ディレクトリ（default: eureka_results）")
     p.add_argument("--max-steps", type=int, default=200_000,
@@ -436,11 +437,15 @@ def main() -> None:
     client, model_name = _build_llm_client(args.llm, args.model)
     print(f"[INFO] LLM: {args.llm} / {model_name}")
 
+    # ポート解決: 未指定時はゲーム設定のデフォルトを使用
+    port = args.port if args.port is not None else game_config.default_port
+    print(f"[INFO] port: {port}")
+
     # ゲーム設定の初期化（obs_schema 取得など）
-    game_config.setup(args.host, args.port)
+    game_config.setup(args.host, port)
 
     # 環境作成
-    raw_env = game_config.make_env(args.host, args.port)
+    raw_env = game_config.make_env(args.host, port)
     if args.no_vec_normalize:
         env = raw_env
         print("[INFO] VecNormalize 無効")

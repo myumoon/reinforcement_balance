@@ -115,3 +115,8 @@ class EurekaGameConfig(ABC):
     def primary_metric_name(self) -> str:
         """compute_primary_metric が返す指標の名前（ログ表示用）。"""
         return "primary_metric"
+
+    @property
+    def default_port(self) -> int:
+        """ゲームの UE5 サーバーデフォルトポート。--port 未指定時に使われる。"""
+        return 8766
