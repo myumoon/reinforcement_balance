@@ -96,11 +96,14 @@ public:
 		return ItemPositions.IsValidIndex(i) ? ItemPositions[i] : FVector2D::ZeroVector;
 	}
 
-	int32     GetEnemyCount()      const { return Enemies.Num(); }
-	FVector2D GetEnemyPos(int32 i) const
+	int32     GetEnemyCount()         const { return Enemies.Num(); }
+	FVector2D GetEnemyPos(int32 i)    const
 	{
-		return Enemies.IsValidIndex(i) ? Enemies[i].Pos : FVector2D::ZeroVector;
+		return Enemies.IsValidIndex(i) ? Enemies[i].Pos   : FVector2D::ZeroVector;
 	}
+	int32     GetEnemyType(int32 i)   const { return Enemies.IsValidIndex(i) ? Enemies[i].Type  : 0; }
+	float     GetEnemyHP(int32 i)     const { return Enemies.IsValidIndex(i) ? Enemies[i].HP    : 0.f; }
+	float     GetEnemyMaxHP(int32 i)  const { return Enemies.IsValidIndex(i) ? Enemies[i].MaxHP : 1.f; }
 
 	// ---- 報酬設定 ----
 
@@ -263,5 +266,5 @@ private:
 	// 敵タイプ別パラメータ取得
 	float GetEnemySpeed(int32 Type) const;
 	float GetEnemyDamagePerTick(int32 Type) const;
-	float GetEnemyMaxHP(int32 Type) const;
+	float GetEnemyTypeMaxHP(int32 Type) const;
 };

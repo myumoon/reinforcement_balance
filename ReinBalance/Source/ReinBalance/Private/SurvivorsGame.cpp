@@ -278,7 +278,7 @@ float ASurvivorsGame::GetEnemyDamagePerTick(int32 Type) const
 	return DPS * PhysicsDt;
 }
 
-float ASurvivorsGame::GetEnemyMaxHP(int32 Type) const
+float ASurvivorsGame::GetEnemyTypeMaxHP(int32 Type) const
 {
 	switch (Type)
 	{
@@ -316,7 +316,7 @@ void ASurvivorsGame::SpawnEnemy()
 	Enemy.Pos   = RandomOnEdge();
 	Enemy.Vel   = FVector2D::ZeroVector;
 	Enemy.Type  = RandStream.RandRange(0, 2);
-	Enemy.MaxHP = GetEnemyMaxHP(Enemy.Type);
+	Enemy.MaxHP = GetEnemyTypeMaxHP(Enemy.Type);
 	Enemy.HP    = Enemy.MaxHP;
 	Enemies.Add(Enemy);
 }
