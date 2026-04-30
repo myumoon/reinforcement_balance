@@ -19,6 +19,10 @@ ReinBalance/Content/*
 # ====================
 Tools/Training/.venv/
 Tools/Training/models/
+Tools/Training/results/
+Tools/Training/eureka_results/
+Tools/Training/__pycache__/
+Tools/Training/**/__pycache__/
 
 # ====================
 # IDE / エディタ
