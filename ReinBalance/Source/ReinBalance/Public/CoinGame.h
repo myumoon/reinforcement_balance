@@ -11,14 +11,15 @@
  * ビジュアル表示は ACoinGameView が担う。
  *
  * 行動: 離散5方向 (0=+Y, 1=-Y, 2=-X, 3=+X, 4=静止)
- * 観測: GetObsDim() 次元 = 10 + NumCoinObs*2 + MaxEnemyObs*5
+ * 観測: GetObsDim() 次元 = 11 + NumCoinObs*2 + MaxEnemyObs*5
  *   [0-1]                  プレイヤー位置 (x,y) / FieldHalfSize
  *   [2-3]                  プレイヤー速度 (vx,vy)
  *   [4-7]                  壁距離 (上/下/左/右) / FieldHalfSize
  *   [8]                    現在の敵数 / MaxEnemyObs
- *   [9]                    次スポーンまでの残り時間 (0~1)
- *   [10 .. 10+N*2-1]       コイン相対位置 dx,dy × NumCoinObs  / (FieldHalfSize*2)
- *   [10+N*2 .. +M*2-1]     敵相対位置  dx,dy × MaxEnemyObs=20 / (FieldHalfSize*2)
+ *   [9]                    エピソード内コイン収集累計数（生値: 0, 1, 2, ...）
+ *   [10]                   次スポーンまでの残り時間 (0~1)
+ *   [11 .. 11+N*2-1]       コイン相対位置 dx,dy × NumCoinObs  / (FieldHalfSize*2)
+ *   [11+N*2 .. +M*2-1]     敵相対位置  dx,dy × MaxEnemyObs=20 / (FieldHalfSize*2)
  *   [.. +M*2]              敵速度      vx,vy × MaxEnemyObs=20
  *   [.. +M]                敵の種類スカラー × MaxEnemyObs=20  (A=0.0, B=0.5, C=1.0)
  * ※ NumCoinObs を変更すると観測次元が変わるため、モデルの再訓練が必要
@@ -50,8 +51,8 @@ public:
 	/** 観測ベクトルのセグメント定義を返す。/obs_schema エンドポイントや検証に使用。 */
 	TArray<FObsSegment> GetObsSchema() const;
 
-	/** 観測次元数を返す: 10 + NumCoinObs*2 + MaxEnemyObs*5 */
-	int32 GetObsDim() const { return 10 + NumCoinObs * 2 + MaxEnemyObs * 5; }
+	/** 観測次元数を返す: 11 + NumCoinObs*2 + MaxEnemyObs*5 */
+	int32 GetObsDim() const { return 11 + NumCoinObs * 2 + MaxEnemyObs * 5; }
 
 	/**
 	 * 観測スキーマのハッシュ文字列を返す。
@@ -154,7 +155,7 @@ protected:
 
 private:
 	// 観測に含めるコインの数
-	static constexpr int32 NumCoinObs = 100;
+	static constexpr int32 NumCoinObs = 20;
 	
 	// 最大敵数
 	static constexpr int32 MaxEnemyObs = 20;
@@ -174,9 +175,10 @@ private:
 	TArray<FVector2D>   CoinPositions;
 	TArray<FEnemyState> Enemies;
 
-	float SpawnTimer = 0.f;
-	float LastReward = 0.f;
-	bool  bDone      = false;
+	float SpawnTimer     = 0.f;
+	float LastReward     = 0.f;
+	bool  bDone          = false;
+	int32 CoinsCollected = 0;
 
 	FRandomStream RandStream;
 

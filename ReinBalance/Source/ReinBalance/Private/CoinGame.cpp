@@ -18,8 +18,9 @@ TArray<FObsSegment> ACoinGame::GetObsSchema() const
 		{ TEXT("player_pos"),    2             },
 		{ TEXT("player_vel"),    2             },
 		{ TEXT("wall_dist"),     4             },
-		{ TEXT("enemy_count"),   1             },
-		{ TEXT("spawn_timer"),   1             },
+		{ TEXT("enemy_count"),    1             },
+		{ TEXT("coins_collected"), 1           },
+		{ TEXT("spawn_timer"),    1             },
 		{ TEXT("coin_rel_pos"),  NumCoinObs*2  },
 		{ TEXT("enemy_rel_pos"), MaxEnemyObs*2 },
 		{ TEXT("enemy_vel"),     MaxEnemyObs*2 },
@@ -29,7 +30,7 @@ TArray<FObsSegment> ACoinGame::GetObsSchema() const
 
 FString ACoinGame::GetObsSchemaHash() const
 {
-	FString Schema = FString::Printf(TEXT("NumCoinObs=%d,MaxEnemyObs=%d"), NumCoinObs, MaxEnemyObs);
+	FString Schema = FString::Printf(TEXT("NumCoinObs=%d,MaxEnemyObs=%d,coins_collected=1"), NumCoinObs, MaxEnemyObs);
 	return FMD5::HashAnsiString(*Schema);
 }
 
@@ -51,9 +52,10 @@ void ACoinGame::ResetState(TOptional<int32> Seed)
 		Coin = RandomInsideField();
 
 	Enemies.Empty();
-	SpawnTimer = EnemySpawnInterval;
-	LastReward = 0.f;
-	bDone      = false;
+	SpawnTimer     = EnemySpawnInterval;
+	LastReward     = 0.f;
+	bDone          = false;
+	CoinsCollected = 0;
 }
 
 void ACoinGame::PhysicsStep(int32 ActionIdx)
@@ -122,7 +124,10 @@ TArray<float> ACoinGame::GetObservation() const
 	// 4. 現在の敵数 (1)
 	Obs.Add(static_cast<float>(Enemies.Num()) / static_cast<float>(MaxEnemyObs));
 
-	// 5. 次スポーンまでの残り時間 (1)
+	// 5. エピソード内コイン収集累計数 (1)  ─ 生値 (0, 1, 2, ...), VecNormalize に委ねる
+	Obs.Add(static_cast<float>(CoinsCollected));
+
+	// 6. 次スポーンまでの残り時間 (1)
 	Obs.Add(FMath::Clamp(SpawnTimer / EnemySpawnInterval, 0.f, 1.f));
 
 	// 6. コイン相対位置 dx,dy × NumCoinObs=3 (6)  ─ 近い順
@@ -249,6 +254,7 @@ void ACoinGame::CheckCoinCollections()
 		if (FVector2D::DistSquared(PlayerPos, Coin) < RadSq)
 		{
 			LastReward += CoinReward;
+			CoinsCollected++;
 			Coin = RandomInsideField();
 		}
 	}

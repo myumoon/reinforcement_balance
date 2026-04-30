@@ -1,5 +1,7 @@
 """UE5 コインゲーム gymnasium 環境ラッパー。"""
 
+from typing import Callable
+
 import numpy as np
 import gymnasium as gym
 from .base_ue5_env import BaseUE5Env
@@ -15,12 +17,22 @@ class CoinEnv(BaseUE5Env):
 
     obs_schema_hash を /reset レスポンスで検証するため、
     UE5側で NumCoinObs を変更してモデルと不一致になった場合は即座にエラーになる。
+
+    _reward_fn に reward_shaping(obs, prev_obs, base_reward) -> float を設定すると
+    EUREKA型報酬シェーピングが有効になる。None のときは base_reward をそのまま返す。
+
+    shaping_weight は shaped_reward に乗じる係数（1.0=通常, 0.0=無効化）。
+    _AnnealingShapingCallback がアニーリング中にこの値を更新する。
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8766, connect_timeout: int = 120):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8766, connect_timeout: int = 120,
+                 shaping_weight: float = 1.0):
         super().__init__(host=host, port=port, connect_timeout=connect_timeout)
         self.action_space = gym.spaces.Discrete(_NUM_ACTIONS)
         self._expected_schema_hash: str | None = None
+        self._reward_fn: Callable | None = None
+        self._prev_obs: np.ndarray | None = None
+        self.shaping_weight = shaping_weight
 
         # SB3 が env をラップする前に observation_space を確定させる必要があるため、
         # __init__ 時点でサーバーに接続して /obs_schema から正しい shape を取得する
@@ -37,6 +49,12 @@ class CoinEnv(BaseUE5Env):
 
         total_dim = schema["total_dim"]
         self._expected_schema_hash = schema["obs_schema_hash"]
+
+        offset = 0
+        self._offsets: dict[str, int] = {}
+        for seg in schema["segments"]:
+            self._offsets[seg["name"]] = offset
+            offset += seg["dim"]
 
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(total_dim,), dtype=np.float32
@@ -56,6 +74,29 @@ class CoinEnv(BaseUE5Env):
                 f"  受信値: {received_hash}\n"
                 f"  → モデルを再訓練するか、NumCoinObs を元に戻してください。"
             )
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
+        obs, info = super().reset(seed=seed, options=options)
+        self._prev_obs = obs
+        return obs, info
+
+    def step(self, action):
+        obs, base_reward, done, truncated, _ = super().step(action)
+
+        shaped = 0.0
+        if self._reward_fn is not None:
+            try:
+                shaped = float(self._reward_fn(obs, self._prev_obs, base_reward))
+                shaped = float(np.clip(shaped, -1.0, 1.0)) * self.shaping_weight
+            except Exception as e:
+                print(f"[WARN] reward_fn エラー: {e}")
+                shaped = 0.0
+
+        # info には元のスケールの base_reward を記録（コイン枚数などのメトリクス計算用）
+        # shaped_reward は shaping_weight 適用後の値（コールバックの比率計算用）
+        info = {"base_reward": base_reward, "shaped_reward": shaped}
+        self._prev_obs = obs
+        return obs, base_reward + shaped, done, truncated, info
 
     def _action_to_payload(self, action) -> dict:
         return {"action": [float(int(action))]}
