@@ -62,17 +62,19 @@ class _AnnealingShapingCallback(BaseCallback):
     """shaped_reward を線形アニーリングするコールバック。
 
     |shaped_reward_mean| / base_reward_mean の比率を check_freq ステップごとに計算し、
-    比率が anneal_threshold を下回ったら anneal_steps かけて shaping_weight を 1.0→0.0 に減衰する。
+    比率が anneal_threshold を下回ったら anneal_steps かけて shaping_weight を 1.0→min_weight に減衰する。
+    min_weight > 0 のとき shaping は永続的に維持される（推論時は不要）。
     """
 
     def __init__(self, raw_env, anneal_threshold: float, anneal_steps: int,
-                 check_freq: int, min_steps: int):
+                 check_freq: int, min_steps: int, min_weight: float = 0.0):
         super().__init__(verbose=0)
         self._raw_env = raw_env
         self.anneal_threshold = anneal_threshold
         self.anneal_steps = anneal_steps
         self.check_freq = check_freq
         self.min_steps = min_steps
+        self.min_weight = min_weight
 
         self._ep_base = 0.0
         self._ep_shaped = 0.0
@@ -111,12 +113,13 @@ class _AnnealingShapingCallback(BaseCallback):
                 print(f"[INFO] shaped_reward アニーリング開始 "
                       f"(ratio={ratio:.3f} < {self.anneal_threshold})")
 
-        # アニーリング中: shaping_weight を線形減衰
+        # アニーリング中: shaping_weight を 1.0 → min_weight に線形減衰
         if self._anneal_start_step is not None:
             progress = (self.num_timesteps - self._anneal_start_step) / self.anneal_steps
-            weight = max(0.0, 1.0 - progress)
+            weight = self.min_weight + (1.0 - self.min_weight) * max(0.0, 1.0 - progress)
             self._raw_env.shaping_weight = weight
-            if weight == 0.0 and self._raw_env._reward_fn is not None:
+            if weight <= self.min_weight and self.min_weight == 0.0 \
+                    and self._raw_env._reward_fn is not None:
                 self._raw_env._reward_fn = None
                 print("[INFO] shaped_reward アニーリング完了 → reward_fn を無効化")
 
@@ -166,6 +169,8 @@ def parse_args() -> argparse.Namespace:
                    help="比率のチェック間隔・ステップ数 (default: 5000)")
     p.add_argument("--anneal-min-steps", type=int, default=50_000,
                    help="アニーリングチェックを開始する最小ステップ数 (default: 50000)")
+    p.add_argument("--anneal-min-weight", type=float, default=0.0,
+                   help="shaping_weight の下限値 (default: 0.0=完全除去, 例: 0.05 で5%%維持)")
     p.add_argument("--ent-coef", type=float, default=0.01,
                    help="PPO エントロピー係数 (default: 0.01)")
     return p.parse_args()
@@ -271,10 +276,12 @@ def main() -> None:
             anneal_steps=args.anneal_steps,
             check_freq=args.anneal_check_freq,
             min_steps=args.anneal_min_steps,
+            min_weight=args.anneal_min_weight,
         )
         callbacks.append(anneal_cb)
         print(f"[INFO] シェーピングアニーリング有効 "
-              f"(threshold={args.anneal_threshold}, anneal_steps={args.anneal_steps:,})")
+              f"(threshold={args.anneal_threshold}, anneal_steps={args.anneal_steps:,}, "
+              f"min_weight={args.anneal_min_weight})")
 
     try:
         model.learn(total_timesteps=args.total_steps, callback=callbacks,
