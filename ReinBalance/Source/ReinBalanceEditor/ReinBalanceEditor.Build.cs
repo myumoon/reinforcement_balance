@@ -19,6 +19,7 @@ public class ReinBalanceEditor : ModuleRules
 		{
 			"UnrealEd",
 			"HTTPServer", // CoinHttpEnvService で FHttpPath / FHttpRouteHandle を使用
+			"Json",       // SurvivorsHttpEnvService の /params JSON パース用
 		});
 	}
 }
