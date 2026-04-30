@@ -88,6 +88,50 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         return (enc * weights).sum(dim=1)                 # [B, embed_dim]
 
     @staticmethod
+    def _attend_weights(enc: torch.Tensor, query: torch.Tensor) -> torch.Tensor:
+        """アテンション重みのみを返す（可視化・デバッグ用）。
+
+        Returns:
+            [B, N]  ∈ (0, 1),  sum over N == 1
+        """
+        scale = enc.shape[-1] ** 0.5
+        scores = (enc * query).sum(-1) / scale  # [B, N]
+        return torch.softmax(scores, dim=1)
+
+    def get_attention_weights(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """コイン・敵それぞれのアテンション重みを返す（可視化・デバッグ用）。
+
+        forward() と同じ前処理を行い、softmax 後の重みを返す。
+        VecNormalize 正規化済み obs をそのまま渡してよい。
+
+        Args:
+            obs: [B, obs_dim]  (VecNormalize 正規化済み obs)
+        Returns:
+            coin_weights:  [B, num_coins]   slot 0 が最近傍
+            enemy_weights: [B, num_enemies] slot 0 が最近傍
+        """
+        B = obs.shape[0]
+        coins  = obs[:, self._coin_i:self._enemy_r_i].reshape(B, self._num_coins, 2)
+        e_pos  = obs[:, self._enemy_r_i:self._enemy_v_i].reshape(B, self._num_enemies, 2)
+        e_vel  = obs[:, self._enemy_v_i:self._enemy_t_i].reshape(B, self._num_enemies, 2)
+        e_type = obs[:, self._enemy_t_i:].reshape(B, self._num_enemies, 1)
+
+        if self.use_polar:
+            coins = self._to_polar(coins)
+            e_pos = self._to_polar(e_pos)
+            e_vel = self._to_polar(e_vel)
+
+        enemies = torch.cat([e_pos, e_vel, e_type], dim=-1)
+
+        coin_enc  = self.coin_encoder(coins)
+        enemy_enc = self.enemy_encoder(enemies)
+
+        return (
+            self._attend_weights(coin_enc,  self.coin_query),
+            self._attend_weights(enemy_enc, self.enemy_query),
+        )
+
+    @staticmethod
     def _to_polar(xy: torch.Tensor) -> torch.Tensor:
         """直交座標 (dx, dy) を極座標 (r, θ) に変換する。
 
