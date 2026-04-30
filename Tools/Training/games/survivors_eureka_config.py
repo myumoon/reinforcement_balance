@@ -279,6 +279,8 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
                 offsets=self._offsets,
                 use_polar=True,
                 dist_alpha=1.0,
+                item_key="item_rel_pos",
+                enemy_scalar_keys=["enemy_type", "enemy_hp"],
             ),
             net_arch=[64, 64],
         )

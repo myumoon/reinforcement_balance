@@ -270,15 +270,26 @@ def main() -> None:
         else:
             from entity_attention_extractor import EntityAttentionExtractor
             offsets = getattr(_get_raw_env(env), "_offsets", {})
-            policy_kwargs = dict(
-                features_extractor_class=EntityAttentionExtractor,
-                features_extractor_kwargs=dict(
+            # ゲームごとに obs セグメント構成を指定する
+            if args.game == "survivors":
+                extractor_kwargs = dict(
                     features_dim=128, offsets=offsets,
                     use_polar=True, dist_alpha=args.dist_alpha,
-                ),
+                    item_key="item_rel_pos",
+                    enemy_scalar_keys=["enemy_type", "enemy_hp"],
+                )
+            else:  # coin
+                extractor_kwargs = dict(
+                    features_dim=128, offsets=offsets,
+                    use_polar=True, dist_alpha=args.dist_alpha,
+                )
+            policy_kwargs = dict(
+                features_extractor_class=EntityAttentionExtractor,
+                features_extractor_kwargs=extractor_kwargs,
                 net_arch=[64, 64],
             )
-            print(f"[INFO] EntityAttentionExtractor を使用します (use_polar=True, dist_alpha={args.dist_alpha})")
+            print(f"[INFO] EntityAttentionExtractor を使用します"
+                  f" (game={args.game}, use_polar=True, dist_alpha={args.dist_alpha})")
             model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, **ppo_kwargs)
     else:
         model = PPO("MlpPolicy", env, **ppo_kwargs)
