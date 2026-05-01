@@ -320,6 +320,10 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
     def primary_metric_name(self) -> str:
         return "item_kill_score"
 
+    @property
+    def default_port(self) -> int:
+        return 8767
+
 
 def create_config() -> SurvivorsEurekaConfig:
     return SurvivorsEurekaConfig()
