@@ -109,7 +109,7 @@ public:
 
 	/** 生存報酬 (毎ステップ) */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
-	float AliveReward = 0.005f;
+	float AliveReward = 0.001f;
 
 	/** アイテム獲得報酬 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
@@ -127,15 +127,15 @@ public:
 
 	/** フィールド上のアイテム数 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	int32 NumItems = 5;
+	int32 NumItems = 10;
 
 	/** 敵スポーン間隔 [秒]（/params で上書き可能） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	float EnemySpawnInterval = 8.f;
+	float EnemySpawnInterval = 5.f;
 
 	/** 同時に存在できる最大敵数（カリキュラム制御用, /params で上書き可能） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	int32 MaxActiveEnemies = 3;
+	int32 MaxActiveEnemies = 6;
 
 	/** 敵速度グローバル倍率（カリキュラム制御用, /params で上書き可能） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")

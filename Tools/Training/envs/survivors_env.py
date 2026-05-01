@@ -72,6 +72,14 @@ class SurvivorsEnv(BaseUE5Env):
     def step(self, action):
         obs, base_reward, done, truncated, _ = super().step(action)
 
+        # 永続 HP ダメージペナルティ（敵接触シグナルを強化）
+        # HP は [0,1] に正規化済み（÷100）。1 HP ダメージ = -1.0（クリップ前）
+        hp_i = self._offsets.get("player_hp", 12)
+        hp_penalty = 0.0
+        if self._prev_obs is not None:
+            hp_delta = max(0.0, float(self._prev_obs[hp_i]) - float(obs[hp_i]))
+            hp_penalty = float(np.clip(-hp_delta * 100.0, -1.0, 0.0))
+
         shaped = 0.0
         if self._reward_fn is not None:
             try:
@@ -81,9 +89,9 @@ class SurvivorsEnv(BaseUE5Env):
                 print(f"[WARN] reward_fn エラー: {e}")
                 shaped = 0.0
 
-        info = {"base_reward": base_reward, "shaped_reward": shaped}
+        info = {"base_reward": base_reward, "shaped_reward": shaped, "hp_penalty": hp_penalty}
         self._prev_obs = obs
-        return obs, base_reward + shaped, done, truncated, info
+        return obs, base_reward + shaped + hp_penalty, done, truncated, info
 
     def set_params(self, **kwargs) -> bool:
         """カリキュラム用パラメータを /params エンドポイントで更新する。
