@@ -270,12 +270,16 @@ def main() -> None:
         else:
             from entity_attention_extractor import EntityAttentionExtractor
             offsets = getattr(_get_raw_env(env), "_offsets", {})
+            extractor_kwargs = dict(
+                features_dim=128, offsets=offsets,
+                use_polar=True, dist_alpha=args.dist_alpha,
+            )
+            if args.game == "survivors":
+                extractor_kwargs["item_key"] = "item_rel_pos"
+                extractor_kwargs["enemy_scalar_keys"] = ["enemy_type", "enemy_hp"]
             policy_kwargs = dict(
                 features_extractor_class=EntityAttentionExtractor,
-                features_extractor_kwargs=dict(
-                    features_dim=128, offsets=offsets,
-                    use_polar=True, dist_alpha=args.dist_alpha,
-                ),
+                features_extractor_kwargs=extractor_kwargs,
                 net_arch=[64, 64],
             )
             print(f"[INFO] EntityAttentionExtractor を使用します (use_polar=True, dist_alpha={args.dist_alpha})")

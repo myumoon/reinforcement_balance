@@ -7,7 +7,7 @@ import requests
 
 from eureka_game_config import EurekaGameConfig
 
-_ALIVE_REWARD = 0.005
+_ALIVE_REWARD = 0.001
 _ITEM_REWARD  = 3.0
 _KILL_REWARD  = 2.0
 
@@ -74,17 +74,19 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"- プレイヤーは離散5方向（上/下/左/右/静止）で移動\n"
             f"- プレイヤーはオーラ（半径 1.5m）で自動攻撃し、敵を倒せる\n"
             f"- 敵に接触すると毎ティック HP が減少し、HP=0 でエピソード終了\n"
-            f"- 敵はフィールド外周からスポーンし、プレイヤーに向かって移動する\n"
+            f"- 敵はフィールド外周からスポーンし、プレイヤーに向かって移動する（最大6体同時、5秒間隔）\n"
+            f"- フィールドにはアイテムが常時10個存在する\n"
             f"- アイテム（{_ITEM_REWARD}点）とKill報酬（{_KILL_REWARD}点/体）で得点を稼ぐ"
         )
 
     def _prompt_section_game_objective(self) -> str:
         return (
-            f"**最優先目標**: 1エピソードで「生存時間を最大化しつつアイテムと敵撃破で得点を稼ぐ」こと。\n"
+            f"**最優先目標**: 1エピソードで「アイテムを取り敵を倒しながら生き延びる」こと。\n"
             f"- 死ぬとエピソード終了するため、HP 管理が最重要\n"
             f"- ただし壁際に逃げ続けるだけでは得点が低い\n"
             f"- 敵をオーラ範囲に引き込んで倒しつつアイテムを取る積極的行動が最善\n"
-            f"- **評価指標: survival_score** = base_reward の平均値（生存+アイテム+Kill）"
+            f"- **評価指標: item_kill_score** = (base_reward - AliveReward×ep_len) の平均\n"
+            f"  純粋なアイテム+Kill スコア。生存だけでは 0.0、アイテム1個で {_ITEM_REWARD:.1f}、Kill1体で {_KILL_REWARD:.1f}"
         )
 
     def _prompt_section_obs_index(self) -> str:
@@ -112,6 +114,11 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"  obs[{ecnt_i}]    = 敵数 / {max_enemy}\n"
             f"  obs[{spawn_i}]    = スポーンタイマー (0~1)\n"
             f"  obs[{xp_i}]    = xp_progress (Phase1=0固定)\n"
+            f"\n"
+            f"**⚠ Phase1 固定値（reward_fn で参照しないこと）**\n"
+            f"  obs[{wpn_i}:{wpn_i+6}] weapon_slots: 常に [0.125, 0.125, 0, 0, 0, 0] 固定\n"
+            f"  obs[{xp_i}]           xp_progress:  常に 0.0\n"
+            f"  obs[{o.get('player_level', xp_i+1)}]           player_level: 常に 0.0\n"
             f"\n"
             f"  obs[{item_i}:{item_i+2}] = 最近アイテムへの相対位置 (dx, dy) / 30m → [-1, 1]\n"
             f"  obs[{er_i}:{er_i+2}] = 最近敵への相対位置 (dx, dy)\n"
@@ -147,15 +154,17 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"- 敵タイプ別 HP: A={_ENEMY_HP['A']}, B={_ENEMY_HP['B']}, C={_ENEMY_HP['C']}\n"
             f"  → Aura で倒す時間: A={_ENEMY_HP['A']/_AURA_DPS:.1f}s, B={_ENEMY_HP['B']/_AURA_DPS:.1f}s, C={_ENEMY_HP['C']/_AURA_DPS:.1f}s\n"
             f"- 敵速度: A=1.0m/s, B=2.5m/s, C=1.5m/s（予測追跡）\n"
-            f"- スポーン間隔: 8秒 ≈ 480ステップ（EnemySpeedMult で倍率変更可能）"
+            f"- スポーン間隔: 5秒 ≈ 300ステップ（MaxActiveEnemies=6、EnemySpeedMult で倍率変更可能）"
         )
 
     def _prompt_section_scale_constraints(self) -> str:
         return (
-            f"- HP ペナルティは差分ベース: `(prev_obs[12] - obs[12]) * scale` を推奨\n"
-            f"  scale は {_MAX_PLAYER_HP} 程度（HP 1 減少あたり shaped -1.0 程度）\n"
+            f"- **HP ペナルティは survivors_env が永続的に適用済み**（info['hp_penalty']）\n"
+            f"  reward_fn でさらに HP 差分ペナルティを追加しないこと（二重計上になる）\n"
+            f"  HP 状態を使う場合は「obs[12] が低い時にアイテム接近を促す」など間接的な利用にとどめること\n"
             f"- 敵接近ペナルティは [-0.05, 0.0] 程度まで\n"
-            f"- アイテム接近ボーナスは 1ステップあたり [-0.03, 0.03] 程度まで\n"
+            f"- アイテム接近ボーナスは 1ステップあたり [-0.03, 0.03] 程度まで（アイテム10個に対して設計）\n"
+            f"- item_kill_score = 0 は「生存のみ」。reward_fn は item_kill_score を上げることを目標とすること\n"
             f"- エピソード全体の shaped_reward 累計が base_reward を大幅に超えないよう設計すること"
         )
 
@@ -241,30 +250,39 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
 
     def compute_primary_metric(self, episode_base_rewards: list[float],
                                episode_lengths: list[int]) -> float:
-        """primary_metric = base_reward の平均（生存+アイテム+Kill を統合）。"""
+        """primary_metric = アイテム+Kill スコアの平均（AliveReward 分を除去）。"""
         if not episode_base_rewards:
             return 0.0
-        return sum(episode_base_rewards) / len(episode_base_rewards)
+        scores = [
+            max(0.0, r - _ALIVE_REWARD * l)
+            for r, l in zip(episode_base_rewards, episode_lengths)
+        ]
+        return sum(scores) / len(scores)
 
     def compute_extra_metrics(self, episode_base_rewards: list[float],
                               episode_lengths: list[int]) -> dict:
         import statistics
         mean_len = sum(episode_lengths) / len(episode_lengths) if episode_lengths else 0.0
+        scores = [
+            max(0.0, r - _ALIVE_REWARD * l)
+            for r, l in zip(episode_base_rewards, episode_lengths)
+        ]
         return {
             "episode_length_mean": round(mean_len, 1),
             "episode_length_min":  min(episode_lengths) if episode_lengths else 0,
             "episode_length_max":  max(episode_lengths) if episode_lengths else 0,
-            "survival_score_std":  round(
-                statistics.stdev(episode_base_rewards) if len(episode_base_rewards) > 1 else 0.0, 3),
+            "item_kill_score_std": round(
+                statistics.stdev(scores) if len(scores) > 1 else 0.0, 3),
         }
 
     def metrics_description(self) -> str:
         return (
             f"- base_reward: C++固定報酬のみ（AliveReward={_ALIVE_REWARD}/step + ItemReward={_ITEM_REWARD} + KillReward={_KILL_REWARD}）\n"
-            f"- shaped_reward: reward_fn の出力\n"
+            f"- shaped_reward: reward_fn の出力（hp_penalty 含む）\n"
             f"- episode_length: エピソード長（ステップ数、最大 = 全 HP 消費まで）\n"
-            f"- survival_score (primary): base_reward の平均。高いほど生存・撃破・収集が優秀\n"
-            f"- survival_score_std: 標準偏差\n"
+            f"- item_kill_score (primary): (base_reward - AliveReward×ep_len) の平均\n"
+            f"  純粋なアイテム+Kill スコア。生存のみ=0.0、アイテム1個={_ITEM_REWARD}、Kill1体={_KILL_REWARD}\n"
+            f"- item_kill_score_std: 標準偏差\n"
             f"- episode_length_min / max: 最短・最長エピソード長"
         )
 
@@ -279,6 +297,8 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
                 offsets=self._offsets,
                 use_polar=True,
                 dist_alpha=1.0,
+                item_key="item_rel_pos",
+                enemy_scalar_keys=["enemy_type", "enemy_hp"],
             ),
             net_arch=[64, 64],
         )
@@ -298,7 +318,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
 
     @property
     def primary_metric_name(self) -> str:
-        return "survival_score"
+        return "item_kill_score"
 
 
 def create_config() -> SurvivorsEurekaConfig:
