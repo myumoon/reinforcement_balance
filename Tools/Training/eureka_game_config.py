@@ -22,7 +22,7 @@ class EurekaGameConfig(ABC):
         pass
 
     @abstractmethod
-    def make_env(self, host: str, port: int):
+    def make_env(self, host: str, port: int, frame_skip: int = 1):
         """gymnasium 環境を生成して返す。"""
         ...
 

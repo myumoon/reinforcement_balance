@@ -67,6 +67,8 @@ def _parse_args() -> argparse.Namespace:
                    help="VecNormalize による観測・報酬の正規化を無効化する")
     p.add_argument("--no-review", action="store_true",
                    help="reward_fn のレビュー＆改訂ステップをスキップする")
+    p.add_argument("--frame-skip", type=int, default=1,
+                   help="フレームスキップ数 N: 1 RL ステップで N 物理ステップ実行（default: 1）")
     return p.parse_args()
 
 
@@ -452,7 +454,7 @@ def main() -> None:
     game_config.setup(args.host, port)
 
     # 環境作成
-    raw_env = game_config.make_env(args.host, port)
+    raw_env = game_config.make_env(args.host, port, frame_skip=args.frame_skip)
     if args.no_vec_normalize:
         env = raw_env
         print("[INFO] VecNormalize 無効")

@@ -49,8 +49,10 @@ public:
 	 */
 	virtual void Tick() = 0;
 
-	/** アクション到着時にゲーム固有の物理操作を行い観測値を返す。GameThread で実行される。 */
-	virtual FEnvStepResult ProcessStep(const TArray<float>& Action) = 0;
+	/** アクション到着時にゲーム固有の物理操作を行い観測値を返す。GameThread で実行される。
+	 *  Steps: 1 RL ステップで実行する物理ステップ数（フレームスキップ）。デフォルト 1。
+	 */
+	virtual FEnvStepResult ProcessStep(const TArray<float>& Action, int32 Steps = 1) = 0;
 
 	/** リセット時にゲーム固有の初期化を行い初期観測値を返す。GameThread で実行される。 */
 	virtual FEnvResetResult ProcessReset(TOptional<int32> Seed) = 0;

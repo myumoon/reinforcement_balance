@@ -78,7 +78,7 @@ void FHttpEnvServerBase::Tick()
 		FStepRequest Req;
 		if (ActionQueue.Dequeue(Req))
 		{
-			FEnvStepResult Result = ProcessStep(Req.Action);
+			FEnvStepResult Result = ProcessStep(Req.Action, Req.Steps);
 
 			FString ObsStr;
 			for (int32 i = 0; i < Result.Obs.Num(); ++i)
@@ -119,6 +119,7 @@ bool FHttpEnvServerBase::HandleReset(const FHttpServerRequest& Request, const FH
 bool FHttpEnvServerBase::HandleStep(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
 	TArray<float> Action;
+	int32 Steps = 1;
 	FString Body(UTF8_TO_TCHAR(reinterpret_cast<const char*>(Request.Body.GetData())));
 	TSharedPtr<FJsonObject> JsonObj;
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
@@ -132,9 +133,12 @@ bool FHttpEnvServerBase::HandleStep(const FHttpServerRequest& Request, const FHt
 				Action.Add(static_cast<float>(Val->AsNumber()));
 			}
 		}
+		double StepsVal;
+		if (JsonObj->TryGetNumberField(TEXT("steps"), StepsVal))
+			Steps = FMath::Clamp(static_cast<int32>(StepsVal), 1, 100);
 	}
 
-	ActionQueue.Enqueue({MoveTemp(Action), OnComplete});
+	ActionQueue.Enqueue({MoveTemp(Action), Steps, OnComplete});
 	return true; // 非同期応答
 }
 

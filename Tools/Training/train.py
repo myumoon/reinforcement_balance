@@ -179,6 +179,8 @@ def parse_args() -> argparse.Namespace:
                    help="shaping_weight の下限値 (default: 0.0=完全除去, 例: 0.05 で5%%維持)")
     p.add_argument("--ent-coef", type=float, default=0.01,
                    help="PPO エントロピー係数 (default: 0.01)")
+    p.add_argument("--frame-skip", type=int, default=1,
+                   help="フレームスキップ数 N: 1 RL ステップで N 物理ステップ実行（default: 1）")
     return p.parse_args()
 
 
@@ -217,14 +219,14 @@ def main() -> None:
         if args.game == "coin":
             from envs.coin_env import CoinEnv
             def _make_coin_env():
-                e = CoinEnv(host=args.host, port=port)
+                e = CoinEnv(host=args.host, port=port, frame_skip=args.frame_skip)
                 e._reward_fn = reward_fn
                 return e
             env = make_vec_env(_make_coin_env, n_envs=1)
         elif args.game == "survivors":
             from envs.survivors_env import SurvivorsEnv
             def _make_survivors_env():
-                e = SurvivorsEnv(host=args.host, port=port)
+                e = SurvivorsEnv(host=args.host, port=port, frame_skip=args.frame_skip)
                 e._reward_fn = reward_fn
                 return e
             env = make_vec_env(_make_survivors_env, n_envs=1)
