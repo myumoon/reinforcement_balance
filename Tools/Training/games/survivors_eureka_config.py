@@ -15,7 +15,7 @@ _KILL_REWARD   = 2.0
 _ITEM_XP       = 1.0
 _KILL_XP_RATIO = 0.05
 _XP_BASE       = 5.0   # Lv0→1 に必要な基礎 XP
-_XP_GROWTH     = 5.0   # レベルごとの増分（XPRequired(n) = XPBase + XPGrowth * n）
+_XP_GROWTH     = 3.0   # レベルごとの増分（XPRequired(n) = XPBase + XPGrowth * n）
 _MAX_LEVEL     = 100
 
 # VS スケール換算ダメージ値（ドキュメント参照用）
@@ -24,6 +24,9 @@ _ENEMY_HP  = {"A": 20.0, "B": 50.0, "C": 30.0}
 _AURA_DPS  = 15.0
 _MAX_PLAYER_HP = 100.0
 
+# 攻撃
+_MIN_AURA_RADIUS = 2.5
+_MAX_AURA_RADIUS = 10.0
 
 def _fetch_obs_schema(host: str, port: int) -> dict:
     url = f"http://{host}:{port}/obs_schema"
@@ -79,13 +82,14 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         return (
             f"2D フィールド（±15m の正方形）でプレイヤーが敵を倒しながらアイテムを集めて生き延びるゲームです。\n"
             f"- プレイヤーは離散5方向（上/下/左/右/静止）で移動\n"
-            f"- プレイヤーはオーラ（半径 1.5m）で自動攻撃し、敵を倒せる\n"
+            f"- プレイヤーはオーラ（Lv0時半径 {_MIN_AURA_RADIUS}m）で自動攻撃し、敵を倒せる\n"
             f"- 敵に接触すると毎ティック HP が減少し、HP=0 でエピソード終了\n"
             f"- 敵はフィールド外周からスポーンし、プレイヤーに向かって移動する（最大6体同時、5秒間隔）\n"
             f"- フィールドにはアイテムが常時10個存在する\n"
             f"- アイテム（{_ITEM_REWARD}点）とKill報酬（{_KILL_REWARD}点/体）で得点を稼ぐ\n"
             f"- アイテム取得で {_ITEM_XP} XP 獲得。XPRequired(lv) = {_XP_BASE:.0f}+{_XP_GROWTH:.0f}×lv でレベルアップ（上限 {_MAX_LEVEL} Lv）\n"
-            f"- 敵撃破でも少量 XP を獲得（{_ITEM_XP * _KILL_XP_RATIO:.2f} XP/体 = アイテムの {_KILL_XP_RATIO*100:.0f}%）"
+            f"- 敵撃破でも少量 XP を獲得（{_ITEM_XP * _KILL_XP_RATIO:.2f} XP/体 = アイテムの {_KILL_XP_RATIO*100:.0f}%）\n"
+            f"- レベルアップで攻撃範囲が拡大（最小半径{_MIN_AURA_RADIUS}、最大半径{_MAX_AURA_RADIUS}で線形補間）\n"
         )
 
     def _prompt_section_game_objective(self) -> str:
@@ -126,6 +130,10 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"             Lv0 では {_ITEM_XP/_XP_BASE:.2f}/item, Lv1 では {_ITEM_XP/(_XP_BASE+_XP_GROWTH):.2f}/item\n"
             f"             XPRequired(lv) = {_XP_BASE:.0f} + {_XP_GROWTH:.0f}×lv\n"
             f"  obs[{o.get('player_level', xp_i+1)}]    = player_level (0~1 = level/{_MAX_LEVEL})\n"
+            f"  ⚠ オーラ半径は player_level から計算可能:\n"
+            f"     aura_m = {_MIN_AURA_RADIUS} + {_MAX_AURA_RADIUS - _MIN_AURA_RADIUS:.1f} * obs[{o.get('player_level', xp_i+1)}]"
+            f"  (Lv0: {_MIN_AURA_RADIUS}m, Lv{_MAX_LEVEL}: {_MAX_AURA_RADIUS}m)\n"
+            f"     旧固定値 1.5m を使ったオーラ圏判定コードは無効。必ず aura_m を使うこと\n"
             f"\n"
             f"**⚠ Phase1 固定値（reward_fn で参照しないこと）**\n"
             f"  obs[{wpn_i}:{wpn_i+6}] weapon_slots: 常に [0.125, 0.125, 0, 0, 0, 0] 固定\n"
@@ -163,7 +171,8 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         return (
             f"- アイテム収集半径: 1.0m\n"
             f"- 敵接触半径: 0.6m（この距離以内で HP ダメージ）\n"
-            f"- オーラ攻撃半径: 1.5m（この距離以内の敵に自動ダメージ）\n"
+            f"- オーラ攻撃半径: Lv0={_MIN_AURA_RADIUS}m → Lv{_MAX_LEVEL}={_MAX_AURA_RADIUS}m（lerp、レベルと共に拡大）\n"
+            f"  reward_fn での計算: aura_m = {_MIN_AURA_RADIUS} + {_MAX_AURA_RADIUS - _MIN_AURA_RADIUS:.1f} * obs[player_level_idx]\n"
             f"- オーラ DPS: {_AURA_DPS} HP/s → per tick: {_AURA_DPS/60:.4f}\n"
             f"- プレイヤー最大 HP: {_MAX_PLAYER_HP}\n"
             f"- 敵タイプ別ダメージ DPS: A={_ENEMY_DPS['A']}, B={_ENEMY_DPS['B']}, C={_ENEMY_DPS['C']} HP/s\n"

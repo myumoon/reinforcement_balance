@@ -255,7 +255,7 @@ void ASurvivorsGameView::DrawAura()
 	if (!GetWorld()) return;
 
 	const FVector2D PPos   = Game->GetPlayerPos();
-	const float     Radius = Game->AuraRadius * SimToUE;
+	const float     Radius = Game->GetAuraSize() * SimToUE;
 
 	DrawDebugCircle(
 		GetWorld(),
