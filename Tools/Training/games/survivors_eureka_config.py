@@ -7,9 +7,16 @@ import requests
 
 from eureka_game_config import EurekaGameConfig
 
-_ALIVE_REWARD = 0.001
-_ITEM_REWARD  = 3.0
-_KILL_REWARD  = 2.0
+_ALIVE_REWARD  = 0.001
+_ITEM_REWARD   = 3.0
+_KILL_REWARD   = 2.0
+
+# XP システム定数（C++ SurvivorsGame.h と同値に保つこと）
+_ITEM_XP       = 1.0
+_KILL_XP_RATIO = 0.05
+_XP_BASE       = 5.0   # Lv0→1 に必要な基礎 XP
+_XP_GROWTH     = 5.0   # レベルごとの増分（XPRequired(n) = XPBase + XPGrowth * n）
+_MAX_LEVEL     = 100
 
 # VS スケール換算ダメージ値（ドキュメント参照用）
 _ENEMY_DPS = {"A": 5.0, "B": 10.0, "C": 8.0}
@@ -76,7 +83,9 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"- 敵に接触すると毎ティック HP が減少し、HP=0 でエピソード終了\n"
             f"- 敵はフィールド外周からスポーンし、プレイヤーに向かって移動する（最大6体同時、5秒間隔）\n"
             f"- フィールドにはアイテムが常時10個存在する\n"
-            f"- アイテム（{_ITEM_REWARD}点）とKill報酬（{_KILL_REWARD}点/体）で得点を稼ぐ"
+            f"- アイテム（{_ITEM_REWARD}点）とKill報酬（{_KILL_REWARD}点/体）で得点を稼ぐ\n"
+            f"- アイテム取得で {_ITEM_XP} XP 獲得。XPRequired(lv) = {_XP_BASE:.0f}+{_XP_GROWTH:.0f}×lv でレベルアップ（上限 {_MAX_LEVEL} Lv）\n"
+            f"- 敵撃破でも少量 XP を獲得（{_ITEM_XP * _KILL_XP_RATIO:.2f} XP/体 = アイテムの {_KILL_XP_RATIO*100:.0f}%）"
         )
 
     def _prompt_section_game_objective(self) -> str:
@@ -113,12 +122,16 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"             Phase1: obs[{wpn_i}]=0.125(Aura), obs[{wpn_i+1}]=0.125(Lv1), 他は0\n"
             f"  obs[{ecnt_i}]    = 敵数 / {max_enemy}\n"
             f"  obs[{spawn_i}]    = スポーンタイマー (0~1)\n"
-            f"  obs[{xp_i}]    = xp_progress (Phase1=0固定)\n"
+            f"  obs[{xp_i}]    = xp_progress (0~1): アイテム取得で増加。レベルアップ時に 0 にリセット\n"
+            f"             Lv0 では {_ITEM_XP/_XP_BASE:.2f}/item, Lv1 では {_ITEM_XP/(_XP_BASE+_XP_GROWTH):.2f}/item\n"
+            f"             XPRequired(lv) = {_XP_BASE:.0f} + {_XP_GROWTH:.0f}×lv\n"
+            f"  obs[{o.get('player_level', xp_i+1)}]    = player_level (0~1 = level/{_MAX_LEVEL})\n"
             f"\n"
             f"**⚠ Phase1 固定値（reward_fn で参照しないこと）**\n"
             f"  obs[{wpn_i}:{wpn_i+6}] weapon_slots: 常に [0.125, 0.125, 0, 0, 0, 0] 固定\n"
-            f"  obs[{xp_i}]           xp_progress:  常に 0.0\n"
-            f"  obs[{o.get('player_level', xp_i+1)}]           player_level: 常に 0.0\n"
+            f"\n"
+            f"  ⚠ アイテム取得検知: obs[{xp_i}] > prev_obs[{xp_i}] または base_reward >= {_ITEM_REWARD}\n"
+            f"    （レベルアップ直後は obs[{xp_i}] が 0 に戻るため base_reward 判定を推奨）\n"
             f"\n"
             f"  obs[{item_i}:{item_i+2}] = 最近アイテムへの相対位置 (dx, dy) / 30m → [-1, 1]\n"
             f"  obs[{er_i}:{er_i+2}] = 最近敵への相対位置 (dx, dy)\n"
@@ -139,7 +152,11 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         return (
             f"- AliveReward = {_ALIVE_REWARD} / step（生存毎ステップ）\n"
             f"- ItemReward  = {_ITEM_REWARD}（アイテム取得時）\n"
-            f"- KillReward  = {_KILL_REWARD}（敵撃破時）"
+            f"- KillReward  = {_KILL_REWARD}（敵撃破時）\n"
+            f"- ItemXP      = {_ITEM_XP}（アイテム取得時の XP）\n"
+            f"- KillXP      = {_ITEM_XP * _KILL_XP_RATIO:.2f}（敵撃破時の XP = ItemXP × {_KILL_XP_RATIO}）\n"
+            f"- XPRequired(lv) = {_XP_BASE:.0f} + {_XP_GROWTH:.0f}×lv  "
+            f"（Lv0→1: {_XP_BASE:.0f} XP, Lv99→100: {_XP_BASE + _XP_GROWTH * 99:.0f} XP）"
         )
 
     def _prompt_section_physics(self) -> str:

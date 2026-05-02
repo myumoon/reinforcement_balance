@@ -69,7 +69,9 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 
 	PlayerPos = FVector2D::ZeroVector;
 	PlayerVel = FVector2D::ZeroVector;
-	PlayerHP  = MaxPlayerHP;
+	PlayerHP    = MaxPlayerHP;
+	PlayerXP    = 0.f;
+	PlayerLevel = 0;
 
 	ItemPositions.SetNum(NumItems);
 	for (FVector2D& Item : ItemPositions)
@@ -169,11 +171,14 @@ TArray<float> ASurvivorsGame::GetObservation() const
 	// 7. 次スポーンまでの残り時間 (1)
 	Obs.Add(FMath::Clamp(SpawnTimer / EnemySpawnInterval, 0.f, 1.f));
 
-	// 8. XP プレースホルダー (1) — Phase1 は 0 固定
-	Obs.Add(0.f);
+	// 8. xp_progress (1)
+	{
+		const float Threshold = XPRequiredForLevel(PlayerLevel);
+		Obs.Add(Threshold > 0.f ? FMath::Clamp(PlayerXP / Threshold, 0.f, 1.f) : 0.f);
+	}
 
-	// 9. プレイヤーレベルプレースホルダー (1) — Phase1 は 0 固定
-	Obs.Add(0.f);
+	// 9. player_level (1)
+	Obs.Add(static_cast<float>(PlayerLevel) / static_cast<float>(MaxPlayerLevel));
 
 	// 10. アイテム相対位置 dx,dy × NumItemObs (近い順)
 	TArray<int32> ItemIdx;
@@ -288,6 +293,24 @@ float ASurvivorsGame::GetEnemyTypeMaxHP(int32 Type) const
 	}
 }
 
+float ASurvivorsGame::XPRequiredForLevel(int32 Level) const
+{
+	return XPBase + XPGrowth * static_cast<float>(Level);
+}
+
+void ASurvivorsGame::ProcessXPGain(float Amount)
+{
+	if (XPBase <= 0.f) return;
+	PlayerXP += Amount;
+	while (PlayerLevel < MaxPlayerLevel)
+	{
+		const float Threshold = XPRequiredForLevel(PlayerLevel);
+		if (PlayerXP < Threshold) break;
+		PlayerXP -= Threshold;
+		PlayerLevel++;
+	}
+}
+
 FVector2D ASurvivorsGame::RandomInsideField()
 {
 	return FVector2D(
@@ -350,6 +373,7 @@ void ASurvivorsGame::ApplyAuraDamage()
 			{
 				Enemies.RemoveAt(i);
 				LastReward += KillReward;
+				ProcessXPGain(ItemXP * KillXPRatio);
 			}
 		}
 	}
@@ -363,6 +387,7 @@ void ASurvivorsGame::CheckItemCollections()
 		if (FVector2D::DistSquared(PlayerPos, Item) < RadSq)
 		{
 			LastReward += ItemReward;
+			ProcessXPGain(ItemXP);
 			Item = RandomInsideField();
 		}
 	}
