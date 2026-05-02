@@ -305,9 +305,11 @@ class _EurekaMetricsCallback(BaseCallback):
 
         self._ep_base = 0.0
         self._ep_shaped = 0.0
+        self._ep_hp = 0.0
         self._ep_len = 0
         self.episode_base_rewards: list[float] = []
         self.episode_shaped_rewards: list[float] = []
+        self.episode_hp_rewards: list[float] = []
         self.episode_lengths: list[int] = []
 
         self._check_history: list[float] = []
@@ -318,14 +320,17 @@ class _EurekaMetricsCallback(BaseCallback):
         info = self.locals["infos"][0]
         self._ep_base += info.get("base_reward", 0.0)
         self._ep_shaped += info.get("shaped_reward", 0.0)
+        self._ep_hp += info.get("hp_penalty", 0.0)
         self._ep_len += 1
 
         if self.locals["dones"][0]:
             self.episode_base_rewards.append(self._ep_base)
             self.episode_shaped_rewards.append(self._ep_shaped)
+            self.episode_hp_rewards.append(self._ep_hp)
             self.episode_lengths.append(self._ep_len)
             self._ep_base = 0.0
             self._ep_shaped = 0.0
+            self._ep_hp = 0.0
             self._ep_len = 0
 
         if (self.num_timesteps >= self.min_steps and
@@ -358,6 +363,7 @@ class _EurekaMetricsCallback(BaseCallback):
             return {"episodes": 0}
         mean_base   = sum(self.episode_base_rewards) / n
         mean_shaped = sum(self.episode_shaped_rewards) / n
+        mean_hp     = sum(self.episode_hp_rewards) / n if self.episode_hp_rewards else 0.0
         mean_len    = sum(self.episode_lengths) / n
         primary     = game_config.compute_primary_metric(
             self.episode_base_rewards, self.episode_lengths)
@@ -365,9 +371,10 @@ class _EurekaMetricsCallback(BaseCallback):
             self.episode_base_rewards, self.episode_lengths)
         return {
             "episodes": n,
-            "episode_reward_mean": round(mean_base + mean_shaped, 4),
+            "episode_reward_mean": round(mean_base + mean_shaped + mean_hp, 4),
             "base_reward_mean": round(mean_base, 4),
             "shaped_reward_mean": round(mean_shaped, 4),
+            "hp_penalty_mean": round(mean_hp, 4),
             "episode_length_mean": round(mean_len, 1),
             game_config.primary_metric_name: round(primary, 3),
             **extra,
