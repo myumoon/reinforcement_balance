@@ -46,8 +46,8 @@ struct FWeaponSlot
  *   [13-18]  武器スロット × 3: (type_norm, level_norm) × MaxWeaponSlots
  *   [19]     現在の敵数 / MaxEnemyObs
  *   [20]     次スポーンまでの残り時間 (0~1)
- *   [21]     xp_progress (0~1, Phase1=0 固定)
- *   [22]     player_level (0~1, Phase1=0 固定)
+ *   [21]     xp_progress (0~1, アイテム取得・敵撃破で増加、レベルアップでリセット)
+ *   [22]     player_level (0~1 = level / MaxPlayerLevel, 最大 MaxPlayerLevel=100)
  *   [23 .. 23+N*2-1]       アイテム相対位置 dx,dy × NumItemObs
  *   [23+N*2 .. +M*6-1]     敵情報 (dx,dy,vx,vy,type_norm,hp_norm) × MaxEnemyObs
  */
@@ -141,6 +141,22 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float EnemySpeedMult = 1.0f;
 
+	/** アイテム獲得時の XP 量 */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	float ItemXP = 1.0f;
+
+	/** 敵撃破時の XP 量（ItemXP の倍率） */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	float KillXPRatio = 0.05f;
+
+	/** Lv0→1 に必要な基礎 XP */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	float XPBase = 5.0f;
+
+	/** 1 レベルごとに増加する XP 量（XPRequired(n) = XPBase + XPGrowth * n） */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	float XPGrowth = 5.0f;
+
 	// ---- プレイヤー ----
 
 	/** プレイヤー最大 HP */
@@ -227,6 +243,7 @@ private:
 	static constexpr int32  MaxWeaponSlots   = 3;
 	static constexpr int32  MaxWeaponTypeSlots = 8; // obs エンコードの型容量
 	static constexpr int32  MaxWeaponLevel   = 8;
+	static constexpr int32  MaxPlayerLevel   = 100;
 	static constexpr float  PhysicsDt        = 1.f / 60.f;
 	static const FVector2D  RayDirs[8];              // 8方向レイキャスト方向
 
@@ -244,6 +261,8 @@ private:
 	FVector2D             PlayerPos;
 	FVector2D             PlayerVel;
 	float                 PlayerHP    = 100.f;
+	float                 PlayerXP    = 0.f;
+	int32                 PlayerLevel = 0;
 	FWeaponSlot           WeaponSlots[MaxWeaponSlots];
 	TArray<FVector2D>     ItemPositions;
 	TArray<FEnemyState>   Enemies;
@@ -267,4 +286,8 @@ private:
 	float GetEnemySpeed(int32 Type) const;
 	float GetEnemyDamagePerTick(int32 Type) const;
 	float GetEnemyTypeMaxHP(int32 Type) const;
+
+	// XP 処理
+	float XPRequiredForLevel(int32 Level) const;
+	void  ProcessXPGain(float Amount);
 };
