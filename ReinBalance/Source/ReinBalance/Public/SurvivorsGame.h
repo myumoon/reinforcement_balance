@@ -89,6 +89,7 @@ public:
 	FVector2D GetPlayerVel()   const { return PlayerVel; }
 	float     GetPlayerHP()    const { return PlayerHP; }
 	float     GetMaxPlayerHP() const { return MaxPlayerHP; }
+	float     GetAuraSize()    const { return AuraRadius; }
 
 	int32     GetItemCount()       const { return ItemPositions.Num(); }
 	FVector2D GetItemPos(int32 i)  const
@@ -155,7 +156,7 @@ public:
 
 	/** 1 レベルごとに増加する XP 量（XPRequired(n) = XPBase + XPGrowth * n） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	float XPGrowth = 5.0f;
+	float XPGrowth = 3.0f;
 
 	// ---- プレイヤー ----
 
@@ -173,9 +174,13 @@ public:
 
 	// ---- 武器 (オーラ) ----
 
-	/** オーラ攻撃半径 [m] */
+	/** 最小オーラ攻撃半径 [m] */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
-	float AuraRadius = 1.5f;
+	float MinAuraRadius = 2.0f;
+	
+	/** 最大オーラ攻撃半径 [m] */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
+	float MaxAuraRadius = 10.0f;
 
 	/** オーラ攻撃 DPS（秒あたりダメージ）: /tick = AuraDPS * PhysicsDt */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
@@ -263,6 +268,7 @@ private:
 	float                 PlayerHP    = 100.f;
 	float                 PlayerXP    = 0.f;
 	int32                 PlayerLevel = 0;
+	float                 AuraRadius  = 0.0f;
 	FWeaponSlot           WeaponSlots[MaxWeaponSlots];
 	TArray<FVector2D>     ItemPositions;
 	TArray<FEnemyState>   Enemies;
@@ -290,4 +296,8 @@ private:
 	// XP 処理
 	float XPRequiredForLevel(int32 Level) const;
 	void  ProcessXPGain(float Amount);
+	void  OnLevelUp(int32 nextLevel);
+	
+	// ステータス
+	void  SetAuraSizeByLevel(int32 level, int32 maxLevel);
 };
