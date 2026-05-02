@@ -41,3 +41,10 @@ ReinBalance/*.sln
 # ====================
 Thumbs.db
 .DS_Store
+
+# ====================
+# AI
+# ====================
+.claude/settings.local.json
+.claude/docs/
+.claude/grill-me/
