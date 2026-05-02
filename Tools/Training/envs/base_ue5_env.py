@@ -15,10 +15,11 @@ class BaseUE5Env(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, host: str, port: int, connect_timeout: int = 120):
+    def __init__(self, host: str, port: int, connect_timeout: int = 120, frame_skip: int = 1):
         super().__init__()
         self.base_url = f"http://{host}:{port}"
         self.connect_timeout = connect_timeout
+        self.frame_skip = frame_skip
         self.session = requests.Session()
         self._server_connected = False
 
@@ -35,6 +36,8 @@ class BaseUE5Env(gym.Env):
 
     def step(self, action):
         payload = self._action_to_payload(action)
+        if self.frame_skip > 1:
+            payload["steps"] = self.frame_skip
         resp = self.session.post(f"{self.base_url}/step", json=payload, timeout=10)
         resp.raise_for_status()
         data = resp.json()

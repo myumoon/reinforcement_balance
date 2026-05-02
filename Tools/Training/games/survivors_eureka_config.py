@@ -67,9 +67,9 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         self._obs_layout_str, self._offsets = _build_obs_layout(schema)
         print(f"[INFO] obs_schema 取得完了: total_dim={schema['total_dim']}")
 
-    def make_env(self, host: str, port: int):
+    def make_env(self, host: str, port: int, frame_skip: int = 1):
         from envs.survivors_env import SurvivorsEnv
-        return SurvivorsEnv(host=host, port=port)
+        return SurvivorsEnv(host=host, port=port, frame_skip=frame_skip)
 
     # ------------------------------------------------------------------ #
     # プロンプトセクション                                                  #

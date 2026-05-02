@@ -57,7 +57,7 @@ private:
 
 	// HTTP スレッド → GameThread
 	struct FResetRequest { TOptional<int32> Seed; FHttpResultCallback Callback; };
-	struct FStepRequest  { TArray<float> Action; FHttpResultCallback Callback; };
+	struct FStepRequest  { TArray<float> Action; int32 Steps = 1; FHttpResultCallback Callback; };
 
 	TQueue<FResetRequest, EQueueMode::Mpsc> ResetQueue;
 	TQueue<FStepRequest,  EQueueMode::Mpsc> ActionQueue;

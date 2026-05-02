@@ -21,8 +21,8 @@ class SurvivorsEnv(BaseUE5Env):
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8767, connect_timeout: int = 120,
-                 shaping_weight: float = 1.0):
-        super().__init__(host=host, port=port, connect_timeout=connect_timeout)
+                 shaping_weight: float = 1.0, frame_skip: int = 1):
+        super().__init__(host=host, port=port, connect_timeout=connect_timeout, frame_skip=frame_skip)
         self.action_space = gym.spaces.Discrete(_NUM_ACTIONS)
         self._expected_schema_hash: str | None = None
         self._reward_fn: Callable | None = None

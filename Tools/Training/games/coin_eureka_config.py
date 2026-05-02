@@ -55,9 +55,9 @@ class CoinEurekaConfig(EurekaGameConfig):
         self._obs_layout_str, self._offsets = _build_obs_layout(schema)
         print(f"[INFO] obs_schema 取得完了: total_dim={schema['total_dim']}")
 
-    def make_env(self, host: str, port: int):
+    def make_env(self, host: str, port: int, frame_skip: int = 1):
         from envs.coin_env import CoinEnv
-        return CoinEnv(host=host, port=port)
+        return CoinEnv(host=host, port=port, frame_skip=frame_skip)
 
     # ------------------------------------------------------------------ #
     # プロンプトセクション（本文のみ。タイトルは _titled_section() で付与）    #

@@ -18,17 +18,25 @@ public:
 		return Result;
 	}
 
-	virtual FEnvStepResult ProcessStep(const TArray<float>& Action) override
+	virtual FEnvStepResult ProcessStep(const TArray<float>& Action, int32 Steps) override
 	{
 		FEnvStepResult Result;
 		if (Cart)
 		{
 			const float Force = Action.Num() > 0 ? FMath::Clamp(Action[0], -1.f, 1.f) : 0.f;
-			Cart->PhysicsStep(Force);
-			Result.Obs       = Cart->GetObservation();
-			Result.Reward    = Cart->GetReward();
-			Result.bDone     = Cart->IsDone();
-			Result.bTruncated = false;
+			float AccumulatedReward = 0.f;
+			for (int32 i = 0; i < Steps; ++i)
+			{
+				Cart->PhysicsStep(Force);
+				AccumulatedReward += Cart->GetReward();
+				if (Cart->IsDone())
+				{
+					Result.bDone = true;
+					break;
+				}
+			}
+			Result.Obs    = Cart->GetObservation();
+			Result.Reward = AccumulatedReward;
 		}
 		return Result;
 	}

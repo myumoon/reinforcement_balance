@@ -22,7 +22,7 @@ public:
 		return Result;
 	}
 
-	virtual FEnvStepResult ProcessStep(const TArray<float>& Action) override
+	virtual FEnvStepResult ProcessStep(const TArray<float>& Action, int32 Steps) override
 	{
 		FEnvStepResult Result;
 		if (Game)
@@ -30,11 +30,19 @@ public:
 			const int32 ActionIdx = Action.Num() > 0
 				? FMath::Clamp(static_cast<int32>(Action[0]), 0, 4)
 				: 4;
-			Game->PhysicsStep(ActionIdx);
-			Result.Obs        = Game->GetObservation();
-			Result.Reward     = Game->GetReward();
-			Result.bDone      = Game->IsDone();
-			Result.bTruncated = false;
+			float AccumulatedReward = 0.f;
+			for (int32 i = 0; i < Steps; ++i)
+			{
+				Game->PhysicsStep(ActionIdx);
+				AccumulatedReward += Game->GetReward();
+				if (Game->IsDone())
+				{
+					Result.bDone = true;
+					break;
+				}
+			}
+			Result.Obs    = Game->GetObservation();
+			Result.Reward = AccumulatedReward;
 		}
 		return Result;
 	}
