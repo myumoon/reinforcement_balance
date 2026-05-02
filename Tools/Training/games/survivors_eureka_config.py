@@ -175,12 +175,21 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         )
 
     def _prompt_section_scale_constraints(self) -> str:
+        max_hp_penalty = _MAX_PLAYER_HP  # 全HP消費時の最大累積ペナルティ
         return (
             f"- **HP ペナルティは survivors_env が永続的に適用済み**（info['hp_penalty']）\n"
             f"  reward_fn でさらに HP 差分ペナルティを追加しないこと（二重計上になる）\n"
             f"  HP 状態を使う場合は「obs[12] が低い時にアイテム接近を促す」など間接的な利用にとどめること\n"
+            f"\n"
+            f"- **HP ペナルティの累積スケール（重要）**\n"
+            f"  1HP ダメージ/step → hp_penalty = -1.0、最大 -{max_hp_penalty:.0f} / エピソード（全 HP 消費時）\n"
+            f"  ep_rew_mean(SB3) が大きく負になる主因は hp_penalty であり、shaped_reward ではない\n"
+            f"  hp_penalty_mean を見て shaped_reward_mean の貢献を判断すること\n"
+            f"  例: hp_penalty_mean=-80, shaped_reward_mean=-5 なら shaped はほぼ影響なし\n"
+            f"\n"
             f"- 敵接近ペナルティは [-0.05, 0.0] 程度まで\n"
             f"- アイテム接近ボーナスは 1ステップあたり [-0.03, 0.03] 程度まで（アイテム10個に対して設計）\n"
+            f"  距離計算例: dist_m = np.sqrt(obs[{self._offsets.get('item_rel_pos', 23)}]**2 + obs[{self._offsets.get('item_rel_pos', 23)+1}]**2) * 30\n"
             f"- item_kill_score = 0 は「生存のみ」。reward_fn は item_kill_score を上げることを目標とすること\n"
             f"- エピソード全体の shaped_reward 累計が base_reward を大幅に超えないよう設計すること"
         )
@@ -294,8 +303,13 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
 
     def metrics_description(self) -> str:
         return (
-            f"- base_reward: C++固定報酬のみ（AliveReward={_ALIVE_REWARD}/step + ItemReward={_ITEM_REWARD} + KillReward={_KILL_REWARD}）\n"
-            f"- shaped_reward: reward_fn の出力（hp_penalty 含む）\n"
+            f"- base_reward_mean: C++固定報酬の1エピソード平均（AliveReward={_ALIVE_REWARD}/step + ItemReward={_ITEM_REWARD} + KillReward={_KILL_REWARD}）\n"
+            f"- shaped_reward_mean: reward_fn 出力の1エピソード平均（hp_penalty は含まない）\n"
+            f"- hp_penalty_mean: 永続 HP ダメージペナルティの1エピソード平均\n"
+            f"  計算式: clip(-hp_delta×100, -1, 0) / step。1HP ダメージ = -1.0 ペナルティ\n"
+            f"  エピソード全体で最大 -{_MAX_PLAYER_HP:.0f} になりうる（全 HP 消費時）\n"
+            f"  ep_rew_mean(SB3) ~= base_reward_mean + shaped_reward_mean + hp_penalty_mean\n"
+            f"- episode_reward_mean: base + shaped + hp_penalty の合計平均（SB3 の ep_rew_mean に対応）\n"
             f"- episode_length: エピソード長（ステップ数、最大 = 全 HP 消費まで）\n"
             f"- item_kill_score (primary): (base_reward - AliveReward×ep_len) の平均\n"
             f"  純粋なアイテム+Kill スコア。生存のみ=0.0、アイテム1個={_ITEM_REWARD}、Kill1体={_KILL_REWARD}\n"
