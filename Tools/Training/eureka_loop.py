@@ -23,7 +23,7 @@ from typing import Callable
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
-from train import CurriculumCallback
+from curriculum_callback import CurriculumCallback
 
 _STATE_FILENAME = "state.json"
 
