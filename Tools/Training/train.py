@@ -15,6 +15,7 @@
 
 import argparse
 import importlib.util
+import json
 from pathlib import Path
 
 from stable_baselines3 import PPO
@@ -152,7 +153,6 @@ class CurriculumCallback(BaseCallback):
         self._ep_base = 0.0
 
     def _on_step(self) -> bool:
-        import json as _json
         info = self.locals["infos"][0]
         self._ep_base += info.get("base_reward", 0.0)
 
@@ -165,9 +165,6 @@ class CurriculumCallback(BaseCallback):
 
             if len(self._scores) >= self.window:
                 mean = sum(self._scores[-self.window:]) / self.window
-                print(f"[Curriculum] active_score_mean={mean:.3f} "
-                      f"(threshold={self.threshold}, stage={self._stage}, "
-                      f"episodes={len(self._scores)})")
                 if self._status_path is not None:
                     status = {
                         "timestep": self.num_timesteps,
@@ -177,7 +174,7 @@ class CurriculumCallback(BaseCallback):
                         "episodes_in_window": min(len(self._scores), self.window),
                     }
                     Path(self._status_path).write_text(
-                        _json.dumps(status, ensure_ascii=False, indent=2)
+                        json.dumps(status, ensure_ascii=False, indent=2)
                     )
                 if mean >= self.threshold:
                     self._advance_stage(mean)
