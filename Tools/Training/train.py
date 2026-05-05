@@ -19,9 +19,10 @@ from pathlib import Path
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
-from curriculum_callback import CurriculumCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
+
+from curriculum_callback import CurriculumCallback
 
 _GAME_DEFAULTS = {
     "balance":   {"port": 8765, "output": "models/balance_model"},
