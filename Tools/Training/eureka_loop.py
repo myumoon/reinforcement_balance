@@ -23,6 +23,7 @@ from typing import Callable
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
+from train import CurriculumCallback
 
 _STATE_FILENAME = "state.json"
 
@@ -69,6 +70,14 @@ def _parse_args() -> argparse.Namespace:
                    help="reward_fn のレビュー＆改訂ステップをスキップする")
     p.add_argument("--frame-skip", type=int, default=1,
                    help="フレームスキップ数 N: 1 RL ステップで N 物理ステップ実行（default: 1）")
+    p.add_argument("--curriculum", action="store_true",
+                   help="カリキュラム学習を有効化（survivors 専用）")
+    p.add_argument("--curriculum-window", type=int, default=20,
+                   help="active_score を平均するエピソード数 (default: 20)")
+    p.add_argument("--curriculum-threshold", type=float, default=5.0,
+                   help="Stage 昇格の active_score 閾値 (default: 5.0, 目安: 撃破数×2.0+収集数×3.0)")
+    p.add_argument("--curriculum-alive-reward", type=float, default=0.001,
+                   help="生存ボーナスの1物理ステップあたりの値 (default: 0.001, UE5側と合わせる)")
     return p.parse_args()
 
 
@@ -590,7 +599,22 @@ def main() -> None:
             )
 
             print(f"[INFO] 訓練開始: {recommended_steps:,} steps (上限: {args.max_steps:,})")
-            model.learn(total_timesteps=recommended_steps, callback=metrics_cb,
+            loop_callbacks = [metrics_cb]
+            if args.curriculum and hasattr(raw_env, "set_params"):
+                curriculum_cb = CurriculumCallback(
+                    raw_env=raw_env,
+                    frame_skip=args.frame_skip,
+                    window=args.curriculum_window,
+                    threshold=args.curriculum_threshold,
+                    alive_reward=args.curriculum_alive_reward,
+                )
+                loop_callbacks.append(curriculum_cb)
+                print(f"[INFO] CurriculumCallback 有効 "
+                      f"(window={args.curriculum_window}, threshold={args.curriculum_threshold}, "
+                      f"frame_skip={args.frame_skip}, alive_reward={args.curriculum_alive_reward})")
+            elif args.curriculum:
+                print("[WARN] --curriculum は set_params をサポートする環境でのみ有効です。無視します。")
+            model.learn(total_timesteps=recommended_steps, callback=loop_callbacks,
                         reset_num_timesteps=True)
 
             # --- メトリクス収集・保存 ---
