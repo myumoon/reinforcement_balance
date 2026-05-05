@@ -1,7 +1,16 @@
 # ReinBalance
 
-バランスゲームの強化学習をUE5で行うためのプロジェクト。
-Python (Stable-Baselines3) で訓練し、ONNX モデルを UE5 (NNERuntimeORT) で推論する。
+UE5 ゲームのバランス調整を強化学習で行うプロジェクト。  
+Python (Stable-Baselines3) で PPO 訓練を行い、ONNX モデルを UE5 (NNERuntimeORT) で推論する。  
+EUREKA 型 LLM ループによる報酬シェーピング関数の自動生成にも対応。
+
+## ゲームモード
+
+| ゲーム | ポート | 概要 |
+|--------|--------|------|
+| BalancePole | 8765 | 倒立振子。カートを左右に動かして2本のポールを立てる古典RL課題 |
+| CoinGame | 8766 | コイン収集。フィールド上のコインを集めながら敵を回避する |
+| Survivors | 8767 | ローグライクサバイバー。Aura攻撃でXP・レベルアップしながら敵を倒す |
 
 ## 環境要件
 
@@ -13,7 +22,6 @@ Python (Stable-Baselines3) で訓練し、ONNX モデルを UE5 (NNERuntimeORT) 
 | Visual Studio | 2022（v14.38 ツールセット） |
 | Windows SDK | 22621 |
 | .NET Framework | 4.6.2 |
-| Perforce (P4V) | DVCS版 |
 
 ### Python 訓練環境
 
@@ -25,26 +33,31 @@ Python (Stable-Baselines3) で訓練し、ONNX モデルを UE5 (NNERuntimeORT) 
 ## ディレクトリ構成
 
 ```
+ue5_reinforcement_balance/
 ├── ReinBalance/
 │   ├── Config/                        # エンジン設定
 │   ├── Content/Models/                # 訓練済み ONNX モデル
-│   ├── Plugins/
-│   │   └── PythonTrainingComm/        # UE5↔Python HTTP 通信プラグイン
 │   └── Source/
-│       ├── ReinBalance/               # Runtime モジュール
-│       ├── ReinBalanceEditor/         # Editor モジュール（訓練サービス）
+│       ├── ReinBalance/               # Runtime モジュール（ゲームロジック）
+│       ├── ReinBalanceEditor/         # Editor モジュール（訓練用HTTPサーバー）
+│       │   └── Private/Training/
+│       │       ├── BalanceHttpEnvService.cpp
+│       │       ├── CoinHttpEnvService.cpp
+│       │       └── SurvivorsHttpEnvService.cpp
 │       ├── ReinBalance.Target.cs
 │       └── ReinBalanceEditor.Target.cs
 ├── Tools/
 │   └── Training/                      # Python 訓練スクリプト
 │       ├── envs/                      # gymnasium 環境ラッパー
+│       ├── games/                     # EUREKA ループ用ゲーム設定
 │       ├── requirements.txt           # バージョン固定
 │       ├── setup.bat                  # Windows セットアップ
 │       ├── setup.sh                   # WSL/Linux セットアップ
 │       ├── train.py                   # 訓練エントリーポイント
+│       ├── eureka_loop.py             # EUREKA型LLM報酬シェーピングループ
 │       └── export_onnx.py             # ONNX 変換スクリプト
 ├── Documents/                         # 設計ドキュメント
-├── .p4ignore
+├── .claude/docs/                      # Claude Code 用設計メモ・ロードマップ
 └── .gitignore
 ```
 
@@ -78,15 +91,16 @@ https://drive.google.com/drive/folders/1K9mLsr1hXK57hIaL_xIgReT3TTyspMxE?usp=dri
 
 Visual Studio からビルドする場合は `ReinBalance/ReinBalance.sln` を開いてください。
 
+> **注意**: UE5 エディタが起動中（Live Coding が有効）のときは UBT ビルドが失敗します。ビルド前にエディタを閉じてください。
+
 ### 4. Python 訓練環境のセットアップ
 
 #### Anaconda のインストール（初回のみ）
 
 [Anaconda](https://www.anaconda.com/download) をインストールしてください。
-インストール後、コマンドプロンプトで以下を確認します。
 
 ```cmd
-conda --version
+conda --version  # インストール確認
 ```
 
 #### conda 環境の作成とパッケージインストール
@@ -95,19 +109,21 @@ conda --version
 cd Tools\Training
 setup.bat
 conda activate reinbalance
-pip install -r requirements.txt
 ```
 
 #### 動作確認（UE5 なし）
 
 ```cmd
 conda activate reinbalance
-python train.py --dry-run
+cd Tools\Training
+python train.py --game survivors --dry-run
 ```
 
 `--dry-run` はスタブ環境を使用するため UE5 の起動は不要です。
 
 ## 訓練の実行
+
+### 基本訓練
 
 1. UE5 エディタでテストレベルを開き、Play In Editor (PIE) を開始する
 2. 別のコマンドプロンプトで訓練スクリプトを実行する
@@ -115,33 +131,58 @@ python train.py --dry-run
 ```cmd
 conda activate reinbalance
 cd Tools\Training
-python train.py
+
+# Survivors ゲームで訓練
+python train.py --game survivors --total-steps 500000
+
+# フレームスキップ（1アクションを4ステップ繰り返す）
+python train.py --game survivors --frame-skip 4 --total-steps 300000
+
+# 報酬シェーピング関数を使用
+python train.py --game survivors --reward-fn eureka_results/my_run/best/reward_fn.py
 ```
 
-3. 訓練完了後、ONNX モデルに変換する
+### EUREKA ループ（LLM による報酬シェーピング）
+
+LLM が報酬シェーピング関数を反復生成・改良する。Anthropic / OpenAI どちらも使用可能。
 
 ```cmd
-python export_onnx.py
+# Survivors で5イテレーション実行（Anthropic Claude）
+python eureka_loop.py --game-config games/survivors_eureka_config.py --iterations 5
+
+# CoinGame で OpenAI GPT-4o を使用
+python eureka_loop.py --game-config games/coin_eureka_config.py --llm openai --model gpt-4o
+
+# 前回のランを再開
+python eureka_loop.py --game-config games/survivors_eureka_config.py --resume my_run
 ```
 
-変換されたモデルは `ReinBalance/Content/Models/balance_model.onnx` に保存されます。
+生成された報酬関数は `eureka_results/<run_name>/best/reward_fn.py` に保存される。
+
+### ONNX エクスポートと推論
+
+```cmd
+# モデルを ONNX に変換
+python export_onnx.py --game survivors --model models/survivors_model
+```
+
+変換されたモデルは `ReinBalance/Content/Models/survivors_model.onnx` に保存され、UE5 の NNERuntimeORT で推論に使用される。
 
 ## ソース管理
 
-Git と Perforce を併用しています。
+Git のみ使用。
 
 | 管理対象 | ツール |
 |----------|--------|
 | ソースコード・設定ファイル・訓練スクリプト | Git |
-| アセット（Content/） | Perforce（最終リビジョンを Google Drive に配置） |
+| アセット（Content/） | Git 管理外（Google Drive からダウンロード） |
 | 訓練済み ONNX モデル（Content/Models/） | Git |
 
 ## エンジン設定
 
 - **グラフィックス**: DX12 / Shader Model 6
 - **入力**: Enhanced Input System
-- **プラグイン**: NNERuntimeORT（推論）、PythonTrainingComm（訓練通信）
-- **タイムステップ**: 固定 60fps（訓練安定化のため）
+- **プラグイン**: NNERuntimeORT（ONNX推論）
 - **デフォルトマップ**: `/Engine/Maps/Templates/OpenWorld`
 
 ## モジュール依存関係
@@ -149,5 +190,4 @@ Git と Perforce を併用しています。
 | モジュール | 種別 | 依存 |
 |-----------|------|------|
 | ReinBalance | Runtime | Core, CoreUObject, Engine, InputCore, EnhancedInput |
-| ReinBalanceEditor | Editor | ReinBalance, PythonTrainingComm |
-| PythonTrainingComm | Editor Plugin | HTTPServer, HTTP, Json |
+| ReinBalanceEditor | Editor | ReinBalance, HTTPServer, HTTP, Json, JsonUtilities |
