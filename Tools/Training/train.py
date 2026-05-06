@@ -34,6 +34,13 @@ from stable_baselines3.common.vec_env import VecNormalize
 from common.utils import _linear_schedule
 from curriculum_callback import CurriculumCallback
 
+try:
+    import wandb
+    from wandb.integration.sb3 import WandbCallback
+    _WANDB_AVAILABLE = True
+except ImportError:
+    _WANDB_AVAILABLE = False
+
 _GAME_DEFAULTS = {
     "balance":   {"port": 8765, "output": "models/balance_model"},
     "coin":      {"port": 8766, "output": "models/coin_model"},
@@ -117,6 +124,13 @@ class _AnnealingShapingCallback(BaseCallback):
             print(f"[INFO] シェーピング比率: {ratio:.3f} "
                   f"(|shaped|={mean_shaped:.4f} / base={mean_base:.4f})")
 
+            if _WANDB_AVAILABLE and wandb.run:
+                wandb.log({
+                    "shaping/ratio": ratio,
+                    "shaping/mean_shaped": mean_shaped,
+                    "shaping/mean_base": mean_base,
+                }, step=self.num_timesteps)
+
             if ratio < self.anneal_threshold and self._anneal_start_step is None:
                 self._anneal_start_step = self.num_timesteps
                 print(f"[INFO] shaped_reward アニーリング開始 "
@@ -194,11 +208,31 @@ def parse_args() -> argparse.Namespace:
                    help="Stage 昇格の active_score 閾値 (default: 5.0, 目安: 撃破数×2.0+収集数×3.0)")
     p.add_argument("--curriculum-alive-reward", type=float, default=0.001,
                    help="生存ボーナスの1物理ステップあたりの値 (default: 0.001, UE5側と合わせる)")
+    p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
+    p.add_argument("--wandb-project", default="rl-balance", help="W&B プロジェクト名")
+    p.add_argument("--wandb-run-name", default=None, help="W&B ラン名（未指定時は自動生成）")
     return p.parse_args()
 
 
 def main() -> None:
+    _use_wandb = False
     args = parse_args()
+
+    _use_wandb = args.wandb and _WANDB_AVAILABLE
+    if _use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config={
+                "game": args.game,
+                "total_steps": args.total_steps,
+                "frame_skip": args.frame_skip,
+                "ent_coef": args.ent_coef,
+                "curriculum": args.curriculum,
+                "reward_fn": str(args.reward_fn) if args.reward_fn else None,
+                **_PPO_KWARGS,
+            },
+        )
 
     ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef}
 
@@ -308,6 +342,8 @@ def main() -> None:
     )
 
     callbacks = [checkpoint_cb]
+    if _use_wandb:
+        callbacks.append(WandbCallback(verbose=0))
     if reward_fn is not None and args.game in ("coin", "survivors"):
         anneal_cb = _AnnealingShapingCallback(
             raw_env=_get_raw_env(env),
@@ -352,6 +388,8 @@ def main() -> None:
             env.save(str(vecnorm_path))
             print(f"[INFO] VecNormalize 統計を保存: {vecnorm_path}")
         env.close()
+        if _use_wandb:
+            wandb.finish()
 
 
 if __name__ == "__main__":
