@@ -21,7 +21,8 @@ _MAX_LEVEL     = 100
 # VS スケール換算ダメージ値（ドキュメント参照用）
 _ENEMY_DPS = {"A": 5.0, "B": 10.0, "C": 8.0}
 _ENEMY_HP  = {"A": 20.0, "B": 50.0, "C": 30.0}
-_AURA_DPS  = 15.0
+_MIN_AURA_DPS  = 15.0   # Lv0 時のオーラ DPS（C++ MinAuraDPS と同値に保つこと）
+_MAX_AURA_DPS  = 30.0   # MaxLevel 時のオーラ DPS（C++ MaxAuraDPS と同値に保つこと）
 _MAX_PLAYER_HP = 100.0
 
 # 攻撃
@@ -145,12 +146,15 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"- 敵接触半径: 0.6m（この距離以内で HP ダメージ）\n"
             f"- オーラ攻撃半径: Lv0={_MIN_AURA_RADIUS}m → Lv{_MAX_LEVEL}={_MAX_AURA_RADIUS}m（lerp、レベルと共に拡大）\n"
             f"  reward_fn での計算: aura_m = {_MIN_AURA_RADIUS} + {_MAX_AURA_RADIUS - _MIN_AURA_RADIUS:.1f} * obs[player_level_idx]\n"
-            f"- オーラ DPS: {_AURA_DPS} HP/s → per tick: {_AURA_DPS/60:.4f}\n"
+            f"- オーラ DPS: Lv0={_MIN_AURA_DPS} HP/s → Lv{_MAX_LEVEL}={_MAX_AURA_DPS} HP/s（レベルと共に線形増加）\n"
+            f"  reward_fn での計算: aura_dps = {_MIN_AURA_DPS} + {_MAX_AURA_DPS - _MIN_AURA_DPS:.1f} * obs[player_level_idx]\n"
+            f"  per tick: Lv0={_MIN_AURA_DPS/60:.4f}, Lv{_MAX_LEVEL}={_MAX_AURA_DPS/60:.4f}\n"
             f"- プレイヤー最大 HP: {_MAX_PLAYER_HP}\n"
             f"- 敵タイプ別ダメージ DPS: A={_ENEMY_DPS['A']}, B={_ENEMY_DPS['B']}, C={_ENEMY_DPS['C']} HP/s\n"
             f"  → per tick: A={_ENEMY_DPS['A']/60:.4f}, B={_ENEMY_DPS['B']/60:.4f}, C={_ENEMY_DPS['C']/60:.4f}\n"
             f"- 敵タイプ別 HP: A={_ENEMY_HP['A']}, B={_ENEMY_HP['B']}, C={_ENEMY_HP['C']}\n"
-            f"  → Aura で倒す時間: A={_ENEMY_HP['A']/_AURA_DPS:.1f}s, B={_ENEMY_HP['B']/_AURA_DPS:.1f}s, C={_ENEMY_HP['C']/_AURA_DPS:.1f}s\n"
+            f"  → Aura で倒す時間 (Lv0): A={_ENEMY_HP['A']/_MIN_AURA_DPS:.1f}s, B={_ENEMY_HP['B']/_MIN_AURA_DPS:.1f}s, C={_ENEMY_HP['C']/_MIN_AURA_DPS:.1f}s\n"
+            f"  → Aura で倒す時間 (Lv{_MAX_LEVEL}): A={_ENEMY_HP['A']/_MAX_AURA_DPS:.1f}s, B={_ENEMY_HP['B']/_MAX_AURA_DPS:.1f}s, C={_ENEMY_HP['C']/_MAX_AURA_DPS:.1f}s\n"
             f"- 敵速度: A=1.0m/s, B=2.5m/s, C=1.5m/s（予測追跡）\n"
             f"- スポーン間隔: 5秒 ≈ 300ステップ（MaxActiveEnemies=6、EnemySpeedMult で倍率変更可能）"
         )
