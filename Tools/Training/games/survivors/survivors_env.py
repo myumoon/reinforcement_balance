@@ -100,6 +100,7 @@ class SurvivorsEnv(BaseUE5Env):
             MaxActiveEnemies (int): 同時存在できる最大敵数
             EnemySpeedMult   (float): 敵速度の倍率
             SpawnInterval    (float): 敵スポーン間隔 [秒]
+            XPGrowth         (float): レベルアップ必要 XP 増分（XPRequired(n) = XPBase + XPGrowth * n）
         Returns:
             True if successful
         """

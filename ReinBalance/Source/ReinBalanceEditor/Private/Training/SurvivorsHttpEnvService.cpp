@@ -126,6 +126,10 @@ private:
 		if (JsonObj->TryGetNumberField(TEXT("SpawnInterval"), SpawnInterval))
 			Game->EnemySpawnInterval = FMath::Clamp(static_cast<float>(SpawnInterval), 2.f, 60.f);
 
+		double XPGrowth;
+		if (JsonObj->TryGetNumberField(TEXT("XPGrowth"), XPGrowth))
+			Game->XPGrowth = FMath::Clamp(static_cast<float>(XPGrowth), 1.f, 20.f);
+
 		OnComplete(MakeJsonResponse(TEXT("{\"status\":\"ok\"}")));
 		return true;
 	}
