@@ -14,8 +14,17 @@
 """
 
 import argparse
+import importlib
 import importlib.util
+import sys
 from pathlib import Path
+
+# リファクタリング前に保存されたモデル（entity_attention_extractor モジュールで pickle 化）を
+# --resume でロードできるよう、旧モジュールパスを sys.modules に登録する
+sys.modules.setdefault(
+    "entity_attention_extractor",
+    importlib.import_module("base.entity_attention_extractor"),
+)
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
