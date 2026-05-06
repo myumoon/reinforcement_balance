@@ -19,6 +19,7 @@
       "Bash(mv:*)",
       "Bash(cp:*)",
       "Bash(cat:*)",
+      "Bash(sed:*)",
       "Bash(grep:*)",
       "Bash(find:*)",
       "Bash(echo:*)",

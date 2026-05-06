@@ -47,3 +47,8 @@ Thumbs.db
 # ====================
 .claude/settings.local.json
 .claude/grill-me/
+
+# ====================
+# ローカル
+# ====================
+.env/
