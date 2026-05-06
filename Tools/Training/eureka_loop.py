@@ -25,6 +25,12 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from curriculum_callback import CurriculumCallback
 
+try:
+    import wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    _WANDB_AVAILABLE = False
+
 _STATE_FILENAME = "state.json"
 
 _DEFAULT_STEPS = 50_000
@@ -82,6 +88,9 @@ def _parse_args() -> argparse.Namespace:
                    help="1回目イテレーションでLLMに伝える訓練課題テキスト（直接指定）")
     p.add_argument("--initial-observation-file", type=Path, default=None,
                    help="1回目イテレーションでLLMに伝える訓練課題テキストのファイルパス")
+    p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
+    p.add_argument("--wandb-project", default="eureka-loop", help="W&B プロジェクト名")
+    p.add_argument("--wandb-run-name", default=None, help="W&B ラン名")
     return p.parse_args()
 
 
@@ -455,6 +464,19 @@ def main() -> None:
 
     print(f"[INFO] 保存先: {run_dir}")
 
+    _use_wandb = args.wandb and _WANDB_AVAILABLE
+    if _use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name or run_name,
+            config={
+                "game_config": str(args.game_config),
+                "iterations": args.iterations,
+                "llm": args.llm,
+                "max_steps": args.max_steps,
+            },
+        )
+
     # LLM クライアント
     client, model_name = _build_llm_client(args.llm, args.model)
     print(f"[INFO] LLM: {args.llm} / {model_name}")
@@ -637,6 +659,11 @@ def main() -> None:
             # --- メトリクス収集・保存 ---
             metrics = metrics_cb.get_metrics(game_config)
             print(f"[INFO] metrics: {metrics}")
+            if _use_wandb and wandb.run:
+                log_dict = {"iteration": i, **metrics}
+                if best_primary is not None:
+                    log_dict["best/primary_metric"] = best_primary
+                wandb.log(log_dict, step=i)
             (iter_dir / "metrics.json").write_text(
                 json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -660,6 +687,10 @@ def main() -> None:
                 shutil.copy(reward_fn_path, best_dir / "reward_fn.py")
                 shutil.copy(iter_dir / "metrics.json", best_dir / "metrics.json")
                 print(f"[INFO] best 更新: {game_config.primary_metric_name}={primary:.3f} (iter {i})")
+                if _use_wandb and wandb.run:
+                    artifact = wandb.Artifact("best-reward-fn", type="reward_function")
+                    artifact.add_file(str(best_dir / "reward_fn.py"))
+                    wandb.log_artifact(artifact)
 
             prev_metrics = metrics
 
@@ -672,6 +703,8 @@ def main() -> None:
 
     finally:
         env.close()
+        if _use_wandb:
+            wandb.finish()
 
 
 

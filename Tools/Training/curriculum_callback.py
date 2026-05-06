@@ -78,3 +78,15 @@ class CurriculumCallback(BaseCallback):
                   f"敵数={enemies}, 速度×{speed:.1f}, スポーン{spawn:.1f}s, XPGrowth={xp_growth:.1f}")
         else:
             print(f"[Curriculum] Stage {self._stage} 昇格試行 — /params 更新失敗")
+        try:
+            import wandb
+            if wandb.run:
+                wandb.log({
+                    "curriculum/stage": self._stage,
+                    "curriculum/score_mean": mean,
+                    "curriculum/max_enemies": enemies,
+                    "curriculum/enemy_speed": speed,
+                    "curriculum/spawn_interval": spawn,
+                }, step=self.num_timesteps)
+        except ImportError:
+            pass
