@@ -73,6 +73,7 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	PlayerXP    = 0.f;
 	PlayerLevel = 0;
 	SetAuraSizeByLevel(PlayerLevel, MaxPlayerLevel);
+	SetAuraDpsByLevel(PlayerLevel, MaxPlayerLevel);
 
 	ItemPositions.SetNum(NumItems);
 	for (FVector2D& Item : ItemPositions)
@@ -316,11 +317,17 @@ void ASurvivorsGame::ProcessXPGain(float Amount)
 void ASurvivorsGame::OnLevelUp(int32 nextLevel)
 {
 	SetAuraSizeByLevel(nextLevel, MaxPlayerLevel);
+	SetAuraDpsByLevel(nextLevel, MaxPlayerLevel);
 }
 
 void ASurvivorsGame::SetAuraSizeByLevel(int32 level, int32 maxLevel)
 {
 	AuraRadius = FMath::Lerp(MinAuraRadius, MaxAuraRadius, static_cast<float>(level) / static_cast<float>(maxLevel));
+}
+
+void ASurvivorsGame::SetAuraDpsByLevel(int32 level, int32 maxLevel)
+{
+	AuraDPS = FMath::Lerp(MinAuraDPS, MaxAuraDPS, static_cast<float>(level) / static_cast<float>(maxLevel));
 }
 
 FVector2D ASurvivorsGame::RandomInsideField()
