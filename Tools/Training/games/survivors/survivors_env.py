@@ -5,7 +5,7 @@ from typing import Callable
 import numpy as np
 import gymnasium as gym
 import requests
-from .base_ue5_env import BaseUE5Env
+from base.base_ue5_env import BaseUE5Env
 
 _NUM_ACTIONS = 5
 

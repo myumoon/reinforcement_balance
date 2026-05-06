@@ -3,9 +3,9 @@
 import json
 import sys
 
-import requests
-
-from eureka_game_config import EurekaGameConfig
+from base.eureka_game_config import EurekaGameConfig
+from common.obs_schema import fetch_obs_schema, build_obs_layout
+from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
 
 _ALIVE_REWARD  = 0.001
 _ITEM_REWARD   = 3.0
@@ -28,34 +28,6 @@ _MAX_PLAYER_HP = 100.0
 _MIN_AURA_RADIUS = 2.5
 _MAX_AURA_RADIUS = 10.0
 
-def _fetch_obs_schema(host: str, port: int) -> dict:
-    url = f"http://{host}:{port}/obs_schema"
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.exceptions.ConnectionError:
-        print(f"[ERROR] UE5 サーバー ({host}:{port}) に接続できませんでした。")
-        print(f"[ERROR] UE5 エディタで PIE (▶) を起動してから再実行してください。")
-        sys.exit(1)
-
-
-def _build_obs_layout(schema: dict) -> tuple[str, dict[str, int]]:
-    lines = []
-    offsets: dict[str, int] = {}
-    offset = 0
-    for seg in schema["segments"]:
-        name = seg["name"]
-        dim = seg["dim"]
-        offsets[name] = offset
-        if dim == 1:
-            lines.append(f"  obs[{offset}]         = {name}")
-        else:
-            lines.append(f"  obs[{offset}:{offset + dim}] = {name}  (dim={dim})")
-        offset += dim
-    lines.append(f"  合計: {schema['total_dim']} 次元")
-    return "\n".join(lines), offsets
-
 
 class SurvivorsEurekaConfig(EurekaGameConfig):
     """Survivors ゲーム専用の EUREKA 設定。"""
@@ -66,12 +38,12 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
 
     def setup(self, host: str, port: int) -> None:
         print(f"[INFO] obs_schema を取得中 ({host}:{port})...")
-        schema = _fetch_obs_schema(host, port)
-        self._obs_layout_str, self._offsets = _build_obs_layout(schema)
+        schema = fetch_obs_schema(host, port)
+        self._obs_layout_str, self._offsets = build_obs_layout(schema)
         print(f"[INFO] obs_schema 取得完了: total_dim={schema['total_dim']}")
 
     def make_env(self, host: str, port: int, frame_skip: int = 1):
-        from envs.survivors_env import SurvivorsEnv
+        from games.survivors.survivors_env import SurvivorsEnv
         return SurvivorsEnv(host=host, port=port, frame_skip=frame_skip)
 
     # ------------------------------------------------------------------ #
@@ -328,17 +300,12 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
 
     def make_model(self, env):
         from stable_baselines3 import PPO
-        from entity_attention_extractor import EntityAttentionExtractor
-        from eureka_game_config import _linear_schedule
+        from common.utils import _linear_schedule
         policy_kwargs = dict(
-            features_extractor_class=EntityAttentionExtractor,
+            features_extractor_class=SurvivorsEntityAttentionExtractor,
             features_extractor_kwargs=dict(
                 features_dim=128,
                 offsets=self._offsets,
-                use_polar=True,
-                dist_alpha=1.0,
-                item_key="item_rel_pos",
-                enemy_scalar_keys=["enemy_type", "enemy_hp"],
             ),
             net_arch=[64, 64],
         )
