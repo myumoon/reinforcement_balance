@@ -78,6 +78,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Stage 昇格の active_score 閾値 (default: 5.0, 目安: 撃破数×2.0+収集数×3.0)")
     p.add_argument("--curriculum-alive-reward", type=float, default=0.001,
                    help="生存ボーナスの1物理ステップあたりの値 (default: 0.001, UE5側と合わせる)")
+    p.add_argument("--initial-observation", default=None,
+                   help="1回目イテレーションでLLMに伝える訓練課題テキスト（直接指定）")
+    p.add_argument("--initial-observation-file", type=Path, default=None,
+                   help="1回目イテレーションでLLMに伝える訓練課題テキストのファイルパス")
     return p.parse_args()
 
 
@@ -471,6 +475,15 @@ def main() -> None:
         env = _wrap_vec_normalize(raw_env)
         print("[INFO] VecNormalize 有効 (norm_obs=True, norm_reward=True, clip_obs=10.0)")
 
+    # 初回イテレーション用の訓練観察テキストを構築
+    initial_observation: str | None = None
+    if args.initial_observation:
+        initial_observation = args.initial_observation
+    elif args.initial_observation_file:
+        initial_observation = Path(args.initial_observation_file).read_text(encoding="utf-8").strip()
+    if initial_observation:
+        print(f"[INFO] 初回イテレーションに訓練観察を追加します ({len(initial_observation)} 文字)")
+
     # 再開状態の読み込み
     state = _load_state(run_dir)
     if state:
@@ -502,13 +515,17 @@ def main() -> None:
 
             # --- LLM に報酬関数を生成させる ---
             print("[INFO] LLM に報酬関数を生成中...")
+            obs_for_iter = initial_observation if i == 1 else None
             if args.llm == "anthropic":
                 static_prefix, dynamic_suffix = game_config.build_prompt_parts(
-                    prev_metrics, i, prev_review_findings)
+                    prev_metrics, i, prev_review_findings,
+                    initial_observation=obs_for_iter)
                 gen_content = (_make_cached_content(static_prefix, dynamic_suffix)
                                if static_prefix else dynamic_suffix)
             else:
-                gen_content = game_config.build_prompt(prev_metrics, i, prev_review_findings)
+                gen_content = game_config.build_prompt(
+                    prev_metrics, i, prev_review_findings,
+                    initial_observation=obs_for_iter)
             try:
                 llm_response = _call_llm(client, model_name, gen_content, args.llm,
                                          max_tokens=8192)
