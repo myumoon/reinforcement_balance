@@ -58,12 +58,12 @@ class CurriculumCallback(BaseCallback):
         self._scores.clear()
         # Phase 1 (stage 1-20): 敵数・速度・スポーン間隔を均等に難化
         #   enemies: stage 28 で cap(20)
-        #   speed  : stage 20 で cap(3.0)
+        #   speed  : stage 20 で cap(2.0)
         #   spawn  : stage 20 で cap(2.0)
         # Phase 2 (stage 21+): XPGrowth 増加でレベルアップを難化（オーラ拡大ペースが落ちる）
         #   xp_growth: stage 30 で cap(8.0)
         enemies   = min(6 + self._stage // 2, 20)
-        speed     = min(1.0 + self._stage * 0.1, 3.0)
+        speed     = min(1.0 + self._stage * 0.1, 2.0)
         spawn     = max(5.0 - self._stage * 0.15, 2.0)
         xp_growth = min(3.0 + max(0, self._stage - 20) * 0.5, 8.0)
         ok = self._raw_env.set_params(

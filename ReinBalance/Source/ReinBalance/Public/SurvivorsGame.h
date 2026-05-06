@@ -182,9 +182,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
 	float MaxAuraRadius = 10.0f;
 
-	/** オーラ攻撃 DPS（秒あたりダメージ）: /tick = AuraDPS * PhysicsDt */
+	/** 最小オーラ攻撃 DPS（秒あたりダメージ）: /tick = AuraDPS * PhysicsDt */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
-	float AuraDPS = 15.f;
+	float MinAuraDPS = 15.f;
+	
+	/** 最大オーラ攻撃 DPS（秒あたりダメージ）: /tick = AuraDPS * PhysicsDt */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
+	float MaxAuraDPS = 30.f;
 
 	// ---- 敵設定 ----
 
@@ -269,6 +273,7 @@ private:
 	float                 PlayerXP    = 0.f;
 	int32                 PlayerLevel = 0;
 	float                 AuraRadius  = 0.0f;
+	float                 AuraDPS     = 0.0f;
 	FWeaponSlot           WeaponSlots[MaxWeaponSlots];
 	TArray<FVector2D>     ItemPositions;
 	TArray<FEnemyState>   Enemies;
@@ -300,4 +305,6 @@ private:
 	
 	// ステータス
 	void  SetAuraSizeByLevel(int32 level, int32 maxLevel);
+	void  SetAuraDpsByLevel(int32 level, int32 maxLevel);
 };
+
