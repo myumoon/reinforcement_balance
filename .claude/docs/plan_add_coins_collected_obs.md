@@ -30,4 +30,4 @@ reward_fn.py でコイン収集イベントを検出するには現在 `base_rew
 
 - `ReinBalance/Source/ReinBalance/Public/CoinGame.h` — `CoinsCollected` メンバー追加、`GetObsDim()` +1
 - `ReinBalance/Source/ReinBalance/Private/CoinGame.cpp` — obs 追加、リセット時クリア
-- `Tools/Training/games/coin_eureka_config.py` — obs インデックス説明追加
+- `Tools/Training/games/coin/coin_eureka_config.py` — obs インデックス説明追加

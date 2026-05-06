@@ -184,8 +184,56 @@ python export_onnx.py --game survivors --model models/survivors_model
 | MaxAuraRadius | float | 10.0 | Aura最大半径（m）MaxLevel時 |
 | XPGrowth | float | 3.0 | レベルアップ必要XP増分 |
 
-> **注意**: Python設定ファイル `games/survivors_eureka_config.py` の `_MIN_AURA_RADIUS = 2.5` は
+> **注意**: Python設定ファイル `games/survivors/survivors_eureka_config.py` の `_MIN_AURA_RADIUS = 2.5` は
 > C++ の `MinAuraRadius = 2.0f` と不一致。報酬関数生成プロンプトで使う定数として修正が必要。
+
+---
+
+## Python 訓練スクリプト設計
+
+### モジュール構成の思想
+
+`Tools/Training/` は以下の 3 層で構成されている:
+
+| ディレクトリ | 役割 | 変更頻度 |
+|------------|------|---------|
+| `base/` | 全ゲーム共通の抽象基底クラス | 低（設計変更時のみ） |
+| `common/` | ゲーム非依存のユーティリティ関数 | 低 |
+| `games/<game>/` | ゲーム固有の実装 | 高（新ゲーム追加・調整） |
+
+### 新しいゲームを追加する手順
+
+1. `games/<game>/` ディレクトリを作成し `__init__.py` を置く
+2. `<game>_env.py`: `BaseUE5Env` を継承して gymnasium 環境を実装
+3. `<game>_env_stub.py`: `gym.Env` を直接継承した dry-run 用スタブを実装
+4. `<game>_entity_attention_extractor.py`（任意）: `EntityAttentionExtractor` を継承してゲーム固有設定を内包
+5. `<game>_eureka_config.py`（任意）: `EurekaGameConfig` を継承して EUREKA ループ用設定を実装
+6. `train.py` の `_GAME_DEFAULTS` と env 選択分岐にゲームを追加
+
+### エンティティアテンション
+
+`base/entity_attention_extractor.py` の `EntityAttentionExtractor` が基底クラス。
+
+ゲーム固有サブクラスで `item_key` / `use_polar` / `enemy_scalar_keys` 等を事前設定する:
+- `games/coin/coin_entity_attention_extractor.py`: `CoinEntityAttentionExtractor`
+- `games/survivors/survivors_entity_attention_extractor.py`: `SurvivorsEntityAttentionExtractor`
+
+`train.py --entity-attention` 指定時はゲームに対応するサブクラスが自動選択される。
+
+> **注意（既存モデルの再開）**: リファクタリング前（PR #37 以前）に `--entity-attention` で
+> 訓練したモデルを `--resume` する場合、cloudpickle が旧モジュールパスを参照するが、
+> `train.py` 起動時に `sys.modules` へ互換エイリアスを自動登録するため **そのまま使用可能**。
+
+### カリキュラム学習（Survivors 専用）
+
+`curriculum_callback.py` の `CurriculumCallback` が実装済み。`--curriculum` フラグで有効化する。
+
+```cmd
+python train.py --game survivors --curriculum --total-steps 500000 \
+    --curriculum-window 20 --curriculum-threshold 5.0
+```
+
+直近 `window` エピソードの `item_kill_score` 平均が `threshold` を超えると自動で敵数・速度・スポーン間隔が段階的に難化する。
 
 ---
 
