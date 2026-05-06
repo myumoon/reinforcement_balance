@@ -56,17 +56,25 @@ class CurriculumCallback(BaseCallback):
     def _advance_stage(self, mean: float):
         self._stage += 1
         self._scores.clear()
-        enemies = min(6 + self._stage, 20)
-        speed   = min(1.0 + self._stage * 0.2, 3.0)
-        spawn   = max(5.0 - self._stage * 0.5, 2.0)
+        # Phase 1 (stage 1-20): 敵数・速度・スポーン間隔を均等に難化
+        #   enemies: stage 28 で cap(20)
+        #   speed  : stage 20 で cap(3.0)
+        #   spawn  : stage 20 で cap(2.0)
+        # Phase 2 (stage 21+): XPGrowth 増加でレベルアップを難化（オーラ拡大ペースが落ちる）
+        #   xp_growth: stage 30 で cap(8.0)
+        enemies   = min(6 + self._stage // 2, 20)
+        speed     = min(1.0 + self._stage * 0.1, 3.0)
+        spawn     = max(5.0 - self._stage * 0.15, 2.0)
+        xp_growth = min(3.0 + max(0, self._stage - 20) * 0.5, 8.0)
         ok = self._raw_env.set_params(
             MaxActiveEnemies=enemies,
             EnemySpeedMult=speed,
             SpawnInterval=spawn,
+            XPGrowth=xp_growth,
         )
         if ok:
             print(f"[Curriculum] Stage {self._stage} に昇格 "
                   f"(active_score_mean={mean:.3f}) — "
-                  f"敵数={enemies}, 速度×{speed:.1f}, スポーン{spawn:.1f}s")
+                  f"敵数={enemies}, 速度×{speed:.1f}, スポーン{spawn:.1f}s, XPGrowth={xp_growth:.1f}")
         else:
             print(f"[Curriculum] Stage {self._stage} 昇格試行 — /params 更新失敗")
