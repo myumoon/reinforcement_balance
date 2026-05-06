@@ -9,7 +9,7 @@
 | Phase 1-A | XP・レベルシステム | ✅ 完了（SurvivorsGame） |
 | Phase 1-A | フレームスキップ（Action Repeat） | ✅ 完了（PR #32） |
 | Phase 1-B | UE5 `/params` エンドポイント | ✅ 完了（SurvivorsGame） |
-| Phase 1-B | **Python CurriculumCallback** | ❌ **未実装 ← 次の作業** |
+| Phase 1-B | **Python CurriculumCallback** | ✅ 完了 |
 | Phase 2 | W&B ログ整備 | ❌ 未実装 |
 | Phase 2 | 並列環境対応 | △ 部分（UE5 単一接続制約で n_envs=1） |
 | Phase 3 | LSTM / Hierarchical RL 等 | ❌ 未実装（将来） |
