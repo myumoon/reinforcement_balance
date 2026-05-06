@@ -201,7 +201,8 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         ])
 
     def _build_prompt_dynamic(self, prev_metrics: dict | None, iteration: int,
-                               prev_review: str | None = None) -> str:
+                               prev_review: str | None = None,
+                               initial_observation: str | None = None) -> str:
         metrics_value = (
             "なし（初回）"
             if prev_metrics is None
@@ -230,6 +231,8 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"この報酬関数で何を解決しようとしているか（1〜3行）"
         )
         items = [metrics_section]
+        if initial_observation is not None:
+            items.append(self._titled_section("ユーザーによる訓練観察・課題", initial_observation))
         if prev_review is not None:
             items.append(self._titled_section("前回レビューで指摘された設計上の問題", prev_review))
         items.append("## 課題\n前回の訓練の結果から課題を判断して箇条書きで記載。")
@@ -237,12 +240,16 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         return "\n\n".join(items)
 
     def build_prompt_parts(self, prev_metrics: dict | None, iteration: int,
-                           prev_review: str | None = None) -> tuple[str, str]:
-        return self._build_prompt_static(), self._build_prompt_dynamic(prev_metrics, iteration, prev_review)
+                           prev_review: str | None = None,
+                           initial_observation: str | None = None) -> tuple[str, str]:
+        return self._build_prompt_static(), self._build_prompt_dynamic(
+            prev_metrics, iteration, prev_review, initial_observation)
 
     def build_prompt(self, prev_metrics: dict | None, iteration: int,
-                     prev_review: str | None = None) -> str:
-        static, dynamic = self.build_prompt_parts(prev_metrics, iteration, prev_review)
+                     prev_review: str | None = None,
+                     initial_observation: str | None = None) -> str:
+        static, dynamic = self.build_prompt_parts(prev_metrics, iteration, prev_review,
+                                                   initial_observation)
         return static + "\n\n" + dynamic
 
     def build_constraints_hint(self) -> str:
