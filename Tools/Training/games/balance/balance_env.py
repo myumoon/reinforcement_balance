@@ -2,7 +2,7 @@
 
 import numpy as np
 import gymnasium as gym
-from .base_ue5_env import BaseUE5Env
+from base.base_ue5_env import BaseUE5Env
 
 
 class BalanceEnv(BaseUE5Env):

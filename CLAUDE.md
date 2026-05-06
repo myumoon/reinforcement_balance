@@ -75,13 +75,27 @@ ue5_reinforcement_balance/
 │       └── ReinBalanceEditor.Target.cs
 ├── Tools/
 │   └── Training/                          # Python 訓練スクリプト
-│       ├── envs/                          # gymnasium 環境ラッパー
+│       ├── base/                          # 共通基底クラス
 │       │   ├── base_ue5_env.py            # HTTP通信基底クラス
-│       │   ├── balance_env.py / coin_env.py / survivors_env.py
-│       │   └── *_env_stub.py              # UE5 なしでの動作確認用スタブ
-│       ├── games/                         # EUREKA ループ用ゲーム設定
-│       │   ├── coin_eureka_config.py
-│       │   └── survivors_eureka_config.py
+│       │   ├── entity_attention_extractor.py  # エンティティアテンション基底
+│       │   └── eureka_game_config.py      # EUREKA設定基底クラス
+│       ├── common/                        # 共通ユーティリティ
+│       │   ├── obs_schema.py              # obs_schema取得・解析
+│       │   └── utils.py                   # _linear_schedule 等
+│       ├── games/                         # ゲーム別モジュール
+│       │   ├── balance/                   # BalancePole
+│       │   │   ├── balance_env.py
+│       │   │   └── balance_env_stub.py
+│       │   ├── coin/                      # CoinGame
+│       │   │   ├── coin_entity_attention_extractor.py
+│       │   │   ├── coin_env.py
+│       │   │   ├── coin_env_stub.py
+│       │   │   └── coin_eureka_config.py
+│       │   └── survivors/                 # Survivors
+│       │       ├── survivors_entity_attention_extractor.py
+│       │       ├── survivors_env.py
+│       │       ├── survivors_env_stub.py
+│       │       └── survivors_eureka_config.py
 │       ├── requirements.txt               # バージョン固定
 │       ├── setup.bat / setup.sh           # 環境セットアップ
 │       ├── train.py                       # 訓練エントリーポイント（SB3 PPO）
@@ -142,8 +156,8 @@ python train.py --game survivors --total-steps 500000
 LLM が報酬シェーピング関数を反復生成・改良する。
 
 ```cmd
-python eureka_loop.py --game-config games/survivors_eureka_config.py --iterations 5
-python eureka_loop.py --game-config games/coin_eureka_config.py --llm openai --model gpt-4o
+python eureka_loop.py --game-config games/survivors/survivors_eureka_config.py --iterations 5
+python eureka_loop.py --game-config games/coin/coin_eureka_config.py --llm openai --model gpt-4o
 ```
 
 生成結果は `eureka_results/<run_name>/` に保存。ベスト関数を `--reward-fn` で train.py に渡せる。

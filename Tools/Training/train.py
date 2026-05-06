@@ -22,6 +22,7 @@ from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
 
+from common.utils import _linear_schedule
 from curriculum_callback import CurriculumCallback
 
 _GAME_DEFAULTS = {
@@ -29,13 +30,6 @@ _GAME_DEFAULTS = {
     "coin":      {"port": 8766, "output": "models/coin_model"},
     "survivors": {"port": 8767, "output": "models/survivors_model"},
 }
-
-
-def _linear_schedule(initial_value: float):
-    """PPO 学習率の線形減衰スケジュール（訓練終了時に 0 になる）。"""
-    def func(progress_remaining: float) -> float:
-        return progress_remaining * initial_value
-    return func
 
 
 _PPO_KWARGS = dict(
@@ -216,32 +210,32 @@ def main() -> None:
 
     if args.dry_run:
         if args.game == "coin":
-            from envs.coin_env_stub import DummyCoinEnv
+            from games.coin.coin_env_stub import DummyCoinEnv
             env = make_vec_env(DummyCoinEnv, n_envs=4)
         elif args.game == "survivors":
-            from envs.survivors_env_stub import DummySurvivorsEnv
+            from games.survivors.survivors_env_stub import DummySurvivorsEnv
             env = make_vec_env(DummySurvivorsEnv, n_envs=4)
         else:
-            from envs.balance_env_stub import DummyBalanceEnv
+            from games.balance.balance_env_stub import DummyBalanceEnv
             env = make_vec_env(DummyBalanceEnv, n_envs=4)
         print(f"[dry-run] game={args.game} スタブ環境で実行")
     else:
         if args.game == "coin":
-            from envs.coin_env import CoinEnv
+            from games.coin.coin_env import CoinEnv
             def _make_coin_env():
                 e = CoinEnv(host=args.host, port=port, frame_skip=args.frame_skip)
                 e._reward_fn = reward_fn
                 return e
             env = make_vec_env(_make_coin_env, n_envs=1)
         elif args.game == "survivors":
-            from envs.survivors_env import SurvivorsEnv
+            from games.survivors.survivors_env import SurvivorsEnv
             def _make_survivors_env():
                 e = SurvivorsEnv(host=args.host, port=port, frame_skip=args.frame_skip)
                 e._reward_fn = reward_fn
                 return e
             env = make_vec_env(_make_survivors_env, n_envs=1)
         else:
-            from envs.balance_env import BalanceEnv
+            from games.balance.balance_env import BalanceEnv
             env = make_vec_env(
                 lambda: BalanceEnv(host=args.host, port=port),
                 n_envs=1,
@@ -280,28 +274,19 @@ def main() -> None:
             print("[WARN] --entity-attention はコイン/サバイバーズゲーム専用です。MlpPolicy を使用します。")
             model = PPO("MlpPolicy", env, **ppo_kwargs)
         else:
-            from entity_attention_extractor import EntityAttentionExtractor
             offsets = getattr(_get_raw_env(env), "_offsets", {})
-            # ゲームごとに obs セグメント構成を指定する
             if args.game == "survivors":
-                extractor_kwargs = dict(
-                    features_dim=128, offsets=offsets,
-                    use_polar=True, dist_alpha=args.dist_alpha,
-                    item_key="item_rel_pos",
-                    enemy_scalar_keys=["enemy_type", "enemy_hp"],
-                )
+                from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
+                extractor_class = SurvivorsEntityAttentionExtractor
             else:  # coin
-                extractor_kwargs = dict(
-                    features_dim=128, offsets=offsets,
-                    use_polar=True, dist_alpha=args.dist_alpha,
-                )
+                from games.coin.coin_entity_attention_extractor import CoinEntityAttentionExtractor
+                extractor_class = CoinEntityAttentionExtractor
             policy_kwargs = dict(
-                features_extractor_class=EntityAttentionExtractor,
-                features_extractor_kwargs=extractor_kwargs,
+                features_extractor_class=extractor_class,
+                features_extractor_kwargs=dict(features_dim=128, offsets=offsets),
                 net_arch=[64, 64],
             )
-            print(f"[INFO] EntityAttentionExtractor を使用します"
-                  f" (game={args.game}, use_polar=True, dist_alpha={args.dist_alpha})")
+            print(f"[INFO] {extractor_class.__name__} を使用します (game={args.game})")
             model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, **ppo_kwargs)
     else:
         model = PPO("MlpPolicy", env, **ppo_kwargs)
