@@ -9,82 +9,33 @@
 | Phase 1-A | XP・レベルシステム | ✅ 完了（SurvivorsGame） |
 | Phase 1-A | フレームスキップ（Action Repeat） | ✅ 完了（PR #32） |
 | Phase 1-B | UE5 `/params` エンドポイント | ✅ 完了（SurvivorsGame） |
-| Phase 1-B | **Python CurriculumCallback** | ❌ **未実装 ← 次の作業** |
-| Phase 2 | W&B ログ整備 | ❌ 未実装 |
+| Phase 1-B | **Python CurriculumCallback** | ✅ 完了（`curriculum_callback.py`） |
+| Phase 2 | W&B ログ整備 | ❌ **未実装 ← 次の作業** |
 | Phase 2 | 並列環境対応 | △ 部分（UE5 単一接続制約で n_envs=1） |
 | Phase 3 | LSTM / Hierarchical RL 等 | ❌ 未実装（将来） |
 
 ---
 
-## Phase 1-B: Python CurriculumCallback
+## Phase 1-B: Python CurriculumCallback ✅ 完了
 
-### 背景
-UE5 の `/params` エンドポイント（MaxActiveEnemies / EnemySpeedMult / SpawnInterval）は実装済み。
-`SurvivorsEnv.set_params()` も実装済み。Python 側の自動難易度制御が未接続。
+**実装場所**: `Tools/Training/curriculum_callback.py`（`train.py` とは独立したファイル）
 
-### 実装内容
+### 使い方
 
-#### `Tools/Training/train.py` に追加
-```python
-class CurriculumCallback(BaseCallback):
-    """直近 window エピソードの item_kill_score 平均が threshold を超えたら難易度を上げる。"""
-    def __init__(self, env, window=20, threshold=5.0, verbose=0):
-        super().__init__(verbose)
-        self.env = env       # SurvivorsEnv（set_params を持つ）
-        self.window = window
-        self.threshold = threshold
-        self._scores: list[float] = []
-        self._stage = 0
-
-    def _on_step(self) -> bool:
-        for info in self.locals.get("infos", []):
-            if "episode" in info:
-                # item_kill_score = base_reward - AliveReward * ep_len
-                base = info.get("base_reward", 0.0)
-                ep_len = info["episode"]["l"]
-                self._scores.append(max(0.0, base - 0.001 * ep_len))
-                if len(self._scores) >= self.window:
-                    mean = sum(self._scores[-self.window:]) / self.window
-                    if mean >= self.threshold:
-                        self._advance_stage()
-        return True
-
-    def _advance_stage(self):
-        self._stage += 1
-        self._scores.clear()
-        enemies = min(6 + self._stage, 20)
-        speed   = min(1.0 + self._stage * 0.2, 3.0)
-        spawn   = max(5.0 - self._stage * 0.5, 2.0)
-        self.env.set_params(
-            MaxActiveEnemies=enemies,
-            EnemySpeedMult=speed,
-            SpawnInterval=spawn,
-        )
-        print(f"[Curriculum] Stage {self._stage} — 敵数={enemies}, 速度×{speed:.1f}, スポーン{spawn:.1f}s")
+```cmd
+python train.py --game survivors --curriculum --total-steps 500000
+python train.py --game survivors --curriculum --curriculum-window 20 --curriculum-threshold 5.0
 ```
 
-CLI 引数追加:
-```python
-p.add_argument("--curriculum", action="store_true",
-               help="カリキュラム学習（SurvivorsGame のみ）")
-p.add_argument("--curriculum-window", type=int, default=20,
-               help="評価ウィンドウサイズ（エピソード数）")
-p.add_argument("--curriculum-threshold", type=float, default=5.0,
-               help="次ステージに進む item_kill_score 閾値")
-```
+| CLI 引数 | デフォルト | 説明 |
+|---------|-----------|------|
+| `--curriculum` | false | カリキュラム学習を有効化（survivors のみ） |
+| `--curriculum-window` | 20 | active_score を平均するエピソード数 |
+| `--curriculum-threshold` | 5.0 | Stage 昇格の active_score 閾値 |
+| `--curriculum-alive-reward` | 0.001 | 生存ボーナス（UE5 側と合わせる） |
 
-#### `Tools/Training/eureka_loop.py` にも同様に適用（オプション引数）
-
-### 影響ファイル
-- `Tools/Training/train.py`
-- `Tools/Training/eureka_loop.py`
-
-### 検証
-```bash
-python train.py --game survivors --curriculum --total-steps 300000
-# → "[Curriculum] Stage X に進みました" がログに出ること
-# → UE5 側の敵数・速度が段階的に増えること
-```
+直近 `window` エピソードの `item_kill_score` 平均が `threshold` を超えると
+敵数・速度・スポーン間隔が段階的に難化する。進捗は `curriculum_status.json` に保存される。
 
 ---
 
