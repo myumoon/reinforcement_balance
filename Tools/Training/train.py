@@ -29,7 +29,7 @@ sys.modules.setdefault(
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import VecNormalize
+from stable_baselines3.common.vec_env import VecFrameStack, VecNormalize
 
 from common.utils import _linear_schedule
 from curriculum_callback import CurriculumCallback
@@ -40,6 +40,12 @@ try:
     _WANDB_AVAILABLE = True
 except ImportError:
     _WANDB_AVAILABLE = False
+
+try:
+    from sb3_contrib import RecurrentPPO
+    _SB3_CONTRIB_AVAILABLE = True
+except ImportError:
+    _SB3_CONTRIB_AVAILABLE = False
 
 _GAME_DEFAULTS = {
     "balance":   {"port": 8765, "output": "models/balance_model"},
@@ -72,6 +78,16 @@ def _get_raw_env(env):
     if hasattr(inner, "unwrapped"):
         inner = inner.unwrapped
     return inner
+
+
+def _find_vecnormalize(env):
+    """VecEnv ラッパーチェーンから VecNormalize レイヤーを見つけて返す（無ければ None）。"""
+    cur = env
+    while cur is not None:
+        if isinstance(cur, VecNormalize):
+            return cur
+        cur = getattr(cur, "venv", None)
+    return None
 
 
 class _AnnealingShapingCallback(BaseCallback):
@@ -200,6 +216,14 @@ def parse_args() -> argparse.Namespace:
                    help="PPO エントロピー係数 (default: 0.01)")
     p.add_argument("--frame-skip", type=int, default=1,
                    help="フレームスキップ数 N: 1 RL ステップで N 物理ステップ実行（default: 1）")
+    p.add_argument("--frame-stack", type=int, default=1,
+                   help="観測フレーム数 N: 直近 N ステップの観測を結合する (default: 1=スタックなし)")
+    p.add_argument("--recurrent", action="store_true",
+                   help="RecurrentPPO (LSTM) ポリシーを使用 (sb3-contrib が必要)")
+    p.add_argument("--lstm-hidden-size", type=int, default=256,
+                   help="LSTM の隠れ層サイズ (default: 256, --recurrent 専用)")
+    p.add_argument("--n-lstm-layers", type=int, default=1,
+                   help="LSTM のレイヤー数 (default: 1, --recurrent 専用)")
     p.add_argument("--curriculum", action="store_true",
                    help="カリキュラム学習を有効化（survivors 専用）")
     p.add_argument("--curriculum-window", type=int, default=20,
@@ -227,12 +251,25 @@ def main() -> None:
                 "game": args.game,
                 "total_steps": args.total_steps,
                 "frame_skip": args.frame_skip,
+                "frame_stack": args.frame_stack,
+                "recurrent": args.recurrent,
+                "lstm_hidden_size": args.lstm_hidden_size if args.recurrent else None,
+                "n_lstm_layers": args.n_lstm_layers if args.recurrent else None,
                 "ent_coef": args.ent_coef,
                 "curriculum": args.curriculum,
                 "reward_fn": str(args.reward_fn) if args.reward_fn else None,
                 **_PPO_KWARGS,
             },
         )
+
+    if args.recurrent and not _SB3_CONTRIB_AVAILABLE:
+        raise ImportError(
+            "--recurrent には sb3-contrib が必要です。"
+            "requirements.txt の sb3-contrib>=2.3.0 をインストールしてください。"
+        )
+    if args.recurrent and args.frame_stack > 1:
+        print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
+              " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")
 
     ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef}
 
@@ -306,16 +343,27 @@ def main() -> None:
             env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
             print("[INFO] VecNormalize を有効化しました (norm_obs=True, norm_reward=True)")
 
+    # フレームスタック: 正規化済み観測を直近 N ステップ分結合する。
+    # VecNormalize の running stats は単一フレームに対するため、VecFrameStack は最外側に配置する。
+    if args.frame_stack > 1:
+        env = VecFrameStack(env, n_stack=args.frame_stack)
+        print(f"[INFO] VecFrameStack を有効化しました (n_stack={args.frame_stack})")
+
+    algo_class = RecurrentPPO if args.recurrent else PPO
+    default_policy = "MlpLstmPolicy" if args.recurrent else "MlpPolicy"
+
     if args.resume:
         resume_path = str(_strip_zip(args.resume))
         print(f"[INFO] {resume_path} から再開")
         if args.entity_attention:
             print("[INFO] --entity-attention は --resume 時は無視されます（保存済みモデルのアーキテクチャを使用）")
-        model = PPO.load(resume_path, env=env)
+        if args.recurrent:
+            print("[INFO] --recurrent は --resume 時は保存済みモデルのアーキテクチャに従います")
+        model = algo_class.load(resume_path, env=env)
     elif args.entity_attention:
         if args.game not in ("coin", "survivors"):
-            print("[WARN] --entity-attention はコイン/サバイバーズゲーム専用です。MlpPolicy を使用します。")
-            model = PPO("MlpPolicy", env, **ppo_kwargs)
+            print(f"[WARN] --entity-attention はコイン/サバイバーズゲーム専用です。{default_policy} を使用します。")
+            model = algo_class(default_policy, env, **ppo_kwargs)
         else:
             offsets = getattr(_get_raw_env(env), "_offsets", {})
             if args.game == "survivors":
@@ -329,10 +377,21 @@ def main() -> None:
                 features_extractor_kwargs=dict(features_dim=128, offsets=offsets),
                 net_arch=[64, 64],
             )
-            print(f"[INFO] {extractor_class.__name__} を使用します (game={args.game})")
-            model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, **ppo_kwargs)
+            if args.recurrent:
+                policy_kwargs["lstm_hidden_size"] = args.lstm_hidden_size
+                policy_kwargs["n_lstm_layers"] = args.n_lstm_layers
+            print(f"[INFO] {extractor_class.__name__} を使用します (game={args.game}, policy={default_policy})")
+            model = algo_class(default_policy, env, policy_kwargs=policy_kwargs, **ppo_kwargs)
+    elif args.recurrent:
+        policy_kwargs = dict(
+            lstm_hidden_size=args.lstm_hidden_size,
+            n_lstm_layers=args.n_lstm_layers,
+        )
+        print(f"[INFO] RecurrentPPO (MlpLstmPolicy) を使用します "
+              f"(lstm_hidden_size={args.lstm_hidden_size}, n_lstm_layers={args.n_lstm_layers})")
+        model = algo_class(default_policy, env, policy_kwargs=policy_kwargs, **ppo_kwargs)
     else:
-        model = PPO("MlpPolicy", env, **ppo_kwargs)
+        model = algo_class(default_policy, env, **ppo_kwargs)
 
     checkpoint_cb = CheckpointCallback(
         save_freq=max(args.checkpoint_freq // (env.num_envs or 1), 1),
@@ -384,8 +443,9 @@ def main() -> None:
     finally:
         model.save(str(output))
         print(f"[INFO] Model saved to {output}.zip")
-        if isinstance(env, VecNormalize):
-            env.save(str(vecnorm_path))
+        vn = _find_vecnormalize(env)
+        if vn is not None:
+            vn.save(str(vecnorm_path))
             print(f"[INFO] VecNormalize 統計を保存: {vecnorm_path}")
         env.close()
         if _use_wandb:
