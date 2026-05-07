@@ -12,6 +12,7 @@ from pathlib import Path
 import torch
 import onnx
 from stable_baselines3 import PPO
+from stable_baselines3.common.save_util import load_from_zip_file
 
 
 class _DeterministicActor(torch.nn.Module):
@@ -32,7 +33,28 @@ class _DeterministicActor(torch.nn.Module):
         return action.float()  # 離散 (int64) も float32 に統一
 
 
+def _assert_not_recurrent(model_path: Path) -> None:
+    """RecurrentPPO で訓練されたモデルは ONNX 出力未対応のため早期に弾く。
+
+    LSTM ポリシーは hidden state を入出力に含める専用エクスポート処理が必要だが、
+    UE5 NNERuntimeORT 側の状態管理も未実装のため一旦未対応とする。
+    """
+    data, _, _ = load_from_zip_file(str(model_path), load_data=True, device="cpu")
+    policy_class = data.get("policy_class")
+    if policy_class is None:
+        return
+    name = policy_class.__name__
+    if "Lstm" in name or "Recurrent" in name:
+        raise NotImplementedError(
+            "RecurrentPPO (LSTM) モデルの ONNX エクスポートは未対応です。"
+            " hidden state を入出力に含めた専用エクスポート処理と UE5 側の状態保持実装が必要です。"
+            f" (検出ポリシークラス: {name})"
+        )
+
+
 def export(model_path: Path, output_path: Path) -> None:
+    _assert_not_recurrent(model_path)
+
     model = PPO.load(str(model_path))
     policy = model.policy
     policy.eval()
