@@ -20,5 +20,7 @@ iopath==0.1.10
 einops==0.8.0
 matplotlib==3.9.1
 scikit-image==0.24.0
+segmentation-models-pytorch==0.3.4
+albumentations==1.4.3
 onnx==1.16.1
 onnxruntime==1.18.1
