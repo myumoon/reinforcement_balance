@@ -3,6 +3,20 @@
 #include "Kismet/GameplayStatics.h"
 #include "Misc/SecureHash.h"
 
+// Garlic レベル別ステータス（仕様: weapons_garlic.md §2）
+// Lv1〜8: damage[HP], hit_interval[s], area_radius[u]
+struct FGarlicParams { float Damage; float HitInterval; float AreaRadius; };
+static constexpr FGarlicParams GarlicTable[8] = {
+	{  5.f, 1.30f,  80.f }, // Lv1
+	{  5.f, 1.25f,  95.f }, // Lv2
+	{ 10.f, 1.20f, 110.f }, // Lv3
+	{ 10.f, 1.15f, 125.f }, // Lv4
+	{ 15.f, 1.10f, 140.f }, // Lv5
+	{ 15.f, 1.05f, 155.f }, // Lv6
+	{ 20.f, 1.00f, 170.f }, // Lv7
+	{ 20.f, 0.95f, 185.f }, // Lv8
+};
+
 // 8方向レイキャスト方向（右回り 0°=右）
 const FVector2D ASurvivorsGame::RayDirs[8] = {
 	FVector2D( 1.f,       0.f      ), //   0° 右
@@ -150,8 +164,11 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	PlayerHP    = MaxPlayerHP;
 	PlayerXP    = 0.f;
 	PlayerLevel = 0;
-	SetAuraSizeByLevel(PlayerLevel, MaxPlayerLevel);
-	SetAuraDpsByLevel(PlayerLevel, MaxPlayerLevel);
+
+	// Garlic は Lv1 スタート（プレイヤーレベルアップごとに +1、上限 Lv8）
+	WeaponSlots[0].Type  = EWeaponType::Aura;
+	WeaponSlots[0].Level = 1;
+	AuraRadius = GarlicTable[0].AreaRadius; // 80u
 
 	ItemPositions.SetNum(NumItems);
 	for (FVector2D& Item : ItemPositions)
@@ -364,13 +381,6 @@ float ASurvivorsGame::GetEnemySpeed(int32 TypeId) const
 	return EnemyTypeTable[TypeId].Speed * EnemySpeedMult;
 }
 
-float ASurvivorsGame::GetEnemyDamagePerTick(int32 TypeId) const
-{
-	// Plan04 で 0.5s 無敵 + per-hit に置き換え予定。暫定 DPS モデル。
-	if (!EnemyTypeTable.IsValidIndex(TypeId)) return 0.f;
-	return EnemyTypeTable[TypeId].ContactDamage * PhysicsDt;
-}
-
 float ASurvivorsGame::GetEnemyTypeMaxHP(int32 TypeId) const
 {
 	if (!EnemyTypeTable.IsValidIndex(TypeId)) return 1.f;
@@ -396,20 +406,12 @@ void ASurvivorsGame::ProcessXPGain(float Amount)
 	}
 }
 
-void ASurvivorsGame::OnLevelUp(int32 nextLevel)
+void ASurvivorsGame::OnLevelUp(int32 NextLevel)
 {
-	SetAuraSizeByLevel(nextLevel, MaxPlayerLevel);
-	SetAuraDpsByLevel(nextLevel, MaxPlayerLevel);
-}
-
-void ASurvivorsGame::SetAuraSizeByLevel(int32 level, int32 maxLevel)
-{
-	AuraRadius = FMath::Lerp(MinAuraRadius, MaxAuraRadius, static_cast<float>(level) / static_cast<float>(maxLevel));
-}
-
-void ASurvivorsGame::SetAuraDpsByLevel(int32 level, int32 maxLevel)
-{
-	AuraDPS = FMath::Lerp(MinAuraDPS, MaxAuraDPS, static_cast<float>(level) / static_cast<float>(maxLevel));
+	// Garlic はプレイヤーレベルアップごとに +1 Lv（上限 MaxWeaponLevel=8）
+	const int32 NewGarlicLv = FMath::Min(WeaponSlots[0].Level + 1, MaxWeaponLevel);
+	WeaponSlots[0].Level = NewGarlicLv;
+	AuraRadius = GarlicTable[NewGarlicLv - 1].AreaRadius;
 }
 
 FVector2D ASurvivorsGame::RandomInsideField()
@@ -473,12 +475,14 @@ void ASurvivorsGame::SpawnEnemy(const FSpawnWave& Wave)
 
 	const FEnemyTypeParams& Params = EnemyTypeTable[TypeIdx];
 	FEnemyState Enemy;
-	Enemy.Pos             = RandomSpawnPos();
-	Enemy.Vel             = FVector2D::ZeroVector;
-	Enemy.TypeId          = TypeIdx;
-	Enemy.CollisionRadius = Params.CollisionRadius;
-	Enemy.MaxHP           = Params.BaseHP;
-	Enemy.HP              = Params.BaseHP;
+	Enemy.Pos               = RandomSpawnPos();
+	Enemy.Vel               = FVector2D::ZeroVector;
+	Enemy.TypeId            = TypeIdx;
+	Enemy.CollisionRadius   = Params.CollisionRadius;
+	Enemy.MaxHP             = Params.BaseHP;
+	Enemy.HP                = Params.BaseHP;
+	Enemy.GarlicLastHitTime = -1000.f; // 初回ヒットを即時許可
+	Enemy.PlayerLastHitTime = -1000.f;
 	Enemies.Add(Enemy);
 }
 
@@ -489,12 +493,14 @@ void ASurvivorsGame::SpawnBoss()
 
 	const FEnemyTypeParams& Params = EnemyTypeTable[BossTypeId];
 	FEnemyState Boss;
-	Boss.Pos             = RandomSpawnPos();
-	Boss.Vel             = FVector2D::ZeroVector;
-	Boss.TypeId          = BossTypeId;
-	Boss.CollisionRadius = Params.CollisionRadius;
-	Boss.MaxHP           = Params.BaseHP;
-	Boss.HP              = Params.BaseHP;
+	Boss.Pos               = RandomSpawnPos();
+	Boss.Vel               = FVector2D::ZeroVector;
+	Boss.TypeId            = BossTypeId;
+	Boss.CollisionRadius   = Params.CollisionRadius;
+	Boss.MaxHP             = Params.BaseHP;
+	Boss.HP                = Params.BaseHP;
+	Boss.GarlicLastHitTime = -1000.f;
+	Boss.PlayerLastHitTime = -1000.f;
 	Enemies.Add(Boss); // 上限カウント外（仕様: 別カウント）
 	UE_LOG(LogTemp, Log, TEXT("[SurvivorsGame] GiantBat spawned at t=%.1f"), ElapsedTime);
 }
@@ -511,19 +517,25 @@ void ASurvivorsGame::UpdateEnemies()
 
 void ASurvivorsGame::ApplyAuraDamage()
 {
-	const float DmgPerTick = AuraDPS * PhysicsDt;
-	const float RadSq      = AuraRadius * AuraRadius;
+	const int32 GarlicLv   = FMath::Clamp(WeaponSlots[0].Level, 1, MaxWeaponLevel);
+	const FGarlicParams& GP = GarlicTable[GarlicLv - 1];
 
 	for (int32 i = Enemies.Num() - 1; i >= 0; --i)
 	{
-		if (FVector2D::DistSquared(PlayerPos, Enemies[i].Pos) <= RadSq)
+		FEnemyState& E = Enemies[i];
+		const float Dist = FVector2D::Distance(PlayerPos, E.Pos);
+		if (Dist <= GP.AreaRadius + E.CollisionRadius)
 		{
-			Enemies[i].HP -= DmgPerTick;
-			if (Enemies[i].HP <= 0.f)
+			if (ElapsedTime - E.GarlicLastHitTime >= GP.HitInterval)
 			{
-				Enemies.RemoveAt(i);
-				LastReward += KillReward;
-				ProcessXPGain(ItemXP * KillXPRatio);
+				E.HP -= GP.Damage;
+				E.GarlicLastHitTime = ElapsedTime;
+				if (E.HP <= 0.f)
+				{
+					Enemies.RemoveAt(i);
+					LastReward += KillReward;
+					ProcessXPGain(ItemXP * KillXPRatio);
+				}
 			}
 		}
 	}
@@ -545,13 +557,18 @@ void ASurvivorsGame::CheckItemCollections()
 
 void ASurvivorsGame::ApplyEnemyContactDamage()
 {
-	// 接触判定: プレイヤー半径 + 敵固有半径（Plan04 で 0.5s 無敵追加予定）
-	for (const FEnemyState& E : Enemies)
+	// 敵ごとに 0.5s 無敵: 同一敵との連続ヒットを制限
+	for (FEnemyState& E : Enemies)
 	{
-		const float HitR  = PlayerRadius + E.CollisionRadius;
+		const float HitR = PlayerRadius + E.CollisionRadius;
 		if (FVector2D::DistSquared(PlayerPos, E.Pos) < HitR * HitR)
 		{
-			PlayerHP -= GetEnemyDamagePerTick(E.TypeId);
+			if (ElapsedTime - E.PlayerLastHitTime >= ContactHitInterval)
+			{
+				if (EnemyTypeTable.IsValidIndex(E.TypeId))
+					PlayerHP -= EnemyTypeTable[E.TypeId].ContactDamage;
+				E.PlayerLastHitTime = ElapsedTime;
+			}
 		}
 	}
 	PlayerHP = FMath::Max(PlayerHP, 0.f);
