@@ -282,22 +282,9 @@ public:
 	float PlayerRadius = 10.f;
 
 	// ---- 武器 (Garlic オーラ) ----
-
-	/** Garlic Lv1 オーラ攻撃半径 [u]（VS 仕様値） */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
-	float MinAuraRadius = 80.0f;
-
-	/** Garlic Lv8 オーラ攻撃半径 [u]（VS 仕様値） */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
-	float MaxAuraRadius = 185.0f;
-
-	/** Garlic Lv1 の DPS（敵1体あたり）: damage / hit_interval = 5 / 1.3 */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
-	float MinAuraDPS = 3.85f;
-
-	/** Garlic Lv8 の DPS（敵1体あたり）: damage / hit_interval = 20 / 0.95 */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
-	float MaxAuraDPS = 21.05f;
+	// レベル別ステータスは GarlicTable[] (SurvivorsGame.cpp) で管理。
+	// Lv1: damage=5, hit_interval=1.30s, area_radius=80u
+	// Lv8: damage=20, hit_interval=0.95s, area_radius=185u
 
 	// ---- 敵設定 ----
 
@@ -320,14 +307,15 @@ protected:
 
 private:
 	// ---- 定数 ----
-	static constexpr int32  NumItemObs        = 20;
-	static constexpr int32  MaxEnemyObs       = 20;
-	static constexpr int32  MaxWeaponSlots    = 3;
+	static constexpr int32  NumItemObs         = 20;
+	static constexpr int32  MaxEnemyObs        = 20;
+	static constexpr int32  MaxWeaponSlots     = 3;
 	static constexpr int32  MaxWeaponTypeSlots = 8;
-	static constexpr int32  MaxWeaponLevel    = 8;
-	static constexpr int32  MaxPlayerLevel    = 100;
-	static constexpr float  PhysicsDt         = 1.f / 60.f;
-	static constexpr float  MaxGameTime       = 1800.f; // obs elapsed_time_norm の基準 (30分)
+	static constexpr int32  MaxWeaponLevel     = 8;
+	static constexpr int32  MaxPlayerLevel     = 100;
+	static constexpr float  PhysicsDt          = 1.f / 60.f;
+	static constexpr float  MaxGameTime        = 1800.f;
+	static constexpr float  ContactHitInterval = 0.5f;  // 敵→プレイヤー接触無敵 [s]
 	static const FVector2D  RayDirs[8];
 
 	// ---- 敵データ ----
@@ -335,10 +323,12 @@ private:
 	{
 		FVector2D Pos;
 		FVector2D Vel;
-		int32     TypeId;          // 0〜10: EnemyTypeTable のインデックス
+		int32     TypeId;              // 0〜10: EnemyTypeTable のインデックス
 		float     HP;
 		float     MaxHP;
-		float     CollisionRadius; // スポーン時に EnemyTypeTable からコピー
+		float     CollisionRadius;     // スポーン時に EnemyTypeTable からコピー
+		float     GarlicLastHitTime;   // 最後に Garlic ヒットを受けた時刻 [s]
+		float     PlayerLastHitTime;   // 最後にプレイヤーに接触ダメージを与えた時刻 [s]
 	};
 
 	// ---- 状態 ----
@@ -347,8 +337,7 @@ private:
 	float                 PlayerHP    = 100.f;
 	float                 PlayerXP    = 0.f;
 	int32                 PlayerLevel = 0;
-	float                 AuraRadius  = 0.0f;
-	float                 AuraDPS     = 0.0f;
+	float                 AuraRadius  = 80.0f; // キャッシュ: GetAuraSize() / View 用
 	FWeaponSlot           WeaponSlots[MaxWeaponSlots];
 	TArray<FVector2D>     ItemPositions;
 	TArray<FEnemyState>   Enemies;
@@ -386,16 +375,11 @@ private:
 
 	// 敵タイプ別パラメータ取得（テーブルルックアップ）
 	float GetEnemySpeed(int32 TypeId) const;
-	float GetEnemyDamagePerTick(int32 TypeId) const;
 	float GetEnemyTypeMaxHP(int32 TypeId) const;
 
 	// XP 処理
 	float XPRequiredForLevel(int32 Level) const;
 	void  ProcessXPGain(float Amount);
-	void  OnLevelUp(int32 nextLevel);
-	
-	// ステータス
-	void  SetAuraSizeByLevel(int32 level, int32 maxLevel);
-	void  SetAuraDpsByLevel(int32 level, int32 maxLevel);
+	void  OnLevelUp(int32 NextLevel);
 };
 
