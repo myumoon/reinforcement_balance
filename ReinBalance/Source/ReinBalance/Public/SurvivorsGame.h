@@ -230,6 +230,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float SpawnRateMult = 1.0f;
 
+	/** スポーン可能な敵 TypeId の上限（カリキュラム制御用, /params で上書き可能）。
+	 *  0=Bat のみ, 2=+Zombie/Skeleton, 4=+Ghost/Werewolf,
+	 *  6=+Mummy/Plant, 9=全通常敵, 10=GiantBat込み全種 */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	int32 MaxEnemyTypeId = 10;
+
 	// ---- スポーン設定 ----
 
 	/** 円周スポーン: プレイヤーからの最小距離 [u] */

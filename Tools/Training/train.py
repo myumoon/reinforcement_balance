@@ -423,13 +423,13 @@ def main() -> None:
             raw_env=_get_raw_env(env),
             frame_skip=args.frame_skip,
             window=args.curriculum_window,
-            threshold=args.curriculum_threshold,
+            threshold_mult=args.curriculum_threshold,
             alive_reward=args.curriculum_alive_reward,
             status_path=str(status_path),
         )
         callbacks.append(curriculum_cb)
         print(f"[INFO] CurriculumCallback 有効 "
-              f"(window={args.curriculum_window}, threshold={args.curriculum_threshold}, "
+              f"(window={args.curriculum_window}, threshold_mult={args.curriculum_threshold}, "
               f"frame_skip={args.frame_skip}, alive_reward={args.curriculum_alive_reward})")
         print(f"[INFO] curriculum_status.json → {status_path}")
     elif args.curriculum:

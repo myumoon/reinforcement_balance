@@ -130,6 +130,10 @@ private:
 		if (JsonObj->TryGetBoolField(TEXT("TimeScalingEnabled"), bTimeScalingEnabled))
 			Game->bTimeScalingEnabled = bTimeScalingEnabled;
 
+		int32 MaxEnemyTypeId;
+		if (JsonObj->TryGetNumberField(TEXT("MaxEnemyTypeId"), MaxEnemyTypeId))
+			Game->MaxEnemyTypeId = FMath::Clamp(MaxEnemyTypeId, 0, 10);
+
 		OnComplete(MakeJsonResponse(TEXT("{\"status\":\"ok\"}")));
 		return true;
 	}
