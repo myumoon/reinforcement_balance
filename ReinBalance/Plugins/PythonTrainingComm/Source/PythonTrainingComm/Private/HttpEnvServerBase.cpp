@@ -100,7 +100,7 @@ void FHttpEnvServerBase::Tick()
 bool FHttpEnvServerBase::HandleReset(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
 	TOptional<int32> Seed;
-	FString Body(UTF8_TO_TCHAR(reinterpret_cast<const char*>(Request.Body.GetData())));
+	FString Body = ParseBodyString(Request);
 	TSharedPtr<FJsonObject> JsonObj;
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
 	if (FJsonSerializer::Deserialize(Reader, JsonObj) && JsonObj.IsValid())
@@ -120,7 +120,7 @@ bool FHttpEnvServerBase::HandleStep(const FHttpServerRequest& Request, const FHt
 {
 	TArray<float> Action;
 	int32 Steps = 1;
-	FString Body(UTF8_TO_TCHAR(reinterpret_cast<const char*>(Request.Body.GetData())));
+	FString Body = ParseBodyString(Request);
 	TSharedPtr<FJsonObject> JsonObj;
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
 	if (FJsonSerializer::Deserialize(Reader, JsonObj) && JsonObj.IsValid())
@@ -146,6 +146,14 @@ bool FHttpEnvServerBase::HandleClose(const FHttpServerRequest& Request, const FH
 {
 	OnComplete(MakeJsonResponse(TEXT("{\"ok\":true}")));
 	return true;
+}
+
+FString FHttpEnvServerBase::ParseBodyString(const FHttpServerRequest& Request)
+{
+	if (Request.Body.IsEmpty()) return {};
+	TArray<uint8> Buf(Request.Body);
+	Buf.Add(0);
+	return FString(UTF8_TO_TCHAR(reinterpret_cast<const char*>(Buf.GetData())));
 }
 
 TUniquePtr<FHttpServerResponse> FHttpEnvServerBase::MakeJsonResponse(const FString& Json)

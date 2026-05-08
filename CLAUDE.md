@@ -179,13 +179,9 @@ python export_onnx.py --game survivors --model models/survivors_model
 |-----------|----|-----------|------|
 | MaxActiveEnemies | int | 6 | 同時出現最大敵数 |
 | EnemySpeedMult | float | 1.0 | 敵速度倍率 |
-| EnemySpawnInterval | float | 5.0 | 敵スポーン間隔（秒） |
-| MinAuraRadius | float | 2.0 | Aura最小半径（m）Lv0時 |
-| MaxAuraRadius | float | 10.0 | Aura最大半径（m）MaxLevel時 |
-| XPGrowth | float | 3.0 | レベルアップ必要XP増分 |
-
-> **注意**: Python設定ファイル `games/survivors/survivors_eureka_config.py` の `_MIN_AURA_RADIUS = 2.5` は
-> C++ の `MinAuraRadius = 2.0f` と不一致。報酬関数生成プロンプトで使う定数として修正が必要。
+| SpawnRateMult | float | 1.0 | スポーンレート倍率 |
+| TimeScalingEnabled | bool | false | 時間経過による HP/ダメージ増加の有効化 |
+| MaxEnemyTypeId | int | 10 | スポーン可能な敵 TypeId の上限（0=Bat のみ, 10=全種） |
 
 ---
 
