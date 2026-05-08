@@ -12,6 +12,7 @@ struct FEnvStepResult
 	float Reward = 0.f;
 	bool bDone = false;
 	bool bTruncated = false;
+	FString InfoJson;
 };
 
 struct FEnvResetResult

@@ -43,6 +43,7 @@ public:
 			}
 			Result.Obs    = Game->GetObservation();
 			Result.Reward = AccumulatedReward;
+			Result.InfoJson = FString::Printf(TEXT("{\"spawn_debug\":%s}"), *Game->GetSpawnDebugJson());
 		}
 		return Result;
 	}

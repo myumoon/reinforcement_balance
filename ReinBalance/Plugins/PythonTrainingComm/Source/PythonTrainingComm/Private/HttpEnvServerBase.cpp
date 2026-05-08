@@ -86,12 +86,14 @@ void FHttpEnvServerBase::Tick()
 				ObsStr += FString::SanitizeFloat(Result.Obs[i]);
 				if (i < Result.Obs.Num() - 1) ObsStr += TEXT(",");
 			}
+			const FString InfoJson = Result.InfoJson.IsEmpty() ? TEXT("{}") : Result.InfoJson;
 			FString Json = FString::Printf(
-				TEXT("{\"obs\":[%s],\"reward\":%f,\"done\":%s,\"truncated\":%s}"),
+				TEXT("{\"obs\":[%s],\"reward\":%f,\"done\":%s,\"truncated\":%s,\"info\":%s}"),
 				*ObsStr,
 				Result.Reward,
 				Result.bDone     ? TEXT("true") : TEXT("false"),
-				Result.bTruncated ? TEXT("true") : TEXT("false"));
+				Result.bTruncated ? TEXT("true") : TEXT("false"),
+				*InfoJson);
 			Req.Callback(MakeJsonResponse(Json));
 		}
 	}

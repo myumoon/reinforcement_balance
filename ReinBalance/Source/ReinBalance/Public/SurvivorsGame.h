@@ -121,6 +121,23 @@ struct FSpawnWave
 	TArray<FEnemySpawnWeight> EnemyWeights;
 };
 
+struct FSurvivorsSpawnDebug
+{
+	float ElapsedTime = 0.f;
+	int32 EnemyCount = 0;
+	int32 CurrentWaveIndex = INDEX_NONE;
+	int32 MinActiveEnemies = 0;
+	int32 MaxActiveEnemies = 0;
+	int32 EffectiveMinEnemies = 0;
+	int32 EffectiveMaxEnemies = 0;
+	int32 MaxEnemyTypeId = 0;
+	int32 AllowedSpawnTypeCount = 0;
+	float SpawnAccumulator = 0.f;
+	bool bHasCurrentWave = false;
+	bool bUsedCurriculumEnemyPool = false;
+	bool bSpawnBlocked = false;
+};
+
 /**
  * Vampire Survivors 風サバイバルゲームのロジッククラス（ビジュアルなし）。
  *
@@ -172,6 +189,9 @@ public:
 
 	/** エピソード終了判定（HP <= 0） */
 	bool IsDone() const;
+
+	FSurvivorsSpawnDebug GetSpawnDebug() const { return LastSpawnDebug; }
+	FString GetSpawnDebugJson() const;
 
 	// ---- ビュー / デバッグ向けアクセサー ----
 
@@ -379,6 +399,7 @@ private:
 	float                 LastReward  = 0.f;
 	bool                  bDone       = false;
 	FRandomStream         RandStream;
+	FSurvivorsSpawnDebug  LastSpawnDebug;
 
 	// ---- WallActors (BeginPlay で自動収集) ----
 	UPROPERTY()
@@ -404,6 +425,8 @@ private:
 
 	// スポーン補助
 	const FSpawnWave* GetCurrentWave() const;
+	int32             GetCurrentWaveIndex() const;
+	bool              BuildSpawnWeights(const FSpawnWave& Wave, TArray<FEnemySpawnWeight>& OutWeights, bool& bOutUsedCurriculumPool) const;
 	int32             SelectTypeByWeight(const TArray<FEnemySpawnWeight>& Weights);
 
 	// 敵タイプ別パラメータ取得（テーブルルックアップ）
@@ -416,4 +439,3 @@ private:
 	void  ProcessXPGain(float Amount);
 	void  OnLevelUp(int32 NextLevel);
 };
-

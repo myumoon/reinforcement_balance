@@ -42,7 +42,7 @@ class BaseUE5Env(gym.Env):
         resp.raise_for_status()
         data = resp.json()
         obs = np.array(data["obs"], dtype=np.float32)
-        return obs, float(data["reward"]), bool(data["done"]), bool(data["truncated"]), {}
+        return obs, float(data["reward"]), bool(data["done"]), bool(data["truncated"]), data.get("info", {})
 
     def close(self):
         try:

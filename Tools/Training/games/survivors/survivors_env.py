@@ -70,7 +70,7 @@ class SurvivorsEnv(BaseUE5Env):
         return obs, info
 
     def step(self, action):
-        obs, base_reward, done, truncated, _ = super().step(action)
+        obs, base_reward, done, truncated, ue_info = super().step(action)
 
         # 永続 HP ダメージペナルティ（敵接触シグナルを強化）
         # HP は [0,1] に正規化済み（÷100）。1 HP ダメージ = -1.0（クリップ前）
@@ -89,7 +89,8 @@ class SurvivorsEnv(BaseUE5Env):
                 print(f"[WARN] reward_fn エラー: {e}")
                 shaped = 0.0
 
-        info = {"base_reward": base_reward, "shaped_reward": shaped, "hp_penalty": hp_penalty}
+        info = dict(ue_info)
+        info.update({"base_reward": base_reward, "shaped_reward": shaped, "hp_penalty": hp_penalty})
         self._prev_obs = obs
         return obs, base_reward + shaped + hp_penalty, done, truncated, info
 

@@ -198,6 +198,7 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	bBossSpawned     = false;
 	LastReward       = 0.f;
 	bDone            = false;
+	LastSpawnDebug   = FSurvivorsSpawnDebug();
 }
 
 // ---- ステップ ----------------------------------------------------------------
@@ -226,15 +227,38 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 	UpdateEnemies();
 	ApplyAuraDamage();
 
-	// Wave ベーススポーン（補充スポーン + accumulator 方式）
-	if (const FSpawnWave* Wave = GetCurrentWave())
+	const int32 CurrentWaveIndex = GetCurrentWaveIndex();
+	const FSpawnWave* Wave = CurrentWaveIndex != INDEX_NONE ? &SpawnWaves[CurrentWaveIndex] : nullptr;
+
+	LastSpawnDebug = FSurvivorsSpawnDebug();
+	LastSpawnDebug.ElapsedTime = ElapsedTime;
+	LastSpawnDebug.EnemyCount = Enemies.Num();
+	LastSpawnDebug.CurrentWaveIndex = CurrentWaveIndex;
+	LastSpawnDebug.MinActiveEnemies = MinActiveEnemies;
+	LastSpawnDebug.MaxActiveEnemies = MaxActiveEnemies;
+	LastSpawnDebug.MaxEnemyTypeId = MaxEnemyTypeId;
+	LastSpawnDebug.SpawnAccumulator = SpawnAccumulator;
+	LastSpawnDebug.bHasCurrentWave = Wave != nullptr;
+
+	// Wave controls spawn rate and max count. Enemy types are selected from
+	// the curriculum pool so long episodes do not outgrow MaxEnemyTypeId.
+	if (Wave)
 	{
 		const int32 EffMin = FMath::Min(MinActiveEnemies, MaxActiveEnemies);
 		const int32 EffMax = FMath::Min(Wave->MaxEnemies, MaxActiveEnemies);
+		TArray<FEnemySpawnWeight> SpawnWeights;
+		bool bUsedCurriculumPool = false;
+		BuildSpawnWeights(*Wave, SpawnWeights, bUsedCurriculumPool);
+
+		LastSpawnDebug.EffectiveMinEnemies = EffMin;
+		LastSpawnDebug.EffectiveMaxEnemies = EffMax;
+		LastSpawnDebug.AllowedSpawnTypeCount = SpawnWeights.Num();
+		LastSpawnDebug.bUsedCurriculumEnemyPool = bUsedCurriculumPool;
+		LastSpawnDebug.bSpawnBlocked = SpawnWeights.IsEmpty();
 
 		// 補充スポーン: 最小数を即時維持（SpawnRate に依存しない）
 		// SpawnEnemy 内で Filtered.IsEmpty() なら何も追加しないためループを抜ける
-		while (Enemies.Num() < EffMin)
+		while (!SpawnWeights.IsEmpty() && Enemies.Num() < EffMin)
 		{
 			const int32 Before = Enemies.Num();
 			SpawnEnemy(*Wave);
@@ -245,12 +269,15 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 		if (Enemies.Num() < EffMax)
 		{
 			SpawnAccumulator += Wave->SpawnRate * SpawnRateMult * PhysicsDt;
-			while (SpawnAccumulator >= 1.f && Enemies.Num() < EffMax)
+			while (!SpawnWeights.IsEmpty() && SpawnAccumulator >= 1.f && Enemies.Num() < EffMax)
 			{
 				SpawnEnemy(*Wave);
 				SpawnAccumulator -= 1.f;
 			}
 		}
+
+		LastSpawnDebug.EnemyCount = Enemies.Num();
+		LastSpawnDebug.SpawnAccumulator = SpawnAccumulator;
 	}
 
 	// ボス 1 回限りスポーン
@@ -405,6 +432,30 @@ TArray<float> ASurvivorsGame::GetObservation() const
 float ASurvivorsGame::GetReward() const { return LastReward; }
 bool  ASurvivorsGame::IsDone()   const { return bDone; }
 
+FString ASurvivorsGame::GetSpawnDebugJson() const
+{
+	return FString::Printf(
+		TEXT("{\"elapsed_time\":%.3f,\"enemy_count\":%d,\"current_wave_index\":%d,"
+			 "\"min_active_enemies\":%d,\"max_active_enemies\":%d,"
+			 "\"effective_min_enemies\":%d,\"effective_max_enemies\":%d,"
+			 "\"max_enemy_type_id\":%d,\"allowed_spawn_type_count\":%d,"
+			 "\"spawn_accumulator\":%.3f,\"has_current_wave\":%s,"
+			 "\"used_curriculum_enemy_pool\":%s,\"spawn_blocked\":%s}"),
+		LastSpawnDebug.ElapsedTime,
+		LastSpawnDebug.EnemyCount,
+		LastSpawnDebug.CurrentWaveIndex,
+		LastSpawnDebug.MinActiveEnemies,
+		LastSpawnDebug.MaxActiveEnemies,
+		LastSpawnDebug.EffectiveMinEnemies,
+		LastSpawnDebug.EffectiveMaxEnemies,
+		LastSpawnDebug.MaxEnemyTypeId,
+		LastSpawnDebug.AllowedSpawnTypeCount,
+		LastSpawnDebug.SpawnAccumulator,
+		LastSpawnDebug.bHasCurrentWave ? TEXT("true") : TEXT("false"),
+		LastSpawnDebug.bUsedCurriculumEnemyPool ? TEXT("true") : TEXT("false"),
+		LastSpawnDebug.bSpawnBlocked ? TEXT("true") : TEXT("false"));
+}
+
 FVector2D ASurvivorsGame::GetItemPos(int32 i) const
 {
 	return Gems.IsValidIndex(i) ? Gems[i].Pos : FVector2D::ZeroVector;
@@ -524,18 +575,78 @@ int32 ASurvivorsGame::SelectTypeByWeight(const TArray<FEnemySpawnWeight>& Weight
 
 const FSpawnWave* ASurvivorsGame::GetCurrentWave() const
 {
-	for (const FSpawnWave& Wave : SpawnWaves)
+	const int32 WaveIndex = GetCurrentWaveIndex();
+	return WaveIndex != INDEX_NONE ? &SpawnWaves[WaveIndex] : nullptr;
+}
+
+int32 ASurvivorsGame::GetCurrentWaveIndex() const
+{
+	for (int32 i = 0; i < SpawnWaves.Num(); ++i)
+	{
+		const FSpawnWave& Wave = SpawnWaves[i];
 		if (ElapsedTime >= Wave.TimeStart && ElapsedTime < Wave.TimeEnd)
-			return &Wave;
-	return nullptr;
+		{
+			return i;
+		}
+	}
+	return INDEX_NONE;
+}
+
+bool ASurvivorsGame::BuildSpawnWeights(const FSpawnWave& Wave, TArray<FEnemySpawnWeight>& OutWeights, bool& bOutUsedCurriculumPool) const
+{
+	OutWeights.Reset();
+	bOutUsedCurriculumPool = false;
+
+	if (EnemyTypeTable.IsEmpty())
+	{
+		return false;
+	}
+
+	const int32 MaxNormalEnemyTypeId = FMath::Min(9, EnemyTypeTable.Num() - 1);
+	const int32 AllowedMaxTypeId = FMath::Clamp(MaxEnemyTypeId, 0, MaxNormalEnemyTypeId);
+	if (AllowedMaxTypeId < MaxNormalEnemyTypeId)
+	{
+		bOutUsedCurriculumPool = true;
+		for (int32 TypeId = 0; TypeId <= AllowedMaxTypeId; ++TypeId)
+		{
+			if (!EnemyTypeTable.IsValidIndex(TypeId) || EnemyTypeTable[TypeId].bIsBoss)
+			{
+				continue;
+			}
+
+			float Weight = 1.f;
+			for (const FEnemySpawnWeight& WaveWeight : Wave.EnemyWeights)
+			{
+				if (WaveWeight.TypeId == TypeId)
+				{
+					Weight = FMath::Max(WaveWeight.Weight, 0.01f);
+					break;
+				}
+			}
+
+			FEnemySpawnWeight SpawnWeight;
+			SpawnWeight.TypeId = TypeId;
+			SpawnWeight.Weight = Weight;
+			OutWeights.Add(SpawnWeight);
+		}
+		return !OutWeights.IsEmpty();
+	}
+
+	for (const FEnemySpawnWeight& WaveWeight : Wave.EnemyWeights)
+	{
+		if (EnemyTypeTable.IsValidIndex(WaveWeight.TypeId) && !EnemyTypeTable[WaveWeight.TypeId].bIsBoss)
+		{
+			OutWeights.Add(WaveWeight);
+		}
+	}
+	return !OutWeights.IsEmpty();
 }
 
 void ASurvivorsGame::SpawnEnemy(const FSpawnWave& Wave)
 {
-	// MaxEnemyTypeId でスポーン可能種別をフィルタ（カリキュラム制御）
 	TArray<FEnemySpawnWeight> Filtered;
-	for (const FEnemySpawnWeight& W : Wave.EnemyWeights)
-		if (W.TypeId <= MaxEnemyTypeId) Filtered.Add(W);
+	bool bUsedCurriculumPool = false;
+	BuildSpawnWeights(Wave, Filtered, bUsedCurriculumPool);
 	if (Filtered.IsEmpty()) return;
 
 	const int32 TypeIdx = SelectTypeByWeight(Filtered);
