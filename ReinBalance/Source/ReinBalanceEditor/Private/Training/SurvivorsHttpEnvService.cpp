@@ -126,6 +126,10 @@ private:
 		if (JsonObj->TryGetNumberField(TEXT("SpawnRateMult"), SpawnRateMult))
 			Game->SpawnRateMult = FMath::Clamp(static_cast<float>(SpawnRateMult), 0.1f, 5.f);
 
+		bool bTimeScalingEnabled;
+		if (JsonObj->TryGetBoolField(TEXT("TimeScalingEnabled"), bTimeScalingEnabled))
+			Game->bTimeScalingEnabled = bTimeScalingEnabled;
+
 		OnComplete(MakeJsonResponse(TEXT("{\"status\":\"ok\"}")));
 		return true;
 	}
