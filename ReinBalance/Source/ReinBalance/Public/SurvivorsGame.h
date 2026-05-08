@@ -42,7 +42,7 @@ struct FWeaponSlot
  * 行動: 離散5方向 (0=+Y, 1=-Y, 2=-X, 3=+X, 4=静止)
  * 観測: GetObsDim() 次元 = 23 + NumItemObs*2 + MaxEnemyObs*6
  *   [0-1]    プレイヤー位置 (x,y) / FieldHalfSize
- *   [2-3]    プレイヤー速度 (vx,vy)
+ *   [2-3]    プレイヤー速度 (vx,vy) / MoveSpeed（-1〜1 に正規化）
  *   [4-11]   8方向レイキャスト壁距離 (0~1)
  *   [12]     プレイヤー HP / MaxPlayerHP
  *   [13-18]  武器スロット × 3: (type_norm, level_norm) × MaxWeaponSlots
@@ -126,13 +126,13 @@ public:
 
 	// ---- フィールド設定 ----
 
-	/** フィールド半幅 [m]。敵/アイテムスポーン範囲・obs 正規化基準として使用。外側境界は AWallActor で定義する。 */
+	/** フィールド半幅 [u]。敵/アイテムスポーン範囲・obs 正規化基準として使用。外側境界は AWallActor で定義する。 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	float FieldHalfSize = 100.f;
+	float FieldHalfSize = 1000.f;
 
-	/** シム座標(m) ↔ UE5 単位 変換スケール。SurvivorsGameView の SimToUE と一致させること。 */
+	/** シム座標(u) ↔ UE5 単位 変換スケール。SurvivorsGameView の SimToUE と一致させること。 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survivors|Config")
-	float SimToUE = 50.f;
+	float SimToUE = 5.f;
 
 	/** フィールド上のアイテム数 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
@@ -168,47 +168,43 @@ public:
 
 	// ---- プレイヤー ----
 
-	/** プレイヤー最大 HP */
+	/** プレイヤー最大 HP（Poe Ratcho） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
-	float MaxPlayerHP = 100.f;
+	float MaxPlayerHP = 70.f;
 
-	/** 入力1方向あたりの加速度 [m/s²] */
+	/** プレイヤー移動速度 [u/s]（直接速度モデル, カリキュラム制御可） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
-	float PlayerAccel = 6.f;
+	float MoveSpeed = 80.f;
 
-	/** 線形ドラッグ係数 */
+	/** プレイヤー衝突半径 [u]（AWallActor との押し出し計算に使用） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
-	float PlayerDrag = 2.f;
+	float PlayerRadius = 10.f;
 
-	/** プレイヤー衝突半径 [m]（AWallActor との押し出し計算に使用） */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
-	float PlayerRadius = 0.3f;
+	// ---- 武器 (Garlic オーラ) ----
 
-	// ---- 武器 (オーラ) ----
+	/** Garlic Lv1 オーラ攻撃半径 [u]（VS 仕様値） */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
+	float MinAuraRadius = 80.0f;
 
-	/** 最小オーラ攻撃半径 [m] */
+	/** Garlic Lv8 オーラ攻撃半径 [u]（VS 仕様値） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
-	float MinAuraRadius = 2.0f;
-	
-	/** 最大オーラ攻撃半径 [m] */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
-	float MaxAuraRadius = 10.0f;
+	float MaxAuraRadius = 185.0f;
 
-	/** 最小オーラ攻撃 DPS（秒あたりダメージ）: /tick = AuraDPS * PhysicsDt */
+	/** Garlic Lv1 の DPS（敵1体あたり）: damage / hit_interval = 5 / 1.3 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
-	float MinAuraDPS = 15.f;
-	
-	/** 最大オーラ攻撃 DPS（秒あたりダメージ）: /tick = AuraDPS * PhysicsDt */
+	float MinAuraDPS = 3.85f;
+
+	/** Garlic Lv8 の DPS（敵1体あたり）: damage / hit_interval = 20 / 0.95 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Weapon")
-	float MaxAuraDPS = 30.f;
+	float MaxAuraDPS = 21.05f;
 
 	// ---- 敵設定 ----
 
-	/** タイプA (低速追跡 Slime) の基本速度 [m/s] */
+	/** タイプA (低速追跡) の基本速度 [u/s]（Plan02 で11種に置換） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemySpeedA = 1.0f;
+	float EnemySpeedA = 10.0f;
 
-	/** タイプA の接触 DPS */
+	/** タイプA の接触ダメージ（1ヒット） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
 	float EnemyDamageA = 5.f;
 
@@ -216,11 +212,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
 	float EnemyHPA = 20.f;
 
-	/** タイプB (高速直進 Zombie) の基本速度 [m/s] */
+	/** タイプB (高速直進) の基本速度 [u/s]（Plan02 で11種に置換） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemySpeedB = 2.5f;
+	float EnemySpeedB = 25.0f;
 
-	/** タイプB の接触 DPS */
+	/** タイプB の接触ダメージ（1ヒット） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
 	float EnemyDamageB = 10.f;
 
@@ -228,11 +224,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
 	float EnemyHPB = 50.f;
 
-	/** タイプC (予測追跡 Ghost) の基本速度 [m/s] */
+	/** タイプC (予測追跡) の基本速度 [u/s]（Plan02 で11種に置換） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemySpeedC = 1.5f;
+	float EnemySpeedC = 15.0f;
 
-	/** タイプC の接触 DPS */
+	/** タイプC の接触ダメージ（1ヒット） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
 	float EnemyDamageC = 8.f;
 
@@ -244,15 +240,15 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
 	float EnemyPredictTime = 0.75f;
 
-	/** 敵との接触判定半径 [m] */
+	/** 敵との接触判定半径 [u]（Plan02 で敵種別に置換） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemyCollisionRadius = 0.6f;
+	float EnemyCollisionRadius = 6.0f;
 
 	// ---- アイテム ----
 
-	/** アイテム収集半径 [m] */
+	/** アイテム収集半径 [u]（Plan06 でジェム pickup_radius=30 に置換） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Item")
-	float ItemCollectRadius = 1.0f;
+	float ItemCollectRadius = 10.0f;
 
 protected:
 	virtual void BeginPlay() override;

@@ -102,19 +102,18 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 
 	LastReward = 0.f;
 
-	// プレイヤー移動（線形ドラッグ）
-	float Ax = 0.f, Ay = 0.f;
+	// プレイヤー移動（直接速度モデル: VS 仕様に準拠）
+	FVector2D MoveDir = FVector2D::ZeroVector;
 	switch (ActionIdx)
 	{
-		case 0: Ay =  PlayerAccel; break;
-		case 1: Ay = -PlayerAccel; break;
-		case 2: Ax = -PlayerAccel; break;
-		case 3: Ax =  PlayerAccel; break;
+		case 0: MoveDir.Y =  1.f; break;
+		case 1: MoveDir.Y = -1.f; break;
+		case 2: MoveDir.X = -1.f; break;
+		case 3: MoveDir.X =  1.f; break;
 		default: break;
 	}
-	PlayerVel.X += (Ax - PlayerDrag * PlayerVel.X) * PhysicsDt;
-	PlayerVel.Y += (Ay - PlayerDrag * PlayerVel.Y) * PhysicsDt;
-	PlayerPos   += PlayerVel * PhysicsDt;
+	PlayerVel  = MoveDir * MoveSpeed;
+	PlayerPos += PlayerVel * PhysicsDt;
 	ResolveWallCollisions();
 
 	UpdateEnemies();
@@ -154,9 +153,9 @@ TArray<float> ASurvivorsGame::GetObservation() const
 	Obs.Add(PlayerPos.X / HN);
 	Obs.Add(PlayerPos.Y / HN);
 
-	// 2. プレイヤー速度 (2)
-	Obs.Add(PlayerVel.X);
-	Obs.Add(PlayerVel.Y);
+	// 2. プレイヤー速度 (2) — MoveSpeed で正規化 (−1〜1)
+	Obs.Add(MoveSpeed > 0.f ? PlayerVel.X / MoveSpeed : 0.f);
+	Obs.Add(MoveSpeed > 0.f ? PlayerVel.Y / MoveSpeed : 0.f);
 
 	// 3. 8方向壁距離 (8)
 	for (int32 r = 0; r < 8; ++r)
