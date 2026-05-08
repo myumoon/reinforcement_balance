@@ -19,7 +19,7 @@ class USurvivorsHPWidget;
  *
  * ビジュアル仕様（上空から俯瞰）:
  *   プレイヤー   : 緑コーン（速度方向を向く）
- *   アイテム     : 黄色の球
+ *   ジェム       : 青(Blue)/緑(Green)/赤(Red) の球（EGemType に対応）
  *   敵A(低速追跡) : 赤・正方形キューブ
  *   敵B(高速直進) : オレンジ・縦長キューブ
  *   敵C(予測追跡) : 赤紫・横長キューブ
@@ -58,6 +58,10 @@ private:
 
 	UPROPERTY()
 	TArray<TObjectPtr<UStaticMeshComponent>> EnemyMeshComponents;
+
+	/** ジェム色変更用マテリアル（GC防止）*/
+	UPROPERTY()
+	TArray<TObjectPtr<UMaterialInstanceDynamic>> GemMaterials;
 
 	/** 敵HP色変更用マテリアル（GC防止） */
 	UPROPERTY()

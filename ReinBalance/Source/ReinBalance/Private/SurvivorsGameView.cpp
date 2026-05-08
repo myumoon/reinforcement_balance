@@ -88,6 +88,7 @@ void ASurvivorsGameView::SetupPlayerMesh()
 
 void ASurvivorsGameView::SetupItemMeshes()
 {
+	// 開始時はジェム0個のため通常は何も生成しない。SyncItemMeshes で動的追加。
 	const int32 Count = Game->GetItemCount();
 	for (int32 i = 0; i < Count; ++i)
 	{
@@ -99,8 +100,9 @@ void ASurvivorsGameView::SetupItemMeshes()
 		if (SphereMeshAsset) Comp->SetStaticMesh(SphereMeshAsset);
 		Comp->SetRelativeScale3D(FVector(0.35f, 0.35f, 0.35f));
 
-		UMaterialInstanceDynamic* Mat = CreateColorMaterial(FLinearColor(1.f, 0.85f, 0.f, 1.f));
+		UMaterialInstanceDynamic* Mat = CreateColorMaterial(FLinearColor(0.3f, 0.7f, 1.0f, 1.f));
 		if (Mat) Comp->SetMaterial(0, Mat);
+		GemMaterials.Add(Mat);
 		ItemMeshComponents.Add(Comp);
 	}
 }
@@ -122,8 +124,9 @@ void ASurvivorsGameView::SyncItemMeshes()
 		Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		if (SphereMeshAsset) Comp->SetStaticMesh(SphereMeshAsset);
 		Comp->SetRelativeScale3D(FVector(0.35f, 0.35f, 0.35f));
-		UMaterialInstanceDynamic* Mat = CreateColorMaterial(FLinearColor(1.f, 0.85f, 0.f, 1.f));
+		UMaterialInstanceDynamic* Mat = CreateColorMaterial(FLinearColor(0.3f, 0.7f, 1.0f, 1.f)); // 色は UpdatePositions で毎フレーム更新
 		if (Mat) Comp->SetMaterial(0, Mat);
+		GemMaterials.Add(Mat);
 		ItemMeshComponents.Add(Comp);
 	}
 }
@@ -201,11 +204,32 @@ void ASurvivorsGameView::UpdatePositions()
 		PlayerMesh->SetRelativeRotation(FRotator(-90.f, Yaw, 0.f));
 	}
 
-	// アイテム
+	// ジェム: 現在数だけ表示、余ったメッシュは非表示
+	const int32 GemGameCount = Game->GetItemCount();
 	for (int32 i = 0; i < ItemMeshComponents.Num(); ++i)
 	{
-		const FVector2D IPos = Game->GetItemPos(i);
-		ItemMeshComponents[i]->SetRelativeLocation(FVector(IPos.X * Game->SimToUE, IPos.Y * Game->SimToUE, 0.f));
+		if (i < GemGameCount)
+		{
+			const FVector2D GPos = Game->GetItemPos(i);
+			ItemMeshComponents[i]->SetVisibility(true);
+			ItemMeshComponents[i]->SetRelativeLocation(FVector(GPos.X * Game->SimToUE, GPos.Y * Game->SimToUE, 0.f));
+
+			if (GemMaterials.IsValidIndex(i) && GemMaterials[i])
+			{
+				FLinearColor GColor;
+				switch (Game->GetItemGemType(i))
+				{
+					case EGemType::Green: GColor = FLinearColor(0.2f, 0.9f, 0.2f, 1.f); break;
+					case EGemType::Red:   GColor = FLinearColor(1.0f, 0.2f, 0.2f, 1.f); break;
+					default:              GColor = FLinearColor(0.3f, 0.7f, 1.0f, 1.f); break; // Blue
+				}
+				GemMaterials[i]->SetVectorParameterValue(TEXT("Color"), GColor);
+			}
+		}
+		else
+		{
+			ItemMeshComponents[i]->SetVisibility(false);
+		}
 	}
 
 	// 敵
