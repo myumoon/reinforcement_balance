@@ -33,6 +33,15 @@ struct FWeaponSlot
 	int32       Level = 0; // 0=未装備, 1-8=レベル
 };
 
+/** 経験値ジェムの種類（青=1XP / 緑=5XP / 赤=10XP） */
+UENUM(BlueprintType)
+enum class EGemType : uint8
+{
+	Blue  = 0, // 雑魚（Bat 系）ドロップ, xp=1
+	Green = 1, // 中型敵ドロップ, xp=5
+	Red   = 2, // ボスドロップ, xp=10
+};
+
 /**
  * 敵1種のパラメーター。EnemyTypeTable に格納し Details パネルやカリキュラムから変更可能。
  * knockback_resistance / is_boss は Plan05 / Plan06 で使用。
@@ -119,7 +128,7 @@ struct FSpawnWave
  * ビジュアル表示は別クラスが担う（未実装）。
  *
  * 行動: 離散5方向 (0=+Y, 1=-Y, 2=-X, 3=+X, 4=静止)
- * 観測: GetObsDim() 次元 = 23 + NumItemObs*2 + MaxEnemyObs*6
+ * 観測: GetObsDim() 次元 = 23 + NumGemObs*2 + MaxEnemyObs*6
  *   [0-1]    プレイヤー位置 (x,y) / FieldHalfSize
  *   [2-3]    プレイヤー速度 (vx,vy) / MoveSpeed（-1〜1 に正規化）
  *   [4-11]   8方向レイキャスト壁距離 (0~1)
@@ -127,9 +136,9 @@ struct FSpawnWave
  *   [13-18]  武器スロット × 3: (type_norm, level_norm) × MaxWeaponSlots
  *   [19]     現在の敵数 / MaxEnemyObs
  *   [20]     経過時間 elapsed_time / MaxGameTime (0~1)
- *   [21]     xp_progress (0~1, アイテム取得・敵撃破で増加、レベルアップでリセット)
+ *   [21]     xp_progress (0~1, ジェム回収・レベルアップでリセット)
  *   [22]     player_level (0~1 = level / MaxPlayerLevel, 最大 MaxPlayerLevel=100)
- *   [23 .. 23+N*2-1]       アイテム相対位置 dx,dy × NumItemObs
+ *   [23 .. 23+N*2-1]       ジェム相対位置 dx,dy × NumGemObs（近い順）
  *   [23+N*2 .. +M*6-1]     敵情報 (dx,dy,vx,vy,type_norm,hp_norm) × MaxEnemyObs
  */
 UCLASS()
@@ -152,8 +161,8 @@ public:
 	/** 観測スキーマを返す */
 	TArray<FSurvivorsObsSegment> GetObsSchema() const;
 
-	/** 観測次元数: 23 + NumItemObs*2 + MaxEnemyObs*6 */
-	int32 GetObsDim() const { return 23 + NumItemObs * 2 + MaxEnemyObs * 6; }
+	/** 観測次元数: 23 + NumGemObs*2 + MaxEnemyObs*6 */
+	int32 GetObsDim() const { return 23 + NumGemObs * 2 + MaxEnemyObs * 6; }
 
 	/** obs 次元に影響するパラメータから生成するハッシュ */
 	FString GetObsSchemaHash() const;
@@ -174,11 +183,10 @@ public:
 	float     GetMaxPlayerHP() const { return MaxPlayerHP; }
 	float     GetAuraSize()    const { return AuraRadius; }
 
-	int32     GetItemCount()       const { return ItemPositions.Num(); }
-	FVector2D GetItemPos(int32 i)  const
-	{
-		return ItemPositions.IsValidIndex(i) ? ItemPositions[i] : FVector2D::ZeroVector;
-	}
+	// View との互換維持のため GetItemCount/GetItemPos はジェムデータを返す
+	int32     GetItemCount()       const { return Gems.Num(); }
+	FVector2D GetItemPos(int32 i)  const;
+	EGemType  GetItemGemType(int32 i) const;
 
 	int32     GetEnemyCount()         const { return Enemies.Num(); }
 	FVector2D GetEnemyPos(int32 i)    const
@@ -195,9 +203,9 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
 	float AliveReward = 0.001f;
 
-	/** アイテム獲得報酬 */
+	/** ジェム回収報酬（種類問わず固定） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
-	float ItemReward = 3.0f;
+	float ItemReward = 1.0f;
 
 	/** 敵撃破ボーナス */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
@@ -212,10 +220,6 @@ public:
 	/** シム座標(u) ↔ UE5 単位 変換スケール。SurvivorsGameView の SimToUE と一致させること。 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survivors|Config")
 	float SimToUE = 5.f;
-
-	/** フィールド上のアイテム数 */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	int32 NumItems = 10;
 
 	/** 同時に存在できる最大敵数の上限（カリキュラム制御用, /params で上書き可能）。
 	 *  実効値 = min(CurrentWave.MaxEnemies, MaxActiveEnemies)。 */
@@ -250,14 +254,6 @@ public:
 	/** 敵速度グローバル倍率（カリキュラム制御用, /params で上書き可能） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float EnemySpeedMult = 1.0f;
-
-	/** アイテム獲得時の XP 量 */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	float ItemXP = 1.0f;
-
-	/** 敵撃破時の XP 量（ItemXP の倍率） */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	float KillXPRatio = 0.05f;
 
 	/** Lv0→1 に必要な基礎 XP */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
@@ -296,18 +292,18 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
 	TArray<FEnemyTypeParams> EnemyTypeTable;
 
-	// ---- アイテム ----
+	// ---- ジェム ----
 
-	/** アイテム収集半径 [u]（Plan06 でジェム pickup_radius=30 に置換） */
+	/** ジェム自動回収半径 [u]（pickup_radius: 仕様 §4.1） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Item")
-	float ItemCollectRadius = 10.0f;
+	float GemPickupRadius = 30.f;
 
 protected:
 	virtual void BeginPlay() override;
 
 private:
 	// ---- 定数 ----
-	static constexpr int32  NumItemObs         = 20;
+	static constexpr int32  NumGemObs          = 20; // obs に含める近傍ジェム数
 	static constexpr int32  MaxEnemyObs        = 20;
 	static constexpr int32  MaxWeaponSlots     = 3;
 	static constexpr int32  MaxWeaponTypeSlots = 8;
@@ -331,6 +327,13 @@ private:
 		float     PlayerLastHitTime;   // 最後にプレイヤーに接触ダメージを与えた時刻 [s]
 	};
 
+	// ---- ジェムデータ ----
+	struct FGemState
+	{
+		FVector2D Pos;
+		EGemType  Type;
+	};
+
 	// ---- 状態 ----
 	FVector2D             PlayerPos;
 	FVector2D             PlayerVel;
@@ -339,7 +342,7 @@ private:
 	int32                 PlayerLevel = 0;
 	float                 AuraRadius  = 80.0f; // キャッシュ: GetAuraSize() / View 用
 	FWeaponSlot           WeaponSlots[MaxWeaponSlots];
-	TArray<FVector2D>     ItemPositions;
+	TArray<FGemState>     Gems;
 	TArray<FEnemyState>   Enemies;
 	float                 ElapsedTime      = 0.f;
 	float                 SpawnAccumulator = 0.f;
@@ -360,7 +363,8 @@ private:
 	void      SpawnBoss();
 	void      UpdateEnemies();
 	void      ApplyAuraDamage();
-	void      CheckItemCollections();
+	void      DropGem(int32 TypeId, FVector2D Pos);
+	void      CheckGemCollections();
 	void      ApplyEnemyContactDamage();
 	void      ResolveWallCollisions();
 	float     CastRayToObstacles(FVector2D Origin, FVector2D Dir) const;

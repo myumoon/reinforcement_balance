@@ -7,6 +7,26 @@
 // Lv1〜8: damage[HP], hit_interval[s], area_radius[u]
 struct FGarlicParams { float Damage; float HitInterval; float AreaRadius; };
 static constexpr float  GarlicKnockbackStrength = 20.f; // [u] 全レベル共通（仕様: knockback.md §2）
+
+// ジェム XP 値（EGemType インデックス順: Blue=0, Green=1, Red=2）
+static constexpr float GemXPValues[3] = { 1.f, 5.f, 10.f };
+
+// 敵 TypeId → ドロップジェム種 (仕様: experience.md §3.2)
+// 0=Bat,1=Zombie,2=Skeleton,3=Ghost,4=Werewolf,5=Mummy,6=Plant,7=BatSwarm,8=FireBeast,9=MedusaHead,10=GiantBat
+static const EGemType GemDropTable[11] = {
+	EGemType::Blue,  // Bat
+	EGemType::Blue,  // Zombie
+	EGemType::Blue,  // Skeleton
+	EGemType::Blue,  // Ghost
+	EGemType::Green, // Werewolf
+	EGemType::Green, // Mummy
+	EGemType::Green, // Plant
+	EGemType::Blue,  // BatSwarm
+	EGemType::Green, // FireBeast
+	EGemType::Green, // MedusaHead
+	EGemType::Red,   // GiantBat
+};
+
 static constexpr FGarlicParams GarlicTable[8] = {
 	{  5.f, 1.30f,  80.f }, // Lv1
 	{  5.f, 1.25f,  95.f }, // Lv2
@@ -135,7 +155,7 @@ TArray<FSurvivorsObsSegment> ASurvivorsGame::GetObsSchema() const
 		{ TEXT("elapsed_time"),  1              },
 		{ TEXT("xp_progress"),   1              },
 		{ TEXT("player_level"),  1              },
-		{ TEXT("item_rel_pos"),  NumItemObs * 2 },
+		{ TEXT("gem_rel_pos"),   NumGemObs * 2  },
 		{ TEXT("enemy_rel_pos"), MaxEnemyObs * 2 },
 		{ TEXT("enemy_vel"),     MaxEnemyObs * 2 },
 		{ TEXT("enemy_type"),    MaxEnemyObs    },
@@ -146,8 +166,8 @@ TArray<FSurvivorsObsSegment> ASurvivorsGame::GetObsSchema() const
 FString ASurvivorsGame::GetObsSchemaHash() const
 {
 	FString Schema = FString::Printf(
-		TEXT("SurvivorsGame,NumItemObs=%d,MaxEnemyObs=%d,MaxWeaponSlots=%d"),
-		NumItemObs, MaxEnemyObs, MaxWeaponSlots);
+		TEXT("SurvivorsGame,NumGemObs=%d,MaxEnemyObs=%d,MaxWeaponSlots=%d"),
+		NumGemObs, MaxEnemyObs, MaxWeaponSlots);
 	return FMD5::HashAnsiString(*Schema);
 }
 
@@ -171,10 +191,7 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	WeaponSlots[0].Level = 1;
 	AuraRadius = GarlicTable[0].AreaRadius; // 80u
 
-	ItemPositions.SetNum(NumItems);
-	for (FVector2D& Item : ItemPositions)
-		Item = RandomInsideField();
-
+	Gems.Empty();
 	Enemies.Empty();
 	ElapsedTime      = 0.f;
 	SpawnAccumulator = 0.f;
@@ -231,8 +248,8 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 		bBossSpawned = true;
 	}
 
-	CheckItemCollections();
 	ApplyEnemyContactDamage();
+	CheckGemCollections();
 
 	if (PlayerHP <= 0.f)
 	{
@@ -295,21 +312,21 @@ TArray<float> ASurvivorsGame::GetObservation() const
 	// 9. player_level (1)
 	Obs.Add(static_cast<float>(PlayerLevel) / static_cast<float>(MaxPlayerLevel));
 
-	// 10. アイテム相対位置 dx,dy × NumItemObs (近い順)
-	TArray<int32> ItemIdx;
-	ItemIdx.Reserve(ItemPositions.Num());
-	for (int32 i = 0; i < ItemPositions.Num(); ++i) ItemIdx.Add(i);
-	ItemIdx.Sort([&](int32 A, int32 B) {
-		return FVector2D::DistSquared(ItemPositions[A], PlayerPos)
-			 < FVector2D::DistSquared(ItemPositions[B], PlayerPos);
+	// 10. ジェム相対位置 dx,dy × NumGemObs (近い順)
+	TArray<int32> GemIdx;
+	GemIdx.Reserve(Gems.Num());
+	for (int32 i = 0; i < Gems.Num(); ++i) GemIdx.Add(i);
+	GemIdx.Sort([&](int32 A, int32 B) {
+		return FVector2D::DistSquared(Gems[A].Pos, PlayerPos)
+			 < FVector2D::DistSquared(Gems[B].Pos, PlayerPos);
 	});
-	for (int32 Slot = 0; Slot < NumItemObs; ++Slot)
+	for (int32 Slot = 0; Slot < NumGemObs; ++Slot)
 	{
-		if (Slot < ItemIdx.Num())
+		if (Slot < GemIdx.Num())
 		{
-			const FVector2D& It = ItemPositions[ItemIdx[Slot]];
-			Obs.Add((It.X - PlayerPos.X) / DN);
-			Obs.Add((It.Y - PlayerPos.Y) / DN);
+			const FVector2D& GPos = Gems[GemIdx[Slot]].Pos;
+			Obs.Add((GPos.X - PlayerPos.X) / DN);
+			Obs.Add((GPos.Y - PlayerPos.Y) / DN);
 		}
 		else { Obs.Add(0.f); Obs.Add(0.f); }
 	}
@@ -373,6 +390,16 @@ TArray<float> ASurvivorsGame::GetObservation() const
 
 float ASurvivorsGame::GetReward() const { return LastReward; }
 bool  ASurvivorsGame::IsDone()   const { return bDone; }
+
+FVector2D ASurvivorsGame::GetItemPos(int32 i) const
+{
+	return Gems.IsValidIndex(i) ? Gems[i].Pos : FVector2D::ZeroVector;
+}
+
+EGemType ASurvivorsGame::GetItemGemType(int32 i) const
+{
+	return Gems.IsValidIndex(i) ? Gems[i].Type : EGemType::Blue;
+}
 
 // ---- 内部ユーティリティ -------------------------------------------------------
 
@@ -545,25 +572,32 @@ void ASurvivorsGame::ApplyAuraDamage()
 
 				if (E.HP <= 0.f)
 				{
+					DropGem(E.TypeId, E.Pos);
 					Enemies.RemoveAt(i);
 					LastReward += KillReward;
-					ProcessXPGain(ItemXP * KillXPRatio);
 				}
 			}
 		}
 	}
 }
 
-void ASurvivorsGame::CheckItemCollections()
+void ASurvivorsGame::DropGem(int32 TypeId, FVector2D Pos)
 {
-	const float RadSq = ItemCollectRadius * ItemCollectRadius;
-	for (FVector2D& Item : ItemPositions)
+	const EGemType Type = (TypeId >= 0 && TypeId < 11) ? GemDropTable[TypeId] : EGemType::Blue;
+	Gems.Add({ Pos, Type });
+}
+
+void ASurvivorsGame::CheckGemCollections()
+{
+	const float RadSq = GemPickupRadius * GemPickupRadius;
+	for (int32 i = Gems.Num() - 1; i >= 0; --i)
 	{
-		if (FVector2D::DistSquared(PlayerPos, Item) < RadSq)
+		if (FVector2D::DistSquared(PlayerPos, Gems[i].Pos) <= RadSq)
 		{
+			const float XPGain = GemXPValues[static_cast<uint8>(Gems[i].Type)];
+			ProcessXPGain(XPGain);
 			LastReward += ItemReward;
-			ProcessXPGain(ItemXP);
-			Item = RandomInsideField();
+			Gems.RemoveAt(i);
 		}
 	}
 }
