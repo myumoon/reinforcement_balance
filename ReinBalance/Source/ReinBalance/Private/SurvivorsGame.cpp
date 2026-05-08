@@ -166,7 +166,7 @@ TArray<FSurvivorsObsSegment> ASurvivorsGame::GetObsSchema() const
 FString ASurvivorsGame::GetObsSchemaHash() const
 {
 	FString Schema = FString::Printf(
-		TEXT("SurvivorsGame,NumGemObs=%d,MaxEnemyObs=%d,MaxWeaponSlots=%d"),
+		TEXT("SurvivorsGame,NumGemObs=%d,MaxEnemyObs=%d,MaxWeaponSlots=%d,enemy_vel_normed"),
 		NumGemObs, MaxEnemyObs, MaxWeaponSlots);
 	return FMD5::HashAnsiString(*Schema);
 }
@@ -366,13 +366,15 @@ TArray<float> ASurvivorsGame::GetObservation() const
 		else { Obs.Add(0.f); Obs.Add(0.f); }
 	}
 
-	// enemy_vel vx,vy (40)
+	// enemy_vel vx,vy (40) — MoveSpeed で正規化（プレイヤー速度と同一基準）
+	// 最速敵 (BatSwarm 104u/s × SpeedMult) でも概ね ±2 以内に収まる
+	const float VN = MoveSpeed > 0.f ? MoveSpeed : 1.f;
 	for (int32 Slot = 0; Slot < MaxEnemyObs; ++Slot)
 	{
 		if (Slot < EnemyIdx.Num())
 		{
 			const FEnemyState& E = Enemies[EnemyIdx[Slot]];
-			Obs.Add(E.Vel.X); Obs.Add(E.Vel.Y);
+			Obs.Add(E.Vel.X / VN); Obs.Add(E.Vel.Y / VN);
 		}
 		else { Obs.Add(0.f); Obs.Add(0.f); }
 	}
