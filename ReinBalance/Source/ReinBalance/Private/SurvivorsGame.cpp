@@ -6,7 +6,7 @@
 // Garlic レベル別ステータス（仕様: weapons_garlic.md §2）
 // Lv1〜8: damage[HP], hit_interval[s], area_radius[u]
 struct FGarlicParams { float Damage; float HitInterval; float AreaRadius; };
-static constexpr float  GarlicKnockbackStrength = 20.f; // [u] 全レベル共通（仕様: knockback.md §2）
+static constexpr float  GarlicKnockbackStrength = 10.f; // [u] 全レベル共通
 
 // ジェム XP 値（EGemType インデックス順: Blue=0, Green=1, Red=2）
 static constexpr float GemXPValues[3] = { 1.f, 5.f, 10.f };
@@ -28,14 +28,14 @@ static const EGemType GemDropTable[11] = {
 };
 
 static constexpr FGarlicParams GarlicTable[8] = {
-	{  5.f, 1.30f,  80.f }, // Lv1
-	{  5.f, 1.25f,  95.f }, // Lv2
-	{ 10.f, 1.20f, 110.f }, // Lv3
-	{ 10.f, 1.15f, 125.f }, // Lv4
-	{ 15.f, 1.10f, 140.f }, // Lv5
-	{ 15.f, 1.05f, 155.f }, // Lv6
-	{ 20.f, 1.00f, 170.f }, // Lv7
-	{ 20.f, 0.95f, 185.f }, // Lv8
+	{  5.f, 1.30f,  25.f }, // Lv1
+	{  5.f, 1.25f,  30.f }, // Lv2
+	{ 10.f, 1.20f,  35.f }, // Lv3
+	{ 10.f, 1.15f,  40.f }, // Lv4
+	{ 15.f, 1.10f,  45.f }, // Lv5
+	{ 15.f, 1.05f,  50.f }, // Lv6
+	{ 20.f, 1.00f,  55.f }, // Lv7
+	{ 20.f, 0.95f,  60.f }, // Lv8
 };
 
 // 8方向レイキャスト方向（右回り 0°=右）
@@ -189,7 +189,7 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	// Garlic は Lv1 スタート（プレイヤーレベルアップごとに +1、上限 Lv8）
 	WeaponSlots[0].Type  = EWeaponType::Aura;
 	WeaponSlots[0].Level = 1;
-	AuraRadius = GarlicTable[0].AreaRadius; // 80u
+	AuraRadius = GarlicTable[0].AreaRadius; // 25u
 
 	Gems.Empty();
 	Enemies.Empty();

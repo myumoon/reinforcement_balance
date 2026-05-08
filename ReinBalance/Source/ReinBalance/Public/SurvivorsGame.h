@@ -271,8 +271,8 @@ public:
 
 	// ---- 武器 (Garlic オーラ) ----
 	// レベル別ステータスは GarlicTable[] (SurvivorsGame.cpp) で管理。
-	// Lv1: damage=5, hit_interval=1.30s, area_radius=80u
-	// Lv8: damage=20, hit_interval=0.95s, area_radius=185u
+	// Lv1: damage=5, hit_interval=1.30s, area_radius=25u
+	// Lv8: damage=20, hit_interval=0.95s, area_radius=60u
 
 	// ---- 敵設定 ----
 
@@ -347,7 +347,7 @@ private:
 	float                 PlayerHP    = 100.f;
 	float                 PlayerXP    = 0.f;
 	int32                 PlayerLevel = 0;
-	float                 AuraRadius  = 80.0f; // キャッシュ: GetAuraSize() / View 用
+	float                 AuraRadius  = 25.0f; // キャッシュ: GetAuraSize() / View 用
 	FWeaponSlot           WeaponSlots[MaxWeaponSlots];
 	TArray<FGemState>     Gems;
 	TArray<FEnemyState>   Enemies;
