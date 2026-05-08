@@ -116,15 +116,15 @@ private:
 		// 各パラメータを上書き（存在するフィールドのみ）
 		int32 MaxActiveEnemies;
 		if (JsonObj->TryGetNumberField(TEXT("MaxActiveEnemies"), MaxActiveEnemies))
-			Game->MaxActiveEnemies = FMath::Clamp(MaxActiveEnemies, 1, 20);
+			Game->MaxActiveEnemies = FMath::Clamp(MaxActiveEnemies, 1, 600);
 
 		double EnemySpeedMult;
 		if (JsonObj->TryGetNumberField(TEXT("EnemySpeedMult"), EnemySpeedMult))
 			Game->EnemySpeedMult = FMath::Clamp(static_cast<float>(EnemySpeedMult), 0.5f, 5.f);
 
-		double SpawnInterval;
-		if (JsonObj->TryGetNumberField(TEXT("SpawnInterval"), SpawnInterval))
-			Game->EnemySpawnInterval = FMath::Clamp(static_cast<float>(SpawnInterval), 2.f, 60.f);
+		double SpawnRateMult;
+		if (JsonObj->TryGetNumberField(TEXT("SpawnRateMult"), SpawnRateMult))
+			Game->SpawnRateMult = FMath::Clamp(static_cast<float>(SpawnRateMult), 0.1f, 5.f);
 
 		double XPGrowth;
 		if (JsonObj->TryGetNumberField(TEXT("XPGrowth"), XPGrowth))

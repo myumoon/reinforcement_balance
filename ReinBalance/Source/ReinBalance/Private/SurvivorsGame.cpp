@@ -23,6 +23,40 @@ ASurvivorsGame::ASurvivorsGame()
 	WeaponSlots[0].Level = 1;
 
 	InitDefaultEnemyTable();
+	InitDefaultSpawnWaves();
+}
+
+void ASurvivorsGame::InitDefaultSpawnWaves()
+{
+	SpawnWaves.Empty();
+
+	// ウェーブ追加ヘルパー（C スタイル配列で初期化リストを安全に渡す）
+	struct FWD { int32 T; float W; };
+	auto AddWave = [this](float TS, float TE, float SR, int32 ME, const FWD* Ws, int32 WCount)
+	{
+		FSpawnWave Wave;
+		Wave.TimeStart  = TS; Wave.TimeEnd = TE;
+		Wave.SpawnRate  = SR; Wave.MaxEnemies = ME;
+		for (int32 i = 0; i < WCount; ++i)
+		{
+			FEnemySpawnWeight EW; EW.TypeId = Ws[i].T; EW.Weight = Ws[i].W;
+			Wave.EnemyWeights.Add(EW);
+		}
+		SpawnWaves.Add(MoveTemp(Wave));
+	};
+
+	// type_id: Bat=0, Zombie=1, Skeleton=2, Ghost=3, Werewolf=4,
+	//          Mummy=5, Plant=6, BatSwarm=7, FireBeast=8, MedusaHead=9
+	{ const FWD w[]={{0,1.0f}};                                                                 AddWave(  0.f,   30.f, 1.0f,  50, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{0,0.7f},{1,0.3f}};                                                        AddWave( 30.f,   60.f, 1.5f,  80, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{0,0.4f},{1,0.3f},{2,0.2f},{3,0.1f}};                                     AddWave( 60.f,  120.f, 2.5f, 120, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{1,0.3f},{2,0.3f},{3,0.2f},{4,0.2f}};                                     AddWave(120.f,  180.f, 3.5f, 160, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{2,0.25f},{3,0.2f},{4,0.3f},{5,0.25f}};                                   AddWave(180.f,  240.f, 4.0f, 200, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{4,0.3f},{5,0.3f},{6,0.3f},{3,0.1f}};                                     AddWave(240.f,  300.f, 4.5f, 250, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{4,0.25f},{5,0.2f},{6,0.2f},{7,0.35f}};                                   AddWave(300.f,  420.f, 5.0f, 300, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{5,0.2f},{6,0.2f},{7,0.3f},{8,0.3f}};                                     AddWave(420.f,  480.f, 6.0f, 400, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{6,0.15f},{7,0.25f},{8,0.3f},{9,0.3f}};                                   AddWave(480.f,  600.f, 7.0f, 500, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{7,0.25f},{8,0.35f},{9,0.4f}};                                             AddWave(600.f, 1800.f, 8.0f, 600, w, UE_ARRAY_COUNT(w)); }
 }
 
 void ASurvivorsGame::InitDefaultEnemyTable()
@@ -83,7 +117,7 @@ TArray<FSurvivorsObsSegment> ASurvivorsGame::GetObsSchema() const
 		{ TEXT("player_hp"),     1              },
 		{ TEXT("weapon_slots"),  MaxWeaponSlots * 2 },
 		{ TEXT("enemy_count"),   1              },
-		{ TEXT("spawn_timer"),   1              },
+		{ TEXT("elapsed_time"),  1              },
 		{ TEXT("xp_progress"),   1              },
 		{ TEXT("player_level"),  1              },
 		{ TEXT("item_rel_pos"),  NumItemObs * 2 },
@@ -124,9 +158,11 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 		Item = RandomInsideField();
 
 	Enemies.Empty();
-	SpawnTimer = EnemySpawnInterval;
-	LastReward = 0.f;
-	bDone      = false;
+	ElapsedTime      = 0.f;
+	SpawnAccumulator = 0.f;
+	bBossSpawned     = false;
+	LastReward       = 0.f;
+	bDone            = false;
 }
 
 // ---- ステップ ----------------------------------------------------------------
@@ -151,14 +187,30 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 	PlayerPos += PlayerVel * PhysicsDt;
 	ResolveWallCollisions();
 
+	ElapsedTime += PhysicsDt;
 	UpdateEnemies();
 	ApplyAuraDamage();
 
-	SpawnTimer -= PhysicsDt;
-	if (SpawnTimer <= 0.f)
+	// Wave ベーススポーン（accumulator 方式）
+	if (const FSpawnWave* Wave = GetCurrentWave())
 	{
-		SpawnEnemy();
-		SpawnTimer = EnemySpawnInterval;
+		const int32 EffMax = FMath::Min(Wave->MaxEnemies, MaxActiveEnemies);
+		if (Enemies.Num() < EffMax)
+		{
+			SpawnAccumulator += Wave->SpawnRate * SpawnRateMult * PhysicsDt;
+			while (SpawnAccumulator >= 1.f && Enemies.Num() < EffMax)
+			{
+				SpawnEnemy(*Wave);
+				SpawnAccumulator -= 1.f;
+			}
+		}
+	}
+
+	// ボス 1 回限りスポーン
+	if (!bBossSpawned && ElapsedTime >= BossSpawnTime)
+	{
+		SpawnBoss();
+		bBossSpawned = true;
 	}
 
 	CheckItemCollections();
@@ -213,8 +265,8 @@ TArray<float> ASurvivorsGame::GetObservation() const
 	// 6. 現在の敵数 (1)
 	Obs.Add(static_cast<float>(Enemies.Num()) / static_cast<float>(MaxEnemyObs));
 
-	// 7. 次スポーンまでの残り時間 (1)
-	Obs.Add(FMath::Clamp(SpawnTimer / EnemySpawnInterval, 0.f, 1.f));
+	// 7. 経過時間 (1): 0〜1 (MaxGameTime=1800s で正規化)
+	Obs.Add(FMath::Clamp(ElapsedTime / MaxGameTime, 0.f, 1.f));
 
 	// 8. xp_progress (1)
 	{
@@ -380,21 +432,71 @@ FVector2D ASurvivorsGame::RandomOnEdge()
 	}
 }
 
-void ASurvivorsGame::SpawnEnemy()
+FVector2D ASurvivorsGame::RandomSpawnPos()
 {
-	if (Enemies.Num() >= MaxActiveEnemies || EnemyTypeTable.Num() == 0) return;
+	const float Angle = RandStream.FRandRange(0.f, 2.f * PI);
+	const float Dist  = RandStream.FRandRange(SpawnMinDistance, SpawnMaxDistance);
+	FVector2D Pos = PlayerPos + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Dist;
+	Pos.X = FMath::Clamp(Pos.X, -FieldHalfSize, FieldHalfSize);
+	Pos.Y = FMath::Clamp(Pos.Y, -FieldHalfSize, FieldHalfSize);
+	return Pos;
+}
 
-	const int32 TypeIdx               = RandStream.RandRange(0, EnemyTypeTable.Num() - 1);
-	const FEnemyTypeParams& Params    = EnemyTypeTable[TypeIdx];
+int32 ASurvivorsGame::SelectTypeByWeight(const TArray<FEnemySpawnWeight>& Weights)
+{
+	float Total = 0.f;
+	for (const FEnemySpawnWeight& W : Weights) Total += W.Weight;
+	if (Total <= 0.f || Weights.Num() == 0) return 0;
 
+	float R = RandStream.FRandRange(0.f, Total);
+	for (const FEnemySpawnWeight& W : Weights)
+	{
+		R -= W.Weight;
+		if (R <= 0.f) return W.TypeId;
+	}
+	return Weights.Last().TypeId;
+}
+
+const FSpawnWave* ASurvivorsGame::GetCurrentWave() const
+{
+	for (const FSpawnWave& Wave : SpawnWaves)
+		if (ElapsedTime >= Wave.TimeStart && ElapsedTime < Wave.TimeEnd)
+			return &Wave;
+	return nullptr;
+}
+
+void ASurvivorsGame::SpawnEnemy(const FSpawnWave& Wave)
+{
+	if (Wave.EnemyWeights.Num() == 0) return;
+	const int32 TypeIdx = SelectTypeByWeight(Wave.EnemyWeights);
+	if (!EnemyTypeTable.IsValidIndex(TypeIdx)) return;
+
+	const FEnemyTypeParams& Params = EnemyTypeTable[TypeIdx];
 	FEnemyState Enemy;
-	Enemy.Pos             = RandomOnEdge();
+	Enemy.Pos             = RandomSpawnPos();
 	Enemy.Vel             = FVector2D::ZeroVector;
 	Enemy.TypeId          = TypeIdx;
 	Enemy.CollisionRadius = Params.CollisionRadius;
 	Enemy.MaxHP           = Params.BaseHP;
 	Enemy.HP              = Params.BaseHP;
 	Enemies.Add(Enemy);
+}
+
+void ASurvivorsGame::SpawnBoss()
+{
+	constexpr int32 BossTypeId = 10; // GiantBat
+	if (!EnemyTypeTable.IsValidIndex(BossTypeId)) return;
+
+	const FEnemyTypeParams& Params = EnemyTypeTable[BossTypeId];
+	FEnemyState Boss;
+	Boss.Pos             = RandomSpawnPos();
+	Boss.Vel             = FVector2D::ZeroVector;
+	Boss.TypeId          = BossTypeId;
+	Boss.CollisionRadius = Params.CollisionRadius;
+	Boss.MaxHP           = Params.BaseHP;
+	Boss.HP              = Params.BaseHP;
+	Enemies.Add(Boss); // 上限カウント外（仕様: 別カウント）
+	UE_LOG(LogTemp, Log, TEXT("[SurvivorsGame] GiantBat spawned at t=%.1f"), ElapsedTime);
 }
 
 void ASurvivorsGame::UpdateEnemies()
