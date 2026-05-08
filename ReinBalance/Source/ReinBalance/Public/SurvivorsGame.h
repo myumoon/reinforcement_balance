@@ -4,6 +4,8 @@
 #include "GameFramework/Actor.h"
 #include "SurvivorsGame.generated.h"
 
+class AWallActor;
+
 /** obs スキーマの1セグメント */
 struct FSurvivorsObsSegment
 {
@@ -122,9 +124,13 @@ public:
 
 	// ---- フィールド設定 ----
 
-	/** フィールド半幅 [m] */
+	/** フィールド半幅 [m]。敵/アイテムスポーン範囲・obs 正規化基準として使用。外側境界は AWallActor で定義する。 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	float FieldHalfSize = 15.f;
+	float FieldHalfSize = 100.f;
+
+	/** シム座標(m) ↔ UE5 単位 変換スケール。SurvivorsGameView の SimToUE と一致させること。 */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	float SimToUE = 50.f;
 
 	/** フィールド上のアイテム数 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
@@ -171,6 +177,10 @@ public:
 	/** 線形ドラッグ係数 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
 	float PlayerDrag = 2.f;
+
+	/** プレイヤー衝突半径 [m]（AWallActor との押し出し計算に使用） */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
+	float PlayerRadius = 0.3f;
 
 	// ---- 武器 (オーラ) ----
 
@@ -282,6 +292,10 @@ private:
 	bool                  bDone       = false;
 	FRandomStream         RandStream;
 
+	// ---- WallActors (BeginPlay で自動収集) ----
+	UPROPERTY()
+	TArray<TObjectPtr<AWallActor>> WallActors;
+
 	// ---- 内部メソッド ----
 	FVector2D RandomInsideField();
 	FVector2D RandomOnEdge();
@@ -290,8 +304,8 @@ private:
 	void      ApplyAuraDamage();
 	void      CheckItemCollections();
 	void      ApplyEnemyContactDamage();
-	void      ClampPlayerToField();
-	float     CastRayToBoundary(FVector2D Origin, FVector2D Dir) const;
+	void      ResolveWallCollisions();
+	float     CastRayToObstacles(FVector2D Origin, FVector2D Dir) const;
 
 	// 敵タイプ別パラメータ取得
 	float GetEnemySpeed(int32 Type) const;

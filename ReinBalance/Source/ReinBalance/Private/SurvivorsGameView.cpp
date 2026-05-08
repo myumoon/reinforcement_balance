@@ -41,7 +41,6 @@ void ASurvivorsGameView::BeginPlay()
 	LoadAssets();
 	SetupPlayerMesh();
 	SetupItemMeshes();
-	SetupBoundaryWalls();
 	UpdatePositions();
 }
 
@@ -58,7 +57,7 @@ void ASurvivorsGameView::Tick(float DeltaTime)
 
 	// HP ウィジェット: プレイヤー頭上に追従
 	const FVector2D PPos = Game->GetPlayerPos();
-	HPWidgetComp->SetRelativeLocation(FVector(PPos.X * SimToUE, PPos.Y * SimToUE, 80.f));
+	HPWidgetComp->SetRelativeLocation(FVector(PPos.X * Game->SimToUE, PPos.Y * Game->SimToUE, 80.f));
 	if (USurvivorsHPWidget* Widget = Cast<USurvivorsHPWidget>(HPWidgetComp->GetUserWidgetObject()))
 	{
 		Widget->UpdateDisplay(Game->GetPlayerHP(), Game->GetMaxPlayerHP());
@@ -104,39 +103,6 @@ void ASurvivorsGameView::SetupItemMeshes()
 		if (Mat) Comp->SetMaterial(0, Mat);
 		ItemMeshComponents.Add(Comp);
 	}
-}
-
-void ASurvivorsGameView::SetupBoundaryWalls()
-{
-	const float HalfSize   = Game->FieldHalfSize * SimToUE;
-	const float Thick      = 10.f;
-	const float Height     = 50.f;
-	const FLinearColor WallColor(0.15f, 0.15f, 0.15f, 1.f);
-
-	auto MakeWall = [&](const TCHAR* Name, FVector Pos, FVector Scale)
-	{
-		UStaticMeshComponent* Wall = NewObject<UStaticMeshComponent>(this, Name);
-		Wall->RegisterComponent();
-		Wall->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepRelativeTransform);
-		Wall->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		if (CubeMeshAsset) Wall->SetStaticMesh(CubeMeshAsset);
-		Wall->SetRelativeLocation(Pos);
-		Wall->SetRelativeScale3D(Scale);
-		UMaterialInstanceDynamic* Mat = CreateColorMaterial(WallColor);
-		if (Mat) Wall->SetMaterial(0, Mat);
-		BoundaryWalls.Add(Wall);
-	};
-
-	// キューブは 100×100×100 単位。Scale = desiredSize / 100
-	const float LongScale  = (HalfSize * 2.f + Thick * 2.f) / 100.f; // 角を被覆
-	const float ShortScale = HalfSize * 2.f / 100.f;
-	const float ThinScale  = Thick  / 100.f;
-	const float TallScale  = Height / 100.f;
-
-	MakeWall(TEXT("WallNorth"), FVector( 0.f,  HalfSize, 0.f), FVector(LongScale,  ThinScale, TallScale));
-	MakeWall(TEXT("WallSouth"), FVector( 0.f, -HalfSize, 0.f), FVector(LongScale,  ThinScale, TallScale));
-	MakeWall(TEXT("WallEast"),  FVector( HalfSize, 0.f,  0.f), FVector(ThinScale, ShortScale, TallScale));
-	MakeWall(TEXT("WallWest"),  FVector(-HalfSize, 0.f,  0.f), FVector(ThinScale, ShortScale, TallScale));
 }
 
 // ---- Tick 内処理 ----
@@ -228,7 +194,7 @@ void ASurvivorsGameView::UpdatePositions()
 	// プレイヤー: 速度方向にコーンを向ける
 	const FVector2D PPos = Game->GetPlayerPos();
 	const FVector2D PVel = Game->GetPlayerVel();
-	PlayerMesh->SetRelativeLocation(FVector(PPos.X * SimToUE, PPos.Y * SimToUE, 0.f));
+	PlayerMesh->SetRelativeLocation(FVector(PPos.X * Game->SimToUE, PPos.Y * Game->SimToUE, 0.f));
 	if (!PVel.IsNearlyZero(0.01f))
 	{
 		const float Yaw = FMath::RadiansToDegrees(FMath::Atan2(PVel.Y, PVel.X));
@@ -239,14 +205,14 @@ void ASurvivorsGameView::UpdatePositions()
 	for (int32 i = 0; i < ItemMeshComponents.Num(); ++i)
 	{
 		const FVector2D IPos = Game->GetItemPos(i);
-		ItemMeshComponents[i]->SetRelativeLocation(FVector(IPos.X * SimToUE, IPos.Y * SimToUE, 0.f));
+		ItemMeshComponents[i]->SetRelativeLocation(FVector(IPos.X * Game->SimToUE, IPos.Y * Game->SimToUE, 0.f));
 	}
 
 	// 敵
 	for (int32 i = 0; i < EnemyMeshComponents.Num(); ++i)
 	{
 		const FVector2D EPos = Game->GetEnemyPos(i);
-		EnemyMeshComponents[i]->SetRelativeLocation(FVector(EPos.X * SimToUE, EPos.Y * SimToUE, 0.f));
+		EnemyMeshComponents[i]->SetRelativeLocation(FVector(EPos.X * Game->SimToUE, EPos.Y * Game->SimToUE, 0.f));
 	}
 }
 
@@ -255,11 +221,11 @@ void ASurvivorsGameView::DrawAura()
 	if (!GetWorld()) return;
 
 	const FVector2D PPos   = Game->GetPlayerPos();
-	const float     Radius = Game->GetAuraSize() * SimToUE;
+	const float     Radius = Game->GetAuraSize() * Game->SimToUE;
 
 	DrawDebugCircle(
 		GetWorld(),
-		FVector(PPos.X * SimToUE, PPos.Y * SimToUE, 2.f),
+		FVector(PPos.X * Game->SimToUE, PPos.Y * Game->SimToUE, 2.f),
 		Radius,
 		48,
 		FColor(50, 150, 255, 255),

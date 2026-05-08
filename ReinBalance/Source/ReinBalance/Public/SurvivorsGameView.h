@@ -26,7 +26,7 @@ class USurvivorsHPWidget;
  *   敵HP色       : 満タン=タイプ色, 瀕死=白 で線形補間
  *   オーラ範囲   : DrawDebugCircle（青）
  *   HP ウィジェット: Screen空間 UMG（緑→黄→赤バー）
- *   フィールド境界: 4辺の薄いキューブ
+ *   フィールド境界: エディタで配置した AWallActor
  */
 UCLASS()
 class REINBALANCE_API ASurvivorsGameView : public AActor
@@ -39,10 +39,6 @@ public:
 	/** ビジュアルの参照先シミュレーター */
 	UPROPERTY(EditAnywhere, Category = "SurvivorsGameView")
 	TObjectPtr<ASurvivorsGame> Game;
-
-	/** シミュレーション座標（m）→ UE5 単位（cm）の変換スケール */
-	UPROPERTY(EditAnywhere, Category = "SurvivorsGameView")
-	float SimToUE = 50.f;
 
 protected:
 	virtual void BeginPlay() override;
@@ -67,9 +63,6 @@ private:
 	UPROPERTY()
 	TArray<TObjectPtr<UMaterialInstanceDynamic>> EnemyMaterials;
 
-	UPROPERTY()
-	TArray<TObjectPtr<UStaticMeshComponent>> BoundaryWalls;
-
 	/** 敵タイプ色キャッシュ（値型, UPROPERTY不要） */
 	TArray<FLinearColor> EnemyTypeColors;
 
@@ -89,7 +82,6 @@ private:
 	void LoadAssets();
 	void SetupPlayerMesh();
 	void SetupItemMeshes();
-	void SetupBoundaryWalls();
 	void SyncItemMeshes();
 	void SyncEnemyMeshes();
 	void UpdateEnemyColors();

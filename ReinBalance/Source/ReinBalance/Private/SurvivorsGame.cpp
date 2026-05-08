@@ -1,4 +1,6 @@
 #include "SurvivorsGame.h"
+#include "WallActor.h"
+#include "Kismet/GameplayStatics.h"
 #include "Misc/SecureHash.h"
 
 // 8方向レイキャスト方向（右回り 0°=右）
@@ -25,6 +27,13 @@ ASurvivorsGame::ASurvivorsGame()
 void ASurvivorsGame::BeginPlay()
 {
 	Super::BeginPlay();
+
+	TArray<AActor*> Found;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), AWallActor::StaticClass(), Found);
+	for (AActor* A : Found)
+		if (AWallActor* W = Cast<AWallActor>(A)) WallActors.Add(W);
+
+	UE_LOG(LogTemp, Log, TEXT("[SurvivorsGame] WallActors found: %d"), WallActors.Num());
 	ResetState(TOptional<int32>());
 }
 
@@ -106,7 +115,7 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 	PlayerVel.X += (Ax - PlayerDrag * PlayerVel.X) * PhysicsDt;
 	PlayerVel.Y += (Ay - PlayerDrag * PlayerVel.Y) * PhysicsDt;
 	PlayerPos   += PlayerVel * PhysicsDt;
-	ClampPlayerToField();
+	ResolveWallCollisions();
 
 	UpdateEnemies();
 	ApplyAuraDamage();
@@ -152,7 +161,7 @@ TArray<float> ASurvivorsGame::GetObservation() const
 	// 3. 8方向壁距離 (8)
 	for (int32 r = 0; r < 8; ++r)
 	{
-		const float Dist = CastRayToBoundary(PlayerPos, RayDirs[r]);
+		const float Dist = CastRayToObstacles(PlayerPos, RayDirs[r]);
 		Obs.Add(FMath::Clamp(Dist / MaxRayDist, 0.f, 1.f));
 	}
 
@@ -425,20 +434,82 @@ void ASurvivorsGame::ApplyEnemyContactDamage()
 	PlayerHP = FMath::Max(PlayerHP, 0.f);
 }
 
-void ASurvivorsGame::ClampPlayerToField()
+void ASurvivorsGame::ResolveWallCollisions()
 {
-	if (PlayerPos.X >  FieldHalfSize) { PlayerPos.X =  FieldHalfSize; PlayerVel.X = 0.f; }
-	if (PlayerPos.X < -FieldHalfSize) { PlayerPos.X = -FieldHalfSize; PlayerVel.X = 0.f; }
-	if (PlayerPos.Y >  FieldHalfSize) { PlayerPos.Y =  FieldHalfSize; PlayerVel.Y = 0.f; }
-	if (PlayerPos.Y < -FieldHalfSize) { PlayerPos.Y = -FieldHalfSize; PlayerVel.Y = 0.f; }
+	for (const TObjectPtr<AWallActor>& Wall : WallActors)
+	{
+		if (!Wall) continue;
+		const FBox2D Box = Wall->GetSimBounds(SimToUE);
+
+		const FVector2D Closest(
+			FMath::Clamp(PlayerPos.X, Box.Min.X, Box.Max.X),
+			FMath::Clamp(PlayerPos.Y, Box.Min.Y, Box.Max.Y));
+		const FVector2D Delta = PlayerPos - Closest;
+		const float DistSq = Delta.SizeSquared();
+
+		if (DistSq < PlayerRadius * PlayerRadius && DistSq > KINDA_SMALL_NUMBER)
+		{
+			const float Dist  = FMath::Sqrt(DistSq);
+			const FVector2D N = Delta / Dist;
+			PlayerPos = Closest + N * PlayerRadius;
+			const float VdotN = FVector2D::DotProduct(PlayerVel, N);
+			if (VdotN < 0.f) PlayerVel -= N * VdotN;
+		}
+		else if (DistSq <= KINDA_SMALL_NUMBER)
+		{
+			// 完全埋まり → 最小ペネトレーション面に押し出す
+			const float px1 = PlayerPos.X - Box.Min.X, px2 = Box.Max.X - PlayerPos.X;
+			const float py1 = PlayerPos.Y - Box.Min.Y, py2 = Box.Max.Y - PlayerPos.Y;
+			const float m = FMath::Min(FMath::Min(px1, px2), FMath::Min(py1, py2));
+			if      (m == px1) { PlayerPos.X = Box.Min.X - PlayerRadius; PlayerVel.X = FMath::Min(PlayerVel.X, 0.f); }
+			else if (m == px2) { PlayerPos.X = Box.Max.X + PlayerRadius; PlayerVel.X = FMath::Max(PlayerVel.X, 0.f); }
+			else if (m == py1) { PlayerPos.Y = Box.Min.Y - PlayerRadius; PlayerVel.Y = FMath::Min(PlayerVel.Y, 0.f); }
+			else               { PlayerPos.Y = Box.Max.Y + PlayerRadius; PlayerVel.Y = FMath::Max(PlayerVel.Y, 0.f); }
+		}
+	}
 }
 
-float ASurvivorsGame::CastRayToBoundary(FVector2D Origin, FVector2D Dir) const
+float ASurvivorsGame::CastRayToObstacles(FVector2D Origin, FVector2D Dir) const
 {
-	float t = TNumericLimits<float>::Max();
-	if (Dir.X >  1e-6f) t = FMath::Min(t, ( FieldHalfSize - Origin.X) / Dir.X);
-	if (Dir.X < -1e-6f) t = FMath::Min(t, (-FieldHalfSize - Origin.X) / Dir.X);
-	if (Dir.Y >  1e-6f) t = FMath::Min(t, ( FieldHalfSize - Origin.Y) / Dir.Y);
-	if (Dir.Y < -1e-6f) t = FMath::Min(t, (-FieldHalfSize - Origin.Y) / Dir.Y);
-	return t < TNumericLimits<float>::Max() ? t : 0.f;
+	// フォールバック: フィールド境界（AWallActor が配置されていない場合の安全網）
+	float tMin = TNumericLimits<float>::Max();
+	if (Dir.X >  1e-6f) tMin = FMath::Min(tMin, ( FieldHalfSize - Origin.X) / Dir.X);
+	if (Dir.X < -1e-6f) tMin = FMath::Min(tMin, (-FieldHalfSize - Origin.X) / Dir.X);
+	if (Dir.Y >  1e-6f) tMin = FMath::Min(tMin, ( FieldHalfSize - Origin.Y) / Dir.Y);
+	if (Dir.Y < -1e-6f) tMin = FMath::Min(tMin, (-FieldHalfSize - Origin.Y) / Dir.Y);
+
+	// AWallActor AABB スラブ法
+	for (const TObjectPtr<AWallActor>& Wall : WallActors)
+	{
+		if (!Wall) continue;
+		const FBox2D Box = Wall->GetSimBounds(SimToUE);
+
+		float tNear = -TNumericLimits<float>::Max();
+		float tFar  =  TNumericLimits<float>::Max();
+
+		if (FMath::Abs(Dir.X) > 1e-6f)
+		{
+			float t1 = (Box.Min.X - Origin.X) / Dir.X;
+			float t2 = (Box.Max.X - Origin.X) / Dir.X;
+			if (t1 > t2) Swap(t1, t2);
+			tNear = FMath::Max(tNear, t1);
+			tFar  = FMath::Min(tFar,  t2);
+		}
+		else if (Origin.X < Box.Min.X || Origin.X > Box.Max.X) continue;
+
+		if (FMath::Abs(Dir.Y) > 1e-6f)
+		{
+			float t1 = (Box.Min.Y - Origin.Y) / Dir.Y;
+			float t2 = (Box.Max.Y - Origin.Y) / Dir.Y;
+			if (t1 > t2) Swap(t1, t2);
+			tNear = FMath::Max(tNear, t1);
+			tFar  = FMath::Min(tFar,  t2);
+		}
+		else if (Origin.Y < Box.Min.Y || Origin.Y > Box.Max.Y) continue;
+
+		if (tNear < tFar && tNear > 0.f)
+			tMin = FMath::Min(tMin, tNear);
+	}
+
+	return tMin < TNumericLimits<float>::Max() ? tMin : 0.f;
 }
