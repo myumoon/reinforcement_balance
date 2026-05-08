@@ -13,6 +13,8 @@ ReinBalance/Plugins/*/Intermediate/
 # ====================
 ReinBalance/Content/*
 !ReinBalance/Content/Models/
+!ReinBalance/Content/Game/
+!ReinBalance/Content/Core/
 
 # ====================
 # Python 訓練環境
@@ -47,6 +49,9 @@ Thumbs.db
 # ====================
 .claude/settings.local.json
 .claude/grill-me/
+.claude/docs/
+.claude/plan/
+.claude/worktree-dev-review/
 
 # ====================
 # ローカル
