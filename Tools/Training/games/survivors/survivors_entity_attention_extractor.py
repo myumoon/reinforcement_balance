@@ -7,7 +7,7 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
             observation_space,
             features_dim=features_dim,
             offsets=offsets,
-            item_key="item_rel_pos",
+            item_key="gem_rel_pos",
             use_polar=True,
             enemy_scalar_keys=["enemy_type", "enemy_hp"],
         )
