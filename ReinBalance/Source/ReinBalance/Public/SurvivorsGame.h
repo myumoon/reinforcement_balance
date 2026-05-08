@@ -70,6 +70,48 @@ struct FEnemyTypeParams
 	bool bIsBoss = false;
 };
 
+/** ウェーブ内の敵種別と出現重み */
+USTRUCT(BlueprintType)
+struct FEnemySpawnWeight
+{
+	GENERATED_BODY()
+
+	/** EnemyTypeTable のインデックス（type_id） */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	int32 TypeId = 0;
+
+	/** 選択重み（相対値、正規化は内部で行う） */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	float Weight = 1.f;
+};
+
+/** 時刻帯（Wave）ごとのスポーン設定 */
+USTRUCT(BlueprintType)
+struct FSpawnWave
+{
+	GENERATED_BODY()
+
+	/** Wave 開始時刻 [秒] */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	float TimeStart = 0.f;
+
+	/** Wave 終了時刻 [秒] */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	float TimeEnd = 30.f;
+
+	/** スポーンレート [体/秒]（SpawnRateMult で乗算） */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	float SpawnRate = 1.f;
+
+	/** この Wave の同時出現上限（MaxActiveEnemies との min を取る） */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	int32 MaxEnemies = 50;
+
+	/** 出現する敵種別と重み */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	TArray<FEnemySpawnWeight> EnemyWeights;
+};
+
 /**
  * Vampire Survivors 風サバイバルゲームのロジッククラス（ビジュアルなし）。
  *
@@ -84,7 +126,7 @@ struct FEnemyTypeParams
  *   [12]     プレイヤー HP / MaxPlayerHP
  *   [13-18]  武器スロット × 3: (type_norm, level_norm) × MaxWeaponSlots
  *   [19]     現在の敵数 / MaxEnemyObs
- *   [20]     次スポーンまでの残り時間 (0~1)
+ *   [20]     経過時間 elapsed_time / MaxGameTime (0~1)
  *   [21]     xp_progress (0~1, アイテム取得・敵撃破で増加、レベルアップでリセット)
  *   [22]     player_level (0~1 = level / MaxPlayerLevel, 最大 MaxPlayerLevel=100)
  *   [23 .. 23+N*2-1]       アイテム相対位置 dx,dy × NumItemObs
@@ -175,13 +217,35 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	int32 NumItems = 10;
 
-	/** 敵スポーン間隔 [秒]（/params で上書き可能） */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	float EnemySpawnInterval = 5.f;
-
-	/** 同時に存在できる最大敵数（カリキュラム制御用, /params で上書き可能） */
+	/** 同時に存在できる最大敵数の上限（カリキュラム制御用, /params で上書き可能）。
+	 *  実効値 = min(CurrentWave.MaxEnemies, MaxActiveEnemies)。 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	int32 MaxActiveEnemies = 6;
+
+	/** スポーンレートグローバル倍率（カリキュラム制御用, /params で上書き可能） */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	float SpawnRateMult = 1.0f;
+
+	// ---- スポーン設定 ----
+
+	/** 円周スポーン: プレイヤーからの最小距離 [u] */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
+	float SpawnMinDistance = 400.f;
+
+	/** 円周スポーン: プレイヤーからの最大距離 [u] */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
+	float SpawnMaxDistance = 600.f;
+
+	/** GiantBat ボスのスポーン時刻 [秒] */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
+	float BossSpawnTime = 600.f;
+
+	/**
+	 * 時刻帯別スポーン設定テーブル（Mad Forest 10 Wave）。
+	 * TimeStart/TimeEnd は秒。各 Wave の SpawnRate は SpawnRateMult で乗算される。
+	 */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
+	TArray<FSpawnWave> SpawnWaves;
 
 	/** 敵速度グローバル倍率（カリキュラム制御用, /params で上書き可能） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
@@ -256,14 +320,15 @@ protected:
 
 private:
 	// ---- 定数 ----
-	static constexpr int32  NumItemObs       = 20;
-	static constexpr int32  MaxEnemyObs      = 20;
-	static constexpr int32  MaxWeaponSlots   = 3;
-	static constexpr int32  MaxWeaponTypeSlots = 8; // obs エンコードの型容量
-	static constexpr int32  MaxWeaponLevel   = 8;
-	static constexpr int32  MaxPlayerLevel   = 100;
-	static constexpr float  PhysicsDt        = 1.f / 60.f;
-	static const FVector2D  RayDirs[8];              // 8方向レイキャスト方向
+	static constexpr int32  NumItemObs        = 20;
+	static constexpr int32  MaxEnemyObs       = 20;
+	static constexpr int32  MaxWeaponSlots    = 3;
+	static constexpr int32  MaxWeaponTypeSlots = 8;
+	static constexpr int32  MaxWeaponLevel    = 8;
+	static constexpr int32  MaxPlayerLevel    = 100;
+	static constexpr float  PhysicsDt         = 1.f / 60.f;
+	static constexpr float  MaxGameTime       = 1800.f; // obs elapsed_time_norm の基準 (30分)
+	static const FVector2D  RayDirs[8];
 
 	// ---- 敵データ ----
 	struct FEnemyState
@@ -287,7 +352,9 @@ private:
 	FWeaponSlot           WeaponSlots[MaxWeaponSlots];
 	TArray<FVector2D>     ItemPositions;
 	TArray<FEnemyState>   Enemies;
-	float                 SpawnTimer  = 0.f;
+	float                 ElapsedTime      = 0.f;
+	float                 SpawnAccumulator = 0.f;
+	bool                  bBossSpawned     = false;
 	float                 LastReward  = 0.f;
 	bool                  bDone       = false;
 	FRandomStream         RandStream;
@@ -299,7 +366,9 @@ private:
 	// ---- 内部メソッド ----
 	FVector2D RandomInsideField();
 	FVector2D RandomOnEdge();
-	void      SpawnEnemy();
+	FVector2D RandomSpawnPos();
+	void      SpawnEnemy(const FSpawnWave& Wave);
+	void      SpawnBoss();
 	void      UpdateEnemies();
 	void      ApplyAuraDamage();
 	void      CheckItemCollections();
@@ -307,8 +376,13 @@ private:
 	void      ResolveWallCollisions();
 	float     CastRayToObstacles(FVector2D Origin, FVector2D Dir) const;
 
-	// 敵テーブル初期化
+	// テーブル初期化
 	void  InitDefaultEnemyTable();
+	void  InitDefaultSpawnWaves();
+
+	// スポーン補助
+	const FSpawnWave* GetCurrentWave() const;
+	int32             SelectTypeByWeight(const TArray<FEnemySpawnWeight>& Weights);
 
 	// 敵タイプ別パラメータ取得（テーブルルックアップ）
 	float GetEnemySpeed(int32 TypeId) const;
