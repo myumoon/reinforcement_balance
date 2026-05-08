@@ -644,12 +644,12 @@ def main() -> None:
                     raw_env=raw_env,
                     frame_skip=args.frame_skip,
                     window=args.curriculum_window,
-                    threshold=args.curriculum_threshold,
+                    threshold_mult=args.curriculum_threshold,
                     alive_reward=args.curriculum_alive_reward,
                 )
                 loop_callbacks.append(curriculum_cb)
                 print(f"[INFO] CurriculumCallback 有効 "
-                      f"(window={args.curriculum_window}, threshold={args.curriculum_threshold}, "
+                      f"(window={args.curriculum_window}, threshold_mult={args.curriculum_threshold}, "
                       f"frame_skip={args.frame_skip}, alive_reward={args.curriculum_alive_reward})")
             elif args.curriculum:
                 print("[WARN] --curriculum は set_params をサポートする環境でのみ有効です。無視します。")
