@@ -180,8 +180,9 @@ python export_onnx.py --game survivors --model models/survivors_model
 | MaxActiveEnemies | int | 6 | 同時出現最大敵数 |
 | EnemySpeedMult | float | 1.0 | 敵速度倍率 |
 | SpawnRateMult | float | 1.0 | スポーンレート倍率 |
-| TimeScalingEnabled | bool | false | 時間経過による HP/ダメージ増加の有効化 |
 | MaxEnemyTypeId | int | 10 | スポーン可能な敵 TypeId の上限（0=Bat のみ, 10=全種） |
+| EnemyHPMult | float | 1.0 | 敵HP倍率（TimeScaling と乗算合成。0.1-10.0） |
+| TimeScalingEnabled | bool | true | 時間経過による HP/ダメージ増加の有効化 |
 
 ---
 

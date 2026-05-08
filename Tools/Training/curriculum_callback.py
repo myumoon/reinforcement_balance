@@ -6,14 +6,26 @@
   active_score = base_reward_ep - alive_reward * frame_skip * ep_len
   生存ボーナスを除いた撃破・収集による実質スコア。
 
+設計方針:
+  - VS本家に倣い「敵は常に画面上に一定数以上いる」状態を維持する
+  - Phase 0 から MaxActiveEnemies=8・SpawnRateMult=3.0 でギャップを防ぐ
+  - 難易度はまず MaxEnemyTypeId（敵種 = 実質HP増）、次に EnemyHPMult と速度で段階的に上昇
+  - TimeScaling は最終 2 フェーズのみ ON
+
 フェーズ設計 (Mad Forest 準拠):
-  Phase 0: バット入門   -- 2敵,  速度x0.5, TypeId<=0 (Bat)
-  Phase 1: 雑魚2種     -- 4敵,  速度x0.7, TypeId<=2 (+ Zombie/Skeleton)
-  Phase 2: 速敵追加    -- 6敵,  速度x0.9, TypeId<=4 (+ Ghost/Werewolf)
-  Phase 3: 標準密度    -- 8敵,  速度x1.0, TypeId<=6 (+ Mummy/Plant)
-  Phase 4: 高密度      -- 12敵, 速度x1.1, TypeId<=9 (全通常敵)
-  Phase 5: 時間強化    -- 15敵, 速度x1.2, TimeScaling ON
-  Phase 6: フルゲーム  -- 20敵, 速度x1.5, GiantBat込み (最終段)
+  Phase 0: バット密集   --  8敵, 速度x0.8, スポーンx3.0, TypeId<=0 (Bat), HP×1.0
+  Phase 1: 雑魚2種     -- 12敵, 速度x0.9, スポーンx3.5, TypeId<=2 (+Zombie/Skeleton), HP×1.5
+  Phase 2: 速敵追加    -- 15敵, 速度x1.0, スポーンx4.0, TypeId<=4 (+Ghost/Werewolf), HP×2.0
+  Phase 3: 標準密度    -- 18敵, 速度x1.0, スポーンx4.0, TypeId<=6 (+Mummy/Plant), HP×2.5
+  Phase 4: 高密度      -- 20敵, 速度x1.1, スポーンx4.5, TypeId<=9 (全通常敵), HP×3.0
+  Phase 5: 時間強化    -- 24敵, 速度x1.2, スポーンx5.0, TypeId<=9, HP×3.0, TimeScaling ON
+  Phase 6: フルゲーム  -- 28敵, 速度x1.5, スポーンx6.0, TypeId<=10 (GiantBat込み), HP×3.0, TimeScaling ON
+
+active_score の目安:
+  Kill×2.0 + Gem×1.0 が基本単位。Phase 0 で8体Batが常駐しており
+  1分エピソードで60kill+60gem=180相当となる。threshold は
+  「エージェントがある程度積極的に行動しなければ達成できない」
+  水準に設定してある。要調整時は threshold_mult で倍率を変える。
 """
 
 import json
@@ -31,18 +43,19 @@ class _Phase:
     speed_mult: float
     spawn_rate_mult: float
     max_enemy_type_id: int
+    enemy_hp_mult: float
     time_scaling: bool
     threshold: Optional[float]  # None = 最終段（昇格なし）
 
 
 PHASES: list[_Phase] = [
-    _Phase("バット入門",  2,  0.5, 0.5,  0, False,  3.0),
-    _Phase("雑魚2種",    4,  0.7, 0.7,  2, False,  5.0),
-    _Phase("速敵追加",   6,  0.9, 1.0,  4, False,  7.0),
-    _Phase("標準密度",   8,  1.0, 1.0,  6, False,  9.0),
-    _Phase("高密度",    12,  1.1, 1.2,  9, False, 10.0),
-    _Phase("時間強化",  15,  1.2, 1.5,  9, True,  11.0),
-    _Phase("フルゲーム", 20, 1.5, 2.0, 10, True,   None),
+    _Phase("バット密集",   8,  0.8, 3.0,  0, 1.0, False,  50.0),
+    _Phase("雑魚2種",     12,  0.9, 3.5,  2, 1.5, False,  90.0),
+    _Phase("速敵追加",    15,  1.0, 4.0,  4, 2.0, False, 130.0),
+    _Phase("標準密度",    18,  1.0, 4.0,  6, 2.5, False, 170.0),
+    _Phase("高密度",      20,  1.1, 4.5,  9, 3.0, False, 210.0),
+    _Phase("時間強化",    24,  1.2, 5.0,  9, 3.0, True,  250.0),
+    _Phase("フルゲーム",  28,  1.5, 6.0, 10, 3.0, True,   None),
 ]
 
 
@@ -127,6 +140,7 @@ class CurriculumCallback(BaseCallback):
             EnemySpeedMult=phase.speed_mult,
             SpawnRateMult=phase.spawn_rate_mult,
             MaxEnemyTypeId=phase.max_enemy_type_id,
+            EnemyHPMult=phase.enemy_hp_mult,
             TimeScalingEnabled=phase.time_scaling,
         )
         label = "初期設定" if initial else f"Phase {self._phase_idx}"
@@ -136,6 +150,7 @@ class CurriculumCallback(BaseCallback):
             f"敵数={phase.max_enemies}, 速度x{phase.speed_mult:.1f}, "
             f"スポーンx{phase.spawn_rate_mult:.1f}, "
             f"TypeId<={phase.max_enemy_type_id}, "
+            f"HPx{phase.enemy_hp_mult:.1f}, "
             f"TimeScaling={'ON' if phase.time_scaling else 'OFF'}"
         )
 
@@ -155,6 +170,7 @@ class CurriculumCallback(BaseCallback):
                 "speed_mult": phase.speed_mult,
                 "spawn_rate_mult": phase.spawn_rate_mult,
                 "max_enemy_type_id": phase.max_enemy_type_id,
+                "enemy_hp_mult": phase.enemy_hp_mult,
                 "time_scaling": phase.time_scaling,
             },
         }
@@ -175,6 +191,7 @@ class CurriculumCallback(BaseCallback):
                         "curriculum/speed_mult": phase.speed_mult,
                         "curriculum/spawn_rate_mult": phase.spawn_rate_mult,
                         "curriculum/max_enemy_type_id": phase.max_enemy_type_id,
+                        "curriculum/enemy_hp_mult": phase.enemy_hp_mult,
                         "curriculum/time_scaling": int(phase.time_scaling),
                     },
                     step=self.num_timesteps,

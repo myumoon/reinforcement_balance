@@ -236,6 +236,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	int32 MaxEnemyTypeId = 10;
 
+	/** 敵 HP 全体倍率（カリキュラム制御用, /params で上書き可能）。
+	 *  TimeScaling による増加と乗算で合成される。デフォルト 1.0。 */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	float EnemyHPMult = 1.0f;
+
 	// ---- スポーン設定 ----
 
 	/** 円周スポーン: プレイヤーからの最小距離 [u] */

@@ -132,6 +132,10 @@ private:
 		if (JsonObj->TryGetNumberField(TEXT("MaxEnemyTypeId"), MaxEnemyTypeId))
 			Game->MaxEnemyTypeId = FMath::Clamp(MaxEnemyTypeId, 0, 10);
 
+		double EnemyHPMult;
+		if (JsonObj->TryGetNumberField(TEXT("EnemyHPMult"), EnemyHPMult))
+			Game->EnemyHPMult = FMath::Clamp(static_cast<float>(EnemyHPMult), 0.1f, 10.f);
+
 		OnComplete(MakeJsonResponse(TEXT("{\"status\":\"ok\"}")));
 		return true;
 	}

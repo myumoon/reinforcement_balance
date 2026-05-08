@@ -530,16 +530,17 @@ void ASurvivorsGame::SpawnEnemy(const FSpawnWave& Wave)
 	if (!EnemyTypeTable.IsValidIndex(TypeIdx)) return;
 
 	const FEnemyTypeParams& Params = EnemyTypeTable[TypeIdx];
-	const float HPMult  = bTimeScalingEnabled ? 1.f + HPScaleRatePerMin  * (ElapsedTime / 60.f) : 1.f;
-	const float DmgMult = bTimeScalingEnabled ? 1.f + DamageScaleRatePerMin * (ElapsedTime / 60.f) : 1.f;
+	const float TimeHPMult = bTimeScalingEnabled ? 1.f + HPScaleRatePerMin  * (ElapsedTime / 60.f) : 1.f;
+	const float DmgMult    = bTimeScalingEnabled ? 1.f + DamageScaleRatePerMin * (ElapsedTime / 60.f) : 1.f;
+	const float TotalHPMult = TimeHPMult * EnemyHPMult;
 
 	FEnemyState Enemy;
 	Enemy.Pos               = RandomSpawnPos();
 	Enemy.Vel               = FVector2D::ZeroVector;
 	Enemy.TypeId            = TypeIdx;
 	Enemy.CollisionRadius   = Params.CollisionRadius;
-	Enemy.MaxHP             = Params.BaseHP * HPMult;
-	Enemy.HP                = Params.BaseHP * HPMult;
+	Enemy.MaxHP             = Params.BaseHP * TotalHPMult;
+	Enemy.HP                = Params.BaseHP * TotalHPMult;
 	Enemy.ContactDamage     = Params.ContactDamage * DmgMult;
 	Enemy.GarlicLastHitTime = -1000.f; // 初回ヒットを即時許可
 	Enemy.PlayerLastHitTime = -1000.f;
@@ -553,16 +554,17 @@ void ASurvivorsGame::SpawnBoss()
 	if (!EnemyTypeTable.IsValidIndex(BossTypeId)) return;
 
 	const FEnemyTypeParams& Params = EnemyTypeTable[BossTypeId];
-	const float HPMult  = bTimeScalingEnabled ? 1.f + HPScaleRatePerMin  * (ElapsedTime / 60.f) : 1.f;
-	const float DmgMult = bTimeScalingEnabled ? 1.f + DamageScaleRatePerMin * (ElapsedTime / 60.f) : 1.f;
+	const float TimeHPMult  = bTimeScalingEnabled ? 1.f + HPScaleRatePerMin  * (ElapsedTime / 60.f) : 1.f;
+	const float DmgMult     = bTimeScalingEnabled ? 1.f + DamageScaleRatePerMin * (ElapsedTime / 60.f) : 1.f;
+	const float TotalHPMult = TimeHPMult * EnemyHPMult;
 
 	FEnemyState Boss;
 	Boss.Pos               = RandomSpawnPos();
 	Boss.Vel               = FVector2D::ZeroVector;
 	Boss.TypeId            = BossTypeId;
 	Boss.CollisionRadius   = Params.CollisionRadius;
-	Boss.MaxHP             = Params.BaseHP * HPMult;
-	Boss.HP                = Params.BaseHP * HPMult;
+	Boss.MaxHP             = Params.BaseHP * TotalHPMult;
+	Boss.HP                = Params.BaseHP * TotalHPMult;
 	Boss.ContactDamage     = Params.ContactDamage * DmgMult;
 	Boss.GarlicLastHitTime = -1000.f;
 	Boss.PlayerLastHitTime = -1000.f;

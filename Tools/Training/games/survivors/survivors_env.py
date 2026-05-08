@@ -101,6 +101,7 @@ class SurvivorsEnv(BaseUE5Env):
             EnemySpeedMult     (float): 敵速度の倍率
             SpawnRateMult      (float): スポーンレートの倍率
             MaxEnemyTypeId     (int):   スポーン可能な敵 TypeId の上限 (0-10)
+            EnemyHPMult        (float): 敵HP倍率 (0.1-10.0, TimeScaling と乗算合成)
             TimeScalingEnabled (bool):  時間経過による HP/ダメージ増加の有効化
         Returns:
             True if successful
