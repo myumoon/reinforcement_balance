@@ -6,6 +6,7 @@
 // Garlic レベル別ステータス（仕様: weapons_garlic.md §2）
 // Lv1〜8: damage[HP], hit_interval[s], area_radius[u]
 struct FGarlicParams { float Damage; float HitInterval; float AreaRadius; };
+static constexpr float  GarlicKnockbackStrength = 20.f; // [u] 全レベル共通（仕様: knockback.md §2）
 static constexpr FGarlicParams GarlicTable[8] = {
 	{  5.f, 1.30f,  80.f }, // Lv1
 	{  5.f, 1.25f,  95.f }, // Lv2
@@ -530,6 +531,18 @@ void ASurvivorsGame::ApplyAuraDamage()
 			{
 				E.HP -= GP.Damage;
 				E.GarlicLastHitTime = ElapsedTime;
+
+				// ノックバック: プレイヤー → 敵方向に押し出す（耐性1.0は完全免疫）
+				if (EnemyTypeTable.IsValidIndex(E.TypeId))
+				{
+					const float Resistance = EnemyTypeTable[E.TypeId].KnockbackResistance;
+					if (Resistance < 1.f)
+					{
+						const FVector2D Dir = (E.Pos - PlayerPos).GetSafeNormal();
+						E.Pos += Dir * GarlicKnockbackStrength * (1.f - Resistance);
+					}
+				}
+
 				if (E.HP <= 0.f)
 				{
 					Enemies.RemoveAt(i);
