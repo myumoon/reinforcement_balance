@@ -525,13 +525,17 @@ void ASurvivorsGame::SpawnEnemy(const FSpawnWave& Wave)
 	if (!EnemyTypeTable.IsValidIndex(TypeIdx)) return;
 
 	const FEnemyTypeParams& Params = EnemyTypeTable[TypeIdx];
+	const float HPMult  = bTimeScalingEnabled ? 1.f + HPScaleRatePerMin  * (ElapsedTime / 60.f) : 1.f;
+	const float DmgMult = bTimeScalingEnabled ? 1.f + DamageScaleRatePerMin * (ElapsedTime / 60.f) : 1.f;
+
 	FEnemyState Enemy;
 	Enemy.Pos               = RandomSpawnPos();
 	Enemy.Vel               = FVector2D::ZeroVector;
 	Enemy.TypeId            = TypeIdx;
 	Enemy.CollisionRadius   = Params.CollisionRadius;
-	Enemy.MaxHP             = Params.BaseHP;
-	Enemy.HP                = Params.BaseHP;
+	Enemy.MaxHP             = Params.BaseHP * HPMult;
+	Enemy.HP                = Params.BaseHP * HPMult;
+	Enemy.ContactDamage     = Params.ContactDamage * DmgMult;
 	Enemy.GarlicLastHitTime = -1000.f; // 初回ヒットを即時許可
 	Enemy.PlayerLastHitTime = -1000.f;
 	Enemies.Add(Enemy);
@@ -543,13 +547,17 @@ void ASurvivorsGame::SpawnBoss()
 	if (!EnemyTypeTable.IsValidIndex(BossTypeId)) return;
 
 	const FEnemyTypeParams& Params = EnemyTypeTable[BossTypeId];
+	const float HPMult  = bTimeScalingEnabled ? 1.f + HPScaleRatePerMin  * (ElapsedTime / 60.f) : 1.f;
+	const float DmgMult = bTimeScalingEnabled ? 1.f + DamageScaleRatePerMin * (ElapsedTime / 60.f) : 1.f;
+
 	FEnemyState Boss;
 	Boss.Pos               = RandomSpawnPos();
 	Boss.Vel               = FVector2D::ZeroVector;
 	Boss.TypeId            = BossTypeId;
 	Boss.CollisionRadius   = Params.CollisionRadius;
-	Boss.MaxHP             = Params.BaseHP;
-	Boss.HP                = Params.BaseHP;
+	Boss.MaxHP             = Params.BaseHP * HPMult;
+	Boss.HP                = Params.BaseHP * HPMult;
+	Boss.ContactDamage     = Params.ContactDamage * DmgMult;
 	Boss.GarlicLastHitTime = -1000.f;
 	Boss.PlayerLastHitTime = -1000.f;
 	Enemies.Add(Boss); // 上限カウント外（仕様: 別カウント）
@@ -635,8 +643,7 @@ void ASurvivorsGame::ApplyEnemyContactDamage()
 		{
 			if (ElapsedTime - E.PlayerLastHitTime >= ContactHitInterval)
 			{
-				if (EnemyTypeTable.IsValidIndex(E.TypeId))
-					PlayerHP -= EnemyTypeTable[E.TypeId].ContactDamage;
+				PlayerHP -= E.ContactDamage; // スポーン時に時間スケーリング済み
 				E.PlayerLastHitTime = ElapsedTime;
 			}
 		}

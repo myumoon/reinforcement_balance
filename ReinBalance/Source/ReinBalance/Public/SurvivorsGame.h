@@ -290,6 +290,20 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Item")
 	float GemPickupRadius = 30.f;
 
+	// ---- 時間スケーリング（仕様: enemies.md §1.1）----
+
+	/** true = 時間経過で敵 HP/ダメージが増加。カリキュラム Phase A では false に設定 */
+	UPROPERTY(EditAnywhere, Category = "Survivors|TimeScaling")
+	bool bTimeScalingEnabled = true;
+
+	/** HP 増加率 [割合/分]（デフォルト +10%/min、仕様 ★★） */
+	UPROPERTY(EditAnywhere, Category = "Survivors|TimeScaling")
+	float HPScaleRatePerMin = 0.10f;
+
+	/** 接触ダメージ増加率 [割合/分]（デフォルト +5%/min、仕様 ★） */
+	UPROPERTY(EditAnywhere, Category = "Survivors|TimeScaling")
+	float DamageScaleRatePerMin = 0.05f;
+
 protected:
 	virtual void BeginPlay() override;
 
@@ -315,6 +329,7 @@ private:
 		float     HP;
 		float     MaxHP;
 		float     CollisionRadius;     // スポーン時に EnemyTypeTable からコピー
+		float     ContactDamage;       // スポーン時に時間スケーリング済みの接触ダメージ
 		float     GarlicLastHitTime;   // 最後に Garlic ヒットを受けた時刻 [s]
 		float     PlayerLastHitTime;   // 最後にプレイヤーに接触ダメージを与えた時刻 [s]
 	};
