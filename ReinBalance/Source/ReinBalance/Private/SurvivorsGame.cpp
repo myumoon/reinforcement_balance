@@ -19,9 +19,44 @@ ASurvivorsGame::ASurvivorsGame()
 {
 	PrimaryActorTick.bCanEverTick = false;
 
-	// Phase 1: スロット0にオーラLv1を固定装備
 	WeaponSlots[0].Type  = EWeaponType::Aura;
 	WeaponSlots[0].Level = 1;
+
+	InitDefaultEnemyTable();
+}
+
+void ASurvivorsGame::InitDefaultEnemyTable()
+{
+	// Mad Forest 敵11種（VS 仕様）。type_id = 配列インデックス。
+	// { Name, BaseHP, Speed[u/s], ContactDamage[/hit], CollisionRadius[u], KnockbackResistance, bIsBoss }
+	struct FRow { const TCHAR* Name; float HP; float Spd; float Dmg; float R; float KB; bool Boss; };
+	static const FRow Rows[] = {
+		{ TEXT("Bat"),        1.f,    70.f,  2.f, 10.f, 0.f, false },
+		{ TEXT("Zombie"),     4.f,    40.f,  3.f, 12.f, 0.f, false },
+		{ TEXT("Skeleton"),   6.f,    45.f,  4.f, 12.f, 0.f, false },
+		{ TEXT("Ghost"),      3.f,    88.f,  3.f, 10.f, 0.f, false },
+		{ TEXT("Werewolf"),  10.f,    80.f,  5.f, 14.f, 0.f, false },
+		{ TEXT("Mummy"),     15.f,    36.f,  6.f, 14.f, 0.f, false },
+		{ TEXT("Plant"),     20.f,    32.f,  7.f, 14.f, 0.f, false },
+		{ TEXT("BatSwarm"),   2.f,   104.f,  3.f,  8.f, 0.f, false },
+		{ TEXT("FireBeast"), 30.f,    64.f, 10.f, 16.f, 0.f, false },
+		{ TEXT("MedusaHead"),25.f,    96.f, 10.f, 12.f, 0.f, false },
+		{ TEXT("GiantBat"), 3000.f,  48.f, 12.f, 32.f, 1.f, true  },
+	};
+
+	EnemyTypeTable.Empty();
+	for (const FRow& R : Rows)
+	{
+		FEnemyTypeParams P;
+		P.Name                = R.Name;
+		P.BaseHP              = R.HP;
+		P.Speed               = R.Spd;
+		P.ContactDamage       = R.Dmg;
+		P.CollisionRadius     = R.R;
+		P.KnockbackResistance = R.KB;
+		P.bIsBoss             = R.Boss;
+		EnemyTypeTable.Add(P);
+	}
 }
 
 void ASurvivorsGame::BeginPlay()
@@ -241,15 +276,15 @@ TArray<float> ASurvivorsGame::GetObservation() const
 		else { Obs.Add(0.f); Obs.Add(0.f); }
 	}
 
-	// enemy_type (20)  A=0.0, B=0.5, C=1.0
+	// enemy_type (20)  type_id / (EnemyTypeTable.Num()-1) → [0, 1]
+	const float TypeNorm = EnemyTypeTable.Num() > 1
+		? static_cast<float>(EnemyTypeTable.Num() - 1) : 1.f;
 	for (int32 Slot = 0; Slot < MaxEnemyObs; ++Slot)
 	{
 		if (Slot < EnemyIdx.Num())
-		{
-			const int32 T = Enemies[EnemyIdx[Slot]].Type;
-			Obs.Add(T == 0 ? 0.0f : T == 1 ? 0.5f : 1.0f);
-		}
-		else { Obs.Add(0.f); }
+			Obs.Add(static_cast<float>(Enemies[EnemyIdx[Slot]].TypeId) / TypeNorm);
+		else
+			Obs.Add(0.f);
 	}
 
 	// enemy_hp (20)
@@ -271,36 +306,23 @@ bool  ASurvivorsGame::IsDone()   const { return bDone; }
 
 // ---- 内部ユーティリティ -------------------------------------------------------
 
-float ASurvivorsGame::GetEnemySpeed(int32 Type) const
+float ASurvivorsGame::GetEnemySpeed(int32 TypeId) const
 {
-	switch (Type)
-	{
-		case 1:  return EnemySpeedB * EnemySpeedMult;
-		case 2:  return EnemySpeedC * EnemySpeedMult;
-		default: return EnemySpeedA * EnemySpeedMult;
-	}
+	if (!EnemyTypeTable.IsValidIndex(TypeId)) return 50.f * EnemySpeedMult;
+	return EnemyTypeTable[TypeId].Speed * EnemySpeedMult;
 }
 
-float ASurvivorsGame::GetEnemyDamagePerTick(int32 Type) const
+float ASurvivorsGame::GetEnemyDamagePerTick(int32 TypeId) const
 {
-	float DPS = 0.f;
-	switch (Type)
-	{
-		case 1:  DPS = EnemyDamageB; break;
-		case 2:  DPS = EnemyDamageC; break;
-		default: DPS = EnemyDamageA; break;
-	}
-	return DPS * PhysicsDt;
+	// Plan04 で 0.5s 無敵 + per-hit に置き換え予定。暫定 DPS モデル。
+	if (!EnemyTypeTable.IsValidIndex(TypeId)) return 0.f;
+	return EnemyTypeTable[TypeId].ContactDamage * PhysicsDt;
 }
 
-float ASurvivorsGame::GetEnemyTypeMaxHP(int32 Type) const
+float ASurvivorsGame::GetEnemyTypeMaxHP(int32 TypeId) const
 {
-	switch (Type)
-	{
-		case 1:  return EnemyHPB;
-		case 2:  return EnemyHPC;
-		default: return EnemyHPA;
-	}
+	if (!EnemyTypeTable.IsValidIndex(TypeId)) return 1.f;
+	return EnemyTypeTable[TypeId].BaseHP;
 }
 
 float ASurvivorsGame::XPRequiredForLevel(int32 Level) const
@@ -360,28 +382,27 @@ FVector2D ASurvivorsGame::RandomOnEdge()
 
 void ASurvivorsGame::SpawnEnemy()
 {
-	if (Enemies.Num() >= MaxActiveEnemies) return;
+	if (Enemies.Num() >= MaxActiveEnemies || EnemyTypeTable.Num() == 0) return;
+
+	const int32 TypeIdx               = RandStream.RandRange(0, EnemyTypeTable.Num() - 1);
+	const FEnemyTypeParams& Params    = EnemyTypeTable[TypeIdx];
 
 	FEnemyState Enemy;
-	Enemy.Pos   = RandomOnEdge();
-	Enemy.Vel   = FVector2D::ZeroVector;
-	Enemy.Type  = RandStream.RandRange(0, 2);
-	Enemy.MaxHP = GetEnemyTypeMaxHP(Enemy.Type);
-	Enemy.HP    = Enemy.MaxHP;
+	Enemy.Pos             = RandomOnEdge();
+	Enemy.Vel             = FVector2D::ZeroVector;
+	Enemy.TypeId          = TypeIdx;
+	Enemy.CollisionRadius = Params.CollisionRadius;
+	Enemy.MaxHP           = Params.BaseHP;
+	Enemy.HP              = Params.BaseHP;
 	Enemies.Add(Enemy);
 }
 
 void ASurvivorsGame::UpdateEnemies()
 {
+	// 全敵がプレイヤーに直線追尾（VS 仕様: AI 差異なし）
 	for (FEnemyState& E : Enemies)
 	{
-		FVector2D Target;
-		switch (E.Type)
-		{
-			case 2:  Target = PlayerPos + PlayerVel * EnemyPredictTime; break;
-			default: Target = PlayerPos; break;
-		}
-		E.Vel = (Target - E.Pos).GetSafeNormal() * GetEnemySpeed(E.Type);
+		E.Vel = (PlayerPos - E.Pos).GetSafeNormal() * GetEnemySpeed(E.TypeId);
 		E.Pos += E.Vel * PhysicsDt;
 	}
 }
@@ -422,12 +443,13 @@ void ASurvivorsGame::CheckItemCollections()
 
 void ASurvivorsGame::ApplyEnemyContactDamage()
 {
-	const float RadSq = EnemyCollisionRadius * EnemyCollisionRadius;
+	// 接触判定: プレイヤー半径 + 敵固有半径（Plan04 で 0.5s 無敵追加予定）
 	for (const FEnemyState& E : Enemies)
 	{
-		if (FVector2D::DistSquared(PlayerPos, E.Pos) < RadSq)
+		const float HitR  = PlayerRadius + E.CollisionRadius;
+		if (FVector2D::DistSquared(PlayerPos, E.Pos) < HitR * HitR)
 		{
-			PlayerHP -= GetEnemyDamagePerTick(E.Type);
+			PlayerHP -= GetEnemyDamagePerTick(E.TypeId);
 		}
 	}
 	PlayerHP = FMath::Max(PlayerHP, 0.f);

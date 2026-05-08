@@ -34,6 +34,43 @@ struct FWeaponSlot
 };
 
 /**
+ * 敵1種のパラメーター。EnemyTypeTable に格納し Details パネルやカリキュラムから変更可能。
+ * knockback_resistance / is_boss は Plan05 / Plan06 で使用。
+ */
+USTRUCT(BlueprintType)
+struct FEnemyTypeParams
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	FString Name;
+
+	/** 出現直後 HP（時間スケーリング前、Plan08 で乗算） */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	float BaseHP = 1.f;
+
+	/** 内部移動速度 [u/s] */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	float Speed = 50.f;
+
+	/** 接触 1 ヒットあたりのダメージ（Plan04 で hit_interval と組み合わせ） */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	float ContactDamage = 5.f;
+
+	/** 衝突判定半径 [u] */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	float CollisionRadius = 10.f;
+
+	/** ノックバック耐性（0=なし, 1=完全耐性）。Plan05 で参照。 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	float KnockbackResistance = 0.f;
+
+	/** ボス扱い（ドロップ・耐性に影響）。Plan06 で参照。 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	bool bIsBoss = false;
+};
+
+/**
  * Vampire Survivors 風サバイバルゲームのロジッククラス（ビジュアルなし）。
  *
  * 2D XY 平面上でプレイヤーが敵を倒しながらアイテムを集めて生き延びる。
@@ -106,7 +143,7 @@ public:
 	{
 		return Enemies.IsValidIndex(i) ? Enemies[i].Pos   : FVector2D::ZeroVector;
 	}
-	int32     GetEnemyType(int32 i)   const { return Enemies.IsValidIndex(i) ? Enemies[i].Type  : 0; }
+	int32     GetEnemyType(int32 i)   const { return Enemies.IsValidIndex(i) ? Enemies[i].TypeId : 0; }
 	float     GetEnemyHP(int32 i)     const { return Enemies.IsValidIndex(i) ? Enemies[i].HP    : 0.f; }
 	float     GetEnemyMaxHP(int32 i)  const { return Enemies.IsValidIndex(i) ? Enemies[i].MaxHP : 1.f; }
 
@@ -200,49 +237,13 @@ public:
 
 	// ---- 敵設定 ----
 
-	/** タイプA (低速追跡) の基本速度 [u/s]（Plan02 で11種に置換） */
+	/**
+	 * 敵11種のパラメーターテーブル（Mad Forest 準拠）。
+	 * type_id = インデックス: 0=Bat, 1=Zombie, ..., 10=GiantBat。
+	 * カリキュラム用に EditAnywhere・/params エンドポイントで変更可能。
+	 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemySpeedA = 10.0f;
-
-	/** タイプA の接触ダメージ（1ヒット） */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemyDamageA = 5.f;
-
-	/** タイプA の HP */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemyHPA = 20.f;
-
-	/** タイプB (高速直進) の基本速度 [u/s]（Plan02 で11種に置換） */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemySpeedB = 25.0f;
-
-	/** タイプB の接触ダメージ（1ヒット） */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemyDamageB = 10.f;
-
-	/** タイプB の HP */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemyHPB = 50.f;
-
-	/** タイプC (予測追跡) の基本速度 [u/s]（Plan02 で11種に置換） */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemySpeedC = 15.0f;
-
-	/** タイプC の接触ダメージ（1ヒット） */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemyDamageC = 8.f;
-
-	/** タイプC の HP */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemyHPC = 30.f;
-
-	/** タイプC の先読み時間 [秒] */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemyPredictTime = 0.75f;
-
-	/** 敵との接触判定半径 [u]（Plan02 で敵種別に置換） */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
-	float EnemyCollisionRadius = 6.0f;
+	TArray<FEnemyTypeParams> EnemyTypeTable;
 
 	// ---- アイテム ----
 
@@ -269,9 +270,10 @@ private:
 	{
 		FVector2D Pos;
 		FVector2D Vel;
-		int32     Type;  // 0=A, 1=B, 2=C
+		int32     TypeId;          // 0〜10: EnemyTypeTable のインデックス
 		float     HP;
 		float     MaxHP;
+		float     CollisionRadius; // スポーン時に EnemyTypeTable からコピー
 	};
 
 	// ---- 状態 ----
@@ -305,10 +307,13 @@ private:
 	void      ResolveWallCollisions();
 	float     CastRayToObstacles(FVector2D Origin, FVector2D Dir) const;
 
-	// 敵タイプ別パラメータ取得
-	float GetEnemySpeed(int32 Type) const;
-	float GetEnemyDamagePerTick(int32 Type) const;
-	float GetEnemyTypeMaxHP(int32 Type) const;
+	// 敵テーブル初期化
+	void  InitDefaultEnemyTable();
+
+	// 敵タイプ別パラメータ取得（テーブルルックアップ）
+	float GetEnemySpeed(int32 TypeId) const;
+	float GetEnemyDamagePerTick(int32 TypeId) const;
+	float GetEnemyTypeMaxHP(int32 TypeId) const;
 
 	// XP 処理
 	float XPRequiredForLevel(int32 Level) const;
