@@ -87,7 +87,9 @@ public:
 
 	// ---- ビュー / デバッグ向けアクセサー ----
 
+	UFUNCTION(BlueprintPure, Category = "Survivors|Config")
 	FVector2D GetPlayerPos()   const { return PlayerPos; }
+	
 	FVector2D GetPlayerVel()   const { return PlayerVel; }
 	float     GetPlayerHP()    const { return PlayerHP; }
 	float     GetMaxPlayerHP() const { return MaxPlayerHP; }
@@ -129,7 +131,7 @@ public:
 	float FieldHalfSize = 100.f;
 
 	/** シム座標(m) ↔ UE5 単位 変換スケール。SurvivorsGameView の SimToUE と一致させること。 */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survivors|Config")
 	float SimToUE = 50.f;
 
 	/** フィールド上のアイテム数 */
