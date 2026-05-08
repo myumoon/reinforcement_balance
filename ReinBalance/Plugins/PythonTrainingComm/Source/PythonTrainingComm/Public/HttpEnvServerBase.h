@@ -49,6 +49,9 @@ protected:
 	/** 派生クラスが追加ルートを解除するフック（StopServer 冒頭で呼ばれる） */
 	virtual void UnregisterAdditionalRoutes(TSharedPtr<IHttpRouter> Router) {}
 
+	/** Request.Body を null 終端保証付きで FString に変換する。 */
+	static FString ParseBodyString(const FHttpServerRequest& Request);
+
 private:
 	TSharedPtr<IHttpRouter> HttpRouter;
 	FHttpRouteHandle ResetRoute;

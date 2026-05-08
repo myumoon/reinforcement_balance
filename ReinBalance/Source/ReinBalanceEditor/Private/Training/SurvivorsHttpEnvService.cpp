@@ -101,9 +101,7 @@ private:
 			return true;
 		}
 
-		// リクエストボディを UTF-8 文字列に変換
-		FString BodyStr = FString(UTF8_TO_TCHAR(
-			reinterpret_cast<const char*>(Request.Body.GetData())));
+		FString BodyStr = ParseBodyString(Request);
 
 		TSharedPtr<FJsonObject> JsonObj;
 		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(BodyStr);
