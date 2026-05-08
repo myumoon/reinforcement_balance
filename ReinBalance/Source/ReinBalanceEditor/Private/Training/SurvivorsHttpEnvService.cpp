@@ -112,6 +112,10 @@ private:
 		}
 
 		// 各パラメータを上書き（存在するフィールドのみ）
+		int32 MinActiveEnemies;
+		if (JsonObj->TryGetNumberField(TEXT("MinActiveEnemies"), MinActiveEnemies))
+			Game->MinActiveEnemies = FMath::Clamp(MinActiveEnemies, 0, 600);
+
 		int32 MaxActiveEnemies;
 		if (JsonObj->TryGetNumberField(TEXT("MaxActiveEnemies"), MaxActiveEnemies))
 			Game->MaxActiveEnemies = FMath::Clamp(MaxActiveEnemies, 1, 600);
@@ -124,13 +128,21 @@ private:
 		if (JsonObj->TryGetNumberField(TEXT("SpawnRateMult"), SpawnRateMult))
 			Game->SpawnRateMult = FMath::Clamp(static_cast<float>(SpawnRateMult), 0.1f, 5.f);
 
-		bool bTimeScalingEnabled;
-		if (JsonObj->TryGetBoolField(TEXT("TimeScalingEnabled"), bTimeScalingEnabled))
-			Game->bTimeScalingEnabled = bTimeScalingEnabled;
-
 		int32 MaxEnemyTypeId;
 		if (JsonObj->TryGetNumberField(TEXT("MaxEnemyTypeId"), MaxEnemyTypeId))
 			Game->MaxEnemyTypeId = FMath::Clamp(MaxEnemyTypeId, 0, 10);
+
+		double EnemyHPScale;
+		if (JsonObj->TryGetNumberField(TEXT("EnemyHPScale"), EnemyHPScale))
+			Game->EnemyHPScale = FMath::Clamp(static_cast<float>(EnemyHPScale), 0.1f, 10.f);
+
+		double EnemyDamageScale;
+		if (JsonObj->TryGetNumberField(TEXT("EnemyDamageScale"), EnemyDamageScale))
+			Game->EnemyDamageScale = FMath::Clamp(static_cast<float>(EnemyDamageScale), 0.1f, 10.f);
+
+		bool bTimeScalingEnabled;
+		if (JsonObj->TryGetBoolField(TEXT("TimeScalingEnabled"), bTimeScalingEnabled))
+			Game->bTimeScalingEnabled = bTimeScalingEnabled;
 
 		OnComplete(MakeJsonResponse(TEXT("{\"status\":\"ok\"}")));
 		return true;

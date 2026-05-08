@@ -221,6 +221,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survivors|Config")
 	float SimToUE = 5.f;
 
+	/** 常時維持する最小敵数（カリキュラム制御用, /params で上書き可能）。
+	 *  毎ステップ Enemies.Num() < MinActiveEnemies なら即時補充される。
+	 *  実効値は MaxActiveEnemies を超えない。 */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	int32 MinActiveEnemies = 4;
+
 	/** 同時に存在できる最大敵数の上限（カリキュラム制御用, /params で上書き可能）。
 	 *  実効値 = min(CurrentWave.MaxEnemies, MaxActiveEnemies)。 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
@@ -231,10 +237,20 @@ public:
 	float SpawnRateMult = 1.0f;
 
 	/** スポーン可能な敵 TypeId の上限（カリキュラム制御用, /params で上書き可能）。
-	 *  0=Bat のみ, 2=+Zombie/Skeleton, 4=+Ghost/Werewolf,
+	 *  0=Bat のみ, 1=+Zombie, 2=+Skeleton, 4=+Ghost/Werewolf,
 	 *  6=+Mummy/Plant, 9=全通常敵, 10=GiantBat込み全種 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	int32 MaxEnemyTypeId = 10;
+
+	/** 敵 HP 倍率（カリキュラム制御用, /params で上書き可能）。
+	 *  TimeScaling による増加と乗算で合成される。デフォルト 1.0。 */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	float EnemyHPScale = 1.0f;
+
+	/** 敵接触ダメージ倍率（カリキュラム制御用, /params で上書き可能）。
+	 *  TimeScaling による増加と乗算で合成される。デフォルト 1.0。 */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	float EnemyDamageScale = 1.0f;
 
 	// ---- スポーン設定 ----
 

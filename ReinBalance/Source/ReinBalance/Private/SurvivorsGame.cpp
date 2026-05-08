@@ -226,10 +226,22 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 	UpdateEnemies();
 	ApplyAuraDamage();
 
-	// Wave ベーススポーン（accumulator 方式）
+	// Wave ベーススポーン（補充スポーン + accumulator 方式）
 	if (const FSpawnWave* Wave = GetCurrentWave())
 	{
+		const int32 EffMin = FMath::Min(MinActiveEnemies, MaxActiveEnemies);
 		const int32 EffMax = FMath::Min(Wave->MaxEnemies, MaxActiveEnemies);
+
+		// 補充スポーン: 最小数を即時維持（SpawnRate に依存しない）
+		// SpawnEnemy 内で Filtered.IsEmpty() なら何も追加しないためループを抜ける
+		while (Enemies.Num() < EffMin)
+		{
+			const int32 Before = Enemies.Num();
+			SpawnEnemy(*Wave);
+			if (Enemies.Num() == Before) break; // 有効な敵種なし → ループ抜け
+		}
+
+		// 通常スポーン: SpawnRate に従い MaxActiveEnemies まで補充
 		if (Enemies.Num() < EffMax)
 		{
 			SpawnAccumulator += Wave->SpawnRate * SpawnRateMult * PhysicsDt;
@@ -530,17 +542,17 @@ void ASurvivorsGame::SpawnEnemy(const FSpawnWave& Wave)
 	if (!EnemyTypeTable.IsValidIndex(TypeIdx)) return;
 
 	const FEnemyTypeParams& Params = EnemyTypeTable[TypeIdx];
-	const float HPMult  = bTimeScalingEnabled ? 1.f + HPScaleRatePerMin  * (ElapsedTime / 60.f) : 1.f;
-	const float DmgMult = bTimeScalingEnabled ? 1.f + DamageScaleRatePerMin * (ElapsedTime / 60.f) : 1.f;
+	const float TimeHPMult  = bTimeScalingEnabled ? 1.f + HPScaleRatePerMin      * (ElapsedTime / 60.f) : 1.f;
+	const float TimeDmgMult = bTimeScalingEnabled ? 1.f + DamageScaleRatePerMin  * (ElapsedTime / 60.f) : 1.f;
 
 	FEnemyState Enemy;
 	Enemy.Pos               = RandomSpawnPos();
 	Enemy.Vel               = FVector2D::ZeroVector;
 	Enemy.TypeId            = TypeIdx;
 	Enemy.CollisionRadius   = Params.CollisionRadius;
-	Enemy.MaxHP             = Params.BaseHP * HPMult;
-	Enemy.HP                = Params.BaseHP * HPMult;
-	Enemy.ContactDamage     = Params.ContactDamage * DmgMult;
+	Enemy.MaxHP             = Params.BaseHP        * EnemyHPScale     * TimeHPMult;
+	Enemy.HP                = Enemy.MaxHP;
+	Enemy.ContactDamage     = Params.ContactDamage * EnemyDamageScale * TimeDmgMult;
 	Enemy.GarlicLastHitTime = -1000.f; // 初回ヒットを即時許可
 	Enemy.PlayerLastHitTime = -1000.f;
 	Enemies.Add(Enemy);
@@ -553,17 +565,17 @@ void ASurvivorsGame::SpawnBoss()
 	if (!EnemyTypeTable.IsValidIndex(BossTypeId)) return;
 
 	const FEnemyTypeParams& Params = EnemyTypeTable[BossTypeId];
-	const float HPMult  = bTimeScalingEnabled ? 1.f + HPScaleRatePerMin  * (ElapsedTime / 60.f) : 1.f;
-	const float DmgMult = bTimeScalingEnabled ? 1.f + DamageScaleRatePerMin * (ElapsedTime / 60.f) : 1.f;
+	const float TimeHPMult  = bTimeScalingEnabled ? 1.f + HPScaleRatePerMin     * (ElapsedTime / 60.f) : 1.f;
+	const float TimeDmgMult = bTimeScalingEnabled ? 1.f + DamageScaleRatePerMin * (ElapsedTime / 60.f) : 1.f;
 
 	FEnemyState Boss;
 	Boss.Pos               = RandomSpawnPos();
 	Boss.Vel               = FVector2D::ZeroVector;
 	Boss.TypeId            = BossTypeId;
 	Boss.CollisionRadius   = Params.CollisionRadius;
-	Boss.MaxHP             = Params.BaseHP * HPMult;
-	Boss.HP                = Params.BaseHP * HPMult;
-	Boss.ContactDamage     = Params.ContactDamage * DmgMult;
+	Boss.MaxHP             = Params.BaseHP        * EnemyHPScale     * TimeHPMult;
+	Boss.HP                = Boss.MaxHP;
+	Boss.ContactDamage     = Params.ContactDamage * EnemyDamageScale * TimeDmgMult;
 	Boss.GarlicLastHitTime = -1000.f;
 	Boss.PlayerLastHitTime = -1000.f;
 	Enemies.Add(Boss); // 上限カウント外（仕様: 別カウント）
