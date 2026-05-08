@@ -255,14 +255,6 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float EnemySpeedMult = 1.0f;
 
-	/** Lv0→1 に必要な基礎 XP */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	float XPBase = 5.0f;
-
-	/** 1 レベルごとに増加する XP 量（XPRequired(n) = XPBase + XPGrowth * n） */
-	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	float XPGrowth = 3.0f;
-
 	// ---- プレイヤー ----
 
 	/** プレイヤー最大 HP（Poe Ratcho） */
@@ -308,7 +300,7 @@ private:
 	static constexpr int32  MaxWeaponSlots     = 3;
 	static constexpr int32  MaxWeaponTypeSlots = 8;
 	static constexpr int32  MaxWeaponLevel     = 8;
-	static constexpr int32  MaxPlayerLevel     = 100;
+	static constexpr int32  MaxPlayerLevel     = 100; // obs 正規化基準（ハードキャップではない）
 	static constexpr float  PhysicsDt          = 1.f / 60.f;
 	static constexpr float  MaxGameTime        = 1800.f;
 	static constexpr float  ContactHitInterval = 0.5f;  // 敵→プレイヤー接触無敵 [s]
@@ -381,8 +373,9 @@ private:
 	float GetEnemySpeed(int32 TypeId) const;
 	float GetEnemyTypeMaxHP(int32 TypeId) const;
 
-	// XP 処理
-	float XPRequiredForLevel(int32 Level) const;
+	// XP 処理（仕様: experience.md §1.1 区分線形テーブル）
+	float XPRequiredForLevel(int32 Level) const;  // Level-1 → Level に必要な XP
+	float CumulativeXPForLevel(int32 Level) const; // Lv1 から Level に達するまでの累計 XP
 	void  ProcessXPGain(float Amount);
 	void  OnLevelUp(int32 NextLevel);
 };

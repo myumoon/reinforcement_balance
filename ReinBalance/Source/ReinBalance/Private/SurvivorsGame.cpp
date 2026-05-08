@@ -184,7 +184,7 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	PlayerVel = FVector2D::ZeroVector;
 	PlayerHP    = MaxPlayerHP;
 	PlayerXP    = 0.f;
-	PlayerLevel = 0;
+	PlayerLevel = 1; // 仕様: player.level 初期値 = 1
 
 	// Garlic は Lv1 スタート（プレイヤーレベルアップごとに +1、上限 Lv8）
 	WeaponSlots[0].Type  = EWeaponType::Aura;
@@ -303,14 +303,16 @@ TArray<float> ASurvivorsGame::GetObservation() const
 	// 7. 経過時間 (1): 0〜1 (MaxGameTime=1800s で正規化)
 	Obs.Add(FMath::Clamp(ElapsedTime / MaxGameTime, 0.f, 1.f));
 
-	// 8. xp_progress (1)
+	// 8. xp_progress (1): 現レベル内の進捗 (累計方式)
 	{
-		const float Threshold = XPRequiredForLevel(PlayerLevel);
-		Obs.Add(Threshold > 0.f ? FMath::Clamp(PlayerXP / Threshold, 0.f, 1.f) : 0.f);
+		const float CurCum  = CumulativeXPForLevel(PlayerLevel);
+		const float NextCum = CumulativeXPForLevel(PlayerLevel + 1);
+		const float Range   = NextCum - CurCum;
+		Obs.Add(Range > 0.f ? FMath::Clamp((PlayerXP - CurCum) / Range, 0.f, 1.f) : 0.f);
 	}
 
-	// 9. player_level (1)
-	Obs.Add(static_cast<float>(PlayerLevel) / static_cast<float>(MaxPlayerLevel));
+	// 9. player_level (1): MaxPlayerLevel=100 で正規化、クランプ有り
+	Obs.Add(FMath::Clamp(static_cast<float>(PlayerLevel) / static_cast<float>(MaxPlayerLevel), 0.f, 1.f));
 
 	// 10. ジェム相対位置 dx,dy × NumGemObs (近い順)
 	TArray<int32> GemIdx;
@@ -417,18 +419,39 @@ float ASurvivorsGame::GetEnemyTypeMaxHP(int32 TypeId) const
 
 float ASurvivorsGame::XPRequiredForLevel(int32 Level) const
 {
-	return XPBase + XPGrowth * static_cast<float>(Level);
+	// Level-1 → Level に上昇するのに必要な XP（区分線形、仕様: experience.md §1.1）
+	if (Level <= 1) return 0.f;
+	if (Level == 2) return 5.f;
+	float Value = 5.f;
+	for (int32 Lv = 3; Lv <= Level; ++Lv)
+	{
+		if      (Lv <= 20) Value += 10.f;
+		else if (Lv <= 40) Value += 13.f;
+		else if (Lv <= 60) Value += 16.f;
+		else if (Lv <= 80) Value += 19.f;
+		else               Value += 22.f;
+	}
+	return Value;
+}
+
+float ASurvivorsGame::CumulativeXPForLevel(int32 Level) const
+{
+	// Lv1 から Level に到達するまでの累計 XP
+	float Total = 0.f;
+	for (int32 Lv = 2; Lv <= Level; ++Lv)
+		Total += XPRequiredForLevel(Lv);
+	return Total;
 }
 
 void ASurvivorsGame::ProcessXPGain(float Amount)
 {
-	if (XPBase <= 0.f) return;
 	PlayerXP += Amount;
-	while (PlayerLevel < MaxPlayerLevel)
+	// 赤ジェム等で複数レベル同時上昇する場合に備え while ループ
+	// レベル上限なし（MaxPlayerLevel は obs 正規化専用）
+	while (true)
 	{
-		const float Threshold = XPRequiredForLevel(PlayerLevel);
-		if (PlayerXP < Threshold) break;
-		PlayerXP -= Threshold;
+		const float NextThreshold = CumulativeXPForLevel(PlayerLevel + 1);
+		if (PlayerXP < NextThreshold) break;
 		PlayerLevel++;
 		OnLevelUp(PlayerLevel);
 	}

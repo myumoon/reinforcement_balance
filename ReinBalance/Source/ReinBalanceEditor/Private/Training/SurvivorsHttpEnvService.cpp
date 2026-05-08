@@ -126,10 +126,6 @@ private:
 		if (JsonObj->TryGetNumberField(TEXT("SpawnRateMult"), SpawnRateMult))
 			Game->SpawnRateMult = FMath::Clamp(static_cast<float>(SpawnRateMult), 0.1f, 5.f);
 
-		double XPGrowth;
-		if (JsonObj->TryGetNumberField(TEXT("XPGrowth"), XPGrowth))
-			Game->XPGrowth = FMath::Clamp(static_cast<float>(XPGrowth), 1.f, 20.f);
-
 		OnComplete(MakeJsonResponse(TEXT("{\"status\":\"ok\"}")));
 		return true;
 	}
