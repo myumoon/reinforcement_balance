@@ -97,10 +97,11 @@ class SurvivorsEnv(BaseUE5Env):
         """カリキュラム用パラメータを /params エンドポイントで更新する。
 
         Args:
-            MaxActiveEnemies (int): 同時存在できる最大敵数
-            EnemySpeedMult   (float): 敵速度の倍率
-            SpawnInterval    (float): 敵スポーン間隔 [秒]
-            XPGrowth         (float): レベルアップ必要 XP 増分（XPRequired(n) = XPBase + XPGrowth * n）
+            MaxActiveEnemies   (int):   同時存在できる最大敵数
+            EnemySpeedMult     (float): 敵速度の倍率
+            SpawnRateMult      (float): スポーンレートの倍率
+            MaxEnemyTypeId     (int):   スポーン可能な敵 TypeId の上限 (0-10)
+            TimeScalingEnabled (bool):  時間経過による HP/ダメージ増加の有効化
         Returns:
             True if successful
         """

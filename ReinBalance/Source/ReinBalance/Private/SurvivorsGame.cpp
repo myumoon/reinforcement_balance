@@ -520,8 +520,13 @@ const FSpawnWave* ASurvivorsGame::GetCurrentWave() const
 
 void ASurvivorsGame::SpawnEnemy(const FSpawnWave& Wave)
 {
-	if (Wave.EnemyWeights.Num() == 0) return;
-	const int32 TypeIdx = SelectTypeByWeight(Wave.EnemyWeights);
+	// MaxEnemyTypeId でスポーン可能種別をフィルタ（カリキュラム制御）
+	TArray<FEnemySpawnWeight> Filtered;
+	for (const FEnemySpawnWeight& W : Wave.EnemyWeights)
+		if (W.TypeId <= MaxEnemyTypeId) Filtered.Add(W);
+	if (Filtered.IsEmpty()) return;
+
+	const int32 TypeIdx = SelectTypeByWeight(Filtered);
 	if (!EnemyTypeTable.IsValidIndex(TypeIdx)) return;
 
 	const FEnemyTypeParams& Params = EnemyTypeTable[TypeIdx];
@@ -544,6 +549,7 @@ void ASurvivorsGame::SpawnEnemy(const FSpawnWave& Wave)
 void ASurvivorsGame::SpawnBoss()
 {
 	constexpr int32 BossTypeId = 10; // GiantBat
+	if (MaxEnemyTypeId < BossTypeId) return; // カリキュラムでボス無効化中
 	if (!EnemyTypeTable.IsValidIndex(BossTypeId)) return;
 
 	const FEnemyTypeParams& Params = EnemyTypeTable[BossTypeId];
