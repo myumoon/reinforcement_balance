@@ -82,7 +82,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         ecnt_i     = o.get("enemy_count", 19)
         spawn_i    = o.get("spawn_timer", 20)
         xp_i       = o.get("xp_progress", 21)
-        item_i     = o.get("item_rel_pos", 23)
+        item_i     = o.get("gem_rel_pos", 23)
         er_i       = o.get("enemy_rel_pos", item_i + 40)
         ev_i       = o.get("enemy_vel", er_i + 40)
         et_i       = o.get("enemy_type", ev_i + 40)
@@ -174,7 +174,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"\n"
             f"- 敵接近ペナルティは [-0.05, 0.0] 程度まで\n"
             f"- アイテム接近ボーナスは 1ステップあたり [-0.03, 0.03] 程度まで（アイテム10個に対して設計）\n"
-            f"  距離計算例: dist_m = np.sqrt(obs[{self._offsets.get('item_rel_pos', 23)}]**2 + obs[{self._offsets.get('item_rel_pos', 23)+1}]**2) * 30\n"
+            f"  距離計算例: dist_m = np.sqrt(obs[{self._offsets.get('gem_rel_pos', 23)}]**2 + obs[{self._offsets.get('gem_rel_pos', 23)+1}]**2) * 30\n"
             f"- item_kill_score = 0 は「生存のみ」。reward_fn は item_kill_score を上げることを目標とすること\n"
             f"- エピソード全体の shaped_reward 累計が base_reward を大幅に超えないよう設計すること"
         )
