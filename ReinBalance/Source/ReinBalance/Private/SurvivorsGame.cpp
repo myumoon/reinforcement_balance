@@ -198,6 +198,7 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	bBossSpawned     = false;
 	LastReward       = 0.f;
 	bDone            = false;
+	bTruncated       = false;
 	LastSpawnDebug   = FSurvivorsSpawnDebug();
 }
 
@@ -205,7 +206,7 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 
 void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 {
-	if (bDone) return;
+	if (bDone || bTruncated) return;
 
 	LastReward = 0.f;
 
@@ -232,6 +233,7 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 
 	LastSpawnDebug = FSurvivorsSpawnDebug();
 	LastSpawnDebug.ElapsedTime = ElapsedTime;
+	LastSpawnDebug.MaxEpisodeTime = MaxEpisodeTime;
 	LastSpawnDebug.EnemyCount = Enemies.Num();
 	LastSpawnDebug.CurrentWaveIndex = CurrentWaveIndex;
 	LastSpawnDebug.MinActiveEnemies = MinActiveEnemies;
@@ -239,6 +241,7 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 	LastSpawnDebug.MaxEnemyTypeId = MaxEnemyTypeId;
 	LastSpawnDebug.SpawnAccumulator = SpawnAccumulator;
 	LastSpawnDebug.bHasCurrentWave = Wave != nullptr;
+	LastSpawnDebug.bTruncated = bTruncated;
 
 	// Wave controls spawn rate and max count. Enemy types are selected from
 	// the curriculum pool so long episodes do not outgrow MaxEnemyTypeId.
@@ -297,6 +300,12 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 	}
 
 	LastReward += AliveReward;
+
+	if (MaxEpisodeTime > 0.f && ElapsedTime >= MaxEpisodeTime)
+	{
+		bTruncated = true;
+		LastSpawnDebug.bTruncated = true;
+	}
 }
 
 // ---- 観測 -------------------------------------------------------------------
@@ -433,17 +442,19 @@ TArray<float> ASurvivorsGame::GetObservation() const
 
 float ASurvivorsGame::GetReward() const { return LastReward; }
 bool  ASurvivorsGame::IsDone()   const { return bDone; }
+bool  ASurvivorsGame::IsTruncated() const { return bTruncated; }
 
 FString ASurvivorsGame::GetSpawnDebugJson() const
 {
 	return FString::Printf(
-		TEXT("{\"elapsed_time\":%.3f,\"enemy_count\":%d,\"current_wave_index\":%d,"
+		TEXT("{\"elapsed_time\":%.3f,\"max_episode_time\":%.3f,\"enemy_count\":%d,\"current_wave_index\":%d,"
 			 "\"min_active_enemies\":%d,\"max_active_enemies\":%d,"
 			 "\"effective_min_enemies\":%d,\"effective_max_enemies\":%d,"
 			 "\"max_enemy_type_id\":%d,\"allowed_spawn_type_count\":%d,"
 			 "\"spawn_accumulator\":%.3f,\"has_current_wave\":%s,"
-			 "\"used_curriculum_enemy_pool\":%s,\"spawn_blocked\":%s}"),
+			 "\"used_curriculum_enemy_pool\":%s,\"spawn_blocked\":%s,\"truncated\":%s}"),
 		LastSpawnDebug.ElapsedTime,
+		LastSpawnDebug.MaxEpisodeTime,
 		LastSpawnDebug.EnemyCount,
 		LastSpawnDebug.CurrentWaveIndex,
 		LastSpawnDebug.MinActiveEnemies,
@@ -455,7 +466,8 @@ FString ASurvivorsGame::GetSpawnDebugJson() const
 		LastSpawnDebug.SpawnAccumulator,
 		LastSpawnDebug.bHasCurrentWave ? TEXT("true") : TEXT("false"),
 		LastSpawnDebug.bUsedCurriculumEnemyPool ? TEXT("true") : TEXT("false"),
-		LastSpawnDebug.bSpawnBlocked ? TEXT("true") : TEXT("false"));
+		LastSpawnDebug.bSpawnBlocked ? TEXT("true") : TEXT("false"),
+		LastSpawnDebug.bTruncated ? TEXT("true") : TEXT("false"));
 }
 
 FVector2D ASurvivorsGame::GetItemPos(int32 i) const
@@ -583,6 +595,11 @@ const FSpawnWave* ASurvivorsGame::GetCurrentWave() const
 
 int32 ASurvivorsGame::GetCurrentWaveIndex() const
 {
+	if (SpawnWaves.IsEmpty())
+	{
+		return INDEX_NONE;
+	}
+
 	for (int32 i = 0; i < SpawnWaves.Num(); ++i)
 	{
 		const FSpawnWave& Wave = SpawnWaves[i];
@@ -591,6 +608,12 @@ int32 ASurvivorsGame::GetCurrentWaveIndex() const
 			return i;
 		}
 	}
+
+	if (ElapsedTime >= SpawnWaves.Last().TimeEnd)
+	{
+		return SpawnWaves.Num() - 1;
+	}
+
 	return INDEX_NONE;
 }
 

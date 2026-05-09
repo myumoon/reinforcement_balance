@@ -124,6 +124,7 @@ struct FSpawnWave
 struct FSurvivorsSpawnDebug
 {
 	float ElapsedTime = 0.f;
+	float MaxEpisodeTime = 0.f;
 	int32 EnemyCount = 0;
 	int32 CurrentWaveIndex = INDEX_NONE;
 	int32 MinActiveEnemies = 0;
@@ -136,6 +137,7 @@ struct FSurvivorsSpawnDebug
 	bool bHasCurrentWave = false;
 	bool bUsedCurriculumEnemyPool = false;
 	bool bSpawnBlocked = false;
+	bool bTruncated = false;
 };
 
 /**
@@ -189,6 +191,7 @@ public:
 
 	/** エピソード終了判定（HP <= 0） */
 	bool IsDone() const;
+	bool IsTruncated() const;
 
 	FSurvivorsSpawnDebug GetSpawnDebug() const { return LastSpawnDebug; }
 	FString GetSpawnDebugJson() const;
@@ -230,6 +233,9 @@ public:
 	/** 敵撃破ボーナス */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
 	float KillReward = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	float MaxEpisodeTime = 300.f;
 
 	// ---- フィールド設定 ----
 
@@ -398,6 +404,7 @@ private:
 	bool                  bBossSpawned     = false;
 	float                 LastReward  = 0.f;
 	bool                  bDone       = false;
+	bool                  bTruncated  = false;
 	FRandomStream         RandStream;
 	FSurvivorsSpawnDebug  LastSpawnDebug;
 

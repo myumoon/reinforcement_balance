@@ -61,9 +61,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", default="eureka_results",
                    help="結果保存の親ディレクトリ（default: eureka_results）")
     p.add_argument("--max-steps", type=int, default=200_000,
-                   help="1イテレーションの最大ステップ数（LLMの推奨値の上限, default: 200000）")
+                   help="LLM推奨ステップ数を使う場合の上限（default: 200000）")
     p.add_argument("--min-steps", type=int, default=30_000,
-                   help="早期終了チェックを開始する最小ステップ数（default: 30000）")
+                   help="実学習ステップ数の下限、かつ早期終了チェック開始ステップ（default: 30000）")
+    p.add_argument("--steps-per-iteration", type=int, default=None,
+                   help="Actual training steps per iteration. Overrides the LLM recommendation when set.")
+    p.add_argument("--env-log-freq", type=int, default=1_000,
+                   help="Environment diagnostics log interval in RL steps. Set 0 to disable.")
     p.add_argument("--eval-freq", type=int, default=10_000,
                    help="プラトー判定の評価間隔・ステップ数（default: 10000）")
     p.add_argument("--patience", type=int, default=3,
@@ -181,6 +185,16 @@ def _extract_steps(text: str) -> int:
         except ValueError:
             pass
     return _DEFAULT_STEPS
+
+
+def _resolve_training_steps(llm_steps: int, args: argparse.Namespace) -> int:
+    if args.steps_per_iteration is not None:
+        return max(1_000, args.steps_per_iteration)
+
+    steps = max(llm_steps, args.min_steps)
+    if args.max_steps >= args.min_steps:
+        steps = min(steps, args.max_steps)
+    return steps
 
 
 def _extract_revision_judgment(revision_text: str) -> str | None:
@@ -319,13 +333,15 @@ class _EurekaMetricsCallback(BaseCallback):
     _RECENT_WINDOW = 20  # プラトー判定に使う直近エピソード数
 
     def __init__(self, compute_metric: Callable, eval_freq: int = 10_000,
-                 min_steps: int = 30_000, patience: int = 3, delta: float = 0.05):
+                 min_steps: int = 30_000, patience: int = 3, delta: float = 0.05,
+                 env_log_freq: int = 1_000):
         super().__init__(verbose=0)
         self._compute_metric = compute_metric
         self.eval_freq = eval_freq
         self.min_steps = min_steps
         self.patience = patience
         self.delta = delta
+        self.env_log_freq = env_log_freq
 
         self._ep_base = 0.0
         self._ep_shaped = 0.0
@@ -339,15 +355,24 @@ class _EurekaMetricsCallback(BaseCallback):
         self._check_history: list[float] = []
         self._no_improve_count = 0
         self._last_check_step = 0
+        self._last_env_log_step = 0
+        self._zero_enemy_steps = 0
+        self._terminated_count = 0
+        self._truncated_count = 0
 
     def _on_step(self) -> bool:
         info = self.locals["infos"][0]
+        spawn_debug = info.get("spawn_debug", {})
         self._ep_base += info.get("base_reward", 0.0)
         self._ep_shaped += info.get("shaped_reward", 0.0)
         self._ep_hp += info.get("hp_penalty", 0.0)
         self._ep_len += 1
 
         if self.locals["dones"][0]:
+            if info.get("TimeLimit.truncated", False) or spawn_debug.get("truncated", False):
+                self._truncated_count += 1
+            else:
+                self._terminated_count += 1
             self.episode_base_rewards.append(self._ep_base)
             self.episode_shaped_rewards.append(self._ep_shaped)
             self.episode_hp_rewards.append(self._ep_hp)
@@ -356,6 +381,35 @@ class _EurekaMetricsCallback(BaseCallback):
             self._ep_shaped = 0.0
             self._ep_hp = 0.0
             self._ep_len = 0
+
+        if spawn_debug:
+            if spawn_debug.get("enemy_count", 0) == 0:
+                self._zero_enemy_steps += 1
+            else:
+                self._zero_enemy_steps = 0
+
+            if self.env_log_freq > 0 and self.num_timesteps - self._last_env_log_step >= self.env_log_freq:
+                self._last_env_log_step = self.num_timesteps
+                print(
+                    "[ENV] "
+                    f"step={self.num_timesteps:,} "
+                    f"t={spawn_debug.get('elapsed_time', 0.0):.1f}s "
+                    f"enemy={spawn_debug.get('enemy_count', 0)} "
+                    f"wave={spawn_debug.get('current_wave_index', -1)} "
+                    f"allowed={spawn_debug.get('allowed_spawn_type_count', 0)} "
+                    f"max_type={spawn_debug.get('max_enemy_type_id', 0)} "
+                    f"blocked={spawn_debug.get('spawn_blocked', False)} "
+                    f"truncated={spawn_debug.get('truncated', False)}"
+                )
+
+            if self._zero_enemy_steps == self.env_log_freq and self.env_log_freq > 0:
+                print(
+                    "[WARN] enemy_count stayed at 0 "
+                    f"for {self._zero_enemy_steps:,} RL steps "
+                    f"(elapsed={spawn_debug.get('elapsed_time', 0.0):.1f}s, "
+                    f"wave={spawn_debug.get('current_wave_index', -1)}, "
+                    f"blocked={spawn_debug.get('spawn_blocked', False)})"
+                )
 
         if (self.num_timesteps >= self.min_steps and
                 self.num_timesteps - self._last_check_step >= self.eval_freq and
@@ -384,7 +438,11 @@ class _EurekaMetricsCallback(BaseCallback):
     def get_metrics(self, game_config) -> dict:
         n = len(self.episode_base_rewards)
         if n == 0:
-            return {"episodes": 0}
+            return {
+                "episodes": 0,
+                "terminated_episodes": self._terminated_count,
+                "truncated_episodes": self._truncated_count,
+            }
         mean_base   = sum(self.episode_base_rewards) / n
         mean_shaped = sum(self.episode_shaped_rewards) / n
         mean_hp     = sum(self.episode_hp_rewards) / n if self.episode_hp_rewards else 0.0
@@ -395,6 +453,8 @@ class _EurekaMetricsCallback(BaseCallback):
             self.episode_base_rewards, self.episode_lengths)
         return {
             "episodes": n,
+            "terminated_episodes": self._terminated_count,
+            "truncated_episodes": self._truncated_count,
             "episode_reward_mean": round(mean_base + mean_shaped + mean_hp, 4),
             "base_reward_mean": round(mean_base, 4),
             "shaped_reward_mean": round(mean_shaped, 4),
@@ -474,6 +534,8 @@ def main() -> None:
                 "iterations": args.iterations,
                 "llm": args.llm,
                 "max_steps": args.max_steps,
+                "min_steps": args.min_steps,
+                "steps_per_iteration": args.steps_per_iteration,
             },
         )
 
@@ -566,9 +628,10 @@ def main() -> None:
             # レスポンス保存
             (iter_dir / "llm_response.txt").write_text(llm_response, encoding="utf-8")
 
-            # コード・ステップ数を抽出（LLMの推奨値を max_steps で上限クランプ）
+            # コード・ステップ数を抽出。LLMの推奨値は記録し、実学習ステップは引数側で決める。
             reward_fn_code = _extract_reward_fn_code(llm_response)
-            recommended_steps = min(_extract_steps(llm_response), args.max_steps)
+            llm_steps = _extract_steps(llm_response)
+            training_steps = _resolve_training_steps(llm_steps, args)
 
             if reward_fn_code is None or not _validate_code(reward_fn_code):
                 print("[WARN] 有効なコードブロックが得られませんでした。シェーピングなしで訓練します。")
@@ -611,7 +674,8 @@ def main() -> None:
                     # 次イテレーションへ引き継ぐレビュー知見を構築
                     prev_review_findings = _build_review_findings(review_response, revision_response)
 
-            print(f"[INFO] 推奨ステップ数: {recommended_steps:,}")
+            print(f"[INFO] LLM recommended steps: {llm_steps:,}")
+            print(f"[INFO] Training steps used: {training_steps:,}")
 
             # reward_fn.py 保存
             reward_fn_path = iter_dir / "reward_fn.py"
@@ -635,9 +699,10 @@ def main() -> None:
                 min_steps=args.min_steps,
                 patience=args.patience,
                 delta=args.delta,
+                env_log_freq=args.env_log_freq,
             )
 
-            print(f"[INFO] 訓練開始: {recommended_steps:,} steps (上限: {args.max_steps:,})")
+            print(f"[INFO] 訓練開始: {training_steps:,} steps (上限: {args.max_steps:,})")
             loop_callbacks = [metrics_cb]
             if args.curriculum and hasattr(raw_env, "set_params"):
                 curriculum_cb = CurriculumCallback(
@@ -653,7 +718,7 @@ def main() -> None:
                       f"frame_skip={args.frame_skip}, alive_reward={args.curriculum_alive_reward})")
             elif args.curriculum:
                 print("[WARN] --curriculum は set_params をサポートする環境でのみ有効です。無視します。")
-            model.learn(total_timesteps=recommended_steps, callback=loop_callbacks,
+            model.learn(total_timesteps=training_steps, callback=loop_callbacks,
                         reset_num_timesteps=True)
 
             # --- メトリクス収集・保存 ---
