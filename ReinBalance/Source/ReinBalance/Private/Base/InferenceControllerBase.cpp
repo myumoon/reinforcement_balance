@@ -1,4 +1,4 @@
-#include "InferenceControllerBase.h"
+#include "Base/InferenceControllerBase.h"
 #include "NNE.h"
 #include "NNETensor.h"
 

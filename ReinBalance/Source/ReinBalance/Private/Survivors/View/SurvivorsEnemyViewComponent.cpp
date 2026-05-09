@@ -1,6 +1,6 @@
-#include "SurvivorsEnemyViewComponent.h"
+#include "Survivors/View/SurvivorsEnemyViewComponent.h"
 
-#include "SurvivorsGame.h"
+#include "Survivors/Logic/SurvivorsGame.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SceneComponent.h"
 #include "Engine/StaticMesh.h"

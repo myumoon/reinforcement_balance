@@ -1,7 +1,7 @@
-#include "SurvivorsGUIViewComponent.h"
+#include "Survivors/View/SurvivorsGUIViewComponent.h"
 
-#include "SurvivorsGame.h"
-#include "SurvivorsHPWidget.h"
+#include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/View/SurvivorsHPWidget.h"
 #include "Components/SceneComponent.h"
 #include "Components/WidgetComponent.h"
 

@@ -3,7 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Components/StaticMeshComponent.h"
-#include "CoinGame.h"
+#include "Coin/CoinGame.h"
 #include "CoinGameView.generated.h"
 
 /**

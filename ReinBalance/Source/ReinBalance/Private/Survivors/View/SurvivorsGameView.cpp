@@ -1,9 +1,9 @@
-#include "SurvivorsGameView.h"
+#include "Survivors/View/SurvivorsGameView.h"
 
-#include "SurvivorsEnemyViewComponent.h"
-#include "SurvivorsGUIViewComponent.h"
-#include "SurvivorsGemViewComponent.h"
-#include "SurvivorsPlayerViewComponent.h"
+#include "Survivors/View/SurvivorsEnemyViewComponent.h"
+#include "Survivors/View/SurvivorsGUIViewComponent.h"
+#include "Survivors/View/SurvivorsGemViewComponent.h"
+#include "Survivors/View/SurvivorsPlayerViewComponent.h"
 #include "Components/SceneComponent.h"
 
 ASurvivorsGameView::ASurvivorsGameView()

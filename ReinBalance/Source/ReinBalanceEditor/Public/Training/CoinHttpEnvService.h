@@ -3,7 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "HttpEnvServerBase.h"
-#include "CoinGame.h"
+#include "Coin/CoinGame.h"
 #include "CoinHttpEnvService.generated.h"
 
 /**

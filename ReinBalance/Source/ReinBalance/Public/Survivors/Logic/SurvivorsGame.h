@@ -2,144 +2,17 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/Logic/SurvivorsTypes.h"
 #include "SurvivorsGame.generated.h"
 
 class AWallActor;
-
-/** obs スキーマの1セグメント */
-struct FSurvivorsObsSegment
-{
-	FString Name;
-	int32   Dim;
-};
-
-/**
- * 武器の種類。将来アイテム取得で追加される。
- * MaxWeaponTypeSlots (=8) 分の容量を obs エンコードに確保済み。
- */
-UENUM(BlueprintType)
-enum class EWeaponType : uint8
-{
-	None     = 0,
-	Aura     = 1,
-	Whip     = 2,
-	Fireball = 3,
-};
-
-/** 武器スロット1つ分のデータ */
-struct FWeaponSlot
-{
-	EWeaponType Type  = EWeaponType::None;
-	int32       Level = 0; // 0=未装備, 1-8=レベル
-};
-
-/** 経験値ジェムの種類（青=1XP / 緑=5XP / 赤=10XP） */
-UENUM(BlueprintType)
-enum class EGemType : uint8
-{
-	Blue  = 0, // 雑魚（Bat 系）ドロップ, xp=1
-	Green = 1, // 中型敵ドロップ, xp=5
-	Red   = 2, // ボスドロップ, xp=10
-};
-
-/**
- * 敵1種のパラメーター。EnemyTypeTable に格納し Details パネルやカリキュラムから変更可能。
- * knockback_resistance / is_boss は Plan05 / Plan06 で使用。
- */
-USTRUCT(BlueprintType)
-struct FEnemyTypeParams
-{
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	FString Name;
-
-	/** 出現直後 HP（時間スケーリング前、Plan08 で乗算） */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	float BaseHP = 1.f;
-
-	/** 内部移動速度 [u/s] */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	float Speed = 50.f;
-
-	/** 接触 1 ヒットあたりのダメージ（Plan04 で hit_interval と組み合わせ） */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	float ContactDamage = 5.f;
-
-	/** 衝突判定半径 [u] */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	float CollisionRadius = 10.f;
-
-	/** ノックバック耐性（0=なし, 1=完全耐性）。Plan05 で参照。 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	float KnockbackResistance = 0.f;
-
-	/** ボス扱い（ドロップ・耐性に影響）。Plan06 で参照。 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	bool bIsBoss = false;
-};
-
-/** ウェーブ内の敵種別と出現重み */
-USTRUCT(BlueprintType)
-struct FEnemySpawnWeight
-{
-	GENERATED_BODY()
-
-	/** EnemyTypeTable のインデックス（type_id） */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	int32 TypeId = 0;
-
-	/** 選択重み（相対値、正規化は内部で行う） */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	float Weight = 1.f;
-};
-
-/** 時刻帯（Wave）ごとのスポーン設定 */
-USTRUCT(BlueprintType)
-struct FSpawnWave
-{
-	GENERATED_BODY()
-
-	/** Wave 開始時刻 [秒] */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	float TimeStart = 0.f;
-
-	/** Wave 終了時刻 [秒] */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	float TimeEnd = 30.f;
-
-	/** スポーンレート [体/秒]（SpawnRateMult で乗算） */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	float SpawnRate = 1.f;
-
-	/** この Wave の同時出現上限（MaxActiveEnemies との min を取る） */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	int32 MaxEnemies = 50;
-
-	/** 出現する敵種別と重み */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly)
-	TArray<FEnemySpawnWeight> EnemyWeights;
-};
-
-struct FSurvivorsSpawnDebug
-{
-	float ElapsedTime = 0.f;
-	float MaxEpisodeTime = 0.f;
-	int32 EnemyCount = 0;
-	int32 CurrentWaveIndex = INDEX_NONE;
-	int32 MinActiveEnemies = 0;
-	int32 MaxActiveEnemies = 0;
-	int32 EffectiveMinEnemies = 0;
-	int32 EffectiveMaxEnemies = 0;
-	int32 MaxEnemyTypeId = 0;
-	int32 AllowedSpawnTypeCount = 0;
-	float SpawnAccumulator = 0.f;
-	bool bHasCurrentWave = false;
-	bool bUsedCurriculumEnemyPool = false;
-	bool bSpawnBlocked = false;
-	bool bTruncated = false;
-};
-
+class USurvivorsCollisionComponent;
+class USurvivorsEnemyComponent;
+class USurvivorsGemComponent;
+class USurvivorsObservationComponent;
+class USurvivorsPlayerComponent;
+class USurvivorsSpawnComponent;
 /**
  * Vampire Survivors 風サバイバルゲームのロジッククラス（ビジュアルなし）。
  *
@@ -356,38 +229,23 @@ protected:
 	virtual void BeginPlay() override;
 
 private:
+	friend class USurvivorsCollisionComponent;
+	friend class USurvivorsEnemyComponent;
+	friend class USurvivorsGemComponent;
+	friend class USurvivorsObservationComponent;
+	friend class USurvivorsPlayerComponent;
+	friend class USurvivorsSpawnComponent;
+
 	// ---- 定数 ----
-	static constexpr int32  NumGemObs          = 20; // obs に含める近傍ジェム数
-	static constexpr int32  MaxEnemyObs        = 20;
-	static constexpr int32  MaxWeaponSlots     = 3;
-	static constexpr int32  MaxWeaponTypeSlots = 8;
-	static constexpr int32  MaxWeaponLevel     = 8;
-	static constexpr int32  MaxPlayerLevel     = 100; // obs 正規化基準（ハードキャップではない）
-	static constexpr float  PhysicsDt          = 1.f / 60.f;
-	static constexpr float  MaxGameTime        = 1800.f;
-	static constexpr float  ContactHitInterval = 0.5f;  // 敵→プレイヤー接触無敵 [s]
-	static const FVector2D  RayDirs[8];
-
-	// ---- 敵データ ----
-	struct FEnemyState
-	{
-		FVector2D Pos;
-		FVector2D Vel;
-		int32     TypeId;              // 0〜10: EnemyTypeTable のインデックス
-		float     HP;
-		float     MaxHP;
-		float     CollisionRadius;     // スポーン時に EnemyTypeTable からコピー
-		float     ContactDamage;       // スポーン時に時間スケーリング済みの接触ダメージ
-		float     GarlicLastHitTime;   // 最後に Garlic ヒットを受けた時刻 [s]
-		float     PlayerLastHitTime;   // 最後にプレイヤーに接触ダメージを与えた時刻 [s]
-	};
-
-	// ---- ジェムデータ ----
-	struct FGemState
-	{
-		FVector2D Pos;
-		EGemType  Type;
-	};
+	static constexpr int32 NumGemObs = SurvivorsGameConstants::NumGemObs;
+	static constexpr int32 MaxEnemyObs = SurvivorsGameConstants::MaxEnemyObs;
+	static constexpr int32 MaxWeaponSlots = SurvivorsGameConstants::MaxWeaponSlots;
+	static constexpr int32 MaxWeaponTypeSlots = SurvivorsGameConstants::MaxWeaponTypeSlots;
+	static constexpr int32 MaxWeaponLevel = SurvivorsGameConstants::MaxWeaponLevel;
+	static constexpr int32 MaxPlayerLevel = SurvivorsGameConstants::MaxPlayerLevel;
+	static constexpr float PhysicsDt = SurvivorsGameConstants::PhysicsDt;
+	static constexpr float MaxGameTime = SurvivorsGameConstants::MaxGameTime;
+	static constexpr float ContactHitInterval = SurvivorsGameConstants::ContactHitInterval;
 
 	// ---- 状態 ----
 	FVector2D             PlayerPos;
@@ -411,6 +269,24 @@ private:
 	// ---- WallActors (BeginPlay で自動収集) ----
 	UPROPERTY()
 	TArray<TObjectPtr<AWallActor>> WallActors;
+
+	UPROPERTY(VisibleAnywhere, Category = "Survivors|Components")
+	TObjectPtr<USurvivorsPlayerComponent> PlayerComponent;
+
+	UPROPERTY(VisibleAnywhere, Category = "Survivors|Components")
+	TObjectPtr<USurvivorsGemComponent> GemComponent;
+
+	UPROPERTY(VisibleAnywhere, Category = "Survivors|Components")
+	TObjectPtr<USurvivorsEnemyComponent> EnemyComponent;
+
+	UPROPERTY(VisibleAnywhere, Category = "Survivors|Components")
+	TObjectPtr<USurvivorsSpawnComponent> SpawnComponent;
+
+	UPROPERTY(VisibleAnywhere, Category = "Survivors|Components")
+	TObjectPtr<USurvivorsCollisionComponent> CollisionComponent;
+
+	UPROPERTY(VisibleAnywhere, Category = "Survivors|Components")
+	TObjectPtr<USurvivorsObservationComponent> ObservationComponent;
 
 	// ---- 内部メソッド ----
 	FVector2D RandomInsideField();
