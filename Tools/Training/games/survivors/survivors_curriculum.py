@@ -47,16 +47,20 @@ class _Phase:
     enemy_hp_scale: float
     enemy_damage_scale: float
     time_scaling: bool
+    min_episode_steps: int
     threshold: Optional[float]  # None = 最終段（昇格なし）
 
 
 PHASES: list[_Phase] = [
-    _Phase("入門",        4,   6,  0.8, 1.0,  1, 0.50, 0.50, False,  30.0),
-    _Phase("Gem回収開始", 6,  10,  0.9, 1.5,  2, 0.75, 0.75, False,  60.0),
-    _Phase("通常序盤",    8,  20,  1.0, 2.0,  4, 1.00, 1.00, False, 100.0),
-    _Phase("囲まれ対応", 12,  40,  1.0, 2.5,  6, 1.25, 1.25, False, 140.0),
-    _Phase("群れ対応",   20,  80,  1.1, 3.0,  9, 1.50, 1.50, True,  180.0),
-    _Phase("Mad Forest", 40, 150,  1.2, 4.0, 10, 2.00, 2.00, True,   None),
+    _Phase("入門",        4,   6,  0.8, 1.0,  1, 0.50, 0.50, False,  600,   30.0),
+    _Phase("Gem回収開始", 6,  10,  0.9, 1.4,  2, 0.75, 0.75, False, 1200,  100.0),
+    _Phase("Gem追従強化", 7,  14,  0.9, 1.7,  3, 0.85, 0.85, False, 1800,  250.0),
+    _Phase("通常序盤",    8,  20,  1.0, 2.0,  4, 1.00, 1.00, False, 2400,  800.0),
+    _Phase("包囲入門",   10,  25,  1.0, 2.2,  4, 1.05, 1.05, False, 2400, 1100.0),
+    _Phase("包囲対応",   12,  30,  1.0, 2.4,  5, 1.10, 1.10, False, 2400, 1300.0),
+    _Phase("多敵対応",   14,  40,  1.0, 2.6,  6, 1.20, 1.20, False, 2400, 1500.0),
+    _Phase("群れ対応",   20,  80,  1.1, 3.0,  9, 1.50, 1.50, True,  2400, 1800.0),
+    _Phase("Mad Forest", 40, 150,  1.2, 4.0, 10, 2.00, 2.00, True,     0,   None),
 ]
 
 
@@ -128,13 +132,19 @@ class CurriculumCallback(BaseCallback):
         phase = PHASES[self._phase_idx]
         effective_threshold = (phase.threshold or float("inf")) * self.threshold_mult
         recent_scores = self._scores[-min(len(self._scores), self.window):]
+        recent_lengths = self._episode_lengths[-len(recent_scores):] if recent_scores else []
         mean = _mean(recent_scores)
+        mean_len = _mean([float(v) for v in recent_lengths])
         self._save_status(mean, effective_threshold)
 
         if len(self._scores) < self.window:
             return True
 
-        if phase.threshold is not None and mean >= effective_threshold:
+        if (
+            phase.threshold is not None
+            and mean >= effective_threshold
+            and mean_len >= phase.min_episode_steps
+        ):
             self._advance_phase(mean, effective_threshold)
 
         return True
@@ -181,7 +191,8 @@ class CurriculumCallback(BaseCallback):
             f"速度x{phase.speed_mult:.1f}, スポーンx{phase.spawn_rate_mult:.1f}, "
             f"TypeId<={phase.max_enemy_type_id}, "
             f"HPx{phase.enemy_hp_scale:.2f}, Dmgx{phase.enemy_damage_scale:.2f}, "
-            f"TimeScaling={'ON' if phase.time_scaling else 'OFF'}"
+            f"TimeScaling={'ON' if phase.time_scaling else 'OFF'}, "
+            f"MinEpisodeSteps={phase.min_episode_steps}"
         )
 
     def _save_status(self, mean: float, threshold: float) -> None:
@@ -200,8 +211,10 @@ class CurriculumCallback(BaseCallback):
         effective_threshold = (base_threshold or float("inf")) * self.threshold_mult
         recent_count = min(len(self._scores), self.window)
         recent_scores = self._scores[-recent_count:] if recent_count else []
+        recent_lengths = self._episode_lengths[-recent_count:] if recent_count else []
         score_mean = _mean(recent_scores)
         score_std = _stdev(recent_scores)
+        length_mean = _mean([float(v) for v in recent_lengths])
         threshold_ratio = (
             score_mean / effective_threshold
             if base_threshold is not None and effective_threshold > 0.0 and recent_scores
@@ -223,10 +236,15 @@ class CurriculumCallback(BaseCallback):
                 "active_score_min": round(min(recent_scores), 4) if recent_scores else None,
                 "active_score_max": round(max(recent_scores), 4) if recent_scores else None,
                 "active_score_std": round(score_std, 4),
+                "episode_length_mean": round(length_mean, 1),
+                "min_episode_steps": phase.min_episode_steps,
                 "base_threshold": base_threshold,
                 "effective_threshold": round(effective_threshold, 4) if base_threshold is not None else None,
                 "threshold_ratio": round(threshold_ratio, 4) if threshold_ratio is not None else None,
-                "ready_for_phase_judgment": recent_count >= self.window,
+                "ready_for_phase_judgment": (
+                    recent_count >= self.window
+                    and length_mean >= phase.min_episode_steps
+                ),
             },
             "overall": {
                 "active_score_mean": round(_mean(self._episode_scores), 4),
@@ -244,6 +262,7 @@ class CurriculumCallback(BaseCallback):
                 "enemy_hp_scale": phase.enemy_hp_scale,
                 "enemy_damage_scale": phase.enemy_damage_scale,
                 "time_scaling": phase.time_scaling,
+                "min_episode_steps": phase.min_episode_steps,
             },
             "recommendation": self.recommend_next_settings(),
         }
@@ -279,6 +298,7 @@ class CurriculumCallback(BaseCallback):
                         "curriculum/enemy_hp_scale": phase.enemy_hp_scale,
                         "curriculum/enemy_damage_scale": phase.enemy_damage_scale,
                         "curriculum/time_scaling": int(phase.time_scaling),
+                        "curriculum/min_episode_steps": phase.min_episode_steps,
                     },
                     step=self.num_timesteps,
                 )
