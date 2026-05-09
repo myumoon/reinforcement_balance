@@ -64,6 +64,27 @@ class EurekaGameConfig(ABC):
         """
         return {}
 
+    def make_curriculum_callback(
+        self,
+        raw_env,
+        *,
+        frame_skip: int,
+        window: int,
+        threshold_mult: float,
+        alive_reward: float,
+        status_path,
+    ):
+        """ゲーム固有のカリキュラム callback を返す。非対応なら None。"""
+        return None
+
+    def collect_curriculum_metrics(self, curriculum_callback) -> dict:
+        """metrics.json に保存するカリキュラム診断を返す。"""
+        return {}
+
+    def format_curriculum_summary(self, curriculum_metrics: dict) -> list[str]:
+        """カリキュラム診断からコンソール表示用の行を返す。"""
+        return []
+
     @staticmethod
     def _titled_section(title: str, body: str) -> str:
         """'## タイトル\\n本文' 形式のセクション文字列を返す。
