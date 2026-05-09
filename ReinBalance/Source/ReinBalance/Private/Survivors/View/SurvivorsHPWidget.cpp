@@ -1,4 +1,4 @@
-#include "SurvivorsHPWidget.h"
+#include "Survivors/View/SurvivorsHPWidget.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/ProgressBar.h"
 #include "Components/CanvasPanel.h"

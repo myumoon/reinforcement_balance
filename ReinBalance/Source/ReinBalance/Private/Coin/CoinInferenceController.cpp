@@ -1,4 +1,4 @@
-#include "CoinInferenceController.h"
+#include "Coin/CoinInferenceController.h"
 
 void ACoinInferenceController::BeginPlay()
 {

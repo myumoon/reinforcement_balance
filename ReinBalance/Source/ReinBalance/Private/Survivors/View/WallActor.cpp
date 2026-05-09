@@ -1,4 +1,4 @@
-#include "WallActor.h"
+#include "Survivors/View/WallActor.h"
 #include "Engine/StaticMesh.h"
 #include "UObject/ConstructorHelpers.h"
 

@@ -1,4 +1,4 @@
-#include "CoinGameView.h"
+#include "Coin/CoinGameView.h"
 #include "Engine/StaticMesh.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceDynamic.h"

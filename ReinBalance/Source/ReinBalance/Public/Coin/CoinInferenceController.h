@@ -1,8 +1,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "InferenceControllerBase.h"
-#include "CoinGame.h"
+#include "Base/InferenceControllerBase.h"
+#include "Coin/CoinGame.h"
 #include "CoinInferenceController.generated.h"
 
 /**

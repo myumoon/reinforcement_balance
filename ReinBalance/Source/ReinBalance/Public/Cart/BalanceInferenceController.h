@@ -1,8 +1,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "InferenceControllerBase.h"
-#include "BalanceCart.h"
+#include "Base/InferenceControllerBase.h"
+#include "Cart/BalanceCart.h"
 #include "BalanceInferenceController.generated.h"
 
 /**

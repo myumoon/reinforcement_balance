@@ -1,4 +1,4 @@
-#include "SurvivorsGemViewComponent.h"
+#include "Survivors/View/SurvivorsGemViewComponent.h"
 
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SceneComponent.h"

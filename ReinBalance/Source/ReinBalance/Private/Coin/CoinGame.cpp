@@ -1,4 +1,4 @@
-#include "CoinGame.h"
+#include "Coin/CoinGame.h"
 #include "Misc/SecureHash.h"
 
 ACoinGame::ACoinGame()

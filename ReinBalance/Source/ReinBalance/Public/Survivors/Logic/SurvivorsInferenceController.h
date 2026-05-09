@@ -1,8 +1,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "InferenceControllerBase.h"
-#include "SurvivorsGame.h"
+#include "Base/InferenceControllerBase.h"
+#include "Survivors/Logic/SurvivorsGame.h"
 #include "SurvivorsInferenceController.generated.h"
 
 /**

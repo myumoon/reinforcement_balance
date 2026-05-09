@@ -1,4 +1,4 @@
-#include "SurvivorsInferenceController.h"
+#include "Survivors/Logic/SurvivorsInferenceController.h"
 
 void ASurvivorsInferenceController::BeginPlay()
 {
