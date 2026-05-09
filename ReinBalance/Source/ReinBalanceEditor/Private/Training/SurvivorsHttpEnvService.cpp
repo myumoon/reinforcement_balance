@@ -40,6 +40,11 @@ public:
 					Result.bDone = true;
 					break;
 				}
+				if (Game->IsTruncated())
+				{
+					Result.bTruncated = true;
+					break;
+				}
 			}
 			Result.Obs    = Game->GetObservation();
 			Result.Reward = AccumulatedReward;
@@ -144,6 +149,10 @@ private:
 		bool bTimeScalingEnabled;
 		if (JsonObj->TryGetBoolField(TEXT("TimeScalingEnabled"), bTimeScalingEnabled))
 			Game->bTimeScalingEnabled = bTimeScalingEnabled;
+
+		double MaxEpisodeTime;
+		if (JsonObj->TryGetNumberField(TEXT("MaxEpisodeTime"), MaxEpisodeTime))
+			Game->MaxEpisodeTime = FMath::Clamp(static_cast<float>(MaxEpisodeTime), 30.f, 1800.f);
 
 		OnComplete(MakeJsonResponse(TEXT("{\"status\":\"ok\"}")));
 		return true;
