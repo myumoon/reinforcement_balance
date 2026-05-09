@@ -175,6 +175,8 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"- 敵接近ペナルティは [-0.05, 0.0] 程度まで\n"
             f"- アイテム接近ボーナスは 1ステップあたり [-0.03, 0.03] 程度まで（アイテム10個に対して設計）\n"
             f"  距離計算例: dist_m = np.sqrt(obs[{self._offsets.get('gem_rel_pos', 23)}]**2 + obs[{self._offsets.get('gem_rel_pos', 23)+1}]**2) * 30\n"
+            f"- Gem 回収は待機による偶然取得ではなく、最近 Gem への距離短縮と取得後の次 Gem 追従を明示的に評価すること\n"
+            f"- 敵が多い場合は、Gem 方向へ直進するだけでなく、敵密度が低い方向から回り込んで Gem に近づく行動を評価すること\n"
             f"- item_kill_score = 0 は「生存のみ」。reward_fn は item_kill_score を上げることを目標とすること\n"
             f"- エピソード全体の shaped_reward 累計が base_reward を大幅に超えないよう設計すること"
         )
@@ -285,10 +287,14 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             max(0.0, r - _ALIVE_REWARD * l)
             for r, l in zip(episode_base_rewards, episode_lengths)
         ]
+        total_steps = sum(episode_lengths)
+        total_score = sum(scores)
         return {
             "episode_length_mean": round(mean_len, 1),
             "episode_length_min":  min(episode_lengths) if episode_lengths else 0,
             "episode_length_max":  max(episode_lengths) if episode_lengths else 0,
+            "item_kill_score_per_1k_steps": round(
+                total_score / total_steps * 1000.0 if total_steps > 0 else 0.0, 3),
             "item_kill_score_std": round(
                 statistics.stdev(scores) if len(scores) > 1 else 0.0, 3),
         }
@@ -305,6 +311,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"- episode_length: エピソード長（ステップ数、最大 = 全 HP 消費まで）\n"
             f"- item_kill_score (primary): (base_reward - AliveReward×ep_len) の平均\n"
             f"  純粋なアイテム+Kill スコア。生存のみ=0.0、アイテム1個={_ITEM_REWARD}、Kill1体={_KILL_REWARD}\n"
+            f"- item_kill_score_per_1k_steps: 1000 step あたりのアイテム+Kill スコア。長く生きるだけでなく能動的に Gem/Kill を取れているかを見る効率指標\n"
             f"- item_kill_score_std: 標準偏差\n"
             f"- episode_length_min / max: 最短・最長エピソード長"
         )
