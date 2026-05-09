@@ -23,7 +23,6 @@ from typing import Callable
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
-from curriculum_callback import CurriculumCallback
 
 try:
     import wandb
@@ -81,7 +80,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--frame-skip", type=int, default=1,
                    help="フレームスキップ数 N: 1 RL ステップで N 物理ステップ実行（default: 1）")
     p.add_argument("--curriculum", action="store_true",
-                   help="カリキュラム学習を有効化（survivors 専用）")
+                   help="カリキュラム学習を有効化（game_config が対応する場合のみ）")
     p.add_argument("--curriculum-window", type=int, default=20,
                    help="active_score を平均するエピソード数 (default: 20)")
     p.add_argument("--curriculum-threshold", type=float, default=5.0,
@@ -705,9 +704,9 @@ def main() -> None:
             print(f"[INFO] 訓練開始: {training_steps:,} steps (上限: {args.max_steps:,})")
             loop_callbacks = [metrics_cb]
             curriculum_cb = None
-            if args.curriculum and hasattr(raw_env, "set_params"):
+            if args.curriculum:
                 curriculum_status_path = iter_dir / "curriculum_status.json"
-                curriculum_cb = CurriculumCallback(
+                curriculum_cb = game_config.make_curriculum_callback(
                     raw_env=raw_env,
                     frame_skip=args.frame_skip,
                     window=args.curriculum_window,
@@ -715,34 +714,30 @@ def main() -> None:
                     alive_reward=args.curriculum_alive_reward,
                     status_path=curriculum_status_path,
                 )
-                loop_callbacks.append(curriculum_cb)
-                print(f"[INFO] CurriculumCallback 有効 "
-                      f"(window={args.curriculum_window}, threshold_mult={args.curriculum_threshold}, "
-                      f"frame_skip={args.frame_skip}, alive_reward={args.curriculum_alive_reward})")
-            elif args.curriculum:
-                print("[WARN] --curriculum は set_params をサポートする環境でのみ有効です。無視します。")
+                if curriculum_cb is not None:
+                    loop_callbacks.append(curriculum_cb)
+                    print(f"[INFO] CurriculumCallback 有効 "
+                          f"(window={args.curriculum_window}, threshold_mult={args.curriculum_threshold}, "
+                          f"frame_skip={args.frame_skip}, alive_reward={args.curriculum_alive_reward})")
+                else:
+                    print("[WARN] --curriculum はこの game_config では未対応です。無視します。")
             model.learn(total_timesteps=training_steps, callback=loop_callbacks,
                         reset_num_timesteps=True)
 
             # --- メトリクス収集・保存 ---
             metrics = metrics_cb.get_metrics(game_config)
             if curriculum_cb is not None:
-                curriculum_diag = curriculum_cb.get_diagnostics()
-                metrics["curriculum"] = curriculum_diag
-                curriculum_diag_path = iter_dir / "curriculum_diagnostics.json"
-                curriculum_diag_path.write_text(
-                    json.dumps(curriculum_diag, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                rec = curriculum_diag.get("recommendation", {})
-                print(
-                    "[Curriculum] next run suggestion: "
-                    f"--curriculum-threshold {rec.get('suggested_curriculum_threshold')} "
-                    f"--curriculum-window {rec.get('suggested_curriculum_window')}"
-                )
-                print(f"[Curriculum] threshold reason: {rec.get('threshold_reason')}")
-                print(f"[Curriculum] window reason: {rec.get('window_reason')}")
-                print(f"[INFO] curriculum_diagnostics.json: {curriculum_diag_path}")
+                curriculum_metrics = game_config.collect_curriculum_metrics(curriculum_cb)
+                if curriculum_metrics:
+                    metrics["curriculum"] = curriculum_metrics
+                    curriculum_diag_path = iter_dir / "curriculum_diagnostics.json"
+                    curriculum_diag_path.write_text(
+                        json.dumps(curriculum_metrics, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    for line in game_config.format_curriculum_summary(curriculum_metrics):
+                        print(line)
+                    print(f"[INFO] curriculum_diagnostics.json: {curriculum_diag_path}")
             print(f"[INFO] metrics: {metrics}")
             if _use_wandb and wandb.run:
                 log_dict = {"iteration": i, **metrics}

@@ -334,6 +334,45 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             verbose=1,
         )
 
+    def make_curriculum_callback(
+        self,
+        raw_env,
+        *,
+        frame_skip: int,
+        window: int,
+        threshold_mult: float,
+        alive_reward: float,
+        status_path,
+    ):
+        if not hasattr(raw_env, "set_params"):
+            return None
+        from games.survivors.survivors_curriculum import CurriculumCallback
+        return CurriculumCallback(
+            raw_env=raw_env,
+            frame_skip=frame_skip,
+            window=window,
+            threshold_mult=threshold_mult,
+            alive_reward=alive_reward,
+            status_path=status_path,
+        )
+
+    def collect_curriculum_metrics(self, curriculum_callback) -> dict:
+        if curriculum_callback is None or not hasattr(curriculum_callback, "get_diagnostics"):
+            return {}
+        return curriculum_callback.get_diagnostics()
+
+    def format_curriculum_summary(self, curriculum_metrics: dict) -> list[str]:
+        rec = curriculum_metrics.get("recommendation", {})
+        if not rec:
+            return []
+        return [
+            "[Curriculum] 次回推奨値: "
+            f"--curriculum-threshold {rec.get('suggested_curriculum_threshold')} "
+            f"--curriculum-window {rec.get('suggested_curriculum_window')}",
+            f"[Curriculum] threshold 根拠: {rec.get('threshold_reason')}",
+            f"[Curriculum] window 根拠: {rec.get('window_reason')}",
+        ]
+
     @property
     def primary_metric_name(self) -> str:
         return "item_kill_score"
