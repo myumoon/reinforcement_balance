@@ -316,7 +316,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"- episode_length_min / max: 最短・最長エピソード長"
         )
 
-    def make_model(self, env):
+    def make_model(self, env, device: str = "auto"):
         from stable_baselines3 import PPO
         from common.utils import _linear_schedule
         policy_kwargs = dict(
@@ -339,6 +339,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             vf_coef=0.5,
             max_grad_norm=0.5,
             verbose=1,
+            device=device,
         )
 
     def make_curriculum_callback(

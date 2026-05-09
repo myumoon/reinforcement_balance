@@ -109,7 +109,7 @@ class EurekaGameConfig(ABC):
         """
         return ""
 
-    def make_model(self, env):
+    def make_model(self, env, device: str = "auto"):
         """PPO モデルを生成して返す。
 
         デフォルト実装: MlpPolicy [64, 64] + 改善済みハイパーパラメータ。
@@ -127,6 +127,7 @@ class EurekaGameConfig(ABC):
             vf_coef=0.5,
             max_grad_norm=0.5,
             verbose=1,
+            device=device,
         )
 
     @property
