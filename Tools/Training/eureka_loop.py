@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -35,6 +36,14 @@ _STATE_FILENAME = "state.json"
 _DEFAULT_STEPS = 50_000
 _DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
 _DEFAULT_OPENAI_MODEL = "gpt-4o"
+
+
+def _log_device_status(requested_device: str) -> None:
+    print(f"[INFO] requested device: {requested_device}")
+    print(f"[INFO] torch={torch.__version__}, cuda_available={torch.cuda.is_available()}, "
+          f"torch_cuda={torch.version.cuda}")
+    if torch.cuda.is_available():
+        print(f"[INFO] cuda device[0]: {torch.cuda.get_device_name(0)}")
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +83,8 @@ def _parse_args() -> argparse.Namespace:
                    help="Actual training steps per iteration. Overrides the LLM recommendation when set.")
     p.add_argument("--env-log-freq", type=int, default=1_000,
                    help="Environment diagnostics log interval in RL steps. Set 0 to disable.")
+    p.add_argument("--device", default="auto",
+                   help="SB3/PyTorch device (auto, cpu, cuda, cuda:0 など。default: auto)")
     p.add_argument("--eval-freq", type=int, default=10_000,
                    help="プラトー判定の評価間隔・ステップ数（default: 10000）")
     p.add_argument("--patience", type=int, default=3,
@@ -551,12 +562,14 @@ def main() -> None:
                 "max_steps": args.max_steps,
                 "min_steps": args.min_steps,
                 "steps_per_iteration": args.steps_per_iteration,
+                "device": args.device,
             },
         )
 
     # LLM クライアント
     client, model_name = _build_llm_client(args.llm, args.model)
     print(f"[INFO] LLM: {args.llm} / {model_name}")
+    _log_device_status(args.device)
 
     # ポート解決: 未指定時はゲーム設定のデフォルトを使用
     port = args.port if args.port is not None else game_config.default_port
@@ -707,7 +720,8 @@ def main() -> None:
                 _get_raw_env(env)._reward_fn = None
 
             # --- PPO 訓練 ---
-            model = game_config.make_model(env)
+            model = game_config.make_model(env, device=args.device)
+            print(f"[INFO] SB3 model device: {model.device}")
             metrics_cb = _EurekaMetricsCallback(
                 compute_metric=game_config.compute_primary_metric,
                 eval_freq=args.eval_freq,

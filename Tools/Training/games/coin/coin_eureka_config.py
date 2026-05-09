@@ -276,7 +276,7 @@ class CoinEurekaConfig(EurekaGameConfig):
             "coins_per_step": round(coins_per_step, 5),
         }
 
-    def make_model(self, env):
+    def make_model(self, env, device: str = "auto"):
         from stable_baselines3 import PPO
         from common.utils import _linear_schedule
         policy_kwargs = dict(
@@ -299,6 +299,7 @@ class CoinEurekaConfig(EurekaGameConfig):
             vf_coef=0.5,
             max_grad_norm=0.5,
             verbose=1,
+            device=device,
         )
 
     @property
