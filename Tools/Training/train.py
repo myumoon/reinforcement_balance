@@ -30,6 +30,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecFrameStack, VecNormalize
+import torch
 
 from common.utils import _linear_schedule
 from curriculum_callback import CurriculumCallback
@@ -65,6 +66,14 @@ _PPO_KWARGS = dict(
     max_grad_norm=0.5,
     verbose=1,
 )
+
+
+def _log_device_status(requested_device: str) -> None:
+    print(f"[INFO] requested device: {requested_device}")
+    print(f"[INFO] torch={torch.__version__}, cuda_available={torch.cuda.is_available()}, "
+          f"torch_cuda={torch.version.cuda}")
+    if torch.cuda.is_available():
+        print(f"[INFO] cuda device[0]: {torch.cuda.get_device_name(0)}")
 
 
 def _get_raw_env(env):
@@ -221,6 +230,8 @@ def parse_args() -> argparse.Namespace:
                    help="shaping_weight の下限値 (default: 0.0=完全除去, 例: 0.05 で5%%維持)")
     p.add_argument("--ent-coef", type=float, default=0.01,
                    help="PPO エントロピー係数 (default: 0.01)")
+    p.add_argument("--device", default="auto",
+                   help="SB3/PyTorch device (auto, cpu, cuda, cuda:0 など。default: auto)")
     p.add_argument("--frame-skip", type=int, default=1,
                    help="フレームスキップ数 N: 1 RL ステップで N 物理ステップ実行（default: 1）")
     p.add_argument("--frame-stack", type=int, default=1,
@@ -269,6 +280,7 @@ def main() -> None:
                 "lstm_hidden_size": args.lstm_hidden_size if args.recurrent else None,
                 "n_lstm_layers": args.n_lstm_layers if args.recurrent else None,
                 "ent_coef": args.ent_coef,
+                "device": args.device,
                 "curriculum": args.curriculum,
                 "reward_fn": str(args.reward_fn) if args.reward_fn else None,
                 **_PPO_KWARGS,
@@ -284,7 +296,8 @@ def main() -> None:
         print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
               " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")
 
-    ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef}
+    _log_device_status(args.device)
+    ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef, "device": args.device}
 
     defaults = _GAME_DEFAULTS[args.game]
     port   = args.port   if args.port   is not None else defaults["port"]
@@ -372,7 +385,7 @@ def main() -> None:
             print("[INFO] --entity-attention は --resume 時は無視されます（保存済みモデルのアーキテクチャを使用）")
         if args.recurrent:
             print("[INFO] --recurrent は --resume 時は保存済みモデルのアーキテクチャに従います")
-        model = algo_class.load(resume_path, env=env)
+        model = algo_class.load(resume_path, env=env, device=args.device)
     elif args.entity_attention:
         if args.game not in ("coin", "survivors"):
             print(f"[WARN] --entity-attention はコイン/サバイバーズゲーム専用です。{default_policy} を使用します。")
@@ -405,6 +418,7 @@ def main() -> None:
         model = algo_class(default_policy, env, policy_kwargs=policy_kwargs, **ppo_kwargs)
     else:
         model = algo_class(default_policy, env, **ppo_kwargs)
+    print(f"[INFO] SB3 model device: {model.device}")
 
     checkpoint_cb = CheckpointCallback(
         save_freq=max(args.checkpoint_freq // (env.num_envs or 1), 1),
