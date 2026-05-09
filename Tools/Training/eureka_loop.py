@@ -704,13 +704,16 @@ def main() -> None:
 
             print(f"[INFO] 訓練開始: {training_steps:,} steps (上限: {args.max_steps:,})")
             loop_callbacks = [metrics_cb]
+            curriculum_cb = None
             if args.curriculum and hasattr(raw_env, "set_params"):
+                curriculum_status_path = iter_dir / "curriculum_status.json"
                 curriculum_cb = CurriculumCallback(
                     raw_env=raw_env,
                     frame_skip=args.frame_skip,
                     window=args.curriculum_window,
                     threshold_mult=args.curriculum_threshold,
                     alive_reward=args.curriculum_alive_reward,
+                    status_path=curriculum_status_path,
                 )
                 loop_callbacks.append(curriculum_cb)
                 print(f"[INFO] CurriculumCallback 有効 "
@@ -723,6 +726,23 @@ def main() -> None:
 
             # --- メトリクス収集・保存 ---
             metrics = metrics_cb.get_metrics(game_config)
+            if curriculum_cb is not None:
+                curriculum_diag = curriculum_cb.get_diagnostics()
+                metrics["curriculum"] = curriculum_diag
+                curriculum_diag_path = iter_dir / "curriculum_diagnostics.json"
+                curriculum_diag_path.write_text(
+                    json.dumps(curriculum_diag, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                rec = curriculum_diag.get("recommendation", {})
+                print(
+                    "[Curriculum] next run suggestion: "
+                    f"--curriculum-threshold {rec.get('suggested_curriculum_threshold')} "
+                    f"--curriculum-window {rec.get('suggested_curriculum_window')}"
+                )
+                print(f"[Curriculum] threshold reason: {rec.get('threshold_reason')}")
+                print(f"[Curriculum] window reason: {rec.get('window_reason')}")
+                print(f"[INFO] curriculum_diagnostics.json: {curriculum_diag_path}")
             print(f"[INFO] metrics: {metrics}")
             if _use_wandb and wandb.run:
                 log_dict = {"iteration": i, **metrics}

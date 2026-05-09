@@ -30,6 +30,21 @@ from typing import Optional
 from stable_baselines3.common.callbacks import BaseCallback
 
 
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _stdev(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    m = _mean(values)
+    return (sum((v - m) ** 2 for v in values) / len(values)) ** 0.5
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
 @dataclass(frozen=True)
 class _Phase:
     name: str
@@ -86,6 +101,13 @@ class CurriculumCallback(BaseCallback):
         self._scores: list[float] = []
         self._phase_idx = 0
         self._ep_base = 0.0
+        self._episode_scores: list[float] = []
+        self._episode_lengths: list[int] = []
+        self._episode_base_rewards: list[float] = []
+        self._episode_alive_rewards: list[float] = []
+        self._terminated_count = 0
+        self._truncated_count = 0
+        self._phase_events: list[dict] = []
 
     def _on_training_start(self) -> None:
         self._apply_phase(PHASES[0], initial=True)
@@ -101,15 +123,24 @@ class CurriculumCallback(BaseCallback):
         alive_total = self.alive_reward * self.frame_skip * ep_len
         score = max(0.0, self._ep_base - alive_total)
         self._scores.append(score)
+        self._episode_scores.append(score)
+        self._episode_lengths.append(ep_len)
+        self._episode_base_rewards.append(self._ep_base)
+        self._episode_alive_rewards.append(alive_total)
+        if info.get("TimeLimit.truncated", False) or info.get("spawn_debug", {}).get("truncated", False):
+            self._truncated_count += 1
+        else:
+            self._terminated_count += 1
         self._ep_base = 0.0
+
+        phase = PHASES[self._phase_idx]
+        effective_threshold = (phase.threshold or float("inf")) * self.threshold_mult
+        recent_scores = self._scores[-min(len(self._scores), self.window):]
+        mean = _mean(recent_scores)
+        self._save_status(mean, effective_threshold)
 
         if len(self._scores) < self.window:
             return True
-
-        mean = sum(self._scores[-self.window:]) / self.window
-        phase = PHASES[self._phase_idx]
-        effective_threshold = (phase.threshold or float("inf")) * self.threshold_mult
-        self._save_status(mean, effective_threshold)
 
         if phase.threshold is not None and mean >= effective_threshold:
             self._advance_phase(mean, effective_threshold)
@@ -118,9 +149,19 @@ class CurriculumCallback(BaseCallback):
 
     def _advance_phase(self, mean: float, threshold: float) -> None:
         prev_name = PHASES[self._phase_idx].name
+        prev_idx = self._phase_idx
         self._phase_idx = min(self._phase_idx + 1, len(PHASES) - 1)
         self._scores.clear()
         next_phase = PHASES[self._phase_idx]
+        self._phase_events.append({
+            "timestep": self.num_timesteps,
+            "from_phase_idx": prev_idx,
+            "from_phase_name": prev_name,
+            "to_phase_idx": self._phase_idx,
+            "to_phase_name": next_phase.name,
+            "active_score_mean": round(mean, 4),
+            "threshold": round(threshold, 4),
+        })
         print(
             f"\n[Curriculum] Phase {self._phase_idx} 昇格: "
             f"{prev_name} -> {next_phase.name} "
@@ -154,14 +195,54 @@ class CurriculumCallback(BaseCallback):
     def _save_status(self, mean: float, threshold: float) -> None:
         if self._status_path is None:
             return
+        status = self.get_diagnostics()
+        status["current_window"]["active_score_mean"] = round(mean, 4)
+        status["current_window"]["effective_threshold"] = round(threshold, 4)
+        Path(self._status_path).write_text(
+            json.dumps(status, ensure_ascii=False, indent=2)
+        )
+
+    def get_diagnostics(self) -> dict:
         phase = PHASES[self._phase_idx]
-        status = {
+        base_threshold = phase.threshold
+        effective_threshold = (base_threshold or float("inf")) * self.threshold_mult
+        recent_count = min(len(self._scores), self.window)
+        recent_scores = self._scores[-recent_count:] if recent_count else []
+        score_mean = _mean(recent_scores)
+        score_std = _stdev(recent_scores)
+        threshold_ratio = (
+            score_mean / effective_threshold
+            if base_threshold is not None and effective_threshold > 0.0 and recent_scores
+            else None
+        )
+        return {
             "timestep": self.num_timesteps,
             "phase_idx": self._phase_idx,
             "phase_name": phase.name,
-            "active_score_mean": round(mean, 4),
-            "threshold": round(threshold, 4),
-            "episodes_in_window": min(len(self._scores), self.window),
+            "window": self.window,
+            "threshold_mult": self.threshold_mult,
+            "episodes_total": len(self._episode_scores),
+            "terminated_episodes": self._terminated_count,
+            "truncated_episodes": self._truncated_count,
+            "current_window": {
+                "episodes": recent_count,
+                "required_episodes": self.window,
+                "active_score_mean": round(score_mean, 4),
+                "active_score_min": round(min(recent_scores), 4) if recent_scores else None,
+                "active_score_max": round(max(recent_scores), 4) if recent_scores else None,
+                "active_score_std": round(score_std, 4),
+                "base_threshold": base_threshold,
+                "effective_threshold": round(effective_threshold, 4) if base_threshold is not None else None,
+                "threshold_ratio": round(threshold_ratio, 4) if threshold_ratio is not None else None,
+                "ready_for_phase_judgment": recent_count >= self.window,
+            },
+            "overall": {
+                "active_score_mean": round(_mean(self._episode_scores), 4),
+                "episode_length_mean": round(_mean([float(v) for v in self._episode_lengths]), 1),
+                "base_reward_mean": round(_mean(self._episode_base_rewards), 4),
+                "alive_reward_mean": round(_mean(self._episode_alive_rewards), 4),
+            },
+            "phase_events": self._phase_events,
             "params": {
                 "min_enemies": phase.min_enemies,
                 "max_enemies": phase.max_enemies,
@@ -172,10 +253,59 @@ class CurriculumCallback(BaseCallback):
                 "enemy_damage_scale": phase.enemy_damage_scale,
                 "time_scaling": phase.time_scaling,
             },
+            "recommendation": self.recommend_next_settings(),
         }
-        Path(self._status_path).write_text(
-            json.dumps(status, ensure_ascii=False, indent=2)
+
+    def recommend_next_settings(self) -> dict:
+        phase = PHASES[self._phase_idx]
+        base_threshold = phase.threshold
+        recent_count = min(len(self._scores), self.window)
+        recent_scores = self._scores[-recent_count:] if recent_count else []
+        score_mean = _mean(recent_scores)
+        effective_threshold = (base_threshold or float("inf")) * self.threshold_mult
+        ratio = (
+            score_mean / effective_threshold
+            if base_threshold is not None and effective_threshold > 0.0 and recent_scores
+            else None
         )
+
+        suggested_window = self.window
+        window_reason = "current window has enough episode samples"
+        if len(self._episode_scores) == 0:
+            suggested_window = min(self.window, 10)
+            window_reason = "no completed episodes were observed; use a smaller window after fixing truncation"
+        elif recent_count < self.window:
+            suggested_window = max(3, min(10, len(self._episode_scores)))
+            window_reason = "fewer episodes than the current window were observed"
+        elif recent_scores and score_mean > 0.0 and _stdev(recent_scores) / score_mean > 1.0:
+            suggested_window = min(30, self.window + 5)
+            window_reason = "active_score is noisy; use a larger smoothing window"
+        elif self.window > 20:
+            suggested_window = 20
+            window_reason = "window is larger than needed for normal eureka iterations"
+
+        suggested_threshold = self.threshold_mult
+        threshold_reason = "current threshold multiplier is in a reasonable range"
+        if ratio is None:
+            threshold_reason = "not enough active_score samples to tune threshold"
+        elif ratio >= 1.8:
+            suggested_threshold = _clamp(self.threshold_mult * 1.25, 0.25, 5.0)
+            threshold_reason = "phase threshold was exceeded by a large margin; make promotion harder"
+        elif ratio >= 1.0:
+            threshold_reason = "phase threshold was reached; keep multiplier unless promotion felt too fast"
+        elif ratio < 0.4:
+            suggested_threshold = _clamp(self.threshold_mult * 0.5, 0.25, 5.0)
+            threshold_reason = "active_score is far below threshold; make promotion easier"
+        elif ratio < 0.75:
+            suggested_threshold = _clamp(self.threshold_mult * 0.75, 0.25, 5.0)
+            threshold_reason = "active_score is below threshold; slightly lower promotion difficulty"
+
+        return {
+            "suggested_curriculum_threshold": round(suggested_threshold, 3),
+            "suggested_curriculum_window": int(suggested_window),
+            "threshold_reason": threshold_reason,
+            "window_reason": window_reason,
+        }
 
     def _log_wandb(self, mean: float, phase: _Phase) -> None:
         try:
