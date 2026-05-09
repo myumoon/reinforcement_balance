@@ -1,0 +1,11 @@
+# train.py 用 Survivors 標準設定
+# 使い方: python train.py --config configs/survivors_train.yaml
+# CLI 引数で個別上書き可能: python train.py --config configs/survivors_train.yaml --total-steps 2000000
+
+game: survivors
+total_steps: 1_000_000
+curriculum: true
+curriculum_window: 20
+frame_skip: 2
+wandb: true
+wandb_project: rl-survivors

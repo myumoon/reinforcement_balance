@@ -180,7 +180,14 @@ def _strip_zip(path: Path) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
+    # 事前パース: --config のみ抽出（他の引数は無視）
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=Path, default=None)
+    pre_args, _ = pre.parse_known_args()
+
     p = argparse.ArgumentParser()
+    p.add_argument("--config", type=Path, default=None,
+                   help="YAML 設定ファイルのパス（CLI 引数で上書き可能）")
     p.add_argument("--game", choices=["balance", "coin", "survivors"], default="balance",
                    help="訓練対象のゲーム (default: balance)")
     p.add_argument("--dry-run", action="store_true", help="UE5 なしでスタブ環境を使用")
@@ -235,6 +242,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
     p.add_argument("--wandb-project", default="rl-balance", help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None, help="W&B ラン名（未指定時は自動生成）")
+
+    # YAML があればデフォルトを差し込む（CLI が常に優先）
+    if pre_args.config:
+        from common.config import load_yaml_config, apply_yaml_defaults
+        apply_yaml_defaults(p, load_yaml_config(pre_args.config))
+
     return p.parse_args()
 
 

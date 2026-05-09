@@ -1,0 +1,13 @@
+# eureka_loop.py 用 Survivors EUREKA 設定
+# 使い方: python eureka_loop.py --config configs/survivors_eureka.yaml
+# CLI 引数で個別上書き可能: python eureka_loop.py --config configs/survivors_eureka.yaml --iterations 10
+
+game_config: games/survivors/survivors_eureka_config.py
+iterations: 5
+max_steps: 150_000
+min_steps: 30_000
+frame_skip: 2
+curriculum: true
+curriculum_window: 20
+wandb: true
+wandb_project: eureka-survivors

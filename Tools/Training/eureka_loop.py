@@ -42,9 +42,16 @@ _DEFAULT_OPENAI_MODEL = "gpt-4o"
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
+    # 事前パース: --config のみ抽出（他の引数は無視）
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=Path, default=None)
+    pre_args, _ = pre.parse_known_args()
+
     p = argparse.ArgumentParser(description="EUREKA型報酬シェーピングループ")
-    p.add_argument("--game-config", required=True,
-                   help="ゲーム設定ファイルのパス（例: games/coin_eureka_config.py）")
+    p.add_argument("--config", type=Path, default=None,
+                   help="YAML 設定ファイルのパス（CLI 引数で上書き可能）")
+    p.add_argument("--game-config", default=None,
+                   help="ゲーム設定ファイルのパス（--config YAML または直接指定）")
     p.add_argument("--iterations", type=int, default=5, help="ループ回数（default: 5）")
     p.add_argument("--run-name", default=None,
                    help="保存ディレクトリ名（未指定時はタイムスタンプ自動生成）")
@@ -94,7 +101,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
     p.add_argument("--wandb-project", default="eureka-loop", help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None, help="W&B ラン名")
-    return p.parse_args()
+
+    # YAML があればデフォルトを差し込む（CLI が常に優先）
+    if pre_args.config:
+        from common.config import load_yaml_config, apply_yaml_defaults
+        apply_yaml_defaults(p, load_yaml_config(pre_args.config))
+
+    args = p.parse_args()
+    if args.game_config is None:
+        p.error("--game-config を指定してください（CLI または --config の YAML 内）")
+    return args
 
 
 # ---------------------------------------------------------------------------
