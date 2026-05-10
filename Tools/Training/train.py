@@ -16,8 +16,12 @@
 import argparse
 import importlib
 import importlib.util
+import json
+import hashlib
+import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 # リファクタリング前に保存されたモデル（entity_attention_extractor モジュールで pickle 化）を
 # --resume でロードできるよう、旧モジュールパスを sys.modules に登録する
@@ -27,7 +31,8 @@ sys.modules.setdefault(
 )
 
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
+import yaml
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecFrameStack, VecNormalize
 import torch
@@ -49,9 +54,9 @@ except ImportError:
     _SB3_CONTRIB_AVAILABLE = False
 
 _GAME_DEFAULTS = {
-    "balance":   {"port": 8765, "output": "models/balance_model"},
-    "coin":      {"port": 8766, "output": "models/coin_model"},
-    "survivors": {"port": 8767, "output": "models/survivors_model"},
+    "balance":   {"port": 8765},
+    "coin":      {"port": 8766},
+    "survivors": {"port": 8767},
 }
 
 
@@ -99,6 +104,239 @@ def _find_vecnormalize(env):
     return None
 
 
+def _json_default(value: Any):
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
+
+
+def _read_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_json(path: Path, data: dict) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _model_zip_path(model_base: Path) -> Path:
+    return model_base if model_base.suffix.lower() == ".zip" else model_base.with_suffix(".zip")
+
+
+def _latest_checkpoint(run_dir: Path) -> Path | None:
+    candidates = list(run_dir.glob("model_*_steps.zip"))
+    if not candidates:
+        final_model = run_dir / "model.zip"
+        return final_model if final_model.exists() else None
+
+    def _step(path: Path) -> int:
+        stem = path.stem
+        try:
+            return int(stem.removeprefix("model_").removesuffix("_steps"))
+        except ValueError:
+            return -1
+
+    return max(candidates, key=_step)
+
+
+def _resolve_resume_path(resume: Path) -> tuple[Path, Path, dict]:
+    if resume.is_dir():
+        run_dir = resume
+        status = _read_json(run_dir / "train_status.json")
+        model_path = status.get("latest_model_path")
+        if model_path:
+            model_zip = Path(model_path)
+            if not model_zip.is_absolute():
+                model_zip = run_dir / model_zip
+        else:
+            model_zip = _latest_checkpoint(run_dir)
+        if model_zip is None or not model_zip.exists():
+            raise FileNotFoundError(f"--resume run_dir に再開可能なモデルがありません: {run_dir}")
+        return run_dir, _strip_zip(model_zip), status
+
+    model_zip = _model_zip_path(resume)
+    if not model_zip.exists():
+        raise FileNotFoundError(f"--resume モデルが見つかりません: {model_zip}")
+    run_dir = model_zip.parent
+    return run_dir, _strip_zip(model_zip), _read_json(run_dir / "train_status.json")
+
+
+def _git_value(args: list[str]) -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", *args],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return None
+
+
+def _resolved_config(args: argparse.Namespace) -> dict:
+    return {
+        key: value
+        for key, value in vars(args).items()
+        if not key.startswith("_")
+    }
+
+
+def _config_hash(config: dict) -> str:
+    encoded = json.dumps(config, default=_json_default, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _write_resolved_config(run_dir: Path, args: argparse.Namespace) -> str:
+    config = _resolved_config(args)
+    config_hash = _config_hash(config)
+    payload = {key: (str(value) if isinstance(value, Path) else value) for key, value in config.items()}
+    payload["config_hash"] = config_hash
+    (run_dir / "config_resolved.yaml").write_text(
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return config_hash
+
+
+def _write_run_meta(run_dir: Path, args: argparse.Namespace, config_hash: str) -> None:
+    _write_json(run_dir / "run_meta.json", {
+        "run_name": args.run_name,
+        "game": args.game,
+        "config_path": str(args.config) if args.config else None,
+        "config_hash": config_hash,
+        "git_branch": _git_value(["branch", "--show-current"]),
+        "git_commit": _git_value(["rev-parse", "HEAD"]),
+    })
+
+
+def _save_training_status(
+    status_path: Path,
+    args: argparse.Namespace,
+    run_dir: Path,
+    latest_model_path: Path,
+    latest_vecnorm_path: Path | None,
+    curriculum_cb,
+    anneal_cb,
+    config_hash: str,
+    num_timesteps: int,
+) -> None:
+    data = {
+        "run_name": args.run_name,
+        "game": args.game,
+        "global_timestep": num_timesteps,
+        "latest_model_path": latest_model_path.name,
+        "latest_vecnormalize_path": latest_vecnorm_path.name if latest_vecnorm_path else None,
+        "config_hash": config_hash,
+        "curriculum": curriculum_cb.export_state() if curriculum_cb is not None else None,
+        "shaping_anneal": anneal_cb.export_state() if anneal_cb is not None else None,
+    }
+    _write_json(status_path, data)
+
+
+class _RunCheckpointCallback(BaseCallback):
+    def __init__(
+        self,
+        run_dir: Path,
+        save_freq: int,
+        vecnorm_getter,
+        status_writer,
+    ):
+        super().__init__(verbose=0)
+        self.run_dir = run_dir
+        self.save_freq = max(save_freq, 1)
+        self._vecnorm_getter = vecnorm_getter
+        self._status_writer = status_writer
+        self._last_save = 0
+
+    def _on_training_start(self) -> None:
+        self._last_save = self.num_timesteps
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self._last_save < self.save_freq:
+            return True
+        self._last_save = self.num_timesteps
+        model_base = self.run_dir / f"model_{self.num_timesteps}_steps"
+        self.model.save(str(model_base))
+        vecnorm_path = None
+        vn = self._vecnorm_getter()
+        if vn is not None:
+            vecnorm_path = self.run_dir / f"vecnormalize_{self.num_timesteps}_steps.pkl"
+            vn.save(str(vecnorm_path))
+        self._status_writer(_model_zip_path(model_base), vecnorm_path, self.num_timesteps)
+        print(f"[INFO] checkpoint saved: {_model_zip_path(model_base)}")
+        return True
+
+
+class _SurvivorsMetricsCallback(BaseCallback):
+    def __init__(self, log_freq: int = 5_000):
+        super().__init__(verbose=0)
+        self.log_freq = log_freq
+        self._last_log = 0
+        self._reset()
+
+    def _reset(self) -> None:
+        self._samples = 0
+        self._hp_sum = 0.0
+        self._hp_min = None
+        self._nearest_gem_sum = 0.0
+        self._nearest_gem_count = 0
+        self._nearest_enemy_sum = 0.0
+        self._nearest_enemy_count = 0
+        self._contact_sum = 0.0
+        self._enemy_count_sum = 0.0
+        self._xp_sum = 0.0
+        self._done_count = 0
+
+    def _on_step(self) -> bool:
+        info = self.locals["infos"][0]
+        self._samples += 1
+        hp = info.get("player_hp")
+        if hp is not None:
+            hp = float(hp)
+            self._hp_sum += hp
+            self._hp_min = hp if self._hp_min is None else min(self._hp_min, hp)
+        nearest_gem = info.get("nearest_gem_distance")
+        if nearest_gem is not None:
+            self._nearest_gem_sum += float(nearest_gem)
+            self._nearest_gem_count += 1
+        nearest_enemy = info.get("nearest_enemy_distance")
+        if nearest_enemy is not None:
+            self._nearest_enemy_sum += float(nearest_enemy)
+            self._nearest_enemy_count += 1
+        self._contact_sum += float(info.get("contact_enemy_count", 0.0) or 0.0)
+        self._enemy_count_sum += float(info.get("observed_enemy_count", 0.0) or 0.0)
+        self._xp_sum += float(info.get("xp_progress", 0.0) or 0.0)
+        if self.locals["dones"][0]:
+            self._done_count += 1
+
+        if self.num_timesteps - self._last_log < self.log_freq or self._samples <= 0:
+            return True
+        self._last_log = self.num_timesteps
+        payload = {
+            "survivors/player_hp_mean": self._hp_sum / max(self._samples, 1),
+            "survivors/player_hp_min": self._hp_min,
+            "survivors/nearest_gem_distance_mean": self._nearest_gem_sum / max(self._nearest_gem_count, 1),
+            "survivors/nearest_enemy_distance_mean": self._nearest_enemy_sum / max(self._nearest_enemy_count, 1),
+            "survivors/contact_enemy_count_mean": self._contact_sum / max(self._samples, 1),
+            "survivors/observed_enemy_count_mean": self._enemy_count_sum / max(self._samples, 1),
+            "survivors/xp_progress_mean": self._xp_sum / max(self._samples, 1),
+            "survivors/episodes_per_window": self._done_count,
+        }
+        print(
+            "[INFO] Survivors metrics: "
+            f"hp_mean={payload['survivors/player_hp_mean']:.3f}, "
+            f"hp_min={(payload['survivors/player_hp_min'] if payload['survivors/player_hp_min'] is not None else 0.0):.3f}, "
+            f"gem_dist={payload['survivors/nearest_gem_distance_mean']:.2f}, "
+            f"enemy_dist={payload['survivors/nearest_enemy_distance_mean']:.2f}, "
+            f"contact={payload['survivors/contact_enemy_count_mean']:.2f}, "
+            f"episodes={self._done_count}"
+        )
+        if _WANDB_AVAILABLE and wandb.run:
+            wandb.log(payload, step=self.num_timesteps)
+        self._reset()
+        return True
+
+
 class _AnnealingShapingCallback(BaseCallback):
     """shaped_reward を線形アニーリングするコールバック。
 
@@ -107,8 +345,16 @@ class _AnnealingShapingCallback(BaseCallback):
     min_weight > 0 のとき shaping は永続的に維持される（推論時は不要）。
     """
 
-    def __init__(self, raw_env, anneal_threshold: float, anneal_steps: int,
-                 check_freq: int, min_steps: int, min_weight: float = 0.0):
+    def __init__(
+        self,
+        raw_env,
+        anneal_threshold: float,
+        anneal_steps: int,
+        check_freq: int,
+        min_steps: int,
+        min_weight: float = 0.0,
+        curriculum_cb=None,
+    ):
         super().__init__(verbose=0)
         self._raw_env = raw_env
         self.anneal_threshold = anneal_threshold
@@ -116,6 +362,7 @@ class _AnnealingShapingCallback(BaseCallback):
         self.check_freq = check_freq
         self.min_steps = min_steps
         self.min_weight = min_weight
+        self._curriculum_cb = curriculum_cb
 
         self._ep_base = 0.0
         self._ep_shaped = 0.0
@@ -124,6 +371,44 @@ class _AnnealingShapingCallback(BaseCallback):
         self._ep_count = 0
         self._last_check = 0
         self._anneal_start_step: int | None = None
+        self._final_phase_start_step: int | None = None
+
+    def export_state(self) -> dict:
+        return {
+            "ep_base": self._ep_base,
+            "ep_shaped": self._ep_shaped,
+            "sum_base": self._sum_base,
+            "sum_shaped": self._sum_shaped,
+            "ep_count": self._ep_count,
+            "last_check": self._last_check,
+            "anneal_start_step": self._anneal_start_step,
+            "final_phase_start_step": self._final_phase_start_step,
+            "shaping_weight": getattr(self._raw_env, "shaping_weight", None),
+        }
+
+    def import_state(self, state: dict) -> None:
+        self._ep_base = float(state.get("ep_base", 0.0))
+        self._ep_shaped = float(state.get("ep_shaped", 0.0))
+        self._sum_base = float(state.get("sum_base", 0.0))
+        self._sum_shaped = float(state.get("sum_shaped", 0.0))
+        self._ep_count = int(state.get("ep_count", 0))
+        self._last_check = int(state.get("last_check", 0))
+        self._anneal_start_step = state.get("anneal_start_step")
+        self._final_phase_start_step = state.get("final_phase_start_step")
+        shaping_weight = state.get("shaping_weight")
+        if shaping_weight is not None:
+            self._raw_env.shaping_weight = float(shaping_weight)
+
+    def _anneal_reference_ready(self) -> tuple[bool, int, str]:
+        if self._curriculum_cb is None:
+            return self.num_timesteps >= self.min_steps, self.num_timesteps, "global"
+        if self._final_phase_start_step is None and self._curriculum_cb.is_final_phase:
+            self._final_phase_start_step = self.num_timesteps
+            print(f"[INFO] 最終フェーズ到達。シェーピングアニーリング基準step={self._final_phase_start_step}")
+        if self._final_phase_start_step is None:
+            return False, 0, "last_phase"
+        elapsed = self.num_timesteps - self._final_phase_start_step
+        return elapsed >= self.min_steps, elapsed, "last_phase"
 
     def _on_step(self) -> bool:
         info = self.locals["infos"][0]
@@ -137,7 +422,8 @@ class _AnnealingShapingCallback(BaseCallback):
             self._ep_base = self._ep_shaped = 0.0
 
         # check_freq ステップごとに比率を計算してアニーリングをトリガー
-        if (self.num_timesteps >= self.min_steps
+        reference_ready, reference_steps, reference_name = self._anneal_reference_ready()
+        if (reference_ready
                 and self.num_timesteps - self._last_check >= self.check_freq
                 and self._ep_count > 0):
             self._last_check = self.num_timesteps
@@ -147,13 +433,15 @@ class _AnnealingShapingCallback(BaseCallback):
             self._sum_base = self._sum_shaped = 0.0
             self._ep_count = 0
             print(f"[INFO] シェーピング比率: {ratio:.3f} "
-                  f"(|shaped|={mean_shaped:.4f} / base={mean_base:.4f})")
+                  f"(|shaped|={mean_shaped:.4f} / base={mean_base:.4f}, "
+                  f"anneal_reference={reference_name}, reference_steps={reference_steps})")
 
             if _WANDB_AVAILABLE and wandb.run:
                 wandb.log({
                     "shaping/ratio": ratio,
                     "shaping/mean_shaped": mean_shaped,
                     "shaping/mean_base": mean_base,
+                    "shaping/anneal_reference_steps": reference_steps,
                 }, step=self.num_timesteps)
 
             if ratio < self.anneal_threshold and self._anneal_start_step is None:
@@ -204,10 +492,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--port", type=int, default=None,
                    help="サーバーポート（未指定時はゲーム別デフォルト: balance=8765, coin=8766, survivors=8767）")
     p.add_argument("--total-steps", type=int, default=500_000)
-    p.add_argument("--output", type=Path, default=None,
-                   help="保存先パス（未指定時はゲーム別デフォルト）")
+    p.add_argument("--run-name", default=None,
+                   help="results/<game>/<run-name>/ に成果物を保存する実行名")
     p.add_argument("--resume", type=Path, default=None,
-                   help="再開する既存モデルのパス（.zip 拡張子は省略・付加どちらでも可）")
+                   help="再開する run_dir または既存モデルのパス（.zip 拡張子は省略・付加どちらでも可）")
     p.add_argument("--checkpoint-freq", type=int, default=10_000,
                    help="チェックポイント保存間隔 (ステップ数, デフォルト: 10000)")
     p.add_argument("--entity-attention", action="store_true",
@@ -266,27 +554,6 @@ def main() -> None:
     _use_wandb = False
     args = parse_args()
 
-    _use_wandb = args.wandb and _WANDB_AVAILABLE
-    if _use_wandb:
-        wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            config={
-                "game": args.game,
-                "total_steps": args.total_steps,
-                "frame_skip": args.frame_skip,
-                "frame_stack": args.frame_stack,
-                "recurrent": args.recurrent,
-                "lstm_hidden_size": args.lstm_hidden_size if args.recurrent else None,
-                "n_lstm_layers": args.n_lstm_layers if args.recurrent else None,
-                "ent_coef": args.ent_coef,
-                "device": args.device,
-                "curriculum": args.curriculum,
-                "reward_fn": str(args.reward_fn) if args.reward_fn else None,
-                **_PPO_KWARGS,
-            },
-        )
-
     if args.recurrent and not _SB3_CONTRIB_AVAILABLE:
         raise ImportError(
             "--recurrent には sb3-contrib が必要です。"
@@ -300,8 +567,70 @@ def main() -> None:
     ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef, "device": args.device}
 
     defaults = _GAME_DEFAULTS[args.game]
-    port   = args.port   if args.port   is not None else defaults["port"]
-    output = _strip_zip(args.output if args.output is not None else Path(defaults["output"]))
+    port = args.port if args.port is not None else defaults["port"]
+
+    resume_status = {}
+    resume_model_base = None
+    resume_source_dir = None
+    if args.resume:
+        resume_source_dir, resume_model_base, resume_status = _resolve_resume_path(args.resume)
+        if args.run_name is None:
+            if args.resume.is_dir() or (resume_source_dir / "train_status.json").exists():
+                args.run_name = resume_source_dir.name
+                run_dir = resume_source_dir
+            else:
+                args.run_name = resume_model_base.name
+                run_dir = Path("results") / args.game / args.run_name
+        else:
+            run_dir = Path("results") / args.game / args.run_name
+    else:
+        if not args.run_name:
+            raise ValueError("--run-name は必須です（--resume <run_dir|model.zip> 時は省略可能）")
+        run_dir = Path("results") / args.game / args.run_name
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if not args.resume:
+        existing_models = [run_dir / "model.zip", *run_dir.glob("model_*_steps.zip")]
+        existing_models = [path for path in existing_models if path.exists()]
+        if existing_models:
+            raise FileExistsError(
+                f"run-name フォルダに既存モデルがあります。resume を使うか別 run-name を指定してください: "
+                f"{run_dir}"
+            )
+
+    model_base_path = run_dir / "model"
+    vecnorm_path = run_dir / "vecnormalize.pkl"
+    status_path = run_dir / "train_status.json"
+    curriculum_status_path = run_dir / "curriculum_status.json"
+    config_hash = _write_resolved_config(run_dir, args)
+    _write_run_meta(run_dir, args, config_hash)
+    print(f"[INFO] run_dir: {run_dir}")
+    print(f"[INFO] config_path: {args.config if args.config else '(none)'}")
+    print(f"[INFO] config_hash: {config_hash}")
+
+    _use_wandb = args.wandb and _WANDB_AVAILABLE
+    if _use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name or args.run_name,
+            config={
+                "game": args.game,
+                "run_name": args.run_name,
+                "run_dir": str(run_dir),
+                "total_steps": args.total_steps,
+                "frame_skip": args.frame_skip,
+                "frame_stack": args.frame_stack,
+                "recurrent": args.recurrent,
+                "lstm_hidden_size": args.lstm_hidden_size if args.recurrent else None,
+                "n_lstm_layers": args.n_lstm_layers if args.recurrent else None,
+                "ent_coef": args.ent_coef,
+                "device": args.device,
+                "curriculum": args.curriculum,
+                "reward_fn": str(args.reward_fn) if args.reward_fn else None,
+                "config_hash": config_hash,
+                **_PPO_KWARGS,
+            },
+        )
 
     # --reward-fn の事前チェック
     reward_fn = None
@@ -348,19 +677,35 @@ def main() -> None:
             )
         print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{port} に接続...")
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-
     # VecNormalize 適用
     # - 新規訓練: 正規化統計を初期化
-    # - 再開: 既存の統計ファイルがあればロード。なければ VecNormalize を無効化（互換性維持）
-    vecnorm_path = output.parent / (output.name + "_vecnorm.pkl")
+    # - 再開: run status またはモデル同階層から既存の統計ファイルをロード
     if not args.no_vec_normalize:
         if args.resume:
-            resume_vecnorm = _strip_zip(args.resume).parent / (_strip_zip(args.resume).name + "_vecnorm.pkl")
-            load_path = vecnorm_path if vecnorm_path.exists() else (resume_vecnorm if resume_vecnorm.exists() else None)
+            status_vecnorm = resume_status.get("latest_vecnormalize_path")
+            load_path = Path(status_vecnorm) if status_vecnorm else None
+            if load_path is not None and not load_path.is_absolute():
+                load_path = resume_source_dir / load_path
+            if load_path is None or not load_path.exists():
+                resume_vecnorm = resume_source_dir / f"{resume_model_base.name}_vecnorm.pkl"
+                final_vecnorm = resume_source_dir / "vecnormalize.pkl"
+                checkpoint_vecnorm = resume_source_dir / f"vecnormalize_{resume_model_base.name.removeprefix('model_').removesuffix('_steps')}_steps.pkl"
+                old_prefix = resume_model_base.name
+                parts = old_prefix.rsplit("_", 2)
+                old_prefix_vecnorm = None
+                if len(parts) == 3 and parts[1].isdigit() and parts[2] == "steps":
+                    old_prefix_vecnorm = resume_source_dir / f"{parts[0]}_vecnorm.pkl"
+                load_path = next(
+                    (
+                        path
+                        for path in (checkpoint_vecnorm, final_vecnorm, resume_vecnorm, old_prefix_vecnorm)
+                        if path is not None and path.exists()
+                    ),
+                    None,
+                )
             if load_path is None:
                 print("[WARN] VecNormalize 統計ファイルが見つかりません。VecNormalize を無効化します。"
-                      f" (探索: {vecnorm_path}, {resume_vecnorm})")
+                      f" (resume_source_dir: {resume_source_dir})")
             else:
                 env = VecNormalize.load(str(load_path), env)
                 env.training = True
@@ -379,7 +724,7 @@ def main() -> None:
     default_policy = "MlpLstmPolicy" if args.recurrent else "MlpPolicy"
 
     if args.resume:
-        resume_path = str(_strip_zip(args.resume))
+        resume_path = str(resume_model_base)
         print(f"[INFO] {resume_path} から再開")
         if args.entity_attention:
             print("[INFO] --entity-attention は --resume 時は無視されます（保存済みモデルのアーキテクチャを使用）")
@@ -420,16 +765,35 @@ def main() -> None:
         model = algo_class(default_policy, env, **ppo_kwargs)
     print(f"[INFO] SB3 model device: {model.device}")
 
-    checkpoint_cb = CheckpointCallback(
-        save_freq=max(args.checkpoint_freq // (env.num_envs or 1), 1),
-        save_path=str(output.parent),
-        name_prefix=output.name,
-        verbose=1,
-    )
-
-    callbacks = [checkpoint_cb]
+    callbacks = []
+    curriculum_cb = None
+    anneal_cb = None
     if _use_wandb:
         callbacks.append(WandbCallback(verbose=0))
+    if args.game == "survivors" and not args.dry_run:
+        callbacks.append(_SurvivorsMetricsCallback(log_freq=5_000))
+
+    if args.curriculum and args.game == "survivors" and not args.dry_run:
+        curriculum_cb = CurriculumCallback(
+            raw_env=_get_raw_env(env),
+            frame_skip=args.frame_skip,
+            window=args.curriculum_window,
+            threshold_mult=args.curriculum_threshold,
+            alive_reward=args.curriculum_alive_reward,
+            status_path=str(curriculum_status_path),
+        )
+        curriculum_state = resume_status.get("curriculum") if resume_status else None
+        if curriculum_state:
+            curriculum_cb.import_state(curriculum_state)
+            print(f"[INFO] curriculum state を復元: phase={curriculum_state.get('phase_name')}")
+        callbacks.append(curriculum_cb)
+        print(f"[INFO] CurriculumCallback 有効 "
+              f"(window={args.curriculum_window}, threshold_mult={args.curriculum_threshold}, "
+              f"frame_skip={args.frame_skip}, alive_reward={args.curriculum_alive_reward})")
+        print(f"[INFO] curriculum_status.json → {curriculum_status_path}")
+    elif args.curriculum:
+        print("[WARN] --curriculum は survivors ゲームかつ非 dry-run 時のみ有効です。無視します。")
+
     if reward_fn is not None and args.game in ("coin", "survivors"):
         anneal_cb = _AnnealingShapingCallback(
             raw_env=_get_raw_env(env),
@@ -438,29 +802,39 @@ def main() -> None:
             check_freq=args.anneal_check_freq,
             min_steps=args.anneal_min_steps,
             min_weight=args.anneal_min_weight,
+            curriculum_cb=curriculum_cb if args.curriculum else None,
         )
+        anneal_state = resume_status.get("shaping_anneal") if resume_status else None
+        if anneal_state:
+            anneal_cb.import_state(anneal_state)
+            print("[INFO] shaping anneal state を復元")
         callbacks.append(anneal_cb)
+        reference = "last_phase" if curriculum_cb is not None else "global"
         print(f"[INFO] シェーピングアニーリング有効 "
               f"(threshold={args.anneal_threshold}, anneal_steps={args.anneal_steps:,}, "
-              f"min_weight={args.anneal_min_weight})")
+              f"min_steps={args.anneal_min_steps:,}, min_weight={args.anneal_min_weight}, "
+              f"reference={reference})")
 
-    if args.curriculum and args.game == "survivors" and not args.dry_run:
-        status_path = output.parent / "curriculum_status.json"
-        curriculum_cb = CurriculumCallback(
-            raw_env=_get_raw_env(env),
-            frame_skip=args.frame_skip,
-            window=args.curriculum_window,
-            threshold_mult=args.curriculum_threshold,
-            alive_reward=args.curriculum_alive_reward,
-            status_path=str(status_path),
+    def _write_status_for_model(model_zip: Path, vecnorm_file: Path | None, timestep: int) -> None:
+        _save_training_status(
+            status_path=status_path,
+            args=args,
+            run_dir=run_dir,
+            latest_model_path=model_zip,
+            latest_vecnorm_path=vecnorm_file,
+            curriculum_cb=curriculum_cb,
+            anneal_cb=anneal_cb,
+            config_hash=config_hash,
+            num_timesteps=timestep,
         )
-        callbacks.append(curriculum_cb)
-        print(f"[INFO] CurriculumCallback 有効 "
-              f"(window={args.curriculum_window}, threshold_mult={args.curriculum_threshold}, "
-              f"frame_skip={args.frame_skip}, alive_reward={args.curriculum_alive_reward})")
-        print(f"[INFO] curriculum_status.json → {status_path}")
-    elif args.curriculum:
-        print("[WARN] --curriculum は survivors ゲームかつ非 dry-run 時のみ有効です。無視します。")
+
+    checkpoint_cb = _RunCheckpointCallback(
+        run_dir=run_dir,
+        save_freq=max(args.checkpoint_freq // (env.num_envs or 1), 1),
+        vecnorm_getter=lambda: _find_vecnormalize(env),
+        status_writer=_write_status_for_model,
+    )
+    callbacks.append(checkpoint_cb)
 
     try:
         model.learn(total_timesteps=args.total_steps, callback=callbacks,
@@ -468,12 +842,16 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[INFO] 訓練を中断しました。モデルを保存します...")
     finally:
-        model.save(str(output))
-        print(f"[INFO] Model saved to {output}.zip")
+        model.save(str(model_base_path))
+        final_model_zip = _model_zip_path(model_base_path)
+        print(f"[INFO] Model saved to {final_model_zip}")
         vn = _find_vecnormalize(env)
+        final_vecnorm_path = None
         if vn is not None:
             vn.save(str(vecnorm_path))
+            final_vecnorm_path = vecnorm_path
             print(f"[INFO] VecNormalize 統計を保存: {vecnorm_path}")
+        _write_status_for_model(final_model_zip, final_vecnorm_path, model.num_timesteps)
         env.close()
         if _use_wandb:
             wandb.finish()

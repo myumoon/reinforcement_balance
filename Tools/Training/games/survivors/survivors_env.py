@@ -91,8 +91,46 @@ class SurvivorsEnv(BaseUE5Env):
 
         info = dict(ue_info)
         info.update({"base_reward": base_reward, "shaped_reward": shaped, "hp_penalty": hp_penalty})
+        info.update(self._extract_training_metrics(obs))
         self._prev_obs = obs
         return obs, base_reward + shaped + hp_penalty, done, truncated, info
+
+    def _extract_training_metrics(self, obs: np.ndarray) -> dict:
+        def offset(name: str, default: int) -> int:
+            return self._offsets.get(name, default)
+
+        def nearest_distance(segment_name: str, default_offset: int, count: int) -> float | None:
+            start = offset(segment_name, default_offset)
+            best = None
+            for i in range(count):
+                dx = float(obs[start + i * 2]) * 30.0
+                dy = float(obs[start + i * 2 + 1]) * 30.0
+                dist = float(np.sqrt(dx * dx + dy * dy))
+                if dist < 0.01 and i > 0:
+                    continue
+                if best is None or dist < best:
+                    best = dist
+            return best
+
+        enemy_rel_i = offset("enemy_rel_pos", 63)
+        contact_enemy_count = 0
+        for i in range(20):
+            dx = float(obs[enemy_rel_i + i * 2]) * 30.0
+            dy = float(obs[enemy_rel_i + i * 2 + 1]) * 30.0
+            dist = float(np.sqrt(dx * dx + dy * dy))
+            if dist < 0.01 and i > 0:
+                continue
+            if dist < 0.7:
+                contact_enemy_count += 1
+
+        return {
+            "player_hp": float(obs[offset("player_hp", 12)]),
+            "xp_progress": float(obs[offset("xp_progress", 21)]),
+            "observed_enemy_count": float(obs[offset("enemy_count", 20)]),
+            "nearest_gem_distance": nearest_distance("gem_rel_pos", 23, 20),
+            "nearest_enemy_distance": nearest_distance("enemy_rel_pos", 63, 20),
+            "contact_enemy_count": contact_enemy_count,
+        }
 
     def set_params(self, **kwargs) -> bool:
         """カリキュラム用パラメータを /params エンドポイントで更新する。
