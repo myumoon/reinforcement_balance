@@ -115,7 +115,41 @@ class CurriculumCallback(BaseCallback):
         self._recommendation_policy = WindowThresholdRecommendationPolicy()
 
     def _on_training_start(self) -> None:
-        self._apply_phase(PHASES[0], initial=True)
+        self._apply_phase(PHASES[self._phase_idx], initial=True)
+
+    @property
+    def is_final_phase(self) -> bool:
+        return self._phase_idx >= len(PHASES) - 1
+
+    def export_state(self) -> dict:
+        return {
+            "phase_idx": self._phase_idx,
+            "phase_name": PHASES[self._phase_idx].name,
+            "scores_window": self._scores,
+            "rollback_bad_windows": self._rollback_bad_windows,
+            "ep_base": self._ep_base,
+            "episode_scores": self._episode_scores,
+            "episode_lengths": self._episode_lengths,
+            "episode_base_rewards": self._episode_base_rewards,
+            "episode_alive_rewards": self._episode_alive_rewards,
+            "terminated_count": self._terminated_count,
+            "truncated_count": self._truncated_count,
+            "phase_events": self._phase_events,
+        }
+
+    def import_state(self, state: dict) -> None:
+        phase_idx = int(state.get("phase_idx", 0))
+        self._phase_idx = max(0, min(phase_idx, len(PHASES) - 1))
+        self._scores = [float(v) for v in state.get("scores_window", [])]
+        self._rollback_bad_windows = int(state.get("rollback_bad_windows", 0))
+        self._ep_base = float(state.get("ep_base", 0.0))
+        self._episode_scores = [float(v) for v in state.get("episode_scores", [])]
+        self._episode_lengths = [int(v) for v in state.get("episode_lengths", [])]
+        self._episode_base_rewards = [float(v) for v in state.get("episode_base_rewards", [])]
+        self._episode_alive_rewards = [float(v) for v in state.get("episode_alive_rewards", [])]
+        self._terminated_count = int(state.get("terminated_count", 0))
+        self._truncated_count = int(state.get("truncated_count", 0))
+        self._phase_events = list(state.get("phase_events", []))
 
     def _on_step(self) -> bool:
         info = self.locals["infos"][0]
@@ -374,6 +408,25 @@ class CurriculumCallback(BaseCallback):
         phase = PHASES[self._phase_idx]
         recent_count = min(len(self._scores), self.window)
         recent_scores = self._scores[-recent_count:] if recent_count else []
+        recent_lengths = self._episode_lengths[-recent_count:] if recent_count else []
+        length_mean = _mean([float(v) for v in recent_lengths])
+        if (
+            recent_count >= self.window
+            and phase.min_episode_steps > 0
+            and length_mean < phase.min_episode_steps * 0.5
+        ):
+            return {
+                "suggested_curriculum_threshold": self.threshold_mult,
+                "suggested_curriculum_window": self.window,
+                "failure_class": "episode_length_collapse",
+                "threshold_reason": (
+                    "episode length collapsed far below the current phase requirement; "
+                    "do not lower threshold. Prefer rollback, phase subdivision, or resume from a pre-collapse checkpoint."
+                ),
+                "window_reason": "current window has enough episode samples",
+                "observed_episode_length_mean": round(length_mean, 1),
+                "required_min_episode_steps": phase.min_episode_steps,
+            }
         return self._recommendation_policy.recommend(
             CurriculumTuningInput(
                 threshold_mult=self.threshold_mult,
