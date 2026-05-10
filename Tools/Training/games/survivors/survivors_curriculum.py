@@ -1,7 +1,9 @@
-"""VSスタイル6段階カリキュラムコールバック。
+"""VSスタイルの段階式カリキュラムコールバック。
 
 各フェーズで直近 window エピソードの active_score 平均が
 フェーズ閾値 × threshold_mult に達したら次フェーズへ昇格する。
+直近 window のスコアまたはエピソード長が大きく崩れた場合は、
+前フェーズへ降格して学習破綻した難易度に留まり続けないようにする。
 
   active_score = base_reward_ep - alive_reward * frame_skip * ep_len
   生存ボーナスを除いた撃破・収集による実質スコア
@@ -14,12 +16,10 @@
   - 難易度は「敵種構成 → HP/ダメージ倍率 → 密度・速度 → TimeScaling」の順で段階上昇
 
 フェーズ設計:
-  Phase 0: 入門        -- Min=4,  Max=6,   TypeId<=1, HP=0.50, Dmg=0.50, Speed=0.8
-  Phase 1: Gem回収開始 -- Min=6,  Max=10,  TypeId<=2, HP=0.75, Dmg=0.75, Speed=0.9
-  Phase 2: 通常序盤    -- Min=8,  Max=20,  TypeId<=4, HP=1.00, Dmg=1.00, Speed=1.0
-  Phase 3: 囲まれ対応  -- Min=12, Max=40,  TypeId<=6, HP=1.25, Dmg=1.25, Speed=1.0
-  Phase 4: 群れ対応    -- Min=20, Max=80,  TypeId<=9, HP=1.50, Dmg=1.50, Speed=1.1, TimeScaling ON
-  Phase 5: Mad Forest  -- Min=40, Max=150, TypeId<=10, HP=2.00, Dmg=2.00, Speed=1.2, TimeScaling ON
+  - Gem回収フェーズで移動と回収の基礎を作る
+  - 通常序盤から包囲入門A/B/Cへ小刻みに上げる
+  - 群れ対応もA/B/Cへ分け、密度・速度・TimeScalingを段階的に上げる
+  - Mad Forest を最終フェーズとして扱う
 """
 
 import json
@@ -49,18 +49,24 @@ class _Phase:
     time_scaling: bool
     min_episode_steps: int
     threshold: Optional[float]  # None = 最終段（昇格なし）
+    rollback_score_ratio: float = 0.35
+    rollback_length_ratio: float = 0.45
 
 
 PHASES: list[_Phase] = [
-    _Phase("入門",        4,   6,  0.8, 1.0,  1, 0.50, 0.50, False,  600,   30.0),
-    _Phase("Gem回収開始", 6,  10,  0.9, 1.4,  2, 0.75, 0.75, False, 1200,  100.0),
-    _Phase("Gem追従強化", 7,  14,  0.9, 1.7,  3, 0.85, 0.85, False, 1800,  250.0),
-    _Phase("通常序盤",    8,  20,  1.0, 2.0,  4, 1.00, 1.00, False, 2400,  800.0),
-    _Phase("包囲入門",   10,  25,  1.0, 2.2,  4, 1.05, 1.05, False, 2400, 1100.0),
-    _Phase("包囲対応",   12,  30,  1.0, 2.4,  5, 1.10, 1.10, False, 2400, 1300.0),
-    _Phase("多敵対応",   14,  40,  1.0, 2.6,  6, 1.20, 1.20, False, 2400, 1500.0),
-    _Phase("群れ対応",   20,  80,  1.1, 3.0,  9, 1.50, 1.50, True,  2400, 1800.0),
-    _Phase("Mad Forest", 40, 150,  1.2, 4.0, 10, 2.00, 2.00, True,     0,   None),
+    _Phase("入門",              4,   6, 0.8, 1.0,  1, 0.50, 0.50, False,  600,   30.0),
+    _Phase("Gem回収開始",       6,  10, 0.9, 1.4,  2, 0.75, 0.75, False, 1200,  100.0),
+    _Phase("Gem追従強化",       7,  14, 0.9, 1.7,  3, 0.85, 0.85, False, 1800,  250.0),
+    _Phase("通常序盤",          8,  20, 1.0, 2.0,  4, 1.00, 1.00, False, 2400,  800.0),
+    _Phase("包囲入門A",         9,  18, 1.0, 2.0,  4, 1.00, 0.80, False, 2400,  950.0),
+    _Phase("包囲入門B",        10,  22, 1.0, 2.1,  4, 1.00, 0.90, False, 2400, 1050.0),
+    _Phase("包囲入門C",        10,  25, 1.0, 2.2,  4, 1.05, 1.00, False, 2400, 1150.0),
+    _Phase("包囲対応",         12,  30, 1.0, 2.4,  5, 1.10, 1.10, False, 2400, 1350.0),
+    _Phase("多敵対応",         14,  40, 1.0, 2.6,  6, 1.20, 1.20, False, 2400, 1550.0),
+    _Phase("群れ対応A",        16,  50, 1.0, 2.7,  7, 1.25, 1.25, False, 2400, 1700.0),
+    _Phase("群れ対応B",        18,  65, 1.05, 2.8,  8, 1.35, 1.35, True,  2400, 1850.0),
+    _Phase("群れ対応C",        20,  80, 1.1, 3.0,  9, 1.50, 1.50, True,  2400, 2000.0),
+    _Phase("Mad Forest",       40, 150, 1.2, 4.0, 10, 2.00, 2.00, True,  2400,   None),
 ]
 
 
@@ -92,9 +98,12 @@ class CurriculumCallback(BaseCallback):
         self.window = window
         self.threshold_mult = threshold_mult
         self.alive_reward = alive_reward
+        self.rollback_patience = 2
+        self.rollback_min_episodes = max(5, window // 2)
         self._status_path = status_path
         self._scores: list[float] = []
         self._phase_idx = 0
+        self._rollback_bad_windows = 0
         self._ep_base = 0.0
         self._episode_scores: list[float] = []
         self._episode_lengths: list[int] = []
@@ -140,6 +149,21 @@ class CurriculumCallback(BaseCallback):
         if len(self._scores) < self.window:
             return True
 
+        rollback, reason = self._should_rollback(
+            phase=phase,
+            mean=mean,
+            mean_len=mean_len,
+            effective_threshold=effective_threshold,
+            recent_count=len(recent_scores),
+        )
+        if rollback:
+            self._rollback_bad_windows += 1
+            if self._rollback_bad_windows >= self.rollback_patience:
+                self._rollback_phase(mean, effective_threshold, mean_len, reason)
+                return True
+        else:
+            self._rollback_bad_windows = 0
+
         if (
             phase.threshold is not None
             and mean >= effective_threshold
@@ -154,8 +178,10 @@ class CurriculumCallback(BaseCallback):
         prev_idx = self._phase_idx
         self._phase_idx = min(self._phase_idx + 1, len(PHASES) - 1)
         self._scores.clear()
+        self._rollback_bad_windows = 0
         next_phase = PHASES[self._phase_idx]
         self._phase_events.append({
+            "event": "advance",
             "timestep": self.num_timesteps,
             "from_phase_idx": prev_idx,
             "from_phase_name": prev_name,
@@ -170,7 +196,75 @@ class CurriculumCallback(BaseCallback):
             f"(score={mean:.3f} >= {threshold:.1f})"
         )
         self._apply_phase(next_phase)
-        self._log_wandb(mean, next_phase)
+        self._log_wandb(mean, next_phase, event="advance")
+
+    def _should_rollback(
+        self,
+        phase: _Phase,
+        mean: float,
+        mean_len: float,
+        effective_threshold: float,
+        recent_count: int,
+    ) -> tuple[bool, str]:
+        if self._phase_idx <= 0 or recent_count < self.rollback_min_episodes:
+            return False, ""
+
+        score_floor, length_floor = self._rollback_floors(phase, effective_threshold)
+        if score_floor is not None and mean < score_floor:
+            return True, f"score={mean:.3f} < rollback_score_floor={score_floor:.3f}"
+        if length_floor is not None and mean_len < length_floor:
+            return True, f"ep_len={mean_len:.1f} < rollback_length_floor={length_floor:.1f}"
+        return False, ""
+
+    def _rollback_phase(
+        self,
+        mean: float,
+        threshold: float,
+        mean_len: float,
+        reason: str,
+    ) -> None:
+        prev_name = PHASES[self._phase_idx].name
+        prev_idx = self._phase_idx
+        self._phase_idx = max(self._phase_idx - 1, 0)
+        self._scores.clear()
+        self._rollback_bad_windows = 0
+        next_phase = PHASES[self._phase_idx]
+        self._phase_events.append({
+            "event": "rollback",
+            "timestep": self.num_timesteps,
+            "from_phase_idx": prev_idx,
+            "from_phase_name": prev_name,
+            "to_phase_idx": self._phase_idx,
+            "to_phase_name": next_phase.name,
+            "active_score_mean": round(mean, 4),
+            "episode_length_mean": round(mean_len, 1),
+            "threshold": round(threshold, 4),
+            "reason": reason,
+        })
+        print(
+            f"\n[Curriculum] Phase {self._phase_idx} 降格: "
+            f"{prev_name} -> {next_phase.name} "
+            f"({reason}, score={mean:.3f}, ep_len={mean_len:.1f})"
+        )
+        self._apply_phase(next_phase)
+        self._log_wandb(mean, next_phase, event="rollback", mean_len=mean_len, reason=reason)
+
+    def _rollback_floors(
+        self,
+        phase: _Phase,
+        effective_threshold: float,
+    ) -> tuple[Optional[float], Optional[float]]:
+        score_floor = (
+            effective_threshold * phase.rollback_score_ratio
+            if phase.threshold is not None
+            else None
+        )
+        length_floor = (
+            phase.min_episode_steps * phase.rollback_length_ratio
+            if phase.min_episode_steps > 0
+            else None
+        )
+        return score_floor, length_floor
 
     def _apply_phase(self, phase: _Phase, initial: bool = False) -> None:
         ok = self._raw_env.set_params(
@@ -215,6 +309,7 @@ class CurriculumCallback(BaseCallback):
         score_mean = _mean(recent_scores)
         score_std = _stdev(recent_scores)
         length_mean = _mean([float(v) for v in recent_lengths])
+        score_floor, length_floor = self._rollback_floors(phase, effective_threshold)
         threshold_ratio = (
             score_mean / effective_threshold
             if base_threshold is not None and effective_threshold > 0.0 and recent_scores
@@ -226,6 +321,9 @@ class CurriculumCallback(BaseCallback):
             "phase_name": phase.name,
             "window": self.window,
             "threshold_mult": self.threshold_mult,
+            "rollback_patience": self.rollback_patience,
+            "rollback_min_episodes": self.rollback_min_episodes,
+            "rollback_bad_windows": self._rollback_bad_windows,
             "episodes_total": len(self._episode_scores),
             "terminated_episodes": self._terminated_count,
             "truncated_episodes": self._truncated_count,
@@ -241,6 +339,9 @@ class CurriculumCallback(BaseCallback):
                 "base_threshold": base_threshold,
                 "effective_threshold": round(effective_threshold, 4) if base_threshold is not None else None,
                 "threshold_ratio": round(threshold_ratio, 4) if threshold_ratio is not None else None,
+                "rollback_score_floor": round(score_floor, 4) if score_floor is not None else None,
+                "rollback_length_floor": round(length_floor, 1) if length_floor is not None else None,
+                "rollback_bad_windows": self._rollback_bad_windows,
                 "ready_for_phase_judgment": (
                     recent_count >= self.window
                     and length_mean >= phase.min_episode_steps
@@ -263,6 +364,8 @@ class CurriculumCallback(BaseCallback):
                 "enemy_damage_scale": phase.enemy_damage_scale,
                 "time_scaling": phase.time_scaling,
                 "min_episode_steps": phase.min_episode_steps,
+                "rollback_score_ratio": phase.rollback_score_ratio,
+                "rollback_length_ratio": phase.rollback_length_ratio,
             },
             "recommendation": self.recommend_next_settings(),
         }
@@ -281,26 +384,38 @@ class CurriculumCallback(BaseCallback):
             )
         )
 
-    def _log_wandb(self, mean: float, phase: _Phase) -> None:
+    def _log_wandb(
+        self,
+        mean: float,
+        phase: _Phase,
+        event: str,
+        mean_len: Optional[float] = None,
+        reason: Optional[str] = None,
+    ) -> None:
         try:
             import wandb
             if wandb.run:
-                wandb.log(
-                    {
-                        "curriculum/phase_idx": self._phase_idx,
-                        "curriculum/phase_name": phase.name,
-                        "curriculum/score_mean": mean,
-                        "curriculum/min_enemies": phase.min_enemies,
-                        "curriculum/max_enemies": phase.max_enemies,
-                        "curriculum/speed_mult": phase.speed_mult,
-                        "curriculum/spawn_rate_mult": phase.spawn_rate_mult,
-                        "curriculum/max_enemy_type_id": phase.max_enemy_type_id,
-                        "curriculum/enemy_hp_scale": phase.enemy_hp_scale,
-                        "curriculum/enemy_damage_scale": phase.enemy_damage_scale,
-                        "curriculum/time_scaling": int(phase.time_scaling),
-                        "curriculum/min_episode_steps": phase.min_episode_steps,
-                    },
-                    step=self.num_timesteps,
-                )
+                payload = {
+                    "curriculum/phase_idx": self._phase_idx,
+                    "curriculum/phase_name": phase.name,
+                    "curriculum/event": event,
+                    "curriculum/score_mean": mean,
+                    "curriculum/min_enemies": phase.min_enemies,
+                    "curriculum/max_enemies": phase.max_enemies,
+                    "curriculum/speed_mult": phase.speed_mult,
+                    "curriculum/spawn_rate_mult": phase.spawn_rate_mult,
+                    "curriculum/max_enemy_type_id": phase.max_enemy_type_id,
+                    "curriculum/enemy_hp_scale": phase.enemy_hp_scale,
+                    "curriculum/enemy_damage_scale": phase.enemy_damage_scale,
+                    "curriculum/time_scaling": int(phase.time_scaling),
+                    "curriculum/min_episode_steps": phase.min_episode_steps,
+                    "curriculum/rollback_score_ratio": phase.rollback_score_ratio,
+                    "curriculum/rollback_length_ratio": phase.rollback_length_ratio,
+                }
+                if mean_len is not None:
+                    payload["curriculum/episode_length_mean"] = mean_len
+                if reason:
+                    payload["curriculum/rollback_reason"] = reason
+                wandb.log(payload, step=self.num_timesteps)
         except ImportError:
             pass
