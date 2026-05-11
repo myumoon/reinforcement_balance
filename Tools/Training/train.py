@@ -222,6 +222,7 @@ def _save_training_status(
     num_timesteps: int,
     exit_reason: str | None = None,
     exit_error: str | None = None,
+    curriculum_completion: dict | None = None,
 ) -> None:
     data = {
         "run_name": args.run_name,
@@ -232,6 +233,7 @@ def _save_training_status(
         "config_hash": config_hash,
         "curriculum": curriculum_cb.export_state() if curriculum_cb is not None else None,
         "shaping_anneal": anneal_cb.export_state() if anneal_cb is not None else None,
+        "curriculum_completion": curriculum_completion,
     }
     if exit_reason is not None:
         data["last_exit_reason"] = exit_reason
@@ -342,6 +344,80 @@ class _SurvivorsMetricsCallback(BaseCallback):
             wandb.log(payload, step=self.num_timesteps)
         self._reset()
         return True
+
+
+class _CurriculumCompletionCallback(BaseCallback):
+    """カリキュラム完了条件を満たしたら SB3 の learn を停止する。"""
+
+    def __init__(
+        self,
+        curriculum_cb,
+        window: int,
+        min_episodes: int,
+        min_score_ratio: float,
+        min_episode_len_ratio: float,
+    ):
+        super().__init__(verbose=0)
+        self._curriculum_cb = curriculum_cb
+        self.window = max(1, window)
+        self.min_episodes = max(1, min_episodes)
+        self.min_score_ratio = max(0.0, min_score_ratio)
+        self.min_episode_len_ratio = max(0.0, min_episode_len_ratio)
+        self.completed = False
+        self.completed_timestep: int | None = None
+        self.last_diagnostics: dict | None = None
+
+    def _on_training_start(self) -> None:
+        if hasattr(self._curriculum_cb, "configure_completion"):
+            self._curriculum_cb.configure_completion(
+                window=self.window,
+                min_episodes=self.min_episodes,
+                min_score_ratio=self.min_score_ratio,
+                min_episode_len_ratio=self.min_episode_len_ratio,
+            )
+
+    def _on_step(self) -> bool:
+        if not self.locals["dones"][0]:
+            return True
+        diagnostics = self._curriculum_cb.get_completion_diagnostics(
+            window=self.window,
+            min_episodes=self.min_episodes,
+            min_score_ratio=self.min_score_ratio,
+            min_episode_len_ratio=self.min_episode_len_ratio,
+        )
+        self.last_diagnostics = diagnostics
+        if _WANDB_AVAILABLE and wandb.run:
+            wandb.log({
+                "curriculum/completion_ready": int(diagnostics["complete"]),
+                "curriculum/is_final_phase": int(diagnostics["is_final_phase"]),
+                "curriculum/completion_episode_count": diagnostics["episodes"],
+                "curriculum/completion_score_mean": diagnostics["active_score_mean"],
+                "curriculum/completion_ep_len_mean": diagnostics["episode_length_mean"],
+            }, step=self.num_timesteps)
+
+        if diagnostics["complete"]:
+            self.completed = True
+            self.completed_timestep = self.num_timesteps
+            print(
+                "\n[INFO] カリキュラム完了条件を満たしたため訓練を停止します "
+                f"(step={self.num_timesteps}, phase={diagnostics['phase_name']}, "
+                f"score_mean={diagnostics['active_score_mean']}, "
+                f"ep_len_mean={diagnostics['episode_length_mean']})"
+            )
+            return False
+        return True
+
+    def export_state(self) -> dict:
+        return {
+            "enabled": True,
+            "completed": self.completed,
+            "completed_timestep": self.completed_timestep,
+            "window": self.window,
+            "min_episodes": self.min_episodes,
+            "min_score_ratio": self.min_score_ratio,
+            "min_episode_len_ratio": self.min_episode_len_ratio,
+            "last_diagnostics": self.last_diagnostics,
+        }
 
 
 class _AnnealingShapingCallback(BaseCallback):
@@ -545,6 +621,16 @@ def parse_args() -> argparse.Namespace:
                    help="Stage 昇格の active_score 閾値 (default: 5.0, 目安: 撃破数×2.0+収集数×3.0)")
     p.add_argument("--curriculum-alive-reward", type=float, default=0.001,
                    help="生存ボーナスの1物理ステップあたりの値 (default: 0.001, UE5側と合わせる)")
+    p.add_argument("--until-curriculum-complete", action="store_true",
+                   help="survivors カリキュラムが最終Phaseで安定するまで継続し、完了時に自動停止する")
+    p.add_argument("--curriculum-complete-window", type=int, default=20,
+                   help="カリキュラム完了判定に使う直近エピソード数 (default: 20)")
+    p.add_argument("--curriculum-complete-min-episodes", type=int, default=20,
+                   help="カリキュラム完了判定に必要な最小エピソード数 (default: 20)")
+    p.add_argument("--curriculum-complete-min-score-ratio", type=float, default=1.0,
+                   help="最終Phase完了に必要なスコア倍率。直前Phase閾値×curriculum-thresholdに乗算 (default: 1.0)")
+    p.add_argument("--curriculum-complete-min-episode-len-ratio", type=float, default=1.0,
+                   help="最終Phase完了に必要な episode_length / min_episode_steps の比率 (default: 1.0)")
     p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
     p.add_argument("--wandb-project", default="rl-balance", help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None, help="W&B ラン名（未指定時は自動生成）")
@@ -633,6 +719,11 @@ def main() -> None:
                 "ent_coef": args.ent_coef,
                 "device": args.device,
                 "curriculum": args.curriculum,
+                "until_curriculum_complete": args.until_curriculum_complete,
+                "curriculum_complete_window": args.curriculum_complete_window,
+                "curriculum_complete_min_episodes": args.curriculum_complete_min_episodes,
+                "curriculum_complete_min_score_ratio": args.curriculum_complete_min_score_ratio,
+                "curriculum_complete_min_episode_len_ratio": args.curriculum_complete_min_episode_len_ratio,
                 "reward_fn": str(args.reward_fn) if args.reward_fn else None,
                 "config_hash": config_hash,
                 **_PPO_KWARGS,
@@ -774,6 +865,7 @@ def main() -> None:
 
     callbacks = []
     curriculum_cb = None
+    curriculum_completion_cb = None
     anneal_cb = None
     if _use_wandb:
         callbacks.append(WandbCallback(verbose=0))
@@ -800,6 +892,25 @@ def main() -> None:
         print(f"[INFO] curriculum_status.json → {curriculum_status_path}")
     elif args.curriculum:
         print("[WARN] --curriculum は survivors ゲームかつ非 dry-run 時のみ有効です。無視します。")
+
+    if args.until_curriculum_complete:
+        if curriculum_cb is None:
+            raise ValueError("--until-curriculum-complete には survivors の --curriculum が必要です")
+        curriculum_completion_cb = _CurriculumCompletionCallback(
+            curriculum_cb=curriculum_cb,
+            window=args.curriculum_complete_window,
+            min_episodes=args.curriculum_complete_min_episodes,
+            min_score_ratio=args.curriculum_complete_min_score_ratio,
+            min_episode_len_ratio=args.curriculum_complete_min_episode_len_ratio,
+        )
+        callbacks.append(curriculum_completion_cb)
+        print(
+            "[INFO] カリキュラム完了まで継続する停止条件を有効化 "
+            f"(max_total_steps={args.total_steps:,}, window={args.curriculum_complete_window}, "
+            f"min_episodes={args.curriculum_complete_min_episodes}, "
+            f"score_ratio={args.curriculum_complete_min_score_ratio}, "
+            f"ep_len_ratio={args.curriculum_complete_min_episode_len_ratio})"
+        )
 
     if reward_fn is not None and args.game in ("coin", "survivors"):
         anneal_cb = _AnnealingShapingCallback(
@@ -829,6 +940,15 @@ def main() -> None:
         exit_reason: str | None = None,
         exit_error: str | None = None,
     ) -> None:
+        completion_state = (
+            curriculum_completion_cb.export_state()
+            if curriculum_completion_cb is not None
+            else (
+                {"enabled": False, "last_diagnostics": curriculum_cb.get_completion_diagnostics()}
+                if curriculum_cb is not None and hasattr(curriculum_cb, "get_completion_diagnostics")
+                else None
+            )
+        )
         _save_training_status(
             status_path=status_path,
             args=args,
@@ -841,6 +961,7 @@ def main() -> None:
             num_timesteps=timestep,
             exit_reason=exit_reason,
             exit_error=exit_error,
+            curriculum_completion=completion_state,
         )
 
     checkpoint_cb = _RunCheckpointCallback(
@@ -857,6 +978,8 @@ def main() -> None:
     try:
         model.learn(total_timesteps=args.total_steps, callback=callbacks,
                     reset_num_timesteps=args.resume is None)
+        if curriculum_completion_cb is not None and curriculum_completion_cb.completed:
+            exit_reason = "curriculum_complete"
     except KeyboardInterrupt:
         exit_reason = "keyboard_interrupt"
         print("\n[INFO] 訓練を中断しました。モデルを保存します...")
