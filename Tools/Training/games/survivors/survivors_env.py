@@ -4,7 +4,6 @@ from typing import Callable
 
 import numpy as np
 import gymnasium as gym
-import requests
 from base.base_ue5_env import BaseUE5Env
 
 _NUM_ACTIONS = 5
@@ -36,9 +35,7 @@ class SurvivorsEnv(BaseUE5Env):
         self._wait_for_server()
 
     def _on_server_connected(self):
-        resp = self.session.get(f"{self.base_url}/obs_schema", timeout=10)
-        resp.raise_for_status()
-        schema = resp.json()
+        schema = self._get_json("/obs_schema", timeout=10, retries=3)
 
         total_dim = schema["total_dim"]
         self._expected_schema_hash = schema["obs_schema_hash"]
@@ -148,8 +145,7 @@ class SurvivorsEnv(BaseUE5Env):
             True if successful
         """
         try:
-            resp = self.session.post(f"{self.base_url}/params", json=kwargs, timeout=5)
-            resp.raise_for_status()
+            self._post_json("/params", kwargs, timeout=5, retries=2)
             return True
         except Exception as e:
             print(f"[WARN] /params 更新失敗: {e}")

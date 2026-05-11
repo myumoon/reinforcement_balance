@@ -43,9 +43,7 @@ class CoinEnv(BaseUE5Env):
 
     def _on_server_connected(self):
         """接続後に /obs_schema を取得して observation_space を確定する。"""
-        resp = self.session.get(f"{self.base_url}/obs_schema", timeout=10)
-        resp.raise_for_status()
-        schema = resp.json()
+        schema = self._get_json("/obs_schema", timeout=10, retries=3)
 
         total_dim = schema["total_dim"]
         self._expected_schema_hash = schema["obs_schema_hash"]
