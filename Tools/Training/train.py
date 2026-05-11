@@ -37,6 +37,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecFrameStack, VecNormalize
 import torch
 
+from base.base_ue5_env import UE5ConnectionError
 from common.utils import _linear_schedule
 from curriculum_callback import CurriculumCallback
 
@@ -219,6 +220,8 @@ def _save_training_status(
     anneal_cb,
     config_hash: str,
     num_timesteps: int,
+    exit_reason: str | None = None,
+    exit_error: str | None = None,
 ) -> None:
     data = {
         "run_name": args.run_name,
@@ -230,6 +233,10 @@ def _save_training_status(
         "curriculum": curriculum_cb.export_state() if curriculum_cb is not None else None,
         "shaping_anneal": anneal_cb.export_state() if anneal_cb is not None else None,
     }
+    if exit_reason is not None:
+        data["last_exit_reason"] = exit_reason
+    if exit_error is not None:
+        data["last_exit_error"] = exit_error
     _write_json(status_path, data)
 
 
@@ -815,7 +822,13 @@ def main() -> None:
               f"min_steps={args.anneal_min_steps:,}, min_weight={args.anneal_min_weight}, "
               f"reference={reference})")
 
-    def _write_status_for_model(model_zip: Path, vecnorm_file: Path | None, timestep: int) -> None:
+    def _write_status_for_model(
+        model_zip: Path,
+        vecnorm_file: Path | None,
+        timestep: int,
+        exit_reason: str | None = None,
+        exit_error: str | None = None,
+    ) -> None:
         _save_training_status(
             status_path=status_path,
             args=args,
@@ -826,6 +839,8 @@ def main() -> None:
             anneal_cb=anneal_cb,
             config_hash=config_hash,
             num_timesteps=timestep,
+            exit_reason=exit_reason,
+            exit_error=exit_error,
         )
 
     checkpoint_cb = _RunCheckpointCallback(
@@ -836,11 +851,20 @@ def main() -> None:
     )
     callbacks.append(checkpoint_cb)
 
+    exit_reason = "completed"
+    exit_error = None
+
     try:
         model.learn(total_timesteps=args.total_steps, callback=callbacks,
                     reset_num_timesteps=args.resume is None)
     except KeyboardInterrupt:
+        exit_reason = "keyboard_interrupt"
         print("\n[INFO] 訓練を中断しました。モデルを保存します...")
+    except UE5ConnectionError as e:
+        exit_reason = "ue5_connection_lost"
+        exit_error = str(e)
+        print("\n[WARN] UE5 HTTP 接続が復旧できませんでした。モデルを保存して終了します。")
+        print(f"[WARN] {exit_error}")
     finally:
         model.save(str(model_base_path))
         final_model_zip = _model_zip_path(model_base_path)
@@ -851,10 +875,26 @@ def main() -> None:
             vn.save(str(vecnorm_path))
             final_vecnorm_path = vecnorm_path
             print(f"[INFO] VecNormalize 統計を保存: {vecnorm_path}")
-        _write_status_for_model(final_model_zip, final_vecnorm_path, model.num_timesteps)
+        _write_status_for_model(
+            final_model_zip,
+            final_vecnorm_path,
+            model.num_timesteps,
+            exit_reason=exit_reason,
+            exit_error=exit_error,
+        )
         env.close()
         if _use_wandb:
-            wandb.finish()
+            try:
+                if wandb.run:
+                    wandb.run.summary["run/exit_reason"] = exit_reason
+                    wandb.log({
+                        "run/ended_by_ue5_connection_lost": (
+                            1 if exit_reason == "ue5_connection_lost" else 0
+                        ),
+                    }, step=model.num_timesteps)
+                wandb.finish()
+            except Exception as e:
+                print(f"[WARN] W&B finish/log failed: {e}")
 
 
 if __name__ == "__main__":
