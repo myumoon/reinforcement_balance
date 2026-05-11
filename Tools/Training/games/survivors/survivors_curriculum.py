@@ -17,7 +17,7 @@
 
 フェーズ設計:
   - Gem回収フェーズで移動と回収の基礎を作る
-  - 通常序盤から包囲入門A/B/Cへ小刻みに上げる
+  - 通常序盤から包囲入門A/B/B+/Cへ小刻みに上げる
   - 群れ対応もA/B/Cへ分け、密度・速度・TimeScalingを段階的に上げる
   - Mad Forest を最終フェーズとして扱う
 """
@@ -51,6 +51,8 @@ class _Phase:
     threshold: Optional[float]  # None = 最終段（昇格なし）
     rollback_score_ratio: float = 0.35
     rollback_length_ratio: float = 0.45
+    promotion_min_score_ratio: float = 0.85
+    promotion_max_score_cv: float = 0.20
 
 
 PHASES: list[_Phase] = [
@@ -59,7 +61,8 @@ PHASES: list[_Phase] = [
     _Phase("Gem追従強化",       7,  14, 0.9, 1.7,  3, 0.85, 0.85, False, 1800,  250.0),
     _Phase("通常序盤",          8,  20, 1.0, 2.0,  4, 1.00, 1.00, False, 2400,  800.0),
     _Phase("包囲入門A",         9,  18, 1.0, 2.0,  4, 1.00, 0.80, False, 2400,  950.0),
-    _Phase("包囲入門B",        10,  22, 1.0, 2.1,  4, 1.00, 0.90, False, 2400, 1050.0),
+    _Phase("包囲入門B",        10,  22, 1.0, 2.1,  4, 1.00, 0.90, False, 2400,  940.0),
+    _Phase("包囲入門B+",       10,  24, 1.0, 2.15, 4, 1.00, 0.95, False, 2400, 1100.0),
     _Phase("包囲入門C",        10,  25, 1.0, 2.2,  4, 1.05, 1.00, False, 2400, 1150.0),
     _Phase("包囲対応",         12,  30, 1.0, 2.4,  5, 1.10, 1.10, False, 2400, 1350.0),
     _Phase("多敵対応",         14,  40, 1.0, 2.6,  6, 1.20, 1.20, False, 2400, 1550.0),
@@ -71,7 +74,7 @@ PHASES: list[_Phase] = [
 
 
 class CurriculumCallback(BaseCallback):
-    """VSスタイル6段階カリキュラム。
+    """VSスタイル段階式カリキュラム。
 
     Args:
         raw_env:        SurvivorsUE5Env インスタンス（set_params を呼ぶ）
@@ -140,6 +143,12 @@ class CurriculumCallback(BaseCallback):
     def import_state(self, state: dict) -> None:
         phase_idx = int(state.get("phase_idx", 0))
         self._phase_idx = max(0, min(phase_idx, len(PHASES) - 1))
+        phase_name = state.get("phase_name")
+        if phase_name:
+            for idx, phase in enumerate(PHASES):
+                if phase.name == phase_name:
+                    self._phase_idx = idx
+                    break
         self._scores = [float(v) for v in state.get("scores_window", [])]
         self._rollback_bad_windows = int(state.get("rollback_bad_windows", 0))
         self._ep_base = float(state.get("ep_base", 0.0))
@@ -178,6 +187,8 @@ class CurriculumCallback(BaseCallback):
         recent_lengths = self._episode_lengths[-len(recent_scores):] if recent_scores else []
         mean = _mean(recent_scores)
         mean_len = _mean([float(v) for v in recent_lengths])
+        score_min = min(recent_scores) if recent_scores else 0.0
+        score_std = _stdev(recent_scores)
         self._save_status(mean, effective_threshold)
 
         if len(self._scores) < self.window:
@@ -198,16 +209,21 @@ class CurriculumCallback(BaseCallback):
         else:
             self._rollback_bad_windows = 0
 
-        if (
-            phase.threshold is not None
-            and mean >= effective_threshold
-            and mean_len >= phase.min_episode_steps
-        ):
-            self._advance_phase(mean, effective_threshold)
+        can_promote, promotion_reason = self._promotion_judgment(
+            phase=phase,
+            mean=mean,
+            mean_len=mean_len,
+            score_min=score_min,
+            score_std=score_std,
+            effective_threshold=effective_threshold,
+            recent_count=len(recent_scores),
+        )
+        if can_promote:
+            self._advance_phase(mean, effective_threshold, promotion_reason)
 
         return True
 
-    def _advance_phase(self, mean: float, threshold: float) -> None:
+    def _advance_phase(self, mean: float, threshold: float, reason: str) -> None:
         prev_name = PHASES[self._phase_idx].name
         prev_idx = self._phase_idx
         self._phase_idx = min(self._phase_idx + 1, len(PHASES) - 1)
@@ -223,14 +239,49 @@ class CurriculumCallback(BaseCallback):
             "to_phase_name": next_phase.name,
             "active_score_mean": round(mean, 4),
             "threshold": round(threshold, 4),
+            "reason": reason,
         })
         print(
             f"\n[Curriculum] Phase {self._phase_idx} 昇格: "
             f"{prev_name} -> {next_phase.name} "
-            f"(score={mean:.3f} >= {threshold:.1f})"
+            f"(score={mean:.3f} >= {threshold:.1f}, {reason})"
         )
         self._apply_phase(next_phase)
         self._log_wandb(mean, next_phase, event="advance")
+
+    def _promotion_judgment(
+        self,
+        phase: _Phase,
+        mean: float,
+        mean_len: float,
+        score_min: float,
+        score_std: float,
+        effective_threshold: float,
+        recent_count: int,
+    ) -> tuple[bool, str]:
+        if phase.threshold is None or recent_count < self.window:
+            return False, ""
+        if mean < effective_threshold:
+            return False, f"score_mean={mean:.3f} < threshold={effective_threshold:.3f}"
+        if mean_len < phase.min_episode_steps:
+            return False, f"ep_len={mean_len:.1f} < min_episode_steps={phase.min_episode_steps}"
+
+        min_score_floor = effective_threshold * phase.promotion_min_score_ratio
+        if score_min < min_score_floor:
+            return False, (
+                f"score_min={score_min:.3f} < promotion_min_score_floor={min_score_floor:.3f}"
+            )
+
+        score_cv = score_std / max(mean, 1e-8)
+        if score_cv > phase.promotion_max_score_cv:
+            return False, (
+                f"score_cv={score_cv:.3f} > promotion_max_score_cv={phase.promotion_max_score_cv:.3f}"
+            )
+
+        return True, (
+            f"score_min={score_min:.3f} >= {min_score_floor:.3f}, "
+            f"score_cv={score_cv:.3f} <= {phase.promotion_max_score_cv:.3f}"
+        )
 
     def _should_rollback(
         self,
@@ -349,6 +400,26 @@ class CurriculumCallback(BaseCallback):
             if base_threshold is not None and effective_threshold > 0.0 and recent_scores
             else None
         )
+        score_min = min(recent_scores) if recent_scores else None
+        promotion_min_score_floor = (
+            effective_threshold * phase.promotion_min_score_ratio
+            if base_threshold is not None
+            else None
+        )
+        score_cv = (
+            score_std / max(score_mean, 1e-8)
+            if recent_scores and score_mean > 0.0
+            else None
+        )
+        promotion_stable = (
+            recent_count >= self.window
+            and base_threshold is not None
+            and score_min is not None
+            and promotion_min_score_floor is not None
+            and score_min >= promotion_min_score_floor
+            and score_cv is not None
+            and score_cv <= phase.promotion_max_score_cv
+        )
         return {
             "timestep": self.num_timesteps,
             "phase_idx": self._phase_idx,
@@ -365,20 +436,32 @@ class CurriculumCallback(BaseCallback):
                 "episodes": recent_count,
                 "required_episodes": self.window,
                 "active_score_mean": round(score_mean, 4),
-                "active_score_min": round(min(recent_scores), 4) if recent_scores else None,
+                "active_score_min": round(score_min, 4) if score_min is not None else None,
                 "active_score_max": round(max(recent_scores), 4) if recent_scores else None,
                 "active_score_std": round(score_std, 4),
+                "active_score_cv": round(score_cv, 4) if score_cv is not None else None,
                 "episode_length_mean": round(length_mean, 1),
                 "min_episode_steps": phase.min_episode_steps,
                 "base_threshold": base_threshold,
                 "effective_threshold": round(effective_threshold, 4) if base_threshold is not None else None,
                 "threshold_ratio": round(threshold_ratio, 4) if threshold_ratio is not None else None,
+                "promotion_min_score_ratio": phase.promotion_min_score_ratio,
+                "promotion_min_score_floor": (
+                    round(promotion_min_score_floor, 4)
+                    if promotion_min_score_floor is not None
+                    else None
+                ),
+                "promotion_max_score_cv": phase.promotion_max_score_cv,
+                "promotion_stability_ok": promotion_stable,
                 "rollback_score_floor": round(score_floor, 4) if score_floor is not None else None,
                 "rollback_length_floor": round(length_floor, 1) if length_floor is not None else None,
                 "rollback_bad_windows": self._rollback_bad_windows,
                 "ready_for_phase_judgment": (
                     recent_count >= self.window
+                    and base_threshold is not None
+                    and score_mean >= effective_threshold
                     and length_mean >= phase.min_episode_steps
+                    and promotion_stable
                 ),
             },
             "overall": {
@@ -400,6 +483,8 @@ class CurriculumCallback(BaseCallback):
                 "min_episode_steps": phase.min_episode_steps,
                 "rollback_score_ratio": phase.rollback_score_ratio,
                 "rollback_length_ratio": phase.rollback_length_ratio,
+                "promotion_min_score_ratio": phase.promotion_min_score_ratio,
+                "promotion_max_score_cv": phase.promotion_max_score_cv,
             },
             "recommendation": self.recommend_next_settings(),
         }
@@ -464,6 +549,8 @@ class CurriculumCallback(BaseCallback):
                     "curriculum/min_episode_steps": phase.min_episode_steps,
                     "curriculum/rollback_score_ratio": phase.rollback_score_ratio,
                     "curriculum/rollback_length_ratio": phase.rollback_length_ratio,
+                    "curriculum/promotion_min_score_ratio": phase.promotion_min_score_ratio,
+                    "curriculum/promotion_max_score_cv": phase.promotion_max_score_cv,
                 }
                 if mean_len is not None:
                     payload["curriculum/episode_length_mean"] = mean_len
