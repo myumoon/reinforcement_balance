@@ -637,6 +637,37 @@ class CurriculumCallback(BaseCallback):
             )
         )
 
+    def get_wandb_progress_metrics(self) -> dict:
+        diagnostics = self.get_diagnostics()
+        window = diagnostics.get("current_window", {})
+        overall = diagnostics.get("overall", {})
+        completion = diagnostics.get("completion", {})
+        episodes_total = max(int(diagnostics.get("episodes_total", 0) or 0), 1)
+        terminated = int(diagnostics.get("terminated_episodes", 0) or 0)
+        truncated = int(diagnostics.get("truncated_episodes", 0) or 0)
+
+        return {
+            "survivors/active_score_mean": window.get("active_score_mean"),
+            "survivors/active_score_min": window.get("active_score_min"),
+            "survivors/active_score_std": window.get("active_score_std"),
+            "survivors/active_score_cv": window.get("active_score_cv"),
+            "survivors/episode_length_mean": window.get("episode_length_mean"),
+            "survivors/base_reward_mean": overall.get("base_reward_mean"),
+            "survivors/alive_reward_mean": overall.get("alive_reward_mean"),
+            "survivors/terminated_ratio": terminated / episodes_total,
+            "survivors/truncated_ratio": truncated / episodes_total,
+            "curriculum/phase_idx": diagnostics.get("phase_idx"),
+            "curriculum/phase_progress_ratio": window.get("threshold_ratio"),
+            "curriculum/ready_for_phase_judgment": int(bool(window.get("ready_for_phase_judgment"))),
+            "curriculum/promotion_stability_ok": int(bool(window.get("promotion_stability_ok"))),
+            "curriculum/rollback_bad_windows": diagnostics.get("rollback_bad_windows"),
+            "curriculum/window_episode_count": window.get("episodes"),
+            "curriculum/is_final_phase": int(bool(completion.get("is_final_phase"))),
+            "curriculum/completion_ready": int(bool(completion.get("complete"))),
+            "curriculum/completion_score_mean": completion.get("active_score_mean"),
+            "curriculum/completion_ep_len_mean": completion.get("episode_length_mean"),
+        }
+
     def _log_wandb(
         self,
         mean: float,
