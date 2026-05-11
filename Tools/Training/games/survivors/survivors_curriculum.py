@@ -116,6 +116,10 @@ class CurriculumCallback(BaseCallback):
         self._truncated_count = 0
         self._phase_events: list[dict] = []
         self._recommendation_policy = WindowThresholdRecommendationPolicy()
+        self._completion_window = window
+        self._completion_min_episodes = window
+        self._completion_min_score_ratio = 1.0
+        self._completion_min_episode_len_ratio = 1.0
 
     def _on_training_start(self) -> None:
         self._apply_phase(PHASES[self._phase_idx], initial=True)
@@ -123,6 +127,18 @@ class CurriculumCallback(BaseCallback):
     @property
     def is_final_phase(self) -> bool:
         return self._phase_idx >= len(PHASES) - 1
+
+    def configure_completion(
+        self,
+        window: int,
+        min_episodes: int,
+        min_score_ratio: float,
+        min_episode_len_ratio: float,
+    ) -> None:
+        self._completion_window = max(1, int(window))
+        self._completion_min_episodes = max(1, int(min_episodes))
+        self._completion_min_score_ratio = max(0.0, float(min_score_ratio))
+        self._completion_min_episode_len_ratio = max(0.0, float(min_episode_len_ratio))
 
     def export_state(self) -> dict:
         return {
@@ -378,11 +394,109 @@ class CurriculumCallback(BaseCallback):
         if self._status_path is None:
             return
         status = self.get_diagnostics()
+        status["completion"] = self.get_completion_diagnostics()
         status["current_window"]["active_score_mean"] = round(mean, 4)
         status["current_window"]["effective_threshold"] = round(threshold, 4)
         Path(self._status_path).write_text(
             json.dumps(status, ensure_ascii=False, indent=2)
         )
+
+    def _completion_base_threshold(self) -> Optional[float]:
+        phase = PHASES[self._phase_idx]
+        if phase.threshold is not None:
+            return phase.threshold
+        if self._phase_idx <= 0:
+            return None
+        return PHASES[self._phase_idx - 1].threshold
+
+    def get_completion_diagnostics(
+        self,
+        window: Optional[int] = None,
+        min_episodes: Optional[int] = None,
+        min_score_ratio: Optional[float] = None,
+        min_episode_len_ratio: Optional[float] = None,
+    ) -> dict:
+        window = self._completion_window if window is None else max(1, int(window))
+        min_episodes = (
+            self._completion_min_episodes
+            if min_episodes is None
+            else max(1, int(min_episodes))
+        )
+        min_score_ratio = (
+            self._completion_min_score_ratio
+            if min_score_ratio is None
+            else max(0.0, float(min_score_ratio))
+        )
+        min_episode_len_ratio = (
+            self._completion_min_episode_len_ratio
+            if min_episode_len_ratio is None
+            else max(0.0, float(min_episode_len_ratio))
+        )
+
+        phase = PHASES[self._phase_idx]
+        recent_count = min(len(self._scores), window)
+        recent_scores = self._scores[-recent_count:] if recent_count else []
+        recent_lengths = self._episode_lengths[-recent_count:] if recent_count else []
+        score_mean = _mean(recent_scores)
+        score_min = min(recent_scores) if recent_scores else None
+        score_std = _stdev(recent_scores)
+        score_cv = (
+            score_std / max(score_mean, 1e-8)
+            if recent_scores and score_mean > 0.0
+            else None
+        )
+        length_mean = _mean([float(v) for v in recent_lengths])
+        base_threshold = self._completion_base_threshold()
+        score_floor = (
+            base_threshold * self.threshold_mult * min_score_ratio
+            if base_threshold is not None
+            else None
+        )
+        length_floor = phase.min_episode_steps * min_episode_len_ratio
+
+        reasons: list[str] = []
+        if not self.is_final_phase:
+            reasons.append("not_final_phase")
+        if recent_count < min_episodes:
+            reasons.append(f"episodes={recent_count} < min_episodes={min_episodes}")
+        if score_floor is not None and score_mean < score_floor:
+            reasons.append(f"score_mean={score_mean:.3f} < completion_score_floor={score_floor:.3f}")
+        if length_mean < length_floor:
+            reasons.append(f"ep_len={length_mean:.1f} < completion_length_floor={length_floor:.1f}")
+        if (
+            score_min is not None
+            and score_floor is not None
+            and score_min < score_floor * phase.promotion_min_score_ratio
+        ):
+            reasons.append(
+                f"score_min={score_min:.3f} < completion_min_score_floor="
+                f"{score_floor * phase.promotion_min_score_ratio:.3f}"
+            )
+        if score_cv is not None and score_cv > phase.promotion_max_score_cv:
+            reasons.append(
+                f"score_cv={score_cv:.3f} > promotion_max_score_cv={phase.promotion_max_score_cv:.3f}"
+            )
+
+        return {
+            "complete": len(reasons) == 0,
+            "reasons": reasons,
+            "is_final_phase": self.is_final_phase,
+            "phase_idx": self._phase_idx,
+            "phase_name": phase.name,
+            "window": window,
+            "episodes": recent_count,
+            "min_episodes": min_episodes,
+            "active_score_mean": round(score_mean, 4),
+            "active_score_min": round(score_min, 4) if score_min is not None else None,
+            "active_score_std": round(score_std, 4),
+            "active_score_cv": round(score_cv, 4) if score_cv is not None else None,
+            "episode_length_mean": round(length_mean, 1),
+            "completion_base_threshold": base_threshold,
+            "completion_score_floor": round(score_floor, 4) if score_floor is not None else None,
+            "completion_length_floor": round(length_floor, 1),
+            "min_score_ratio": min_score_ratio,
+            "min_episode_len_ratio": min_episode_len_ratio,
+        }
 
     def get_diagnostics(self) -> dict:
         phase = PHASES[self._phase_idx]
@@ -471,6 +585,7 @@ class CurriculumCallback(BaseCallback):
                 "alive_reward_mean": round(_mean(self._episode_alive_rewards), 4),
             },
             "phase_events": self._phase_events,
+            "completion": self.get_completion_diagnostics(),
             "params": {
                 "min_enemies": phase.min_enemies,
                 "max_enemies": phase.max_enemies,
