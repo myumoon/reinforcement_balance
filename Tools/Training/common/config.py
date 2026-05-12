@@ -26,11 +26,12 @@ def apply_yaml_defaults(parser, yaml_config: dict) -> None:
 
     filtered = {}
     for key, val in yaml_config.items():
-        if key not in known_dests:
+        dest = key if key in known_dests else key.replace("-", "_")
+        if dest not in known_dests:
             warnings.warn(f"[config] 未知のキー '{key}' を無視します", stacklevel=2)
             continue
-        if key in path_dests and isinstance(val, str):
+        if dest in path_dests and isinstance(val, str):
             val = Path(val)
-        filtered[key] = val
+        filtered[dest] = val
 
     parser.set_defaults(**filtered)
