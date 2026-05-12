@@ -43,7 +43,6 @@ from curriculum_callback import CurriculumCallback
 
 try:
     import wandb
-    from wandb.integration.sb3 import WandbCallback
     _WANDB_AVAILABLE = True
 except ImportError:
     _WANDB_AVAILABLE = False
@@ -636,6 +635,7 @@ def main() -> None:
         wandb.init(
             project=args.wandb_project,
             name=args.wandb_run_name or args.run_name,
+            sync_tensorboard=True,
             config={
                 "game": args.game,
                 "run_name": args.run_name,
@@ -656,9 +656,11 @@ def main() -> None:
                 "curriculum_complete_min_episode_len_ratio": args.curriculum_complete_min_episode_len_ratio,
                 "reward_fn": str(args.reward_fn) if args.reward_fn else None,
                 "config_hash": config_hash,
+                "tensorboard_log": str(run_dir / "tensorboard"),
                 **_PPO_KWARGS,
             },
         )
+        ppo_kwargs["tensorboard_log"] = str(run_dir / "tensorboard")
 
     # --reward-fn の事前チェック
     reward_fn = None
@@ -758,7 +760,8 @@ def main() -> None:
             print("[INFO] --entity-attention は --resume 時は無視されます（保存済みモデルのアーキテクチャを使用）")
         if args.recurrent:
             print("[INFO] --recurrent は --resume 時は保存済みモデルのアーキテクチャに従います")
-        model = algo_class.load(resume_path, env=env, device=args.device)
+        load_kwargs = {"tensorboard_log": ppo_kwargs["tensorboard_log"]} if _use_wandb else {}
+        model = algo_class.load(resume_path, env=env, device=args.device, **load_kwargs)
     elif args.entity_attention:
         if args.game not in ("coin", "survivors"):
             print(f"[WARN] --entity-attention はコイン/サバイバーズゲーム専用です。{default_policy} を使用します。")
@@ -797,8 +800,6 @@ def main() -> None:
     curriculum_cb = None
     curriculum_completion_cb = None
     anneal_cb = None
-    if _use_wandb:
-        callbacks.append(WandbCallback(verbose=0))
     survivors_metrics_callback = None
     survivors_curriculum_metrics_callback = None
     if args.game == "survivors" and not args.dry_run:
