@@ -767,7 +767,9 @@ def main() -> None:
             print(f"[WARN] --entity-attention はコイン/サバイバーズゲーム専用です。{default_policy} を使用します。")
             model = algo_class(default_policy, env, **ppo_kwargs)
         else:
-            offsets = getattr(_get_raw_env(env), "_offsets", {})
+            raw_env = _get_raw_env(env)
+            offsets = getattr(raw_env, "_offsets", {})
+            obs_schema = getattr(raw_env, "_obs_schema", [])
             if args.game == "survivors":
                 from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
                 extractor_class = SurvivorsEntityAttentionExtractor
@@ -776,7 +778,7 @@ def main() -> None:
                 extractor_class = CoinEntityAttentionExtractor
             policy_kwargs = dict(
                 features_extractor_class=extractor_class,
-                features_extractor_kwargs=dict(features_dim=128, offsets=offsets),
+                features_extractor_kwargs=dict(features_dim=128, offsets=offsets, obs_schema=obs_schema),
                 net_arch=[64, 64],
             )
             if args.recurrent:

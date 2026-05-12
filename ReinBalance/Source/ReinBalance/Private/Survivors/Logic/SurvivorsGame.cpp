@@ -57,6 +57,16 @@ FString ASurvivorsGame::GetObsSchemaHash() const
 {
 	return ObservationComponent->GetObsSchemaHash();
 }
+int32 ASurvivorsGame::GetObsDim() const
+{
+	if (CachedObsDim >= 0) return CachedObsDim;
+	if (!ObservationComponent) return 0;
+	int32 Total = 0;
+	for (const FSurvivorsObsSegment& Seg : ObservationComponent->GetObsSchema())
+		Total += Seg.Dim;
+	CachedObsDim = Total;
+	return CachedObsDim;
+}
 void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 {
 	if (Seed.IsSet())

@@ -28,6 +28,7 @@ class SurvivorsEnv(BaseUE5Env):
         self._prev_obs: np.ndarray | None = None
         self.shaping_weight = shaping_weight
         self._offsets: dict[str, int] = {}
+        self._obs_schema: list[dict] = []
 
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
@@ -39,6 +40,7 @@ class SurvivorsEnv(BaseUE5Env):
 
         total_dim = schema["total_dim"]
         self._expected_schema_hash = schema["obs_schema_hash"]
+        self._obs_schema = schema["segments"]
 
         offset = 0
         for seg in schema["segments"]:

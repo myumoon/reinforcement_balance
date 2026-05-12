@@ -23,6 +23,21 @@ namespace SurvivorsGameConstants
 	static constexpr float ContactHitInterval = 0.5f;
 	static constexpr float GarlicKnockbackStrength = 10.f;
 
+	// 方向別密度/最近傍距離 obs の定数
+	static constexpr int32 EnemyDensityDirCount            = 16;
+	static constexpr float EnemyNearestDistanceMax         = 2400.0f;
+	static constexpr float EnemyDensityNearDistanceMax     = 600.0f;
+	static constexpr float EnemyDensityMidDistanceMax      = 1400.0f;
+	static constexpr float EnemyDensityNearNormalizeFactor = 4.0f;
+	static constexpr float EnemyDensityMidNormalizeFactor  = 6.0f;
+
+	static constexpr int32 GemDensityDirCount              = 16;
+	static constexpr float GemNearestDistanceMax           = 2400.0f;
+	static constexpr float GemDensityNearDistanceMax       = 600.0f;
+	static constexpr float GemDensityMidDistanceMax        = 1400.0f;
+	static constexpr float GemDensityNearNormalizeFactor   = 6.0f;
+	static constexpr float GemDensityMidNormalizeFactor    = 10.0f;
+
 	inline const FVector2D RayDirs[8] = {
 		FVector2D( 1.f,      0.f     ),
 		FVector2D( 0.7071f,  0.7071f ),
