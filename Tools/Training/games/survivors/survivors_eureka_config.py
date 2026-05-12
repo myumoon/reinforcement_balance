@@ -89,6 +89,8 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         ehp_i      = o.get("enemy_hp", et_i + 20)
         max_enemy  = (ev_i - er_i) // 2
         num_items  = (er_i - item_i) // 2
+        end_i      = ehp_i + max_enemy
+        end_i      = o.get("enemy_nearest_dist_16dir", end_i)
 
         return (
             f"  obs[0:2]   = player_pos (x,y) / FieldHalfSize(15m) → [-1, 1]\n"
@@ -126,7 +128,25 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"    obs[{er_i}+i*2], obs[{er_i}+i*2+1] = dx,dy\n"
             f"    obs[{ev_i}+i*2], obs[{ev_i}+i*2+1] = vx,vy\n"
             f"    obs[{et_i}+i]   = type\n"
-            f"    obs[{ehp_i}+i]   = hp/max_hp"
+            f"    obs[{ehp_i}+i]   = hp/max_hp\n"
+            f"\n"
+            f"**方向別密度/最近傍距離（16方向×6セグメント、全Phaseで利用可能）**\n"
+            f"  16方向はプレイヤー中心22.5度刻みの扇形ビン（0=右, 時計回り）\n"
+            f"  obs[{o.get('enemy_nearest_dist_16dir', end_i)}:{o.get('enemy_nearest_dist_16dir', end_i)+16}]\n"
+            f"    = enemy_nearest_dist_16dir: 各方向の最近傍敵距離 (0=危険・接触近い, 1=24m以内に敵なし)\n"
+            f"  obs[{o.get('enemy_density_near_16dir', end_i+16)}:{o.get('enemy_density_near_16dir', end_i+16)+16}]\n"
+            f"    = enemy_density_near_16dir: 0〜6m の距離重み付き敵密度 (0=空, 1=高密度)\n"
+            f"  obs[{o.get('enemy_density_mid_16dir', end_i+32)}:{o.get('enemy_density_mid_16dir', end_i+32)+16}]\n"
+            f"    = enemy_density_mid_16dir: 6〜14m の距離重み付き敵密度 (0=空, 1=高密度)\n"
+            f"  obs[{o.get('gem_nearest_dist_16dir', end_i+48)}:{o.get('gem_nearest_dist_16dir', end_i+48)+16}]\n"
+            f"    = gem_nearest_dist_16dir: 各方向の最近傍Gem距離 (0=近くにGem, 1=24m以内にGemなし)\n"
+            f"  obs[{o.get('gem_density_near_16dir', end_i+64)}:{o.get('gem_density_near_16dir', end_i+64)+16}]\n"
+            f"    = gem_density_near_16dir: 0〜6m の距離重み付きGem密度 (0=空, 1=高密度)\n"
+            f"  obs[{o.get('gem_density_mid_16dir', end_i+80)}:{o.get('gem_density_mid_16dir', end_i+80)+16}]\n"
+            f"    = gem_density_mid_16dir: 6〜14m の距離重み付きGem密度 (0=空, 1=高密度)\n"
+            f"  ⚠ Phase6以降の包囲脱出・壁際回避で特に重要。\n"
+            f"     enemy_nearest_dist が低い方向=危険、高い方向=隙間。\n"
+            f"     低PhaseではGem方向への過度な誘導を避けること。"
         )
 
     def _prompt_section_fixed_rewards(self) -> str:

@@ -20,7 +20,7 @@ class USurvivorsSpawnComponent;
  * ビジュアル表示は別クラスが担う（未実装）。
  *
  * 行動: 離散5方向 (0=+Y, 1=-Y, 2=-X, 3=+X, 4=静止)
- * 観測: GetObsDim() 次元 = 23 + NumGemObs*2 + MaxEnemyObs*6
+ * 観測: GetObsDim() 次元 = GetObsSchema() の dim 合計
  *   [0-1]    プレイヤー位置 (x,y) / FieldHalfSize
  *   [2-3]    プレイヤー速度 (vx,vy) / MoveSpeed（-1〜1 に正規化）
  *   [4-11]   8方向レイキャスト壁距離 (0~1)
@@ -32,6 +32,8 @@ class USurvivorsSpawnComponent;
  *   [22]     player_level (0~1 = level / MaxPlayerLevel, 最大 MaxPlayerLevel=100)
  *   [23 .. 23+N*2-1]       ジェム相対位置 dx,dy × NumGemObs（近い順）
  *   [23+N*2 .. +M*6-1]     敵情報 (dx,dy,vx,vy,type_norm,hp_norm) × MaxEnemyObs
+ *   [+16×3]  敵方向特徴: enemy_nearest_dist_16dir / enemy_density_near_16dir / enemy_density_mid_16dir
+ *   [+16×3]  Gem方向特徴: gem_nearest_dist_16dir / gem_density_near_16dir / gem_density_mid_16dir
  */
 UCLASS()
 class REINBALANCE_API ASurvivorsGame : public AActor
@@ -53,8 +55,8 @@ public:
 	/** 観測スキーマを返す */
 	TArray<FSurvivorsObsSegment> GetObsSchema() const;
 
-	/** 観測次元数: 23 + NumGemObs*2 + MaxEnemyObs*6 */
-	int32 GetObsDim() const { return 23 + NumGemObs * 2 + MaxEnemyObs * 6; }
+	/** 観測次元数: GetObsSchema() の dim 合計（初回計算後はキャッシュ） */
+	int32 GetObsDim() const;
 
 	/** obs 次元に影響するパラメータから生成するハッシュ */
 	FString GetObsSchemaHash() const;
@@ -321,4 +323,6 @@ private:
 	float CumulativeXPForLevel(int32 Level) const; // Lv1 から Level に達するまでの累計 XP
 	void  ProcessXPGain(float Amount);
 	void  OnLevelUp(int32 NextLevel);
+
+	mutable int32 CachedObsDim = -1;
 };

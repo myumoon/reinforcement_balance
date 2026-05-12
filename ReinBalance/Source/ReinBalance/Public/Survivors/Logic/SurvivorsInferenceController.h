@@ -28,7 +28,7 @@ public:
 protected:
 	virtual uint32 GetObsDim() const override
 	{
-		return SurvivorsGame ? static_cast<uint32>(SurvivorsGame->GetObsDim()) : 183u;
+		return SurvivorsGame ? static_cast<uint32>(SurvivorsGame->GetObsDim()) : 279u;
 	}
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
