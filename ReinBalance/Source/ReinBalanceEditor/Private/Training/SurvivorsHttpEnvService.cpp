@@ -28,8 +28,8 @@ public:
 		if (Game)
 		{
 			const int32 ActionIdx = Action.Num() > 0
-				? FMath::Clamp(static_cast<int32>(Action[0]), 0, 4)
-				: 4;
+				? FMath::Clamp(static_cast<int32>(Action[0]), 0, 8)
+				: 8;
 			float AccumulatedReward = 0.f;
 			for (int32 i = 0; i < Steps; ++i)
 			{

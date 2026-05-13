@@ -4,7 +4,7 @@ import numpy as np
 import gymnasium as gym
 
 _OBS_DIM = 279  # 183 + 96 (方向別密度/最近傍距離 16方向×6セグメント)
-_NUM_ACTIONS = 5
+_NUM_ACTIONS = 9
 
 # UE5 GetObsSchema() と一致するオフセット・スキーマ（dry-run 時の extractor 用）
 _OBS_SCHEMA = [
