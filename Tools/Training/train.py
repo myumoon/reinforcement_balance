@@ -631,10 +631,21 @@ def main() -> None:
     print(f"[INFO] config_hash: {config_hash}")
 
     _use_wandb = args.wandb and _WANDB_AVAILABLE
+
+    # --resume 時に同一 W&B run へグラフを継続する
+    wandb_run_id: str | None = None
+    _wandb_id_path = run_dir / "wandb_run_id.txt"
+    if args.resume and _wandb_id_path.exists():
+        wandb_run_id = _wandb_id_path.read_text().strip() or None
+        if wandb_run_id:
+            print(f"[INFO] W&B run_id を再利用します: {wandb_run_id}")
+
     if _use_wandb:
         wandb.init(
             project=args.wandb_project,
             name=args.wandb_run_name or args.run_name,
+            id=wandb_run_id,
+            resume="must" if wandb_run_id else None,
             sync_tensorboard=True,
             config={
                 "game": args.game,
@@ -660,6 +671,9 @@ def main() -> None:
                 **_PPO_KWARGS,
             },
         )
+        # 新規 run のときだけ run_id を保存（resume 時は上書きしない）
+        if not wandb_run_id:
+            _wandb_id_path.write_text(wandb.run.id)
         ppo_kwargs["tensorboard_log"] = str(run_dir / "tensorboard")
 
     # --reward-fn の事前チェック
