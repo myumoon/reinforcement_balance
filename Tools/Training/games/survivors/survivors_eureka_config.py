@@ -1,39 +1,18 @@
 """Survivors ゲーム専用の EUREKA 設定。"""
 
+from __future__ import annotations
+
 import json
 import sys
 from pathlib import Path
 
 from base.eureka_game_config import EurekaGameConfig
 from common.obs_schema import fetch_obs_schema, build_obs_layout
-from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
 from games.survivors.survivors_reward_validator import validate_survivors_reward_code
 from games.survivors.survivors_source_of_truth import (
     build_survivors_source_of_truth,
     render_source_of_truth_markdown,
 )
-
-_ALIVE_REWARD  = 0.001
-_ITEM_REWARD   = 1.0
-_KILL_REWARD   = 2.0
-
-# XP システム定数（C++ SurvivorsGame.h と同値に保つこと）
-_ITEM_XP       = 1.0
-_KILL_XP_RATIO = 0.05
-_XP_BASE       = 5.0   # Lv0→1 に必要な基礎 XP
-_XP_GROWTH     = 3.0   # レベルごとの増分（XPRequired(n) = XPBase + XPGrowth * n）
-_MAX_LEVEL     = 100
-
-# VS スケール換算ダメージ値（ドキュメント参照用）
-_ENEMY_DPS = {"A": 5.0, "B": 10.0, "C": 8.0}
-_ENEMY_HP  = {"A": 20.0, "B": 50.0, "C": 30.0}
-_MIN_AURA_DPS  = 15.0   # Lv0 時のオーラ DPS（C++ MinAuraDPS と同値に保つこと）
-_MAX_AURA_DPS  = 30.0   # MaxLevel 時のオーラ DPS（C++ MaxAuraDPS と同値に保つこと）
-_MAX_PLAYER_HP = 70.0
-
-# 攻撃
-_MIN_AURA_RADIUS = 2.0
-_MAX_AURA_RADIUS = 10.0
 
 
 class SurvivorsEurekaConfig(EurekaGameConfig):
@@ -43,6 +22,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         self._obs_layout_str: str = ""
         self._offsets: dict[str, int] = {}
         self._obs_schema: dict | None = None
+        self._source_of_truth: dict | None = None
 
     def setup(self, host: str, port: int) -> None:
         print(f"[INFO] obs_schema を取得中 ({host}:{port})...")
@@ -57,12 +37,13 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
 
     def build_source_of_truth(self, host: str, port: int) -> dict:
         repo_root = Path(__file__).resolve().parents[4]
-        return build_survivors_source_of_truth(
+        self._source_of_truth = build_survivors_source_of_truth(
             repo_root=repo_root,
             host=host,
             port=port,
             obs_schema=self._obs_schema,
         )
+        return self._source_of_truth
 
     def render_source_of_truth(self, source_of_truth: dict | None) -> str:
         return render_source_of_truth_markdown(source_of_truth)
@@ -76,36 +57,84 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             return ""
         return self._titled_section("Source of Truth (C++/UE5 auto extracted)", rendered)
 
+    def _effective_source_of_truth(self, source_of_truth: dict | None = None) -> dict:
+        return source_of_truth or self._source_of_truth or {}
+
+    def _reward_constant(self, name: str, default: float) -> float:
+        return float(
+            self._effective_source_of_truth().get("reward_constants", {}).get(name, default)
+        )
+
+    def _player_constant(self, name: str, default: float) -> float:
+        return float(
+            self._effective_source_of_truth().get("player_constants", {}).get(name, default)
+        )
+
+    def _observation_constant(self, name: str, default: float | int) -> float | int:
+        return self._effective_source_of_truth().get("observation_constants", {}).get(name, default)
+
+    def _garlic_summary(self) -> str:
+        table = self._effective_source_of_truth().get("garlic_table", [])
+        if not table:
+            return "GarlicTable は Source of Truth のC++ snippetを参照してください。"
+        first = table[0]
+        last = table[-1]
+        return (
+            f"GarlicTable: Lv1 damage={first['damage']}, interval={first['hit_interval']}s, "
+            f"radius={first['area_radius']}u / Lv{len(table)} damage={last['damage']}, "
+            f"interval={last['hit_interval']}s, radius={last['area_radius']}u"
+        )
+
+    def _gem_xp_summary(self) -> str:
+        values = self._effective_source_of_truth().get("gem_xp_values", [])
+        return f"GemXPValues: {values}" if values else "GemXPValues は Source of Truth のC++ snippetを参照してください。"
+
+    def _enemy_summary(self) -> str:
+        enemies = self._effective_source_of_truth().get("enemy_types", [])
+        if not enemies:
+            return "EnemyTypeTable は Source of Truth のC++ snippetを参照してください。"
+        rows = [
+            f"TypeId {e['type_id']} {e['name']}: HP={e['base_hp']}, speed={e['speed']}, damage={e['contact_damage']}"
+            for e in enemies
+        ]
+        return "\n".join(rows)
+
     # ------------------------------------------------------------------ #
     # プロンプトセクション                                                  #
     # ------------------------------------------------------------------ #
 
     def _prompt_section_game_overview(self) -> str:
+        item_reward = self._reward_constant("ItemReward", 1.0)
+        kill_reward = self._reward_constant("KillReward", 2.0)
         return (
             f"2D フィールド（±15m の正方形）でプレイヤーが敵を倒しながらアイテムを集めて生き延びるゲームです。\n"
             f"- プレイヤーは離散5方向（上/下/左/右/静止）で移動\n"
-            f"- プレイヤーはオーラ（Lv0時半径 {_MIN_AURA_RADIUS}m）で自動攻撃し、敵を倒せる\n"
+            f"- プレイヤーはGarlicオーラで自動攻撃し、敵を倒せる\n"
             f"- 敵に接触すると毎ティック HP が減少し、HP=0 でエピソード終了\n"
             f"- 敵はフィールド外周からスポーンし、プレイヤーに向かって移動する（同時敵数とスポーン頻度はカリキュラムで変化）\n"
             f"- 敵を倒すとGemがドロップし、Gem取得でXPとItemRewardを得る\n"
-            f"- アイテム（{_ITEM_REWARD}点）とKill報酬（{_KILL_REWARD}点/体）で得点を稼ぐ\n"
-            f"- アイテム取得で {_ITEM_XP} XP 獲得。XPRequired(lv) = {_XP_BASE:.0f}+{_XP_GROWTH:.0f}×lv でレベルアップ（上限 {_MAX_LEVEL} Lv）\n"
-            f"- 敵撃破でも少量 XP を獲得（{_ITEM_XP * _KILL_XP_RATIO:.2f} XP/体 = アイテムの {_KILL_XP_RATIO*100:.0f}%）\n"
-            f"- レベルアップで攻撃範囲が拡大（最小半径{_MIN_AURA_RADIUS}、最大半径{_MAX_AURA_RADIUS}で線形補間）\n"
+            f"- Gem取得（ItemReward={item_reward}）と敵撃破（KillReward={kill_reward}）で得点を稼ぐ\n"
+            f"- XPRequiredForLevel、GemXPValues、GarlicTable は Source of Truth のC++抽出値を参照すること\n"
+            f"- レベルアップでGarlicが強化される。手書きのXP式やGarlic式を仮定しないこと\n"
         )
 
     def _prompt_section_game_objective(self) -> str:
+        item_reward = self._reward_constant("ItemReward", 1.0)
+        kill_reward = self._reward_constant("KillReward", 2.0)
         return (
             f"**最優先目標**: 1エピソードで「アイテムを取り敵を倒しながら生き延びる」こと。\n"
             f"- 死ぬとエピソード終了するため、HP 管理が最重要\n"
             f"- ただし壁際に逃げ続けるだけでは得点が低い\n"
             f"- 敵をオーラ範囲に引き込んで倒しつつアイテムを取る積極的行動が最善\n"
             f"- **評価指標: item_kill_score** = (base_reward - AliveReward×ep_len) の平均\n"
-            f"  純粋なアイテム+Kill スコア。生存だけでは 0.0、アイテム1個で {_ITEM_REWARD:.1f}、Kill1体で {_KILL_REWARD:.1f}"
+            f"  純粋なGem+Kill スコア。生存だけでは 0.0、Gem1個で {item_reward:.1f}、Kill1体で {kill_reward:.1f}"
         )
 
     def _prompt_section_obs_index(self) -> str:
         o = self._offsets
+        max_player_hp = self._player_constant("MaxPlayerHP", 70.0)
+        item_reward = self._reward_constant("ItemReward", 1.0)
+        max_player_level = self._observation_constant("MaxPlayerLevel", 100)
         hp_i       = o.get("player_hp", 12)
         wpn_i      = o.get("weapon_slots", 13)
         ecnt_i     = o.get("enemy_count", 19)
@@ -125,24 +154,20 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"  obs[0:2]   = player_pos (x,y) / FieldHalfSize(15m) → [-1, 1]\n"
             f"  obs[2:4]   = player_vel (vx,vy)\n"
             f"  obs[4:12]  = wall_rays 8方向 (0~1, 1=遠い・0=壁が近い)\n"
-            f"  obs[{hp_i}]     = player_hp / {_MAX_PLAYER_HP} (0~1)\n"
+            f"  obs[{hp_i}]     = player_hp / MaxPlayerHP={max_player_hp} (0~1)\n"
             f"  obs[{wpn_i}:{wpn_i+6}] = weapon_slots × 3: (type_norm, level_norm) 各 [0,1]\n"
             f"             Phase1: obs[{wpn_i}]=0.125(Aura), obs[{wpn_i+1}]=0.125(Lv1), 他は0\n"
             f"  obs[{ecnt_i}]    = 敵数 / {max_enemy}\n"
             f"  obs[{spawn_i}]    = スポーンタイマー (0~1)\n"
             f"  obs[{xp_i}]    = xp_progress (0~1): アイテム取得で増加。レベルアップ時に 0 にリセット\n"
-            f"             Lv0 では {_ITEM_XP/_XP_BASE:.2f}/item, Lv1 では {_ITEM_XP/(_XP_BASE+_XP_GROWTH):.2f}/item\n"
-            f"             XPRequired(lv) = {_XP_BASE:.0f} + {_XP_GROWTH:.0f}×lv\n"
-            f"  obs[{o.get('player_level', xp_i+1)}]    = player_level (0~1 = level/{_MAX_LEVEL})\n"
-            f"  ⚠ オーラ半径は player_level から計算可能:\n"
-            f"     aura_m = {_MIN_AURA_RADIUS} + {_MAX_AURA_RADIUS - _MIN_AURA_RADIUS:.1f} * obs[{o.get('player_level', xp_i+1)}]"
-            f"  (Lv0: {_MIN_AURA_RADIUS}m, Lv{_MAX_LEVEL}: {_MAX_AURA_RADIUS}m)\n"
-            f"     旧固定値 1.5m を使ったオーラ圏判定コードは無効。必ず aura_m を使うこと\n"
+            f"             XPRequiredForLevel は Source of Truth のC++ snippetを参照すること\n"
+            f"  obs[{o.get('player_level', xp_i+1)}]    = player_level (0~1 = level/{max_player_level})\n"
+            f"  ⚠ Garlic半径・ダメージ・hit interval は GarlicTable 由来。手書き線形式を仮定しないこと\n"
             f"\n"
             f"**⚠ Phase1 固定値（reward_fn で参照しないこと）**\n"
             f"  obs[{wpn_i}:{wpn_i+6}] weapon_slots: 常に [0.125, 0.125, 0, 0, 0, 0] 固定\n"
             f"\n"
-            f"  ⚠ アイテム取得検知: obs[{xp_i}] > prev_obs[{xp_i}] または base_reward >= {_ITEM_REWARD}\n"
+            f"  ⚠ Gem取得検知: obs[{xp_i}] > prev_obs[{xp_i}] または base_reward >= {item_reward}\n"
             f"    （レベルアップ直後は obs[{xp_i}] が 0 に戻るため base_reward 判定を推奨）\n"
             f"\n"
             f"  obs[{item_i}:{item_i+2}] = 最近アイテムへの相対位置 (dx, dy) / 30m → [-1, 1]\n"
@@ -179,37 +204,34 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         )
 
     def _prompt_section_fixed_rewards(self) -> str:
+        alive_reward = self._reward_constant("AliveReward", 0.001)
+        item_reward = self._reward_constant("ItemReward", 1.0)
+        kill_reward = self._reward_constant("KillReward", 2.0)
         return (
-            f"- AliveReward = {_ALIVE_REWARD} / step（生存毎ステップ）\n"
-            f"- ItemReward  = {_ITEM_REWARD}（アイテム取得時）\n"
-            f"- KillReward  = {_KILL_REWARD}（敵撃破時）\n"
-            f"- ItemXP      = {_ITEM_XP}（アイテム取得時の XP）\n"
-            f"- KillXP      = {_ITEM_XP * _KILL_XP_RATIO:.2f}（敵撃破時の XP = ItemXP × {_KILL_XP_RATIO}）\n"
-            f"- XPRequired(lv) = {_XP_BASE:.0f} + {_XP_GROWTH:.0f}×lv  "
-            f"（Lv0→1: {_XP_BASE:.0f} XP, Lv99→100: {_XP_BASE + _XP_GROWTH * 99:.0f} XP）"
+            f"- AliveReward = {alive_reward} / step（生存毎ステップ）\n"
+            f"- ItemReward  = {item_reward}（Gem取得時）\n"
+            f"- KillReward  = {kill_reward}（敵撃破時）\n"
+            f"- {self._gem_xp_summary()}\n"
+            f"- XPRequiredForLevel は Source of Truth のC++ snippetを参照してください。"
         )
 
     def _prompt_section_physics(self) -> str:
+        max_player_hp = self._player_constant("MaxPlayerHP", 70.0)
+        move_speed = self._player_constant("MoveSpeed", 80.0)
+        gem_pickup_radius = self._player_constant("GemPickupRadius", 30.0)
+        contact_interval = self._observation_constant("ContactHitInterval", "Source of Truth")
         return (
-            f"- アイテム収集半径: 1.0m\n"
-            f"- 敵接触半径: 0.6m（この距離以内で HP ダメージ）\n"
-            f"- オーラ攻撃半径: Lv0={_MIN_AURA_RADIUS}m → Lv{_MAX_LEVEL}={_MAX_AURA_RADIUS}m（lerp、レベルと共に拡大）\n"
-            f"  reward_fn での計算: aura_m = {_MIN_AURA_RADIUS} + {_MAX_AURA_RADIUS - _MIN_AURA_RADIUS:.1f} * obs[player_level_idx]\n"
-            f"- オーラ DPS: Lv0={_MIN_AURA_DPS} HP/s → Lv{_MAX_LEVEL}={_MAX_AURA_DPS} HP/s（レベルと共に線形増加）\n"
-            f"  reward_fn での計算: aura_dps = {_MIN_AURA_DPS} + {_MAX_AURA_DPS - _MIN_AURA_DPS:.1f} * obs[player_level_idx]\n"
-            f"  per tick: Lv0={_MIN_AURA_DPS/60:.4f}, Lv{_MAX_LEVEL}={_MAX_AURA_DPS/60:.4f}\n"
-            f"- プレイヤー最大 HP: {_MAX_PLAYER_HP}\n"
-            f"- 敵タイプ別ダメージ DPS: A={_ENEMY_DPS['A']}, B={_ENEMY_DPS['B']}, C={_ENEMY_DPS['C']} HP/s\n"
-            f"  → per tick: A={_ENEMY_DPS['A']/60:.4f}, B={_ENEMY_DPS['B']/60:.4f}, C={_ENEMY_DPS['C']/60:.4f}\n"
-            f"- 敵タイプ別 HP: A={_ENEMY_HP['A']}, B={_ENEMY_HP['B']}, C={_ENEMY_HP['C']}\n"
-            f"  → Aura で倒す時間 (Lv0): A={_ENEMY_HP['A']/_MIN_AURA_DPS:.1f}s, B={_ENEMY_HP['B']/_MIN_AURA_DPS:.1f}s, C={_ENEMY_HP['C']/_MIN_AURA_DPS:.1f}s\n"
-            f"  → Aura で倒す時間 (Lv{_MAX_LEVEL}): A={_ENEMY_HP['A']/_MAX_AURA_DPS:.1f}s, B={_ENEMY_HP['B']/_MAX_AURA_DPS:.1f}s, C={_ENEMY_HP['C']/_MAX_AURA_DPS:.1f}s\n"
-            f"- 敵速度: A=1.0m/s, B=2.5m/s, C=1.5m/s（予測追跡）\n"
+            f"- プレイヤー最大 HP: {max_player_hp}\n"
+            f"- プレイヤー移動速度: {move_speed}\n"
+            f"- Gem pickup radius: {gem_pickup_radius}\n"
+            f"- 接触ダメージ間隔: {contact_interval}\n"
+            f"- {self._garlic_summary()}\n"
+            f"- 敵タイプ別パラメータ:\n{self._enemy_summary()}\n"
             f"- スポーン間隔と同時敵数はカリキュラム/paramsで変化するため、固定のMaxActiveEnemiesを前提にしないこと"
         )
 
     def _prompt_section_scale_constraints(self) -> str:
-        max_hp_penalty = _MAX_PLAYER_HP  # 全HP消費時の最大累積ペナルティ
+        max_hp_penalty = self._player_constant("MaxPlayerHP", 70.0)
         return (
             f"- **HP ペナルティは survivors_env が永続的に適用済み**（info['hp_penalty']）\n"
             f"  reward_fn でさらに HP 差分ペナルティを追加しないこと（二重計上になる）\n"
@@ -327,8 +349,9 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         """primary_metric = アイテム+Kill スコアの平均（AliveReward 分を除去）。"""
         if not episode_base_rewards:
             return 0.0
+        alive_reward = self._reward_constant("AliveReward", 0.001)
         scores = [
-            max(0.0, r - _ALIVE_REWARD * l)
+            max(0.0, r - alive_reward * l)
             for r, l in zip(episode_base_rewards, episode_lengths)
         ]
         return sum(scores) / len(scores)
@@ -337,8 +360,9 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
                               episode_lengths: list[int]) -> dict:
         import statistics
         mean_len = sum(episode_lengths) / len(episode_lengths) if episode_lengths else 0.0
+        alive_reward = self._reward_constant("AliveReward", 0.001)
         scores = [
-            max(0.0, r - _ALIVE_REWARD * l)
+            max(0.0, r - alive_reward * l)
             for r, l in zip(episode_base_rewards, episode_lengths)
         ]
         total_steps = sum(episode_lengths)
@@ -354,17 +378,21 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         }
 
     def metrics_description(self) -> str:
+        alive_reward = self._reward_constant("AliveReward", 0.001)
+        item_reward = self._reward_constant("ItemReward", 1.0)
+        kill_reward = self._reward_constant("KillReward", 2.0)
+        max_player_hp = self._player_constant("MaxPlayerHP", 70.0)
         return (
-            f"- base_reward_mean: C++固定報酬の1エピソード平均（AliveReward={_ALIVE_REWARD}/step + ItemReward={_ITEM_REWARD} + KillReward={_KILL_REWARD}）\n"
+            f"- base_reward_mean: C++固定報酬の1エピソード平均（AliveReward={alive_reward}/step + ItemReward={item_reward} + KillReward={kill_reward}）\n"
             f"- shaped_reward_mean: reward_fn 出力の1エピソード平均（hp_penalty は含まない）\n"
             f"- hp_penalty_mean: 永続 HP ダメージペナルティの1エピソード平均\n"
             f"  計算式: clip(-hp_delta×100, -1, 0) / step。1HP ダメージ = -1.0 ペナルティ\n"
-            f"  エピソード全体で最大 -{_MAX_PLAYER_HP:.0f} になりうる（全 HP 消費時）\n"
+            f"  エピソード全体で最大 -{max_player_hp:.0f} になりうる（全 HP 消費時）\n"
             f"  ep_rew_mean(SB3) ~= base_reward_mean + shaped_reward_mean + hp_penalty_mean\n"
             f"- episode_reward_mean: base + shaped + hp_penalty の合計平均（SB3 の ep_rew_mean に対応）\n"
             f"- episode_length: エピソード長（ステップ数、最大 = 全 HP 消費まで）\n"
             f"- item_kill_score (primary): (base_reward - AliveReward×ep_len) の平均\n"
-            f"  純粋なアイテム+Kill スコア。生存のみ=0.0、アイテム1個={_ITEM_REWARD}、Kill1体={_KILL_REWARD}\n"
+            f"  純粋なGem+Kill スコア。生存のみ=0.0、Gem1個={item_reward}、Kill1体={kill_reward}\n"
             f"- item_kill_score_per_1k_steps: 1000 step あたりのアイテム+Kill スコア。長く生きるだけでなく能動的に Gem/Kill を取れているかを見る効率指標\n"
             f"- item_kill_score_std: 標準偏差\n"
             f"- episode_length_min / max: 最短・最長エピソード長"
@@ -373,6 +401,8 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
     def make_model(self, env, device: str = "auto"):
         from stable_baselines3 import PPO
         from common.utils import _linear_schedule
+        from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
+
         policy_kwargs = dict(
             features_extractor_class=SurvivorsEntityAttentionExtractor,
             features_extractor_kwargs=dict(

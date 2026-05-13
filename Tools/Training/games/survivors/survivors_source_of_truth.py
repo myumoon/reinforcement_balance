@@ -37,12 +37,71 @@ def _extract_const_number(text: str, name: str) -> float | int | None:
 
 def _extract_inline_array(text: str, name: str) -> str | None:
     match = re.search(
-        rf"\binline\s+constexpr\s+.+?\s+{re.escape(name)}\s*\[[^\]]*\]\s*=\s*\{{"
-        rf"(?P<body>.*?)\n\s*\}};",
+        rf"\binline\s+constexpr\s+[^\n]+?\s+{re.escape(name)}\s*\[[^\]]*\]\s*=\s*\{{"
+        rf"(?P<body>.*?)\s*\}};",
         text,
         flags=re.DOTALL,
     )
     return match.group(0).strip() if match else None
+
+
+def _extract_garlic_table(text: str) -> list[dict[str, float]]:
+    table = _extract_inline_array(text, "GarlicTable")
+    if not table:
+        return []
+    rows = []
+    for damage, interval, radius in re.findall(
+        r"\{\s*([0-9]+(?:\.[0-9]*)?)f?\s*,\s*([0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
+        r"([0-9]+(?:\.[0-9]*)?)f?\s*\}",
+        table,
+    ):
+        rows.append({
+            "damage": float(damage),
+            "hit_interval": float(interval),
+            "area_radius": float(radius),
+        })
+    return rows
+
+
+def _extract_float_array_values(text: str, name: str) -> list[float]:
+    array = _extract_inline_array(text, name)
+    if not array:
+        return []
+    body_match = re.search(r"\{(?P<body>.*?)\}", array, flags=re.DOTALL)
+    body = body_match.group("body") if body_match else array
+    return [float(v) for v in re.findall(r"([0-9]+(?:\.[0-9]*)?)f?\b", body)]
+
+
+def _extract_enemy_types(text: str) -> list[dict[str, Any]]:
+    table_match = re.search(
+        r"static\s+const\s+FRow\s+Rows\[\]\s*=\s*\{(?P<body>.*?)\n\s*\};",
+        text,
+        flags=re.DOTALL,
+    )
+    if not table_match:
+        return []
+    rows = []
+    row_re = re.compile(
+        r"\{\s*TEXT\(\"(?P<name>[^\"]+)\"\)\s*,\s*"
+        r"(?P<hp>[0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
+        r"(?P<speed>[0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
+        r"(?P<damage>[0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
+        r"(?P<radius>[0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
+        r"(?P<knockback>[0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
+        r"(?P<boss>true|false)\s*\}",
+    )
+    for idx, match in enumerate(row_re.finditer(table_match.group("body"))):
+        rows.append({
+            "type_id": idx,
+            "name": match.group("name"),
+            "base_hp": float(match.group("hp")),
+            "speed": float(match.group("speed")),
+            "contact_damage": float(match.group("damage")),
+            "collision_radius": float(match.group("radius")),
+            "knockback_resistance": float(match.group("knockback")),
+            "is_boss": match.group("boss") == "true",
+        })
+    return rows
 
 
 def _snippet(text: str, rel_path: str, symbol: str, pattern: str, context: int = 2) -> dict[str, Any] | None:
@@ -93,12 +152,16 @@ def build_survivors_source_of_truth(
     gem_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsGemComponent.cpp"
     enemy_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsEnemyComponent.cpp"
     obs_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsObservationComponent.cpp"
+    player_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsPlayerComponent.cpp"
+    spawn_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsSpawnComponent.cpp"
 
     game_h = _read(repo_root, game_h_path)
     constants_h = _read(repo_root, constants_h_path)
     gem_cpp = _read(repo_root, gem_cpp_path)
     enemy_cpp = _read(repo_root, enemy_cpp_path)
     obs_cpp = _read(repo_root, obs_cpp_path)
+    player_cpp = _read(repo_root, player_cpp_path)
+    spawn_cpp = _read(repo_root, spawn_cpp_path)
 
     if obs_schema is None:
         obs_schema = _fetch_schema(host, port)
@@ -116,6 +179,13 @@ def build_survivors_source_of_truth(
     observation_constants = {
         "NumGemObs": _extract_const_number(constants_h, "NumGemObs"),
         "MaxEnemyObs": _extract_const_number(constants_h, "MaxEnemyObs"),
+        "MaxWeaponSlots": _extract_const_number(constants_h, "MaxWeaponSlots"),
+        "MaxWeaponLevel": _extract_const_number(constants_h, "MaxWeaponLevel"),
+        "MaxPlayerLevel": _extract_const_number(constants_h, "MaxPlayerLevel"),
+        "PhysicsDt": _extract_const_number(constants_h, "PhysicsDt"),
+        "MaxGameTime": _extract_const_number(constants_h, "MaxGameTime"),
+        "ContactHitInterval": _extract_const_number(constants_h, "ContactHitInterval"),
+        "GarlicKnockbackStrength": _extract_const_number(constants_h, "GarlicKnockbackStrength"),
         "EnemyDensityDirCount": _extract_const_number(constants_h, "EnemyDensityDirCount"),
         "EnemyNearestDistanceMax": _extract_const_number(constants_h, "EnemyNearestDistanceMax"),
         "EnemyDensityNearDistanceMax": _extract_const_number(constants_h, "EnemyDensityNearDistanceMax"),
@@ -141,6 +211,9 @@ def build_survivors_source_of_truth(
     item_reward = reward_constants["ItemReward"]
     kill_reward = reward_constants["KillReward"]
     alive_reward = reward_constants["AliveReward"]
+    garlic_table_values = _extract_garlic_table(constants_h)
+    gem_xp_values = _extract_float_array_values(constants_h, "GemXPValues")
+    enemy_types = _extract_enemy_types(spawn_cpp)
 
     snippets = [
         _snippet(game_h, game_h_path, "reward constants", r"\bAliveReward\b", context=8),
@@ -148,9 +221,11 @@ def build_survivors_source_of_truth(
         _snippet(gem_cpp, gem_cpp_path, "gem pickup reward", r"LastReward\s*\+=\s*Game->ItemReward"),
         _snippet(enemy_cpp, enemy_cpp_path, "enemy kill reward", r"LastReward\s*\+=\s*Game->KillReward"),
         _snippet(obs_cpp, obs_cpp_path, "observation schema", r"enemy_nearest_dist_16dir", context=8),
+        _snippet(player_cpp, player_cpp_path, "XPRequiredForLevel", r"XPRequiredForLevel", context=18),
+        _snippet(spawn_cpp, spawn_cpp_path, "EnemyTypeTable", r"static const FRow Rows\[\]", context=18),
     ]
     garlic_table = _extract_inline_array(constants_h, "GarlicTable")
-    gem_xp_values = _extract_inline_array(constants_h, "GemXPValues")
+    gem_xp_snippet = _extract_inline_array(constants_h, "GemXPValues")
     if garlic_table:
         snippets.append(
             {
@@ -160,13 +235,13 @@ def build_survivors_source_of_truth(
                 "code": garlic_table,
             }
         )
-    if gem_xp_values:
+    if gem_xp_snippet:
         snippets.append(
             {
                 "path": constants_h_path,
                 "symbol": "GemXPValues",
                 "line": None,
-                "code": gem_xp_values,
+                "code": gem_xp_snippet,
             }
         )
 
@@ -179,6 +254,9 @@ def build_survivors_source_of_truth(
         "reward_constants": reward_constants,
         "player_constants": player_constants,
         "observation_constants": observation_constants,
+        "garlic_table": garlic_table_values,
+        "gem_xp_values": gem_xp_values,
+        "enemy_types": enemy_types,
         "observation": _schema_payload(obs_schema),
         "reward_events": {
             "alive": {
@@ -217,6 +295,9 @@ def render_source_of_truth_markdown(sot: dict[str, Any] | None) -> str:
     player = sot.get("player_constants", {})
     obs_consts = sot.get("observation_constants", {})
     observation = sot.get("observation", {})
+    garlic_table = sot.get("garlic_table", [])
+    gem_xp_values = sot.get("gem_xp_values", [])
+    enemy_types = sot.get("enemy_types", [])
     snippets = sot.get("source_snippets", [])
 
     lines = [
@@ -244,6 +325,11 @@ def render_source_of_truth_markdown(sot: dict[str, Any] | None) -> str:
         f"- GemNearestDistanceMax: {obs_consts.get('GemNearestDistanceMax')}",
         f"- GemDensityNearDistanceMax: {obs_consts.get('GemDensityNearDistanceMax')}",
         f"- GemDensityMidDistanceMax: {obs_consts.get('GemDensityMidDistanceMax')}",
+        "",
+        "### XP / Garlic / Enemy parameters",
+        f"- GemXPValues: {gem_xp_values}",
+        f"- GarlicTable levels: {len(garlic_table)}",
+        f"- EnemyTypeTable rows: {len(enemy_types)}",
         "",
         "### UE5 obs_schema",
         "```json",

@@ -1,5 +1,7 @@
 """EUREKA ゲーム設定の抽象基底クラス。"""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 
 from common.utils import _linear_schedule
