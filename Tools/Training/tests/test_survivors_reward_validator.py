@@ -16,6 +16,11 @@ def _source_of_truth():
         "player_constants": {
             "MaxPlayerHP": 70.0,
         },
+        "directional_density": {
+            "axis_mapping": {
+                "+X": 8,
+            },
+        },
     }
 
 
@@ -41,3 +46,20 @@ if base_reward >= 1.0:
     findings = validate_survivors_reward_code(code, _source_of_truth())
 
     assert findings == []
+
+
+def test_validator_rejects_dir0_plus_x_bin_assumption():
+    code = """
+_BIN_ANGLES = np.array([i * (2.0 * np.pi / 16.0) for i in range(16)])
+_BIN_UX = np.cos(_BIN_ANGLES)
+_BIN_UY = np.sin(_BIN_ANGLES)
+
+def _nearest_bin(dx, dy):
+    ux = dx
+    uy = dy
+    return int(np.argmax(ux * _BIN_UX + uy * _BIN_UY))
+"""
+
+    findings = validate_survivors_reward_code(code, _source_of_truth())
+
+    assert any(f["code"] == "DIRECTION_BIN_MISMATCH" for f in findings)

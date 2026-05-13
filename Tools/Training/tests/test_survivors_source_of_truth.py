@@ -20,6 +20,10 @@ def test_survivors_source_of_truth_extracts_cpp_constants():
     assert sot["gem_xp_values"] == [1.0, 5.0, 10.0]
     assert len(sot["garlic_table"]) == 8
     assert any(enemy["name"] == "GiantBat" for enemy in sot["enemy_types"])
+    assert sot["directional_density"]["axis_mapping"]["+X"] == 8
+    assert sot["directional_density"]["axis_mapping"]["+Y"] == 12
+    assert sot["directional_density"]["axis_mapping"]["-Y"] == 4
+    assert "atan2" in sot["directional_density"]["formula"]
 
 
 def test_survivors_eureka_config_uses_source_of_truth_for_metric():
