@@ -247,6 +247,93 @@ def _validate_code(code: str) -> bool:
         return False
 
 
+def _save_source_of_truth(game_config, source_of_truth: dict | None, out_dir: Path,
+                          json_name: str = "source_of_truth.json",
+                          md_name: str = "source_of_truth.md") -> None:
+    if not source_of_truth:
+        return
+    (out_dir / json_name).write_text(
+        json.dumps(source_of_truth, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    rendered = game_config.render_source_of_truth(source_of_truth)
+    if rendered:
+        (out_dir / md_name).write_text(rendered, encoding="utf-8")
+
+
+def _format_validation_findings(findings: list[dict]) -> str:
+    if not findings:
+        return "問題なし"
+    lines = []
+    for finding in findings:
+        severity = finding.get("severity", "warning")
+        code = finding.get("code", "VALIDATION")
+        message = finding.get("message", "")
+        pattern = finding.get("pattern", "")
+        lines.append(f"- [{severity}] {code}: {message} (pattern: `{pattern}`)")
+    return "\n".join(lines)
+
+
+def _has_validation_errors(findings: list[dict]) -> bool:
+    return any(finding.get("severity") == "error" for finding in findings)
+
+
+def _save_validation_findings(findings: list[dict], out_dir: Path,
+                              basename: str = "reward_validation") -> None:
+    (out_dir / f"{basename}.json").write_text(
+        json.dumps(findings, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (out_dir / f"{basename}.txt").write_text(
+        _format_validation_findings(findings),
+        encoding="utf-8",
+    )
+
+
+def _call_build_prompt_parts(game_config, prev_metrics, iteration, prev_review_findings,
+                             obs_for_iter, source_of_truth):
+    try:
+        return game_config.build_prompt_parts(
+            prev_metrics, iteration, prev_review_findings,
+            initial_observation=obs_for_iter,
+            source_of_truth=source_of_truth,
+        )
+    except TypeError:
+        return game_config.build_prompt_parts(
+            prev_metrics, iteration, prev_review_findings,
+            initial_observation=obs_for_iter,
+        )
+
+
+def _call_build_prompt(game_config, prev_metrics, iteration, prev_review_findings,
+                       obs_for_iter, source_of_truth):
+    try:
+        return game_config.build_prompt(
+            prev_metrics, iteration, prev_review_findings,
+            initial_observation=obs_for_iter,
+            source_of_truth=source_of_truth,
+        )
+    except TypeError:
+        return game_config.build_prompt(
+            prev_metrics, iteration, prev_review_findings,
+            initial_observation=obs_for_iter,
+        )
+
+
+def _call_build_game_context(game_config, source_of_truth):
+    try:
+        return game_config.build_game_context(source_of_truth=source_of_truth)
+    except TypeError:
+        return game_config.build_game_context()
+
+
+def _call_build_constraints_hint(game_config, source_of_truth):
+    try:
+        return game_config.build_constraints_hint(source_of_truth=source_of_truth)
+    except TypeError:
+        return game_config.build_constraints_hint()
+
+
 def _build_review_static(game_context: str) -> str:
     """レビュープロンプトの静的部分（Anthropic キャッシュ対象）。"""
     ctx_section = f"## ゲームコンテキスト\n{game_context}\n\n---" if game_context.strip() else ""
@@ -577,6 +664,16 @@ def main() -> None:
 
     # ゲーム設定の初期化（obs_schema 取得など）
     game_config.setup(args.host, port)
+    source_of_truth = game_config.build_source_of_truth(args.host, port)
+    if source_of_truth:
+        _save_source_of_truth(
+            game_config,
+            source_of_truth,
+            run_dir,
+            json_name="source_of_truth_latest.json",
+            md_name="source_of_truth_latest.md",
+        )
+        print(f"[INFO] source_of_truth_latest 保存: {run_dir}")
 
     # 環境作成
     raw_env = game_config.make_env(args.host, port, frame_skip=args.frame_skip)
@@ -624,20 +721,21 @@ def main() -> None:
             print(f"\n{'=' * 60}")
             print(f"[EUREKA] イテレーション {i}/{args.iterations}")
             print(f"{'=' * 60}")
+            _save_source_of_truth(game_config, source_of_truth, iter_dir)
 
             # --- LLM に報酬関数を生成させる ---
             print("[INFO] LLM に報酬関数を生成中...")
             obs_for_iter = initial_observation if i == 1 else None
             if args.llm == "anthropic":
-                static_prefix, dynamic_suffix = game_config.build_prompt_parts(
-                    prev_metrics, i, prev_review_findings,
-                    initial_observation=obs_for_iter)
+                static_prefix, dynamic_suffix = _call_build_prompt_parts(
+                    game_config, prev_metrics, i, prev_review_findings,
+                    obs_for_iter, source_of_truth)
                 gen_content = (_make_cached_content(static_prefix, dynamic_suffix)
                                if static_prefix else dynamic_suffix)
             else:
-                gen_content = game_config.build_prompt(
-                    prev_metrics, i, prev_review_findings,
-                    initial_observation=obs_for_iter)
+                gen_content = _call_build_prompt(
+                    game_config, prev_metrics, i, prev_review_findings,
+                    obs_for_iter, source_of_truth)
             try:
                 llm_response = _call_llm(client, model_name, gen_content, args.llm,
                                          max_tokens=8192)
@@ -669,24 +767,45 @@ def main() -> None:
                     "    return 0.0\n"
                 )
             else:
+                initial_validation = game_config.validate_reward_code(reward_fn_code, source_of_truth)
+                if initial_validation:
+                    _save_validation_findings(initial_validation, iter_dir, "reward_validation_initial")
+                    print("[WARN] reward_fn semantic validation findings:")
+                    print(_format_validation_findings(initial_validation))
+
                 # レビュー＆改訂ステップ（--no-review で無効化可能）
                 if not args.no_review:
                     # Step A: レビュアー LLM がフィードバックのみ返す（コードは書かない）
                     print("[INFO] reward_fn をレビュー中...")
-                    game_context = game_config.build_game_context()
+                    game_context = _call_build_game_context(game_config, source_of_truth)
+                    validation_review_section = (
+                        "\n\n## 機械検証で検出された問題\n"
+                        f"{_format_validation_findings(initial_validation)}"
+                        if initial_validation else ""
+                    )
                     if args.llm == "anthropic" and game_context.strip():
                         review_content = _make_cached_content(
                             _build_review_static(game_context),
-                            _build_review_dynamic(reward_fn_code, prev_metrics),
+                            _build_review_dynamic(reward_fn_code, prev_metrics)
+                            + validation_review_section,
                         )
                     else:
-                        review_content = _build_review_prompt(reward_fn_code, game_context, prev_metrics)
+                        review_content = (
+                            _build_review_prompt(reward_fn_code, game_context, prev_metrics)
+                            + validation_review_section
+                        )
                     review_response = _call_llm(client, model_name, review_content, args.llm)
+                    if initial_validation:
+                        review_response = (
+                            f"{review_response}\n\n"
+                            "## 機械検証で検出された問題\n"
+                            f"{_format_validation_findings(initial_validation)}"
+                        )
                     (iter_dir / "review_response.txt").write_text(review_response, encoding="utf-8")
 
                     # Step B: 生成 LLM がレビュー意見を判断して最終版を実装
                     print("[INFO] レビュー意見をもとに改訂中...")
-                    constraints_hint = game_config.build_constraints_hint()
+                    constraints_hint = _call_build_constraints_hint(game_config, source_of_truth)
                     revision_prompt = _build_revision_prompt(reward_fn_code, review_response, constraints_hint)
                     revision_response = _call_llm(client, model_name, revision_prompt, args.llm)
                     (iter_dir / "revision_response.txt").write_text(revision_response, encoding="utf-8")
@@ -701,6 +820,16 @@ def main() -> None:
 
                     # 次イテレーションへ引き継ぐレビュー知見を構築
                     prev_review_findings = _build_review_findings(review_response, revision_response)
+
+                final_validation = game_config.validate_reward_code(reward_fn_code, source_of_truth)
+                _save_validation_findings(final_validation, iter_dir)
+                if _has_validation_errors(final_validation):
+                    print("[ERROR] reward_fn semantic validation failed:")
+                    print(_format_validation_findings(final_validation))
+                    _save_state(run_dir, i, prev_metrics, best_iter, best_primary,
+                                prev_review_findings)
+                    env.close()
+                    return
 
             print(f"[INFO] LLM recommended steps: {llm_steps:,}")
             print(f"[INFO] Training steps used: {training_steps:,}")

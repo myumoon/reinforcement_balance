@@ -2,13 +2,19 @@
 
 import json
 import sys
+from pathlib import Path
 
 from base.eureka_game_config import EurekaGameConfig
 from common.obs_schema import fetch_obs_schema, build_obs_layout
 from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
+from games.survivors.survivors_reward_validator import validate_survivors_reward_code
+from games.survivors.survivors_source_of_truth import (
+    build_survivors_source_of_truth,
+    render_source_of_truth_markdown,
+)
 
 _ALIVE_REWARD  = 0.001
-_ITEM_REWARD   = 3.0
+_ITEM_REWARD   = 1.0
 _KILL_REWARD   = 2.0
 
 # XP システム定数（C++ SurvivorsGame.h と同値に保つこと）
@@ -23,7 +29,7 @@ _ENEMY_DPS = {"A": 5.0, "B": 10.0, "C": 8.0}
 _ENEMY_HP  = {"A": 20.0, "B": 50.0, "C": 30.0}
 _MIN_AURA_DPS  = 15.0   # Lv0 時のオーラ DPS（C++ MinAuraDPS と同値に保つこと）
 _MAX_AURA_DPS  = 30.0   # MaxLevel 時のオーラ DPS（C++ MaxAuraDPS と同値に保つこと）
-_MAX_PLAYER_HP = 100.0
+_MAX_PLAYER_HP = 70.0
 
 # 攻撃
 _MIN_AURA_RADIUS = 2.0
@@ -36,16 +42,39 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
     def __init__(self):
         self._obs_layout_str: str = ""
         self._offsets: dict[str, int] = {}
+        self._obs_schema: dict | None = None
 
     def setup(self, host: str, port: int) -> None:
         print(f"[INFO] obs_schema を取得中 ({host}:{port})...")
         schema = fetch_obs_schema(host, port)
+        self._obs_schema = schema
         self._obs_layout_str, self._offsets = build_obs_layout(schema)
         print(f"[INFO] obs_schema 取得完了: total_dim={schema['total_dim']}")
 
     def make_env(self, host: str, port: int, frame_skip: int = 1):
         from games.survivors.survivors_env import SurvivorsEnv
         return SurvivorsEnv(host=host, port=port, frame_skip=frame_skip)
+
+    def build_source_of_truth(self, host: str, port: int) -> dict:
+        repo_root = Path(__file__).resolve().parents[4]
+        return build_survivors_source_of_truth(
+            repo_root=repo_root,
+            host=host,
+            port=port,
+            obs_schema=self._obs_schema,
+        )
+
+    def render_source_of_truth(self, source_of_truth: dict | None) -> str:
+        return render_source_of_truth_markdown(source_of_truth)
+
+    def validate_reward_code(self, code: str, source_of_truth: dict | None) -> list[dict]:
+        return validate_survivors_reward_code(code, source_of_truth)
+
+    def _source_of_truth_section(self, source_of_truth: dict | None) -> str:
+        rendered = self.render_source_of_truth(source_of_truth)
+        if not rendered:
+            return ""
+        return self._titled_section("Source of Truth (C++/UE5 auto extracted)", rendered)
 
     # ------------------------------------------------------------------ #
     # プロンプトセクション                                                  #
@@ -57,8 +86,8 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"- プレイヤーは離散5方向（上/下/左/右/静止）で移動\n"
             f"- プレイヤーはオーラ（Lv0時半径 {_MIN_AURA_RADIUS}m）で自動攻撃し、敵を倒せる\n"
             f"- 敵に接触すると毎ティック HP が減少し、HP=0 でエピソード終了\n"
-            f"- 敵はフィールド外周からスポーンし、プレイヤーに向かって移動する（最大6体同時、5秒間隔）\n"
-            f"- フィールドにはアイテムが常時10個存在する\n"
+            f"- 敵はフィールド外周からスポーンし、プレイヤーに向かって移動する（同時敵数とスポーン頻度はカリキュラムで変化）\n"
+            f"- 敵を倒すとGemがドロップし、Gem取得でXPとItemRewardを得る\n"
             f"- アイテム（{_ITEM_REWARD}点）とKill報酬（{_KILL_REWARD}点/体）で得点を稼ぐ\n"
             f"- アイテム取得で {_ITEM_XP} XP 獲得。XPRequired(lv) = {_XP_BASE:.0f}+{_XP_GROWTH:.0f}×lv でレベルアップ（上限 {_MAX_LEVEL} Lv）\n"
             f"- 敵撃破でも少量 XP を獲得（{_ITEM_XP * _KILL_XP_RATIO:.2f} XP/体 = アイテムの {_KILL_XP_RATIO*100:.0f}%）\n"
@@ -176,7 +205,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"  → Aura で倒す時間 (Lv0): A={_ENEMY_HP['A']/_MIN_AURA_DPS:.1f}s, B={_ENEMY_HP['B']/_MIN_AURA_DPS:.1f}s, C={_ENEMY_HP['C']/_MIN_AURA_DPS:.1f}s\n"
             f"  → Aura で倒す時間 (Lv{_MAX_LEVEL}): A={_ENEMY_HP['A']/_MAX_AURA_DPS:.1f}s, B={_ENEMY_HP['B']/_MAX_AURA_DPS:.1f}s, C={_ENEMY_HP['C']/_MAX_AURA_DPS:.1f}s\n"
             f"- 敵速度: A=1.0m/s, B=2.5m/s, C=1.5m/s（予測追跡）\n"
-            f"- スポーン間隔: 5秒 ≈ 300ステップ（MaxActiveEnemies=6、EnemySpeedMult で倍率変更可能）"
+            f"- スポーン間隔と同時敵数はカリキュラム/paramsで変化するため、固定のMaxActiveEnemiesを前提にしないこと"
         )
 
     def _prompt_section_scale_constraints(self) -> str:
@@ -205,8 +234,9 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
     # ゲームコンテキスト・プロンプト構築                                      #
     # ------------------------------------------------------------------ #
 
-    def build_game_context(self) -> str:
+    def build_game_context(self, source_of_truth: dict | None = None) -> str:
         return "\n\n".join([
+            self._source_of_truth_section(source_of_truth),
             self._titled_section("ゲーム概要",           self._prompt_section_game_overview()),
             self._titled_section("ゲームの目標",          self._prompt_section_game_objective()),
             self._titled_section("obs インデックス一覧",  self._prompt_section_obs_index()),
@@ -216,9 +246,10 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             self._titled_section("メトリクスの意味",       self.metrics_description()),
         ])
 
-    def _build_prompt_static(self) -> str:
+    def _build_prompt_static(self, source_of_truth: dict | None = None) -> str:
         return "\n\n".join([
             "あなたは強化学習の報酬設計エキスパートです。",
+            self._source_of_truth_section(source_of_truth),
             self._titled_section("ゲーム概要",           self._prompt_section_game_overview()),
             self._titled_section("ゲームの目標",          self._prompt_section_game_objective()),
             self._titled_section("obs インデックス一覧",  self._prompt_section_obs_index()),
@@ -267,19 +298,22 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
 
     def build_prompt_parts(self, prev_metrics: dict | None, iteration: int,
                            prev_review: str | None = None,
-                           initial_observation: str | None = None) -> tuple[str, str]:
-        return self._build_prompt_static(), self._build_prompt_dynamic(
+                           initial_observation: str | None = None,
+                           source_of_truth: dict | None = None) -> tuple[str, str]:
+        return self._build_prompt_static(source_of_truth), self._build_prompt_dynamic(
             prev_metrics, iteration, prev_review, initial_observation)
 
     def build_prompt(self, prev_metrics: dict | None, iteration: int,
                      prev_review: str | None = None,
-                     initial_observation: str | None = None) -> str:
+                     initial_observation: str | None = None,
+                     source_of_truth: dict | None = None) -> str:
         static, dynamic = self.build_prompt_parts(prev_metrics, iteration, prev_review,
-                                                   initial_observation)
+                                                   initial_observation, source_of_truth)
         return static + "\n\n" + dynamic
 
-    def build_constraints_hint(self) -> str:
+    def build_constraints_hint(self, source_of_truth: dict | None = None) -> str:
         return "\n\n".join([
+            self._source_of_truth_section(source_of_truth),
             self._titled_section("スケール制約", self._prompt_section_scale_constraints()),
             self._titled_section("物理定数",     self._prompt_section_physics()),
         ])

@@ -1,0 +1,72 @@
+## Survivors EUREKA initial observation
+
+このファイルは固定仕様の source of truth ではありません。
+C++/UE5 由来の報酬定数、MaxPlayerHP、obs_schema、GarlicTable、GemXPValues、敵パラメータは
+eureka_loop が自動抽出する Source of Truth セクションを優先してください。
+
+このファイルには、今回の訓練で観察した課題と reward_fn に期待する方向性だけを書きます。
+
+## 現在の主課題
+
+Phase6 以降の包囲入門で、平均スコアは伸びる一方で崩壊episodeが混ざっています。
+目的は平均点だけを上げることではなく、短時間死亡episodeを減らし、active_score_min を上げ、
+active_score_cv を下げることです。
+
+見えている失敗パターン:
+
+- 敵に囲まれたときに隙間方向へ逃げられず、数秒から十数秒で死亡する。
+- 近くのGemを拾う圧が弱い、または敵密度が高い方向のGemへ不用意に向かう。
+- その場でうろうろして、偶然落ちたGemを拾う挙動になりやすい。
+- 低HP、壁際、近距離敵密度が高い状態でGem優先が強すぎると崩壊する。
+
+## reward_fn に期待する方針
+
+- 近距離敵密度が高い方向へ進む行動を弱くする。
+- 最近傍敵距離が短い方向を避け、敵密度が低い方向へ移動する圧を作る。
+- 全方向が危険な場合でも静止で固まらず、相対的にましな方向へ動く圧を残す。
+- Gemは「安全な方向にある場合」に回収を促す。
+- 敵密度が高い方向へのGem接近報酬は抑制する。
+- 低HP時はGemより接触回避と壁際脱出を優先する。
+- Garlic範囲で敵を倒す行動は促すが、接触半径へ突っ込む報酬にはしない。
+
+## 方向密度obsの使い方
+
+敵/Gemの方向別最近傍距離・密度obsは全Phaseで利用可能です。
+Phase6以降だけに限定する必要はありません。
+序盤から使うことで「敵密度を避けつつ安全なGemへ向かう」基本行動を早めに学習させたいです。
+
+ただし、escape_score や `gem_density - enemy_density` のような強い合成スコアを作り込みすぎないでください。
+まずは以下のような局所的でスケールの小さい shaping にしてください。
+
+- 敵が近い方向へ移動したときの軽いペナルティ。
+- 敵が少なく、最近傍敵距離が遠い方向へ移動したときの軽いボーナス。
+- Gemが近く、敵密度が低い方向へ移動したときの軽いボーナス。
+- 低HP時や壁際では敵回避をGem接近より優先するゲート。
+
+## 評価時に重視するログ
+
+- active_score_mean
+- active_score_min
+- active_score_cv
+- episode_length_mean / min
+- player_hp_mean / min
+- contact_enemy_count_mean
+- nearest_enemy_distance_mean
+- nearest_gem_distance_mean
+- xp_progress_mean
+- item_kill_score_per_1k_steps
+
+期待する変化:
+
+- active_score_min が上がる。
+- active_score_cv が下がる。
+- episode_length_min が上がる。
+- contact_enemy_count_mean が下がる。
+- nearest_enemy_distance_mean が少し上がる。
+- nearest_gem_distance_mean は上がりすぎず、Gem回収効率も維持される。
+
+## 注意
+
+base_reward の固定報酬を reward_fn 側で再実装しないでください。
+shaping は base_reward より小さい補助信号として扱ってください。
+Source of Truth と矛盾する固定値や古い obs index をこのファイルの内容から推測しないでください。

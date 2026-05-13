@@ -24,13 +24,15 @@ class EurekaGameConfig(ABC):
     @abstractmethod
     def build_prompt(self, prev_metrics: dict | None, iteration: int,
                      prev_review: str | None = None,
-                     initial_observation: str | None = None) -> str:
+                     initial_observation: str | None = None,
+                     source_of_truth: dict | None = None) -> str:
         """LLM へのプロンプト文字列を生成して返す。"""
         ...
 
     def build_prompt_parts(self, prev_metrics: dict | None, iteration: int,
                            prev_review: str | None = None,
-                           initial_observation: str | None = None) -> tuple[str, str]:
+                           initial_observation: str | None = None,
+                           source_of_truth: dict | None = None) -> tuple[str, str]:
         """Anthropic プロンプトキャッシュ用の (静的プレフィックス, 動的サフィックス) を返す。
 
         デフォルト実装: 静的部分なし（キャッシュ無効）。
@@ -38,12 +40,24 @@ class EurekaGameConfig(ABC):
         """
         return "", self.build_prompt(prev_metrics, iteration, prev_review, initial_observation)
 
-    def build_constraints_hint(self) -> str:
+    def build_constraints_hint(self, source_of_truth: dict | None = None) -> str:
         """改訂プロンプト用の制約ヒント文字列を返す（任意 override）。
 
         デフォルト実装: 空文字（制約ヒントなし）。
         """
         return ""
+
+    def build_source_of_truth(self, host: str, port: int) -> dict | None:
+        """Return structured game facts used by prompts and validators."""
+        return None
+
+    def render_source_of_truth(self, source_of_truth: dict | None) -> str:
+        """Render structured game facts as Markdown."""
+        return ""
+
+    def validate_reward_code(self, code: str, source_of_truth: dict | None) -> list[dict]:
+        """Return semantic validation findings for generated reward code."""
+        return []
 
     def compute_primary_metric(self, episode_base_rewards: list[float],
                                episode_lengths: list[int]) -> float:
@@ -94,7 +108,7 @@ class EurekaGameConfig(ABC):
         """
         return f"## {title}\n{body}"
 
-    def build_game_context(self) -> str:
+    def build_game_context(self, source_of_truth: dict | None = None) -> str:
         """レビュープロンプト用のゲームコンテキストを返す（任意 override）。
 
         ゲームルール・物理定数・固定報酬など reward_fn 設計に必要な情報を返す。
