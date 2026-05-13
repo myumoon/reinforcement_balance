@@ -185,7 +185,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"    obs[{ehp_i}+i]   = hp/max_hp\n"
             f"\n"
             f"**方向別密度/最近傍距離（16方向×6セグメント、全Phaseで利用可能）**\n"
-            f"  16方向はプレイヤー中心22.5度刻みの扇形ビン（0=右, 時計回り）\n"
+            f"  16方向はC++の atan2 + PI シフトで計算される扇形ビン（Dir0=-X側, Dir8=+X側）\n"
             f"  obs[{o.get('enemy_nearest_dist_16dir', end_i)}:{o.get('enemy_nearest_dist_16dir', end_i)+16}]\n"
             f"    = enemy_nearest_dist_16dir: 各方向の最近傍敵距離 (0=危険・接触近い, 1=24m以内に敵なし)\n"
             f"  obs[{o.get('enemy_density_near_16dir', end_i+16)}:{o.get('enemy_density_near_16dir', end_i+16)+16}]\n"

@@ -104,6 +104,35 @@ def _extract_enemy_types(text: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _direction_bin_for(dx: float, dy: float, dir_count: int) -> int:
+    import math
+
+    angle_rad = math.atan2(dy, dx)
+    angle01 = (angle_rad + math.pi) / (2.0 * math.pi)
+    return max(0, min(dir_count - 1, int(math.floor(angle01 * dir_count))))
+
+
+def _directional_density_semantics(dir_count: int | None) -> dict[str, Any]:
+    count = int(dir_count or 16)
+    return {
+        "source_function": "BuildDirectionalDensityFeatures",
+        "formula": "Dir = floor(((atan2(Rel.Y, Rel.X) + PI) / (2 * PI)) * DirCount)",
+        "dir_count": count,
+        "angle_shift": "+PI",
+        "axis_mapping": {
+            "+X": _direction_bin_for(1.0, 0.0, count),
+            "+Y": _direction_bin_for(0.0, 1.0, count),
+            "-Y": _direction_bin_for(0.0, -1.0, count),
+            "-X_boundary": "Dir 0 or DirCount-1 depending on exact atan2 boundary",
+        },
+        "notes": [
+            "Dir 0 is not +X. For 16 bins, +X maps to Dir 8.",
+            "Code that defines bin angles as i * 2*pi/16 assumes Dir 0 = +X and is incorrect.",
+            "Use the same atan2 + PI formula as C++ when mapping vectors to density bins.",
+        ],
+    }
+
+
 def _snippet(text: str, rel_path: str, symbol: str, pattern: str, context: int = 2) -> dict[str, Any] | None:
     lines = text.splitlines()
     for idx, line in enumerate(lines):
@@ -214,6 +243,9 @@ def build_survivors_source_of_truth(
     garlic_table_values = _extract_garlic_table(constants_h)
     gem_xp_values = _extract_float_array_values(constants_h, "GemXPValues")
     enemy_types = _extract_enemy_types(spawn_cpp)
+    directional_density = _directional_density_semantics(
+        observation_constants.get("EnemyDensityDirCount")
+    )
 
     snippets = [
         _snippet(game_h, game_h_path, "reward constants", r"\bAliveReward\b", context=8),
@@ -221,6 +253,7 @@ def build_survivors_source_of_truth(
         _snippet(gem_cpp, gem_cpp_path, "gem pickup reward", r"LastReward\s*\+=\s*Game->ItemReward"),
         _snippet(enemy_cpp, enemy_cpp_path, "enemy kill reward", r"LastReward\s*\+=\s*Game->KillReward"),
         _snippet(obs_cpp, obs_cpp_path, "observation schema", r"enemy_nearest_dist_16dir", context=8),
+        _snippet(obs_cpp, obs_cpp_path, "directional density bin formula", r"AngleRad", context=10),
         _snippet(player_cpp, player_cpp_path, "XPRequiredForLevel", r"XPRequiredForLevel", context=18),
         _snippet(spawn_cpp, spawn_cpp_path, "EnemyTypeTable", r"static const FRow Rows\[\]", context=18),
     ]
@@ -257,6 +290,7 @@ def build_survivors_source_of_truth(
         "garlic_table": garlic_table_values,
         "gem_xp_values": gem_xp_values,
         "enemy_types": enemy_types,
+        "directional_density": directional_density,
         "observation": _schema_payload(obs_schema),
         "reward_events": {
             "alive": {
@@ -298,6 +332,7 @@ def render_source_of_truth_markdown(sot: dict[str, Any] | None) -> str:
     garlic_table = sot.get("garlic_table", [])
     gem_xp_values = sot.get("gem_xp_values", [])
     enemy_types = sot.get("enemy_types", [])
+    directional = sot.get("directional_density", {})
     snippets = sot.get("source_snippets", [])
 
     lines = [
@@ -330,6 +365,12 @@ def render_source_of_truth_markdown(sot: dict[str, Any] | None) -> str:
         f"- GemXPValues: {gem_xp_values}",
         f"- GarlicTable levels: {len(garlic_table)}",
         f"- EnemyTypeTable rows: {len(enemy_types)}",
+        "",
+        "### Directional density bin semantics",
+        f"- Formula: {directional.get('formula')}",
+        f"- DirCount: {directional.get('dir_count')}",
+        f"- Axis mapping: {directional.get('axis_mapping')}",
+        "- Important: Dir 0 is not +X. For 16 bins, +X maps to Dir 8.",
         "",
         "### UE5 obs_schema",
         "```json",

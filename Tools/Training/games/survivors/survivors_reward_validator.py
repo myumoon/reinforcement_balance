@@ -33,6 +33,7 @@ def validate_survivors_reward_code(code: str, source_of_truth: dict[str, Any] | 
     item_reward = reward.get("ItemReward")
     kill_reward = reward.get("KillReward")
     max_player_hp = player.get("MaxPlayerHP")
+    directional_density = source_of_truth.get("directional_density", {})
 
     findings: list[dict] = []
 
@@ -87,6 +88,23 @@ def validate_survivors_reward_code(code: str, source_of_truth: dict[str, Any] | 
                         "error",
                         "MAX_HP_MISMATCH",
                         "MaxPlayerHP is 70.0 in C++, but reward_fn appears to use 100.0.",
+                        pattern,
+                    )
+                )
+
+    axis_mapping = directional_density.get("axis_mapping", {})
+    if axis_mapping.get("+X") == 8:
+        direction_error_patterns = [
+            r"_BIN_ANGLES\s*=\s*np\.array\(\s*\[\s*i\s*\*\s*\(?\s*2(?:\.0)?\s*\*\s*np\.pi\s*/\s*16(?:\.0)?",
+            r"return\s+int\s*\(\s*np\.argmax\s*\(\s*ux\s*\*\s*_BIN_UX\s*\+\s*uy\s*\*\s*_BIN_UY\s*\)\s*\)",
+        ]
+        for pattern in direction_error_patterns:
+            if _matches(code, pattern):
+                findings.append(
+                    _finding(
+                        "error",
+                        "DIRECTION_BIN_MISMATCH",
+                        "Directional density bins use atan2 + PI in C++ (+X maps to Dir 8), but reward_fn appears to assume Dir 0 is +X.",
                         pattern,
                     )
                 )
