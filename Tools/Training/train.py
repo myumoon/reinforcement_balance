@@ -564,6 +564,10 @@ def parse_args() -> argparse.Namespace:
                    help="deterministic 評価の間隔 (timesteps, 0=無効, survivors のみ有効, default: 50000)")
     p.add_argument("--eval-episodes", type=int, default=5,
                    help="評価エピソード数 (default: 5, --eval-freq > 0 のとき有効)")
+    p.add_argument("--bc-warmup-episodes", type=int, default=0,
+                   help="BC 事前初期化のデモ収集エピソード数（0=無効, survivors のみ有効, --resume 時は無視, default: 0）")
+    p.add_argument("--bc-epochs", type=int, default=30,
+                   help="BC 訓練エポック数（default: 30, --bc-warmup-episodes > 0 のとき有効）")
     p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
     p.add_argument("--wandb-project", default="rl-balance", help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None, help="W&B ラン名（未指定時は自動生成）")
@@ -944,6 +948,21 @@ def main() -> None:
         status_writer=_write_status_for_model,
     )
     callbacks.append(checkpoint_cb)
+
+    # BC 事前初期化（survivors + 非 dry-run + 非 resume + --bc-warmup-episodes > 0）
+    if args.game == "survivors" and not args.dry_run and not args.resume and args.bc_warmup_episodes > 0:
+        from games.survivors.survivors_bc import bc_warmup
+        print(
+            f"[INFO] BC 事前初期化を開始します "
+            f"(episodes={args.bc_warmup_episodes}, epochs={args.bc_epochs})"
+        )
+        bc_warmup(
+            model=model,
+            env=env,
+            n_episodes=args.bc_warmup_episodes,
+            epochs=args.bc_epochs,
+            verbose=1,
+        )
 
     exit_reason = "completed"
     exit_error = None
