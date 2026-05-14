@@ -39,6 +39,22 @@ from torch.optim import Adam
 #   dir16=15 (≈ 168.75°) → W  (action 6)
 _DIR16_TO_ACTION9: list[int] = [6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1, 0, 0, 7, 7, 6]
 
+# wall_rays インデックス → 9方向アクション変換テーブル
+# C++ RayDirs (SurvivorsGameConstants.h): [E, NE, N, NW, W, SW, S, SE]
+# 9方向アクション:                         [N=0, NE=1, E=2, SE=3, S=4, SW=5, W=6, NW=7]
+#   wall[0]=E  → action 2 (East)
+#   wall[1]=NE → action 1 (NE)
+#   wall[2]=N  → action 0 (North)
+#   wall[3]=NW → action 7 (NW)
+#   wall[4]=W  → action 6 (West)
+#   wall[5]=SW → action 5 (SW)
+#   wall[6]=S  → action 4 (South)
+#   wall[7]=SE → action 3 (SE)
+_WALL_RAY_TO_ACTION9: list[int] = [2, 1, 0, 7, 6, 5, 4, 3]
+
+# 壁が近いと判断する wall_rays の閾値（0=壁接触, 1=遠い）
+_WALL_CLOSE_THRESHOLD: float = 0.15
+
 
 def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     """ルールベース方策。生の（正規化前）obs を想定するが VecNormalize 後でも動作する。
@@ -49,15 +65,18 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     優先度:
       1. 最大敵近距離密度方向から逃げる（差が閾値以上のとき）
       2. Gem × 安全スコアが最大の方向へ移動
-      3. 敵最近傍距離が最大の安全方向へ移動
+      3. 敵も Gem も方向差なし → 壁際なら最も開けた方向へ戻る
+      4. 敵最近傍距離に方向差あり → 最安全方向へ移動
+      5. 判断材料なし → 静止
 
     Returns:
-        int: 0–8 の行動（敵も Gem も方向差なし → 8=静止）
+        int: 0–8 の行動
     """
     DIR_COUNT = 16
     o_en = offsets["enemy_density_near_16dir"]
     o_gn = offsets["gem_density_near_16dir"]
     o_nd = offsets["enemy_nearest_dist_16dir"]
+    o_wr = offsets.get("wall_rays")
 
     enemy_near = obs[o_en:o_en + DIR_COUNT].astype(np.float64)
     gem_near   = obs[o_gn:o_gn + DIR_COUNT].astype(np.float64)
@@ -69,11 +88,11 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     danger_dir = int(np.argmax(enemy_near))
     escape_dir = (danger_dir + DIR_COUNT // 2) % DIR_COUNT
 
-    # 危険方向の密度が逃避先より range の 30% 以上高い → 逃げる（VecNormalize 不変）
+    # 1. 危険方向の密度が逃避先より range の 30% 以上高い → 逃げる（VecNormalize 不変）
     if en_range > 1e-6 and (en_max - float(enemy_near[escape_dir])) / en_range > 0.3:
         return _DIR16_TO_ACTION9[escape_dir]
 
-    # 安全スコア（敵密度が低い方向ほど高い）× Gem 密度でスコアリング
+    # 2. 安全スコア（敵密度が低い方向ほど高い）× Gem 密度でスコアリング
     safety = 1.0 - (enemy_near - en_min) / max(en_range, 1e-6)
     gem_score = gem_near * safety
     gn_min, gn_max = float(np.min(gem_score)), float(np.max(gem_score))
@@ -82,13 +101,21 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     if gn_max - gn_min > 1e-6:
         return _DIR16_TO_ACTION9[gem_dir]
 
-    # 全方向が均一（敵なし）の場合は静止。均一 argmax は常に index 0 → 西方向固定になり
-    # 壁際に張り付くデモを大量生成してしまうため、情報がないときは動かない。
+    # 3. 敵も Gem も方向差なし → 壁際なら最も開けた方向（argmax wall_rays）へ戻る
+    if o_wr is not None:
+        wall = obs[o_wr:o_wr + 8].astype(np.float64)
+        if float(np.min(wall)) < _WALL_CLOSE_THRESHOLD:
+            open_dir = int(np.argmax(wall))
+            return _WALL_RAY_TO_ACTION9[open_dir]
+
+    # 4. 敵最近傍距離に方向差あり → 最安全方向へ移動
     nd_range = float(np.max(enemy_nd)) - float(np.min(enemy_nd))
-    if nd_range < 1e-6:
-        return 8  # 静止
-    safest = int(np.argmax(enemy_nd))
-    return _DIR16_TO_ACTION9[safest]
+    if nd_range > 1e-6:
+        safest = int(np.argmax(enemy_nd))
+        return _DIR16_TO_ACTION9[safest]
+
+    # 5. 判断材料なし（敵も Gem も検出なし、壁も遠い）→ 静止
+    return 8
 
 
 def bc_warmup(
