@@ -63,11 +63,14 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     相対閾値（range の割合）を使うことで正規化の有無に依存しない。
 
     優先度:
-      1. 最大敵近距離密度方向から逃げる（差が閾値以上のとき）
-      2. Gem × 安全スコアが最大の方向へ移動
-      3. 敵も Gem も方向差なし → 壁際なら最も開けた方向へ戻る
+      1. 壁際なら最も開けた方向へ戻る（コーナー脱出を最優先）
+      2. 最大敵近距離密度方向から逃げる（差が閾値以上のとき）
+      3. Gem × 安全スコアが最大の方向へ移動
       4. 敵最近傍距離に方向差あり → 最安全方向へ移動
       5. 判断材料なし → 静止
+
+    コーナーでは「敵の逃避先」が壁方向になり動けなくなるため、
+    壁チェックを最初に行い、敵に近づいてでもコーナーから脱出させる。
 
     Returns:
         int: 0–8 の行動
@@ -88,11 +91,19 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     danger_dir = int(np.argmax(enemy_near))
     escape_dir = (danger_dir + DIR_COUNT // 2) % DIR_COUNT
 
-    # 1. 危険方向の密度が逃避先より range の 30% 以上高い → 逃げる（VecNormalize 不変）
+    # 1. 壁際なら最も開けた方向（argmax wall_rays）へ戻る
+    # コーナーでは敵逃避先が壁方向になって動けなくなるため最優先で脱出する。
+    if o_wr is not None:
+        wall = obs[o_wr:o_wr + 8].astype(np.float64)
+        if float(np.min(wall)) < _WALL_CLOSE_THRESHOLD:
+            open_dir = int(np.argmax(wall))
+            return _WALL_RAY_TO_ACTION9[open_dir]
+
+    # 2. 危険方向の密度が逃避先より range の 30% 以上高い → 逃げる（VecNormalize 不変）
     if en_range > 1e-6 and (en_max - float(enemy_near[escape_dir])) / en_range > 0.3:
         return _DIR16_TO_ACTION9[escape_dir]
 
-    # 2. 安全スコア（敵密度が低い方向ほど高い）× Gem 密度でスコアリング
+    # 3. 安全スコア（敵密度が低い方向ほど高い）× Gem 密度でスコアリング
     safety = 1.0 - (enemy_near - en_min) / max(en_range, 1e-6)
     gem_score = gem_near * safety
     gn_min, gn_max = float(np.min(gem_score)), float(np.max(gem_score))
@@ -100,13 +111,6 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
 
     if gn_max - gn_min > 1e-6:
         return _DIR16_TO_ACTION9[gem_dir]
-
-    # 3. 敵も Gem も方向差なし → 壁際なら最も開けた方向（argmax wall_rays）へ戻る
-    if o_wr is not None:
-        wall = obs[o_wr:o_wr + 8].astype(np.float64)
-        if float(np.min(wall)) < _WALL_CLOSE_THRESHOLD:
-            open_dir = int(np.argmax(wall))
-            return _WALL_RAY_TO_ACTION9[open_dir]
 
     # 4. 敵最近傍距離に方向差あり → 最安全方向へ移動
     nd_range = float(np.max(enemy_nd)) - float(np.min(enemy_nd))
