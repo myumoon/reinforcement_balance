@@ -6,13 +6,14 @@ import numpy as np
 import gymnasium as gym
 from base.base_ue5_env import BaseUE5Env
 
-_NUM_ACTIONS = 5
+_NUM_ACTIONS = 9
 
 
 class SurvivorsEnv(BaseUE5Env):
     """UE5 Survivors ゲームの gymnasium ラッパー。
 
-    行動空間: Discrete(5) — 0=上(+Y), 1=下(-Y), 2=左(-X), 3=右(+X), 4=静止
+    行動空間: Discrete(9) — 0=北(+Y), 1=北東, 2=東(+X), 3=南東, 4=南(-Y),
+                             5=南西, 6=西(-X), 7=北西, 8=静止
     観測空間: UE5 の /obs_schema エンドポイントから自動取得する
 
     _reward_fn に reward_shaping(obs, prev_obs, base_reward) -> float を設定すると

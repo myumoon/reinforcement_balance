@@ -31,14 +31,20 @@ void USurvivorsPlayerComponent::ApplyAction(int32 ActionIdx)
 {
 	if (!Game) return;
 
+	// アクション番号定義（対称性拡張・Python/EUREKA prompt と共通仕様）
+	// 0=北(+Y), 1=北東, 2=東(+X), 3=南東, 4=南(-Y), 5=南西, 6=西(-X), 7=北西, 8=静止
 	FVector2D MoveDir = FVector2D::ZeroVector;
 	switch (ActionIdx)
 	{
-		case 0: MoveDir.Y =  1.f; break;
-		case 1: MoveDir.Y = -1.f; break;
-		case 2: MoveDir.X = -1.f; break;
-		case 3: MoveDir.X =  1.f; break;
-		default: break;
+		case 0: MoveDir = FVector2D( 0.f,  1.f);                        break; // 北
+		case 1: MoveDir = FVector2D( 1.f,  1.f).GetSafeNormal(); break; // 北東
+		case 2: MoveDir = FVector2D( 1.f,  0.f);                        break; // 東
+		case 3: MoveDir = FVector2D( 1.f, -1.f).GetSafeNormal(); break; // 南東
+		case 4: MoveDir = FVector2D( 0.f, -1.f);                        break; // 南
+		case 5: MoveDir = FVector2D(-1.f, -1.f).GetSafeNormal(); break; // 南西
+		case 6: MoveDir = FVector2D(-1.f,  0.f);                        break; // 西
+		case 7: MoveDir = FVector2D(-1.f,  1.f).GetSafeNormal(); break; // 北西
+		default: break; // 8=静止
 	}
 	Game->PlayerVel = MoveDir * Game->MoveSpeed;
 	Game->PlayerPos += Game->PlayerVel * SurvivorsGameConstants::PhysicsDt;
