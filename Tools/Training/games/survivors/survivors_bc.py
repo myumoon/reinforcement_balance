@@ -1,9 +1,6 @@
-"""Survivors ルールベース行動クローニング（PPO 事前初期化）.
+"""Survivors ルールベース行動クローニング（ポリシー事前初期化）.
 
-使い方（train.py から自動呼び出し）:
-    python train.py --game survivors --bc-warmup-episodes 100 --bc-epochs 30
-
-デモ収集にはUE5接続が必要。dry-run では使用不可。
+run_bc.py から呼び出される。train.py からの直接呼び出しは廃止。
 """
 
 import numpy as np
@@ -69,7 +66,6 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     en_min, en_max = float(np.min(enemy_near)), float(np.max(enemy_near))
     en_range = en_max - en_min
 
-    # 最も危険な方向とその逆方向（逃避先）
     danger_dir = int(np.argmax(enemy_near))
     escape_dir = (danger_dir + DIR_COUNT // 2) % DIR_COUNT
 
@@ -86,7 +82,6 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     if gn_max - gn_min > 1e-6:
         return _DIR16_TO_ACTION9[gem_dir]
 
-    # どちらでもない：最も安全な方向（敵最近傍距離が最大）へ
     safest = int(np.argmax(enemy_nd))
     return _DIR16_TO_ACTION9[safest]
 
@@ -99,7 +94,7 @@ def bc_warmup(
     lr: float = 3e-4,
     batch_size: int = 512,
     verbose: int = 1,
-) -> None:
+) -> dict:
     """ルールベース方策でデモ収集し、model を行動クローニングで事前初期化する。
 
     VecNormalize が有効な場合、ルール方策は生の obs で判断し、BC 訓練は正規化済み obs で
@@ -116,20 +111,29 @@ def bc_warmup(
         lr:          Adam 学習率
         batch_size:  ミニバッチサイズ
         verbose:     0: サイレント, 1: 進捗表示
+
+    Returns:
+        dict: BC 統計情報
+            transitions: 収集遷移数
+            episode_rewards: エピソード報酬リスト
+            episode_rewards_mean: 平均エピソード報酬
+            episode_length_mean: 平均エピソード長
+            action_counts: アクション別選択数 (index 0–8)
+            final_loss: 最終エポックの平均 BC loss
+            loss_history: エポックごとの平均 BC loss リスト
     """
     raw_env = _get_raw_env(env)
     offsets: dict | None = getattr(raw_env, "_offsets", None)
     if offsets is None:
         if verbose:
             print("[BC] _offsets が取得できないため BC をスキップします")
-        return
-    # 必要な obs セグメントが存在するか確認
+        return {}
     required = {"enemy_density_near_16dir", "gem_density_near_16dir", "enemy_nearest_dist_16dir"}
     missing = required - set(offsets.keys())
     if missing:
         if verbose:
             print(f"[BC] 必要な obs セグメントが存在しないため BC をスキップします: {missing}")
-        return
+        return {}
 
     vec_norm = _find_vecnormalize(env)
     if verbose:
@@ -143,37 +147,34 @@ def bc_warmup(
     obs_list: list[np.ndarray] = []
     act_list: list[int] = []
     episode_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    action_counts = [0] * 9
     ep_count = 0
     ep_reward = 0.0
+    ep_length = 0
 
     obs = env.reset()
 
     while ep_count < n_episodes:
-        # ルール方策は raw obs（VecNormalize 前）で判断
         if vec_norm is not None:
             raw_obs = vec_norm.get_original_obs()[0]
         else:
             raw_obs = obs[0]
 
-        # VecFrameStack の場合 raw_obs は最新フレームのみ（single-frame）
-        # obs はスタック済みなので shape が異なる場合は最後の単一フレームを使用
-        if raw_obs.shape != obs[0].shape:
-            single_frame_dim = raw_obs.shape[0]
-            raw_obs_check = obs[0][-single_frame_dim:]
-            del raw_obs_check  # 参照のみ確認
-
         action = rule_policy(raw_obs, offsets)
-
-        # BC 訓練用: model が実際に受け取る obs（正規化・スタック済み）を記録
         obs_list.append(obs[0].copy())
         act_list.append(action)
+        action_counts[action] += 1
 
         obs, reward, done, _info = env.step(np.array([action]))
         ep_reward += float(reward[0])
+        ep_length += 1
 
         if done[0]:
             episode_rewards.append(ep_reward)
+            episode_lengths.append(ep_length)
             ep_reward = 0.0
+            ep_length = 0
             ep_count += 1
             if verbose and ep_count % 20 == 0:
                 recent = episode_rewards[-20:]
@@ -186,11 +187,12 @@ def bc_warmup(
     if verbose:
         print(
             f"[BC] デモ収集完了: {total_transitions} 遷移, "
-            f"平均エピソード報酬={float(np.mean(episode_rewards)):.1f}"
+            f"平均エピソード報酬={float(np.mean(episode_rewards)):.1f}, "
+            f"平均エピソード長={float(np.mean(episode_lengths)):.0f}"
         )
         print(f"[BC] BC 訓練開始 (epochs={epochs}, batch_size={batch_size}, lr={lr})...")
 
-    _bc_train(
+    train_stats = _bc_train(
         model,
         np.array(obs_list, dtype=np.float32),
         np.array(act_list, dtype=np.int64),
@@ -200,12 +202,21 @@ def bc_warmup(
         verbose=verbose,
     )
 
-    # 収集後 obs を model に設定して次の rollout 収集を clean state から開始
     model._last_obs = obs
     model._last_episode_starts = done.copy()
 
     if verbose:
         print("[BC] BC 初期化完了")
+
+    return {
+        "transitions": total_transitions,
+        "episode_rewards": episode_rewards,
+        "episode_rewards_mean": float(np.mean(episode_rewards)) if episode_rewards else 0.0,
+        "episode_length_mean": float(np.mean(episode_lengths)) if episode_lengths else 0.0,
+        "action_counts": action_counts,
+        "final_loss": train_stats["final_loss"],
+        "loss_history": train_stats["loss_history"],
+    }
 
 
 def _bc_train(
@@ -216,8 +227,12 @@ def _bc_train(
     lr: float,
     batch_size: int,
     verbose: int,
-) -> None:
-    """BC 訓練ループ（内部ヘルパー）."""
+) -> dict:
+    """BC 訓練ループ（内部ヘルパー）.
+
+    Returns:
+        dict: final_loss, loss_history
+    """
     is_recurrent = hasattr(model.policy, "lstm_actor")
     device = model.device
     n = len(obs_arr)
@@ -227,6 +242,8 @@ def _bc_train(
 
     opt = Adam(model.policy.parameters(), lr=lr)
     model.policy.set_training_mode(True)
+
+    loss_history: list[float] = []
 
     for epoch in range(epochs):
         perm = torch.randperm(n, device=device)
@@ -238,7 +255,6 @@ def _bc_train(
             ac = act_t[idx]
 
             if not is_recurrent:
-                # SB3 PPO (MlpPolicy): evaluate_actions が log_prob を返す
                 _, log_probs, _ = model.policy.evaluate_actions(ob, ac)
                 loss = -log_probs.mean()
             else:
@@ -258,10 +274,14 @@ def _bc_train(
             opt.step()
             ep_losses.append(float(loss.item()))
 
+        epoch_loss = float(np.mean(ep_losses))
+        loss_history.append(epoch_loss)
+
         if verbose and ((epoch + 1) % 10 == 0 or epoch == 0):
-            print(f"[BC]   epoch {epoch + 1:3d}/{epochs}  loss={float(np.mean(ep_losses)):.4f}")
+            print(f"[BC]   epoch {epoch + 1:3d}/{epochs}  loss={epoch_loss:.4f}")
 
     model.policy.set_training_mode(False)
+    return {"final_loss": loss_history[-1] if loss_history else 0.0, "loss_history": loss_history}
 
 
 def _get_raw_env(env):
@@ -291,7 +311,6 @@ def _find_vecnormalize(env):
 
 
 if __name__ == "__main__":
-    # 方向マッピングの検証（pytest がない環境での動作確認用）
     import math
 
     def _ue5_atan2_to_dir16(angle_deg: float) -> int:
@@ -299,18 +318,14 @@ if __name__ == "__main__":
         angle01 = (angle_rad + math.pi) / (2.0 * math.pi)
         return max(0, min(15, int(angle01 * 16)))
 
-    # 9方向アクションの角度（atan2 convention, +X=East, +Y=North）
     action_angles = {0: 90.0, 1: 45.0, 2: 0.0, 3: -45.0, 4: -90.0, 5: -135.0, 6: 180.0, 7: 135.0}
 
     print("=== dir16 → action9 テーブル検証 ===")
     errors = []
     for dir16 in range(16):
-        # ビン中心角（degrees）
         angle01_center = (dir16 + 0.5) / 16.0
         angle_rad_center = angle01_center * 2.0 * math.pi - math.pi
         angle_deg_center = math.degrees(angle_rad_center)
-
-        # 最近傍アクションを計算
         best_action = min(action_angles.keys(), key=lambda a: min(
             abs(action_angles[a] - angle_deg_center),
             360.0 - abs(action_angles[a] - angle_deg_center),
@@ -322,16 +337,5 @@ if __name__ == "__main__":
         print(f"  dir16={dir16:2d} ({angle_deg_center:8.2f}°) → action {expected} | {status}")
 
     if errors:
-        print("\n[FAIL] 不一致:")
-        for e in errors:
-            print(f"  {e}")
-        raise AssertionError("_DIR16_TO_ACTION9 テーブルに誤りがあります")
-    else:
-        print("\n[OK] すべてのマッピングが正しいです")
-
-    # C++ 実装の action → dir16 検証
-    print("\n=== action → dir16 検証 ===")
-    for action, angle_deg in action_angles.items():
-        dir16 = _ue5_atan2_to_dir16(angle_deg)
-        reverse = _DIR16_TO_ACTION9[dir16]
-        print(f"  action {action} ({angle_deg:7.2f}°) → dir16={dir16} → action {reverse}")
+        raise AssertionError(f"_DIR16_TO_ACTION9 テーブルに誤りがあります: {errors}")
+    print("\n[OK] すべてのマッピングが正しいです")
