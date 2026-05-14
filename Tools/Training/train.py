@@ -564,10 +564,10 @@ def parse_args() -> argparse.Namespace:
                    help="deterministic 評価の間隔 (timesteps, 0=無効, survivors のみ有効, default: 50000)")
     p.add_argument("--eval-episodes", type=int, default=5,
                    help="評価エピソード数 (default: 5, --eval-freq > 0 のとき有効)")
-    p.add_argument("--bc-warmup-episodes", type=int, default=0,
-                   help="BC 事前初期化のデモ収集エピソード数（0=無効, survivors のみ有効, --resume 時は無視, default: 0）")
-    p.add_argument("--bc-epochs", type=int, default=30,
-                   help="BC 訓練エポック数（default: 30, --bc-warmup-episodes > 0 のとき有効）")
+    p.add_argument("--init-model", type=Path, default=None,
+                   help="BC 済みモデルを新規 PPO の初期重みとしてロード（--resume とは排他）")
+    p.add_argument("--init-vecnormalize", type=Path, default=None,
+                   help="--init-model と組み合わせて BC 時の VecNormalize 統計をロード")
     p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
     p.add_argument("--wandb-project", default="rl-balance", help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None, help="W&B ラン名（未指定時は自動生成）")
@@ -589,6 +589,10 @@ def main() -> None:
             "--recurrent には sb3-contrib が必要です。"
             "requirements.txt の sb3-contrib>=2.3.0 をインストールしてください。"
         )
+    if args.init_model and args.resume:
+        raise ValueError("--init-model と --resume は同時に使用できません")
+    if args.init_vecnormalize and not args.init_model:
+        raise ValueError("--init-vecnormalize は --init-model と組み合わせて使用してください")
     if args.recurrent and args.frame_stack > 1:
         print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
               " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")
@@ -731,9 +735,14 @@ def main() -> None:
 
     # VecNormalize 適用
     # - 新規訓練: 正規化統計を初期化
+    # - --init-vecnormalize: BC 時の統計をロードして引き継ぐ
     # - 再開: run status またはモデル同階層から既存の統計ファイルをロード
     if not args.no_vec_normalize:
-        if args.resume:
+        if args.init_vecnormalize:
+            env = VecNormalize.load(str(args.init_vecnormalize), env)
+            env.training = True
+            print(f"[INFO] VecNormalize 統計をロード (--init-vecnormalize): {args.init_vecnormalize}")
+        elif args.resume:
             status_vecnorm = resume_status.get("latest_vecnormalize_path")
             load_path = Path(status_vecnorm) if status_vecnorm else None
             if load_path is not None and not load_path.is_absolute():
@@ -775,7 +784,20 @@ def main() -> None:
     algo_class = RecurrentPPO if args.recurrent else PPO
     default_policy = "MlpLstmPolicy" if args.recurrent else "MlpPolicy"
 
-    if args.resume:
+    if args.init_model:
+        init_path = str(_strip_zip(args.init_model))
+        print(f"[INFO] BC 済みモデルを初期値としてロード: {init_path}")
+        load_kwargs = {"tensorboard_log": ppo_kwargs["tensorboard_log"]} if _use_wandb else {}
+        model = algo_class.load(init_path, env=env, device=args.device, **load_kwargs)
+        model.num_timesteps = 0
+        # optimizer state を BC の影響から切り離す（momentum/variance をリセット）
+        if hasattr(model.policy, "optimizer"):
+            opt_cls = type(model.policy.optimizer)
+            model.policy.optimizer = opt_cls(
+                model.policy.parameters(), **model.policy.optimizer.defaults
+            )
+        print("[INFO] --init-model: num_timesteps=0 にリセット、optimizer state をリセット")
+    elif args.resume:
         resume_path = str(resume_model_base)
         print(f"[INFO] {resume_path} から再開")
         if args.entity_attention:
@@ -949,27 +971,14 @@ def main() -> None:
     )
     callbacks.append(checkpoint_cb)
 
-    # BC 事前初期化（survivors + 非 dry-run + 非 resume + --bc-warmup-episodes > 0）
-    if args.game == "survivors" and not args.dry_run and not args.resume and args.bc_warmup_episodes > 0:
-        from games.survivors.survivors_bc import bc_warmup
-        print(
-            f"[INFO] BC 事前初期化を開始します "
-            f"(episodes={args.bc_warmup_episodes}, epochs={args.bc_epochs})"
-        )
-        bc_warmup(
-            model=model,
-            env=env,
-            n_episodes=args.bc_warmup_episodes,
-            epochs=args.bc_epochs,
-            verbose=1,
-        )
-
     exit_reason = "completed"
     exit_error = None
 
     try:
+        # --resume: 継続 (False), --init-model / 新規: 0から開始 (True)
+        reset_timesteps = args.resume is None
         model.learn(total_timesteps=args.total_steps, callback=callbacks,
-                    reset_num_timesteps=args.resume is None)
+                    reset_num_timesteps=reset_timesteps)
         if curriculum_completion_cb is not None and curriculum_completion_cb.completed:
             exit_reason = "curriculum_complete"
     except KeyboardInterrupt:
