@@ -123,6 +123,13 @@ class SurvivorsEnv(BaseUE5Env):
             if dist < 0.7:
                 contact_enemy_count += 1
 
+        vel_i = offset("player_vel", 2)
+        vx, vy = float(obs[vel_i]), float(obs[vel_i + 1])
+        move_speed = float(np.sqrt(vx * vx + vy * vy))
+
+        wall_ray_i = offset("wall_rays", 4)
+        wall_min = float(np.min(obs[wall_ray_i:wall_ray_i + 8]))
+
         return {
             "player_hp": float(obs[offset("player_hp", 12)]),
             "xp_progress": float(obs[offset("xp_progress", 21)]),
@@ -130,6 +137,9 @@ class SurvivorsEnv(BaseUE5Env):
             "nearest_gem_distance": nearest_distance("gem_rel_pos", 23, 20),
             "nearest_enemy_distance": nearest_distance("enemy_rel_pos", 63, 20),
             "contact_enemy_count": contact_enemy_count,
+            "move_speed": move_speed,
+            "is_stationary": int(move_speed < 0.003),
+            "is_wall_near": int(wall_min < 0.08),
         }
 
     def set_params(self, **kwargs) -> bool:
