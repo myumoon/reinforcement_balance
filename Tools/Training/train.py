@@ -560,6 +560,10 @@ def parse_args() -> argparse.Namespace:
                    help="最終Phase完了に必要なスコア倍率。直前Phase閾値×curriculum-thresholdに乗算 (default: 1.0)")
     p.add_argument("--curriculum-complete-min-episode-len-ratio", type=float, default=1.0,
                    help="最終Phase完了に必要な episode_length / min_episode_steps の比率 (default: 1.0)")
+    p.add_argument("--eval-freq", type=int, default=50_000,
+                   help="deterministic 評価の間隔 (timesteps, 0=無効, survivors のみ有効, default: 50000)")
+    p.add_argument("--eval-episodes", type=int, default=5,
+                   help="評価エピソード数 (default: 5, --eval-freq > 0 のとき有効)")
     p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
     p.add_argument("--wandb-project", default="rl-balance", help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None, help="W&B ラン名（未指定時は自動生成）")
@@ -828,6 +832,16 @@ def main() -> None:
         survivors_curriculum_metrics_callback = SurvivorsCurriculumProgressMetricsCallback
         callbacks.append(survivors_metrics_callback(log_freq=5_000, frame_skip=args.frame_skip))
         callbacks.append(ActionDistributionCallback(n_actions=9, log_freq=5_000))
+        if args.eval_freq > 0:
+            from games.survivors.survivors_eval_callback import SurvivorsEvalCallback
+            callbacks.append(SurvivorsEvalCallback(
+                eval_freq=args.eval_freq,
+                n_eval_episodes=args.eval_episodes,
+                frame_skip=args.frame_skip,
+                alive_reward=args.curriculum_alive_reward,
+            ))
+            print(f"[INFO] SurvivorsEvalCallback 有効 "
+                  f"(eval_freq={args.eval_freq:,}, n_eval_episodes={args.eval_episodes})")
 
     if args.curriculum and args.game == "survivors" and not args.dry_run:
         curriculum_cb = CurriculumCallback(
