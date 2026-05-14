@@ -54,6 +54,12 @@ _WALL_RAY_TO_ACTION9: list[int] = [2, 1, 0, 7, 6, 5, 4, 3]
 
 # 壁が近いと判断する wall_rays の閾値（0=壁接触, 1=遠い）
 _WALL_CLOSE_THRESHOLD: float = 0.15
+# enemy_nearest_dist が下回ったら後退りする閾値（0=接触, 1=24m以上）
+_CONTACT_DIST_THRESHOLD: float = 0.15
+# 「包囲」と判断する最小密度（全方向がこれを超えると包囲とみなす）
+_SURROUND_MIN_DENSITY: float = 0.08
+# 「包囲」と判断する密度レンジの上限（差がこれ未満なら全方向均一=包囲）
+_SURROUND_MAX_RANGE: float = 0.35
 
 
 def rule_policy(obs: np.ndarray, offsets: dict) -> int:
@@ -62,15 +68,17 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     argmax ベースの比較は VecNormalize の線形変換に対して不変。
     相対閾値（range の割合）を使うことで正規化の有無に依存しない。
 
-    優先度:
-      1. 壁際なら最も開けた方向へ戻る（コーナー脱出を最優先）
-      2. 最大敵近距離密度方向から逃げる（差が閾値以上のとき）
-      3. Gem × 安全スコアが最大の方向へ移動
-      4. 敵最近傍距離に方向差あり → 最安全方向へ移動
-      5. 判断材料なし → 静止
+    行動方針:
+      敵を Aura 範囲に引き込んで倒し Gem を落とさせる → Gem を拾う、が基本。
+      逃げるのは「接触距離まで追い詰められた」か「全方向に囲まれた」ときのみ。
 
-    コーナーでは「敵の逃避先」が壁方向になり動けなくなるため、
-    壁チェックを最初に行い、敵に近づいてでもコーナーから脱出させる。
+    優先度:
+      1. 包囲 + 壁際 → argmax(wall_rays) 方向へ脱出（ダメージ覚悟）
+      2. 包囲（全方向密度均一・高）→ argmin(enemy_near) 方向へ脱出
+      3. 接触距離に敵 → 最接近方向の反対へ後退り（Aura 範囲を維持）
+      4. Gem 収集 → 安全スコア付き gem_density の最大方向へ
+      5. 敵に接近 → enemy_density_mid の最大方向へ（Aura 範囲に引き込む）
+      6. 判断材料なし → 静止
 
     Returns:
         int: 0–8 の行動
@@ -79,46 +87,55 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     o_en = offsets["enemy_density_near_16dir"]
     o_gn = offsets["gem_density_near_16dir"]
     o_nd = offsets["enemy_nearest_dist_16dir"]
+    o_em = offsets.get("enemy_density_mid_16dir")
     o_wr = offsets.get("wall_rays")
 
     enemy_near = obs[o_en:o_en + DIR_COUNT].astype(np.float64)
     gem_near   = obs[o_gn:o_gn + DIR_COUNT].astype(np.float64)
     enemy_nd   = obs[o_nd:o_nd + DIR_COUNT].astype(np.float64)
 
-    en_min, en_max = float(np.min(enemy_near)), float(np.max(enemy_near))
+    en_min = float(np.min(enemy_near))
+    en_max = float(np.max(enemy_near))
     en_range = en_max - en_min
+    nd_min = float(np.min(enemy_nd))
+    nd_max = float(np.max(enemy_nd))
 
-    danger_dir = int(np.argmax(enemy_near))
-    escape_dir = (danger_dir + DIR_COUNT // 2) % DIR_COUNT
+    # 包囲判定: 全方向に密度があり かつ 方向差が小さい
+    surrounded = en_min > _SURROUND_MIN_DENSITY and en_range < _SURROUND_MAX_RANGE
 
-    # 1. 壁際なら最も開けた方向（argmax wall_rays）へ戻る
-    # コーナーでは敵逃避先が壁方向になって動けなくなるため最優先で脱出する。
-    if o_wr is not None:
+    # 1. 包囲 + 壁際 → 壁から離れる（ダメージ覚悟）
+    if surrounded and o_wr is not None:
         wall = obs[o_wr:o_wr + 8].astype(np.float64)
         if float(np.min(wall)) < _WALL_CLOSE_THRESHOLD:
             open_dir = int(np.argmax(wall))
             return _WALL_RAY_TO_ACTION9[open_dir]
 
-    # 2. 危険方向の密度が逃避先より range の 30% 以上高い → 逃げる（VecNormalize 不変）
-    if en_range > 1e-6 and (en_max - float(enemy_near[escape_dir])) / en_range > 0.3:
-        return _DIR16_TO_ACTION9[escape_dir]
+    # 2. 包囲 → 最低密度方向へ脱出
+    if surrounded:
+        return _DIR16_TO_ACTION9[int(np.argmin(enemy_near))]
 
-    # 3. 安全スコア（敵密度が低い方向ほど高い）× Gem 密度でスコアリング
-    safety = 1.0 - (enemy_near - en_min) / max(en_range, 1e-6)
-    gem_score = gem_near * safety
-    gn_min, gn_max = float(np.min(gem_score)), float(np.max(gem_score))
-    gem_dir = int(np.argmax(gem_score))
+    # 3. 接触距離に敵 → 最接近方向の反対へ後退り（Aura 範囲を維持しながら離れる）
+    if nd_min < _CONTACT_DIST_THRESHOLD:
+        danger_dir = int(np.argmin(enemy_nd))  # 最も近い敵がいる方向
+        retreat_dir = (danger_dir + DIR_COUNT // 2) % DIR_COUNT
+        return _DIR16_TO_ACTION9[retreat_dir]
 
-    if gn_max - gn_min > 1e-6:
-        return _DIR16_TO_ACTION9[gem_dir]
+    # 4. Gem 収集 → 安全スコア（enemy_nd が高い方向ほど安全）× gem_near の最大方向
+    if nd_max > 1e-6 and float(np.max(gem_near)) > 1e-6:
+        safety = enemy_nd / nd_max  # [0, 1]: 敵が遠い方向ほど高い
+        gem_score = gem_near * safety
+        gn_max = float(np.max(gem_score))
+        if gn_max - float(np.min(gem_score)) > 1e-6:
+            return _DIR16_TO_ACTION9[int(np.argmax(gem_score))]
 
-    # 4. 敵最近傍距離に方向差あり → 最安全方向へ移動
-    nd_range = float(np.max(enemy_nd)) - float(np.min(enemy_nd))
-    if nd_range > 1e-6:
-        safest = int(np.argmax(enemy_nd))
-        return _DIR16_TO_ACTION9[safest]
+    # 5. 敵に接近 → enemy_density_mid の最大方向（中距離の敵を Aura 範囲内に引き込む）
+    if o_em is not None:
+        enemy_mid = obs[o_em:o_em + DIR_COUNT].astype(np.float64)
+        em_range = float(np.max(enemy_mid)) - float(np.min(enemy_mid))
+        if em_range > 1e-6:
+            return _DIR16_TO_ACTION9[int(np.argmax(enemy_mid))]
 
-    # 5. 判断材料なし（敵も Gem も検出なし、壁も遠い）→ 静止
+    # 6. 判断材料なし（敵も Gem も検出なし）→ 静止
     return 8
 
 
