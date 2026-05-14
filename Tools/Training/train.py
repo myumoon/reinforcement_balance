@@ -820,12 +820,14 @@ def main() -> None:
     survivors_curriculum_metrics_callback = None
     if args.game == "survivors" and not args.dry_run:
         from games.survivors.survivors_training_metrics import (
+            ActionDistributionCallback,
             SurvivorsCurriculumProgressMetricsCallback,
             SurvivorsMetricsCallback,
         )
         survivors_metrics_callback = SurvivorsMetricsCallback
         survivors_curriculum_metrics_callback = SurvivorsCurriculumProgressMetricsCallback
-        callbacks.append(survivors_metrics_callback(log_freq=5_000))
+        callbacks.append(survivors_metrics_callback(log_freq=5_000, frame_skip=args.frame_skip))
+        callbacks.append(ActionDistributionCallback(n_actions=9, log_freq=5_000))
 
     if args.curriculum and args.game == "survivors" and not args.dry_run:
         curriculum_cb = CurriculumCallback(

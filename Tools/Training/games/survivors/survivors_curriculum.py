@@ -55,6 +55,14 @@ class _Phase:
     promotion_max_score_cv: float = 0.20
 
 
+# promotion_blocker カテゴリ定数（W&B グラフで停滞原因を数値で識別する）
+BLOCKER_NONE = 0           # 昇格可能（または最終フェーズ）
+BLOCKER_NOT_ENOUGH_EP = 1  # ウィンドウ内エピソード数不足
+BLOCKER_SCORE_MEAN_LOW = 2 # score_mean < effective_threshold
+BLOCKER_EP_LEN_LOW = 3     # episode_length_mean < min_episode_steps
+BLOCKER_SCORE_MIN_LOW = 4  # score_min < promotion_min_score_floor
+BLOCKER_SCORE_CV_HIGH = 5  # score_cv > promotion_max_score_cv
+
 PHASES: list[_Phase] = [
     _Phase("入門",              4,   6, 0.8, 1.0,  1, 0.50, 0.50, False,  600,   30.0),
     _Phase("Gem回収開始",       6,  10, 0.9, 1.4,  2, 0.75, 0.75, False, 1200,  100.0),
@@ -120,6 +128,8 @@ class CurriculumCallback(BaseCallback):
         self._completion_min_episodes = window
         self._completion_min_score_ratio = 1.0
         self._completion_min_episode_len_ratio = 1.0
+        self._steps_in_phase: int = 0
+        self._episodes_in_phase: int = 0
 
     def _on_training_start(self) -> None:
         self._apply_phase(PHASES[self._phase_idx], initial=True)
@@ -154,6 +164,8 @@ class CurriculumCallback(BaseCallback):
             "terminated_count": self._terminated_count,
             "truncated_count": self._truncated_count,
             "phase_events": self._phase_events,
+            "steps_in_phase": self._steps_in_phase,
+            "episodes_in_phase": self._episodes_in_phase,
         }
 
     def import_state(self, state: dict) -> None:
@@ -175,14 +187,18 @@ class CurriculumCallback(BaseCallback):
         self._terminated_count = int(state.get("terminated_count", 0))
         self._truncated_count = int(state.get("truncated_count", 0))
         self._phase_events = list(state.get("phase_events", []))
+        self._steps_in_phase = int(state.get("steps_in_phase", 0))
+        self._episodes_in_phase = int(state.get("episodes_in_phase", 0))
 
     def _on_step(self) -> bool:
         info = self.locals["infos"][0]
         self._ep_base += info.get("base_reward", 0.0)
+        self._steps_in_phase += 1
 
         if "episode" not in info:
             return True
 
+        self._episodes_in_phase += 1
         ep_len = info["episode"]["l"]
         alive_total = self.alive_reward * self.frame_skip * ep_len
         score = max(0.0, self._ep_base - alive_total)
@@ -245,6 +261,8 @@ class CurriculumCallback(BaseCallback):
         self._phase_idx = min(self._phase_idx + 1, len(PHASES) - 1)
         self._scores.clear()
         self._rollback_bad_windows = 0
+        self._steps_in_phase = 0
+        self._episodes_in_phase = 0
         next_phase = PHASES[self._phase_idx]
         self._phase_events.append({
             "event": "advance",
@@ -329,6 +347,8 @@ class CurriculumCallback(BaseCallback):
         self._phase_idx = max(self._phase_idx - 1, 0)
         self._scores.clear()
         self._rollback_bad_windows = 0
+        self._steps_in_phase = 0
+        self._episodes_in_phase = 0
         next_phase = PHASES[self._phase_idx]
         self._phase_events.append({
             "event": "rollback",
@@ -637,6 +657,32 @@ class CurriculumCallback(BaseCallback):
             )
         )
 
+    def _compute_blocker_category(self, window: dict, phase_threshold_is_none: bool) -> int:
+        """昇格を阻害している原因をカテゴリ定数で返す。昇格可能なら BLOCKER_NONE。"""
+        if phase_threshold_is_none or self.is_final_phase:
+            return BLOCKER_NONE
+        recent_count = int(window.get("episodes", 0) or 0)
+        required = int(window.get("required_episodes", 1) or 1)
+        if recent_count < required:
+            return BLOCKER_NOT_ENOUGH_EP
+        score_mean = float(window.get("active_score_mean") or 0.0)
+        threshold = float(window.get("effective_threshold") or float("inf"))
+        if score_mean < threshold:
+            return BLOCKER_SCORE_MEAN_LOW
+        length_mean = float(window.get("episode_length_mean") or 0.0)
+        min_ep_steps = int(window.get("min_episode_steps") or 0)
+        if length_mean < min_ep_steps:
+            return BLOCKER_EP_LEN_LOW
+        score_min = window.get("active_score_min")
+        min_score_floor = window.get("promotion_min_score_floor")
+        if score_min is not None and min_score_floor is not None and score_min < min_score_floor:
+            return BLOCKER_SCORE_MIN_LOW
+        score_cv = window.get("active_score_cv")
+        max_cv = window.get("promotion_max_score_cv")
+        if score_cv is not None and max_cv is not None and score_cv > max_cv:
+            return BLOCKER_SCORE_CV_HIGH
+        return BLOCKER_NONE
+
     def get_wandb_progress_metrics(self) -> dict:
         diagnostics = self.get_diagnostics()
         window = diagnostics.get("current_window", {})
@@ -645,6 +691,12 @@ class CurriculumCallback(BaseCallback):
         episodes_total = max(int(diagnostics.get("episodes_total", 0) or 0), 1)
         terminated = int(diagnostics.get("terminated_episodes", 0) or 0)
         truncated = int(diagnostics.get("truncated_episodes", 0) or 0)
+
+        phase = PHASES[self._phase_idx]
+        blocker = self._compute_blocker_category(
+            window=window,
+            phase_threshold_is_none=(phase.threshold is None),
+        )
 
         return {
             "survivors/active_score_mean": window.get("active_score_mean"),
@@ -658,6 +710,13 @@ class CurriculumCallback(BaseCallback):
             "survivors/truncated_ratio": truncated / episodes_total,
             "curriculum/phase_idx": diagnostics.get("phase_idx"),
             "curriculum/phase_progress_ratio": window.get("threshold_ratio"),
+            "curriculum/score_mean": window.get("active_score_mean"),
+            "curriculum/score_min": window.get("active_score_min"),
+            "curriculum/score_cv": window.get("active_score_cv"),
+            "curriculum/threshold_ratio": window.get("threshold_ratio"),
+            "curriculum/steps_in_phase": self._steps_in_phase,
+            "curriculum/episodes_in_phase": self._episodes_in_phase,
+            "curriculum/promotion_blocker": blocker,
             "curriculum/ready_for_phase_judgment": int(bool(window.get("ready_for_phase_judgment"))),
             "curriculum/promotion_stability_ok": int(bool(window.get("promotion_stability_ok"))),
             "curriculum/rollback_bad_windows": diagnostics.get("rollback_bad_windows"),
