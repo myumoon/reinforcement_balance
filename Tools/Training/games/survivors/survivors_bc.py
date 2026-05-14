@@ -73,8 +73,8 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     danger_dir = int(np.argmax(enemy_near))
     escape_dir = (danger_dir + DIR_COUNT // 2) % DIR_COUNT
 
-    # range の 30% 以上差があれば逃げる（raw obs では 0.0〜1.0、normalized でも相対判断）
-    if en_range > 1e-6 and (en_max - float(enemy_near[escape_dir])) / en_range < 0.7:
+    # 危険方向の密度が逃避先より range の 30% 以上高い → 逃げる（VecNormalize 不変）
+    if en_range > 1e-6 and (en_max - float(enemy_near[escape_dir])) / en_range > 0.3:
         return _DIR16_TO_ACTION9[escape_dir]
 
     # 安全スコア（敵密度が低い方向ほど高い）× Gem 密度でスコアリング
