@@ -52,7 +52,7 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
       3. 敵最近傍距離が最大の安全方向へ移動
 
     Returns:
-        int: 0–7 の行動（静止=8 は使用しない）
+        int: 0–8 の行動（敵も Gem も方向差なし → 8=静止）
     """
     DIR_COUNT = 16
     o_en = offsets["enemy_density_near_16dir"]
@@ -82,6 +82,11 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     if gn_max - gn_min > 1e-6:
         return _DIR16_TO_ACTION9[gem_dir]
 
+    # 全方向が均一（敵なし）の場合は静止。均一 argmax は常に index 0 → 西方向固定になり
+    # 壁際に張り付くデモを大量生成してしまうため、情報がないときは動かない。
+    nd_range = float(np.max(enemy_nd)) - float(np.min(enemy_nd))
+    if nd_range < 1e-6:
+        return 8  # 静止
     safest = int(np.argmax(enemy_nd))
     return _DIR16_TO_ACTION9[safest]
 
