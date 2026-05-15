@@ -4,15 +4,19 @@
 PPO モデルを保存する。PPO 本番訓練は実行しない。
 
 使い方（Tools/Training/ から実行）:
-    python games/survivors/run_bc.py --run-name survivors_bc_v1 --episodes 100 --epochs 30
+    python games/survivors/run_bc.py --version-name v7 --run-name bc_run1 --episodes 100 --epochs 30
 
 出力:
-    results/survivors/<run-name>/
-        model_bc.zip          BC 済みポリシーの重み
-        vecnormalize_bc.pkl   VecNormalize 統計（--no-vec-normalize 時は省略）
-        bc_status.json        BC 統計・メタ情報
-        config_resolved.yaml  引数確定後の設定
-        run_meta.json         実行環境情報
+    runs/survivors/<version-name>/bc/<run-name>/
+        config/
+            config_resolved.yaml  引数確定後の設定
+            run_meta.json         実行環境情報
+        log/
+            bc_status.json        BC 統計・メタ情報
+        result/
+            model_bc.zip          BC 済みポリシーの重み
+            vecnormalize_bc.pkl   VecNormalize 統計（--no-vec-normalize 時は省略）
+            model_bc_validated.zip  検証通過時のみ
 """
 
 from __future__ import annotations
@@ -55,8 +59,9 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Survivors BC 専用 CLI: ルールベース方策でBC済みモデルを作成する"
     )
-    p.add_argument("--config",       type=Path,  default=None,    help="YAML config（train_config_run.yaml 等）")
-    p.add_argument("--run-name",     required=True,               help="run 名（results/survivors/<name>/ に保存）")
+    p.add_argument("--config",        type=Path,  default=None,    help="YAML config（bc_train_config_run.yaml 等）")
+    p.add_argument("--version-name",  required=True,               help="バージョン名（runs/survivors/<version-name>/bc/<run-name>/ に保存）")
+    p.add_argument("--run-name",      required=True,               help="run 名")
     p.add_argument("--episodes",     type=int,   default=100,     help="デモ収集エピソード数 (default: 100)")
     p.add_argument("--epochs",       type=int,   default=30,      help="BC 訓練エポック数 (default: 30)")
     p.add_argument("--lr",           type=float, default=3e-4,    help="BC Adam 学習率 (default: 3e-4)")
@@ -125,12 +130,15 @@ def main() -> None:
         raise ImportError("--recurrent には sb3-contrib が必要です")
 
     # run_dir 作成
-    run_dir = Path("results") / "survivors" / args.run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir    = Path("runs") / "survivors" / args.version_name / "bc" / args.run_name
+    log_dir    = run_dir / "log"
+    result_dir = run_dir / "result"
+    for d in [log_dir, result_dir]:
+        d.mkdir(parents=True, exist_ok=True)
 
-    model_bc_path   = run_dir / "model_bc.zip"
-    vecnorm_bc_path = run_dir / "vecnormalize_bc.pkl"
-    status_path     = run_dir / "bc_status.json"
+    model_bc_path   = result_dir / "model_bc.zip"
+    vecnorm_bc_path = result_dir / "vecnormalize_bc.pkl"
+    status_path     = log_dir / "bc_status.json"
 
     if model_bc_path.exists():
         raise FileExistsError(
@@ -138,8 +146,8 @@ def main() -> None:
         )
 
     # config 保存
-    _write_resolved_config(run_dir, args)
-    _write_run_meta(run_dir, args)
+    _write_resolved_config(log_dir, args)
+    _write_run_meta(log_dir, args)
     print(f"[INFO] run_dir: {run_dir}")
 
     # W&B 初期化
@@ -203,7 +211,7 @@ def main() -> None:
     )
 
     # モデル保存
-    model.save(str(run_dir / "model_bc"))
+    model.save(str(result_dir / "model_bc"))
     print(f"[INFO] BC 済みモデルを保存: {model_bc_path}")
 
     # VecNormalize 統計保存
@@ -243,9 +251,9 @@ def main() -> None:
             "validated_model_path": None,
         }
         if result["passed"]:
-            model.save(str(run_dir / "model_bc_validated"))
-            validated_model_path = str(run_dir / "model_bc_validated.zip")
-            validation_result["validated_model_path"] = "model_bc_validated.zip"
+            model.save(str(result_dir / "model_bc_validated"))
+            validated_model_path = str(result_dir / "model_bc_validated.zip")
+            validation_result["validated_model_path"] = "result/model_bc_validated.zip"
             print(f"[INFO] 検証成功: model_bc_validated.zip を保存しました")
         else:
             print(f"[WARN] 検証失敗: model_bc_validated.zip は作成しません")

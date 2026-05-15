@@ -125,10 +125,17 @@ def _model_zip_path(model_base: Path) -> Path:
 
 
 def _latest_checkpoint(run_dir: Path) -> Path | None:
-    candidates = list(run_dir.glob("model_*_steps.zip"))
+    # 新構成: work/model_steps/
+    new_dir = run_dir / "work" / "model_steps"
+    candidates = list(new_dir.glob("model_*_steps.zip")) if new_dir.exists() else []
+    # 旧構成フォールバック
     if not candidates:
-        final_model = run_dir / "model.zip"
-        return final_model if final_model.exists() else None
+        candidates = list(run_dir.glob("model_*_steps.zip"))
+    if not candidates:
+        for final in [run_dir / "result" / "model.zip", run_dir / "model.zip"]:
+            if final.exists():
+                return final
+        return None
 
     def _step(path: Path) -> int:
         stem = path.stem
@@ -143,7 +150,13 @@ def _latest_checkpoint(run_dir: Path) -> Path | None:
 def _resolve_resume_path(resume: Path) -> tuple[Path, Path, dict]:
     if resume.is_dir():
         run_dir = resume
-        status = _read_json(run_dir / "train_status.json")
+        # 新構成: log/train_status.json、旧構成: train_status.json
+        for status_candidate in [run_dir / "log" / "train_status.json", run_dir / "train_status.json"]:
+            if status_candidate.exists():
+                status = _read_json(status_candidate)
+                break
+        else:
+            status = {}
         model_path = status.get("latest_model_path")
         if model_path:
             model_zip = Path(model_path)
@@ -159,7 +172,10 @@ def _resolve_resume_path(resume: Path) -> tuple[Path, Path, dict]:
     if not model_zip.exists():
         raise FileNotFoundError(f"--resume モデルが見つかりません: {model_zip}")
     run_dir = model_zip.parent
-    return run_dir, _strip_zip(model_zip), _read_json(run_dir / "train_status.json")
+    for status_candidate in [run_dir / "log" / "train_status.json", run_dir / "train_status.json"]:
+        if status_candidate.exists():
+            return run_dir, _strip_zip(model_zip), _read_json(status_candidate)
+    return run_dir, _strip_zip(model_zip), {}
 
 
 def _git_value(args: list[str]) -> str | None:
@@ -223,12 +239,19 @@ def _save_training_status(
     exit_error: str | None = None,
     curriculum_completion: dict | None = None,
 ) -> None:
+    # run_dir からの相対パスで記録することで新旧両構成に対応
+    def _rel(p: Path) -> str:
+        try:
+            return str(p.relative_to(run_dir))
+        except ValueError:
+            return str(p)
+
     data = {
         "run_name": args.run_name,
         "game": args.game,
         "global_timestep": num_timesteps,
-        "latest_model_path": latest_model_path.name,
-        "latest_vecnormalize_path": latest_vecnorm_path.name if latest_vecnorm_path else None,
+        "latest_model_path": _rel(latest_model_path),
+        "latest_vecnormalize_path": _rel(latest_vecnorm_path) if latest_vecnorm_path else None,
         "config_hash": config_hash,
         "curriculum": curriculum_cb.export_state() if curriculum_cb is not None else None,
         "shaping_anneal": anneal_cb.export_state() if anneal_cb is not None else None,
@@ -244,13 +267,15 @@ def _save_training_status(
 class _RunCheckpointCallback(BaseCallback):
     def __init__(
         self,
-        run_dir: Path,
+        model_steps_dir: Path,
+        vecnorm_dir: Path,
         save_freq: int,
         vecnorm_getter,
         status_writer,
     ):
         super().__init__(verbose=0)
-        self.run_dir = run_dir
+        self._model_steps_dir = model_steps_dir
+        self._vecnorm_dir = vecnorm_dir
         self.save_freq = max(save_freq, 1)
         self._vecnorm_getter = vecnorm_getter
         self._status_writer = status_writer
@@ -263,12 +288,12 @@ class _RunCheckpointCallback(BaseCallback):
         if self.num_timesteps - self._last_save < self.save_freq:
             return True
         self._last_save = self.num_timesteps
-        model_base = self.run_dir / f"model_{self.num_timesteps}_steps"
+        model_base = self._model_steps_dir / f"model_{self.num_timesteps}_steps"
         self.model.save(str(model_base))
         vecnorm_path = None
         vn = self._vecnorm_getter()
         if vn is not None:
-            vecnorm_path = self.run_dir / f"vecnormalize_{self.num_timesteps}_steps.pkl"
+            vecnorm_path = self._vecnorm_dir / f"vecnormalize_{self.num_timesteps}_steps.pkl"
             vn.save(str(vecnorm_path))
         self._status_writer(_model_zip_path(model_base), vecnorm_path, self.num_timesteps)
         print(f"[INFO] checkpoint saved: {_model_zip_path(model_base)}")
@@ -574,8 +599,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--port", type=int, default=None,
                    help="サーバーポート（未指定時はゲーム別デフォルト: balance=8765, coin=8766, survivors=8767）")
     p.add_argument("--total-steps", type=int, default=500_000)
+    p.add_argument("--version-name", default=None,
+                   help="runs/<game>/<version-name>/ 以下に成果物を保存するバージョン名（新規run時は必須）")
     p.add_argument("--run-name", default=None,
-                   help="results/<game>/<run-name>/ に成果物を保存する実行名")
+                   help="runs/<game>/<version-name>/train/<run-name>/ に成果物を保存する実行名")
     p.add_argument("--resume", type=Path, default=None,
                    help="再開する run_dir または既存モデルのパス（.zip 拡張子は省略・付加どちらでも可）")
     p.add_argument("--checkpoint-freq", type=int, default=10_000,
@@ -679,35 +706,47 @@ def main() -> None:
     if args.resume:
         resume_source_dir, resume_model_base, resume_status = _resolve_resume_path(args.resume)
         if args.run_name is None:
-            if args.resume.is_dir() or (resume_source_dir / "train_status.json").exists():
-                args.run_name = resume_source_dir.name
-                run_dir = resume_source_dir
-            else:
-                args.run_name = resume_model_base.name
-                run_dir = Path("results") / args.game / args.run_name
+            args.run_name = resume_source_dir.name
+            run_dir = resume_source_dir
+        elif args.version_name:
+            run_dir = Path("runs") / args.game / args.version_name / "train" / args.run_name
         else:
-            run_dir = Path("results") / args.game / args.run_name
+            run_dir = resume_source_dir
     else:
         if not args.run_name:
             raise ValueError("--run-name は必須です（--resume <run_dir|model.zip> 時は省略可能）")
-        run_dir = Path("results") / args.game / args.run_name
+        if not args.version_name:
+            raise ValueError("--version-name は必須です（新規 run 時）")
+        run_dir = Path("runs") / args.game / args.version_name / "train" / args.run_name
 
-    run_dir.mkdir(parents=True, exist_ok=True)
+    # サブディレクトリ定義
+    work_dir        = run_dir / "work"
+    log_dir         = run_dir / "log"
+    result_dir      = run_dir / "result"
+    model_steps_dir = work_dir / "model_steps"
+    vecnorm_dir     = work_dir / "vecnormalize"
+
+    for d in [work_dir, log_dir, result_dir, model_steps_dir, vecnorm_dir]:
+        d.mkdir(parents=True, exist_ok=True)
+
     if not args.resume:
-        existing_models = [run_dir / "model.zip", *run_dir.glob("model_*_steps.zip")]
-        existing_models = [path for path in existing_models if path.exists()]
+        existing_models = [
+            *model_steps_dir.glob("model_*_steps.zip"),
+            result_dir / "model.zip",
+        ]
+        existing_models = [p for p in existing_models if p.exists()]
         if existing_models:
             raise FileExistsError(
                 f"run-name フォルダに既存モデルがあります。resume を使うか別 run-name を指定してください: "
                 f"{run_dir}"
             )
 
-    model_base_path = run_dir / "model"
-    vecnorm_path = run_dir / "vecnormalize.pkl"
-    status_path = run_dir / "train_status.json"
-    curriculum_status_path = run_dir / "curriculum_status.json"
-    config_hash = _write_resolved_config(run_dir, args)
-    _write_run_meta(run_dir, args, config_hash)
+    model_base_path         = result_dir / "model"
+    vecnorm_path            = result_dir / "vecnormalize.pkl"
+    status_path             = log_dir / "train_status.json"
+    curriculum_status_path  = log_dir / "curriculum_status.json"
+    config_hash = _write_resolved_config(log_dir, args)
+    _write_run_meta(log_dir, args, config_hash)
     print(f"[INFO] run_dir: {run_dir}")
     print(f"[INFO] config_path: {args.config if args.config else '(none)'}")
     print(f"[INFO] config_hash: {config_hash}")
@@ -716,7 +755,7 @@ def main() -> None:
 
     # --resume 時に同一 W&B run へグラフを継続する
     wandb_run_id: str | None = None
-    _wandb_id_path = run_dir / "wandb_run_id.txt"
+    _wandb_id_path = work_dir / "wandb_run_id.txt"
     if args.resume and _wandb_id_path.exists():
         wandb_run_id = _wandb_id_path.read_text().strip() or None
         if wandb_run_id:
@@ -749,14 +788,14 @@ def main() -> None:
                 "curriculum_complete_min_episode_len_ratio": args.curriculum_complete_min_episode_len_ratio,
                 "reward_fn": str(args.reward_fn) if args.reward_fn else None,
                 "config_hash": config_hash,
-                "tensorboard_log": str(run_dir / "tensorboard"),
+                "tensorboard_log": str(log_dir / "tensorboard"),
                 **_PPO_KWARGS,
             },
         )
         # 新規 run のときだけ run_id を保存（resume 時は上書きしない）
         if not wandb_run_id:
             _wandb_id_path.write_text(wandb.run.id)
-        ppo_kwargs["tensorboard_log"] = str(run_dir / "tensorboard")
+        ppo_kwargs["tensorboard_log"] = str(log_dir / "tensorboard")
 
     # --reward-fn の事前チェック
     reward_fn = None
@@ -819,8 +858,12 @@ def main() -> None:
                 load_path = resume_source_dir / load_path
             if load_path is None or not load_path.exists():
                 resume_vecnorm = resume_source_dir / f"{resume_model_base.name}_vecnorm.pkl"
+                # 新構成: result/ と work/vecnormalize/
+                final_vecnorm_new = resume_source_dir / "result" / "vecnormalize.pkl"
                 final_vecnorm = resume_source_dir / "vecnormalize.pkl"
-                checkpoint_vecnorm = resume_source_dir / f"vecnormalize_{resume_model_base.name.removeprefix('model_').removesuffix('_steps')}_steps.pkl"
+                stem = resume_model_base.name.removeprefix("model_").removesuffix("_steps")
+                checkpoint_vecnorm_new = resume_source_dir / "work" / "vecnormalize" / f"vecnormalize_{stem}_steps.pkl"
+                checkpoint_vecnorm = resume_source_dir / f"vecnormalize_{stem}_steps.pkl"
                 old_prefix = resume_model_base.name
                 parts = old_prefix.rsplit("_", 2)
                 old_prefix_vecnorm = None
@@ -829,7 +872,9 @@ def main() -> None:
                 load_path = next(
                     (
                         path
-                        for path in (checkpoint_vecnorm, final_vecnorm, resume_vecnorm, old_prefix_vecnorm)
+                        for path in (checkpoint_vecnorm_new, checkpoint_vecnorm,
+                                     final_vecnorm_new, final_vecnorm,
+                                     resume_vecnorm, old_prefix_vecnorm)
                         if path is not None and path.exists()
                     ),
                     None,
@@ -1006,7 +1051,8 @@ def main() -> None:
         )
 
     checkpoint_cb = _RunCheckpointCallback(
-        run_dir=run_dir,
+        model_steps_dir=model_steps_dir,
+        vecnorm_dir=vecnorm_dir,
         save_freq=max(args.checkpoint_freq // (env.num_envs or 1), 1),
         vecnorm_getter=lambda: _find_vecnormalize(env),
         status_writer=_write_status_for_model,
