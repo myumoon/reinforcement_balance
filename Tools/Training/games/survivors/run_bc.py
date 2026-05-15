@@ -98,18 +98,12 @@ def _parse_args() -> argparse.Namespace:
                    help="検証失敗時も正常終了する（デフォルトは非ゼロ終了）")
     # BC パラメータスケジュール
     p.add_argument(
-        "--bc-schedule", type=str, default=None,
+        "--bc-schedule", type=Path, default=None,
         help=(
-            "BC中のゲームパラメータスケジュール (JSON配列)。"
-            "各要素は {\"episode\": N, <UE5パラメータ>} の形式。"
+            "BC中のゲームパラメータスケジュールを記述した JSON ファイルパス。"
+            "配列形式で各要素は {\"episode\": N, <UE5パラメータ>}。"
             "episode=0 のエントリはデモ収集開始前に適用される。"
-            "デフォルト3フェーズ例(--episodes=100): "
-            "[{\"episode\": 0, \"MinActiveEnemies\": 2, \"MaxActiveEnemies\": 5, "
-            "\"EnemyDamageScale\": 0.3, \"EnemySpeedMult\": 0.7, \"SpawnRateMult\": 0.5, \"MaxEnemyTypeId\": 2}, "
-            "{\"episode\": 34, \"MinActiveEnemies\": 10, \"MaxActiveEnemies\": 20, "
-            "\"EnemyDamageScale\": 0.7, \"EnemySpeedMult\": 0.9, \"SpawnRateMult\": 1.0, \"MaxEnemyTypeId\": 5}, "
-            "{\"episode\": 67, \"MinActiveEnemies\": 50, \"MaxActiveEnemies\": 100, "
-            "\"EnemyDamageScale\": 1.0, \"EnemySpeedMult\": 1.0, \"SpawnRateMult\": 1.0, \"MaxEnemyTypeId\": 10}]"
+            "例: games/survivors/bc_schedule_default.json"
         ),
     )
 
@@ -180,10 +174,11 @@ def main() -> None:
     model = _make_model(args, env)
     print(f"[INFO] モデル作成完了 (device={model.device})")
 
-    # BC パラメータスケジュール解析
+    # BC パラメータスケジュール読み込み
     params_schedule: list[tuple[int, dict]] | None = None
     if args.bc_schedule:
-        raw_sched = json.loads(args.bc_schedule)
+        schedule_path = Path(args.bc_schedule)
+        raw_sched = json.loads(schedule_path.read_text(encoding="utf-8"))
         params_schedule = []
         for entry in raw_sched:
             entry = dict(entry)
@@ -191,7 +186,7 @@ def main() -> None:
             params_schedule.append((ep, entry))
         params_schedule.sort(key=lambda x: x[0])
         phases = ", ".join(f"ep{ep}:{list(p.keys())}" for ep, p in params_schedule)
-        print(f"[INFO] BC スケジュール: {phases}")
+        print(f"[INFO] BC スケジュール ({schedule_path}): {phases}")
 
     # BC 実行
     from games.survivors.survivors_bc import bc_warmup, validate_bc_model
