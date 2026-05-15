@@ -80,8 +80,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=None,
                    help="サーバーポート（未指定時はゲーム設定のデフォルト: coin=8766, survivors=8767）")
-    p.add_argument("--output-dir", default=None,
-                   help="結果保存の親ディレクトリ（省略時は runs/<game>/<version-name>/eureka/）")
     p.add_argument("--max-steps", type=int, default=200_000,
                    help="LLM推奨ステップ数を使う場合の上限（default: 200000）")
     p.add_argument("--min-steps", type=int, default=30_000,
@@ -630,11 +628,7 @@ def main() -> None:
         print("[ERROR] --resume と --run-name は同時に指定できません。")
         return
 
-    eureka_root = (
-        Path(args.output_dir)
-        if args.output_dir
-        else Path("runs") / args.game / args.version_name / "eureka"
-    )
+    eureka_root = Path("runs") / args.game / args.version_name / "eureka"
 
     if args.resume:
         run_name = args.resume
