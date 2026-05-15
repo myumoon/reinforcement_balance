@@ -282,6 +282,27 @@ def rule_policy(obs: np.ndarray, offsets: dict, rng: np.random.Generator | None 
     return 8
 
 
+def _maybe_update_params(
+    env,
+    schedule: list[tuple[int, dict]] | None,
+    ep_count: int,
+    verbose: int,
+) -> None:
+    """params_schedule の ep_count に対応するエントリでゲームパラメータを更新する。"""
+    if not schedule:
+        return
+    raw_env = _get_raw_env(env)
+    fn = getattr(raw_env, "set_params", None)
+    if fn is None:
+        return
+    for threshold, params in schedule:
+        if ep_count == threshold:
+            if verbose:
+                print(f"[BC] ep={ep_count}: ゲームパラメータ更新 {params}")
+            fn(**params)
+            return
+
+
 def bc_warmup(
     model,
     env,
@@ -289,6 +310,7 @@ def bc_warmup(
     epochs: int = 30,
     lr: float = 3e-4,
     batch_size: int = 512,
+    params_schedule: list[tuple[int, dict]] | None = None,
     verbose: int = 1,
 ) -> dict:
     """ルールベース方策でデモ収集し、model を行動クローニングで事前初期化する。
@@ -300,13 +322,17 @@ def bc_warmup(
     LSTM の時系列挙動は PPO 訓練で学習される。
 
     Args:
-        model:       SB3 PPO または RecurrentPPO（learn() 前に呼ぶこと）
-        env:         訓練用 VecEnv（VecNormalize / VecFrameStack ラッパーを含んでよい）
-        n_episodes:  デモ収集エピソード数
-        epochs:      BC エポック数（少なめにして局所最適化を防ぐ）
-        lr:          Adam 学習率
-        batch_size:  ミニバッチサイズ
-        verbose:     0: サイレント, 1: 進捗表示
+        model:           SB3 PPO または RecurrentPPO（learn() 前に呼ぶこと）
+        env:             訓練用 VecEnv（VecNormalize / VecFrameStack ラッパーを含んでよい）
+        n_episodes:      デモ収集エピソード数
+        epochs:          BC エポック数（少なめにして局所最適化を防ぐ）
+        lr:              Adam 学習率
+        batch_size:      ミニバッチサイズ
+        params_schedule: エピソード境界でゲームパラメータを変化させるスケジュール。
+                         [(start_episode, {UE5パラメータ名: 値, ...}), ...] の形式。
+                         start_episode==0 のエントリは収集開始前に適用される。
+                         None の場合はパラメータ更新を行わない（UE5 デフォルト値を使用）。
+        verbose:         0: サイレント, 1: 進捗表示
 
     Returns:
         dict: BC 統計情報
@@ -334,10 +360,11 @@ def bc_warmup(
     vec_norm = _find_vecnormalize(env)
     if verbose:
         n_stack = getattr(env, "n_stack", 1)
+        sched_info = f", スケジュール={len(params_schedule)}フェーズ" if params_schedule else ""
         print(
             f"[BC] デモ収集開始 "
             f"(n_episodes={n_episodes}, VecNormalize={'有効' if vec_norm else '無効'}, "
-            f"frame_stack={n_stack})"
+            f"frame_stack={n_stack}{sched_info})"
         )
 
     obs_list: list[np.ndarray] = []
@@ -350,6 +377,7 @@ def bc_warmup(
     ep_length = 0
 
     obs = env.reset()
+    _maybe_update_params(env, params_schedule, 0, verbose)
 
     while ep_count < n_episodes:
         if vec_norm is not None:
@@ -372,6 +400,7 @@ def bc_warmup(
             ep_reward = 0.0
             ep_length = 0
             ep_count += 1
+            _maybe_update_params(env, params_schedule, ep_count, verbose)
             if verbose and ep_count % 20 == 0:
                 recent = episode_rewards[-20:]
                 print(

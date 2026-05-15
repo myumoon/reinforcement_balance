@@ -1,0 +1,29 @@
+[
+  {
+    "episode": 0,
+    "MinActiveEnemies": 2,
+    "MaxActiveEnemies": 5,
+    "EnemyDamageScale": 0.3,
+    "EnemySpeedMult": 0.7,
+    "SpawnRateMult": 0.5,
+    "MaxEnemyTypeId": 2
+  },
+  {
+    "episode": 34,
+    "MinActiveEnemies": 10,
+    "MaxActiveEnemies": 20,
+    "EnemyDamageScale": 0.7,
+    "EnemySpeedMult": 0.9,
+    "SpawnRateMult": 1.0,
+    "MaxEnemyTypeId": 5
+  },
+  {
+    "episode": 67,
+    "MinActiveEnemies": 50,
+    "MaxActiveEnemies": 100,
+    "EnemyDamageScale": 1.0,
+    "EnemySpeedMult": 1.0,
+    "SpawnRateMult": 1.0,
+    "MaxEnemyTypeId": 10
+  }
+]

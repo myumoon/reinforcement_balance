@@ -96,6 +96,16 @@ def _parse_args() -> argparse.Namespace:
                    help="エピソード平均長の下限 (default: 1200)")
     p.add_argument("--bc-no-fail-on-error",     action="store_true",
                    help="検証失敗時も正常終了する（デフォルトは非ゼロ終了）")
+    # BC パラメータスケジュール
+    p.add_argument(
+        "--bc-schedule", type=Path, default=None,
+        help=(
+            "BC中のゲームパラメータスケジュールを記述した JSON ファイルパス。"
+            "配列形式で各要素は {\"episode\": N, <UE5パラメータ>}。"
+            "episode=0 のエントリはデモ収集開始前に適用される。"
+            "例: games/survivors/bc_schedule_default.json"
+        ),
+    )
 
     if pre_args.config:
         from common.config import load_yaml_config, apply_yaml_defaults
@@ -164,6 +174,20 @@ def main() -> None:
     model = _make_model(args, env)
     print(f"[INFO] モデル作成完了 (device={model.device})")
 
+    # BC パラメータスケジュール読み込み
+    params_schedule: list[tuple[int, dict]] | None = None
+    if args.bc_schedule:
+        schedule_path = Path(args.bc_schedule)
+        raw_sched = json.loads(schedule_path.read_text(encoding="utf-8"))
+        params_schedule = []
+        for entry in raw_sched:
+            entry = dict(entry)
+            ep = int(entry.pop("episode"))
+            params_schedule.append((ep, entry))
+        params_schedule.sort(key=lambda x: x[0])
+        phases = ", ".join(f"ep{ep}:{list(p.keys())}" for ep, p in params_schedule)
+        print(f"[INFO] BC スケジュール ({schedule_path}): {phases}")
+
     # BC 実行
     from games.survivors.survivors_bc import bc_warmup, validate_bc_model
     print(f"[INFO] BC 開始 (episodes={args.episodes}, epochs={args.epochs})")
@@ -174,6 +198,7 @@ def main() -> None:
         epochs=args.epochs,
         lr=args.lr,
         batch_size=args.batch_size,
+        params_schedule=params_schedule,
         verbose=1,
     )
 
@@ -226,7 +251,7 @@ def main() -> None:
             print(f"[WARN] 検証失敗: model_bc_validated.zip は作成しません")
 
     # bc_status.json 保存（検証結果を含む）
-    _write_bc_status(status_path, args, stats, vec_norm is not None, validation_result)
+    _write_bc_status(status_path, args, stats, vec_norm is not None, validation_result, params_schedule)
     print(f"[INFO] bc_status.json を保存: {status_path}")
 
     # W&B サマリ
@@ -366,6 +391,7 @@ def _write_run_meta(run_dir: Path, args) -> None:
 def _write_bc_status(
     status_path: Path, args, stats: dict, has_vecnorm: bool,
     validation_result: dict | None = None,
+    params_schedule: list[tuple[int, dict]] | None = None,
 ) -> None:
     action_counts = stats.get("action_counts", [])
     total_acts = max(sum(action_counts), 1)
@@ -400,6 +426,7 @@ def _write_bc_status(
         "recurrent":             args.recurrent,
         "git_branch":            git_branch,
         "git_commit":            git_commit,
+        "bc_schedule":           [{"episode": ep, **p} for ep, p in params_schedule] if params_schedule else None,
         "validation":            validation_result or {"enabled": False},
     }
     status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2))
