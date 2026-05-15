@@ -337,6 +337,169 @@ def _bc_train(
     return {"final_loss": loss_history[-1] if loss_history else 0.0, "loss_history": loss_history}
 
 
+def validate_bc_model(
+    model,
+    env,
+    n_episodes: int = 5,
+    max_stationary_ratio: float = 0.35,
+    min_move_speed: float = 0.15,
+    max_dominant_action_ratio: float = 0.35,
+    max_wall_near_ratio: float = 0.30,
+    min_gem_pickups_est: float = 3.0,
+    min_episode_len: float = 1200.0,
+    verbose: int = 1,
+) -> dict:
+    """BC済みモデルをエピソード評価し、品質ゲートを確認する。
+
+    検証指標:
+        stationary_ratio:        静止(move_speed<0.003)ステップ割合
+        move_speed_mean:         平均移動速度（info["move_speed"] の平均）
+        dominant_action_ratio:   最頻アクションの割合
+        wall_near_ratio:         壁近接(is_wall_near)ステップ割合
+        gem_pickups_est_mean:    エピソード平均Gem取得推定数
+        episode_length_mean:     エピソード平均長
+
+    Returns:
+        dict:
+            passed (bool): すべての閾値を満たした場合 True
+            metrics (dict): 各指標の計測値
+            thresholds (dict): 使用した閾値
+            fail_reasons (list[str]): 失敗理由のリスト
+    """
+    is_recurrent = hasattr(model.policy, "lstm_actor")
+
+    vec_norm = _find_vecnormalize(env)
+    was_training = None
+    if vec_norm is not None:
+        was_training = vec_norm.training
+        vec_norm.training = False
+
+    total_steps = 0
+    stationary_steps = 0
+    wall_near_steps = 0
+    speed_sum = 0.0
+    action_counts = [0] * 9
+    ep_lengths: list[int] = []
+    ep_gem_pickups: list[int] = []
+
+    lstm_states = None
+    episode_starts = np.ones(1, dtype=bool)
+    obs = env.reset()
+
+    ep_steps = 0
+    ep_gem_est = 0
+    prev_xp: float | None = None
+
+    try:
+        while len(ep_lengths) < n_episodes:
+            action, lstm_states = model.predict(
+                obs,
+                state=lstm_states,
+                episode_start=episode_starts,
+                deterministic=True,
+            )
+            obs, _, done, infos = env.step(action)
+            info = infos[0]
+
+            episode_starts = done
+
+            ep_steps += 1
+            total_steps += 1
+            action_counts[int(action[0])] += 1
+
+            speed = float(info.get("move_speed", 0.0) or 0.0)
+            speed_sum += speed
+            if info.get("is_stationary"):
+                stationary_steps += 1
+            if info.get("is_wall_near"):
+                wall_near_steps += 1
+
+            xp_now = float(info.get("xp_progress", 0.0) or 0.0)
+            if prev_xp is not None and xp_now > prev_xp + 0.005:
+                ep_gem_est += 1
+            prev_xp = xp_now
+
+            if done[0]:
+                ep_lengths.append(ep_steps)
+                ep_gem_pickups.append(ep_gem_est)
+                ep_steps = 0
+                ep_gem_est = 0
+                prev_xp = None
+                lstm_states = None
+                episode_starts = np.ones(1, dtype=bool)
+    finally:
+        if vec_norm is not None and was_training is not None:
+            vec_norm.training = was_training
+
+    episodes = len(ep_lengths)
+    if total_steps == 0 or episodes == 0:
+        return {
+            "passed": False,
+            "metrics": {},
+            "thresholds": {},
+            "fail_reasons": ["評価エピソードが0件でした"],
+        }
+
+    dom_action = int(np.argmax(action_counts))
+    metrics = {
+        "stationary_ratio":       stationary_steps / total_steps,
+        "move_speed_mean":        speed_sum / total_steps,
+        "dominant_action":        dom_action,
+        "dominant_action_ratio":  max(action_counts) / total_steps,
+        "wall_near_ratio":        wall_near_steps / total_steps,
+        "gem_pickups_est_mean":   float(np.mean(ep_gem_pickups)),
+        "episode_length_mean":    float(np.mean(ep_lengths)),
+    }
+    thresholds = {
+        "max_stationary_ratio":       max_stationary_ratio,
+        "min_move_speed":             min_move_speed,
+        "max_dominant_action_ratio":  max_dominant_action_ratio,
+        "max_wall_near_ratio":        max_wall_near_ratio,
+        "min_gem_pickups_est":        min_gem_pickups_est,
+        "min_episode_len":            min_episode_len,
+    }
+
+    fail_reasons: list[str] = []
+    if metrics["stationary_ratio"] > max_stationary_ratio:
+        fail_reasons.append(f"stationary_ratio {metrics['stationary_ratio']:.3f} > {max_stationary_ratio}")
+    if metrics["move_speed_mean"] < min_move_speed:
+        fail_reasons.append(f"move_speed_mean {metrics['move_speed_mean']:.3f} < {min_move_speed}")
+    if metrics["dominant_action_ratio"] > max_dominant_action_ratio:
+        fail_reasons.append(
+            f"dominant_action_ratio {metrics['dominant_action_ratio']:.3f} > {max_dominant_action_ratio}"
+            f" (action={dom_action})"
+        )
+    if metrics["wall_near_ratio"] > max_wall_near_ratio:
+        fail_reasons.append(f"wall_near_ratio {metrics['wall_near_ratio']:.3f} > {max_wall_near_ratio}")
+    if metrics["gem_pickups_est_mean"] < min_gem_pickups_est:
+        fail_reasons.append(f"gem_pickups_est_mean {metrics['gem_pickups_est_mean']:.2f} < {min_gem_pickups_est}")
+    if metrics["episode_length_mean"] < min_episode_len:
+        fail_reasons.append(f"episode_length_mean {metrics['episode_length_mean']:.0f} < {min_episode_len}")
+
+    passed = len(fail_reasons) == 0
+
+    if verbose:
+        status = "PASSED" if passed else "FAILED"
+        print(
+            f"[BC検証] {status} ({episodes}エピソード)  "
+            f"stationary={metrics['stationary_ratio']:.2f}  "
+            f"speed={metrics['move_speed_mean']:.3f}  "
+            f"dom_action={metrics['dominant_action_ratio']:.2f}  "
+            f"wall_near={metrics['wall_near_ratio']:.2f}  "
+            f"gem_est={metrics['gem_pickups_est_mean']:.1f}  "
+            f"ep_len={metrics['episode_length_mean']:.0f}"
+        )
+        for reason in fail_reasons:
+            print(f"[BC検証]   NG: {reason}")
+
+    return {
+        "passed": passed,
+        "metrics": metrics,
+        "thresholds": thresholds,
+        "fail_reasons": fail_reasons,
+    }
+
+
 def _get_raw_env(env):
     """VecEnv ラッパーチェーンを辿って生の環境を返す."""
     inner = env
