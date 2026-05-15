@@ -60,9 +60,92 @@ _CONTACT_DIST_THRESHOLD: float = 0.15
 _SURROUND_MIN_DENSITY: float = 0.08
 # 「包囲」と判断する密度レンジの上限（差がこれ未満なら全方向均一=包囲）
 _SURROUND_MAX_RANGE: float = 0.35
+# 中心付近（center return を無効化する半径）
+_CENTER_NEAR_THRESHOLD: float = 0.15
+
+# action9 の角度（度）: index = action9, None = idle(8)
+# 0=N(90°), 1=NE(45°), 2=E(0°), 3=SE(-45°), 4=S(-90°), 5=SW(-135°), 6=W(180°), 7=NW(135°)
+_ACTION9_ANGLES_DEG: list[float] = [90.0, 45.0, 0.0, -45.0, -90.0, -135.0, 180.0, 135.0]
+
+# wall_rays の action9 → wall_ray インデックスの逆引き
+# _WALL_RAY_TO_ACTION9 = [E=2, NE=1, N=0, NW=7, W=6, SW=5, S=4, SE=3]
+_ACTION9_TO_WALL_RAY: dict[int, int] = {2: 0, 1: 1, 0: 2, 7: 3, 6: 4, 5: 5, 4: 6, 3: 7}
+
+# モジュールレベルの乱数生成器（rule_policy の同点処理に使用）
+_RNG: np.random.Generator = np.random.default_rng()
 
 
-def rule_policy(obs: np.ndarray, offsets: dict) -> int:
+def set_rule_policy_seed(seed: int) -> None:
+    """rule_policy の同点ランダム選択のシードを設定する（BC 再現性用）。"""
+    global _RNG
+    _RNG = np.random.default_rng(seed)
+
+
+def _angle_diff_deg(a: float, b: float) -> float:
+    """2つの角度（度）の最小差を返す [0, 180]。"""
+    d = abs(a - b) % 360.0
+    return d if d <= 180.0 else 360.0 - d
+
+
+def _get_center_action9(px: float, py: float) -> int | None:
+    """player_pos から中心方向の action9 を返す。中心付近なら None。
+
+    px = PlayerPos.X / FieldHalfSize: +East, -West
+    py = PlayerPos.Y / FieldHalfSize: +North, -South
+    """
+    if abs(px) < _CENTER_NEAR_THRESHOLD and abs(py) < _CENTER_NEAR_THRESHOLD:
+        return None
+    # 中心方向ベクトル = (-px, -py) in (East, North) 空間
+    angle_deg = float(np.degrees(np.arctan2(-py, -px)))
+    return int(min(range(8), key=lambda a: _angle_diff_deg(_ACTION9_ANGLES_DEG[a], angle_deg)))
+
+
+def _select_best_action9(
+    dir16_scores: np.ndarray,
+    blocked: set[int],
+    center_a9: int | None = None,
+    rng: np.random.Generator | None = None,
+    eps: float = 1e-6,
+) -> int | None:
+    """dir16 スコアから最良の action9 を選ぶ。
+
+    - 同じ action9 にマップされる dir16 は最大値を採用
+    - blocked に含まれる action9 は除外
+    - 同点時: 中心方向に近い候補を優先 → それでも複数ならランダム選択
+    - 全 action9 がブロックされている場合は None を返す
+    """
+    a9_scores: dict[int, float] = {}
+    for d16 in range(16):
+        a9 = _DIR16_TO_ACTION9[d16]
+        if a9 in blocked:
+            continue
+        s = float(dir16_scores[d16])
+        if a9 not in a9_scores or s > a9_scores[a9]:
+            a9_scores[a9] = s
+
+    if not a9_scores:
+        return None
+
+    max_s = max(a9_scores.values())
+    candidates = [a9 for a9, s in a9_scores.items() if max_s - s <= eps]
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # 中心方向に近い候補を優先
+    if center_a9 is not None and center_a9 < 8:
+        ca_deg = _ACTION9_ANGLES_DEG[center_a9]
+        candidates.sort(key=lambda a: _angle_diff_deg(_ACTION9_ANGLES_DEG[a], ca_deg))
+        min_diff = _angle_diff_deg(_ACTION9_ANGLES_DEG[candidates[0]], ca_deg)
+        candidates = [a for a in candidates if _angle_diff_deg(_ACTION9_ANGLES_DEG[a], ca_deg) <= min_diff + eps]
+        if len(candidates) == 1:
+            return candidates[0]
+
+    _rng = rng if rng is not None else _RNG
+    return int(_rng.choice(candidates))
+
+
+def rule_policy(obs: np.ndarray, offsets: dict, rng: np.random.Generator | None = None) -> int:
     """ルールベース方策。生の（正規化前）obs を想定するが VecNormalize 後でも動作する。
 
     argmax ベースの比較は VecNormalize の線形変換に対して不変。
@@ -70,15 +153,16 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
 
     行動方針:
       敵を Aura 範囲に引き込んで倒し Gem を落とさせる → Gem を拾う、が基本。
-      逃げるのは「接触距離まで追い詰められた」か「全方向に囲まれた」ときのみ。
 
     優先度:
-      1. 包囲 + 壁際 → argmax(wall_rays) 方向へ脱出（ダメージ覚悟）
-      2. 包囲（全方向密度均一・高）→ argmin(enemy_near) 方向へ脱出
-      3. 接触距離に敵 → 最接近方向の反対へ後退り（Aura 範囲を維持）
-      4. Gem 収集 → 安全スコア付き gem_density の最大方向へ
-      5. 敵に接近 → enemy_density_mid の最大方向へ（Aura 範囲に引き込む）
-      6. 判断材料なし → 静止
+      1. [常時フィルタ] 壁が近い action9 を blocked セットに追加
+      2. 接触距離に敵 → 最接近方向の反対へ退避（blocked 除外）
+      3. 包囲（全方向密度均一・高）→ 最低密度方向へ脱出（blocked 除外）
+      4. Gem 収集 → gem スコア（near+mid+dist）× 安全スコアの最大方向（blocked 除外・中心優先）
+      5. 敵に接近 → enemy_density_mid の最大方向（blocked 除外・中心優先）
+      6. 中心復帰 → player_pos から中心方向（blocked 除外）
+      7. 開けた方向 → argmax(wall_rays) 方向
+      8. Idle
 
     Returns:
         int: 0–8 の行動
@@ -89,53 +173,112 @@ def rule_policy(obs: np.ndarray, offsets: dict) -> int:
     o_nd = offsets["enemy_nearest_dist_16dir"]
     o_em = offsets.get("enemy_density_mid_16dir")
     o_wr = offsets.get("wall_rays")
+    o_pp = offsets.get("player_pos")
+    o_gd = offsets.get("gem_nearest_dist_16dir")
+    o_gm = offsets.get("gem_density_mid_16dir")
 
     enemy_near = obs[o_en:o_en + DIR_COUNT].astype(np.float64)
     gem_near   = obs[o_gn:o_gn + DIR_COUNT].astype(np.float64)
     enemy_nd   = obs[o_nd:o_nd + DIR_COUNT].astype(np.float64)
 
-    en_min = float(np.min(enemy_near))
-    en_max = float(np.max(enemy_near))
-    en_range = en_max - en_min
     nd_min = float(np.min(enemy_nd))
     nd_max = float(np.max(enemy_nd))
 
-    # 包囲判定: 全方向に密度があり かつ 方向差が小さい
-    surrounded = en_min > _SURROUND_MIN_DENSITY and en_range < _SURROUND_MAX_RANGE
-
-    # 1. 包囲 + 壁際 → 壁から離れる（ダメージ覚悟）
-    if surrounded and o_wr is not None:
+    # ── 1. 壁が近い action9 を blocked に追加（全ステップ共通フィルタ） ──
+    # 壁が近い方向に加え、その隣接方向（斜め）もブロックする。
+    # 例: 北壁が近い → N(0), NE(1), NW(7) をブロック
+    blocked: set[int] = set()
+    wall: np.ndarray | None = None
+    if o_wr is not None:
         wall = obs[o_wr:o_wr + 8].astype(np.float64)
-        if float(np.min(wall)) < _WALL_CLOSE_THRESHOLD:
-            open_dir = int(np.argmax(wall))
-            return _WALL_RAY_TO_ACTION9[open_dir]
+        for ray_i, dist in enumerate(wall):
+            if float(dist) < _WALL_CLOSE_THRESHOLD:
+                a9 = _WALL_RAY_TO_ACTION9[ray_i]
+                blocked.add(a9)
+                blocked.add((a9 - 1) % 8)   # 隣接する斜め方向
+                blocked.add((a9 + 1) % 8)
 
-    # 2. 包囲 → 最低密度方向へ脱出
-    if surrounded:
-        return _DIR16_TO_ACTION9[int(np.argmin(enemy_near))]
+    # player_pos から中心方向を取得（中心付近なら None）
+    center_a9: int | None = None
+    if o_pp is not None:
+        px = float(obs[o_pp])
+        py = float(obs[o_pp + 1])
+        center_a9 = _get_center_action9(px, py)
 
-    # 3. 接触距離に敵 → 最接近方向の反対へ後退り（Aura 範囲を維持しながら離れる）
+    # ── 2. 接触距離に敵 → 反対方向へ退避 ──
     if nd_min < _CONTACT_DIST_THRESHOLD:
-        danger_dir = int(np.argmin(enemy_nd))  # 最も近い敵がいる方向
-        retreat_dir = (danger_dir + DIR_COUNT // 2) % DIR_COUNT
-        return _DIR16_TO_ACTION9[retreat_dir]
+        danger_d16 = int(np.argmin(enemy_nd))
+        retreat_d16 = (danger_d16 + DIR_COUNT // 2) % DIR_COUNT
+        retreat_a9 = _DIR16_TO_ACTION9[retreat_d16]
+        if retreat_a9 not in blocked:
+            return retreat_a9
+        # 退避方向が壁ならば、安全スコアで最善の非blocked方向を選ぶ
+        act = _select_best_action9(enemy_nd, blocked, center_a9, rng)
+        if act is not None:
+            return act
 
-    # 4. Gem 収集 → 安全スコア（enemy_nd が高い方向ほど安全）× gem_near の最大方向
-    if nd_max > 1e-6 and float(np.max(gem_near)) > 1e-6:
-        safety = enemy_nd / nd_max  # [0, 1]: 敵が遠い方向ほど高い
-        gem_score = gem_near * safety
-        gn_max = float(np.max(gem_score))
-        if gn_max - float(np.min(gem_score)) > 1e-6:
-            return _DIR16_TO_ACTION9[int(np.argmax(gem_score))]
+    # ── 3. 包囲判定 → 最低密度方向へ脱出 ──
+    en_min = float(np.min(enemy_near))
+    en_range = float(np.max(enemy_near)) - en_min
+    if en_min > _SURROUND_MIN_DENSITY and en_range < _SURROUND_MAX_RANGE:
+        act = _select_best_action9(-enemy_near, blocked, center_a9, rng)
+        if act is not None:
+            return act
 
-    # 5. 敵に接近 → enemy_density_mid の最大方向（中距離の敵を Aura 範囲内に引き込む）
+    # ── 4. Gem 収集 ──
+    # gem スコア: near(0.5) + mid(0.25) + (1-dist)(0.25)
+    gem_score = gem_near * 0.5
+    if o_gm is not None:
+        gem_mid = obs[o_gm:o_gm + DIR_COUNT].astype(np.float64)
+        gem_score = gem_score + gem_mid * 0.25
+    if o_gd is not None:
+        gem_nd = obs[o_gd:o_gd + DIR_COUNT].astype(np.float64)
+        gem_score = gem_score + (1.0 - gem_nd) * 0.25
+
+    # 安全スコア: enemy_nd 高い方向ほど安全、enemy_near/mid が高い方向は減点
+    en_max = float(np.max(enemy_near))
+    safety = (enemy_nd / nd_max) if nd_max > 1e-6 else np.ones(DIR_COUNT)
     if o_em is not None:
         enemy_mid = obs[o_em:o_em + DIR_COUNT].astype(np.float64)
-        em_range = float(np.max(enemy_mid)) - float(np.min(enemy_mid))
-        if em_range > 1e-6:
-            return _DIR16_TO_ACTION9[int(np.argmax(enemy_mid))]
+        em_max = float(np.max(enemy_mid))
+        safety = (
+            safety
+            - 0.3 * (enemy_near / en_max if en_max > 1e-6 else 0.0)
+            - 0.2 * (enemy_mid / em_max if em_max > 1e-6 else 0.0)
+        )
 
-    # 6. 判断材料なし（敵も Gem も検出なし）→ 静止
+    final_gem = gem_score * np.clip(safety, 0.0, 1.0)
+    if float(np.max(final_gem)) > 1e-6:
+        act = _select_best_action9(final_gem, blocked, center_a9, rng)
+        if act is not None:
+            return act
+
+    # ── 5. 敵接近（Aura 範囲に引き込む） ──
+    if o_em is not None:
+        enemy_mid_arr = obs[o_em:o_em + DIR_COUNT].astype(np.float64)
+        em_range = float(np.max(enemy_mid_arr)) - float(np.min(enemy_mid_arr))
+        if em_range > 1e-6:
+            act = _select_best_action9(enemy_mid_arr, blocked, center_a9, rng)
+            if act is not None:
+                return act
+
+    # ── 6. 中心復帰 ──
+    if center_a9 is not None:
+        if center_a9 not in blocked:
+            return center_a9
+        # 中心方向がブロックされていれば、中心に最も近い非blocked方向を選ぶ
+        unblocked = [a for a in range(8) if a not in blocked]
+        if unblocked:
+            ca_deg = _ACTION9_ANGLES_DEG[center_a9]
+            return min(unblocked, key=lambda a: _angle_diff_deg(_ACTION9_ANGLES_DEG[a], ca_deg))
+
+    # ── 7. 開けた方向（wall_rays argmax） ──
+    if wall is not None:
+        unblocked = [a for a in range(8) if a not in blocked]
+        if unblocked:
+            return max(unblocked, key=lambda a: wall[_ACTION9_TO_WALL_RAY[a]])
+
+    # ── 8. Idle ──
     return 8
 
 
