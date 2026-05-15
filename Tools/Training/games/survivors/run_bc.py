@@ -75,6 +75,27 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--wandb",        action="store_true",         help="W&B ログを有効化")
     p.add_argument("--wandb-project", default="survivors",        help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None,              help="W&B ラン名（未指定時は --run-name を使用）")
+    # BC 検証ゲート
+    p.add_argument("--bc-validation",           action="store_true", default=True,
+                   help="BC後に品質検証を実行する（default: 有効）")
+    p.add_argument("--no-bc-validation",        action="store_false", dest="bc_validation",
+                   help="BC品質検証を無効化する")
+    p.add_argument("--bc-validation-episodes",  type=int,   default=5,
+                   help="検証エピソード数 (default: 5)")
+    p.add_argument("--bc-max-stationary-ratio", type=float, default=0.35,
+                   help="静止ステップ割合の上限 (default: 0.35)")
+    p.add_argument("--bc-min-move-speed",       type=float, default=0.15,
+                   help="平均移動速度の下限 (default: 0.15)")
+    p.add_argument("--bc-max-dominant-action",  type=float, default=0.35,
+                   help="最頻アクション割合の上限 (default: 0.35)")
+    p.add_argument("--bc-max-wall-near-ratio",  type=float, default=0.30,
+                   help="壁近接ステップ割合の上限 (default: 0.30)")
+    p.add_argument("--bc-min-gem-pickups",      type=float, default=3.0,
+                   help="エピソード平均Gem取得推定数の下限 (default: 3.0)")
+    p.add_argument("--bc-min-episode-len",      type=float, default=1200.0,
+                   help="エピソード平均長の下限 (default: 1200)")
+    p.add_argument("--bc-no-fail-on-error",     action="store_true",
+                   help="検証失敗時も正常終了する（デフォルトは非ゼロ終了）")
 
     if pre_args.config:
         from common.config import load_yaml_config, apply_yaml_defaults
@@ -144,7 +165,7 @@ def main() -> None:
     print(f"[INFO] モデル作成完了 (device={model.device})")
 
     # BC 実行
-    from games.survivors.survivors_bc import bc_warmup
+    from games.survivors.survivors_bc import bc_warmup, validate_bc_model
     print(f"[INFO] BC 開始 (episodes={args.episodes}, epochs={args.epochs})")
     stats = bc_warmup(
         model=model,
@@ -166,8 +187,46 @@ def main() -> None:
         vec_norm.save(str(vecnorm_bc_path))
         print(f"[INFO] VecNormalize 統計を保存: {vecnorm_bc_path}")
 
-    # bc_status.json 保存
-    _write_bc_status(status_path, args, stats, vec_norm is not None)
+    # BC 検証ゲート
+    validation_result: dict = {"enabled": False}
+    validated_model_path = None
+    if args.bc_validation:
+        print(
+            f"[INFO] BC 検証開始 (episodes={args.bc_validation_episodes}, "
+            f"max_stationary={args.bc_max_stationary_ratio}, "
+            f"min_speed={args.bc_min_move_speed})"
+        )
+        result = validate_bc_model(
+            model=model,
+            env=env,
+            n_episodes=args.bc_validation_episodes,
+            max_stationary_ratio=args.bc_max_stationary_ratio,
+            min_move_speed=args.bc_min_move_speed,
+            max_dominant_action_ratio=args.bc_max_dominant_action,
+            max_wall_near_ratio=args.bc_max_wall_near_ratio,
+            min_gem_pickups_est=args.bc_min_gem_pickups,
+            min_episode_len=args.bc_min_episode_len,
+            verbose=1,
+        )
+        validation_result = {
+            "enabled": True,
+            "passed": result["passed"],
+            "episodes": args.bc_validation_episodes,
+            "metrics": result["metrics"],
+            "thresholds": result["thresholds"],
+            "fail_reasons": result["fail_reasons"],
+            "validated_model_path": None,
+        }
+        if result["passed"]:
+            model.save(str(run_dir / "model_bc_validated"))
+            validated_model_path = str(run_dir / "model_bc_validated.zip")
+            validation_result["validated_model_path"] = "model_bc_validated.zip"
+            print(f"[INFO] 検証成功: model_bc_validated.zip を保存しました")
+        else:
+            print(f"[WARN] 検証失敗: model_bc_validated.zip は作成しません")
+
+    # bc_status.json 保存（検証結果を含む）
+    _write_bc_status(status_path, args, stats, vec_norm is not None, validation_result)
     print(f"[INFO] bc_status.json を保存: {status_path}")
 
     # W&B サマリ
@@ -187,9 +246,29 @@ def main() -> None:
         if stats.get("loss_history"):
             for ep, loss in enumerate(stats["loss_history"]):
                 wandb.log({"bc/train_loss": loss, "bc/epoch": ep + 1})
+        if validation_result.get("enabled"):
+            metrics = validation_result.get("metrics", {})
+            wandb.summary.update({
+                "bc_validation/passed":               int(validation_result.get("passed", False)),
+                "bc_validation/stationary_ratio":     metrics.get("stationary_ratio", 0.0),
+                "bc_validation/move_speed_mean":      metrics.get("move_speed_mean", 0.0),
+                "bc_validation/dominant_action_ratio": metrics.get("dominant_action_ratio", 0.0),
+                "bc_validation/wall_near_ratio":      metrics.get("wall_near_ratio", 0.0),
+                "bc_validation/gem_pickups_est_mean": metrics.get("gem_pickups_est_mean", 0.0),
+                "bc_validation/episode_length_mean":  metrics.get("episode_length_mean", 0.0),
+            })
         wandb.finish()
 
     env.close()
+
+    # 検証失敗時の終了処理（env.close() 後に行う）
+    if args.bc_validation and validation_result.get("enabled") and not validation_result.get("passed"):
+        if not args.bc_no_fail_on_error:
+            raise RuntimeError(
+                f"BC 検証失敗: {'; '.join(validation_result.get('fail_reasons', []))}"
+            )
+        print("[WARN] BC 検証失敗（--bc-no-fail-on-error のため続行）")
+
     print("[INFO] BC 完了")
 
 
@@ -284,7 +363,10 @@ def _write_run_meta(run_dir: Path, args) -> None:
     (run_dir / "run_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
 
 
-def _write_bc_status(status_path: Path, args, stats: dict, has_vecnorm: bool) -> None:
+def _write_bc_status(
+    status_path: Path, args, stats: dict, has_vecnorm: bool,
+    validation_result: dict | None = None,
+) -> None:
     action_counts = stats.get("action_counts", [])
     total_acts = max(sum(action_counts), 1)
     action_dist = {f"action_{i}": c / total_acts for i, c in enumerate(action_counts)}
@@ -318,6 +400,7 @@ def _write_bc_status(status_path: Path, args, stats: dict, has_vecnorm: bool) ->
         "recurrent":             args.recurrent,
         "git_branch":            git_branch,
         "git_commit":            git_commit,
+        "validation":            validation_result or {"enabled": False},
     }
     status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2))
 
