@@ -488,6 +488,76 @@ def _strip_zip(path: Path) -> Path:
     return path.with_suffix("") if path.suffix.lower() == ".zip" else path
 
 
+def _create_model(args, env, algo_class, default_policy: str, ppo_kwargs: dict):
+    """現在の args/env から PPO モデルを新規作成する。
+
+    --init-model と通常新規作成の両方で使う共通パス。
+    entity_attention / recurrent の分岐をここに集約する。
+    """
+    if args.entity_attention and args.game in ("coin", "survivors"):
+        raw_env = _get_raw_env(env)
+        offsets = getattr(raw_env, "_offsets", {})
+        obs_schema = getattr(raw_env, "_obs_schema", [])
+        if args.game == "survivors":
+            from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
+            extractor_class = SurvivorsEntityAttentionExtractor
+        else:
+            from games.coin.coin_entity_attention_extractor import CoinEntityAttentionExtractor
+            extractor_class = CoinEntityAttentionExtractor
+        policy_kwargs = dict(
+            features_extractor_class=extractor_class,
+            features_extractor_kwargs=dict(features_dim=128, offsets=offsets, obs_schema=obs_schema),
+            net_arch=[64, 64],
+        )
+        if args.recurrent:
+            policy_kwargs["lstm_hidden_size"] = args.lstm_hidden_size
+            policy_kwargs["n_lstm_layers"] = args.n_lstm_layers
+        print(f"[INFO] {extractor_class.__name__} を使用します (game={args.game}, policy={default_policy})")
+        return algo_class(default_policy, env, policy_kwargs=policy_kwargs, **ppo_kwargs)
+    elif args.entity_attention:
+        print(f"[WARN] --entity-attention はコイン/サバイバーズゲーム専用です。{default_policy} を使用します。")
+        return algo_class(default_policy, env, **ppo_kwargs)
+    elif args.recurrent:
+        policy_kwargs = dict(
+            lstm_hidden_size=args.lstm_hidden_size,
+            n_lstm_layers=args.n_lstm_layers,
+        )
+        print(
+            f"[INFO] RecurrentPPO (MlpLstmPolicy) を使用します "
+            f"(lstm_hidden_size={args.lstm_hidden_size}, n_lstm_layers={args.n_lstm_layers})"
+        )
+        return algo_class(default_policy, env, policy_kwargs=policy_kwargs, **ppo_kwargs)
+    else:
+        return algo_class(default_policy, env, **ppo_kwargs)
+
+
+def _load_policy_weights_from_model(
+    model, init_model_path: Path, algo_class, device: str
+) -> None:
+    """BC済みモデルから policy の state_dict だけを現在モデルへ移植する。
+
+    optimizer state / clip_range / learning_rate / ent_coef / n_steps 等の
+    PPO ハイパーパラメータは現在モデル（現在の config）の値を維持する。
+
+    --init-model: 事前学習済み policy を初期値として使う（PPO 設定は引き継がない）
+    --resume:     同じ訓練の完全再開（optimizer state / timesteps も含めて復元）
+    """
+    source = algo_class.load(str(_strip_zip(init_model_path)), device=device)
+
+    src_obs = source.policy.observation_space
+    dst_obs = model.policy.observation_space
+    if src_obs != dst_obs:
+        raise RuntimeError(
+            f"[ERROR] --init-model: obs_space 不一致。アーキテクチャが一致するBC モデルを指定してください。\n"
+            f"  BC zip:  {src_obs}\n"
+            f"  current: {dst_obs}"
+        )
+
+    model.policy.load_state_dict(source.policy.state_dict(), strict=True)
+    print("[INFO] --init-model: policy weights のみを移植しました (strict=True)")
+    print("[INFO] PPO ハイパーパラメータは BC zip ではなく現在の config を使用します")
+
+
 def parse_args() -> argparse.Namespace:
     # 事前パース: --config のみ抽出（他の引数は無視）
     pre = argparse.ArgumentParser(add_help=False)
@@ -784,20 +854,7 @@ def main() -> None:
     algo_class = RecurrentPPO if args.recurrent else PPO
     default_policy = "MlpLstmPolicy" if args.recurrent else "MlpPolicy"
 
-    if args.init_model:
-        init_path = str(_strip_zip(args.init_model))
-        print(f"[INFO] BC 済みモデルを初期値としてロード: {init_path}")
-        load_kwargs = {"tensorboard_log": ppo_kwargs["tensorboard_log"]} if _use_wandb else {}
-        model = algo_class.load(init_path, env=env, device=args.device, **load_kwargs)
-        model.num_timesteps = 0
-        # optimizer state を BC の影響から切り離す（momentum/variance をリセット）
-        if hasattr(model.policy, "optimizer"):
-            opt_cls = type(model.policy.optimizer)
-            model.policy.optimizer = opt_cls(
-                model.policy.parameters(), **model.policy.optimizer.defaults
-            )
-        print("[INFO] --init-model: num_timesteps=0 にリセット、optimizer state をリセット")
-    elif args.resume:
+    if args.resume:
         resume_path = str(resume_model_base)
         print(f"[INFO] {resume_path} から再開")
         if args.entity_attention:
@@ -806,40 +863,25 @@ def main() -> None:
             print("[INFO] --recurrent は --resume 時は保存済みモデルのアーキテクチャに従います")
         load_kwargs = {"tensorboard_log": ppo_kwargs["tensorboard_log"]} if _use_wandb else {}
         model = algo_class.load(resume_path, env=env, device=args.device, **load_kwargs)
-    elif args.entity_attention:
-        if args.game not in ("coin", "survivors"):
-            print(f"[WARN] --entity-attention はコイン/サバイバーズゲーム専用です。{default_policy} を使用します。")
-            model = algo_class(default_policy, env, **ppo_kwargs)
-        else:
-            raw_env = _get_raw_env(env)
-            offsets = getattr(raw_env, "_offsets", {})
-            obs_schema = getattr(raw_env, "_obs_schema", [])
-            if args.game == "survivors":
-                from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
-                extractor_class = SurvivorsEntityAttentionExtractor
-            else:  # coin
-                from games.coin.coin_entity_attention_extractor import CoinEntityAttentionExtractor
-                extractor_class = CoinEntityAttentionExtractor
-            policy_kwargs = dict(
-                features_extractor_class=extractor_class,
-                features_extractor_kwargs=dict(features_dim=128, offsets=offsets, obs_schema=obs_schema),
-                net_arch=[64, 64],
-            )
-            if args.recurrent:
-                policy_kwargs["lstm_hidden_size"] = args.lstm_hidden_size
-                policy_kwargs["n_lstm_layers"] = args.n_lstm_layers
-            print(f"[INFO] {extractor_class.__name__} を使用します (game={args.game}, policy={default_policy})")
-            model = algo_class(default_policy, env, policy_kwargs=policy_kwargs, **ppo_kwargs)
-    elif args.recurrent:
-        policy_kwargs = dict(
-            lstm_hidden_size=args.lstm_hidden_size,
-            n_lstm_layers=args.n_lstm_layers,
-        )
-        print(f"[INFO] RecurrentPPO (MlpLstmPolicy) を使用します "
-              f"(lstm_hidden_size={args.lstm_hidden_size}, n_lstm_layers={args.n_lstm_layers})")
-        model = algo_class(default_policy, env, policy_kwargs=policy_kwargs, **ppo_kwargs)
     else:
-        model = algo_class(default_policy, env, **ppo_kwargs)
+        # --init-model の有無にかかわらず、現在の config でモデルを新規作成する
+        model = _create_model(args, env, algo_class, default_policy, ppo_kwargs)
+        if args.init_model:
+            # policy weights のみを移植する（PPO ハイパーパラメータは現在 config を維持）
+            print(f"[INFO] --init-model: {args.init_model} から policy weights を移植します")
+            print("[INFO] --resume との違い: --init-model は weights のみ移植。optimizer/PPO設定は現在 config を使用")
+            _load_policy_weights_from_model(model, args.init_model, algo_class, args.device)
+            model.num_timesteps = 0
+            lr_val = ppo_kwargs.get("learning_rate", "N/A")
+            cr_val = ppo_kwargs.get("clip_range", "N/A")
+            ec_val = ppo_kwargs.get("ent_coef", args.ent_coef)
+            ns_val = ppo_kwargs.get("n_steps", "N/A")
+            bs_val = ppo_kwargs.get("batch_size", "N/A")
+            print(
+                f"[INFO] 現在 config の PPO 設定: "
+                f"clip_range={cr_val}, learning_rate={lr_val}, "
+                f"ent_coef={ec_val}, n_steps={ns_val}, batch_size={bs_val}"
+            )
     print(f"[INFO] SB3 model device: {model.device}")
 
     callbacks = []
