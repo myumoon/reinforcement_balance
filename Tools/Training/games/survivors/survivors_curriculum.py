@@ -17,7 +17,7 @@
 
 フェーズ設計:
   - Gem回収フェーズで移動と回収の基礎を作る
-  - 通常序盤から包囲入門A/B/B+/Cへ小刻みに上げる
+  - 通常序盤から包囲入門A/B/Cへ段階的に上げる（各フェーズで最大敵数・密度・ダメージを増加）
   - 群れ対応もA/B/Cへ分け、密度・速度・TimeScalingを段階的に上げる
   - Mad Forest を最終フェーズとして扱う
 """
@@ -71,19 +71,22 @@ PHASES: list[_Phase] = [
     _Phase("Gem回収開始",       6,  10, 0.9, 1.4,  2, 0.75, 0.75, False, 1200,  100.0),
     _Phase("Gem追従強化",       7,  14, 0.9, 1.7,  3, 0.85, 0.85, False, 1800,  250.0),
     _Phase("通常序盤",          8,  20, 1.0, 2.0,  4, 1.00, 1.00, False, 2400,  800.0),
-    _Phase("包囲入門A",         9,  18, 1.0, 2.0,  4, 1.00, 0.80, False, 2400,  950.0,
+    # 包囲入門A/B/C: 3段階。A→通常序盤と同じ max=20 から開始し、B/C で密度・ダメージを段階上昇。
+    # threshold × 2.0 の期待クリアマージン:
+    #   A: max=20 → 期待スコア≈2200 vs 有効閾値 1900 (+16%)
+    #   B: max=24 → 期待スコア≈2640 vs 有効閾値 2400 (+10%)
+    #   C: max=28 → 期待スコア≈3080 vs 有効閾値 2700 (+14%)
+    _Phase("包囲入門A",         9,  20, 1.0, 2.1,  4, 1.00, 0.85, False, 2400,  950.0,
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
            promotion_score_stat="percentile", promotion_score_percentile=10.0),
-    _Phase("包囲入門B",        10,  22, 1.0, 2.1,  4, 1.00, 0.90, False, 2400,  940.0,
+    _Phase("包囲入門B",        10,  24, 1.0, 2.2,  4, 1.00, 0.95, False, 2400, 1200.0,
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
            promotion_score_stat="percentile", promotion_score_percentile=10.0),
-    _Phase("包囲入門B+",       10,  24, 1.0, 2.15, 4, 1.00, 0.95, False, 2400, 1100.0,
+    _Phase("包囲入門C",        11,  28, 1.0, 2.35, 4, 1.05, 1.00, False, 2400, 1350.0,
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
            promotion_score_stat="percentile", promotion_score_percentile=10.0),
-    _Phase("包囲入門C",        10,  25, 1.0, 2.2,  4, 1.05, 1.00, False, 2400, 1150.0,
-           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
-           promotion_score_stat="percentile", promotion_score_percentile=10.0),
-    _Phase("包囲対応",         12,  30, 1.0, 2.4,  5, 1.10, 1.10, False, 2400, 1350.0,
+    # 包囲対応: max=30 → 期待スコア≈3300 vs 有効閾値 3000 (+10%), 新敵種追加 (max_type=5)
+    _Phase("包囲対応",         12,  30, 1.05, 2.5, 5, 1.10, 1.10, False, 2400, 1500.0,
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
            promotion_score_stat="percentile", promotion_score_percentile=10.0),
     _Phase("多敵対応",         14,  40, 1.0, 2.6,  6, 1.20, 1.20, False, 2400, 1550.0,
