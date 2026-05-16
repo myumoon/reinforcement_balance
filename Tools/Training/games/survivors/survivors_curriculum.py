@@ -63,7 +63,7 @@ BLOCKER_NONE = 0           # 昇格可能（または最終フェーズ）
 BLOCKER_NOT_ENOUGH_EP = 1  # ウィンドウ内エピソード数不足
 BLOCKER_SCORE_MEAN_LOW = 2 # score_mean < effective_threshold
 BLOCKER_EP_LEN_LOW = 3     # episode_length_mean < min_episode_steps
-BLOCKER_SCORE_MIN_LOW = 4  # score_min < promotion_min_score_floor
+BLOCKER_SCORE_MIN_LOW = 4  # promotion_low_score (score_min or score_p10) < promotion_low_score_floor
 BLOCKER_SCORE_CV_HIGH = 5  # score_cv > promotion_max_score_cv
 
 PHASES: list[_Phase] = [
@@ -565,11 +565,6 @@ class CurriculumCallback(BaseCallback):
             else None
         )
         score_min = min(recent_scores) if recent_scores else None
-        promotion_min_score_floor = (
-            effective_threshold * phase.promotion_min_score_ratio
-            if base_threshold is not None
-            else None
-        )
         score_cv = (
             score_std / max(score_mean, 1e-8)
             if recent_scores and score_mean > 0.0
@@ -626,8 +621,8 @@ class CurriculumCallback(BaseCallback):
                 "threshold_ratio": round(threshold_ratio, 4) if threshold_ratio is not None else None,
                 "promotion_min_score_ratio": phase.promotion_min_score_ratio,
                 "promotion_min_score_floor": (
-                    round(promotion_min_score_floor, 4)
-                    if promotion_min_score_floor is not None
+                    round(promotion_low_score_floor, 4)
+                    if promotion_low_score_floor is not None
                     else None
                 ),
                 "promotion_max_score_cv": phase.promotion_max_score_cv,
