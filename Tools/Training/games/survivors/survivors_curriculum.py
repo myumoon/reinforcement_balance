@@ -32,6 +32,7 @@ from base.curriculum import (
     WindowThresholdRecommendationPolicy,
     mean as _mean,
     stdev as _stdev,
+    percentile as _percentile,
 )
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -53,6 +54,8 @@ class _Phase:
     rollback_length_ratio: float = 0.45
     promotion_min_score_ratio: float = 0.85
     promotion_max_score_cv: float = 0.20
+    promotion_score_stat: str = "min"       # "min" | "percentile"
+    promotion_score_percentile: float = 10.0
 
 
 # promotion_blocker カテゴリ定数（W&B グラフで停滞原因を数値で識別する）
@@ -60,7 +63,7 @@ BLOCKER_NONE = 0           # 昇格可能（または最終フェーズ）
 BLOCKER_NOT_ENOUGH_EP = 1  # ウィンドウ内エピソード数不足
 BLOCKER_SCORE_MEAN_LOW = 2 # score_mean < effective_threshold
 BLOCKER_EP_LEN_LOW = 3     # episode_length_mean < min_episode_steps
-BLOCKER_SCORE_MIN_LOW = 4  # score_min < promotion_min_score_floor
+BLOCKER_SCORE_MIN_LOW = 4  # promotion_low_score (score_min or score_p10) < promotion_low_score_floor
 BLOCKER_SCORE_CV_HIGH = 5  # score_cv > promotion_max_score_cv
 
 PHASES: list[_Phase] = [
@@ -68,15 +71,33 @@ PHASES: list[_Phase] = [
     _Phase("Gem回収開始",       6,  10, 0.9, 1.4,  2, 0.75, 0.75, False, 1200,  100.0),
     _Phase("Gem追従強化",       7,  14, 0.9, 1.7,  3, 0.85, 0.85, False, 1800,  250.0),
     _Phase("通常序盤",          8,  20, 1.0, 2.0,  4, 1.00, 1.00, False, 2400,  800.0),
-    _Phase("包囲入門A",         9,  18, 1.0, 2.0,  4, 1.00, 0.80, False, 2400,  950.0),
-    _Phase("包囲入門B",        10,  22, 1.0, 2.1,  4, 1.00, 0.90, False, 2400,  940.0),
-    _Phase("包囲入門B+",       10,  24, 1.0, 2.15, 4, 1.00, 0.95, False, 2400, 1100.0),
-    _Phase("包囲入門C",        10,  25, 1.0, 2.2,  4, 1.05, 1.00, False, 2400, 1150.0),
-    _Phase("包囲対応",         12,  30, 1.0, 2.4,  5, 1.10, 1.10, False, 2400, 1350.0),
-    _Phase("多敵対応",         14,  40, 1.0, 2.6,  6, 1.20, 1.20, False, 2400, 1550.0),
-    _Phase("群れ対応A",        16,  50, 1.0, 2.7,  7, 1.25, 1.25, False, 2400, 1700.0),
-    _Phase("群れ対応B",        18,  65, 1.05, 2.8,  8, 1.35, 1.35, True,  2400, 1850.0),
-    _Phase("群れ対応C",        20,  80, 1.1, 3.0,  9, 1.50, 1.50, True,  2400, 2000.0),
+    _Phase("包囲入門A",         9,  18, 1.0, 2.0,  4, 1.00, 0.80, False, 2400,  950.0,
+           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
+           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+    _Phase("包囲入門B",        10,  22, 1.0, 2.1,  4, 1.00, 0.90, False, 2400,  940.0,
+           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
+           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+    _Phase("包囲入門B+",       10,  24, 1.0, 2.15, 4, 1.00, 0.95, False, 2400, 1100.0,
+           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
+           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+    _Phase("包囲入門C",        10,  25, 1.0, 2.2,  4, 1.05, 1.00, False, 2400, 1150.0,
+           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
+           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+    _Phase("包囲対応",         12,  30, 1.0, 2.4,  5, 1.10, 1.10, False, 2400, 1350.0,
+           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
+           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+    _Phase("多敵対応",         14,  40, 1.0, 2.6,  6, 1.20, 1.20, False, 2400, 1550.0,
+           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
+           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+    _Phase("群れ対応A",        16,  50, 1.0, 2.7,  7, 1.25, 1.25, False, 2400, 1700.0,
+           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
+           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+    _Phase("群れ対応B",        18,  65, 1.05, 2.8,  8, 1.35, 1.35, True,  2400, 1850.0,
+           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
+           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+    _Phase("群れ対応C",        20,  80, 1.1, 3.0,  9, 1.50, 1.50, True,  2400, 2000.0,
+           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
+           promotion_score_stat="percentile", promotion_score_percentile=10.0),
     _Phase("Mad Forest",       40, 150, 1.2, 4.0, 10, 2.00, 2.00, True,  2400,   None),
 ]
 
@@ -249,6 +270,7 @@ class CurriculumCallback(BaseCallback):
             score_std=score_std,
             effective_threshold=effective_threshold,
             recent_count=len(recent_scores),
+            recent_scores=recent_scores,
         )
         if can_promote:
             self._advance_phase(mean, effective_threshold, promotion_reason)
@@ -292,6 +314,7 @@ class CurriculumCallback(BaseCallback):
         score_std: float,
         effective_threshold: float,
         recent_count: int,
+        recent_scores: list[float] | None = None,
     ) -> tuple[bool, str]:
         if phase.threshold is None or recent_count < self.window:
             return False, ""
@@ -300,10 +323,17 @@ class CurriculumCallback(BaseCallback):
         if mean_len < phase.min_episode_steps:
             return False, f"ep_len={mean_len:.1f} < min_episode_steps={phase.min_episode_steps}"
 
+        if phase.promotion_score_stat == "percentile" and recent_scores is not None:
+            low_score = _percentile(recent_scores, phase.promotion_score_percentile)
+            low_stat_label = f"score_p{int(phase.promotion_score_percentile)}"
+        else:
+            low_score = score_min
+            low_stat_label = "score_min"
+
         min_score_floor = effective_threshold * phase.promotion_min_score_ratio
-        if score_min < min_score_floor:
+        if low_score < min_score_floor:
             return False, (
-                f"score_min={score_min:.3f} < promotion_min_score_floor={min_score_floor:.3f}"
+                f"{low_stat_label}={low_score:.3f} < promotion_min_score_floor={min_score_floor:.3f}"
             )
 
         score_cv = score_std / max(mean, 1e-8)
@@ -313,7 +343,7 @@ class CurriculumCallback(BaseCallback):
             )
 
         return True, (
-            f"score_min={score_min:.3f} >= {min_score_floor:.3f}, "
+            f"{low_stat_label}={low_score:.3f} >= {min_score_floor:.3f}, "
             f"score_cv={score_cv:.3f} <= {phase.promotion_max_score_cv:.3f}"
         )
 
@@ -535,22 +565,30 @@ class CurriculumCallback(BaseCallback):
             else None
         )
         score_min = min(recent_scores) if recent_scores else None
-        promotion_min_score_floor = (
-            effective_threshold * phase.promotion_min_score_ratio
-            if base_threshold is not None
-            else None
-        )
         score_cv = (
             score_std / max(score_mean, 1e-8)
             if recent_scores and score_mean > 0.0
             else None
         )
+        # percentile / min ベースの low_score を計算
+        if phase.promotion_score_stat == "percentile" and recent_scores:
+            promotion_low_score = _percentile(recent_scores, phase.promotion_score_percentile)
+        else:
+            promotion_low_score = score_min if score_min is not None else 0.0
+        promotion_low_score_floor = (
+            effective_threshold * phase.promotion_min_score_ratio
+            if base_threshold is not None
+            else None
+        )
+        promotion_low_score_ok = (
+            promotion_low_score_floor is not None
+            and promotion_low_score >= promotion_low_score_floor
+        )
         promotion_stable = (
             recent_count >= self.window
             and base_threshold is not None
-            and score_min is not None
-            and promotion_min_score_floor is not None
-            and score_min >= promotion_min_score_floor
+            and promotion_low_score_floor is not None
+            and promotion_low_score_ok
             and score_cv is not None
             and score_cv <= phase.promotion_max_score_cv
         )
@@ -574,6 +612,8 @@ class CurriculumCallback(BaseCallback):
                 "active_score_max": round(max(recent_scores), 4) if recent_scores else None,
                 "active_score_std": round(score_std, 4),
                 "active_score_cv": round(score_cv, 4) if score_cv is not None else None,
+                "active_score_p10": round(_percentile(recent_scores, 10.0), 4) if recent_scores else None,
+                "active_score_p20": round(_percentile(recent_scores, 20.0), 4) if recent_scores else None,
                 "episode_length_mean": round(length_mean, 1),
                 "min_episode_steps": phase.min_episode_steps,
                 "base_threshold": base_threshold,
@@ -581,11 +621,20 @@ class CurriculumCallback(BaseCallback):
                 "threshold_ratio": round(threshold_ratio, 4) if threshold_ratio is not None else None,
                 "promotion_min_score_ratio": phase.promotion_min_score_ratio,
                 "promotion_min_score_floor": (
-                    round(promotion_min_score_floor, 4)
-                    if promotion_min_score_floor is not None
+                    round(promotion_low_score_floor, 4)
+                    if promotion_low_score_floor is not None
                     else None
                 ),
                 "promotion_max_score_cv": phase.promotion_max_score_cv,
+                "promotion_score_stat": phase.promotion_score_stat,
+                "promotion_score_percentile": phase.promotion_score_percentile,
+                "promotion_low_score": round(promotion_low_score, 4),
+                "promotion_low_score_floor": (
+                    round(promotion_low_score_floor, 4)
+                    if promotion_low_score_floor is not None
+                    else None
+                ),
+                "promotion_low_score_ok": promotion_low_score_ok,
                 "promotion_stability_ok": promotion_stable,
                 "rollback_score_floor": round(score_floor, 4) if score_floor is not None else None,
                 "rollback_length_floor": round(length_floor, 1) if length_floor is not None else None,
@@ -620,6 +669,8 @@ class CurriculumCallback(BaseCallback):
                 "rollback_length_ratio": phase.rollback_length_ratio,
                 "promotion_min_score_ratio": phase.promotion_min_score_ratio,
                 "promotion_max_score_cv": phase.promotion_max_score_cv,
+                "promotion_score_stat": phase.promotion_score_stat,
+                "promotion_score_percentile": phase.promotion_score_percentile,
             },
             "recommendation": self.recommend_next_settings(),
         }
@@ -673,9 +724,9 @@ class CurriculumCallback(BaseCallback):
         min_ep_steps = int(window.get("min_episode_steps") or 0)
         if length_mean < min_ep_steps:
             return BLOCKER_EP_LEN_LOW
-        score_min = window.get("active_score_min")
-        min_score_floor = window.get("promotion_min_score_floor")
-        if score_min is not None and min_score_floor is not None and score_min < min_score_floor:
+        promotion_low_score = window.get("promotion_low_score")
+        min_score_floor = window.get("promotion_low_score_floor")
+        if promotion_low_score is not None and min_score_floor is not None and promotion_low_score < min_score_floor:
             return BLOCKER_SCORE_MIN_LOW
         score_cv = window.get("active_score_cv")
         max_cv = window.get("promotion_max_score_cv")
@@ -719,6 +770,12 @@ class CurriculumCallback(BaseCallback):
             "curriculum/promotion_blocker": blocker,
             "curriculum/ready_for_phase_judgment": int(bool(window.get("ready_for_phase_judgment"))),
             "curriculum/promotion_stability_ok": int(bool(window.get("promotion_stability_ok"))),
+            "curriculum/active_score_p10": window.get("active_score_p10"),
+            "curriculum/active_score_p20": window.get("active_score_p20"),
+            "curriculum/promotion_low_score": window.get("promotion_low_score"),
+            "curriculum/promotion_low_score_floor": window.get("promotion_low_score_floor"),
+            "curriculum/promotion_low_score_ok": int(bool(window.get("promotion_low_score_ok"))),
+            "curriculum/promotion_score_percentile": window.get("promotion_score_percentile"),
             "curriculum/rollback_bad_windows": diagnostics.get("rollback_bad_windows"),
             "curriculum/window_episode_count": window.get("episodes"),
             "curriculum/is_final_phase": int(bool(completion.get("is_final_phase"))),

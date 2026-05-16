@@ -20,6 +20,17 @@ def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+def percentile(values: list[float], p: float) -> float:
+    """p パーセンタイル値を返す（線形補間、numpy 互換）。"""
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    idx = (p / 100.0) * (len(sorted_vals) - 1)
+    lo = int(idx)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (idx - lo)
+
+
 @dataclass(frozen=True)
 class CurriculumTuningInput:
     threshold_mult: float
