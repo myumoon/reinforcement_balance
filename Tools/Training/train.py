@@ -147,6 +147,24 @@ def _latest_checkpoint(run_dir: Path) -> Path | None:
     return max(candidates, key=_step)
 
 
+def _find_run_root(start: Path) -> tuple[Path, dict]:
+    """start から親方向へ遡り run ルート（log/train_status.json を含む祖先）を返す。
+
+    見つからない場合は start 自身と空 dict を返す。
+    """
+    candidate = start
+    while True:
+        for status_name in ["log/train_status.json", "train_status.json"]:
+            status_path = candidate / status_name
+            if status_path.exists():
+                return candidate, _read_json(status_path)
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    return start, {}
+
+
 def _resolve_resume_path(resume: Path) -> tuple[Path, Path, dict]:
     if resume.is_dir():
         run_dir = resume
@@ -171,11 +189,8 @@ def _resolve_resume_path(resume: Path) -> tuple[Path, Path, dict]:
     model_zip = _model_zip_path(resume)
     if not model_zip.exists():
         raise FileNotFoundError(f"--resume モデルが見つかりません: {model_zip}")
-    run_dir = model_zip.parent
-    for status_candidate in [run_dir / "log" / "train_status.json", run_dir / "train_status.json"]:
-        if status_candidate.exists():
-            return run_dir, _strip_zip(model_zip), _read_json(status_candidate)
-    return run_dir, _strip_zip(model_zip), {}
+    run_dir, status = _find_run_root(model_zip.parent)
+    return run_dir, _strip_zip(model_zip), status
 
 
 def _git_value(args: list[str]) -> str | None:
