@@ -245,28 +245,29 @@ bool USurvivorsSpawnComponent::BuildSpawnWeights(const FSpawnWave& Wave, TArray<
 	if (AllowedMaxTypeId < MaxNormalEnemyTypeId)
 	{
 		bOutUsedCurriculumPool = true;
-		for (int32 TypeId = 0; TypeId <= AllowedMaxTypeId; ++TypeId)
-		{
-			if (!Game->EnemyTypeTable.IsValidIndex(TypeId) || Game->EnemyTypeTable[TypeId].bIsBoss)
-			{
-				continue;
-			}
 
-			float Weight = 1.f;
-			for (const FEnemySpawnWeight& WaveWeight : Wave.EnemyWeights)
-			{
-				if (WaveWeight.TypeId == TypeId)
-				{
-					Weight = FMath::Max(WaveWeight.Weight, 0.01f);
-					break;
-				}
-			}
+		// Wave に記載されており AllowedMaxTypeId 以内の TypeId のみ採用する。
+		// 未記載 TypeId に weight=1.0 を付与すると意図しない敵種が大量出現するため除外する。
+		for (const FEnemySpawnWeight& WaveWeight : Wave.EnemyWeights)
+		{
+			if (WaveWeight.TypeId > AllowedMaxTypeId) continue;
+			if (!Game->EnemyTypeTable.IsValidIndex(WaveWeight.TypeId)) continue;
+			if (Game->EnemyTypeTable[WaveWeight.TypeId].bIsBoss) continue;
 
 			FEnemySpawnWeight SpawnWeight;
-			SpawnWeight.TypeId = TypeId;
-			SpawnWeight.Weight = Weight;
+			SpawnWeight.TypeId = WaveWeight.TypeId;
+			SpawnWeight.Weight = FMath::Max(WaveWeight.Weight, 0.01f);
 			OutWeights.Add(SpawnWeight);
 		}
+
+		// Wave に対象 TypeId が存在しない場合（例: 後半 Wave で全種が上限超え）は
+		// TypeId 0 (Bat) にフォールバックして空プールを防ぐ。
+		if (OutWeights.IsEmpty() && Game->EnemyTypeTable.IsValidIndex(0)
+			&& !Game->EnemyTypeTable[0].bIsBoss)
+		{
+			OutWeights.Add({ 0, 1.f });
+		}
+
 		return !OutWeights.IsEmpty();
 	}
 
