@@ -6,6 +6,7 @@ game: survivors
 total_steps: 1_000_000
 curriculum: true
 curriculum_window: 20
+curriculum_threshold: 2.0
 frame_skip: 2
 wandb: true
 wandb_project: rl-survivors
