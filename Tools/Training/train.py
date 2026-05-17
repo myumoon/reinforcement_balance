@@ -370,7 +370,7 @@ class _CurriculumCompletionCallback(BaseCallback):
             )
 
     def _on_step(self) -> bool:
-        if not self.locals["dones"][0]:
+        if not any(self.locals["dones"]):
             return True
         diagnostics = self._curriculum_cb.get_completion_diagnostics(
             window=self.window,
@@ -775,6 +775,19 @@ def main() -> None:
     if args.recurrent and args.frame_stack > 1:
         print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
               " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")
+    if args.n_envs > 1:
+        suggested_n_steps = getattr(args, "n_steps", 4096) // args.n_envs
+        print(
+            f"[WARN] --n-envs={args.n_envs}: SB3 の n_steps はenv単位です。"
+            f" 総rolloutサイズ = n_steps × n_envs になるため、既存と同じ更新間隔を保つには"
+            f" --n-steps {suggested_n_steps} を推奨します。"
+        )
+        if args.eval_freq > 0:
+            print(
+                "[WARN] --n-envs > 1 では SurvivorsEvalCallback を無効化します。"
+                " 評価時に全envのLSTM stateが壊れるため安全に実行できません。"
+                " 評価が必要な場合は --eval-freq 0 のまま別途 n_envs=1 で確認してください。"
+            )
 
     _log_device_status(args.device)
     ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef, "device": args.device}
@@ -931,6 +944,14 @@ def main() -> None:
                 env = DummyVecEnv(env_fns)
                 print(f"[INFO] survivors マルチ env: n_envs={args.n_envs}, "
                       f"ports={list(range(base_port, base_port + args.n_envs))}")
+                # 全 env の obs_schema_hash が一致しているか確認
+                hashes = env.env_method("get_obs_schema_hash")
+                if len(set(hashes)) != 1:
+                    raise RuntimeError(
+                        f"[ERROR] 各 UE5 インスタンスの obs_schema_hash が一致しません: {hashes}\n"
+                        "全インスタンスが同じレベル・設定で起動されているか確認してください。"
+                    )
+                print(f"[INFO] obs_schema_hash 一致確認: {hashes[0]}")
             else:
                 env = DummyVecEnv([_make_survivors_fn(base_port)])
         else:
@@ -1047,7 +1068,7 @@ def main() -> None:
         survivors_curriculum_metrics_callback = SurvivorsCurriculumProgressMetricsCallback
         callbacks.append(survivors_metrics_callback(log_freq=5_000, frame_skip=args.frame_skip))
         callbacks.append(ActionDistributionCallback(n_actions=9, log_freq=5_000))
-        if args.eval_freq > 0:
+        if args.eval_freq > 0 and args.n_envs == 1:
             from games.survivors.survivors_eval_callback import SurvivorsEvalCallback
             callbacks.append(SurvivorsEvalCallback(
                 eval_freq=args.eval_freq,

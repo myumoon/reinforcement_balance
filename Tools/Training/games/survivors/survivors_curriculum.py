@@ -451,9 +451,13 @@ class CurriculumCallback(BaseCallback):
         if self.training_env is not None and self.training_env.num_envs > 1:
             # DummyVecEnv / SubprocVecEnv 共通: 全インスタンスに一括適用
             results = self.training_env.env_method("set_params", **params)
-            ok = all(results)
+            failed = [i for i, r in enumerate(results) if not r]
+            ok = len(failed) == 0
+            if failed:
+                print(f"[Curriculum][ERROR] /params 適用失敗: env index {failed}")
         else:
             ok = self._raw_env.set_params(**params)
+            failed = [] if ok else [0]
         label = "初期設定" if initial else f"Phase {self._phase_idx}"
         status = "適用" if ok else "失敗 (/params 更新エラー)"
         print(
@@ -465,6 +469,11 @@ class CurriculumCallback(BaseCallback):
             f"TimeScaling={'ON' if phase.time_scaling else 'OFF'}, "
             f"MinEpisodeSteps={phase.min_episode_steps}"
         )
+        if not ok:
+            raise RuntimeError(
+                f"[Curriculum] {label} の /params 適用が失敗しました (失敗 env: {failed})。"
+                " UE5 インスタンスとの接続を確認してください。"
+            )
 
     def _save_status(self, mean: float, threshold: float) -> None:
         if self._status_path is None:

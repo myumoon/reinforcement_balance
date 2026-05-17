@@ -150,6 +150,10 @@ class SurvivorsEnv(BaseUE5Env):
         """SubprocVecEnv の env_method 経由での取得用。"""
         return self._offsets
 
+    def get_obs_schema_hash(self) -> str:
+        """全 env 間の obs_schema 一致確認用。"""
+        return self._expected_schema_hash or ""
+
     def get_shaping_weight(self) -> float:
         """SubprocVecEnv / マルチenv の env_method 経由での取得用。"""
         return self.shaping_weight
