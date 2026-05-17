@@ -142,6 +142,14 @@ class SurvivorsEnv(BaseUE5Env):
             "is_wall_near": int(wall_min < 0.08),
         }
 
+    def get_obs_schema(self) -> list:
+        """SubprocVecEnv の env_method 経由での取得用。"""
+        return self._obs_schema
+
+    def get_offsets(self) -> dict:
+        """SubprocVecEnv の env_method 経由での取得用。"""
+        return self._offsets
+
     def set_params(self, **kwargs) -> bool:
         """カリキュラム用パラメータを /params エンドポイントで更新する。
 

@@ -82,16 +82,40 @@ def _log_device_status(requested_device: str) -> None:
 
 
 def _get_raw_env(env):
-    """VecEnv ラッパーチェーンを辿って生の環境（CoinEnv）を返す。"""
+    """VecEnv ラッパーチェーンを辿って生の環境（DummyVecEnv の env[0]）を返す。
+
+    DummyVecEnv: envs[0] に直接アクセスして返す。
+    SubprocVecEnv: 直接アクセス不可のため None を返す（_get_obs_attrs を使うこと）。
+    """
     inner = env
     while hasattr(inner, "venv"):
         inner = inner.venv
     if hasattr(inner, "envs"):
         inner = inner.envs[0]
-    # gymnasium.Wrapper (Monitor等) は _ 始まりの属性をフォワードしないため unwrapped で剥がす
-    if hasattr(inner, "unwrapped"):
-        inner = inner.unwrapped
-    return inner
+        # gymnasium.Wrapper (Monitor等) は _ 始まりの属性をフォワードしないため unwrapped で剥がす
+        if hasattr(inner, "unwrapped"):
+            inner = inner.unwrapped
+        return inner
+    return None  # SubprocVecEnv
+
+
+def _get_obs_attrs(env) -> tuple[dict, list]:
+    """DummyVecEnv / SubprocVecEnv 両対応で _offsets と _obs_schema を取得する。
+
+    entity_attention extractor の構築に必要。
+    """
+    inner = env
+    while hasattr(inner, "venv"):
+        inner = inner.venv
+    if hasattr(inner, "envs"):
+        raw = inner.envs[0]
+        if hasattr(raw, "unwrapped"):
+            raw = raw.unwrapped
+        return getattr(raw, "_offsets", {}), getattr(raw, "_obs_schema", [])
+    # SubprocVecEnv: env_method 経由で取得
+    offsets = inner.env_method("get_offsets")[0]
+    obs_schema = inner.env_method("get_obs_schema")[0]
+    return offsets, obs_schema
 
 
 def _find_vecnormalize(env):
@@ -537,9 +561,7 @@ def _create_model(args, env, algo_class, default_policy: str, ppo_kwargs: dict):
     entity_attention / recurrent の分岐をここに集約する。
     """
     if args.entity_attention and args.game in ("coin", "survivors"):
-        raw_env = _get_raw_env(env)
-        offsets = getattr(raw_env, "_offsets", {})
-        obs_schema = getattr(raw_env, "_obs_schema", [])
+        offsets, obs_schema = _get_obs_attrs(env)
         if args.game == "survivors":
             from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
             extractor_class = SurvivorsEntityAttentionExtractor
@@ -615,6 +637,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=None,
                    help="サーバーポート（未指定時はゲーム別デフォルト: balance=8765, coin=8766, survivors=8767）")
+    p.add_argument("--n-envs", type=int, default=1,
+                   help="並列 UE5 インスタンス数（--game survivors 専用, default: 1）")
+    p.add_argument("--base-port", type=int, default=None,
+                   help="並列時の起点ポート（--n-envs > 1 時は base_port+i を各インスタンスに割り当て。"
+                        "未指定時は --port またはゲーム別デフォルトを使用）")
     p.add_argument("--total-steps", type=int, default=500_000)
     p.add_argument("--version-name", default=None,
                    help="runs/<game>/<version-name>/ 以下に成果物を保存するバージョン名（新規run時は必須）")
@@ -716,6 +743,12 @@ def main() -> None:
 
     defaults = _GAME_DEFAULTS[args.game]
     port = args.port if args.port is not None else defaults["port"]
+    base_port = args.base_port if args.base_port is not None else port
+
+    if args.n_envs > 1 and args.game != "survivors":
+        raise ValueError("--n-envs > 1 は survivors ゲームのみ対応しています")
+    if args.n_envs > 1 and args.dry_run:
+        raise ValueError("--n-envs > 1 は --dry-run と同時に使用できません")
 
     resume_status = {}
     resume_model_base = None
@@ -846,18 +879,32 @@ def main() -> None:
             env = make_vec_env(_make_coin_env, n_envs=1)
         elif args.game == "survivors":
             from games.survivors.survivors_env import SurvivorsEnv
-            def _make_survivors_env():
-                e = SurvivorsEnv(host=args.host, port=port, frame_skip=args.frame_skip)
-                e._reward_fn = reward_fn
-                return e
-            env = make_vec_env(_make_survivors_env, n_envs=1)
+            from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+
+            def _make_survivors_fn(p: int):
+                def _init():
+                    e = SurvivorsEnv(host=args.host, port=p, frame_skip=args.frame_skip)
+                    e._reward_fn = reward_fn
+                    return e
+                return _init
+
+            if args.n_envs > 1:
+                env_fns = [_make_survivors_fn(base_port + i) for i in range(args.n_envs)]
+                env = DummyVecEnv(env_fns)
+                print(f"[INFO] survivors マルチ env: n_envs={args.n_envs}, "
+                      f"ports={list(range(base_port, base_port + args.n_envs))}")
+            else:
+                env = DummyVecEnv([_make_survivors_fn(base_port)])
         else:
             from games.balance.balance_env import BalanceEnv
             env = make_vec_env(
                 lambda: BalanceEnv(host=args.host, port=port),
                 n_envs=1,
             )
-        print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{port} に接続...")
+        if args.game == "survivors" and args.n_envs > 1:
+            print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{base_port}〜{base_port + args.n_envs - 1} に接続...")
+        else:
+            print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{port} に接続...")
 
     # VecNormalize 適用
     # - 新規訓練: 正規化統計を初期化
@@ -1016,8 +1063,12 @@ def main() -> None:
         )
 
     if reward_fn is not None and args.game in ("coin", "survivors"):
+        _anneal_raw_env = _get_raw_env(env)
+        if _anneal_raw_env is None:
+            print("[WARN] --reward-fn と --n-envs > 1 (SubprocVecEnv) の組み合わせは非対応です。"
+                  "シェーピングアニーリングは env[0] のみに適用されます。")
         anneal_cb = _AnnealingShapingCallback(
-            raw_env=_get_raw_env(env),
+            raw_env=_anneal_raw_env,
             anneal_threshold=args.anneal_threshold,
             anneal_steps=args.anneal_steps,
             check_freq=args.anneal_check_freq,

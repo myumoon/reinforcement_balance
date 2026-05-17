@@ -136,7 +136,8 @@ class CurriculumCallback(BaseCallback):
         self._scores: list[float] = []
         self._phase_idx = 0
         self._rollback_bad_windows = 0
-        self._ep_base = 0.0
+        self._ep_base = 0.0          # n_envs=1 用（後方互換）
+        self._ep_base_per_env: list[float] = []  # n_envs > 1 用（_on_training_start で初期化）
         self._episode_scores: list[float] = []
         self._episode_lengths: list[int] = []
         self._episode_base_rewards: list[float] = []
@@ -153,6 +154,8 @@ class CurriculumCallback(BaseCallback):
         self._episodes_in_phase: int = 0
 
     def _on_training_start(self) -> None:
+        n = self.training_env.num_envs if self.training_env is not None else 1
+        self._ep_base_per_env = [0.0] * n
         self._apply_phase(PHASES[self._phase_idx], initial=True)
 
     @property
@@ -212,27 +215,44 @@ class CurriculumCallback(BaseCallback):
         self._episodes_in_phase = int(state.get("episodes_in_phase", 0))
 
     def _on_step(self) -> bool:
-        info = self.locals["infos"][0]
-        self._ep_base += info.get("base_reward", 0.0)
+        infos = self.locals["infos"]
+        n_envs = len(infos)
+
+        # _ep_base_per_env が未初期化（resume後など）の場合は補完
+        if len(self._ep_base_per_env) != n_envs:
+            self._ep_base_per_env = [self._ep_base] + [0.0] * (n_envs - 1)
+
         self._steps_in_phase += 1
 
-        if "episode" not in info:
-            return True
+        episode_ended = False
+        for env_idx, info in enumerate(infos):
+            self._ep_base_per_env[env_idx] += info.get("base_reward", 0.0)
 
-        self._episodes_in_phase += 1
-        ep_len = info["episode"]["l"]
-        alive_total = self.alive_reward * self.frame_skip * ep_len
-        score = max(0.0, self._ep_base - alive_total)
-        self._scores.append(score)
-        self._episode_scores.append(score)
-        self._episode_lengths.append(ep_len)
-        self._episode_base_rewards.append(self._ep_base)
-        self._episode_alive_rewards.append(alive_total)
-        if info.get("TimeLimit.truncated", False) or info.get("spawn_debug", {}).get("truncated", False):
-            self._truncated_count += 1
-        else:
-            self._terminated_count += 1
-        self._ep_base = 0.0
+            if "episode" not in info:
+                continue
+
+            self._episodes_in_phase += 1
+            ep_len = info["episode"]["l"]
+            ep_base = self._ep_base_per_env[env_idx]
+            alive_total = self.alive_reward * self.frame_skip * ep_len
+            score = max(0.0, ep_base - alive_total)
+            self._scores.append(score)
+            self._episode_scores.append(score)
+            self._episode_lengths.append(ep_len)
+            self._episode_base_rewards.append(ep_base)
+            self._episode_alive_rewards.append(alive_total)
+            if info.get("TimeLimit.truncated", False) or info.get("spawn_debug", {}).get("truncated", False):
+                self._truncated_count += 1
+            else:
+                self._terminated_count += 1
+            self._ep_base_per_env[env_idx] = 0.0
+            episode_ended = True
+
+        # n_envs=1 用の _ep_base を同期（export_state / import_state の後方互換）
+        self._ep_base = self._ep_base_per_env[0]
+
+        if not episode_ended:
+            return True
 
         phase = PHASES[self._phase_idx]
         effective_threshold = (phase.threshold or float("inf")) * self.threshold_mult
@@ -418,7 +438,7 @@ class CurriculumCallback(BaseCallback):
         return score_floor, length_floor
 
     def _apply_phase(self, phase: _Phase, initial: bool = False) -> None:
-        ok = self._raw_env.set_params(
+        params = dict(
             MinActiveEnemies=phase.min_enemies,
             MaxActiveEnemies=phase.max_enemies,
             EnemySpeedMult=phase.speed_mult,
@@ -428,6 +448,12 @@ class CurriculumCallback(BaseCallback):
             EnemyDamageScale=phase.enemy_damage_scale,
             TimeScalingEnabled=phase.time_scaling,
         )
+        if self.training_env is not None and self.training_env.num_envs > 1:
+            # DummyVecEnv / SubprocVecEnv 共通: 全インスタンスに一括適用
+            results = self.training_env.env_method("set_params", **params)
+            ok = all(results)
+        else:
+            ok = self._raw_env.set_params(**params)
         label = "初期設定" if initial else f"Phase {self._phase_idx}"
         status = "適用" if ok else "失敗 (/params 更新エラー)"
         print(
