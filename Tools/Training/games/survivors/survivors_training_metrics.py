@@ -139,7 +139,8 @@ class SurvivorsMetricsCallback(BaseCallback):
                     "episode/kills_est":       self._ep_kills_est,
                     "episode/terminated":      int(not is_truncated),
                     "episode/truncated":       int(is_truncated),
-                })
+                    "global_step":             self.num_timesteps,
+                }, step=self.num_timesteps)
 
             self._ep_reset()
 
@@ -172,6 +173,7 @@ class SurvivorsMetricsCallback(BaseCallback):
             f"episodes={self._done_count}"
         )
         if _WANDB_AVAILABLE and wandb.run:
+            payload["global_step"] = self.num_timesteps
             wandb.log(payload, step=self.num_timesteps)
         self._reset_window()
         return True
@@ -223,6 +225,7 @@ class ActionDistributionCallback(BaseCallback):
             payload[f"behavior/action_{i}_{name}"] = prob
 
         if _WANDB_AVAILABLE and wandb.run:
+            payload["global_step"] = self.num_timesteps
             wandb.log(payload, step=self.num_timesteps)
 
         self._counts = [0] * self.n_actions
@@ -245,6 +248,8 @@ class SurvivorsCurriculumProgressMetricsCallback(BaseCallback):
             return True
 
         payload = self._curriculum_cb.get_wandb_progress_metrics()
-        wandb.log({k: v for k, v in payload.items() if v is not None}, step=self.num_timesteps)
+        filtered = {k: v for k, v in payload.items() if v is not None}
+        filtered["global_step"] = self.num_timesteps
+        wandb.log(filtered, step=self.num_timesteps)
         self._last_log = self.num_timesteps
         return True
