@@ -14,6 +14,9 @@ except ImportError:
 class SurvivorsMetricsCallback(BaseCallback):
     """Survivorsウィンドウ統計とエピソード単位ログを W&B へ出力する。
 
+    n_envs > 1 対応: 全 env の infos を集計してウィンドウ統計を計算する。
+    エピソードログは env ごとに独立してトラッキングし、done 時に出力する。
+
     Args:
         log_freq:   ウィンドウ統計を出力するステップ間隔
         frame_skip: train.py の --frame-skip と同じ値（kills推定に使用）
@@ -24,8 +27,8 @@ class SurvivorsMetricsCallback(BaseCallback):
         self.log_freq = log_freq
         self.frame_skip = frame_skip
         self._last_log = 0
+        self._ep_per_env: list[dict] = []
         self._reset_window()
-        self._ep_reset()
 
     def _reset_window(self) -> None:
         self._samples = 0
@@ -44,105 +47,119 @@ class SurvivorsMetricsCallback(BaseCallback):
         self._stationary_steps = 0
         self._wall_near_steps = 0
 
-    def _ep_reset(self) -> None:
-        self._ep_base_reward = 0.0
-        self._ep_shaped_reward = 0.0
-        self._ep_damage = 0.0
-        self._ep_hp_sum = 0.0
-        self._ep_hp_min: float | None = None
-        self._ep_hp_steps = 0
-        self._ep_gem_pickups_est = 0
-        self._ep_kills_est = 0
-        self._ep_prev_xp: float | None = None
-        self._ep_steps = 0
+    def _new_ep_state(self) -> dict:
+        return {
+            "base_reward": 0.0,
+            "shaped_reward": 0.0,
+            "damage": 0.0,
+            "hp_sum": 0.0,
+            "hp_min": None,
+            "hp_steps": 0,
+            "gem_pickups_est": 0,
+            "kills_est": 0,
+            "prev_xp": None,
+            "steps": 0,
+        }
+
+    def _on_training_start(self) -> None:
+        n = self.training_env.num_envs
+        self._ep_per_env = [self._new_ep_state() for _ in range(n)]
 
     def _on_step(self) -> bool:
-        info = self.locals["infos"][0]
-        self._samples += 1
-        self._ep_steps += 1
+        infos = self.locals["infos"]
+        dones = self.locals["dones"]
+        n = len(infos)
 
-        # HP
-        hp = info.get("player_hp")
-        if hp is not None:
-            hp = float(hp)
-            self._hp_sum += hp
-            self._ep_hp_sum += hp
-            self._ep_hp_steps += 1
-            self._hp_min = hp if self._hp_min is None else min(self._hp_min, hp)
-            self._ep_hp_min = hp if self._ep_hp_min is None else min(self._ep_hp_min, hp)
+        # resume 直後などで _ep_per_env が未初期化の場合は補完
+        if len(self._ep_per_env) != n:
+            self._ep_per_env = [self._new_ep_state() for _ in range(n)]
 
-        # 距離系
-        nearest_gem = info.get("nearest_gem_distance")
-        if nearest_gem is not None:
-            self._nearest_gem_sum += float(nearest_gem)
-            self._nearest_gem_count += 1
-        nearest_enemy = info.get("nearest_enemy_distance")
-        if nearest_enemy is not None:
-            self._nearest_enemy_sum += float(nearest_enemy)
-            self._nearest_enemy_count += 1
+        for i, (info, done) in enumerate(zip(infos, dones)):
+            ep = self._ep_per_env[i]
+            ep["steps"] += 1
+            self._samples += 1
 
-        contact = float(info.get("contact_enemy_count", 0.0) or 0.0)
-        self._contact_sum += contact
-        if contact > 0:
-            self._contact_nonzero_steps += 1
+            # HP
+            hp = info.get("player_hp")
+            if hp is not None:
+                hp = float(hp)
+                self._hp_sum += hp
+                ep["hp_sum"] += hp
+                ep["hp_steps"] += 1
+                self._hp_min = hp if self._hp_min is None else min(self._hp_min, hp)
+                ep["hp_min"] = hp if ep["hp_min"] is None else min(ep["hp_min"], hp)
 
-        self._enemy_count_sum += float(info.get("observed_enemy_count", 0.0) or 0.0)
-        self._xp_sum += float(info.get("xp_progress", 0.0) or 0.0)
+            # 距離系
+            nearest_gem = info.get("nearest_gem_distance")
+            if nearest_gem is not None:
+                self._nearest_gem_sum += float(nearest_gem)
+                self._nearest_gem_count += 1
+            nearest_enemy = info.get("nearest_enemy_distance")
+            if nearest_enemy is not None:
+                self._nearest_enemy_sum += float(nearest_enemy)
+                self._nearest_enemy_count += 1
 
-        # 行動品質
-        speed = float(info.get("move_speed", 0.0) or 0.0)
-        self._speed_sum += speed
-        if info.get("is_stationary"):
-            self._stationary_steps += 1
-        if info.get("is_wall_near"):
-            self._wall_near_steps += 1
+            contact = float(info.get("contact_enemy_count", 0.0) or 0.0)
+            self._contact_sum += contact
+            if contact > 0:
+                self._contact_nonzero_steps += 1
 
-        # エピソード報酬追跡
-        base_r = float(info.get("base_reward", 0.0) or 0.0)
-        shaped_r = float(info.get("shaped_reward", 0.0) or 0.0)
-        hp_pen = float(info.get("hp_penalty", 0.0) or 0.0)
-        self._ep_base_reward += base_r
-        self._ep_shaped_reward += shaped_r
-        self._ep_damage += abs(hp_pen)
+            self._enemy_count_sum += float(info.get("observed_enemy_count", 0.0) or 0.0)
+            self._xp_sum += float(info.get("xp_progress", 0.0) or 0.0)
 
-        # Gem pickup 推定: XP の増加をカウント（レベルアップは XP 低下で無視）
-        xp_now = float(info.get("xp_progress", 0.0) or 0.0)
-        if self._ep_prev_xp is not None and xp_now > self._ep_prev_xp + 0.005:
-            self._ep_gem_pickups_est += 1
-        self._ep_prev_xp = xp_now
+            # 行動品質
+            speed = float(info.get("move_speed", 0.0) or 0.0)
+            self._speed_sum += speed
+            if info.get("is_stationary"):
+                self._stationary_steps += 1
+            if info.get("is_wall_near"):
+                self._wall_near_steps += 1
 
-        # Kill 推定: KillReward=2.0 相当のスパイクを検出
-        alive_step = 0.001 * self.frame_skip
-        if base_r - alive_step >= 1.9:
-            self._ep_kills_est += max(1, int((base_r - alive_step + 0.05) / 2.0))
+            # エピソード報酬追跡
+            base_r = float(info.get("base_reward", 0.0) or 0.0)
+            shaped_r = float(info.get("shaped_reward", 0.0) or 0.0)
+            hp_pen = float(info.get("hp_penalty", 0.0) or 0.0)
+            ep["base_reward"] += base_r
+            ep["shaped_reward"] += shaped_r
+            ep["damage"] += abs(hp_pen)
 
-        # エピソード終了時: per-episode ログ
-        if self.locals["dones"][0]:
-            self._done_count += 1
-            ep_info = self.locals["infos"][0].get("episode")
-            ep_len = int(ep_info["l"]) if ep_info else self._ep_steps
-            is_truncated = bool(self.locals["infos"][0].get("TimeLimit.truncated", False))
+            # Gem pickup 推定: XP の増加をカウント（レベルアップは XP 低下で無視）
+            xp_now = float(info.get("xp_progress", 0.0) or 0.0)
+            if ep["prev_xp"] is not None and xp_now > ep["prev_xp"] + 0.005:
+                ep["gem_pickups_est"] += 1
+            ep["prev_xp"] = xp_now
 
-            if _WANDB_AVAILABLE and wandb.run:
-                ep_base = self._ep_base_reward
-                ep_shaped = self._ep_shaped_reward
-                shaping_ratio = abs(ep_shaped) / max(abs(ep_base), 1e-8)
-                wandb.log({
-                    "episode/length":          ep_len,
-                    "episode/base_reward":     ep_base,
-                    "episode/shaped_reward":   ep_shaped,
-                    "episode/shaping_ratio":   shaping_ratio,
-                    "episode/hp_mean":         self._ep_hp_sum / max(self._ep_hp_steps, 1),
-                    "episode/hp_min":          self._ep_hp_min if self._ep_hp_min is not None else 0.0,
-                    "episode/damage_taken":    self._ep_damage,
-                    "episode/gem_pickups_est": self._ep_gem_pickups_est,
-                    "episode/kills_est":       self._ep_kills_est,
-                    "episode/terminated":      int(not is_truncated),
-                    "episode/truncated":       int(is_truncated),
-                    "global_step":             self.num_timesteps,
-                }, step=self.num_timesteps)
+            # Kill 推定: KillReward=2.0 相当のスパイクを検出
+            alive_step = 0.001 * self.frame_skip
+            if base_r - alive_step >= 1.9:
+                ep["kills_est"] += max(1, int((base_r - alive_step + 0.05) / 2.0))
 
-            self._ep_reset()
+            # エピソード終了時: per-episode ログ
+            if done:
+                self._done_count += 1
+                ep_info = info.get("episode")
+                ep_len = int(ep_info["l"]) if ep_info else ep["steps"]
+                is_truncated = bool(info.get("TimeLimit.truncated", False))
+
+                if _WANDB_AVAILABLE and wandb.run:
+                    ep_base = ep["base_reward"]
+                    ep_shaped = ep["shaped_reward"]
+                    wandb.log({
+                        "episode/length":          ep_len,
+                        "episode/base_reward":     ep_base,
+                        "episode/shaped_reward":   ep_shaped,
+                        "episode/shaping_ratio":   abs(ep_shaped) / max(abs(ep_base), 1e-8),
+                        "episode/hp_mean":         ep["hp_sum"] / max(ep["hp_steps"], 1),
+                        "episode/hp_min":          ep["hp_min"] if ep["hp_min"] is not None else 0.0,
+                        "episode/damage_taken":    ep["damage"],
+                        "episode/gem_pickups_est": ep["gem_pickups_est"],
+                        "episode/kills_est":       ep["kills_est"],
+                        "episode/terminated":      int(not is_truncated),
+                        "episode/truncated":       int(is_truncated),
+                        "global_step":             self.num_timesteps,
+                    }, step=self.num_timesteps)
+
+                self._ep_per_env[i] = self._new_ep_state()
 
         # ウィンドウ統計ログ
         if self.num_timesteps - self._last_log < self.log_freq or self._samples <= 0:
@@ -184,6 +201,7 @@ class ActionDistributionCallback(BaseCallback):
 
     Survivors の 9方向行動（0=北 〜 7=北西、8=静止）に対して
     各アクションの選択率とエントロピーを W&B へ出力する。
+    n_envs > 1 対応: 全 env のアクションを集計する。
 
     Args:
         n_actions: アクション数（デフォルト: 9）
@@ -201,10 +219,12 @@ class ActionDistributionCallback(BaseCallback):
         self._total = 0
 
     def _on_step(self) -> bool:
-        action = int(self.locals["actions"][0])
-        if 0 <= action < self.n_actions:
-            self._counts[action] += 1
-        self._total += 1
+        actions = self.locals["actions"]
+        for action in actions:
+            a = int(action)
+            if 0 <= a < self.n_actions:
+                self._counts[a] += 1
+        self._total += len(actions)
 
         if self.num_timesteps - self._last_log < self.log_freq or self._total <= 0:
             return True
@@ -243,7 +263,7 @@ class SurvivorsCurriculumProgressMetricsCallback(BaseCallback):
         self._last_log = 0
 
     def _on_step(self) -> bool:
-        should_log = self.locals["dones"][0] or self.num_timesteps - self._last_log >= self.log_freq
+        should_log = any(self.locals["dones"]) or self.num_timesteps - self._last_log >= self.log_freq
         if not should_log or not (_WANDB_AVAILABLE and wandb.run):
             return True
 

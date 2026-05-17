@@ -82,16 +82,40 @@ def _log_device_status(requested_device: str) -> None:
 
 
 def _get_raw_env(env):
-    """VecEnv ラッパーチェーンを辿って生の環境（CoinEnv）を返す。"""
+    """VecEnv ラッパーチェーンを辿って生の環境（DummyVecEnv の env[0]）を返す。
+
+    DummyVecEnv: envs[0] に直接アクセスして返す。
+    SubprocVecEnv: 直接アクセス不可のため None を返す（_get_obs_attrs を使うこと）。
+    """
     inner = env
     while hasattr(inner, "venv"):
         inner = inner.venv
     if hasattr(inner, "envs"):
         inner = inner.envs[0]
-    # gymnasium.Wrapper (Monitor等) は _ 始まりの属性をフォワードしないため unwrapped で剥がす
-    if hasattr(inner, "unwrapped"):
-        inner = inner.unwrapped
-    return inner
+        # gymnasium.Wrapper (Monitor等) は _ 始まりの属性をフォワードしないため unwrapped で剥がす
+        if hasattr(inner, "unwrapped"):
+            inner = inner.unwrapped
+        return inner
+    return None  # SubprocVecEnv
+
+
+def _get_obs_attrs(env) -> tuple[dict, list]:
+    """DummyVecEnv / SubprocVecEnv 両対応で _offsets と _obs_schema を取得する。
+
+    entity_attention extractor の構築に必要。
+    """
+    inner = env
+    while hasattr(inner, "venv"):
+        inner = inner.venv
+    if hasattr(inner, "envs"):
+        raw = inner.envs[0]
+        if hasattr(raw, "unwrapped"):
+            raw = raw.unwrapped
+        return getattr(raw, "_offsets", {}), getattr(raw, "_obs_schema", [])
+    # SubprocVecEnv: env_method 経由で取得
+    offsets = inner.env_method("get_offsets")[0]
+    obs_schema = inner.env_method("get_obs_schema")[0]
+    return offsets, obs_schema
 
 
 def _find_vecnormalize(env):
@@ -346,7 +370,7 @@ class _CurriculumCompletionCallback(BaseCallback):
             )
 
     def _on_step(self) -> bool:
-        if not self.locals["dones"][0]:
+        if not any(self.locals["dones"]):
             return True
         diagnostics = self._curriculum_cb.get_completion_diagnostics(
             window=self.window,
@@ -396,11 +420,12 @@ class _AnnealingShapingCallback(BaseCallback):
     |shaped_reward_mean| / base_reward_mean の比率を check_freq ステップごとに計算し、
     比率が anneal_threshold を下回ったら anneal_steps かけて shaping_weight を 1.0→min_weight に減衰する。
     min_weight > 0 のとき shaping は永続的に維持される（推論時は不要）。
+
+    n_envs > 1 対応: shaping_weight / reward_fn の操作は env_method で全インスタンスに適用する。
     """
 
     def __init__(
         self,
-        raw_env,
         anneal_threshold: float,
         anneal_steps: int,
         check_freq: int,
@@ -409,7 +434,6 @@ class _AnnealingShapingCallback(BaseCallback):
         curriculum_cb=None,
     ):
         super().__init__(verbose=0)
-        self._raw_env = raw_env
         self.anneal_threshold = anneal_threshold
         self.anneal_steps = anneal_steps
         self.check_freq = check_freq
@@ -417,31 +441,59 @@ class _AnnealingShapingCallback(BaseCallback):
         self.min_weight = min_weight
         self._curriculum_cb = curriculum_cb
 
-        self._ep_base = 0.0
-        self._ep_shaped = 0.0
+        self._ep_base_per_env: list[float] = []    # env ごとのエピソード内累積
+        self._ep_shaped_per_env: list[float] = []
+        self._pending_shaping_weight: float | None = None  # import_state → _on_training_start で適用
         self._sum_base = 0.0
         self._sum_shaped = 0.0
         self._ep_count = 0
         self._last_check = 0
         self._anneal_start_step: int | None = None
         self._final_phase_start_step: int | None = None
+        self._reward_fn_cleared = False
+
+    def _on_training_start(self) -> None:
+        n = self.training_env.num_envs
+        self._ep_base_per_env = [0.0] * n
+        self._ep_shaped_per_env = [0.0] * n
+        if self._pending_shaping_weight is not None:
+            self._set_shaping_weight(self._pending_shaping_weight)
+            self._pending_shaping_weight = None
+
+    def _set_shaping_weight(self, weight: float) -> None:
+        """全 env に shaping_weight を設定する。"""
+        self.training_env.env_method("set_shaping_weight", weight)
+
+    def _clear_reward_fn(self) -> None:
+        """全 env の reward_fn を無効化する。"""
+        self.training_env.env_method("clear_reward_fn")
+        self._reward_fn_cleared = True
+
+    def _get_shaping_weight(self) -> float:
+        """env[0] から shaping_weight を取得する（export_state 用）。"""
+        if self.training_env is None:
+            return self._pending_shaping_weight if self._pending_shaping_weight is not None else 1.0
+        return self.training_env.env_method("get_shaping_weight")[0]
 
     def export_state(self) -> dict:
         return {
-            "ep_base": self._ep_base,
-            "ep_shaped": self._ep_shaped,
+            "ep_base": self._ep_base_per_env[0] if self._ep_base_per_env else 0.0,
+            "ep_shaped": self._ep_shaped_per_env[0] if self._ep_shaped_per_env else 0.0,
             "sum_base": self._sum_base,
             "sum_shaped": self._sum_shaped,
             "ep_count": self._ep_count,
             "last_check": self._last_check,
             "anneal_start_step": self._anneal_start_step,
             "final_phase_start_step": self._final_phase_start_step,
-            "shaping_weight": getattr(self._raw_env, "shaping_weight", None),
+            "shaping_weight": self._get_shaping_weight(),
         }
 
     def import_state(self, state: dict) -> None:
-        self._ep_base = float(state.get("ep_base", 0.0))
-        self._ep_shaped = float(state.get("ep_shaped", 0.0))
+        ep_base = float(state.get("ep_base", 0.0))
+        ep_shaped = float(state.get("ep_shaped", 0.0))
+        n = len(self._ep_base_per_env) if self._ep_base_per_env else 1
+        self._ep_base_per_env = [ep_base] + [0.0] * (n - 1)
+        self._ep_shaped_per_env = [ep_shaped] + [0.0] * (n - 1)
         self._sum_base = float(state.get("sum_base", 0.0))
         self._sum_shaped = float(state.get("sum_shaped", 0.0))
         self._ep_count = int(state.get("ep_count", 0))
@@ -450,7 +502,8 @@ class _AnnealingShapingCallback(BaseCallback):
         self._final_phase_start_step = state.get("final_phase_start_step")
         shaping_weight = state.get("shaping_weight")
         if shaping_weight is not None:
-            self._raw_env.shaping_weight = float(shaping_weight)
+            # training_env は _on_training_start まで未設定のため pending に保存
+            self._pending_shaping_weight = float(shaping_weight)
 
     def _anneal_reference_ready(self) -> tuple[bool, int, str]:
         if self._curriculum_cb is None:
@@ -464,15 +517,25 @@ class _AnnealingShapingCallback(BaseCallback):
         return elapsed >= self.min_steps, elapsed, "last_phase"
 
     def _on_step(self) -> bool:
-        info = self.locals["infos"][0]
-        self._ep_base   += info.get("base_reward",   0.0)
-        self._ep_shaped += info.get("shaped_reward", 0.0)
+        infos = self.locals["infos"]
+        dones = self.locals["dones"]
+        n_envs = len(infos)
 
-        if self.locals["dones"][0]:
-            self._sum_base   += self._ep_base
-            self._sum_shaped += abs(self._ep_shaped)
-            self._ep_count   += 1
-            self._ep_base = self._ep_shaped = 0.0
+        # _ep_*_per_env が未初期化（resume 直後など）の場合は補完
+        if len(self._ep_base_per_env) != n_envs:
+            self._ep_base_per_env = [0.0] * n_envs
+            self._ep_shaped_per_env = [0.0] * n_envs
+
+        for i, (info, done) in enumerate(zip(infos, dones)):
+            self._ep_base_per_env[i]   += info.get("base_reward",   0.0)
+            self._ep_shaped_per_env[i] += info.get("shaped_reward", 0.0)
+
+            if done:
+                self._sum_base   += self._ep_base_per_env[i]
+                self._sum_shaped += abs(self._ep_shaped_per_env[i])
+                self._ep_count   += 1
+                self._ep_base_per_env[i] = 0.0
+                self._ep_shaped_per_env[i] = 0.0
 
         # check_freq ステップごとに比率を計算してアニーリングをトリガー
         reference_ready, reference_steps, reference_name = self._anneal_reference_ready()
@@ -503,14 +566,13 @@ class _AnnealingShapingCallback(BaseCallback):
                 print(f"[INFO] shaped_reward アニーリング開始 "
                       f"(ratio={ratio:.3f} < {self.anneal_threshold})")
 
-        # アニーリング中: shaping_weight を 1.0 → min_weight に線形減衰
+        # アニーリング中: shaping_weight を 1.0 → min_weight に線形減衰（全 env に適用）
         if self._anneal_start_step is not None:
             progress = (self.num_timesteps - self._anneal_start_step) / self.anneal_steps
             weight = self.min_weight + (1.0 - self.min_weight) * max(0.0, 1.0 - progress)
-            self._raw_env.shaping_weight = weight
-            if weight <= self.min_weight and self.min_weight == 0.0 \
-                    and self._raw_env._reward_fn is not None:
-                self._raw_env._reward_fn = None
+            self._set_shaping_weight(weight)
+            if weight <= self.min_weight and self.min_weight == 0.0 and not self._reward_fn_cleared:
+                self._clear_reward_fn()
                 print("[INFO] shaped_reward アニーリング完了 → reward_fn を無効化")
 
         return True
@@ -537,9 +599,7 @@ def _create_model(args, env, algo_class, default_policy: str, ppo_kwargs: dict):
     entity_attention / recurrent の分岐をここに集約する。
     """
     if args.entity_attention and args.game in ("coin", "survivors"):
-        raw_env = _get_raw_env(env)
-        offsets = getattr(raw_env, "_offsets", {})
-        obs_schema = getattr(raw_env, "_obs_schema", [])
+        offsets, obs_schema = _get_obs_attrs(env)
         if args.game == "survivors":
             from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
             extractor_class = SurvivorsEntityAttentionExtractor
@@ -615,6 +675,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=None,
                    help="サーバーポート（未指定時はゲーム別デフォルト: balance=8765, coin=8766, survivors=8767）")
+    p.add_argument("--n-envs", type=int, default=1,
+                   help="並列 UE5 インスタンス数（--game survivors 専用, default: 1）")
+    p.add_argument("--n-steps", type=int, default=4096,
+                   help="1 rollout で各 env が収集するステップ数 (default: 4096)。"
+                        "--n-envs > 1 では総 rollout = n_steps × n_envs になります")
+    p.add_argument("--base-port", type=int, default=None,
+                   help="並列時の起点ポート（--n-envs > 1 時は base_port+i を各インスタンスに割り当て。"
+                        "未指定時は --port またはゲーム別デフォルトを使用）")
+    p.add_argument("--eval-port", type=int, default=None,
+                   help="eval 専用 UE5 インスタンスのポート（--eval-freq > 0 かつ survivors 専用）。"
+                        "未指定時は base_port + n_envs を自動採用")
     p.add_argument("--total-steps", type=int, default=500_000)
     p.add_argument("--version-name", default=None,
                    help="runs/<game>/<version-name>/ 以下に成果物を保存するバージョン名（新規run時は必須）")
@@ -710,12 +781,36 @@ def main() -> None:
     if args.recurrent and args.frame_stack > 1:
         print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
               " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")
+    if args.n_envs > 1:
+        total_rollout = args.n_steps * args.n_envs
+        print(
+            f"[INFO] --n-envs={args.n_envs}: 総rollout = {args.n_steps} steps × {args.n_envs} envs"
+            f" = {total_rollout} steps/iteration"
+        )
 
     _log_device_status(args.device)
-    ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef, "device": args.device}
+    ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef, "device": args.device, "n_steps": args.n_steps}
 
     defaults = _GAME_DEFAULTS[args.game]
     port = args.port if args.port is not None else defaults["port"]
+    base_port = args.base_port if args.base_port is not None else port
+
+    if args.n_envs > 1 and args.game != "survivors":
+        raise ValueError("--n-envs > 1 は survivors ゲームのみ対応しています")
+    if args.n_envs > 1 and args.dry_run:
+        raise ValueError("--n-envs > 1 は --dry-run と同時に使用できません")
+
+    # eval port 解決（survivors + non-dry-run + eval_freq > 0 + n_envs > 1 の場合のみ eval 専用 env を作る）
+    # n_envs == 1 では既存互換: eval 専用 env なし、training_env を評価に使用
+    if args.game == "survivors" and not args.dry_run and args.eval_freq > 0 and args.n_envs > 1:
+        _train_ports = set(range(base_port, base_port + args.n_envs))
+        if args.eval_port is None:
+            args.eval_port = base_port + args.n_envs
+        if args.eval_port in _train_ports:
+            raise ValueError(
+                f"--eval-port が train ports と重複しています: "
+                f"eval_port={args.eval_port}, train_ports={sorted(_train_ports)}"
+            )
 
     resume_status = {}
     resume_model_base = None
@@ -803,10 +898,15 @@ def main() -> None:
                 "curriculum_complete_min_episodes": args.curriculum_complete_min_episodes,
                 "curriculum_complete_min_score_ratio": args.curriculum_complete_min_score_ratio,
                 "curriculum_complete_min_episode_len_ratio": args.curriculum_complete_min_episode_len_ratio,
+                "n_envs": args.n_envs,
+                "base_port": base_port,
+                "eval_port": args.eval_port,
                 "reward_fn": str(args.reward_fn) if args.reward_fn else None,
                 "config_hash": config_hash,
                 "tensorboard_log": str(log_dir / "tensorboard"),
                 **_PPO_KWARGS,
+                "n_steps": args.n_steps,      # _PPO_KWARGS のデフォルトを args 値で上書き
+                "ent_coef": args.ent_coef,    # 同上
             },
         )
         # 新規 run のときだけ run_id を保存（resume 時は上書きしない）
@@ -824,6 +924,8 @@ def main() -> None:
         else:
             reward_fn = _load_reward_fn(args.reward_fn)
             print(f"[INFO] 報酬シェーピング関数をロード: {args.reward_fn}")
+
+    eval_env = None
 
     if args.dry_run:
         if args.game == "coin":
@@ -846,18 +948,55 @@ def main() -> None:
             env = make_vec_env(_make_coin_env, n_envs=1)
         elif args.game == "survivors":
             from games.survivors.survivors_env import SurvivorsEnv
-            def _make_survivors_env():
-                e = SurvivorsEnv(host=args.host, port=port, frame_skip=args.frame_skip)
-                e._reward_fn = reward_fn
-                return e
-            env = make_vec_env(_make_survivors_env, n_envs=1)
+            from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+
+            def _make_survivors_fn(p: int):
+                def _init():
+                    e = SurvivorsEnv(host=args.host, port=p, frame_skip=args.frame_skip)
+                    e._reward_fn = reward_fn
+                    return e
+                return _init
+
+            if args.n_envs > 1:
+                env_fns = [_make_survivors_fn(base_port + i) for i in range(args.n_envs)]
+                env = DummyVecEnv(env_fns)
+                print(f"[INFO] survivors マルチ env: n_envs={args.n_envs}, "
+                      f"ports={list(range(base_port, base_port + args.n_envs))}")
+                # 全 env の obs_schema_hash が一致しているか確認
+                hashes = env.env_method("get_obs_schema_hash")
+                if len(set(hashes)) != 1:
+                    raise RuntimeError(
+                        f"[ERROR] 各 UE5 インスタンスの obs_schema_hash が一致しません: {hashes}\n"
+                        "全インスタンスが同じレベル・設定で起動されているか確認してください。"
+                    )
+                print(f"[INFO] obs_schema_hash 一致確認: {hashes[0]}")
+            else:
+                env = DummyVecEnv([_make_survivors_fn(base_port)])
+            # eval 専用 env 作成（n_envs > 1 かつ eval_freq > 0 の場合のみ）
+            # n_envs == 1 は training_env を評価に転用する旧来の動作を維持する
+            if args.n_envs > 1 and args.eval_freq > 0:
+                eval_env = DummyVecEnv([_make_survivors_fn(args.eval_port)])
+                eval_hash = eval_env.env_method("get_obs_schema_hash")[0]
+                train_hash = env.env_method("get_obs_schema_hash")[0]
+                if eval_hash != train_hash:
+                    raise RuntimeError(
+                        f"[ERROR] eval env の obs_schema_hash が train env と一致しません。\n"
+                        f"  train: {train_hash}\n"
+                        f"  eval : {eval_hash}"
+                    )
+                print(f"[INFO] train ports: {list(range(base_port, base_port + args.n_envs))}")
+                print(f"[INFO] eval port  : {args.eval_port}")
+                print(f"[INFO] eval env は訓練 env から独立しています")
         else:
             from games.balance.balance_env import BalanceEnv
             env = make_vec_env(
                 lambda: BalanceEnv(host=args.host, port=port),
                 n_envs=1,
             )
-        print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{port} に接続...")
+        if args.game == "survivors" and args.n_envs > 1:
+            print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{base_port}〜{base_port + args.n_envs - 1} に接続...")
+        else:
+            print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{port} に接続...")
 
     # VecNormalize 適用
     # - 新規訓練: 正規化統計を初期化
@@ -907,11 +1046,20 @@ def main() -> None:
             env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
             print("[INFO] VecNormalize を有効化しました (norm_obs=True, norm_reward=True)")
 
+    # eval env の VecNormalize（訓練 env の stats を評価直前にコピーするため空の統計で初期化）
+    if eval_env is not None and not args.no_vec_normalize:
+        eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0, training=False)
+        print("[INFO] eval env に VecNormalize を適用しました (training=False, norm_reward=False)")
+
     # フレームスタック: 正規化済み観測を直近 N ステップ分結合する。
     # VecNormalize の running stats は単一フレームに対するため、VecFrameStack は最外側に配置する。
     if args.frame_stack > 1:
         env = VecFrameStack(env, n_stack=args.frame_stack)
         print(f"[INFO] VecFrameStack を有効化しました (n_stack={args.frame_stack})")
+    # eval env にも訓練 env と同じ順序で VecFrameStack を適用する
+    if eval_env is not None and args.frame_stack > 1:
+        eval_env = VecFrameStack(eval_env, n_stack=args.frame_stack)
+        print(f"[INFO] eval env に VecFrameStack を適用しました (n_stack={args.frame_stack})")
 
     algo_class = RecurrentPPO if args.recurrent else PPO
     default_policy = "MlpLstmPolicy" if args.recurrent else "MlpPolicy"
@@ -965,13 +1113,19 @@ def main() -> None:
         if args.eval_freq > 0:
             from games.survivors.survivors_eval_callback import SurvivorsEvalCallback
             callbacks.append(SurvivorsEvalCallback(
+                eval_env=eval_env,  # None なら n_envs=1 旧互換（training_env を使用）
                 eval_freq=args.eval_freq,
                 n_eval_episodes=args.eval_episodes,
                 frame_skip=args.frame_skip,
                 alive_reward=args.curriculum_alive_reward,
             ))
-            print(f"[INFO] SurvivorsEvalCallback 有効 "
-                  f"(eval_freq={args.eval_freq:,}, n_eval_episodes={args.eval_episodes})")
+            if eval_env is not None:
+                print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
+                      f"n_eval_episodes={args.eval_episodes}, eval_port={args.eval_port}, "
+                      f"eval_env=isolated)")
+            else:
+                print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
+                      f"n_eval_episodes={args.eval_episodes}, eval_env=training_env[n_envs=1互換])")
 
     if args.curriculum and args.game == "survivors" and not args.dry_run:
         curriculum_cb = CurriculumCallback(
@@ -1017,7 +1171,6 @@ def main() -> None:
 
     if reward_fn is not None and args.game in ("coin", "survivors"):
         anneal_cb = _AnnealingShapingCallback(
-            raw_env=_get_raw_env(env),
             anneal_threshold=args.anneal_threshold,
             anneal_steps=args.anneal_steps,
             check_freq=args.anneal_check_freq,
@@ -1070,7 +1223,7 @@ def main() -> None:
     checkpoint_cb = _RunCheckpointCallback(
         model_steps_dir=model_steps_dir,
         vecnorm_dir=vecnorm_dir,
-        save_freq=max(args.checkpoint_freq // (env.num_envs or 1), 1),
+        save_freq=max(args.checkpoint_freq, 1),
         vecnorm_getter=lambda: _find_vecnormalize(env),
         status_writer=_write_status_for_model,
     )
@@ -1112,6 +1265,8 @@ def main() -> None:
             exit_error=exit_error,
         )
         env.close()
+        if eval_env is not None:
+            eval_env.close()
         if _use_wandb:
             try:
                 if wandb.run:
