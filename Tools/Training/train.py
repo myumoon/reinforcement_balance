@@ -362,6 +362,7 @@ class _CurriculumCompletionCallback(BaseCallback):
                 "curriculum/completion_episode_count": diagnostics["episodes"],
                 "curriculum/completion_score_mean": diagnostics["active_score_mean"],
                 "curriculum/completion_ep_len_mean": diagnostics["episode_length_mean"],
+                "global_step": self.num_timesteps,
             }, step=self.num_timesteps)
 
         if diagnostics["complete"]:
@@ -494,6 +495,7 @@ class _AnnealingShapingCallback(BaseCallback):
                     "shaping/mean_shaped": mean_shaped,
                     "shaping/mean_base": mean_base,
                     "shaping/anneal_reference_steps": reference_steps,
+                    "global_step": self.num_timesteps,
                 }, step=self.num_timesteps)
 
             if ratio < self.anneal_threshold and self._anneal_start_step is None:
@@ -1118,6 +1120,7 @@ def main() -> None:
                         "run/ended_by_ue5_connection_lost": (
                             1 if exit_reason == "ue5_connection_lost" else 0
                         ),
+                        "global_step": model.num_timesteps,
                     }, step=model.num_timesteps)
                 wandb.finish()
             except Exception as e:

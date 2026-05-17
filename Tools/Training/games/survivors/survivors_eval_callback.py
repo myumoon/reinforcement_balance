@@ -227,6 +227,7 @@ class SurvivorsEvalCallback(BaseCallback):
             )
 
         if _WANDB_AVAILABLE and wandb.run:
+            payload["global_step"] = self.num_timesteps
             wandb.log(payload, step=self.num_timesteps)
 
         if getattr(self, "model", None) is not None:
