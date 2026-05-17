@@ -818,6 +818,7 @@ class CurriculumCallback(BaseCallback):
                     payload["curriculum/episode_length_mean"] = mean_len
                 if reason:
                     payload["curriculum/rollback_reason"] = reason
+                payload["global_step"] = self.num_timesteps
                 wandb.log(payload, step=self.num_timesteps)
         except ImportError:
             pass

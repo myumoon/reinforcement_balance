@@ -245,6 +245,8 @@ class SurvivorsCurriculumProgressMetricsCallback(BaseCallback):
             return True
 
         payload = self._curriculum_cb.get_wandb_progress_metrics()
-        wandb.log({k: v for k, v in payload.items() if v is not None}, step=self.num_timesteps)
+        filtered = {k: v for k, v in payload.items() if v is not None}
+        filtered["global_step"] = self.num_timesteps
+        wandb.log(filtered, step=self.num_timesteps)
         self._last_log = self.num_timesteps
         return True
