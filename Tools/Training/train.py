@@ -905,6 +905,7 @@ def main() -> None:
                 "config_hash": config_hash,
                 "tensorboard_log": str(log_dir / "tensorboard"),
                 **_PPO_KWARGS,
+                "n_steps": args.n_steps,  # _PPO_KWARGS のデフォルトを args 値で上書き
             },
         )
         # 新規 run のときだけ run_id を保存（resume 時は上書きしない）
@@ -1221,7 +1222,7 @@ def main() -> None:
     checkpoint_cb = _RunCheckpointCallback(
         model_steps_dir=model_steps_dir,
         vecnorm_dir=vecnorm_dir,
-        save_freq=max(args.checkpoint_freq // (env.num_envs or 1), 1),
+        save_freq=max(args.checkpoint_freq, 1),
         vecnorm_getter=lambda: _find_vecnormalize(env),
         status_writer=_write_status_for_model,
     )

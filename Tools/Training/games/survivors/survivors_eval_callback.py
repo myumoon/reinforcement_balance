@@ -79,6 +79,23 @@ class SurvivorsEvalCallback(BaseCallback):
             eval_vecnorm.obs_rms = copy.deepcopy(train_vecnorm.obs_rms)
             eval_vecnorm.ret_rms = copy.deepcopy(train_vecnorm.ret_rms)
 
+    def _sync_shaping(self) -> None:
+        """訓練側の shaping_weight を eval_env へ同期する。
+
+        _AnnealingShapingCallback によってアニーリングが進んでいる場合、
+        eval env も同じ shaping_weight で評価する必要がある。
+        weight が 0 の場合は clear_reward_fn も実行して eval shaped_reward を 0 に揃える。
+        """
+        if self.eval_env is None:
+            return
+        weights = self.training_env.env_method("get_shaping_weight")
+        if not weights:
+            return
+        w = float(weights[0])
+        self.eval_env.env_method("set_shaping_weight", w)
+        if w == 0.0:
+            self.eval_env.env_method("clear_reward_fn")
+
     def _on_rollout_end(self) -> None:
         if self.num_timesteps - self._last_eval_step < self.eval_freq:
             return
@@ -89,9 +106,10 @@ class SurvivorsEvalCallback(BaseCallback):
         env = self.training_env if use_training_env else self.eval_env
         model = self.model
 
-        # eval_env 使用時のみ VecNormalize 統計を同期する
+        # eval_env 使用時のみ VecNormalize 統計と shaping_weight を同期する
         if not use_training_env:
             self._sync_vecnormalize()
+            self._sync_shaping()
 
         # 評価中は VecNormalize running stats を更新しない
         was_training = getattr(env, "training", None)
