@@ -677,6 +677,9 @@ def parse_args() -> argparse.Namespace:
                    help="サーバーポート（未指定時はゲーム別デフォルト: balance=8765, coin=8766, survivors=8767）")
     p.add_argument("--n-envs", type=int, default=1,
                    help="並列 UE5 インスタンス数（--game survivors 専用, default: 1）")
+    p.add_argument("--n-steps", type=int, default=4096,
+                   help="1 rollout で各 env が収集するステップ数 (default: 4096)。"
+                        "--n-envs > 1 では総 rollout = n_steps × n_envs になります")
     p.add_argument("--base-port", type=int, default=None,
                    help="並列時の起点ポート（--n-envs > 1 時は base_port+i を各インスタンスに割り当て。"
                         "未指定時は --port またはゲーム別デフォルトを使用）")
@@ -779,15 +782,14 @@ def main() -> None:
         print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
               " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")
     if args.n_envs > 1:
-        suggested_n_steps = getattr(args, "n_steps", 4096) // args.n_envs
+        total_rollout = args.n_steps * args.n_envs
         print(
-            f"[WARN] --n-envs={args.n_envs}: SB3 の n_steps はenv単位です。"
-            f" 総rolloutサイズ = n_steps × n_envs になるため、既存と同じ更新間隔を保つには"
-            f" --n-steps {suggested_n_steps} を推奨します。"
+            f"[INFO] --n-envs={args.n_envs}: 総rollout = {args.n_steps} steps × {args.n_envs} envs"
+            f" = {total_rollout} steps/iteration"
         )
 
     _log_device_status(args.device)
-    ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef, "device": args.device}
+    ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef, "device": args.device, "n_steps": args.n_steps}
 
     defaults = _GAME_DEFAULTS[args.game]
     port = args.port if args.port is not None else defaults["port"]
@@ -798,8 +800,9 @@ def main() -> None:
     if args.n_envs > 1 and args.dry_run:
         raise ValueError("--n-envs > 1 は --dry-run と同時に使用できません")
 
-    # eval port 解決（survivors + non-dry-run + eval_freq > 0 の場合）
-    if args.game == "survivors" and not args.dry_run and args.eval_freq > 0:
+    # eval port 解決（survivors + non-dry-run + eval_freq > 0 + n_envs > 1 の場合のみ eval 専用 env を作る）
+    # n_envs == 1 では既存互換: eval 専用 env なし、training_env を評価に使用
+    if args.game == "survivors" and not args.dry_run and args.eval_freq > 0 and args.n_envs > 1:
         _train_ports = set(range(base_port, base_port + args.n_envs))
         if args.eval_port is None:
             args.eval_port = base_port + args.n_envs
@@ -967,8 +970,9 @@ def main() -> None:
                 print(f"[INFO] obs_schema_hash 一致確認: {hashes[0]}")
             else:
                 env = DummyVecEnv([_make_survivors_fn(base_port)])
-            # eval 専用 env 作成（eval_freq > 0 の場合）
-            if args.eval_freq > 0:
+            # eval 専用 env 作成（n_envs > 1 かつ eval_freq > 0 の場合のみ）
+            # n_envs == 1 は training_env を評価に転用する旧来の動作を維持する
+            if args.n_envs > 1 and args.eval_freq > 0:
                 eval_env = DummyVecEnv([_make_survivors_fn(args.eval_port)])
                 eval_hash = eval_env.env_method("get_obs_schema_hash")[0]
                 train_hash = env.env_method("get_obs_schema_hash")[0]
@@ -1050,6 +1054,10 @@ def main() -> None:
     if args.frame_stack > 1:
         env = VecFrameStack(env, n_stack=args.frame_stack)
         print(f"[INFO] VecFrameStack を有効化しました (n_stack={args.frame_stack})")
+    # eval env にも訓練 env と同じ順序で VecFrameStack を適用する
+    if eval_env is not None and args.frame_stack > 1:
+        eval_env = VecFrameStack(eval_env, n_stack=args.frame_stack)
+        print(f"[INFO] eval env に VecFrameStack を適用しました (n_stack={args.frame_stack})")
 
     algo_class = RecurrentPPO if args.recurrent else PPO
     default_policy = "MlpLstmPolicy" if args.recurrent else "MlpPolicy"
@@ -1100,18 +1108,22 @@ def main() -> None:
         survivors_curriculum_metrics_callback = SurvivorsCurriculumProgressMetricsCallback
         callbacks.append(survivors_metrics_callback(log_freq=5_000, frame_skip=args.frame_skip))
         callbacks.append(ActionDistributionCallback(n_actions=9, log_freq=5_000))
-        if eval_env is not None:
+        if args.eval_freq > 0:
             from games.survivors.survivors_eval_callback import SurvivorsEvalCallback
             callbacks.append(SurvivorsEvalCallback(
-                eval_env=eval_env,
+                eval_env=eval_env,  # None なら n_envs=1 旧互換（training_env を使用）
                 eval_freq=args.eval_freq,
                 n_eval_episodes=args.eval_episodes,
                 frame_skip=args.frame_skip,
                 alive_reward=args.curriculum_alive_reward,
             ))
-            print(f"[INFO] SurvivorsEvalCallback 有効 "
-                  f"(eval_freq={args.eval_freq:,}, n_eval_episodes={args.eval_episodes}, "
-                  f"eval_port={args.eval_port})")
+            if eval_env is not None:
+                print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
+                      f"n_eval_episodes={args.eval_episodes}, eval_port={args.eval_port}, "
+                      f"eval_env=isolated)")
+            else:
+                print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
+                      f"n_eval_episodes={args.eval_episodes}, eval_env=training_env[n_envs=1互換])")
 
     if args.curriculum and args.game == "survivors" and not args.dry_run:
         curriculum_cb = CurriculumCallback(

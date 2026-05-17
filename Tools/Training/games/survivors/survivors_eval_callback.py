@@ -19,14 +19,17 @@ _KILL_REWARD = 2.0
 class SurvivorsEvalCallback(BaseCallback):
     """deterministic policy で評価rolloutを実行し、W&B と SB3 logger へ記録する。
 
-    eval_env として訓練環境とは独立した専用の VecEnv を受け取る。
-    訓練中の obs / episode_start / LSTM state には一切触れない。
+    eval_env が指定されている場合（n_envs > 1）:
+        訓練環境とは独立した専用の VecEnv で評価を実施する。
+        model._last_obs / _last_episode_starts には一切触れない。
+        評価直前に訓練側 VecNormalize の obs_rms/ret_rms を eval 側へコピーして同期する。
 
-    評価直前に訓練側 VecNormalize の obs_rms/ret_rms を eval 側へコピーして
-    正規化統計を同期する。eval 中は eval_env.training=False で統計更新を止める。
+    eval_env が None の場合（n_envs == 1 旧互換モード）:
+        self.training_env をそのまま評価に使用する（旧来の動作）。
+        評価後に model._last_obs / _last_episode_starts を更新して次 rollout の起点を保証する。
 
     Args:
-        eval_env:         評価専用 VecEnv（DummyVecEnv(1) + VecNormalize 推奨）
+        eval_env:         評価専用 VecEnv（n_envs > 1 時）。None なら training_env を使用。
         eval_freq:        評価間隔（timesteps）。0 で無効。
         n_eval_episodes:  評価エピソード数
         frame_skip:       train.py の --frame-skip 値（active_score・kills推定に使用）
@@ -36,7 +39,7 @@ class SurvivorsEvalCallback(BaseCallback):
 
     def __init__(
         self,
-        eval_env,
+        eval_env=None,
         eval_freq: int = 50_000,
         n_eval_episodes: int = 5,
         frame_skip: int = 1,
@@ -81,13 +84,16 @@ class SurvivorsEvalCallback(BaseCallback):
             return
 
         self._last_eval_step = self.num_timesteps
-        env = self.eval_env
+        # eval_env が None の場合は training_env を使う（n_envs=1 旧互換）
+        use_training_env = self.eval_env is None
+        env = self.training_env if use_training_env else self.eval_env
         model = self.model
 
-        # 訓練側 VecNormalize の統計を eval_env へ同期
-        self._sync_vecnormalize()
+        # eval_env 使用時のみ VecNormalize 統計を同期する
+        if not use_training_env:
+            self._sync_vecnormalize()
 
-        # 評価中は eval_env の VecNormalize running stats を更新しない
+        # 評価中は VecNormalize running stats を更新しない
         was_training = getattr(env, "training", None)
         if was_training is not None:
             env.training = False
@@ -189,11 +195,15 @@ class SurvivorsEvalCallback(BaseCallback):
                 "terminated":     int(not is_truncated),
             })
 
-        # eval_env の VecNormalize を元の状態に戻す
+        # VecNormalize を元の状態に戻す
         if was_training is not None:
             env.training = was_training
 
-        # 訓練環境（model._last_obs 等）には一切触れない
+        if use_training_env:
+            # n_envs=1 旧互換: model._last_obs を更新して次 rollout の起点を保証
+            model._last_obs = obs
+            model._last_episode_starts = np.ones((env.num_envs,), dtype=bool)
+        # eval_env 使用時は訓練環境（model._last_obs 等）には一切触れない
 
         metrics = self._aggregate(episode_results)
         self._log_results(metrics)
