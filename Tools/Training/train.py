@@ -905,7 +905,8 @@ def main() -> None:
                 "config_hash": config_hash,
                 "tensorboard_log": str(log_dir / "tensorboard"),
                 **_PPO_KWARGS,
-                "n_steps": args.n_steps,  # _PPO_KWARGS のデフォルトを args 値で上書き
+                "n_steps": args.n_steps,      # _PPO_KWARGS のデフォルトを args 値で上書き
+                "ent_coef": args.ent_coef,    # 同上
             },
         )
         # 新規 run のときだけ run_id を保存（resume 時は上書きしない）
