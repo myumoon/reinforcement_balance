@@ -1,7 +1,10 @@
 """Survivors deterministic 評価rollout コールバック。"""
 
+import copy
+
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.vec_env import VecNormalize
 
 try:
     import wandb
@@ -16,16 +19,14 @@ _KILL_REWARD = 2.0
 class SurvivorsEvalCallback(BaseCallback):
     """deterministic policy で評価rolloutを実行し、W&B と SB3 logger へ記録する。
 
-    UE5 は1インスタンスのため、訓練環境をそのまま評価に転用する。
-    ``_on_rollout_end``（rollout収集後・gradient更新前）でトリガーされ、
-    ``eval_freq`` ステップごとに ``n_eval_episodes`` エピソードを
-    ``deterministic=True`` で実行する。
+    eval_env として訓練環境とは独立した専用の VecEnv を受け取る。
+    訓練中の obs / episode_start / LSTM state には一切触れない。
 
-    評価中は VecNormalize の training フラグを False にして統計更新を止める。
-    評価後は model._last_obs を最後の auto-reset obs で更新し、
-    次の rollout collection が clean state から始まれるよう保証する。
+    評価直前に訓練側 VecNormalize の obs_rms/ret_rms を eval 側へコピーして
+    正規化統計を同期する。eval 中は eval_env.training=False で統計更新を止める。
 
     Args:
+        eval_env:         評価専用 VecEnv（DummyVecEnv(1) + VecNormalize 推奨）
         eval_freq:        評価間隔（timesteps）。0 で無効。
         n_eval_episodes:  評価エピソード数
         frame_skip:       train.py の --frame-skip 値（active_score・kills推定に使用）
@@ -35,6 +36,7 @@ class SurvivorsEvalCallback(BaseCallback):
 
     def __init__(
         self,
+        eval_env,
         eval_freq: int = 50_000,
         n_eval_episodes: int = 5,
         frame_skip: int = 1,
@@ -42,6 +44,7 @@ class SurvivorsEvalCallback(BaseCallback):
         verbose: int = 1,
     ):
         super().__init__(verbose=verbose)
+        self.eval_env = eval_env
         self.eval_freq = max(1, eval_freq)
         self.n_eval_episodes = max(1, n_eval_episodes)
         self.frame_skip = frame_skip
@@ -51,20 +54,44 @@ class SurvivorsEvalCallback(BaseCallback):
     def _on_step(self) -> bool:
         return True
 
+    def _sync_vecnormalize(self) -> None:
+        """訓練側 VecNormalize の obs_rms/ret_rms を eval_env へコピーする。"""
+        train_vecnorm: VecNormalize | None = None
+        cur = self.training_env
+        while cur is not None:
+            if isinstance(cur, VecNormalize):
+                train_vecnorm = cur
+                break
+            cur = getattr(cur, "venv", None)
+
+        eval_vecnorm: VecNormalize | None = None
+        cur = self.eval_env
+        while cur is not None:
+            if isinstance(cur, VecNormalize):
+                eval_vecnorm = cur
+                break
+            cur = getattr(cur, "venv", None)
+
+        if train_vecnorm is not None and eval_vecnorm is not None:
+            eval_vecnorm.obs_rms = copy.deepcopy(train_vecnorm.obs_rms)
+            eval_vecnorm.ret_rms = copy.deepcopy(train_vecnorm.ret_rms)
+
     def _on_rollout_end(self) -> None:
         if self.num_timesteps - self._last_eval_step < self.eval_freq:
             return
 
         self._last_eval_step = self.num_timesteps
-        env = self.training_env
+        env = self.eval_env
         model = self.model
 
-        # 評価中は VecNormalize の running stats を更新しない
+        # 訓練側 VecNormalize の統計を eval_env へ同期
+        self._sync_vecnormalize()
+
+        # 評価中は eval_env の VecNormalize running stats を更新しない
         was_training = getattr(env, "training", None)
         if was_training is not None:
             env.training = False
 
-        # 最初の eval episode 用に env をリセット
         obs = env.reset()
         episode_results: list[dict] = []
 
@@ -99,7 +126,6 @@ class SurvivorsEvalCallback(BaseCallback):
                     deterministic=True,
                 )
                 obs, _reward, done, info = env.step(action)
-                # done 後の obs は DummyVecEnv の auto-reset obs（次エピソード開始点）
                 episode_starts = done
                 ep_steps += 1
 
@@ -120,7 +146,6 @@ class SurvivorsEvalCallback(BaseCallback):
                     ep_gem_pickups += 1
                 ep_prev_xp = xp
 
-                # Kill推定: KillReward=2.0 相当の報酬スパイクをカウント
                 alive_step = self.alive_reward * self.frame_skip
                 if base_r - alive_step >= 1.9:
                     ep_kills += max(1, int((base_r - alive_step + 0.05) / _KILL_REWARD))
@@ -142,7 +167,6 @@ class SurvivorsEvalCallback(BaseCallback):
                 if done[0]:
                     is_truncated = bool(si.get("TimeLimit.truncated", False))
 
-            # active_score: alive_reward 分を除いた実績スコア（カリキュラムと同定義）
             alive_total = self.alive_reward * self.frame_skip * ep_steps
             active_score = max(0.0, ep_base - alive_total)
 
@@ -164,15 +188,12 @@ class SurvivorsEvalCallback(BaseCallback):
                 "stationary":     ep_stationary_steps / max(ep_steps, 1),
                 "terminated":     int(not is_truncated),
             })
-            # obs は done 時の auto-reset obs。次 episode はここから開始するので reset() 不要。
 
-        # VecNormalize を訓練モードに戻す
+        # eval_env の VecNormalize を元の状態に戻す
         if was_training is not None:
             env.training = was_training
 
-        # model._last_obs を更新（最後の episode の auto-reset obs を次 rollout の起点に）
-        model._last_obs = obs
-        model._last_episode_starts = np.ones((env.num_envs,), dtype=bool)
+        # 訓練環境（model._last_obs 等）には一切触れない
 
         metrics = self._aggregate(episode_results)
         self._log_results(metrics)

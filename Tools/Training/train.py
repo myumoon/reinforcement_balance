@@ -680,6 +680,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--base-port", type=int, default=None,
                    help="並列時の起点ポート（--n-envs > 1 時は base_port+i を各インスタンスに割り当て。"
                         "未指定時は --port またはゲーム別デフォルトを使用）")
+    p.add_argument("--eval-port", type=int, default=None,
+                   help="eval 専用 UE5 インスタンスのポート（--eval-freq > 0 かつ survivors 専用）。"
+                        "未指定時は base_port + n_envs を自動採用")
     p.add_argument("--total-steps", type=int, default=500_000)
     p.add_argument("--version-name", default=None,
                    help="runs/<game>/<version-name>/ 以下に成果物を保存するバージョン名（新規run時は必須）")
@@ -782,12 +785,6 @@ def main() -> None:
             f" 総rolloutサイズ = n_steps × n_envs になるため、既存と同じ更新間隔を保つには"
             f" --n-steps {suggested_n_steps} を推奨します。"
         )
-        if args.eval_freq > 0:
-            print(
-                "[WARN] --n-envs > 1 では SurvivorsEvalCallback を無効化します。"
-                " 評価時に全envのLSTM stateが壊れるため安全に実行できません。"
-                " 評価が必要な場合は --eval-freq 0 のまま別途 n_envs=1 で確認してください。"
-            )
 
     _log_device_status(args.device)
     ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef, "device": args.device}
@@ -800,6 +797,17 @@ def main() -> None:
         raise ValueError("--n-envs > 1 は survivors ゲームのみ対応しています")
     if args.n_envs > 1 and args.dry_run:
         raise ValueError("--n-envs > 1 は --dry-run と同時に使用できません")
+
+    # eval port 解決（survivors + non-dry-run + eval_freq > 0 の場合）
+    if args.game == "survivors" and not args.dry_run and args.eval_freq > 0:
+        _train_ports = set(range(base_port, base_port + args.n_envs))
+        if args.eval_port is None:
+            args.eval_port = base_port + args.n_envs
+        if args.eval_port in _train_ports:
+            raise ValueError(
+                f"--eval-port が train ports と重複しています: "
+                f"eval_port={args.eval_port}, train_ports={sorted(_train_ports)}"
+            )
 
     resume_status = {}
     resume_model_base = None
@@ -887,6 +895,9 @@ def main() -> None:
                 "curriculum_complete_min_episodes": args.curriculum_complete_min_episodes,
                 "curriculum_complete_min_score_ratio": args.curriculum_complete_min_score_ratio,
                 "curriculum_complete_min_episode_len_ratio": args.curriculum_complete_min_episode_len_ratio,
+                "n_envs": args.n_envs,
+                "base_port": base_port,
+                "eval_port": args.eval_port,
                 "reward_fn": str(args.reward_fn) if args.reward_fn else None,
                 "config_hash": config_hash,
                 "tensorboard_log": str(log_dir / "tensorboard"),
@@ -908,6 +919,8 @@ def main() -> None:
         else:
             reward_fn = _load_reward_fn(args.reward_fn)
             print(f"[INFO] 報酬シェーピング関数をロード: {args.reward_fn}")
+
+    eval_env = None
 
     if args.dry_run:
         if args.game == "coin":
@@ -954,6 +967,20 @@ def main() -> None:
                 print(f"[INFO] obs_schema_hash 一致確認: {hashes[0]}")
             else:
                 env = DummyVecEnv([_make_survivors_fn(base_port)])
+            # eval 専用 env 作成（eval_freq > 0 の場合）
+            if args.eval_freq > 0:
+                eval_env = DummyVecEnv([_make_survivors_fn(args.eval_port)])
+                eval_hash = eval_env.env_method("get_obs_schema_hash")[0]
+                train_hash = env.env_method("get_obs_schema_hash")[0]
+                if eval_hash != train_hash:
+                    raise RuntimeError(
+                        f"[ERROR] eval env の obs_schema_hash が train env と一致しません。\n"
+                        f"  train: {train_hash}\n"
+                        f"  eval : {eval_hash}"
+                    )
+                print(f"[INFO] train ports: {list(range(base_port, base_port + args.n_envs))}")
+                print(f"[INFO] eval port  : {args.eval_port}")
+                print(f"[INFO] eval env は訓練 env から独立しています")
         else:
             from games.balance.balance_env import BalanceEnv
             env = make_vec_env(
@@ -1013,6 +1040,11 @@ def main() -> None:
             env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
             print("[INFO] VecNormalize を有効化しました (norm_obs=True, norm_reward=True)")
 
+    # eval env の VecNormalize（訓練 env の stats を評価直前にコピーするため空の統計で初期化）
+    if eval_env is not None and not args.no_vec_normalize:
+        eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0, training=False)
+        print("[INFO] eval env に VecNormalize を適用しました (training=False, norm_reward=False)")
+
     # フレームスタック: 正規化済み観測を直近 N ステップ分結合する。
     # VecNormalize の running stats は単一フレームに対するため、VecFrameStack は最外側に配置する。
     if args.frame_stack > 1:
@@ -1068,16 +1100,18 @@ def main() -> None:
         survivors_curriculum_metrics_callback = SurvivorsCurriculumProgressMetricsCallback
         callbacks.append(survivors_metrics_callback(log_freq=5_000, frame_skip=args.frame_skip))
         callbacks.append(ActionDistributionCallback(n_actions=9, log_freq=5_000))
-        if args.eval_freq > 0 and args.n_envs == 1:
+        if eval_env is not None:
             from games.survivors.survivors_eval_callback import SurvivorsEvalCallback
             callbacks.append(SurvivorsEvalCallback(
+                eval_env=eval_env,
                 eval_freq=args.eval_freq,
                 n_eval_episodes=args.eval_episodes,
                 frame_skip=args.frame_skip,
                 alive_reward=args.curriculum_alive_reward,
             ))
             print(f"[INFO] SurvivorsEvalCallback 有効 "
-                  f"(eval_freq={args.eval_freq:,}, n_eval_episodes={args.eval_episodes})")
+                  f"(eval_freq={args.eval_freq:,}, n_eval_episodes={args.eval_episodes}, "
+                  f"eval_port={args.eval_port})")
 
     if args.curriculum and args.game == "survivors" and not args.dry_run:
         curriculum_cb = CurriculumCallback(
@@ -1217,6 +1251,8 @@ def main() -> None:
             exit_error=exit_error,
         )
         env.close()
+        if eval_env is not None:
+            eval_env.close()
         if _use_wandb:
             try:
                 if wandb.run:
