@@ -420,11 +420,12 @@ class _AnnealingShapingCallback(BaseCallback):
     |shaped_reward_mean| / base_reward_mean の比率を check_freq ステップごとに計算し、
     比率が anneal_threshold を下回ったら anneal_steps かけて shaping_weight を 1.0→min_weight に減衰する。
     min_weight > 0 のとき shaping は永続的に維持される（推論時は不要）。
+
+    n_envs > 1 対応: shaping_weight / reward_fn の操作は env_method で全インスタンスに適用する。
     """
 
     def __init__(
         self,
-        raw_env,
         anneal_threshold: float,
         anneal_steps: int,
         check_freq: int,
@@ -433,7 +434,6 @@ class _AnnealingShapingCallback(BaseCallback):
         curriculum_cb=None,
     ):
         super().__init__(verbose=0)
-        self._raw_env = raw_env
         self.anneal_threshold = anneal_threshold
         self.anneal_steps = anneal_steps
         self.check_freq = check_freq
@@ -441,31 +441,59 @@ class _AnnealingShapingCallback(BaseCallback):
         self.min_weight = min_weight
         self._curriculum_cb = curriculum_cb
 
-        self._ep_base = 0.0
-        self._ep_shaped = 0.0
+        self._ep_base_per_env: list[float] = []    # env ごとのエピソード内累積
+        self._ep_shaped_per_env: list[float] = []
+        self._pending_shaping_weight: float | None = None  # import_state → _on_training_start で適用
         self._sum_base = 0.0
         self._sum_shaped = 0.0
         self._ep_count = 0
         self._last_check = 0
         self._anneal_start_step: int | None = None
         self._final_phase_start_step: int | None = None
+        self._reward_fn_cleared = False
+
+    def _on_training_start(self) -> None:
+        n = self.training_env.num_envs
+        self._ep_base_per_env = [0.0] * n
+        self._ep_shaped_per_env = [0.0] * n
+        if self._pending_shaping_weight is not None:
+            self._set_shaping_weight(self._pending_shaping_weight)
+            self._pending_shaping_weight = None
+
+    def _set_shaping_weight(self, weight: float) -> None:
+        """全 env に shaping_weight を設定する。"""
+        self.training_env.env_method("set_shaping_weight", weight)
+
+    def _clear_reward_fn(self) -> None:
+        """全 env の reward_fn を無効化する。"""
+        self.training_env.env_method("clear_reward_fn")
+        self._reward_fn_cleared = True
+
+    def _get_shaping_weight(self) -> float:
+        """env[0] から shaping_weight を取得する（export_state 用）。"""
+        if self.training_env is None:
+            return self._pending_shaping_weight if self._pending_shaping_weight is not None else 1.0
+        return self.training_env.env_method("get_shaping_weight")[0]
 
     def export_state(self) -> dict:
         return {
-            "ep_base": self._ep_base,
-            "ep_shaped": self._ep_shaped,
+            "ep_base": self._ep_base_per_env[0] if self._ep_base_per_env else 0.0,
+            "ep_shaped": self._ep_shaped_per_env[0] if self._ep_shaped_per_env else 0.0,
             "sum_base": self._sum_base,
             "sum_shaped": self._sum_shaped,
             "ep_count": self._ep_count,
             "last_check": self._last_check,
             "anneal_start_step": self._anneal_start_step,
             "final_phase_start_step": self._final_phase_start_step,
-            "shaping_weight": getattr(self._raw_env, "shaping_weight", None),
+            "shaping_weight": self._get_shaping_weight(),
         }
 
     def import_state(self, state: dict) -> None:
-        self._ep_base = float(state.get("ep_base", 0.0))
-        self._ep_shaped = float(state.get("ep_shaped", 0.0))
+        ep_base = float(state.get("ep_base", 0.0))
+        ep_shaped = float(state.get("ep_shaped", 0.0))
+        n = len(self._ep_base_per_env) if self._ep_base_per_env else 1
+        self._ep_base_per_env = [ep_base] + [0.0] * (n - 1)
+        self._ep_shaped_per_env = [ep_shaped] + [0.0] * (n - 1)
         self._sum_base = float(state.get("sum_base", 0.0))
         self._sum_shaped = float(state.get("sum_shaped", 0.0))
         self._ep_count = int(state.get("ep_count", 0))
@@ -474,7 +502,8 @@ class _AnnealingShapingCallback(BaseCallback):
         self._final_phase_start_step = state.get("final_phase_start_step")
         shaping_weight = state.get("shaping_weight")
         if shaping_weight is not None:
-            self._raw_env.shaping_weight = float(shaping_weight)
+            # training_env は _on_training_start まで未設定のため pending に保存
+            self._pending_shaping_weight = float(shaping_weight)
 
     def _anneal_reference_ready(self) -> tuple[bool, int, str]:
         if self._curriculum_cb is None:
@@ -488,15 +517,25 @@ class _AnnealingShapingCallback(BaseCallback):
         return elapsed >= self.min_steps, elapsed, "last_phase"
 
     def _on_step(self) -> bool:
-        info = self.locals["infos"][0]
-        self._ep_base   += info.get("base_reward",   0.0)
-        self._ep_shaped += info.get("shaped_reward", 0.0)
+        infos = self.locals["infos"]
+        dones = self.locals["dones"]
+        n_envs = len(infos)
 
-        if self.locals["dones"][0]:
-            self._sum_base   += self._ep_base
-            self._sum_shaped += abs(self._ep_shaped)
-            self._ep_count   += 1
-            self._ep_base = self._ep_shaped = 0.0
+        # _ep_*_per_env が未初期化（resume 直後など）の場合は補完
+        if len(self._ep_base_per_env) != n_envs:
+            self._ep_base_per_env = [0.0] * n_envs
+            self._ep_shaped_per_env = [0.0] * n_envs
+
+        for i, (info, done) in enumerate(zip(infos, dones)):
+            self._ep_base_per_env[i]   += info.get("base_reward",   0.0)
+            self._ep_shaped_per_env[i] += info.get("shaped_reward", 0.0)
+
+            if done:
+                self._sum_base   += self._ep_base_per_env[i]
+                self._sum_shaped += abs(self._ep_shaped_per_env[i])
+                self._ep_count   += 1
+                self._ep_base_per_env[i] = 0.0
+                self._ep_shaped_per_env[i] = 0.0
 
         # check_freq ステップごとに比率を計算してアニーリングをトリガー
         reference_ready, reference_steps, reference_name = self._anneal_reference_ready()
@@ -527,14 +566,13 @@ class _AnnealingShapingCallback(BaseCallback):
                 print(f"[INFO] shaped_reward アニーリング開始 "
                       f"(ratio={ratio:.3f} < {self.anneal_threshold})")
 
-        # アニーリング中: shaping_weight を 1.0 → min_weight に線形減衰
+        # アニーリング中: shaping_weight を 1.0 → min_weight に線形減衰（全 env に適用）
         if self._anneal_start_step is not None:
             progress = (self.num_timesteps - self._anneal_start_step) / self.anneal_steps
             weight = self.min_weight + (1.0 - self.min_weight) * max(0.0, 1.0 - progress)
-            self._raw_env.shaping_weight = weight
-            if weight <= self.min_weight and self.min_weight == 0.0 \
-                    and self._raw_env._reward_fn is not None:
-                self._raw_env._reward_fn = None
+            self._set_shaping_weight(weight)
+            if weight <= self.min_weight and self.min_weight == 0.0 and not self._reward_fn_cleared:
+                self._clear_reward_fn()
                 print("[INFO] shaped_reward アニーリング完了 → reward_fn を無効化")
 
         return True
@@ -1063,12 +1101,7 @@ def main() -> None:
         )
 
     if reward_fn is not None and args.game in ("coin", "survivors"):
-        _anneal_raw_env = _get_raw_env(env)
-        if _anneal_raw_env is None:
-            print("[WARN] --reward-fn と --n-envs > 1 (SubprocVecEnv) の組み合わせは非対応です。"
-                  "シェーピングアニーリングは env[0] のみに適用されます。")
         anneal_cb = _AnnealingShapingCallback(
-            raw_env=_anneal_raw_env,
             anneal_threshold=args.anneal_threshold,
             anneal_steps=args.anneal_steps,
             check_freq=args.anneal_check_freq,

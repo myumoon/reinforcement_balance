@@ -150,6 +150,18 @@ class SurvivorsEnv(BaseUE5Env):
         """SubprocVecEnv の env_method 経由での取得用。"""
         return self._offsets
 
+    def get_shaping_weight(self) -> float:
+        """SubprocVecEnv / マルチenv の env_method 経由での取得用。"""
+        return self.shaping_weight
+
+    def set_shaping_weight(self, weight: float) -> None:
+        """SubprocVecEnv / マルチenv の env_method 経由での設定用。"""
+        self.shaping_weight = weight
+
+    def clear_reward_fn(self) -> None:
+        """SubprocVecEnv / マルチenv の env_method 経由でアニーリング完了時に無効化。"""
+        self._reward_fn = None
+
     def set_params(self, **kwargs) -> bool:
         """カリキュラム用パラメータを /params エンドポイントで更新する。
 
