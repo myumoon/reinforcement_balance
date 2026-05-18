@@ -881,9 +881,16 @@ def main() -> None:
         source_dir, resume_step = _parse_resume_spec(args.resume)
         model_zip_to_load, vecnorm_from_run, resume_status = _resolve_resume_from_run(source_dir, resume_step)
         if args.run_name is None:
-            # continue mode: 同一 run に追記。version_name チェックはスキップ
-            run_dir = source_dir
-            args.run_name = source_dir.name
+            if args.config is not None:
+                # config-inferred mode: config ファイルの親フォルダを run_dir とする
+                # 想定構造: run_dir/config/train_config.yaml → run_dir = config.parent.parent
+                run_dir = Path(args.config).resolve().parent.parent
+                args.run_name = run_dir.name
+                print(f"[INFO] --run-name 未指定: config から run_dir を推論しました → {run_dir}")
+            else:
+                # continue mode: 同一 run に追記（--config なし時のフォールバック）
+                args.run_name = resume_source_dir.name
+                run_dir = resume_source_dir
         elif args.version_name:
             # branch mode: 新規 run_dir を生成
             run_dir = Path("runs") / args.game / args.version_name / "train" / args.run_name
