@@ -889,8 +889,8 @@ def main() -> None:
                 print(f"[INFO] --run-name 未指定: config から run_dir を推論しました → {run_dir}")
             else:
                 # continue mode: 同一 run に追記（--config なし時のフォールバック）
-                args.run_name = resume_source_dir.name
-                run_dir = resume_source_dir
+                args.run_name = source_dir.name
+                run_dir = source_dir
         elif args.version_name:
             # branch mode: 新規 run_dir を生成
             run_dir = Path("runs") / args.game / args.version_name / "train" / args.run_name
