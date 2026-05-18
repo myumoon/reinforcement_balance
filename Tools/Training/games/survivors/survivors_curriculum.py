@@ -152,6 +152,7 @@ class CurriculumCallback(BaseCallback):
         self._completion_min_episode_len_ratio = 1.0
         self._steps_in_phase: int = 0
         self._episodes_in_phase: int = 0
+        self._missing_episode_info_count: int = 0
 
     def _on_training_start(self) -> None:
         n = self.training_env.num_envs if self.training_env is not None else 1
@@ -224,11 +225,21 @@ class CurriculumCallback(BaseCallback):
 
         self._steps_in_phase += 1
 
+        dones = self.locals.get("dones", [False] * n_envs)
+
         episode_ended = False
         for env_idx, info in enumerate(infos):
             self._ep_base_per_env[env_idx] += info.get("base_reward", 0.0)
 
             if "episode" not in info:
+                if dones[env_idx]:
+                    self._missing_episode_info_count += 1
+                    if self._missing_episode_info_count <= 5:
+                        print(
+                            f"[WARN] CurriculumCallback: done=True ですが info['episode'] がありません "
+                            f"(env_idx={env_idx}, 累計={self._missing_episode_info_count})。"
+                            "Monitor が外れている可能性があります。"
+                        )
                 continue
 
             self._episodes_in_phase += 1
