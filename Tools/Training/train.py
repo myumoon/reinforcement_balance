@@ -178,10 +178,15 @@ def _find_run_root(start: Path) -> tuple[Path, dict]:
     """
     candidate = start
     while True:
-        for status_name in ["log/train_status.json", "train_status.json"]:
+        for status_name in ["log/train_status.json", "work/train_status.json"]:
             status_path = candidate / status_name
             if status_path.exists():
                 return candidate, _read_json(status_path)
+        status_path = candidate / "train_status.json"
+        if status_path.exists():
+            if candidate.name == "work":
+                return candidate.parent, _read_json(status_path)
+            return candidate, _read_json(status_path)
         parent = candidate.parent
         if parent == candidate:
             break
@@ -193,7 +198,11 @@ def _resolve_resume_path(resume: Path) -> tuple[Path, Path, dict]:
     if resume.is_dir():
         run_dir = resume
         # 新構成: log/train_status.json、旧構成: train_status.json
-        for status_candidate in [run_dir / "log" / "train_status.json", run_dir / "train_status.json"]:
+        for status_candidate in [
+            run_dir / "log" / "train_status.json",
+            run_dir / "work" / "train_status.json",
+            run_dir / "train_status.json",
+        ]:
             if status_candidate.exists():
                 status = _read_json(status_candidate)
                 break
@@ -214,6 +223,10 @@ def _resolve_resume_path(resume: Path) -> tuple[Path, Path, dict]:
     if not model_zip.exists():
         raise FileNotFoundError(f"--resume モデルが見つかりません: {model_zip}")
     run_dir, status = _find_run_root(model_zip.parent)
+    step_token = model_zip.stem.removeprefix("model_").removesuffix("_steps")
+    exact_status = run_dir / "work" / "status" / f"train_status_{step_token}_steps.json"
+    if exact_status.exists():
+        status = _read_json(exact_status)
     return run_dir, _strip_zip(model_zip), status
 
 
@@ -277,6 +290,7 @@ def _save_training_status(
     exit_reason: str | None = None,
     exit_error: str | None = None,
     curriculum_completion: dict | None = None,
+    mirror_paths: list[Path] | None = None,
 ) -> None:
     # run_dir からの相対パスで記録することで新旧両構成に対応
     def _rel(p: Path) -> str:
@@ -301,6 +315,9 @@ def _save_training_status(
     if exit_error is not None:
         data["last_exit_error"] = exit_error
     _write_json(status_path, data)
+    for mirror_path in mirror_paths or []:
+        mirror_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(mirror_path, data)
 
 
 class _RunCheckpointCallback(BaseCallback):
@@ -837,8 +854,9 @@ def main() -> None:
     result_dir      = run_dir / "result"
     model_steps_dir = work_dir / "model_steps"
     vecnorm_dir     = work_dir / "vecnormalize"
+    status_dir      = work_dir / "status"
 
-    for d in [work_dir, log_dir, result_dir, model_steps_dir, vecnorm_dir]:
+    for d in [work_dir, log_dir, result_dir, model_steps_dir, vecnorm_dir, status_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
     if not args.resume:
@@ -856,6 +874,7 @@ def main() -> None:
     model_base_path         = result_dir / "model"
     vecnorm_path            = result_dir / "vecnormalize.pkl"
     status_path             = log_dir / "train_status.json"
+    work_status_path        = work_dir / "train_status.json"
     curriculum_status_path  = log_dir / "curriculum_status.json"
     config_hash = _write_resolved_config(log_dir, args)
     _write_run_meta(log_dir, args, config_hash)
@@ -1218,6 +1237,10 @@ def main() -> None:
             exit_reason=exit_reason,
             exit_error=exit_error,
             curriculum_completion=completion_state,
+            mirror_paths=[
+                work_status_path,
+                status_dir / f"train_status_{timestep}_steps.json",
+            ],
         )
 
     checkpoint_cb = _RunCheckpointCallback(
