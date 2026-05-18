@@ -7,7 +7,7 @@
   python train.py --dry-run                    # BalancePole スタブ
   python train.py --game coin --dry-run        # CoinGame    スタブ
   python train.py --game survivors --dry-run   # Survivors   スタブ
-  python train.py --resume models/balance_model
+  python train.py --resume runs/balance/v01/train/run-base
   python train.py --game coin --reward-fn eureka_results/my_run/best/reward_fn.py
   python train.py --game survivors --reward-fn eureka_results/my_run/best/reward_fn.py
   python train.py --help
@@ -144,90 +144,133 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+
+
+def _parse_step_shorthand(s: str) -> int:
+    """200k/2M/2.5M/2_000k/200_000 などを int に変換する。
+
+    アルゴリズム:
+    1. アンダースコアを除去
+    2. 末尾が k/K -> float(残部) * 1_000 を int に
+    3. 末尾が m/M -> float(残部) * 1_000_000 を int に
+    4. それ以外 -> int(s) で変換（小数はエラー）
+    """
+    s_clean = s.replace("_", "")
+    if s_clean.lower().endswith("k"):
+        return int(float(s_clean[:-1]) * 1_000)
+    if s_clean.lower().endswith("m"):
+        return int(float(s_clean[:-1]) * 1_000_000)
+    return int(s_clean)
+
+
+def _parse_resume_spec(spec: str) -> "tuple[Path, int | None]":
+    """path@step または path を (Path, int | None) に分解する。
+
+    Examples::
+
+        _parse_resume_spec("runs/run-base@200k")   # (Path("runs/run-base"), 200_000)
+        _parse_resume_spec("runs/run-base@2.5M")   # (Path("runs/run-base"), 2_500_000)
+        _parse_resume_spec("runs/run-base")         # (Path("runs/run-base"), None)
+
+    最後の @ を分割点とする（パス内に @ が含まれる場合に対応）。
+    step が 0 以下の場合は ValueError。
+    """
+    at_idx = spec.rfind("@")
+    if at_idx == -1:
+        return Path(spec), None
+    path_part = spec[:at_idx]
+    step_part = spec[at_idx + 1:]
+    step = _parse_step_shorthand(step_part)
+    if step <= 0:
+        raise ValueError(
+            f"@step には正の整数を指定してください: @{step_part!r} -> {step}"
+        )
+    return Path(path_part), step
+
+
+def _list_available_steps(source_dir: Path) -> list[int]:
+    """source_dir/work/model_steps/model_*_steps.zip をglobしてステップ数の昇順リストを返す。"""
+    model_steps_dir = source_dir / "work" / "model_steps"
+    if not model_steps_dir.exists():
+        return []
+    steps = []
+    for p in model_steps_dir.glob("model_*_steps.zip"):
+        stem = p.stem
+        try:
+            step_val = int(stem.removeprefix("model_").removesuffix("_steps"))
+            steps.append(step_val)
+        except ValueError:
+            pass
+    return sorted(steps)
+
+
+def _resolve_resume_from_run(
+    source_dir: Path,
+    step: "int | None",
+) -> "tuple[Path, Path | None, dict]":
+    """run ディレクトリとステップ指定から (model_zip, vecnorm_path, status_dict) を返す。
+
+    step=None: result/model.zip -> なければ work/model_steps/ 最大ステップへ自動フォールバック。
+    step=N:    work/model_steps/model_{N}_steps.zip を使用。
+    """
+    if not source_dir.exists():
+        raise FileNotFoundError(
+            f"[ERROR] resume 対象ディレクトリが見つかりません: {source_dir}\n"
+            f"ヒント: 新記法は run ディレクトリを指定します。例: resume: runs/survivors/v06/train/run-base"
+        )
+
+    if step is None:
+        result_model = source_dir / "result" / "model.zip"
+        if result_model.exists():
+            model_zip = result_model
+            vecnorm_path = source_dir / "result" / "vecnormalize.pkl"
+            if not vecnorm_path.exists():
+                print(f"[WARN] VecNormalize 統計が見つかりません: {vecnorm_path}")
+                vecnorm_path = None
+            status_path = source_dir / "work" / "train_status.json"
+            status_dict = _read_json(status_path) if status_path.exists() else {}
+            return model_zip, vecnorm_path, status_dict
+
+        available = _list_available_steps(source_dir)
+        if not available:
+            raise FileNotFoundError(
+                f"[ERROR] resume 対象ディレクトリに再開可能なモデルがありません: {source_dir}\n"
+                f"  result/model.zip も work/model_steps/ も見つかりませんでした。"
+            )
+        max_step = available[-1]
+        model_zip = source_dir / "work" / "model_steps" / f"model_{max_step}_steps.zip"
+        print(
+            f"[WARN] result/model.zip が存在しません。最新チェックポイントを使用します: "
+            f"work/model_steps/model_{max_step}_steps.zip"
+        )
+        vecnorm_path = source_dir / "work" / "vecnormalize" / f"vecnormalize_{max_step}_steps.pkl"
+        if not vecnorm_path.exists():
+            print(f"[WARN] VecNormalize 統計が見つかりません: {vecnorm_path}")
+            vecnorm_path = None
+        status_path = source_dir / "work" / "status" / f"train_status_{max_step}_steps.json"
+        if not status_path.exists():
+            status_path = source_dir / "work" / "train_status.json"
+        status_dict = _read_json(status_path) if status_path.exists() else {}
+        return model_zip, vecnorm_path, status_dict
+
+    model_zip = source_dir / "work" / "model_steps" / f"model_{step}_steps.zip"
+    if not model_zip.exists():
+        available = _list_available_steps(source_dir)
+        raise FileNotFoundError(
+            f"[ERROR] ステップ {step} のモデルが見つかりません: {model_zip}\n"
+            f"利用可能なステップ: {available}"
+        )
+    vecnorm_path = source_dir / "work" / "vecnormalize" / f"vecnormalize_{step}_steps.pkl"
+    if not vecnorm_path.exists():
+        print(f"[WARN] VecNormalize 統計が見つかりません: {vecnorm_path}")
+        vecnorm_path = None
+    status_path = source_dir / "work" / "status" / f"train_status_{step}_steps.json"
+    status_dict = _read_json(status_path) if status_path.exists() else {}
+    return model_zip, vecnorm_path, status_dict
+
+
 def _model_zip_path(model_base: Path) -> Path:
     return model_base if model_base.suffix.lower() == ".zip" else model_base.with_suffix(".zip")
-
-
-def _latest_checkpoint(run_dir: Path) -> Path | None:
-    # 新構成: work/model_steps/
-    new_dir = run_dir / "work" / "model_steps"
-    candidates = list(new_dir.glob("model_*_steps.zip")) if new_dir.exists() else []
-    # 旧構成フォールバック
-    if not candidates:
-        candidates = list(run_dir.glob("model_*_steps.zip"))
-    if not candidates:
-        for final in [run_dir / "result" / "model.zip", run_dir / "model.zip"]:
-            if final.exists():
-                return final
-        return None
-
-    def _step(path: Path) -> int:
-        stem = path.stem
-        try:
-            return int(stem.removeprefix("model_").removesuffix("_steps"))
-        except ValueError:
-            return -1
-
-    return max(candidates, key=_step)
-
-
-def _find_run_root(start: Path) -> tuple[Path, dict]:
-    """start から親方向へ遡り run ルート（log/train_status.json を含む祖先）を返す。
-
-    見つからない場合は start 自身と空 dict を返す。
-    """
-    candidate = start
-    while True:
-        for status_name in ["log/train_status.json", "work/train_status.json"]:
-            status_path = candidate / status_name
-            if status_path.exists():
-                return candidate, _read_json(status_path)
-        status_path = candidate / "train_status.json"
-        if status_path.exists():
-            if candidate.name == "work":
-                return candidate.parent, _read_json(status_path)
-            return candidate, _read_json(status_path)
-        parent = candidate.parent
-        if parent == candidate:
-            break
-        candidate = parent
-    return start, {}
-
-
-def _resolve_resume_path(resume: Path) -> tuple[Path, Path, dict]:
-    if resume.is_dir():
-        run_dir = resume
-        # 新構成: log/train_status.json、旧構成: train_status.json
-        for status_candidate in [
-            run_dir / "log" / "train_status.json",
-            run_dir / "work" / "train_status.json",
-            run_dir / "train_status.json",
-        ]:
-            if status_candidate.exists():
-                status = _read_json(status_candidate)
-                break
-        else:
-            status = {}
-        model_path = status.get("latest_model_path")
-        if model_path:
-            model_zip = Path(model_path)
-            if not model_zip.is_absolute():
-                model_zip = run_dir / model_zip
-        else:
-            model_zip = _latest_checkpoint(run_dir)
-        if model_zip is None or not model_zip.exists():
-            raise FileNotFoundError(f"--resume run_dir に再開可能なモデルがありません: {run_dir}")
-        return run_dir, _strip_zip(model_zip), status
-
-    model_zip = _model_zip_path(resume)
-    if not model_zip.exists():
-        raise FileNotFoundError(f"--resume モデルが見つかりません: {model_zip}")
-    run_dir, status = _find_run_root(model_zip.parent)
-    step_token = model_zip.stem.removeprefix("model_").removesuffix("_steps")
-    exact_status = run_dir / "work" / "status" / f"train_status_{step_token}_steps.json"
-    if exact_status.exists():
-        status = _read_json(exact_status)
-    return run_dir, _strip_zip(model_zip), status
 
 
 def _git_value(args: list[str]) -> str | None:
@@ -708,7 +751,7 @@ def parse_args() -> argparse.Namespace:
                    help="runs/<game>/<version-name>/ 以下に成果物を保存するバージョン名（新規run時は必須）")
     p.add_argument("--run-name", default=None,
                    help="runs/<game>/<version-name>/train/<run-name>/ に成果物を保存する実行名")
-    p.add_argument("--resume", type=Path, default=None,
+    p.add_argument("--resume", type=str, default=None,
                    help="再開する run_dir または既存モデルのパス（.zip 拡張子は省略・付加どちらでも可）")
     p.add_argument("--checkpoint-freq", type=int, default=10_000,
                    help="チェックポイント保存間隔 (ステップ数, デフォルト: 10000)")
@@ -830,20 +873,34 @@ def main() -> None:
             )
 
     resume_status = {}
-    resume_model_base = None
-    resume_source_dir = None
+    model_zip_to_load = None
+    source_dir = None
+    resume_step = None
+    is_branch = False
     if args.resume:
-        resume_source_dir, resume_model_base, resume_status = _resolve_resume_path(args.resume)
+        source_dir, resume_step = _parse_resume_spec(args.resume)
+        model_zip_to_load, vecnorm_from_run, resume_status = _resolve_resume_from_run(source_dir, resume_step)
         if args.run_name is None:
-            args.run_name = resume_source_dir.name
-            run_dir = resume_source_dir
+            # continue mode: 同一 run に追記。version_name チェックはスキップ
+            run_dir = source_dir
+            args.run_name = source_dir.name
         elif args.version_name:
+            # branch mode: 新規 run_dir を生成
             run_dir = Path("runs") / args.game / args.version_name / "train" / args.run_name
         else:
-            run_dir = resume_source_dir
+            # --run-name 指定あり + --version-name 未指定は branch mode の設定ミス
+            raise ValueError("--version-name は必須です（branch resume 時: --run-name を指定した場合）")
+        is_branch = run_dir.resolve() != source_dir.resolve()
+        # continue mode で @step 指定は不可（ロールバックは branch mode で行うこと）
+        if not is_branch and resume_step is not None:
+            raise ValueError(
+                "同一 run への resume では @step 指定はできません。\n"
+                "最終結果からの継続には resume: {run_path}（@なし）を使用してください。\n"
+                "チェックポイントへのロールバックは branch mode（--run-name 指定）を使用してください。"
+            )
     else:
         if not args.run_name:
-            raise ValueError("--run-name は必須です（--resume <run_dir|model.zip> 時は省略可能）")
+            raise ValueError("--run-name は必須です（--resume <run_dir> 時は省略可能）")
         if not args.version_name:
             raise ValueError("--version-name は必須です（新規 run 時）")
         run_dir = Path("runs") / args.game / args.version_name / "train" / args.run_name
@@ -884,20 +941,20 @@ def main() -> None:
 
     _use_wandb = args.wandb and _WANDB_AVAILABLE
 
-    # --resume 時に同一 W&B run へグラフを継続する
+    # W&B 初期化:
+    #   continue mode (is_branch=False): 同一 run_id で継続（run_dir/work/wandb_run_id.txt を読む）
+    #   branch mode  (is_branch=True):  新規 run、元 run を group で紐付け
     wandb_run_id: str | None = None
     _wandb_id_path = work_dir / "wandb_run_id.txt"
-    if args.resume and _wandb_id_path.exists():
+    if args.resume and not is_branch and _wandb_id_path.exists():
         wandb_run_id = _wandb_id_path.read_text().strip() or None
         if wandb_run_id:
-            print(f"[INFO] W&B run_id を再利用します: {wandb_run_id}")
+            print(f"[INFO] W&B run_id を再利用します (continue mode): {wandb_run_id}")
 
     if _use_wandb:
-        wandb.init(
+        _wandb_init_kwargs: dict = dict(
             project=args.wandb_project,
             name=args.wandb_run_name or args.run_name,
-            id=wandb_run_id,
-            resume="must" if wandb_run_id else None,
             sync_tensorboard=True,
             config={
                 "game": args.game,
@@ -928,8 +985,16 @@ def main() -> None:
                 "ent_coef": args.ent_coef,    # 同上
             },
         )
-        # 新規 run のときだけ run_id を保存（resume 時は上書きしない）
-        if not wandb_run_id:
+        if is_branch:
+            # branch mode: 元 run を group で紐付け（新規 run として開始）
+            _wandb_init_kwargs["group"] = source_dir.name
+        else:
+            # continue mode または新規: run_id があれば resume="must" で継続
+            _wandb_init_kwargs["id"] = wandb_run_id
+            _wandb_init_kwargs["resume"] = "must" if wandb_run_id else None
+        wandb.init(**_wandb_init_kwargs)
+        # branch mode または新規 run のとき run_id を保存（continue mode は上書きしない）
+        if is_branch or not wandb_run_id:
             _wandb_id_path.write_text(wandb.run.id)
         ppo_kwargs["tensorboard_log"] = str(log_dir / "tensorboard")
 
@@ -1027,40 +1092,13 @@ def main() -> None:
             env.training = True
             print(f"[INFO] VecNormalize 統計をロード (--init-vecnormalize): {args.init_vecnormalize}")
         elif args.resume:
-            status_vecnorm = resume_status.get("latest_vecnormalize_path")
-            load_path = Path(status_vecnorm) if status_vecnorm else None
-            if load_path is not None and not load_path.is_absolute():
-                load_path = resume_source_dir / load_path
-            if load_path is None or not load_path.exists():
-                resume_vecnorm = resume_source_dir / f"{resume_model_base.name}_vecnorm.pkl"
-                # 新構成: result/ と work/vecnormalize/
-                final_vecnorm_new = resume_source_dir / "result" / "vecnormalize.pkl"
-                final_vecnorm = resume_source_dir / "vecnormalize.pkl"
-                stem = resume_model_base.name.removeprefix("model_").removesuffix("_steps")
-                checkpoint_vecnorm_new = resume_source_dir / "work" / "vecnormalize" / f"vecnormalize_{stem}_steps.pkl"
-                checkpoint_vecnorm = resume_source_dir / f"vecnormalize_{stem}_steps.pkl"
-                old_prefix = resume_model_base.name
-                parts = old_prefix.rsplit("_", 2)
-                old_prefix_vecnorm = None
-                if len(parts) == 3 and parts[1].isdigit() and parts[2] == "steps":
-                    old_prefix_vecnorm = resume_source_dir / f"{parts[0]}_vecnorm.pkl"
-                load_path = next(
-                    (
-                        path
-                        for path in (checkpoint_vecnorm_new, checkpoint_vecnorm,
-                                     final_vecnorm_new, final_vecnorm,
-                                     resume_vecnorm, old_prefix_vecnorm)
-                        if path is not None and path.exists()
-                    ),
-                    None,
-                )
-            if load_path is None:
-                print("[WARN] VecNormalize 統計ファイルが見つかりません。VecNormalize を無効化します。"
-                      f" (resume_source_dir: {resume_source_dir})")
-            else:
-                env = VecNormalize.load(str(load_path), env)
+            # _resolve_resume_from_run が返す vecnorm_from_run を使用
+            if vecnorm_from_run is not None:
+                env = VecNormalize.load(str(vecnorm_from_run), env)
                 env.training = True
-                print(f"[INFO] VecNormalize 統計をロード: {load_path}")
+                print(f"[INFO] VecNormalize 統計をロード: {vecnorm_from_run}")
+            else:
+                print("[WARN] VecNormalize 統計が見つかりません。VecNormalize を無効化します。")
         else:
             env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
             print("[INFO] VecNormalize を有効化しました (norm_obs=True, norm_reward=True)")
@@ -1084,8 +1122,9 @@ def main() -> None:
     default_policy = "MlpLstmPolicy" if args.recurrent else "MlpPolicy"
 
     if args.resume:
-        resume_path = str(resume_model_base)
-        print(f"[INFO] {resume_path} から再開")
+        # model_zip_to_load は _resolve_resume_from_run が返す Path（.zip 付き）
+        resume_path = str(_strip_zip(model_zip_to_load))
+        print(f"[INFO] {model_zip_to_load} から再開")
         if args.entity_attention:
             print("[INFO] --entity-attention は --resume 時は無視されます（保存済みモデルのアーキテクチャを使用）")
         if args.recurrent:
