@@ -142,6 +142,30 @@ class SurvivorsEnv(BaseUE5Env):
             "is_wall_near": int(wall_min < 0.08),
         }
 
+    def get_obs_schema(self) -> list:
+        """SubprocVecEnv の env_method 経由での取得用。"""
+        return self._obs_schema
+
+    def get_offsets(self) -> dict:
+        """SubprocVecEnv の env_method 経由での取得用。"""
+        return self._offsets
+
+    def get_obs_schema_hash(self) -> str:
+        """全 env 間の obs_schema 一致確認用。"""
+        return self._expected_schema_hash or ""
+
+    def get_shaping_weight(self) -> float:
+        """SubprocVecEnv / マルチenv の env_method 経由での取得用。"""
+        return self.shaping_weight
+
+    def set_shaping_weight(self, weight: float) -> None:
+        """SubprocVecEnv / マルチenv の env_method 経由での設定用。"""
+        self.shaping_weight = weight
+
+    def clear_reward_fn(self) -> None:
+        """SubprocVecEnv / マルチenv の env_method 経由でアニーリング完了時に無効化。"""
+        self._reward_fn = None
+
     def set_params(self, **kwargs) -> bool:
         """カリキュラム用パラメータを /params エンドポイントで更新する。
 

@@ -7,7 +7,7 @@
   python train.py --dry-run                    # BalancePole スタブ
   python train.py --game coin --dry-run        # CoinGame    スタブ
   python train.py --game survivors --dry-run   # Survivors   スタブ
-  python train.py --resume models/balance_model
+  python train.py --resume runs/balance/v01/train/run-base
   python train.py --game coin --reward-fn eureka_results/my_run/best/reward_fn.py
   python train.py --game survivors --reward-fn eureka_results/my_run/best/reward_fn.py
   python train.py --help
@@ -82,16 +82,40 @@ def _log_device_status(requested_device: str) -> None:
 
 
 def _get_raw_env(env):
-    """VecEnv ラッパーチェーンを辿って生の環境（CoinEnv）を返す。"""
+    """VecEnv ラッパーチェーンを辿って生の環境（DummyVecEnv の env[0]）を返す。
+
+    DummyVecEnv: envs[0] に直接アクセスして返す。
+    SubprocVecEnv: 直接アクセス不可のため None を返す（_get_obs_attrs を使うこと）。
+    """
     inner = env
     while hasattr(inner, "venv"):
         inner = inner.venv
     if hasattr(inner, "envs"):
         inner = inner.envs[0]
-    # gymnasium.Wrapper (Monitor等) は _ 始まりの属性をフォワードしないため unwrapped で剥がす
-    if hasattr(inner, "unwrapped"):
-        inner = inner.unwrapped
-    return inner
+        # gymnasium.Wrapper (Monitor等) は _ 始まりの属性をフォワードしないため unwrapped で剥がす
+        if hasattr(inner, "unwrapped"):
+            inner = inner.unwrapped
+        return inner
+    return None  # SubprocVecEnv
+
+
+def _get_obs_attrs(env) -> tuple[dict, list]:
+    """DummyVecEnv / SubprocVecEnv 両対応で _offsets と _obs_schema を取得する。
+
+    entity_attention extractor の構築に必要。
+    """
+    inner = env
+    while hasattr(inner, "venv"):
+        inner = inner.venv
+    if hasattr(inner, "envs"):
+        raw = inner.envs[0]
+        if hasattr(raw, "unwrapped"):
+            raw = raw.unwrapped
+        return getattr(raw, "_offsets", {}), getattr(raw, "_obs_schema", [])
+    # SubprocVecEnv: env_method 経由で取得
+    offsets = inner.env_method("get_offsets")[0]
+    obs_schema = inner.env_method("get_obs_schema")[0]
+    return offsets, obs_schema
 
 
 def _find_vecnormalize(env):
@@ -120,77 +144,133 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+
+
+def _parse_step_shorthand(s: str) -> int:
+    """200k/2M/2.5M/2_000k/200_000 などを int に変換する。
+
+    アルゴリズム:
+    1. アンダースコアを除去
+    2. 末尾が k/K -> float(残部) * 1_000 を int に
+    3. 末尾が m/M -> float(残部) * 1_000_000 を int に
+    4. それ以外 -> int(s) で変換（小数はエラー）
+    """
+    s_clean = s.replace("_", "")
+    if s_clean.lower().endswith("k"):
+        return int(float(s_clean[:-1]) * 1_000)
+    if s_clean.lower().endswith("m"):
+        return int(float(s_clean[:-1]) * 1_000_000)
+    return int(s_clean)
+
+
+def _parse_resume_spec(spec: str) -> "tuple[Path, int | None]":
+    """path@step または path を (Path, int | None) に分解する。
+
+    Examples::
+
+        _parse_resume_spec("runs/run-base@200k")   # (Path("runs/run-base"), 200_000)
+        _parse_resume_spec("runs/run-base@2.5M")   # (Path("runs/run-base"), 2_500_000)
+        _parse_resume_spec("runs/run-base")         # (Path("runs/run-base"), None)
+
+    最後の @ を分割点とする（パス内に @ が含まれる場合に対応）。
+    step が 0 以下の場合は ValueError。
+    """
+    at_idx = spec.rfind("@")
+    if at_idx == -1:
+        return Path(spec), None
+    path_part = spec[:at_idx]
+    step_part = spec[at_idx + 1:]
+    step = _parse_step_shorthand(step_part)
+    if step <= 0:
+        raise ValueError(
+            f"@step には正の整数を指定してください: @{step_part!r} -> {step}"
+        )
+    return Path(path_part), step
+
+
+def _list_available_steps(source_dir: Path) -> list[int]:
+    """source_dir/work/model_steps/model_*_steps.zip をglobしてステップ数の昇順リストを返す。"""
+    model_steps_dir = source_dir / "work" / "model_steps"
+    if not model_steps_dir.exists():
+        return []
+    steps = []
+    for p in model_steps_dir.glob("model_*_steps.zip"):
+        stem = p.stem
+        try:
+            step_val = int(stem.removeprefix("model_").removesuffix("_steps"))
+            steps.append(step_val)
+        except ValueError:
+            pass
+    return sorted(steps)
+
+
+def _resolve_resume_from_run(
+    source_dir: Path,
+    step: "int | None",
+) -> "tuple[Path, Path | None, dict]":
+    """run ディレクトリとステップ指定から (model_zip, vecnorm_path, status_dict) を返す。
+
+    step=None: result/model.zip -> なければ work/model_steps/ 最大ステップへ自動フォールバック。
+    step=N:    work/model_steps/model_{N}_steps.zip を使用。
+    """
+    if not source_dir.exists():
+        raise FileNotFoundError(
+            f"[ERROR] resume 対象ディレクトリが見つかりません: {source_dir}\n"
+            f"ヒント: 新記法は run ディレクトリを指定します。例: resume: runs/survivors/v06/train/run-base"
+        )
+
+    if step is None:
+        result_model = source_dir / "result" / "model.zip"
+        if result_model.exists():
+            model_zip = result_model
+            vecnorm_path = source_dir / "result" / "vecnormalize.pkl"
+            if not vecnorm_path.exists():
+                print(f"[WARN] VecNormalize 統計が見つかりません: {vecnorm_path}")
+                vecnorm_path = None
+            status_path = source_dir / "work" / "train_status.json"
+            status_dict = _read_json(status_path) if status_path.exists() else {}
+            return model_zip, vecnorm_path, status_dict
+
+        available = _list_available_steps(source_dir)
+        if not available:
+            raise FileNotFoundError(
+                f"[ERROR] resume 対象ディレクトリに再開可能なモデルがありません: {source_dir}\n"
+                f"  result/model.zip も work/model_steps/ も見つかりませんでした。"
+            )
+        max_step = available[-1]
+        model_zip = source_dir / "work" / "model_steps" / f"model_{max_step}_steps.zip"
+        print(
+            f"[WARN] result/model.zip が存在しません。最新チェックポイントを使用します: "
+            f"work/model_steps/model_{max_step}_steps.zip"
+        )
+        vecnorm_path = source_dir / "work" / "vecnormalize" / f"vecnormalize_{max_step}_steps.pkl"
+        if not vecnorm_path.exists():
+            print(f"[WARN] VecNormalize 統計が見つかりません: {vecnorm_path}")
+            vecnorm_path = None
+        status_path = source_dir / "work" / "status" / f"train_status_{max_step}_steps.json"
+        if not status_path.exists():
+            status_path = source_dir / "work" / "train_status.json"
+        status_dict = _read_json(status_path) if status_path.exists() else {}
+        return model_zip, vecnorm_path, status_dict
+
+    model_zip = source_dir / "work" / "model_steps" / f"model_{step}_steps.zip"
+    if not model_zip.exists():
+        available = _list_available_steps(source_dir)
+        raise FileNotFoundError(
+            f"[ERROR] ステップ {step} のモデルが見つかりません: {model_zip}\n"
+            f"利用可能なステップ: {available}"
+        )
+    vecnorm_path = source_dir / "work" / "vecnormalize" / f"vecnormalize_{step}_steps.pkl"
+    if not vecnorm_path.exists():
+        print(f"[WARN] VecNormalize 統計が見つかりません: {vecnorm_path}")
+        vecnorm_path = None
+    status_path = source_dir / "work" / "status" / f"train_status_{step}_steps.json"
+    status_dict = _read_json(status_path) if status_path.exists() else {}
+    return model_zip, vecnorm_path, status_dict
+
+
 def _model_zip_path(model_base: Path) -> Path:
     return model_base if model_base.suffix.lower() == ".zip" else model_base.with_suffix(".zip")
-
-
-def _latest_checkpoint(run_dir: Path) -> Path | None:
-    # 新構成: work/model_steps/
-    new_dir = run_dir / "work" / "model_steps"
-    candidates = list(new_dir.glob("model_*_steps.zip")) if new_dir.exists() else []
-    # 旧構成フォールバック
-    if not candidates:
-        candidates = list(run_dir.glob("model_*_steps.zip"))
-    if not candidates:
-        for final in [run_dir / "result" / "model.zip", run_dir / "model.zip"]:
-            if final.exists():
-                return final
-        return None
-
-    def _step(path: Path) -> int:
-        stem = path.stem
-        try:
-            return int(stem.removeprefix("model_").removesuffix("_steps"))
-        except ValueError:
-            return -1
-
-    return max(candidates, key=_step)
-
-
-def _find_run_root(start: Path) -> tuple[Path, dict]:
-    """start から親方向へ遡り run ルート（log/train_status.json を含む祖先）を返す。
-
-    見つからない場合は start 自身と空 dict を返す。
-    """
-    candidate = start
-    while True:
-        for status_name in ["log/train_status.json", "train_status.json"]:
-            status_path = candidate / status_name
-            if status_path.exists():
-                return candidate, _read_json(status_path)
-        parent = candidate.parent
-        if parent == candidate:
-            break
-        candidate = parent
-    return start, {}
-
-
-def _resolve_resume_path(resume: Path) -> tuple[Path, Path, dict]:
-    if resume.is_dir():
-        run_dir = resume
-        # 新構成: log/train_status.json、旧構成: train_status.json
-        for status_candidate in [run_dir / "log" / "train_status.json", run_dir / "train_status.json"]:
-            if status_candidate.exists():
-                status = _read_json(status_candidate)
-                break
-        else:
-            status = {}
-        model_path = status.get("latest_model_path")
-        if model_path:
-            model_zip = Path(model_path)
-            if not model_zip.is_absolute():
-                model_zip = run_dir / model_zip
-        else:
-            model_zip = _latest_checkpoint(run_dir)
-        if model_zip is None or not model_zip.exists():
-            raise FileNotFoundError(f"--resume run_dir に再開可能なモデルがありません: {run_dir}")
-        return run_dir, _strip_zip(model_zip), status
-
-    model_zip = _model_zip_path(resume)
-    if not model_zip.exists():
-        raise FileNotFoundError(f"--resume モデルが見つかりません: {model_zip}")
-    run_dir, status = _find_run_root(model_zip.parent)
-    return run_dir, _strip_zip(model_zip), status
 
 
 def _git_value(args: list[str]) -> str | None:
@@ -253,6 +333,7 @@ def _save_training_status(
     exit_reason: str | None = None,
     exit_error: str | None = None,
     curriculum_completion: dict | None = None,
+    mirror_paths: list[Path] | None = None,
 ) -> None:
     # run_dir からの相対パスで記録することで新旧両構成に対応
     def _rel(p: Path) -> str:
@@ -277,6 +358,9 @@ def _save_training_status(
     if exit_error is not None:
         data["last_exit_error"] = exit_error
     _write_json(status_path, data)
+    for mirror_path in mirror_paths or []:
+        mirror_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(mirror_path, data)
 
 
 class _RunCheckpointCallback(BaseCallback):
@@ -346,7 +430,7 @@ class _CurriculumCompletionCallback(BaseCallback):
             )
 
     def _on_step(self) -> bool:
-        if not self.locals["dones"][0]:
+        if not any(self.locals["dones"]):
             return True
         diagnostics = self._curriculum_cb.get_completion_diagnostics(
             window=self.window,
@@ -362,6 +446,7 @@ class _CurriculumCompletionCallback(BaseCallback):
                 "curriculum/completion_episode_count": diagnostics["episodes"],
                 "curriculum/completion_score_mean": diagnostics["active_score_mean"],
                 "curriculum/completion_ep_len_mean": diagnostics["episode_length_mean"],
+                "global_step": self.num_timesteps,
             }, step=self.num_timesteps)
 
         if diagnostics["complete"]:
@@ -395,11 +480,12 @@ class _AnnealingShapingCallback(BaseCallback):
     |shaped_reward_mean| / base_reward_mean の比率を check_freq ステップごとに計算し、
     比率が anneal_threshold を下回ったら anneal_steps かけて shaping_weight を 1.0→min_weight に減衰する。
     min_weight > 0 のとき shaping は永続的に維持される（推論時は不要）。
+
+    n_envs > 1 対応: shaping_weight / reward_fn の操作は env_method で全インスタンスに適用する。
     """
 
     def __init__(
         self,
-        raw_env,
         anneal_threshold: float,
         anneal_steps: int,
         check_freq: int,
@@ -408,7 +494,6 @@ class _AnnealingShapingCallback(BaseCallback):
         curriculum_cb=None,
     ):
         super().__init__(verbose=0)
-        self._raw_env = raw_env
         self.anneal_threshold = anneal_threshold
         self.anneal_steps = anneal_steps
         self.check_freq = check_freq
@@ -416,31 +501,59 @@ class _AnnealingShapingCallback(BaseCallback):
         self.min_weight = min_weight
         self._curriculum_cb = curriculum_cb
 
-        self._ep_base = 0.0
-        self._ep_shaped = 0.0
+        self._ep_base_per_env: list[float] = []    # env ごとのエピソード内累積
+        self._ep_shaped_per_env: list[float] = []
+        self._pending_shaping_weight: float | None = None  # import_state → _on_training_start で適用
         self._sum_base = 0.0
         self._sum_shaped = 0.0
         self._ep_count = 0
         self._last_check = 0
         self._anneal_start_step: int | None = None
         self._final_phase_start_step: int | None = None
+        self._reward_fn_cleared = False
+
+    def _on_training_start(self) -> None:
+        n = self.training_env.num_envs
+        self._ep_base_per_env = [0.0] * n
+        self._ep_shaped_per_env = [0.0] * n
+        if self._pending_shaping_weight is not None:
+            self._set_shaping_weight(self._pending_shaping_weight)
+            self._pending_shaping_weight = None
+
+    def _set_shaping_weight(self, weight: float) -> None:
+        """全 env に shaping_weight を設定する。"""
+        self.training_env.env_method("set_shaping_weight", weight)
+
+    def _clear_reward_fn(self) -> None:
+        """全 env の reward_fn を無効化する。"""
+        self.training_env.env_method("clear_reward_fn")
+        self._reward_fn_cleared = True
+
+    def _get_shaping_weight(self) -> float:
+        """env[0] から shaping_weight を取得する（export_state 用）。"""
+        if self.training_env is None:
+            return self._pending_shaping_weight if self._pending_shaping_weight is not None else 1.0
+        return self.training_env.env_method("get_shaping_weight")[0]
 
     def export_state(self) -> dict:
         return {
-            "ep_base": self._ep_base,
-            "ep_shaped": self._ep_shaped,
+            "ep_base": self._ep_base_per_env[0] if self._ep_base_per_env else 0.0,
+            "ep_shaped": self._ep_shaped_per_env[0] if self._ep_shaped_per_env else 0.0,
             "sum_base": self._sum_base,
             "sum_shaped": self._sum_shaped,
             "ep_count": self._ep_count,
             "last_check": self._last_check,
             "anneal_start_step": self._anneal_start_step,
             "final_phase_start_step": self._final_phase_start_step,
-            "shaping_weight": getattr(self._raw_env, "shaping_weight", None),
+            "shaping_weight": self._get_shaping_weight(),
         }
 
     def import_state(self, state: dict) -> None:
-        self._ep_base = float(state.get("ep_base", 0.0))
-        self._ep_shaped = float(state.get("ep_shaped", 0.0))
+        ep_base = float(state.get("ep_base", 0.0))
+        ep_shaped = float(state.get("ep_shaped", 0.0))
+        n = len(self._ep_base_per_env) if self._ep_base_per_env else 1
+        self._ep_base_per_env = [ep_base] + [0.0] * (n - 1)
+        self._ep_shaped_per_env = [ep_shaped] + [0.0] * (n - 1)
         self._sum_base = float(state.get("sum_base", 0.0))
         self._sum_shaped = float(state.get("sum_shaped", 0.0))
         self._ep_count = int(state.get("ep_count", 0))
@@ -449,7 +562,8 @@ class _AnnealingShapingCallback(BaseCallback):
         self._final_phase_start_step = state.get("final_phase_start_step")
         shaping_weight = state.get("shaping_weight")
         if shaping_weight is not None:
-            self._raw_env.shaping_weight = float(shaping_weight)
+            # training_env は _on_training_start まで未設定のため pending に保存
+            self._pending_shaping_weight = float(shaping_weight)
 
     def _anneal_reference_ready(self) -> tuple[bool, int, str]:
         if self._curriculum_cb is None:
@@ -463,15 +577,25 @@ class _AnnealingShapingCallback(BaseCallback):
         return elapsed >= self.min_steps, elapsed, "last_phase"
 
     def _on_step(self) -> bool:
-        info = self.locals["infos"][0]
-        self._ep_base   += info.get("base_reward",   0.0)
-        self._ep_shaped += info.get("shaped_reward", 0.0)
+        infos = self.locals["infos"]
+        dones = self.locals["dones"]
+        n_envs = len(infos)
 
-        if self.locals["dones"][0]:
-            self._sum_base   += self._ep_base
-            self._sum_shaped += abs(self._ep_shaped)
-            self._ep_count   += 1
-            self._ep_base = self._ep_shaped = 0.0
+        # _ep_*_per_env が未初期化（resume 直後など）の場合は補完
+        if len(self._ep_base_per_env) != n_envs:
+            self._ep_base_per_env = [0.0] * n_envs
+            self._ep_shaped_per_env = [0.0] * n_envs
+
+        for i, (info, done) in enumerate(zip(infos, dones)):
+            self._ep_base_per_env[i]   += info.get("base_reward",   0.0)
+            self._ep_shaped_per_env[i] += info.get("shaped_reward", 0.0)
+
+            if done:
+                self._sum_base   += self._ep_base_per_env[i]
+                self._sum_shaped += abs(self._ep_shaped_per_env[i])
+                self._ep_count   += 1
+                self._ep_base_per_env[i] = 0.0
+                self._ep_shaped_per_env[i] = 0.0
 
         # check_freq ステップごとに比率を計算してアニーリングをトリガー
         reference_ready, reference_steps, reference_name = self._anneal_reference_ready()
@@ -494,6 +618,7 @@ class _AnnealingShapingCallback(BaseCallback):
                     "shaping/mean_shaped": mean_shaped,
                     "shaping/mean_base": mean_base,
                     "shaping/anneal_reference_steps": reference_steps,
+                    "global_step": self.num_timesteps,
                 }, step=self.num_timesteps)
 
             if ratio < self.anneal_threshold and self._anneal_start_step is None:
@@ -501,14 +626,13 @@ class _AnnealingShapingCallback(BaseCallback):
                 print(f"[INFO] shaped_reward アニーリング開始 "
                       f"(ratio={ratio:.3f} < {self.anneal_threshold})")
 
-        # アニーリング中: shaping_weight を 1.0 → min_weight に線形減衰
+        # アニーリング中: shaping_weight を 1.0 → min_weight に線形減衰（全 env に適用）
         if self._anneal_start_step is not None:
             progress = (self.num_timesteps - self._anneal_start_step) / self.anneal_steps
             weight = self.min_weight + (1.0 - self.min_weight) * max(0.0, 1.0 - progress)
-            self._raw_env.shaping_weight = weight
-            if weight <= self.min_weight and self.min_weight == 0.0 \
-                    and self._raw_env._reward_fn is not None:
-                self._raw_env._reward_fn = None
+            self._set_shaping_weight(weight)
+            if weight <= self.min_weight and self.min_weight == 0.0 and not self._reward_fn_cleared:
+                self._clear_reward_fn()
                 print("[INFO] shaped_reward アニーリング完了 → reward_fn を無効化")
 
         return True
@@ -535,9 +659,7 @@ def _create_model(args, env, algo_class, default_policy: str, ppo_kwargs: dict):
     entity_attention / recurrent の分岐をここに集約する。
     """
     if args.entity_attention and args.game in ("coin", "survivors"):
-        raw_env = _get_raw_env(env)
-        offsets = getattr(raw_env, "_offsets", {})
-        obs_schema = getattr(raw_env, "_obs_schema", [])
+        offsets, obs_schema = _get_obs_attrs(env)
         if args.game == "survivors":
             from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
             extractor_class = SurvivorsEntityAttentionExtractor
@@ -613,12 +735,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=None,
                    help="サーバーポート（未指定時はゲーム別デフォルト: balance=8765, coin=8766, survivors=8767）")
+    p.add_argument("--n-envs", type=int, default=1,
+                   help="並列 UE5 インスタンス数（--game survivors 専用, default: 1）")
+    p.add_argument("--n-steps", type=int, default=4096,
+                   help="1 rollout で各 env が収集するステップ数 (default: 4096)。"
+                        "--n-envs > 1 では総 rollout = n_steps × n_envs になります")
+    p.add_argument("--base-port", type=int, default=None,
+                   help="並列時の起点ポート（--n-envs > 1 時は base_port+i を各インスタンスに割り当て。"
+                        "未指定時は --port またはゲーム別デフォルトを使用）")
+    p.add_argument("--eval-port", type=int, default=None,
+                   help="eval 専用 UE5 インスタンスのポート（--eval-freq > 0 かつ survivors 専用）。"
+                        "未指定時は base_port + n_envs を自動採用")
     p.add_argument("--total-steps", type=int, default=500_000)
     p.add_argument("--version-name", default=None,
                    help="runs/<game>/<version-name>/ 以下に成果物を保存するバージョン名（新規run時は必須）")
     p.add_argument("--run-name", default=None,
                    help="runs/<game>/<version-name>/train/<run-name>/ に成果物を保存する実行名")
-    p.add_argument("--resume", type=Path, default=None,
+    p.add_argument("--resume", type=str, default=None,
                    help="再開する run_dir または既存モデルのパス（.zip 拡張子は省略・付加どちらでも可）")
     p.add_argument("--checkpoint-freq", type=int, default=10_000,
                    help="チェックポイント保存間隔 (ステップ数, デフォルト: 10000)")
@@ -708,18 +841,45 @@ def main() -> None:
     if args.recurrent and args.frame_stack > 1:
         print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
               " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")
+    if args.n_envs > 1:
+        total_rollout = args.n_steps * args.n_envs
+        print(
+            f"[INFO] --n-envs={args.n_envs}: 総rollout = {args.n_steps} steps × {args.n_envs} envs"
+            f" = {total_rollout} steps/iteration"
+        )
 
     _log_device_status(args.device)
-    ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef, "device": args.device}
+    ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef, "device": args.device, "n_steps": args.n_steps}
 
     defaults = _GAME_DEFAULTS[args.game]
     port = args.port if args.port is not None else defaults["port"]
+    base_port = args.base_port if args.base_port is not None else port
+
+    if args.n_envs > 1 and args.game != "survivors":
+        raise ValueError("--n-envs > 1 は survivors ゲームのみ対応しています")
+    if args.n_envs > 1 and args.dry_run:
+        raise ValueError("--n-envs > 1 は --dry-run と同時に使用できません")
+
+    # eval port 解決（survivors + non-dry-run + eval_freq > 0 + n_envs > 1 の場合のみ eval 専用 env を作る）
+    # n_envs == 1 では既存互換: eval 専用 env なし、training_env を評価に使用
+    if args.game == "survivors" and not args.dry_run and args.eval_freq > 0 and args.n_envs > 1:
+        _train_ports = set(range(base_port, base_port + args.n_envs))
+        if args.eval_port is None:
+            args.eval_port = base_port + args.n_envs
+        if args.eval_port in _train_ports:
+            raise ValueError(
+                f"--eval-port が train ports と重複しています: "
+                f"eval_port={args.eval_port}, train_ports={sorted(_train_ports)}"
+            )
 
     resume_status = {}
-    resume_model_base = None
-    resume_source_dir = None
+    model_zip_to_load = None
+    source_dir = None
+    resume_step = None
+    is_branch = False
     if args.resume:
-        resume_source_dir, resume_model_base, resume_status = _resolve_resume_path(args.resume)
+        source_dir, resume_step = _parse_resume_spec(args.resume)
+        model_zip_to_load, vecnorm_from_run, resume_status = _resolve_resume_from_run(source_dir, resume_step)
         if args.run_name is None:
             if args.config is not None:
                 # config-inferred mode: config ファイルの親フォルダを run_dir とする
@@ -732,12 +892,22 @@ def main() -> None:
                 args.run_name = resume_source_dir.name
                 run_dir = resume_source_dir
         elif args.version_name:
+            # branch mode: 新規 run_dir を生成
             run_dir = Path("runs") / args.game / args.version_name / "train" / args.run_name
         else:
-            run_dir = resume_source_dir
+            # --run-name 指定あり + --version-name 未指定は branch mode の設定ミス
+            raise ValueError("--version-name は必須です（branch resume 時: --run-name を指定した場合）")
+        is_branch = run_dir.resolve() != source_dir.resolve()
+        # continue mode で @step 指定は不可（ロールバックは branch mode で行うこと）
+        if not is_branch and resume_step is not None:
+            raise ValueError(
+                "同一 run への resume では @step 指定はできません。\n"
+                "最終結果からの継続には resume: {run_path}（@なし）を使用してください。\n"
+                "チェックポイントへのロールバックは branch mode（--run-name 指定）を使用してください。"
+            )
     else:
         if not args.run_name:
-            raise ValueError("--run-name は必須です（--resume <run_dir|model.zip> 時は省略可能）")
+            raise ValueError("--run-name は必須です（--resume <run_dir> 時は省略可能）")
         if not args.version_name:
             raise ValueError("--version-name は必須です（新規 run 時）")
         run_dir = Path("runs") / args.game / args.version_name / "train" / args.run_name
@@ -748,8 +918,9 @@ def main() -> None:
     result_dir      = run_dir / "result"
     model_steps_dir = work_dir / "model_steps"
     vecnorm_dir     = work_dir / "vecnormalize"
+    status_dir      = work_dir / "status"
 
-    for d in [work_dir, log_dir, result_dir, model_steps_dir, vecnorm_dir]:
+    for d in [work_dir, log_dir, result_dir, model_steps_dir, vecnorm_dir, status_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
     if not args.resume:
@@ -767,6 +938,7 @@ def main() -> None:
     model_base_path         = result_dir / "model"
     vecnorm_path            = result_dir / "vecnormalize.pkl"
     status_path             = log_dir / "train_status.json"
+    work_status_path        = work_dir / "train_status.json"
     curriculum_status_path  = log_dir / "curriculum_status.json"
     config_hash = _write_resolved_config(log_dir, args)
     _write_run_meta(log_dir, args, config_hash)
@@ -776,20 +948,20 @@ def main() -> None:
 
     _use_wandb = args.wandb and _WANDB_AVAILABLE
 
-    # --resume 時に同一 W&B run へグラフを継続する
+    # W&B 初期化:
+    #   continue mode (is_branch=False): 同一 run_id で継続（run_dir/work/wandb_run_id.txt を読む）
+    #   branch mode  (is_branch=True):  新規 run、元 run を group で紐付け
     wandb_run_id: str | None = None
     _wandb_id_path = work_dir / "wandb_run_id.txt"
-    if args.resume and _wandb_id_path.exists():
+    if args.resume and not is_branch and _wandb_id_path.exists():
         wandb_run_id = _wandb_id_path.read_text().strip() or None
         if wandb_run_id:
-            print(f"[INFO] W&B run_id を再利用します: {wandb_run_id}")
+            print(f"[INFO] W&B run_id を再利用します (continue mode): {wandb_run_id}")
 
     if _use_wandb:
-        wandb.init(
+        _wandb_init_kwargs: dict = dict(
             project=args.wandb_project,
             name=args.wandb_run_name or args.run_name,
-            id=wandb_run_id,
-            resume="must" if wandb_run_id else None,
             sync_tensorboard=True,
             config={
                 "game": args.game,
@@ -809,14 +981,27 @@ def main() -> None:
                 "curriculum_complete_min_episodes": args.curriculum_complete_min_episodes,
                 "curriculum_complete_min_score_ratio": args.curriculum_complete_min_score_ratio,
                 "curriculum_complete_min_episode_len_ratio": args.curriculum_complete_min_episode_len_ratio,
+                "n_envs": args.n_envs,
+                "base_port": base_port,
+                "eval_port": args.eval_port,
                 "reward_fn": str(args.reward_fn) if args.reward_fn else None,
                 "config_hash": config_hash,
                 "tensorboard_log": str(log_dir / "tensorboard"),
                 **_PPO_KWARGS,
+                "n_steps": args.n_steps,      # _PPO_KWARGS のデフォルトを args 値で上書き
+                "ent_coef": args.ent_coef,    # 同上
             },
         )
-        # 新規 run のときだけ run_id を保存（resume 時は上書きしない）
-        if not wandb_run_id:
+        if is_branch:
+            # branch mode: 元 run を group で紐付け（新規 run として開始）
+            _wandb_init_kwargs["group"] = source_dir.name
+        else:
+            # continue mode または新規: run_id があれば resume="must" で継続
+            _wandb_init_kwargs["id"] = wandb_run_id
+            _wandb_init_kwargs["resume"] = "must" if wandb_run_id else None
+        wandb.init(**_wandb_init_kwargs)
+        # branch mode または新規 run のとき run_id を保存（continue mode は上書きしない）
+        if is_branch or not wandb_run_id:
             _wandb_id_path.write_text(wandb.run.id)
         ppo_kwargs["tensorboard_log"] = str(log_dir / "tensorboard")
 
@@ -830,6 +1015,8 @@ def main() -> None:
         else:
             reward_fn = _load_reward_fn(args.reward_fn)
             print(f"[INFO] 報酬シェーピング関数をロード: {args.reward_fn}")
+
+    eval_env = None
 
     if args.dry_run:
         if args.game == "coin":
@@ -852,18 +1039,55 @@ def main() -> None:
             env = make_vec_env(_make_coin_env, n_envs=1)
         elif args.game == "survivors":
             from games.survivors.survivors_env import SurvivorsEnv
-            def _make_survivors_env():
-                e = SurvivorsEnv(host=args.host, port=port, frame_skip=args.frame_skip)
-                e._reward_fn = reward_fn
-                return e
-            env = make_vec_env(_make_survivors_env, n_envs=1)
+            from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+
+            def _make_survivors_fn(p: int):
+                def _init():
+                    e = SurvivorsEnv(host=args.host, port=p, frame_skip=args.frame_skip)
+                    e._reward_fn = reward_fn
+                    return e
+                return _init
+
+            if args.n_envs > 1:
+                env_fns = [_make_survivors_fn(base_port + i) for i in range(args.n_envs)]
+                env = DummyVecEnv(env_fns)
+                print(f"[INFO] survivors マルチ env: n_envs={args.n_envs}, "
+                      f"ports={list(range(base_port, base_port + args.n_envs))}")
+                # 全 env の obs_schema_hash が一致しているか確認
+                hashes = env.env_method("get_obs_schema_hash")
+                if len(set(hashes)) != 1:
+                    raise RuntimeError(
+                        f"[ERROR] 各 UE5 インスタンスの obs_schema_hash が一致しません: {hashes}\n"
+                        "全インスタンスが同じレベル・設定で起動されているか確認してください。"
+                    )
+                print(f"[INFO] obs_schema_hash 一致確認: {hashes[0]}")
+            else:
+                env = DummyVecEnv([_make_survivors_fn(base_port)])
+            # eval 専用 env 作成（n_envs > 1 かつ eval_freq > 0 の場合のみ）
+            # n_envs == 1 は training_env を評価に転用する旧来の動作を維持する
+            if args.n_envs > 1 and args.eval_freq > 0:
+                eval_env = DummyVecEnv([_make_survivors_fn(args.eval_port)])
+                eval_hash = eval_env.env_method("get_obs_schema_hash")[0]
+                train_hash = env.env_method("get_obs_schema_hash")[0]
+                if eval_hash != train_hash:
+                    raise RuntimeError(
+                        f"[ERROR] eval env の obs_schema_hash が train env と一致しません。\n"
+                        f"  train: {train_hash}\n"
+                        f"  eval : {eval_hash}"
+                    )
+                print(f"[INFO] train ports: {list(range(base_port, base_port + args.n_envs))}")
+                print(f"[INFO] eval port  : {args.eval_port}")
+                print(f"[INFO] eval env は訓練 env から独立しています")
         else:
             from games.balance.balance_env import BalanceEnv
             env = make_vec_env(
                 lambda: BalanceEnv(host=args.host, port=port),
                 n_envs=1,
             )
-        print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{port} に接続...")
+        if args.game == "survivors" and args.n_envs > 1:
+            print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{base_port}〜{base_port + args.n_envs - 1} に接続...")
+        else:
+            print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{port} に接続...")
 
     # VecNormalize 適用
     # - 新規訓練: 正規化統計を初期化
@@ -875,56 +1099,39 @@ def main() -> None:
             env.training = True
             print(f"[INFO] VecNormalize 統計をロード (--init-vecnormalize): {args.init_vecnormalize}")
         elif args.resume:
-            status_vecnorm = resume_status.get("latest_vecnormalize_path")
-            load_path = Path(status_vecnorm) if status_vecnorm else None
-            if load_path is not None and not load_path.is_absolute():
-                load_path = resume_source_dir / load_path
-            if load_path is None or not load_path.exists():
-                resume_vecnorm = resume_source_dir / f"{resume_model_base.name}_vecnorm.pkl"
-                # 新構成: result/ と work/vecnormalize/
-                final_vecnorm_new = resume_source_dir / "result" / "vecnormalize.pkl"
-                final_vecnorm = resume_source_dir / "vecnormalize.pkl"
-                stem = resume_model_base.name.removeprefix("model_").removesuffix("_steps")
-                checkpoint_vecnorm_new = resume_source_dir / "work" / "vecnormalize" / f"vecnormalize_{stem}_steps.pkl"
-                checkpoint_vecnorm = resume_source_dir / f"vecnormalize_{stem}_steps.pkl"
-                old_prefix = resume_model_base.name
-                parts = old_prefix.rsplit("_", 2)
-                old_prefix_vecnorm = None
-                if len(parts) == 3 and parts[1].isdigit() and parts[2] == "steps":
-                    old_prefix_vecnorm = resume_source_dir / f"{parts[0]}_vecnorm.pkl"
-                load_path = next(
-                    (
-                        path
-                        for path in (checkpoint_vecnorm_new, checkpoint_vecnorm,
-                                     final_vecnorm_new, final_vecnorm,
-                                     resume_vecnorm, old_prefix_vecnorm)
-                        if path is not None and path.exists()
-                    ),
-                    None,
-                )
-            if load_path is None:
-                print("[WARN] VecNormalize 統計ファイルが見つかりません。VecNormalize を無効化します。"
-                      f" (resume_source_dir: {resume_source_dir})")
-            else:
-                env = VecNormalize.load(str(load_path), env)
+            # _resolve_resume_from_run が返す vecnorm_from_run を使用
+            if vecnorm_from_run is not None:
+                env = VecNormalize.load(str(vecnorm_from_run), env)
                 env.training = True
-                print(f"[INFO] VecNormalize 統計をロード: {load_path}")
+                print(f"[INFO] VecNormalize 統計をロード: {vecnorm_from_run}")
+            else:
+                print("[WARN] VecNormalize 統計が見つかりません。VecNormalize を無効化します。")
         else:
             env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
             print("[INFO] VecNormalize を有効化しました (norm_obs=True, norm_reward=True)")
+
+    # eval env の VecNormalize（訓練 env の stats を評価直前にコピーするため空の統計で初期化）
+    if eval_env is not None and not args.no_vec_normalize:
+        eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0, training=False)
+        print("[INFO] eval env に VecNormalize を適用しました (training=False, norm_reward=False)")
 
     # フレームスタック: 正規化済み観測を直近 N ステップ分結合する。
     # VecNormalize の running stats は単一フレームに対するため、VecFrameStack は最外側に配置する。
     if args.frame_stack > 1:
         env = VecFrameStack(env, n_stack=args.frame_stack)
         print(f"[INFO] VecFrameStack を有効化しました (n_stack={args.frame_stack})")
+    # eval env にも訓練 env と同じ順序で VecFrameStack を適用する
+    if eval_env is not None and args.frame_stack > 1:
+        eval_env = VecFrameStack(eval_env, n_stack=args.frame_stack)
+        print(f"[INFO] eval env に VecFrameStack を適用しました (n_stack={args.frame_stack})")
 
     algo_class = RecurrentPPO if args.recurrent else PPO
     default_policy = "MlpLstmPolicy" if args.recurrent else "MlpPolicy"
 
     if args.resume:
-        resume_path = str(resume_model_base)
-        print(f"[INFO] {resume_path} から再開")
+        # model_zip_to_load は _resolve_resume_from_run が返す Path（.zip 付き）
+        resume_path = str(_strip_zip(model_zip_to_load))
+        print(f"[INFO] {model_zip_to_load} から再開")
         if args.entity_attention:
             print("[INFO] --entity-attention は --resume 時は無視されます（保存済みモデルのアーキテクチャを使用）")
         if args.recurrent:
@@ -971,13 +1178,19 @@ def main() -> None:
         if args.eval_freq > 0:
             from games.survivors.survivors_eval_callback import SurvivorsEvalCallback
             callbacks.append(SurvivorsEvalCallback(
+                eval_env=eval_env,  # None なら n_envs=1 旧互換（training_env を使用）
                 eval_freq=args.eval_freq,
                 n_eval_episodes=args.eval_episodes,
                 frame_skip=args.frame_skip,
                 alive_reward=args.curriculum_alive_reward,
             ))
-            print(f"[INFO] SurvivorsEvalCallback 有効 "
-                  f"(eval_freq={args.eval_freq:,}, n_eval_episodes={args.eval_episodes})")
+            if eval_env is not None:
+                print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
+                      f"n_eval_episodes={args.eval_episodes}, eval_port={args.eval_port}, "
+                      f"eval_env=isolated)")
+            else:
+                print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
+                      f"n_eval_episodes={args.eval_episodes}, eval_env=training_env[n_envs=1互換])")
 
     if args.curriculum and args.game == "survivors" and not args.dry_run:
         curriculum_cb = CurriculumCallback(
@@ -1023,7 +1236,6 @@ def main() -> None:
 
     if reward_fn is not None and args.game in ("coin", "survivors"):
         anneal_cb = _AnnealingShapingCallback(
-            raw_env=_get_raw_env(env),
             anneal_threshold=args.anneal_threshold,
             anneal_steps=args.anneal_steps,
             check_freq=args.anneal_check_freq,
@@ -1071,12 +1283,16 @@ def main() -> None:
             exit_reason=exit_reason,
             exit_error=exit_error,
             curriculum_completion=completion_state,
+            mirror_paths=[
+                work_status_path,
+                status_dir / f"train_status_{timestep}_steps.json",
+            ],
         )
 
     checkpoint_cb = _RunCheckpointCallback(
         model_steps_dir=model_steps_dir,
         vecnorm_dir=vecnorm_dir,
-        save_freq=max(args.checkpoint_freq // (env.num_envs or 1), 1),
+        save_freq=max(args.checkpoint_freq, 1),
         vecnorm_getter=lambda: _find_vecnormalize(env),
         status_writer=_write_status_for_model,
     )
@@ -1118,6 +1334,8 @@ def main() -> None:
             exit_error=exit_error,
         )
         env.close()
+        if eval_env is not None:
+            eval_env.close()
         if _use_wandb:
             try:
                 if wandb.run:
@@ -1126,6 +1344,7 @@ def main() -> None:
                         "run/ended_by_ue5_connection_lost": (
                             1 if exit_reason == "ue5_connection_lost" else 0
                         ),
+                        "global_step": model.num_timesteps,
                     }, step=model.num_timesteps)
                 wandb.finish()
             except Exception as e:
