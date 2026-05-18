@@ -1039,13 +1039,14 @@ def main() -> None:
             env = make_vec_env(_make_coin_env, n_envs=1)
         elif args.game == "survivors":
             from games.survivors.survivors_env import SurvivorsEnv
+            from stable_baselines3.common.monitor import Monitor
             from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
             def _make_survivors_fn(p: int):
                 def _init():
                     e = SurvivorsEnv(host=args.host, port=p, frame_skip=args.frame_skip)
                     e._reward_fn = reward_fn
-                    return e
+                    return Monitor(e)
                 return _init
 
             if args.n_envs > 1:
@@ -1162,6 +1163,7 @@ def main() -> None:
     callbacks = []
     curriculum_cb = None
     curriculum_completion_cb = None
+    resume_episode_count = 0
     anneal_cb = None
     survivors_metrics_callback = None
     survivors_curriculum_metrics_callback = None
@@ -1205,6 +1207,7 @@ def main() -> None:
         if curriculum_state:
             curriculum_cb.import_state(curriculum_state)
             print(f"[INFO] curriculum state を復元: phase={curriculum_state.get('phase_name')}")
+        resume_episode_count = len((curriculum_state or {}).get("episode_scores", []))
         callbacks.append(curriculum_cb)
         if _use_wandb and survivors_curriculum_metrics_callback is not None:
             callbacks.append(survivors_curriculum_metrics_callback(curriculum_cb, log_freq=5_000))
@@ -1336,6 +1339,14 @@ def main() -> None:
         env.close()
         if eval_env is not None:
             eval_env.close()
+        if args.curriculum and curriculum_cb is not None and args.total_steps >= 20_000:
+            current_episode_count = len(curriculum_cb.export_state().get("episode_scores", []))
+            if current_episode_count <= resume_episode_count:
+                print(
+                    "[WARN] curriculum episode count が増えていません "
+                    f"(resume時={resume_episode_count}, 終了時={current_episode_count})。"
+                    " Monitor / info['episode'] を確認してください。"
+                )
         if _use_wandb:
             try:
                 if wandb.run:
