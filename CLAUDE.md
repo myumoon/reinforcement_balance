@@ -148,7 +148,7 @@ python train.py --game survivors --total-steps 500000
 | `--frame-skip N` | N ステップ分アクションを繰り返す（Action Repeat）| 1 |
 | `--reward-fn path` | EUREKA生成の報酬シェーピング関数を適用 | なし |
 | `--dry-run` | UE5 なしでスタブ環境で動作確認 | false |
-| `--resume path` | 途中から再開 | なし |
+| `--resume path[@step]` | 再開する run のパス（`@step` で特定ステップ指定可。例: `runs/survivors/v06/train/run-base@2M`）| なし |
 | `--ent-coef` | PPO エントロピー係数 | 0.01 |
 
 ### EUREKA ループ（LLM による報酬シェーピング）
