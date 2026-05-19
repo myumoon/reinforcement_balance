@@ -34,6 +34,7 @@ class SurvivorsEnv(BaseUE5Env):
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
         )
+        self._last_params: dict = {}
         self._wait_for_server()
 
     def _on_server_connected(self):
@@ -183,10 +184,15 @@ class SurvivorsEnv(BaseUE5Env):
         """
         try:
             self._post_json("/params", kwargs, timeout=5, retries=2)
+            self._last_params.update(kwargs)
             return True
         except Exception as e:
             print(f"[WARN] /params 更新失敗: {e}")
             return False
+
+    def get_params(self) -> dict:
+        """最後に set_params で適用したパラメータを返す。eval_env との同期用。"""
+        return dict(self._last_params)
 
     def _action_to_payload(self, action) -> dict:
         return {"action": [float(int(action))]}
