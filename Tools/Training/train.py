@@ -1042,11 +1042,21 @@ def main() -> None:
             from stable_baselines3.common.monitor import Monitor
             from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
+            class _SurvivorsMonitor(Monitor):
+                """Monitor + SurvivorsEnv 固有メソッドの明示フォワード。
+                gymnasium の __getattr__ 経由のフォワードは v1.0 で廃止されるため
+                set_params / set_shaping_weight を明示定義して非推奨警告を抑制する。"""
+                def set_params(self, **kwargs) -> bool:
+                    return self.env.set_params(**kwargs)
+
+                def set_shaping_weight(self, weight: float) -> None:
+                    self.env.set_shaping_weight(weight)
+
             def _make_survivors_fn(p: int):
                 def _init():
                     e = SurvivorsEnv(host=args.host, port=p, frame_skip=args.frame_skip)
                     e._reward_fn = reward_fn
-                    return Monitor(e)
+                    return _SurvivorsMonitor(e)
                 return _init
 
             if args.n_envs > 1:
