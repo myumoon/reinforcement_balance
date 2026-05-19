@@ -1049,8 +1049,14 @@ def main() -> None:
                 def set_params(self, **kwargs) -> bool:
                     return self.env.set_params(**kwargs)
 
+                def get_params(self) -> dict:
+                    return self.env.get_params()
+
                 def set_shaping_weight(self, weight: float) -> None:
                     self.env.set_shaping_weight(weight)
+
+                def clear_reward_fn(self) -> None:
+                    self.env.clear_reward_fn()
 
             def _make_survivors_fn(p: int):
                 def _init():

@@ -1,6 +1,7 @@
 """Survivors deterministic 評価rollout コールバック。"""
 
 import copy
+import json
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
@@ -96,6 +97,34 @@ class SurvivorsEvalCallback(BaseCallback):
         if w == 0.0:
             self.eval_env.env_method("clear_reward_fn")
 
+    def _sync_env_params(self) -> None:
+        """訓練側の curriculum phase params を eval_env へ同期する。
+
+        curriculum が training env に適用した UE5 パラメータ（敵数・速度等）を
+        eval env に転送して、公平な評価条件を保つ。
+        """
+        if self.eval_env is None:
+            return
+        params_list = self.training_env.env_method("get_params")
+        params_list = [p for p in params_list if p]
+        if not params_list:
+            print("[WARN] Eval env params sync skipped: training env returned empty params.")
+            return
+
+        if len({json.dumps(p, sort_keys=True) for p in params_list}) > 1:
+            print("[WARN] training env params differ across envs; using env[0] for eval sync.")
+
+        params = params_list[0]
+        self.eval_env.env_method("set_params", **params)
+
+        if self.verbose >= 1:
+            summary = ", ".join(
+                f"{k}={v}" for k, v in params.items()
+                if k in ("MinActiveEnemies", "MaxActiveEnemies", "SpawnRateMult",
+                         "MaxEnemyTypeId", "EnemyHPScale", "EnemyDamageScale")
+            )
+            print(f"[Eval] synced env params: {summary}")
+
     def _on_rollout_end(self) -> None:
         if self.num_timesteps - self._last_eval_step < self.eval_freq:
             return
@@ -106,10 +135,11 @@ class SurvivorsEvalCallback(BaseCallback):
         env = self.training_env if use_training_env else self.eval_env
         model = self.model
 
-        # eval_env 使用時のみ VecNormalize 統計と shaping_weight を同期する
+        # eval_env 使用時のみ VecNormalize 統計と shaping_weight、curriculum params を同期する
         if not use_training_env:
             self._sync_vecnormalize()
             self._sync_shaping()
+            self._sync_env_params()
 
         # 評価中は VecNormalize running stats を更新しない
         was_training = getattr(env, "training", None)
