@@ -1,6 +1,7 @@
 #include "Training/SurvivorsParallelSetupActor.h"
 #include "Training/SurvivorsHttpEnvService.h"
 #include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/View/SurvivorsGameView.h"
 #include "Kismet/GameplayStatics.h"
 
 ASurvivorsParallelSetupActor::ASurvivorsParallelSetupActor()
@@ -48,10 +49,54 @@ void ASurvivorsParallelSetupActor::BeginPlay()
 		BasePort, BasePort + TrainGames.Num() - 1,
 		EvalGame ? *FString::Printf(TEXT("ポート %d"), EvalPort) : TEXT("なし"));
 
-	// プレビューカメラに Game を設定（eval があれば eval、なければ最後の train）
-	ASurvivorsGame* PreviewGame = EvalGame ? EvalGame.Get()
-	                            : (TrainGames.Num() > 0 ? TrainGames.Last().Get() : nullptr);
-	BindCameraToGame(PreviewGame);
+	// GameView をスポーン（ViewPort > 0 の場合のみ）
+	SpawnedGameView = nullptr;
+	if (ViewPort > 0)
+	{
+		ASurvivorsGame* ViewGame = FindGameByPort(ViewPort);
+		if (ViewGame)
+		{
+			SpawnedGameView = SpawnGameView(ViewGame);
+			UE_LOG(LogTemp, Log,
+				TEXT("[SurvivorsParallelSetup] GameView をポート %d の Game にバインドしました。"),
+				ViewPort);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[SurvivorsParallelSetup] ViewPort %d に対応する Game が見つかりません。"
+				     " BasePort=%d〜%d、EvalPort=%d"),
+				ViewPort, BasePort, BasePort + TrainGames.Num() - 1, EvalPort);
+		}
+	}
+
+	// プレビューカメラを ViewPort の Game にバインド。
+	// ViewPort が未設定の場合は eval → 最後の train にフォールバック。
+	ASurvivorsGame* CameraTarget = nullptr;
+	if (ViewPort > 0)
+	{
+		CameraTarget = FindGameByPort(ViewPort);
+	}
+	if (!CameraTarget)
+	{
+		CameraTarget = EvalGame ? EvalGame.Get()
+		             : (TrainGames.Num() > 0 ? TrainGames.Last().Get() : nullptr);
+	}
+	BindCameraToGame(CameraTarget);
+}
+
+ASurvivorsGame* ASurvivorsParallelSetupActor::FindGameByPort(int32 Port) const
+{
+	if (EvalPort > 0 && Port == EvalPort)
+	{
+		return EvalGame.Get();
+	}
+	const int32 Idx = Port - BasePort;
+	if (TrainGames.IsValidIndex(Idx))
+	{
+		return TrainGames[Idx].Get();
+	}
+	return nullptr;
 }
 
 ASurvivorsGame* ASurvivorsParallelSetupActor::SpawnGame()
@@ -91,12 +136,72 @@ ASurvivorsHttpEnvService* ASurvivorsParallelSetupActor::SpawnService(
 	return Service;
 }
 
+ASurvivorsGameView* ASurvivorsParallelSetupActor::SpawnGameView(ASurvivorsGame* Game)
+{
+	if (!Game) return nullptr;
+
+	// SpawnActorDeferred で BeginPlay 前に Game を設定する
+	ASurvivorsGameView* View = GetWorld()->SpawnActorDeferred<ASurvivorsGameView>(
+		ASurvivorsGameView::StaticClass(), GetActorTransform());
+
+	if (!View)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[SurvivorsParallelSetup] ASurvivorsGameView のスポーンに失敗しました。"));
+		return nullptr;
+	}
+
+	View->Game = Game;
+	UGameplayStatics::FinishSpawningActor(View, GetActorTransform());
+	return View;
+}
+
 void ASurvivorsParallelSetupActor::BindCameraToGame(ASurvivorsGame* Game)
 {
-	if (!FollowPlayerCameraActor || !Game) return;
+	if (!Game) return;
 
-	// FollowPlayerCamera は Blueprint アクターのため C++ から直接アクセスできない。
-	// リフレクション経由で "Game" 変数を設定する。
+	// FollowPlayerCameraClass が設定されていれば動的スポーンして BeginPlay 前に Game を注入する
+	if (FollowPlayerCameraClass)
+	{
+		AActor* CameraActor = GetWorld()->SpawnActorDeferred<AActor>(
+			FollowPlayerCameraClass, GetActorTransform());
+
+		if (!CameraActor)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[SurvivorsParallelSetup] FollowPlayerCamera のスポーンに失敗しました。"));
+			return;
+		}
+
+		// Blueprint アクターのため reflection 経由で "Game" プロパティを設定してから BeginPlay を呼ぶ
+		FObjectProperty* Prop = CastField<FObjectProperty>(
+			CameraActor->GetClass()->FindPropertyByName(TEXT("Game")));
+
+		if (Prop)
+		{
+			Prop->SetObjectPropertyValue(
+				Prop->ContainerPtrToValuePtr<void>(CameraActor), Game);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[SurvivorsParallelSetup] FollowPlayerCameraClass (%s) に"
+				     " 'Game' プロパティが見つかりません。"),
+				*FollowPlayerCameraClass->GetName());
+		}
+
+		UGameplayStatics::FinishSpawningActor(CameraActor, GetActorTransform());
+
+		UE_LOG(LogTemp, Log,
+			TEXT("[SurvivorsParallelSetup] FollowPlayerCamera を動的スポーンし"
+			     " Game を %s に設定しました。"),
+			*Game->GetName());
+		return;
+	}
+
+	// フォールバック: レベル上の FollowPlayerCameraActor に reflection で設定
+	if (!FollowPlayerCameraActor) return;
+
 	FObjectProperty* Prop = CastField<FObjectProperty>(
 		FollowPlayerCameraActor->GetClass()->FindPropertyByName(TEXT("Game")));
 
