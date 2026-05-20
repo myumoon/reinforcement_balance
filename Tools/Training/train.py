@@ -773,6 +773,12 @@ def parse_args() -> argparse.Namespace:
                    help="アニーリングチェックを開始する最小ステップ数 (default: 50000)")
     p.add_argument("--anneal-min-weight", type=float, default=0.0,
                    help="shaping_weight の下限値 (default: 0.0=完全除去, 例: 0.05 で5%%維持)")
+    p.add_argument("--noveld", action="store_true",
+                   help="NovelD 内発的動機を有効化（Survivors のみ）")
+    p.add_argument("--noveld-beta", type=float, default=0.3,
+                   help="NovelD 内発的報酬スケール係数 β（default: 0.3）")
+    p.add_argument("--noveld-alpha", type=float, default=0.5,
+                   help="NovelD 差分係数 α（default: 0.5）")
     p.add_argument("--ent-coef", type=float, default=0.01,
                    help="PPO エントロピー係数 (default: 0.01)")
     p.add_argument("--device", default="auto",
@@ -985,6 +991,9 @@ def main() -> None:
                 "base_port": base_port,
                 "eval_port": args.eval_port,
                 "reward_fn": str(args.reward_fn) if args.reward_fn else None,
+                "noveld": args.noveld,
+                "noveld_beta": args.noveld_beta,
+                "noveld_alpha": args.noveld_alpha,
                 "config_hash": config_hash,
                 "tensorboard_log": str(log_dir / "tensorboard"),
                 **_PPO_KWARGS,
@@ -1252,6 +1261,18 @@ def main() -> None:
             f"score_ratio={args.curriculum_complete_min_score_ratio}, "
             f"ep_len_ratio={args.curriculum_complete_min_episode_len_ratio})"
         )
+
+    if args.game == "survivors" and args.noveld and not args.dry_run:
+        from games.survivors.noveld_callback import NovelDCallback
+        noveld_cb = NovelDCallback(
+            beta=args.noveld_beta,
+            alpha=args.noveld_alpha,
+            verbose=1,
+        )
+        callbacks.append(noveld_cb)
+        print(f"[INFO] NovelDCallback 有効 (beta={args.noveld_beta}, alpha={args.noveld_alpha})")
+    elif args.noveld and args.dry_run:
+        print("[WARN] --noveld は --dry-run 時は無視されます。")
 
     if reward_fn is not None and args.game in ("coin", "survivors"):
         anneal_cb = _AnnealingShapingCallback(
