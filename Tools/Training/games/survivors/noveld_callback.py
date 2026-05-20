@@ -92,8 +92,9 @@ class NovelDCallback(BaseCallback):
         new_obs = self.locals["new_obs"]
         dones   = self.locals["dones"]
 
-        obs_t = torch.as_tensor(new_obs, dtype=torch.float32, device=self.model.device)
-        novelty = self._rnd.novelty(obs_t).detach().cpu().numpy()
+        with torch.no_grad():
+            obs_t = torch.as_tensor(new_obs, dtype=torch.float32, device=self.model.device)
+            novelty = self._rnd.novelty(obs_t).cpu().numpy()
 
         # Welford running stats 更新（n_envs 分を逐次更新）
         for nov in novelty:

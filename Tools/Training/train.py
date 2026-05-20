@@ -991,9 +991,9 @@ def main() -> None:
                 "base_port": base_port,
                 "eval_port": args.eval_port,
                 "reward_fn": str(args.reward_fn) if args.reward_fn else None,
-                "noveld": getattr(args, "noveld", False),
-                "noveld_beta": getattr(args, "noveld_beta", 0.3),
-                "noveld_alpha": getattr(args, "noveld_alpha", 0.5),
+                "noveld": args.noveld,
+                "noveld_beta": args.noveld_beta,
+                "noveld_alpha": args.noveld_alpha,
                 "config_hash": config_hash,
                 "tensorboard_log": str(log_dir / "tensorboard"),
                 **_PPO_KWARGS,
@@ -1262,7 +1262,7 @@ def main() -> None:
             f"ep_len_ratio={args.curriculum_complete_min_episode_len_ratio})"
         )
 
-    if args.game == "survivors" and getattr(args, "noveld", False):
+    if args.game == "survivors" and args.noveld and not args.dry_run:
         from games.survivors.noveld_callback import NovelDCallback
         noveld_cb = NovelDCallback(
             beta=args.noveld_beta,
@@ -1271,6 +1271,8 @@ def main() -> None:
         )
         callbacks.append(noveld_cb)
         print(f"[INFO] NovelDCallback 有効 (beta={args.noveld_beta}, alpha={args.noveld_alpha})")
+    elif args.noveld and args.dry_run:
+        print("[WARN] --noveld は --dry-run 時は無視されます。")
 
     if reward_fn is not None and args.game in ("coin", "survivors"):
         anneal_cb = _AnnealingShapingCallback(
