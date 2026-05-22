@@ -1,5 +1,9 @@
 """NovelD 内発的動機コールバック（Survivors 専用）。"""
 
+from __future__ import annotations
+
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -70,6 +74,8 @@ class NovelDCallback(BaseCallback):
         self._nov_m2: float = 0.0
         self._nov_count: int = 0
         self._warmup_steps: int = 0
+        # resume 時に _on_training_start で適用する pending state ファイルパス
+        self._pending_import_path: Path | None = None
 
     def _on_training_start(self) -> None:
         obs_space = self.training_env.observation_space
@@ -83,6 +89,12 @@ class NovelDCallback(BaseCallback):
         self._prev_novelty = np.zeros(n_envs, dtype=np.float32)
         # warmup: 最初の1ロールアウト分は r_int=0 にして running stats を安定させる
         self._warmup_steps = self.model.n_steps * n_envs
+
+        # resume からの状態復元（_rnd / _optimizer 初期化後に適用）
+        if self._pending_import_path is not None:
+            self._restore_state(self._pending_import_path, obs_dim)
+            self._pending_import_path = None
+
         print(
             f"[NovelD] 初期化完了: obs_dim={obs_dim}, beta={self.beta}, "
             f"alpha={self.alpha}, warmup={self._warmup_steps} steps"
@@ -107,6 +119,7 @@ class NovelDCallback(BaseCallback):
         nov_norm = (novelty - self._nov_mean) / (nov_std + 1e-8)
 
         r_int = np.maximum(0.0, nov_norm - self.alpha * self._prev_novelty)
+        # resume 後の最初の step は _prev_novelty=0（エピソード境界相当）として扱う
         self._prev_novelty = np.where(dones, 0.0, nov_norm).astype(np.float32)
 
         # warmup 中は r_int を加算しない
@@ -148,3 +161,76 @@ class NovelDCallback(BaseCallback):
             )
         self._obs_buffer.clear()
         self._int_reward_buffer.clear()
+
+    # ── 状態の保存・復元 ─────────────────────────────────────────────────────
+
+    def save_to_file(self, path: Path) -> None:
+        """target / predictor / optimizer state と Welford stats を .pt ファイルに保存する。"""
+        if self._rnd is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        obs_dim = self._rnd.target[0].in_features
+        payload = {
+            "meta": {
+                "obs_dim": obs_dim,
+                "hidden_dim": self.hidden_dim,
+                "beta": self.beta,
+                "alpha": self.alpha,
+                "lr": self.lr,
+            },
+            "target":    self._rnd.target.state_dict(),
+            "predictor": self._rnd.predictor.state_dict(),
+            "optimizer": self._optimizer.state_dict(),
+            "nov_mean":  self._nov_mean,
+            "nov_m2":    self._nov_m2,
+            "nov_count": self._nov_count,
+        }
+        torch.save(payload, path)
+
+    def load_from_file(self, path: Path) -> None:
+        """resume 時に呼び出す。_on_training_start まで pending に保持する。"""
+        if not path.exists():
+            print(f"[NovelD] WARN: state ファイルが見つかりません: {path} → 初期状態で起動します。")
+            return
+        self._pending_import_path = path
+        print(f"[NovelD] resume state を pending に登録: {path}")
+
+    def _restore_state(self, path: Path, obs_dim: int) -> None:
+        """_on_training_start 内で _rnd / _optimizer 初期化後に呼ばれる。"""
+        payload = torch.load(path, map_location=self.model.device, weights_only=True)
+        meta = payload["meta"]
+
+        # 構造不一致はエラー（state_dict のロード自体が失敗するため早期検出）
+        if meta["obs_dim"] != obs_dim:
+            raise ValueError(
+                f"[NovelD] obs_dim 不一致: saved={meta['obs_dim']}, current={obs_dim}"
+            )
+        if meta["hidden_dim"] != self.hidden_dim:
+            raise ValueError(
+                f"[NovelD] hidden_dim 不一致: saved={meta['hidden_dim']}, current={self.hidden_dim}"
+            )
+
+        # スケール変更は警告のみ（意図的な変更を許容）
+        for key in ("beta", "alpha", "lr"):
+            saved_val = meta[key]
+            current_val = getattr(self, key)
+            if saved_val != current_val:
+                print(
+                    f"[NovelD] WARN: {key} 不一致 saved={saved_val}, current={current_val} "
+                    f"（現在の設定値を使用）"
+                )
+
+        self._rnd.target.load_state_dict(payload["target"])
+        self._rnd.predictor.load_state_dict(payload["predictor"])
+        self._optimizer.load_state_dict(payload["optimizer"])
+        self._nov_mean  = float(payload["nov_mean"])
+        self._nov_m2    = float(payload["nov_m2"])
+        self._nov_count = int(payload["nov_count"])
+
+        # resume 後は warmup 不要（predictor は継続学習済み）
+        self._warmup_steps = 0
+
+        print(
+            f"[NovelD] resume から predictor・target・optimizer・running stats を復元しました。"
+            f"（obs_dim={obs_dim}, nov_count={self._nov_count}）"
+        )

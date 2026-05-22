@@ -334,6 +334,7 @@ def _save_training_status(
     exit_error: str | None = None,
     curriculum_completion: dict | None = None,
     mirror_paths: list[Path] | None = None,
+    noveld_state_path: Path | None = None,
 ) -> None:
     # run_dir からの相対パスで記録することで新旧両構成に対応
     def _rel(p: Path) -> str:
@@ -352,6 +353,7 @@ def _save_training_status(
         "curriculum": curriculum_cb.export_state() if curriculum_cb is not None else None,
         "shaping_anneal": anneal_cb.export_state() if anneal_cb is not None else None,
         "curriculum_completion": curriculum_completion,
+        "noveld_state_path": _rel(noveld_state_path) if noveld_state_path is not None else None,
     }
     if exit_reason is not None:
         data["last_exit_reason"] = exit_reason
@@ -925,6 +927,7 @@ def main() -> None:
     model_steps_dir = work_dir / "model_steps"
     vecnorm_dir     = work_dir / "vecnormalize"
     status_dir      = work_dir / "status"
+    noveld_dir      = work_dir / "noveld"
 
     for d in [work_dir, log_dir, result_dir, model_steps_dir, vecnorm_dir, status_dir]:
         d.mkdir(parents=True, exist_ok=True)
@@ -1190,6 +1193,7 @@ def main() -> None:
     curriculum_completion_cb = None
     resume_episode_count = 0
     anneal_cb = None
+    noveld_cb = None
     survivors_metrics_callback = None
     survivors_curriculum_metrics_callback = None
     if args.game == "survivors" and not args.dry_run:
@@ -1271,6 +1275,12 @@ def main() -> None:
         )
         callbacks.append(noveld_cb)
         print(f"[INFO] NovelDCallback 有効 (beta={args.noveld_beta}, alpha={args.noveld_alpha})")
+        noveld_state_rel = resume_status.get("noveld_state_path") if resume_status else None
+        if noveld_state_rel and source_dir is not None:
+            noveld_cb.load_from_file(source_dir / noveld_state_rel)
+            print("[INFO] NovelD state を resume から復元しました。")
+        elif noveld_state_rel:
+            print("[WARN] NovelD state パスが見つかりましたが source_dir が不明のためスキップします。")
     elif args.noveld and args.dry_run:
         print("[WARN] --noveld は --dry-run 時は無視されます。")
 
@@ -1310,6 +1320,10 @@ def main() -> None:
                 else None
             )
         )
+        noveld_pt_path = None
+        if noveld_cb is not None:
+            noveld_pt_path = noveld_dir / f"noveld_{timestep}_steps.pt"
+            noveld_cb.save_to_file(noveld_pt_path)
         _save_training_status(
             status_path=status_path,
             args=args,
@@ -1327,6 +1341,7 @@ def main() -> None:
                 work_status_path,
                 status_dir / f"train_status_{timestep}_steps.json",
             ],
+            noveld_state_path=noveld_pt_path,
         )
 
     checkpoint_cb = _RunCheckpointCallback(
