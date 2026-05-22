@@ -50,12 +50,14 @@ class _Phase:
     time_scaling: bool
     min_episode_steps: int
     threshold: Optional[float]  # None = 最終段（昇格なし）
-    rollback_score_ratio: float = 0.35
-    rollback_length_ratio: float = 0.45
+    rollback_score_ratio: float = 0.60
+    rollback_length_ratio: float = 0.60
     promotion_min_score_ratio: float = 0.85
     promotion_max_score_cv: float = 0.20
     promotion_score_stat: str = "min"       # "min" | "percentile"
     promotion_score_percentile: float = 10.0
+    # threshold=None の最終フェーズ用: ロールバック score floor の基準となる参照閾値
+    rollback_reference_threshold: Optional[float] = None
 
 
 # promotion_blocker カテゴリ定数（W&B グラフで停滞原因を数値で識別する）
@@ -95,10 +97,17 @@ PHASES: list[_Phase] = [
     _Phase("群れ対応B",        18,  65, 1.05, 2.8,  8, 1.35, 1.35, True,  2400, 1850.0,
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
            promotion_score_stat="percentile", promotion_score_percentile=10.0),
-    _Phase("群れ対応C",        20,  80, 1.1, 3.0,  9, 1.50, 1.50, True,  2400, 2000.0,
+    _Phase("群れ対応C",        20,  80, 1.1,  3.0,  9, 1.50, 1.50, True,  2400, 2000.0,
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
            promotion_score_stat="percentile", promotion_score_percentile=10.0),
-    _Phase("Mad Forest",       40, 150, 1.2, 4.0, 10, 2.00, 2.00, True,  2400,   None),
+    _Phase("Mad Forest 入門",  27, 100, 1.13, 3.3, 10, 1.67, 1.67, True,  2400, 2100.0,
+           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
+           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+    _Phase("Mad Forest 中級",  33, 125, 1.17, 3.7, 10, 1.83, 1.83, True,  2400, 2250.0,
+           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
+           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+    _Phase("Mad Forest",       40, 150, 1.2,  4.0, 10, 2.00, 2.00, True,  2400,   None,
+           rollback_reference_threshold=2250.0),
 ]
 
 
@@ -130,7 +139,7 @@ class CurriculumCallback(BaseCallback):
         self.window = window
         self.threshold_mult = threshold_mult
         self.alive_reward = alive_reward
-        self.rollback_patience = 2
+        self.rollback_patience = 3
         self.rollback_min_episodes = max(5, window // 2)
         self._status_path = status_path
         self._scores: list[float] = []
@@ -436,11 +445,17 @@ class CurriculumCallback(BaseCallback):
         phase: _Phase,
         effective_threshold: float,
     ) -> tuple[Optional[float], Optional[float]]:
-        score_floor = (
-            effective_threshold * phase.rollback_score_ratio
-            if phase.threshold is not None
-            else None
-        )
+        if phase.threshold is not None:
+            score_floor = effective_threshold * phase.rollback_score_ratio
+        elif phase.rollback_reference_threshold is not None:
+            # 最終フェーズ用: 直前フェーズの threshold を基準にロールバック floor を計算する
+            score_floor = (
+                phase.rollback_reference_threshold
+                * self.threshold_mult
+                * phase.rollback_score_ratio
+            )
+        else:
+            score_floor = None
         length_floor = (
             phase.min_episode_steps * phase.rollback_length_ratio
             if phase.min_episode_steps > 0
