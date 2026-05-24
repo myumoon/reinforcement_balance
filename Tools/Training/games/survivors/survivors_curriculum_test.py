@@ -151,6 +151,10 @@ def main() -> None:
     # run ディレクトリを解決（_TRAINING_ROOT 基準の絶対パス）
     run_dir = _TRAINING_ROOT / "runs" / "survivors" / args.version_name / "train" / args.run
 
+    if not run_dir.exists():
+        print(f"[ERROR] run_dir が見つかりません: {run_dir}", file=sys.stderr)
+        sys.exit(1)
+
     print(f"[INFO] run_dir: {run_dir}")
     model, vecnorm_path, status = _load_run(run_dir)
     print(f"[INFO] model loaded from: {status.get('latest_model_path', '?')}")
@@ -227,54 +231,56 @@ def main() -> None:
     )
     print(f"        advance_patience_steps={args.advance_patience_steps:,}")
 
-    while True:
-        # 終了判定 1: 最終フェーズに到達（ループ先頭でチェック）
-        if curriculum_cb.is_final_phase:
-            print(
-                f"[DONE] 最終フェーズ（{PHASES[curriculum_cb._phase_idx].name}）に到達 → 終了"
-            )
-            break
+    try:
+        while True:
+            # 終了判定 1: 最終フェーズに到達（ループ先頭でチェック）
+            if curriculum_cb.is_final_phase:
+                print(
+                    f"[DONE] 最終フェーズ（{PHASES[curriculum_cb._phase_idx].name}）に到達 → 終了"
+                )
+                break
 
-        # 終了判定 2: advance_patience_steps を超過
-        if total_steps > 0 and (total_steps - last_advance_step) > args.advance_patience_steps:
-            print(
-                f"[DONE] 直近の昇格から {args.advance_patience_steps:,} step 経過しても昇格なし → 終了"
-            )
-            break
+            # 終了判定 2: advance_patience_steps を超過
+            if total_steps > 0 and (total_steps - last_advance_step) > args.advance_patience_steps:
+                print(
+                    f"[DONE] 直近の昇格から {args.advance_patience_steps:,} step 経過しても昇格なし → 終了"
+                )
+                break
 
-        action, _ = model.predict(obs, deterministic=True)
-        obs, rewards, dones, infos = vec_env.step(action)
+            action, _ = model.predict(obs, deterministic=True)
+            obs, rewards, dones, infos = vec_env.step(action)
 
-        total_steps += n_envs
-        mock_model.num_timesteps = total_steps
+            total_steps += n_envs
+            mock_model.num_timesteps = total_steps
 
-        curriculum_cb.locals = {"infos": infos, "dones": dones}
-        curriculum_cb._on_step()
+            curriculum_cb.locals = {"infos": infos, "dones": dones}
+            curriculum_cb._on_step()
 
-        # phase advance/rollback 検出 → patience タイマーリセット
-        if curriculum_cb._phase_idx != prev_phase_idx:
-            last_advance_step = total_steps
-            prev_phase_idx = curriculum_cb._phase_idx
+            # phase advance/rollback 検出 → patience タイマーリセット
+            if curriculum_cb._phase_idx != prev_phase_idx:
+                last_advance_step = total_steps
+                prev_phase_idx = curriculum_cb._phase_idx
 
-        if any(dones):
-            metrics = curriculum_cb.get_wandb_progress_metrics()
-            wandb.log({**metrics, "global_step": total_steps}, step=total_steps)
+            if any(dones):
+                metrics = curriculum_cb.get_wandb_progress_metrics()
+                wandb.log({**metrics, "global_step": total_steps}, step=total_steps)
 
-    # 終了サマリー
-    print("=== カリキュラムテスト完了 ===")
-    print(f"  総ステップ数  : {total_steps:,}")
-    print(
-        f"  最終フェーズ  : {PHASES[curriculum_cb._phase_idx].name}"
-        f" (idx={curriculum_cb._phase_idx})"
-    )
-    print(f"  Phase Events  : {len(curriculum_cb._phase_events)} 件")
-    for ev in curriculum_cb._phase_events:
+        # 終了サマリー
+        print("=== カリキュラムテスト完了 ===")
+        print(f"  総ステップ数  : {total_steps:,}")
         print(
-            f"    {ev['timestep']:>10,}: {ev['from_phase_name']} → {ev['to_phase_name']}"
-            f" [{ev['event']}] score={ev['active_score_mean']:.1f}"
+            f"  最終フェーズ  : {PHASES[curriculum_cb._phase_idx].name}"
+            f" (idx={curriculum_cb._phase_idx})"
         )
-
-    wandb.finish()
+        print(f"  Phase Events  : {len(curriculum_cb._phase_events)} 件")
+        for ev in curriculum_cb._phase_events:
+            print(
+                f"    {ev['timestep']:>10,}: {ev['from_phase_name']} → {ev['to_phase_name']}"
+                f" [{ev['event']}] score={ev['active_score_mean']:.1f}"
+            )
+    finally:
+        vec_env.close()
+        wandb.finish()
 
 
 if __name__ == "__main__":
