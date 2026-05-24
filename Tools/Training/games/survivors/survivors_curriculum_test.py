@@ -149,13 +149,13 @@ def _load_run(run_dir: Path) -> tuple[PPO, Path, dict]:
 def _make_env(port: int, frame_skip: int, dry_run: bool):
     """(raw_env, Monitor(raw_env)) を返す。raw_env は CurriculumCallback.set_params 用、Monitor は SB3 統計収集用。"""
     if dry_run:
-        from games.survivors.survivors_env_stub import SurvivorsEnvStub
+        from games.survivors.survivors_env_stub import DummySurvivorsEnv
 
-        raw_env = SurvivorsEnvStub()
+        raw_env = DummySurvivorsEnv()
     else:
-        from games.survivors.survivors_env import SurvivorsUE5Env
+        from games.survivors.survivors_env import SurvivorsEnv
 
-        raw_env = SurvivorsUE5Env(port=port, frame_skip=frame_skip)
+        raw_env = SurvivorsEnv(port=port, frame_skip=frame_skip)
     return raw_env, Monitor(raw_env)
 
 
