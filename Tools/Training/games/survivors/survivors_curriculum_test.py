@@ -26,10 +26,18 @@ from stable_baselines3.common.monitor import Monitor
 
 
 class _MockModel:
-    """CurriculumCallback が参照する num_timesteps の追跡用シム。"""
+    """CurriculumCallback が参照する num_timesteps / get_env() の追跡用シム。
 
-    def __init__(self, start_timesteps: int = 0):
+    BaseCallback.training_env は self.model.get_env() を呼ぶ read-only property のため、
+    vec_env への参照を get_env() で返す必要がある。
+    """
+
+    def __init__(self, start_timesteps: int = 0, env=None):
         self.num_timesteps = start_timesteps
+        self._env = env
+
+    def get_env(self):
+        return self._env
 
 
 def parse_args() -> argparse.Namespace:
@@ -237,9 +245,8 @@ def main() -> None:
             }
         )
 
-    mock_model = _MockModel(start_timesteps=0)
+    mock_model = _MockModel(start_timesteps=0, env=vec_env)
     curriculum_cb.model = mock_model
-    curriculum_cb.training_env = vec_env
     curriculum_cb._on_training_start()
 
     # 評価ループ
