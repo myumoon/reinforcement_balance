@@ -977,12 +977,8 @@ def main() -> None:
     #   branch mode  (is_branch=True):  新規 run、元 run を group で紐付け
     wandb_run_id: str | None = None
     _wandb_id_path = work_dir / "wandb_run_id.txt"
-    if args.resume and not is_branch and _wandb_id_path.exists():
-        wandb_run_id = _wandb_id_path.read_text().strip() or None
-        if wandb_run_id:
-            print(f"[INFO] W&B run_id を再利用します (continue mode): {wandb_run_id}")
-    # --spalf resume: spalf_state.json から wandb_run_id を優先読み込み
     if args.spalf and args.resume and not is_branch:
+        # SPALF resume: spalf_state.json から wandb_run_id を読む（wandb_run_id.txt より優先）
         _spalf_wid_path = source_dir / "log" / "spalf_state.json"
         if _spalf_wid_path.exists():
             try:
@@ -993,6 +989,10 @@ def main() -> None:
                     print(f"[INFO] W&B run_id を spalf_state.json から再利用: {wandb_run_id}")
             except Exception as _e:
                 print(f"[WARN] spalf_state.json から wandb_run_id 読み込み失敗: {_e}")
+    elif args.resume and not is_branch and _wandb_id_path.exists():
+        wandb_run_id = _wandb_id_path.read_text().strip() or None
+        if wandb_run_id:
+            print(f"[INFO] W&B run_id を再利用します (continue mode): {wandb_run_id}")
 
     if _use_wandb:
         _wandb_init_kwargs: dict = dict(

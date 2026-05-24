@@ -44,12 +44,9 @@ class TestParamsToVec:
     def test_max_params_vec_is_one(self):
         cb = _make_cb()
         max_params = {k: hi for k, (lo, hi) in _PARAM_BOUNDS.items()}
+        max_params["time_scaling"] = True  # bool 型で渡して _params_to_vec の bool 分岐を確認
         vec = cb._params_to_vec(max_params)
-        for i, key in enumerate(_PARAM_KEYS):
-            if key == "time_scaling":
-                assert vec[i] == pytest.approx(1.0, abs=0.01)
-            else:
-                assert vec[i] == pytest.approx(1.0, abs=0.01)
+        assert np.allclose(vec, 1.0, atol=0.01)
 
     def test_min_params_vec_is_zero(self):
         cb = _make_cb()

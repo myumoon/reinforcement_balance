@@ -110,9 +110,9 @@ class SpalfCallback(BaseCallback):
     def _on_training_start(self) -> None:
         n = self.training_env.num_envs if self.training_env is not None else 1
         self._ep_base_per_env = [0.0] * n
-        self._apply_params(_PHASE0_PARAMS)
-        self._current_params = dict(_PHASE0_PARAMS)
-        self._current_param_vec = self._params_to_vec(_PHASE0_PARAMS)
+        # resume 時は import_state で復元済みの _current_params を適用する。
+        # 新規開始時は __init__ で _current_params = _PHASE0_PARAMS に初期化済み。
+        self._apply_params(self._current_params)
 
     def _on_step(self) -> bool:
         infos = self.locals["infos"]
@@ -126,8 +126,6 @@ class SpalfCallback(BaseCallback):
             self._ep_base_per_env[env_idx] += info.get("base_reward", 0.0)
 
             if "episode" not in info:
-                if dones[env_idx]:
-                    pass  # episode info なしは無視
                 continue
 
             ep_len = info["episode"]["l"]
@@ -157,6 +155,8 @@ class SpalfCallback(BaseCallback):
             self._alp_buffer.append((self._current_param_vec.copy(), alp))
 
             # GMM 再フィット（5 エピソードごと）
+            # _total_episodes は warmup 分も含むため ALP バッファサイズと乖離するが、
+            # len(self._alp_buffer) >= 10 のガードが実質的な最小サンプル数を保証する。
             if self._total_episodes % 5 == 0 and len(self._alp_buffer) >= 10:
                 self._fit_gmm()
 
@@ -252,7 +252,7 @@ class SpalfCallback(BaseCallback):
                 if bic < best_bic:
                     best_bic, best_gmm = bic, gmm
             except Exception:
-                break
+                continue
 
         if best_gmm is None:
             return
@@ -304,9 +304,15 @@ class SpalfCallback(BaseCallback):
             TimeScalingEnabled=params["time_scaling"],
         )
         if self.training_env is not None and self.training_env.num_envs > 1:
-            self.training_env.env_method("set_params", **ue5_params)
+            results = self.training_env.env_method("set_params", **ue5_params)
+            failed = [i for i, r in enumerate(results) if not r]
+            if failed:
+                print(f"[SPALF][ERROR] /params 適用失敗: env index {failed}")
         else:
-            self._raw_env.set_params(**ue5_params)
+            if self._raw_env is not None:
+                ok = self._raw_env.set_params(**ue5_params)
+                if not ok:
+                    print("[SPALF][ERROR] /params 適用失敗: single env")
         self._current_params = params
         if self.verbose >= 1:
             print(
