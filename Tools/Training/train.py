@@ -813,6 +813,18 @@ def parse_args() -> argparse.Namespace:
                    help="最終Phase完了に必要なスコア倍率。直前Phase閾値×curriculum-thresholdに乗算 (default: 1.0)")
     p.add_argument("--curriculum-complete-min-episode-len-ratio", type=float, default=1.0,
                    help="最終Phase完了に必要な episode_length / min_episode_steps の比率 (default: 1.0)")
+    p.add_argument("--spalf", action="store_true",
+                   help="SPALF 連続パラメータカリキュラム学習を有効化（survivors 専用、--curriculum と排他）")
+    p.add_argument("--spalf-r-b", type=float, default=0.1,
+                   help="SPALF モード切替閾値（正規化スコアの移動平均がこれを下回ると SPALF モード、default: 0.1）")
+    p.add_argument("--spalf-alpha", type=float, default=0.2,
+                   help="SPALF f_α の非線形増幅係数（default: 0.2）")
+    p.add_argument("--spalf-buffer-size", type=int, default=200,
+                   help="SPALF 報酬履歴・ALP バッファサイズ（default: 200）")
+    p.add_argument("--spalf-warmup-episodes", type=int, default=50,
+                   help="SPALF 開始前のウォームアップエピソード数（default: 50）")
+    p.add_argument("--spalf-max-score", type=float, default=2250.0,
+                   help="スコア正規化の最大値（default: 2250.0）")
     p.add_argument("--eval-freq", type=int, default=50_000,
                    help="deterministic 評価の間隔 (timesteps, 0=無効, survivors のみ有効, default: 50000)")
     p.add_argument("--eval-episodes", type=int, default=5,
@@ -846,6 +858,8 @@ def main() -> None:
         raise ValueError("--init-model と --resume は同時に使用できません")
     if args.init_vecnormalize and not args.init_model:
         raise ValueError("--init-vecnormalize は --init-model と組み合わせて使用してください")
+    if args.curriculum and args.spalf:
+        raise ValueError("--curriculum と --spalf は同時に使用できません")
     if args.recurrent and args.frame_stack > 1:
         print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
               " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")
@@ -949,6 +963,7 @@ def main() -> None:
     status_path             = log_dir / "train_status.json"
     work_status_path        = work_dir / "train_status.json"
     curriculum_status_path  = log_dir / "curriculum_status.json"
+    spalf_status_path       = log_dir / "spalf_state.json"
     config_hash = _write_resolved_config(log_dir, args)
     _write_run_meta(log_dir, args, config_hash)
     print(f"[INFO] run_dir: {run_dir}")
@@ -966,6 +981,18 @@ def main() -> None:
         wandb_run_id = _wandb_id_path.read_text().strip() or None
         if wandb_run_id:
             print(f"[INFO] W&B run_id を再利用します (continue mode): {wandb_run_id}")
+    # --spalf resume: spalf_state.json から wandb_run_id を優先読み込み
+    if args.spalf and args.resume and not is_branch:
+        _spalf_wid_path = source_dir / "log" / "spalf_state.json"
+        if _spalf_wid_path.exists():
+            try:
+                _spalf_wid_state = json.loads(_spalf_wid_path.read_text(encoding="utf-8"))
+                _spalf_wid = _spalf_wid_state.get("wandb_run_id")
+                if _spalf_wid:
+                    wandb_run_id = _spalf_wid
+                    print(f"[INFO] W&B run_id を spalf_state.json から再利用: {wandb_run_id}")
+            except Exception as _e:
+                print(f"[WARN] spalf_state.json から wandb_run_id 読み込み失敗: {_e}")
 
     if _use_wandb:
         _wandb_init_kwargs: dict = dict(
@@ -997,6 +1024,12 @@ def main() -> None:
                 "noveld": args.noveld,
                 "noveld_beta": args.noveld_beta,
                 "noveld_alpha": args.noveld_alpha,
+                "spalf": args.spalf,
+                "spalf_r_b": args.spalf_r_b,
+                "spalf_alpha": args.spalf_alpha,
+                "spalf_buffer_size": args.spalf_buffer_size,
+                "spalf_warmup_episodes": args.spalf_warmup_episodes,
+                "spalf_max_score": args.spalf_max_score,
                 "config_hash": config_hash,
                 "tensorboard_log": str(log_dir / "tensorboard"),
                 **_PPO_KWARGS,
@@ -1247,6 +1280,39 @@ def main() -> None:
     elif args.curriculum:
         print("[WARN] --curriculum は survivors ゲームかつ非 dry-run 時のみ有効です。無視します。")
 
+    spalf_cb = None
+    if args.spalf and args.game == "survivors" and not args.dry_run:
+        from games.survivors.spalf_callback import SpalfCallback
+        spalf_cb = SpalfCallback(
+            raw_env=_get_raw_env(env),
+            frame_skip=args.frame_skip,
+            alive_reward=args.curriculum_alive_reward,
+            r_b=args.spalf_r_b,
+            alpha=args.spalf_alpha,
+            max_score=args.spalf_max_score,
+            buffer_size=args.spalf_buffer_size,
+            warmup_episodes=args.spalf_warmup_episodes,
+            status_path=str(spalf_status_path),
+        )
+        if args.resume:
+            _spalf_state_file = source_dir / "log" / "spalf_state.json"
+            if _spalf_state_file.exists():
+                _spalf_state = json.loads(_spalf_state_file.read_text(encoding="utf-8"))
+                spalf_cb.import_state(_spalf_state)
+                print(f"[INFO] SPALF state を復元: total_episodes={_spalf_state.get('total_episodes', 0)}")
+            else:
+                print("[WARN] --spalf resume: spalf_state.json が見つかりません。新規開始します。")
+        callbacks.append(spalf_cb)
+        print(
+            f"[INFO] SpalfCallback 有効 "
+            f"(r_b={args.spalf_r_b}, alpha={args.spalf_alpha}, "
+            f"buffer_size={args.spalf_buffer_size}, warmup_episodes={args.spalf_warmup_episodes}, "
+            f"max_score={args.spalf_max_score})"
+        )
+        print(f"[INFO] spalf_state.json → {spalf_status_path}")
+    elif args.spalf:
+        print("[WARN] --spalf は survivors ゲームかつ非 dry-run 時のみ有効です。無視します。")
+
     if args.until_curriculum_complete:
         if curriculum_cb is None:
             raise ValueError("--until-curriculum-complete には survivors の --curriculum が必要です")
@@ -1388,6 +1454,9 @@ def main() -> None:
             exit_reason=exit_reason,
             exit_error=exit_error,
         )
+        if spalf_cb is not None:
+            spalf_cb._save_status()
+            print(f"[INFO] SPALF state を保存: {spalf_status_path}")
         env.close()
         if eval_env is not None:
             eval_env.close()
