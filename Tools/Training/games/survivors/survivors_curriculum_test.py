@@ -3,7 +3,9 @@
 使用例:
   python survivors_curriculum_test.py 09_goldilocks_phase12
   python survivors_curriculum_test.py 09_goldilocks_phase12 --start-phase 12 --advance-patience-steps 300000
-  python survivors_curriculum_test.py 09_goldilocks --config runs/survivors/v06/train/09_goldilocks/config/train_config_resume.yaml
+
+  # --config のみで run を省略可能（config パスの親ディレクトリから run 名を自動推論）
+  python survivors_curriculum_test.py --config runs/survivors/v06/train/09_goldilocks/config/train_config_resume.yaml
 """
 
 import sys
@@ -37,17 +39,29 @@ def parse_args() -> argparse.Namespace:
     pre_args, _ = pre.parse_known_args()
 
     p = argparse.ArgumentParser(description="フェーズ型カリキュラム昇格チェック（推論専用）")
-    p.add_argument("run", type=str, help="run 名（例: 09_goldilocks_phase12）")
+    p.add_argument(
+        "run",
+        type=str,
+        nargs="?",
+        default=None,
+        help="run 名（例: 09_goldilocks_phase12）。--config 指定時は省略可能（config パスから自動推論）",
+    )
     p.add_argument(
         "--config",
         type=Path,
         default=None,
-        help="YAML 設定ファイルのパス。既存 run の config/train_config_resume.yaml を指定すると各設定を自動引き継ぎ",
+        help="YAML 設定ファイルのパス。既存 run の config/ 以下の YAML を指定すると各設定を自動引き継ぎ。run 省略時は config パスから run 名を推論",
+    )
+    p.add_argument(
+        "--game",
+        choices=["balance", "coin", "survivors"],
+        default="survivors",
+        help="ゲーム種別（パス解決に使用: runs/<game>/<version>/train/<run>）(default: survivors)",
     )
     p.add_argument(
         "--version-name",
         default="v06",
-        help="runs/survivors/<version>/train/<run> (default: v06)",
+        help="runs/<game>/<version>/train/<run> (default: v06)",
     )
     p.add_argument(
         "--start-phase",
@@ -148,8 +162,17 @@ def _make_env(port: int, frame_skip: int, dry_run: bool):
 def main() -> None:
     args = parse_args()
 
-    # run ディレクトリを解決（_TRAINING_ROOT 基準の絶対パス）
-    run_dir = _TRAINING_ROOT / "runs" / "survivors" / args.version_name / "train" / args.run
+    # run ディレクトリを解決
+    if args.config is not None and args.run is None:
+        # --config から run_dir を直接推論（想定構造: runs/<game>/<version>/train/<run>/config/...）
+        run_dir = Path(args.config).resolve().parent.parent
+        args.run = run_dir.name
+        print(f"[INFO] --run 未指定: config から run を推論しました → {args.run}")
+    elif args.run is None:
+        print("[ERROR] run は --config なしの場合は必須です", file=sys.stderr)
+        sys.exit(1)
+    else:
+        run_dir = _TRAINING_ROOT / "runs" / args.game / args.version_name / "train" / args.run
 
     if not run_dir.exists():
         print(f"[ERROR] run_dir が見つかりません: {run_dir}", file=sys.stderr)
