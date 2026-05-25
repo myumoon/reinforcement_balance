@@ -59,7 +59,9 @@ class SpalfCallback(BaseCallback):
         alive_reward:      生存ボーナス係数（train.py の --curriculum-alive-reward と同じ値）
         r_b:               正規化後バッファ平均報酬の境界値（< r_b で SPALF モード）
         alpha:             正則化強度 α（正規化スコア空間）
-        max_score:         スコア正規化スケール（Phase 15 threshold ≈ 2250）
+        max_score:         スコア正規化スケール。score_norm = active_score / max_score が
+                           常に [0, 1] に収まるよう、訓練中の期待最大スコアより大きく設定すること。
+                           小さすぎると score_norm > 1.0 となり ALP が破綻する。
         buffer_size:       (params, score) / (params, ALP) バッファサイズ（エピソード数）
         warmup_episodes:   Phase 0 固定で動作する初期エピソード数
         status_path:       spalf_state.json の出力先（None = 保存なし）
@@ -102,6 +104,11 @@ class SpalfCallback(BaseCallback):
         self._current_params: dict = dict(_PHASE0_PARAMS)
         self._current_param_vec: np.ndarray = self._params_to_vec(_PHASE0_PARAMS)
         self._ep_base_per_env: list[float] = []
+        # env ごとに「現在エピソード開始時点のパラメータ vec」を記録する。
+        # n_envs > 1 では params 変更が全 env に即時適用されるため、
+        # エピソード途中の env は旧 params で走り続ける。
+        # ALP 計算時はこの per-env 値を使い、スコアを正しいパラメータに帰属させる。
+        self._ep_start_param_vec_per_env: list[np.ndarray] = []
 
     # ------------------------------------------------------------------
     # SB3 BaseCallback インターフェース
@@ -113,6 +120,8 @@ class SpalfCallback(BaseCallback):
         # resume 時は import_state で復元済みの _current_params を適用する。
         # 新規開始時は __init__ で _current_params = _PHASE0_PARAMS に初期化済み。
         self._apply_params(self._current_params)
+        # 全 env はこの時点から同一パラメータで開始する
+        self._ep_start_param_vec_per_env = [self._current_param_vec.copy() for _ in range(n)]
 
     def _on_step(self) -> bool:
         infos = self.locals["infos"]
@@ -121,6 +130,8 @@ class SpalfCallback(BaseCallback):
 
         if len(self._ep_base_per_env) != n_envs:
             self._ep_base_per_env = [0.0] * n_envs
+        if len(self._ep_start_param_vec_per_env) != n_envs:
+            self._ep_start_param_vec_per_env = [self._current_param_vec.copy() for _ in range(n_envs)]
 
         for env_idx, info in enumerate(infos):
             self._ep_base_per_env[env_idx] += info.get("base_reward", 0.0)
@@ -147,12 +158,16 @@ class SpalfCallback(BaseCallback):
                 self._log_wandb_on_episode_end(active_score, score_norm, warmup=True)
                 continue
 
-            # ALP 計算
-            alp = self._compute_alp_for_episode(score_norm, self._current_param_vec)
+            # ALP 計算: このエピソードが「開始した時点のパラメータ」を使う。
+            # n_envs > 1 では他 env のエピソード終了により params が途中変更されるため、
+            # _current_param_vec（最後にサンプルしたパラメータ）ではなく
+            # _ep_start_param_vec_per_env[env_idx]（このエピソード開始時点のパラメータ）を使う。
+            ep_param_vec = self._ep_start_param_vec_per_env[env_idx]
+            alp = self._compute_alp_for_episode(score_norm, ep_param_vec)
 
-            # バッファ更新
-            self._reward_history.append((self._current_param_vec.copy(), score_norm))
-            self._alp_buffer.append((self._current_param_vec.copy(), alp))
+            # バッファ更新（スコアをそのエピソードのパラメータに帰属）
+            self._reward_history.append((ep_param_vec.copy(), score_norm))
+            self._alp_buffer.append((ep_param_vec.copy(), alp))
 
             # GMM 再フィット（5 エピソードごと）
             # _total_episodes は warmup 分も含むため ALP バッファサイズと乖離するが、
@@ -160,10 +175,13 @@ class SpalfCallback(BaseCallback):
             if self._total_episodes % 5 == 0 and len(self._alp_buffer) >= 10:
                 self._fit_gmm()
 
-            # 次のパラメータをサンプリングして適用
+            # 次のパラメータをサンプリングして全 env に適用
             new_params, new_vec = self._sample_next_params()
             self._apply_params(new_params)
             self._current_param_vec = new_vec
+            # env_idx の次エピソードは new_vec で開始する。
+            # 他 env はまだ旧パラメータのエピソード途中なので _ep_start_param_vec を変えない。
+            self._ep_start_param_vec_per_env[env_idx] = new_vec.copy()
 
             # W&B ログ
             self._log_wandb_on_episode_end(active_score, score_norm, warmup=False)
