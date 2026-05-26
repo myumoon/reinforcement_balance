@@ -3,23 +3,14 @@
 過去の不具合修正・レビュー指摘から得られた教訓を集約したドキュメント。
 新しいコールバック・Env・訓練スクリプトを実装するときに参照すること。
 
+UE5 側の HTTP API 仕様・挙動は [`ue5_survivors_env.md`](ue5_survivors_env.md) を参照。
+
 ---
 
-## 1. UE5 ↔ Python 通信の設計原則
+## 1. Python ↔ UE5 通信の設計原則
 
-### `/params` エンドポイントは即時反映される
-
-`/params` を受信した UE5 は `Game->MinActiveEnemies = ...` のように**その場で直接代入**する。
-エピソードのリセットや次ステップまで待機する処理は一切ない。
-
-```
-Python が /params を送信
-  → UE5 が即座に Game->MinActiveEnemies, EnemySpeedMult ... を上書き
-  → 以降のステップは新しいパラメータで動き続ける（エピソード継続中でも）
-```
-
-エピソード途中に送信すると**前半と後半で難易度が変わる**。
-これは ALP 計算の前提（「このパラメータでこのスコアが出た」）を崩す原因になる。
+UE5 の `/params` はエピソード途中でも**即時反映**される（詳細は [`ue5_survivors_env.md`](ue5_survivors_env.md)）。
+Python 側はこの挙動を前提に以下のルールを守ること。
 
 ### 送信先は必要最低限の env に絞ること（PR #127）
 
@@ -48,20 +39,6 @@ n_envs=4、平均エピソード長 300 ステップの場合:
 | フェーズ昇格時のみ送信（フェーズ型カリキュラム） | ~0〜1 回 |
 
 HTTP 送信回数は訓練速度に直結する。不要な送信はパフォーマンスを 2 倍程度低下させることがある。
-
-### ゲームパラメータ（Survivors / `/params`）
-
-各パラメータの定義・デフォルト値・説明コメントは以下のファイルを Source of Truth とすること:
-
-```
-ReinBalance/Source/ReinBalance/Public/Survivors/Logic/SurvivorsGame.h
-```
-
-`/params` エンドポイントでの受信・適用処理は以下を参照:
-
-```
-ReinBalance/Source/ReinBalanceEditor/Private/Training/SurvivorsHttpEnvService.cpp
-```
 
 ---
 
