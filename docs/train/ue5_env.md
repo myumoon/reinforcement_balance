@@ -44,7 +44,7 @@ Python が /params を送信
 
 `/params` の送信タイミングはエピソードの区切りと無関係。
 エピソード途中に送信すると前半と後半で難易度が変わる。
-Python 側はこの挙動を前提に実装すること（→ [`training_impl_notes.md`](training_impl_notes.md) の通信設計原則を参照）。
+Python 側はこの挙動を前提に実装すること（→ [`impl_notes.md`](impl_notes.md) の通信設計原則を参照）。
 
 ---
 
