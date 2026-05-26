@@ -174,7 +174,8 @@ python export_onnx.py --game survivors --model models/survivors_model
 ## ゲームパラメータ（SurvivorsGame）
 
 カリキュラム学習で使用するパラメータ（`/params` エンドポイントで動的変更可能）。
-パラメータ一覧・通信設計・既知の注意事項は [`Tools/Training/docs/training_impl_notes.md`](Tools/Training/docs/training_impl_notes.md) を参照。
+定義・デフォルト値は `ReinBalance/Source/ReinBalance/Public/Survivors/Logic/SurvivorsGame.h` を参照。
+通信設計・既知の注意事項は [`Tools/Training/docs/training_impl_notes.md`](Tools/Training/docs/training_impl_notes.md) を参照。
 
 ---
 

@@ -49,18 +49,19 @@ n_envs=4、平均エピソード長 300 ステップの場合:
 
 HTTP 送信回数は訓練速度に直結する。不要な送信はパフォーマンスを 2 倍程度低下させることがある。
 
-### ゲームパラメータ一覧（Survivors / `/params`）
+### ゲームパラメータ（Survivors / `/params`）
 
-| パラメータ | 型 | デフォルト | 説明 |
-|---|---|---|---|
-| `MinActiveEnemies` | int | 4 | 毎ステップ即時維持する最小敵数 |
-| `MaxActiveEnemies` | int | 6 | 同時出現最大敵数 |
-| `EnemySpeedMult` | float | 1.0 | 敵速度倍率 |
-| `SpawnRateMult` | float | 1.0 | スポーンレート倍率 |
-| `MaxEnemyTypeId` | int | 10 | スポーン可能な敵 TypeId 上限（1=Bat のみ、10=全種） |
-| `EnemyHPScale` | float | 1.0 | 敵 HP 倍率（TimeScaling と乗算合成。0.1–10.0） |
-| `EnemyDamageScale` | float | 1.0 | 敵接触ダメージ倍率（TimeScaling と乗算合成。0.1–10.0） |
-| `TimeScalingEnabled` | bool | true | 時間経過による HP/ダメージ増加の有効化 |
+各パラメータの定義・デフォルト値・説明コメントは以下のファイルを Source of Truth とすること:
+
+```
+ReinBalance/Source/ReinBalance/Public/Survivors/Logic/SurvivorsGame.h
+```
+
+`/params` エンドポイントでの受信・適用処理は以下を参照:
+
+```
+ReinBalance/Source/ReinBalanceEditor/Private/Training/SurvivorsHttpEnvService.cpp
+```
 
 ---
 
