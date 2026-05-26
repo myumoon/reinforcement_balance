@@ -175,9 +175,10 @@ class SpalfCallback(BaseCallback):
             if self._total_episodes % 5 == 0 and len(self._alp_buffer) >= 10:
                 self._fit_gmm()
 
-            # 次のパラメータをサンプリングして全 env に適用
+            # 次のパラメータをサンプリングして env_idx のみに適用する。
+            # 他 env はエピソード途中のため送信不要（自身のエピソード終了時に受け取る）。
             new_params, new_vec = self._sample_next_params()
-            self._apply_params(new_params)
+            self._apply_params(new_params, env_idx=env_idx)
             self._current_param_vec = new_vec
             # env_idx の次エピソードは new_vec で開始する。
             # 他 env はまだ旧パラメータのエピソード途中なので _ep_start_param_vec を変えない。
@@ -310,7 +311,8 @@ class SpalfCallback(BaseCallback):
     # パラメータ適用
     # ------------------------------------------------------------------
 
-    def _apply_params(self, params: dict) -> None:
+    def _apply_params(self, params: dict, env_idx: Optional[int] = None) -> None:
+        """env_idx を指定すると該当 env のみに送信する。None の場合は全 env に送信する。"""
         ue5_params = dict(
             MinActiveEnemies=params["min_enemies"],
             MaxActiveEnemies=params["max_enemies"],
@@ -322,10 +324,12 @@ class SpalfCallback(BaseCallback):
             TimeScalingEnabled=params["time_scaling"],
         )
         if self.training_env is not None and self.training_env.num_envs > 1:
-            results = self.training_env.env_method("set_params", **ue5_params)
+            indices = [env_idx] if env_idx is not None else None
+            results = self.training_env.env_method("set_params", indices=indices, **ue5_params)
             failed = [i for i, r in enumerate(results) if not r]
             if failed:
-                print(f"[SPALF][ERROR] /params 適用失敗: env index {failed}")
+                actual_indices = [env_idx] if env_idx is not None else list(range(self.training_env.num_envs))
+                print(f"[SPALF][ERROR] /params 適用失敗: env index {[actual_indices[i] for i in failed]}")
         else:
             if self._raw_env is not None:
                 ok = self._raw_env.set_params(**ue5_params)
