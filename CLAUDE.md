@@ -173,18 +173,9 @@ python export_onnx.py --game survivors --model models/survivors_model
 
 ## ゲームパラメータ（SurvivorsGame）
 
-カリキュラム学習で使用するパラメータ（`/params` エンドポイントで動的変更可能）:
-
-| パラメータ | 型 | デフォルト | 説明 |
-|-----------|----|-----------|------|
-| MinActiveEnemies | int | 4 | 毎ステップ即時維持する最小敵数 |
-| MaxActiveEnemies | int | 6 | 同時出現最大敵数 |
-| EnemySpeedMult | float | 1.0 | 敵速度倍率 |
-| SpawnRateMult | float | 1.0 | スポーンレート倍率（通常スポーン部分） |
-| MaxEnemyTypeId | int | 10 | スポーン可能な敵 TypeId の上限（0=Bat のみ, 10=全種） |
-| EnemyHPScale | float | 1.0 | 敵HP倍率（TimeScaling と乗算合成。0.1-10.0） |
-| EnemyDamageScale | float | 1.0 | 敵接触ダメージ倍率（TimeScaling と乗算合成。0.1-10.0） |
-| TimeScalingEnabled | bool | true | 時間経過による HP/ダメージ増加の有効化 |
+カリキュラム学習で使用するパラメータ（`/params` エンドポイントで動的変更可能）。
+定義・デフォルト値は `ReinBalance/Source/ReinBalance/Public/Survivors/Logic/SurvivorsGame.h` を参照。
+通信設計・既知の注意事項は [`Tools/Training/docs/training_impl_notes.md`](Tools/Training/docs/training_impl_notes.md) を参照。
 
 ---
 
@@ -233,6 +224,8 @@ python train.py --game survivors --curriculum --total-steps 500000 \
 ```
 
 直近 `window` エピソードの `item_kill_score` 平均が `threshold` を超えると自動で敵数・速度・スポーン間隔が段階的に難化する。
+
+実装上の注意事項（コールバック・多並列環境・Resume・SPALF）は [`Tools/Training/docs/training_impl_notes.md`](Tools/Training/docs/training_impl_notes.md) を参照。
 
 ---
 
