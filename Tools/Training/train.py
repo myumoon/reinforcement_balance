@@ -783,6 +783,14 @@ def parse_args() -> argparse.Namespace:
                    help="NovelD 差分係数 α（default: 0.5）")
     p.add_argument("--ent-coef", type=float, default=0.01,
                    help="PPO エントロピー係数 (default: 0.01)")
+    p.add_argument("--n-epochs", type=int, default=None,
+                   help="PPO の勾配更新エポック数（default: 10）")
+    p.add_argument("--clip-range", type=float, default=None,
+                   help="PPO のクリップ範囲（default: 0.1）")
+    p.add_argument("--learning-rate", type=float, default=None,
+                   help="PPO の初期学習率・線形スケジュール（default: 3e-4）")
+    p.add_argument("--batch-size", type=int, default=None,
+                   help="PPO のミニバッチサイズ（default: 256）")
     p.add_argument("--device", default="auto",
                    help="SB3/PyTorch device (auto, cpu, cuda, cuda:0 など。default: auto)")
     p.add_argument("--frame-skip", type=int, default=1,
@@ -872,6 +880,14 @@ def main() -> None:
 
     _log_device_status(args.device)
     ppo_kwargs = {**_PPO_KWARGS, "ent_coef": args.ent_coef, "device": args.device, "n_steps": args.n_steps}
+    if args.n_epochs is not None:
+        ppo_kwargs["n_epochs"] = args.n_epochs
+    if args.clip_range is not None:
+        ppo_kwargs["clip_range"] = args.clip_range
+    if args.learning_rate is not None:
+        ppo_kwargs["learning_rate"] = _linear_schedule(args.learning_rate)
+    if args.batch_size is not None:
+        ppo_kwargs["batch_size"] = args.batch_size
 
     defaults = _GAME_DEFAULTS[args.game]
     port = args.port if args.port is not None else defaults["port"]
@@ -1032,9 +1048,7 @@ def main() -> None:
                 "spalf_max_score": args.spalf_max_score,
                 "config_hash": config_hash,
                 "tensorboard_log": str(log_dir / "tensorboard"),
-                **_PPO_KWARGS,
-                "n_steps": args.n_steps,      # _PPO_KWARGS のデフォルトを args 値で上書き
-                "ent_coef": args.ent_coef,    # 同上
+                **ppo_kwargs,
             },
         )
         if is_branch:
