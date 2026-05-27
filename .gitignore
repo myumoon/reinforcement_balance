@@ -52,6 +52,7 @@ Thumbs.db
 .claude/docs/
 .claude/plan/
 .claude/worktree-dev-review/
+.claude/task-state.json
 
 # ====================
 # ローカル

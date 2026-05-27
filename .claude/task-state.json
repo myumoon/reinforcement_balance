@@ -1,7 +1,0 @@
-{
-  "id": "A",
-  "description": "Survivors 汎用難易度指標 (survivors/difficulty_score, spalf/score_norm_over1_ratio) を W&B に追加する",
-  "status": "implementing",
-  "branch": "feature-a-20260527074219",
-  "iteration": 1
-}
