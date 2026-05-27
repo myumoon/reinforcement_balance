@@ -1059,6 +1059,12 @@ def main() -> None:
             _wandb_init_kwargs["id"] = wandb_run_id
             _wandb_init_kwargs["resume"] = "must" if wandb_run_id else None
         wandb.init(**_wandb_init_kwargs)
+        # カスタム wandb.log メトリクスの x 軸を global_step に統一する。
+        # sync_tensorboard=True の TensorBoard メトリクスは自動設定されるが、
+        # 手動 wandb.log で記録するメトリクスは define_metric が必要。
+        for _prefix in ("survivors/", "spalf/", "episode/", "behavior/",
+                         "curriculum/", "expl/", "eval/"):
+            wandb.define_metric(f"{_prefix}*", step_metric="global_step")
         # branch mode または新規 run のとき run_id を保存（continue mode は上書きしない）
         if is_branch or not wandb_run_id:
             _wandb_id_path.write_text(wandb.run.id)
