@@ -1,7 +1,0 @@
-{
-  "id": "A",
-  "description": "Tools/Training/ ディレクトリをゲーム別フォルダ構成にリファクタリング",
-  "status": "implementing",
-  "branch": "refactor-a-20260506091139",
-  "iteration": 1
-}

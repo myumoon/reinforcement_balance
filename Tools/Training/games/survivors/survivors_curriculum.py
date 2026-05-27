@@ -36,6 +36,8 @@ from base.curriculum import (
 )
 from stable_baselines3.common.callbacks import BaseCallback
 
+from games.survivors.survivors_difficulty import compute_difficulty_score
+
 
 @dataclass(frozen=True)
 class _Phase:
@@ -874,6 +876,16 @@ class CurriculumCallback(BaseCallback):
                     "curriculum/rollback_length_ratio": phase.rollback_length_ratio,
                     "curriculum/promotion_min_score_ratio": phase.promotion_min_score_ratio,
                     "curriculum/promotion_max_score_cv": phase.promotion_max_score_cv,
+                    "survivors/difficulty_score": compute_difficulty_score({
+                        "min_enemies":        phase.min_enemies,
+                        "max_enemies":        phase.max_enemies,
+                        "speed_mult":         phase.speed_mult,
+                        "spawn_rate_mult":    phase.spawn_rate_mult,
+                        "max_enemy_type_id":  phase.max_enemy_type_id,
+                        "enemy_hp_scale":     phase.enemy_hp_scale,
+                        "enemy_damage_scale": phase.enemy_damage_scale,
+                        "time_scaling":       phase.time_scaling,
+                    }),
                 }
                 if mean_len is not None:
                     payload["curriculum/episode_length_mean"] = mean_len

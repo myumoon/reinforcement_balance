@@ -22,6 +22,8 @@ from typing import Optional
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 
+from games.survivors.survivors_difficulty import compute_difficulty_score
+
 # パラメータ空間の定義（PHASES 最大値を超えた領域も探索）
 _PARAM_BOUNDS: dict[str, tuple] = {
     "min_enemies":        (4,    80),
@@ -378,6 +380,11 @@ class SpalfCallback(BaseCallback):
             "spalf/current_enemy_hp_scale":     self._current_params.get("enemy_hp_scale", 0.0),
             "spalf/current_enemy_damage_scale": self._current_params.get("enemy_damage_scale", 0.0),
             "spalf/current_time_scaling":       int(bool(self._current_params.get("time_scaling", False))),
+            "survivors/difficulty_score":       compute_difficulty_score(self._current_params),
+            "spalf/score_norm_over1_ratio":     (
+                sum(1 for s in self._recent_reward_buffer if s > 1.0) / len(self._recent_reward_buffer)
+                if self._recent_reward_buffer else 0.0
+            ),
         }
 
     def _log_wandb_on_episode_end(

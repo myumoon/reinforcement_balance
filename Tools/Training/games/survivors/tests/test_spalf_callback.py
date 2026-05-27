@@ -177,3 +177,22 @@ class TestSaveStatus:
     def test_no_error_when_path_none(self):
         cb = _make_cb(status_path=None)
         cb._save_status()  # エラーにならないこと
+
+
+class TestDifficultyMetrics:
+    def test_difficulty_score_in_metrics(self):
+        cb = _make_cb()
+        metrics = cb.get_wandb_progress_metrics()
+        assert "survivors/difficulty_score" in metrics
+        assert metrics["survivors/difficulty_score"] >= 0.0
+
+    def test_score_norm_over1_ratio_empty_buffer(self):
+        cb = _make_cb()
+        metrics = cb.get_wandb_progress_metrics()
+        assert metrics["spalf/score_norm_over1_ratio"] == 0.0
+
+    def test_score_norm_over1_ratio(self):
+        cb = _make_cb()
+        cb._recent_reward_buffer.extend([0.5, 1.2, 0.8, 1.5, 0.3])
+        metrics = cb.get_wandb_progress_metrics()
+        assert abs(metrics["spalf/score_norm_over1_ratio"] - 0.4) < 1e-6
