@@ -137,6 +137,7 @@ class SpalfCallback(BaseCallback):
 
         ep_active_scores: list[float] = []
         ep_score_norms: list[float] = []
+        ep_has_warmup: bool = False
 
         for env_idx, info in enumerate(infos):
             self._ep_base_per_env[env_idx] += info.get("base_reward", 0.0)
@@ -162,6 +163,7 @@ class SpalfCallback(BaseCallback):
             if self._total_episodes <= self._warmup_episodes:
                 ep_active_scores.append(active_score)
                 ep_score_norms.append(score_norm)
+                ep_has_warmup = True
                 continue
 
             # ALP 計算: このエピソードが「開始した時点のパラメータ」を使う。
@@ -199,7 +201,7 @@ class SpalfCallback(BaseCallback):
 
         # W&B ログ: 同一 num_timesteps で複数回呼ばれないよう、ステップ末尾に 1 回だけ実行
         if ep_active_scores:
-            self._log_wandb_per_step(ep_active_scores, ep_score_norms)
+            self._log_wandb_per_step(ep_active_scores, ep_score_norms, ep_has_warmup)
 
         return True
 
@@ -396,13 +398,15 @@ class SpalfCallback(BaseCallback):
         }
 
     def _log_wandb_per_step(
-        self, active_scores: list[float], score_norms: list[float]
+        self, active_scores: list[float], score_norms: list[float], has_warmup: bool = False
     ) -> None:
         try:
             import wandb
             if not wandb.run:
                 return
             metrics = self.get_wandb_progress_metrics()
+            if has_warmup:
+                metrics["spalf/mode"] = 0
             metrics.update({
                 "survivors/active_score":     sum(active_scores) / len(active_scores),
                 "survivors/score_normalized": sum(score_norms) / len(score_norms),
