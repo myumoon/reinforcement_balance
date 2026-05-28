@@ -22,19 +22,10 @@ from typing import Optional
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 
-from games.survivors.survivors_difficulty import compute_difficulty_score
+from games.survivors.survivors_difficulty import PARAM_BOUNDS, compute_difficulty_score
 
-# パラメータ空間の定義（PHASES 最大値を超えた領域も探索）
-_PARAM_BOUNDS: dict[str, tuple] = {
-    "min_enemies":        (4,    80),
-    "max_enemies":        (6,   300),
-    "speed_mult":         (0.8,  1.2),   # VS 本編でも高難易度で敵は遅いため上限は 1.2
-    "spawn_rate_mult":    (1.0,  6.0),
-    "max_enemy_type_id":  (1,    10),
-    "enemy_hp_scale":     (0.5,  4.0),
-    "enemy_damage_scale": (0.5,  4.0),
-    "time_scaling":       (0.0,  1.0),   # 0.5 以上で True
-}
+# SPALF 探索範囲 = difficulty_score 正規化範囲（survivors_difficulty.PARAM_BOUNDS と同一）
+_PARAM_BOUNDS = PARAM_BOUNDS
 
 _PARAM_KEYS = list(_PARAM_BOUNDS.keys())
 _N_PARAMS = len(_PARAM_KEYS)
