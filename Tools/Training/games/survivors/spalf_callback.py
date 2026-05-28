@@ -135,6 +135,10 @@ class SpalfCallback(BaseCallback):
         if len(self._ep_start_param_vec_per_env) != n_envs:
             self._ep_start_param_vec_per_env = [self._current_param_vec.copy() for _ in range(n_envs)]
 
+        ep_active_scores: list[float] = []
+        ep_score_norms: list[float] = []
+        ep_has_warmup: bool = False
+
         for env_idx, info in enumerate(infos):
             self._ep_base_per_env[env_idx] += info.get("base_reward", 0.0)
 
@@ -157,7 +161,9 @@ class SpalfCallback(BaseCallback):
 
             # warm-up 期間はバッファ更新・パラメータ変更をスキップ
             if self._total_episodes <= self._warmup_episodes:
-                self._log_wandb_on_episode_end(active_score, score_norm, warmup=True)
+                ep_active_scores.append(active_score)
+                ep_score_norms.append(score_norm)
+                ep_has_warmup = True
                 continue
 
             # ALP 計算: このエピソードが「開始した時点のパラメータ」を使う。
@@ -186,12 +192,16 @@ class SpalfCallback(BaseCallback):
             # 他 env はまだ旧パラメータのエピソード途中なので _ep_start_param_vec を変えない。
             self._ep_start_param_vec_per_env[env_idx] = new_vec.copy()
 
-            # W&B ログ
-            self._log_wandb_on_episode_end(active_score, score_norm, warmup=False)
+            ep_active_scores.append(active_score)
+            ep_score_norms.append(score_norm)
 
             # spalf_state.json 保存（50 エピソードごと）
             if self._total_episodes % 50 == 0 and self._status_path is not None:
                 self._save_status()
+
+        # W&B ログ: 同一 num_timesteps で複数回呼ばれないよう、ステップ末尾に 1 回だけ実行
+        if ep_active_scores:
+            self._log_wandb_per_step(ep_active_scores, ep_score_norms, ep_has_warmup)
 
         return True
 
@@ -387,19 +397,19 @@ class SpalfCallback(BaseCallback):
             ),
         }
 
-    def _log_wandb_on_episode_end(
-        self, active_score: float, score_norm: float, warmup: bool
+    def _log_wandb_per_step(
+        self, active_scores: list[float], score_norms: list[float], has_warmup: bool = False
     ) -> None:
         try:
             import wandb
             if not wandb.run:
                 return
-            mode = 0 if warmup else (1 if self._use_spalf_mode else 2)
             metrics = self.get_wandb_progress_metrics()
+            if has_warmup:
+                metrics["spalf/mode"] = 0
             metrics.update({
-                "survivors/active_score": active_score,
-                "survivors/score_normalized": score_norm,
-                "spalf/mode": mode,
+                "survivors/active_score":     sum(active_scores) / len(active_scores),
+                "survivors/score_normalized": sum(score_norms) / len(score_norms),
                 "global_step": self.num_timesteps,
             })
             wandb.log(metrics, step=self.num_timesteps)
