@@ -4,11 +4,13 @@ CurriculumCallback・SpalfCallback 両方から使用できる汎用関数を提
 """
 from __future__ import annotations
 
-# 難易度スコアの基準となるパラメーター範囲: (min, max) のタプル。
+# パラメーター範囲: (min, max) のタプル。SPALF の探索範囲かつ difficulty_score の正規化基準。
 # min: PHASES[0]（入門）の値 → difficulty_score = 0.0 相当
 # max: PHASES[-1]（Mad Forest）の値 → difficulty_score = 1.0 相当
 # PHASES を変更した場合はここも合わせて更新すること。
-_PARAM_DIFFICULTY_RANGE: dict[str, tuple[float, float]] = {
+# spalf_callback.py がこのテーブルを _PARAM_BOUNDS としてインポートするため、
+# 両ファイルで探索範囲・スコア計算範囲が常に一致する。
+PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "min_enemies":        ( 4.0,  40.0),
     "max_enemies":        ( 6.0, 150.0),
     "speed_mult":         ( 0.8,   1.2),
@@ -19,8 +21,8 @@ _PARAM_DIFFICULTY_RANGE: dict[str, tuple[float, float]] = {
     "time_scaling":       ( 0.0,   1.0),
 }
 
-_PARAM_DIFFICULTY_MIN: dict[str, float] = {k: v[0] for k, v in _PARAM_DIFFICULTY_RANGE.items()}
-_PARAM_DIFFICULTY_MAX: dict[str, float] = {k: v[1] for k, v in _PARAM_DIFFICULTY_RANGE.items()}
+_PARAM_DIFFICULTY_MIN: dict[str, float] = {k: v[0] for k, v in PARAM_BOUNDS.items()}
+_PARAM_DIFFICULTY_MAX: dict[str, float] = {k: v[1] for k, v in PARAM_BOUNDS.items()}
 
 # 難易度スコアの重み（正規化後の加重平均に使用）。
 PARAM_DIFFICULTY_WEIGHTS: dict[str, float] = {
@@ -50,7 +52,7 @@ def compute_difficulty_score(params: dict) -> float:
     """
     weighted_sum = 0.0
     total_weight = 0.0
-    for key, (min_val, max_val) in _PARAM_DIFFICULTY_RANGE.items():
+    for key, (min_val, max_val) in PARAM_BOUNDS.items():
         if max_val <= min_val:
             continue
         val = params.get(key, min_val)
