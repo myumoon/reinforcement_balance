@@ -25,6 +25,22 @@ ReinBalance/Source/ReinBalanceEditor/ReinBalanceEditor.Build.cs
 | ReinBalance | Runtime | Core, Engine, EnhancedInput, NNERuntimeORT |
 | ReinBalanceEditor | Editor | ReinBalance, HTTPServer, HTTP, Json |
 
+## Python 環境
+
+conda は Windows 側 (Anaconda) にインストールされており、WSL からは直接 `conda` コマンドは使えない。
+
+| 用途 | パス |
+|------|------|
+| Python 実行ファイル (WSL) | `/mnt/c/Users/neko/anaconda3/envs/reinbalance/python.exe` |
+| Python 実行ファイル (Windows) | `C:\Users\neko\anaconda3\envs\reinbalance\python.exe` |
+| conda 本体 (WSL) | `/mnt/c/Users/neko/anaconda3/Scripts/conda.exe` |
+
+WSL から Python スクリプトを実行するときは以下のように呼び出す:
+
+```bash
+/mnt/c/Users/neko/anaconda3/envs/reinbalance/python.exe <script>.py
+```
+
 ## エンジン設定
 
 `ReinBalance/Config/DefaultEngine.ini` および関連 `.ini` を参照。
