@@ -43,12 +43,15 @@ class SpalfCallback(BaseCallback):
         n = self.training_env.num_envs if self.training_env is not None else 1
         self._param_applier.set_training_env(self.training_env)
         self._score_tracker.reset(n)
-        initial_params = dict(_PHASE0_PARAMS)
+        # resume 時は import_state() で _current_params が復元済みのため上書きしない
+        if self._spalf._current_params is None:
+            self._spalf._current_params = dict(_PHASE0_PARAMS)
+        initial_params = self._spalf._current_params
         self._param_applier.apply(initial_params)
         initial_vec = self._spalf.params_to_vec(initial_params)
         self._ep_start_param_vec_per_env = [initial_vec.copy() for _ in range(n)]
-        self._spalf._current_params = initial_params
-        self._spalf._current_param_vec = initial_vec
+        if self._spalf._current_param_vec is None:
+            self._spalf._current_param_vec = initial_vec
 
     def _on_step(self) -> bool:
         n_envs = len(self.locals["infos"])

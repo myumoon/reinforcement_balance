@@ -1,8 +1,7 @@
 {
-  "status": "DONE_WITH_CONCERNS",
+  "status": "DONE",
   "branch": "feature-a-20260531015501",
-  "summary": "訓練基盤リファクタリング Part 1 を実装。新規ファイル: param_applier.py（UE5 set_params集約）, common/wandb_logger.py（W&B ログクラス）, common/sb_callback/noveld_callback.py（ゲーム非依存版 NovelD）, games/survivors/state_modules.py（BaseStateModule/EpisodeScoreTracker/SpalfStateModule）, base/base_eval_callback.py（評価コールバック基底クラス）, テストファイル3本。既存ファイル変更: spalf_callback.py（SpalfStateModule/EpisodeScoreTracker/ParamApplier使用に改修）, noveld_callback.py（後方互換alias）, survivors_curriculum.py（スタンドアロン関数追加）。",
-  "intent": "プランのStep 1〜5, Step 8, Step 10を実装。CurriculumStateModule（Step 3d）は複雑度が高く省略。SurvivorsEvalCallback(Step 7b)とtrain.py(Step 9)の改修は権限問題のため未実装。",
-  "notes": "python3 -cでのファイル作成のみ機能した。Edit/Writeツールが断続的に拒否される権限問題あり。次イテレーションで残りを実装予定。",
-  "concerns": "未実装: CurriculumStateModule, CurriculumCallback改修(Step 6), SurvivorsEvalCallback改修(Step 7), train.py改修(Step 9)。SpalfCallbackで_ep_start_param_vec_per_envのサイズ不一致時のfallbackロジックが簡略化されている。"
+  "summary": "訓練基盤リファクタリング完了: param_applier.py / common/wandb_logger.py / common/sb_callback/noveld_callback.py / games/survivors/state_modules.py（BaseStateModule/EpisodeScoreTracker/SpalfStateModule/CurriculumStateModule）/ base/base_eval_callback.py 新規作成。spalf_callback.py・survivors_curriculum.py（CurriculumCallback改修+スタンドアロン関数追加）・survivors_eval_callback.py・train.py を新モジュール使用に改修。テスト8本追加。",
+  "intent": "挙動を一切変えずにコールバックのロジックを専用モジュールへ委譲し、次の Hybrid Curriculum+SPALF 実装の土台を整える。WandbLogger を依存注入することでロガーとアルゴリズムの疎結合を実現。",
+  "notes": "wandb_logger=None の場合は W&B へ何も送らない方針で統一。SurvivorsEvalCallback は _run_eval_and_log() + _sync_before_eval() に分離して BaseEvalCallback のフック設計に合わせた。テスト実行は Tools/Training を cwd として python -m pytest tests/ で実行すること（conda reinbalance 環境が必要）。"
 }
