@@ -791,6 +791,8 @@ def parse_args() -> argparse.Namespace:
                    help="PPO の初期学習率・線形スケジュール（default: 3e-4）")
     p.add_argument("--batch-size", type=int, default=None,
                    help="PPO のミニバッチサイズ（default: 256）")
+    p.add_argument("--target-kl", type=float, default=None,
+                   help="PPO の early stopping 閾値。approx_kl がこの値を超えると更新を打ち切る（default: None = 無効）")
     p.add_argument("--device", default="auto",
                    help="SB3/PyTorch device (auto, cpu, cuda, cuda:0 など。default: auto)")
     p.add_argument("--frame-skip", type=int, default=1,
@@ -888,6 +890,8 @@ def main() -> None:
         ppo_kwargs["learning_rate"] = _linear_schedule(args.learning_rate)
     if args.batch_size is not None:
         ppo_kwargs["batch_size"] = args.batch_size
+    if args.target_kl is not None:
+        ppo_kwargs["target_kl"] = args.target_kl
 
     defaults = _GAME_DEFAULTS[args.game]
     port = args.port if args.port is not None else defaults["port"]
