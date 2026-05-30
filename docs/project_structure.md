@@ -29,17 +29,20 @@ ReinBalance/Source/ReinBalanceEditor/ReinBalanceEditor.Build.cs
 
 conda は Windows 側 (Anaconda) にインストールされており、WSL からは直接 `conda` コマンドは使えない。
 
-| 用途 | パス |
-|------|------|
-| Python 実行ファイル (WSL) | `/mnt/c/Users/neko/anaconda3/envs/reinbalance/python.exe` |
-| Python 実行ファイル (Windows) | `C:\Users\neko\anaconda3\envs\reinbalance\python.exe` |
-| conda 本体 (WSL) | `/mnt/c/Users/neko/anaconda3/Scripts/conda.exe` |
-
-WSL から Python スクリプトを実行するときは以下のように呼び出す:
+**初回セットアップ（一度だけ実行）:**
 
 ```bash
-/mnt/c/Users/neko/anaconda3/envs/reinbalance/python.exe <script>.py
+bash Tools/setup_wsl.sh
+source ~/.bashrc   # zsh の場合は source ~/.zshrc
 ```
+
+セットアップ後は `python` / `python3` コマンドが reinbalance 環境を指す。
+
+| 用途 | パス |
+|------|------|
+| セットアップスクリプト | `Tools/setup_wsl.sh` |
+| Python 実行ファイル (Windows) | `%USERPROFILE%\anaconda3\envs\reinbalance\python.exe` |
+| conda 本体 (Windows) | `%USERPROFILE%\anaconda3\Scripts\conda.exe` |
 
 ## エンジン設定
 
