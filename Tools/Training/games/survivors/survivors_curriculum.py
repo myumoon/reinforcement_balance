@@ -895,3 +895,60 @@ class CurriculumCallback(BaseCallback):
                 wandb.log(payload, step=self.num_timesteps)
         except ImportError:
             pass
+
+
+def promotion_judgment(phase, mean: float, mean_len: float, score_min: float, score_std: float,
+                        effective_threshold: float, window: int, recent_count: int,
+                        recent_scores=None) -> tuple:
+    from base.curriculum import percentile as _percentile
+    if phase.threshold is None or recent_count < window:
+        return False, ""
+    if mean < effective_threshold:
+        return False, f"score_mean={mean:.3f} < threshold={effective_threshold:.3f}"
+    if mean_len < phase.min_episode_steps:
+        return False, f"ep_len={mean_len:.1f} < min_episode_steps={phase.min_episode_steps}"
+    if phase.promotion_score_stat == "percentile" and recent_scores is not None:
+        low_score = _percentile(recent_scores, phase.promotion_score_percentile)
+        low_stat_label = f"score_p{int(phase.promotion_score_percentile)}"
+    else:
+        low_score = score_min
+        low_stat_label = "score_min"
+    min_score_floor = effective_threshold * phase.promotion_min_score_ratio
+    if low_score < min_score_floor:
+        return False, f"{low_stat_label}={low_score:.3f} < promotion_min_score_floor={min_score_floor:.3f}"
+    score_cv = score_std / max(mean, 1e-8)
+    if score_cv > phase.promotion_max_score_cv:
+        return False, f"score_cv={score_cv:.3f} > promotion_max_score_cv={phase.promotion_max_score_cv:.3f}"
+    return True, f"{low_stat_label}={low_score:.3f} >= {min_score_floor:.3f}, score_cv={score_cv:.3f} <= {phase.promotion_max_score_cv:.3f}"
+
+
+def rollback_floors(phase, effective_threshold: float, threshold_mult: float) -> tuple:
+    if phase.threshold is not None:
+        score_floor = effective_threshold * phase.rollback_score_ratio
+    elif phase.rollback_reference_threshold is not None:
+        score_floor = (
+            phase.rollback_reference_threshold
+            * threshold_mult
+            * phase.rollback_score_ratio
+        )
+    else:
+        score_floor = None
+    length_floor = (
+        phase.min_episode_steps * phase.rollback_length_ratio
+        if phase.min_episode_steps > 0
+        else None
+    )
+    return score_floor, length_floor
+
+
+def should_rollback(phase, phase_idx: int, mean: float, mean_len: float,
+                    effective_threshold: float, threshold_mult: float,
+                    rollback_min_episodes: int, recent_count: int) -> tuple:
+    if phase_idx <= 0 or recent_count < rollback_min_episodes:
+        return False, ""
+    score_floor, length_floor = rollback_floors(phase, effective_threshold, threshold_mult)
+    if score_floor is not None and mean < score_floor:
+        return True, f"score={mean:.3f} < rollback_score_floor={score_floor:.3f}"
+    if length_floor is not None and mean_len < length_floor:
+        return True, f"ep_len={mean_len:.1f} < rollback_length_floor={length_floor:.1f}"
+    return False, ""
