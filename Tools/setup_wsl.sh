@@ -19,7 +19,8 @@ if grep -q "$MARKER" "$RC_FILE" 2>/dev/null; then
 fi
 
 # Windows ホームディレクトリを取得
-WIN_HOME=$(wslpath "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')")
+_WIN_HOME_WIN=$(cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r\n')
+WIN_HOME=$(wslpath "$_WIN_HOME_WIN")
 
 # conda env の存在確認
 PYTHON_PATH="$WIN_HOME/anaconda3/envs/reinbalance/python.exe"
@@ -29,12 +30,13 @@ if [ ! -f "$PYTHON_PATH" ]; then
     exit 1
 fi
 
-# RC ファイルに追記
+# RC ファイルに追記（シェル起動時に毎回 Windows ホームを解決する）
 cat >> "$RC_FILE" << 'EOF'
 
 # reinbalance WSL setup
-WIN_HOME=$(wslpath "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')")
-export PATH="$WIN_HOME/anaconda3/envs/reinbalance:$WIN_HOME/anaconda3/envs/reinbalance/Scripts:$PATH"
+_WIN_HOME_WIN=$(cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r\n')
+export PATH="$(wslpath "$_WIN_HOME_WIN")/anaconda3/envs/reinbalance:$(wslpath "$_WIN_HOME_WIN")/anaconda3/envs/reinbalance/Scripts:$PATH"
+unset _WIN_HOME_WIN
 alias python3=python
 EOF
 
