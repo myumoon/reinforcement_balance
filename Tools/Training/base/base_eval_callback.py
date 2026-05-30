@@ -27,7 +27,7 @@ class BaseEvalCallback(BaseCallback):
         self.eval_freq = max(1, eval_freq)
         self.n_eval_episodes = max(1, n_eval_episodes)
         self._wandb_logger = wandb_logger
-        self._last_eval_step: int = -max(1, eval_freq)
+        self._last_eval_step: int = 0
 
     def _on_step(self) -> bool:
         return True

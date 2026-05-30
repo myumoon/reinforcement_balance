@@ -362,7 +362,7 @@ class CurriculumCallback(BaseCallback):
         terminated = int(diagnostics.get("terminated_episodes", 0) or 0)
         truncated = int(diagnostics.get("truncated_episodes", 0) or 0)
         phase = PHASES[self._curriculum.current_phase]
-        blocker = self._compute_blocker_category(window=window, phase_threshold_is_none=(phase.threshold is None))
+        blocker = self._compute_blocker_category(window_dict=window, phase_threshold_is_none=(phase.threshold is None))
         return {
             "survivors/active_score_mean": window.get("active_score_mean"),
             "survivors/active_score_min": window.get("active_score_min"),
