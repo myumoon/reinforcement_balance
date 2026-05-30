@@ -29,24 +29,20 @@ ReinBalance/Source/ReinBalanceEditor/ReinBalanceEditor.Build.cs
 
 conda は Windows 側 (Anaconda) にインストールされており、WSL からは直接 `conda` コマンドは使えない。
 
-WSL から Windows ホームディレクトリを取得するには `cmd.exe` と `wslpath` を組み合わせる:
+**初回セットアップ（一度だけ実行）:**
 
 ```bash
-WIN_HOME=$(wslpath "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')")
+bash Tools/setup_wsl.sh
+source ~/.bashrc   # zsh の場合は source ~/.zshrc
 ```
+
+セットアップ後は `python` / `python3` コマンドが reinbalance 環境を指す。
 
 | 用途 | パス |
 |------|------|
-| Python 実行ファイル (WSL) | `$WIN_HOME/anaconda3/envs/reinbalance/python.exe` |
+| セットアップスクリプト | `Tools/setup_wsl.sh` |
 | Python 実行ファイル (Windows) | `%USERPROFILE%\anaconda3\envs\reinbalance\python.exe` |
-| conda 本体 (WSL) | `$WIN_HOME/anaconda3/Scripts/conda.exe` |
-
-WSL から Python スクリプトを実行するときは以下のように呼び出す:
-
-```bash
-WIN_HOME=$(wslpath "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')")
-$WIN_HOME/anaconda3/envs/reinbalance/python.exe <script>.py
-```
+| conda 本体 (Windows) | `%USERPROFILE%\anaconda3\Scripts\conda.exe` |
 
 ## エンジン設定
 
