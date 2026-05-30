@@ -8,7 +8,7 @@ _TRAINING_ROOT = Path(__file__).resolve().parent.parent
 if str(_TRAINING_ROOT) not in sys.path:
     sys.path.insert(0, str(_TRAINING_ROOT))
 
-from games.survivors.state_modules import EpisodeScoreTracker, SpalfStateModule, _PHASE0_PARAMS
+from games.survivors.state_modules import EpisodeScoreTracker, SpalfStateModule, CurriculumStateModule, _PHASE0_PARAMS
 
 
 class TestEpisodeScoreTracker:
@@ -84,3 +84,72 @@ class TestSpalfStateModuleRoundtrip:
         assert np.all(vec >= 0.0) and np.all(vec <= 1.0)
         params_back = m.vec_to_params(vec)
         assert params_back["min_enemies"] == _PHASE0_PARAMS["min_enemies"]
+
+
+class TestCurriculumStateModule:
+    def _make(self, window=3):
+        return CurriculumStateModule(window=window, threshold_mult=1.0, rollback_patience=2)
+
+    def test_initial_state(self):
+        m = self._make()
+        assert m.current_phase == 0
+        assert not m.is_final_phase
+
+    def test_advance(self):
+        """十分なスコアが続いた場合にフェーズが昇格すること。"""
+        m = self._make(window=3)
+        phase0 = m._PHASES[0]
+        threshold = (phase0.threshold or float("inf")) * m.threshold_mult
+        high_score = threshold * 2.0
+        for _ in range(3):
+            m.on_episode_end(high_score, ep_len=3000)
+        result = m.check_phase_transition()
+        assert result == "advance"
+        assert m.current_phase == 1
+
+    def test_rollback(self):
+        """スコアが低い状態が rollback_patience 回続いた場合にフェーズが降格すること。"""
+        m = self._make(window=3)
+        # まず phase 1 に昇格させる
+        phase0 = m._PHASES[0]
+        high_score = (phase0.threshold or 1.0) * 2.0
+        for _ in range(3):
+            m.on_episode_end(high_score, ep_len=3000)
+        m.check_phase_transition()
+        assert m.current_phase == 1
+        # phase 1 の rollback_score_floor を下回るスコアを入れる
+        phase1 = m._PHASES[1]
+        threshold1 = (phase1.threshold or 1.0) * m.threshold_mult
+        floor = threshold1 * phase1.rollback_score_ratio
+        low_score = floor * 0.5
+        for _ in range(3):
+            m.on_episode_end(low_score, ep_len=100)
+        m.check_phase_transition()  # bad window 1
+        for _ in range(3):
+            m.on_episode_end(low_score, ep_len=100)
+        result = m.check_phase_transition()  # bad window 2 → rollback
+        assert result == "rollback"
+        assert m.current_phase == 0
+
+    def test_export_import_roundtrip(self):
+        """export_state / import_state が状態を正確に復元すること。"""
+        m = self._make(window=5)
+        for i in range(3):
+            m.on_episode_end(float(i * 100), ep_len=1000)
+        state = m.export_state()
+        m2 = self._make(window=5)
+        m2.import_state(state)
+        assert m2.phase_idx == m.current_phase
+        assert m2._rollback_bad_windows == m._rollback_bad_windows
+        assert len(m2._scores) == len(m._scores)
+
+    def test_export_keys(self):
+        """export_state が必要なキーをすべて含むこと（resume 互換性）。"""
+        m = self._make()
+        state = m.export_state()
+        required_keys = {
+            "phase_idx", "phase_name", "scores_window", "rollback_bad_windows",
+            "episode_scores", "episode_lengths", "steps_in_phase", "episodes_in_phase",
+        }
+        for key in required_keys:
+            assert key in state, f"missing key: {key}"

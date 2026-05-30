@@ -295,3 +295,531 @@ class SpalfStateModule(BaseStateModule):
         )
 
 
+
+
+class CurriculumStateModule(BaseStateModule):
+    """カリキュラムのフェーズ管理・昇格・ロールバックロジックを担当するステートモジュール。
+
+    CurriculumCallback からフェーズ遷移ロジックを分離したクラス。
+    フェーズ定義 (PHASES) と判定ロジックは survivors_curriculum から参照する。
+    """
+
+    def __init__(
+        self,
+        window: int,
+        threshold_mult: float,
+        rollback_patience: int = 3,
+        status_path=None,
+    ):
+        from games.survivors.survivors_curriculum import PHASES
+        self._PHASES = PHASES
+        self.window = window
+        self.threshold_mult = threshold_mult
+        self.rollback_patience = rollback_patience
+        self.rollback_min_episodes = max(5, window // 2)
+        self._status_path = status_path
+
+        self._phase_idx: int = 0
+        self._scores: list[float] = []
+        self._rollback_bad_windows: int = 0
+        self._episode_scores: list[float] = []
+        self._episode_lengths: list[int] = []
+        self._episode_base_rewards: list[float] = []
+        self._episode_alive_rewards: list[float] = []
+        self._terminated_count: int = 0
+        self._truncated_count: int = 0
+        self._phase_events: list[dict] = []
+        self._steps_in_phase: int = 0
+        self._episodes_in_phase: int = 0
+        self._missing_episode_info_count: int = 0
+
+        self._completion_window: int = window
+        self._completion_min_episodes: int = window
+        self._completion_min_score_ratio: float = 1.0
+        self._completion_min_episode_len_ratio: float = 1.0
+
+    @property
+    def current_phase(self) -> int:
+        return self._phase_idx
+
+    @property
+    def is_final_phase(self) -> bool:
+        return self._phase_idx >= len(self._PHASES) - 1
+
+    def configure_completion(self, window, min_episodes, min_score_ratio, min_episode_len_ratio):
+        self._completion_window = max(1, int(window))
+        self._completion_min_episodes = max(1, int(min_episodes))
+        self._completion_min_score_ratio = max(0.0, float(min_score_ratio))
+        self._completion_min_episode_len_ratio = max(0.0, float(min_episode_len_ratio))
+
+    def on_episode_end(self, active_score: float, ep_len: int) -> None:
+        self._scores.append(active_score)
+        self._episode_scores.append(active_score)
+        self._episode_lengths.append(ep_len)
+        self._episodes_in_phase += 1
+
+    def check_phase_transition(self):
+        from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
+        phase = self._PHASES[self._phase_idx]
+        effective_threshold = (phase.threshold or float("inf")) * self.threshold_mult
+        recent_scores = self._scores[-min(len(self._scores), self.window):]
+        recent_lengths = self._episode_lengths[-len(recent_scores):] if recent_scores else []
+        mean = _mean(recent_scores)
+        mean_len = _mean([float(v) for v in recent_lengths])
+        score_min = min(recent_scores) if recent_scores else 0.0
+        score_std = _stdev(recent_scores)
+        self.save_status()
+        if len(self._scores) < self.window:
+            return None
+        rollback, reason = self._should_rollback(phase, mean, mean_len, effective_threshold, len(recent_scores))
+        if rollback:
+            self._rollback_bad_windows += 1
+            if self._rollback_bad_windows >= self.rollback_patience:
+                self._rollback_phase(mean, effective_threshold, mean_len, reason)
+                return "rollback"
+        else:
+            self._rollback_bad_windows = 0
+        can_promote, promotion_reason = self._promotion_judgment(phase, mean, mean_len, score_min, score_std, effective_threshold, len(recent_scores), recent_scores)
+        if can_promote:
+            self._advance_phase(mean, effective_threshold, promotion_reason)
+            return "advance"
+        return None
+
+    def _should_rollback(self, phase, mean, mean_len, effective_threshold, recent_count):
+        if self._phase_idx <= 0 or recent_count < self.rollback_min_episodes:
+            return False, ""
+        score_floor, length_floor = self._rollback_floors(phase, effective_threshold)
+        if score_floor is not None and mean < score_floor:
+            return True, f"score={mean:.3f} < rollback_score_floor={score_floor:.3f}"
+        if length_floor is not None and mean_len < length_floor:
+            return True, f"ep_len={mean_len:.1f} < rollback_length_floor={length_floor:.1f}"
+        return False, ""
+
+    def _rollback_floors(self, phase, effective_threshold):
+        if phase.threshold is not None:
+            score_floor = effective_threshold * phase.rollback_score_ratio
+        elif phase.rollback_reference_threshold is not None:
+            score_floor = phase.rollback_reference_threshold * self.threshold_mult * phase.rollback_score_ratio
+        else:
+            score_floor = None
+        length_floor = (phase.min_episode_steps * phase.rollback_length_ratio if phase.min_episode_steps > 0 else None)
+        return score_floor, length_floor
+
+    def _promotion_judgment(self, phase, mean, mean_len, score_min, score_std, effective_threshold, recent_count, recent_scores=None):
+        from base.curriculum import percentile as _percentile
+        if phase.threshold is None or recent_count < self.window:
+            return False, ""
+        if mean < effective_threshold:
+            return False, f"score_mean={mean:.3f} < threshold={effective_threshold:.3f}"
+        if mean_len < phase.min_episode_steps:
+            return False, f"ep_len={mean_len:.1f} < min_episode_steps={phase.min_episode_steps}"
+        if phase.promotion_score_stat == "percentile" and recent_scores is not None:
+            low_score = _percentile(recent_scores, phase.promotion_score_percentile)
+            low_stat_label = f"score_p{int(phase.promotion_score_percentile)}"
+        else:
+            low_score = score_min
+            low_stat_label = "score_min"
+        min_score_floor = effective_threshold * phase.promotion_min_score_ratio
+        if low_score < min_score_floor:
+            return False, f"{low_stat_label}={low_score:.3f} < promotion_min_score_floor={min_score_floor:.3f}"
+        score_cv = score_std / max(mean, 1e-8)
+        if score_cv > phase.promotion_max_score_cv:
+            return False, f"score_cv={score_cv:.3f} > promotion_max_score_cv={phase.promotion_max_score_cv:.3f}"
+        return True, f"{low_stat_label}={low_score:.3f} >= {min_score_floor:.3f}, score_cv={score_cv:.3f} <= {phase.promotion_max_score_cv:.3f}"
+
+    def _advance_phase(self, mean, threshold, reason):
+        prev_name = self._PHASES[self._phase_idx].name
+        prev_idx = self._phase_idx
+        self._phase_idx = min(self._phase_idx + 1, len(self._PHASES) - 1)
+        self._scores.clear()
+        self._rollback_bad_windows = 0
+        self._steps_in_phase = 0
+        self._episodes_in_phase = 0
+        next_phase = self._PHASES[self._phase_idx]
+        self._phase_events.append({"event": "advance", "from_phase_idx": prev_idx, "from_phase_name": prev_name, "to_phase_idx": self._phase_idx, "to_phase_name": next_phase.name, "active_score_mean": round(mean, 4), "threshold": round(threshold, 4), "reason": reason})
+        msg = "[Curriculum] Phase " + str(self._phase_idx) + " 昇格: " + prev_name + " -> " + next_phase.name + " (score=" + str(round(mean, 3)) + " >= " + str(round(threshold, 1)) + ", " + reason + ")"
+        print(msg)
+
+    def _rollback_phase(self, mean, threshold, mean_len, reason):
+        prev_name = self._PHASES[self._phase_idx].name
+        prev_idx = self._phase_idx
+        self._phase_idx = max(self._phase_idx - 1, 0)
+        self._scores.clear()
+        self._rollback_bad_windows = 0
+        self._steps_in_phase = 0
+        self._episodes_in_phase = 0
+        next_phase = self._PHASES[self._phase_idx]
+        self._phase_events.append({"event": "rollback", "from_phase_idx": prev_idx, "from_phase_name": prev_name, "to_phase_idx": self._phase_idx, "to_phase_name": next_phase.name, "active_score_mean": round(mean, 4), "episode_length_mean": round(mean_len, 1), "threshold": round(threshold, 4), "reason": reason})
+        msg = "[Curriculum] Phase " + str(self._phase_idx) + " 降格: " + prev_name + " -> " + next_phase.name + " (" + reason + ", score=" + str(round(mean, 3)) + ", ep_len=" + str(round(mean_len, 1)) + ")"
+        print(msg)
+
+    def get_wandb_metrics(self) -> dict:
+        from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
+        phase = self._PHASES[self._phase_idx]
+        base_threshold = phase.threshold
+        effective_threshold = (base_threshold or float("inf")) * self.threshold_mult
+        recent_count = min(len(self._scores), self.window)
+        recent_scores = self._scores[-recent_count:] if recent_count else []
+        score_mean = _mean(recent_scores)
+        threshold_ratio = (score_mean / effective_threshold if base_threshold is not None and effective_threshold > 0.0 and recent_scores else None)
+        score_cv = (_stdev(recent_scores) / max(score_mean, 1e-8) if recent_scores and score_mean > 0.0 else None)
+        if phase.promotion_score_stat == "percentile" and recent_scores:
+            promotion_low_score = _percentile(recent_scores, phase.promotion_score_percentile)
+        else:
+            promotion_low_score = min(recent_scores) if recent_scores else 0.0
+        promotion_low_score_floor = (effective_threshold * phase.promotion_min_score_ratio if base_threshold is not None else None)
+        completion = self.get_completion_diagnostics()
+        return {
+            "curriculum/phase_idx": self._phase_idx,
+            "curriculum/phase_progress_ratio": threshold_ratio,
+            "curriculum/score_mean": score_mean,
+            "curriculum/score_min": min(recent_scores) if recent_scores else None,
+            "curriculum/score_cv": score_cv,
+            "curriculum/threshold_ratio": threshold_ratio,
+            "curriculum/steps_in_phase": self._steps_in_phase,
+            "curriculum/episodes_in_phase": self._episodes_in_phase,
+            "curriculum/rollback_bad_windows": self._rollback_bad_windows,
+            "curriculum/window_episode_count": recent_count,
+            "curriculum/is_final_phase": int(bool(completion.get("is_final_phase"))),
+            "curriculum/completion_ready": int(bool(completion.get("complete"))),
+            "curriculum/completion_score_mean": completion.get("active_score_mean"),
+            "curriculum/completion_ep_len_mean": completion.get("episode_length_mean"),
+            "curriculum/promotion_low_score": round(promotion_low_score, 4),
+            "curriculum/promotion_low_score_floor": (round(promotion_low_score_floor, 4) if promotion_low_score_floor is not None else None),
+            "curriculum/promotion_low_score_ok": int(promotion_low_score_floor is not None and promotion_low_score >= promotion_low_score_floor),
+        }
+
+    def _completion_base_threshold(self):
+        phase = self._PHASES[self._phase_idx]
+        if phase.threshold is not None:
+            return phase.threshold
+        if self._phase_idx <= 0:
+            return None
+        return self._PHASES[self._phase_idx - 1].threshold
+
+    def get_completion_diagnostics(self, window=None, min_episodes=None, min_score_ratio=None, min_episode_len_ratio=None):
+        from base.curriculum import mean as _mean, stdev as _stdev
+        window = self._completion_window if window is None else max(1, int(window))
+        min_episodes = self._completion_min_episodes if min_episodes is None else max(1, int(min_episodes))
+        min_score_ratio = self._completion_min_score_ratio if min_score_ratio is None else max(0.0, float(min_score_ratio))
+        min_episode_len_ratio = self._completion_min_episode_len_ratio if min_episode_len_ratio is None else max(0.0, float(min_episode_len_ratio))
+        phase = self._PHASES[self._phase_idx]
+        recent_count = min(len(self._scores), window)
+        recent_scores = self._scores[-recent_count:] if recent_count else []
+        recent_lengths = self._episode_lengths[-recent_count:] if recent_count else []
+        score_mean = _mean(recent_scores)
+        score_min = min(recent_scores) if recent_scores else None
+        score_std = _stdev(recent_scores)
+        score_cv = (score_std / max(score_mean, 1e-8) if recent_scores and score_mean > 0.0 else None)
+        length_mean = _mean([float(v) for v in recent_lengths])
+        base_threshold = self._completion_base_threshold()
+        score_floor = (base_threshold * self.threshold_mult * min_score_ratio if base_threshold is not None else None)
+        length_floor = phase.min_episode_steps * min_episode_len_ratio
+        reasons = []
+        if not self.is_final_phase:
+            reasons.append("not_final_phase")
+        if recent_count < min_episodes:
+            reasons.append(f"episodes={recent_count} < min_episodes={min_episodes}")
+        if score_floor is not None and score_mean < score_floor:
+            reasons.append(f"score_mean={score_mean:.3f} < completion_score_floor={score_floor:.3f}")
+        if length_mean < length_floor:
+            reasons.append(f"ep_len={length_mean:.1f} < completion_length_floor={length_floor:.1f}")
+        if score_min is not None and score_floor is not None and score_min < score_floor * phase.promotion_min_score_ratio:
+            reasons.append(f"score_min={score_min:.3f} < completion_min_score_floor={score_floor * phase.promotion_min_score_ratio:.3f}")
+        if score_cv is not None and score_cv > phase.promotion_max_score_cv:
+            reasons.append(f"score_cv={score_cv:.3f} > promotion_max_score_cv={phase.promotion_max_score_cv:.3f}")
+        return {"complete": len(reasons) == 0, "reasons": reasons, "is_final_phase": self.is_final_phase, "phase_idx": self._phase_idx, "phase_name": phase.name, "window": window, "episodes": recent_count, "min_episodes": min_episodes, "active_score_mean": round(score_mean, 4), "active_score_min": round(score_min, 4) if score_min is not None else None, "active_score_std": round(score_std, 4), "active_score_cv": round(score_cv, 4) if score_cv is not None else None, "episode_length_mean": round(length_mean, 1), "completion_base_threshold": base_threshold, "completion_score_floor": round(score_floor, 4) if score_floor is not None else None, "completion_length_floor": round(length_floor, 1), "min_score_ratio": min_score_ratio, "min_episode_len_ratio": min_episode_len_ratio}
+
+    def export_state(self) -> dict:
+        phase_idx = self._phase_idx
+        return {"phase_idx": phase_idx, "phase_name": self._PHASES[phase_idx].name, "scores_window": self._scores, "rollback_bad_windows": self._rollback_bad_windows, "ep_base": 0.0, "episode_scores": self._episode_scores, "episode_lengths": self._episode_lengths, "episode_base_rewards": self._episode_base_rewards, "episode_alive_rewards": self._episode_alive_rewards, "terminated_count": self._terminated_count, "truncated_count": self._truncated_count, "phase_events": self._phase_events, "steps_in_phase": self._steps_in_phase, "episodes_in_phase": self._episodes_in_phase}
+
+    def import_state(self, state: dict) -> None:
+        phase_idx = int(state.get("phase_idx", 0))
+        self._phase_idx = max(0, min(phase_idx, len(self._PHASES) - 1))
+        phase_name = state.get("phase_name")
+        if phase_name:
+            for idx, phase in enumerate(self._PHASES):
+                if phase.name == phase_name:
+                    self._phase_idx = idx
+                    break
+        self._scores = [float(v) for v in state.get("scores_window", [])]
+        self._rollback_bad_windows = int(state.get("rollback_bad_windows", 0))
+        self._episode_scores = [float(v) for v in state.get("episode_scores", [])]
+        self._episode_lengths = [int(v) for v in state.get("episode_lengths", [])]
+        self._episode_base_rewards = [float(v) for v in state.get("episode_base_rewards", [])]
+        self._episode_alive_rewards = [float(v) for v in state.get("episode_alive_rewards", [])]
+        self._terminated_count = int(state.get("terminated_count", 0))
+        self._truncated_count = int(state.get("truncated_count", 0))
+        self._phase_events = list(state.get("phase_events", []))
+        self._steps_in_phase = int(state.get("steps_in_phase", 0))
+        self._episodes_in_phase = int(state.get("episodes_in_phase", 0))
+
+    def save_status(self, path=None) -> None:
+        import json
+        from pathlib import Path
+        target = path or self._status_path
+        if target is None:
+            return
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text(json.dumps(self.export_state(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def __init__(
+        self,
+        window: int,
+        threshold_mult: float,
+        rollback_patience: int = 3,
+        status_path=None,
+    ):
+        from games.survivors.survivors_curriculum import PHASES
+        self._PHASES = PHASES
+        self.window = window
+        self.threshold_mult = threshold_mult
+        self.rollback_patience = rollback_patience
+        self.rollback_min_episodes = max(5, window // 2)
+        self._status_path = status_path
+
+        self._phase_idx: int = 0
+        self._scores: list[float] = []
+        self._rollback_bad_windows: int = 0
+        self._episode_scores: list[float] = []
+        self._episode_lengths: list[int] = []
+        self._episode_base_rewards: list[float] = []
+        self._episode_alive_rewards: list[float] = []
+        self._terminated_count: int = 0
+        self._truncated_count: int = 0
+        self._phase_events: list[dict] = []
+        self._steps_in_phase: int = 0
+        self._episodes_in_phase: int = 0
+        self._missing_episode_info_count: int = 0
+
+        self._completion_window: int = window
+        self._completion_min_episodes: int = window
+        self._completion_min_score_ratio: float = 1.0
+        self._completion_min_episode_len_ratio: float = 1.0
+
+    @property
+    def current_phase(self) -> int:
+        return self._phase_idx
+
+    @property
+    def is_final_phase(self) -> bool:
+        return self._phase_idx >= len(self._PHASES) - 1
+
+    def configure_completion(self, window, min_episodes, min_score_ratio, min_episode_len_ratio):
+        self._completion_window = max(1, int(window))
+        self._completion_min_episodes = max(1, int(min_episodes))
+        self._completion_min_score_ratio = max(0.0, float(min_score_ratio))
+        self._completion_min_episode_len_ratio = max(0.0, float(min_episode_len_ratio))
+
+    def on_episode_end(self, active_score: float, ep_len: int) -> None:
+        self._scores.append(active_score)
+        self._episode_scores.append(active_score)
+        self._episode_lengths.append(ep_len)
+        self._episodes_in_phase += 1
+
+    def check_phase_transition(self):
+        from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
+        phase = self._PHASES[self._phase_idx]
+        effective_threshold = (phase.threshold or float("inf")) * self.threshold_mult
+        recent_scores = self._scores[-min(len(self._scores), self.window):]
+        recent_lengths = self._episode_lengths[-len(recent_scores):] if recent_scores else []
+        mean = _mean(recent_scores)
+        mean_len = _mean([float(v) for v in recent_lengths])
+        score_min = min(recent_scores) if recent_scores else 0.0
+        score_std = _stdev(recent_scores)
+        self.save_status()
+        if len(self._scores) < self.window:
+            return None
+        rollback, reason = self._should_rollback(phase, mean, mean_len, effective_threshold, len(recent_scores))
+        if rollback:
+            self._rollback_bad_windows += 1
+            if self._rollback_bad_windows >= self.rollback_patience:
+                self._rollback_phase(mean, effective_threshold, mean_len, reason)
+                return "rollback"
+        else:
+            self._rollback_bad_windows = 0
+        can_promote, promotion_reason = self._promotion_judgment(phase, mean, mean_len, score_min, score_std, effective_threshold, len(recent_scores), recent_scores)
+        if can_promote:
+            self._advance_phase(mean, effective_threshold, promotion_reason)
+            return "advance"
+        return None
+
+    def _should_rollback(self, phase, mean, mean_len, effective_threshold, recent_count):
+        if self._phase_idx <= 0 or recent_count < self.rollback_min_episodes:
+            return False, ""
+        score_floor, length_floor = self._rollback_floors(phase, effective_threshold)
+        if score_floor is not None and mean < score_floor:
+            return True, f"score={mean:.3f} < rollback_score_floor={score_floor:.3f}"
+        if length_floor is not None and mean_len < length_floor:
+            return True, f"ep_len={mean_len:.1f} < rollback_length_floor={length_floor:.1f}"
+        return False, ""
+
+    def _rollback_floors(self, phase, effective_threshold):
+        if phase.threshold is not None:
+            score_floor = effective_threshold * phase.rollback_score_ratio
+        elif phase.rollback_reference_threshold is not None:
+            score_floor = phase.rollback_reference_threshold * self.threshold_mult * phase.rollback_score_ratio
+        else:
+            score_floor = None
+        length_floor = (phase.min_episode_steps * phase.rollback_length_ratio if phase.min_episode_steps > 0 else None)
+        return score_floor, length_floor
+
+    def _promotion_judgment(self, phase, mean, mean_len, score_min, score_std, effective_threshold, recent_count, recent_scores=None):
+        from base.curriculum import percentile as _percentile
+        if phase.threshold is None or recent_count < self.window:
+            return False, ""
+        if mean < effective_threshold:
+            return False, f"score_mean={mean:.3f} < threshold={effective_threshold:.3f}"
+        if mean_len < phase.min_episode_steps:
+            return False, f"ep_len={mean_len:.1f} < min_episode_steps={phase.min_episode_steps}"
+        if phase.promotion_score_stat == "percentile" and recent_scores is not None:
+            low_score = _percentile(recent_scores, phase.promotion_score_percentile)
+            low_stat_label = f"score_p{int(phase.promotion_score_percentile)}"
+        else:
+            low_score = score_min
+            low_stat_label = "score_min"
+        min_score_floor = effective_threshold * phase.promotion_min_score_ratio
+        if low_score < min_score_floor:
+            return False, f"{low_stat_label}={low_score:.3f} < promotion_min_score_floor={min_score_floor:.3f}"
+        score_cv = score_std / max(mean, 1e-8)
+        if score_cv > phase.promotion_max_score_cv:
+            return False, f"score_cv={score_cv:.3f} > promotion_max_score_cv={phase.promotion_max_score_cv:.3f}"
+        return True, f"{low_stat_label}={low_score:.3f} >= {min_score_floor:.3f}, score_cv={score_cv:.3f} <= {phase.promotion_max_score_cv:.3f}"
+
+    def _advance_phase(self, mean, threshold, reason):
+        prev_name = self._PHASES[self._phase_idx].name
+        prev_idx = self._phase_idx
+        self._phase_idx = min(self._phase_idx + 1, len(self._PHASES) - 1)
+        self._scores.clear()
+        self._rollback_bad_windows = 0
+        self._steps_in_phase = 0
+        self._episodes_in_phase = 0
+        next_phase = self._PHASES[self._phase_idx]
+        self._phase_events.append({"event": "advance", "from_phase_idx": prev_idx, "from_phase_name": prev_name, "to_phase_idx": self._phase_idx, "to_phase_name": next_phase.name, "active_score_mean": round(mean, 4), "threshold": round(threshold, 4), "reason": reason})
+        msg = "[Curriculum] Phase " + str(self._phase_idx) + " 昇格: " + prev_name + " -> " + next_phase.name + " (score=" + str(round(mean, 3)) + " >= " + str(round(threshold, 1)) + ", " + reason + ")"
+        print(msg)
+
+    def _rollback_phase(self, mean, threshold, mean_len, reason):
+        prev_name = self._PHASES[self._phase_idx].name
+        prev_idx = self._phase_idx
+        self._phase_idx = max(self._phase_idx - 1, 0)
+        self._scores.clear()
+        self._rollback_bad_windows = 0
+        self._steps_in_phase = 0
+        self._episodes_in_phase = 0
+        next_phase = self._PHASES[self._phase_idx]
+        self._phase_events.append({"event": "rollback", "from_phase_idx": prev_idx, "from_phase_name": prev_name, "to_phase_idx": self._phase_idx, "to_phase_name": next_phase.name, "active_score_mean": round(mean, 4), "episode_length_mean": round(mean_len, 1), "threshold": round(threshold, 4), "reason": reason})
+        msg = "[Curriculum] Phase " + str(self._phase_idx) + " 降格: " + prev_name + " -> " + next_phase.name + " (" + reason + ", score=" + str(round(mean, 3)) + ", ep_len=" + str(round(mean_len, 1)) + ")"
+        print(msg)
+
+    def get_wandb_metrics(self) -> dict:
+        from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
+        phase = self._PHASES[self._phase_idx]
+        base_threshold = phase.threshold
+        effective_threshold = (base_threshold or float("inf")) * self.threshold_mult
+        recent_count = min(len(self._scores), self.window)
+        recent_scores = self._scores[-recent_count:] if recent_count else []
+        score_mean = _mean(recent_scores)
+        threshold_ratio = (score_mean / effective_threshold if base_threshold is not None and effective_threshold > 0.0 and recent_scores else None)
+        score_cv = (_stdev(recent_scores) / max(score_mean, 1e-8) if recent_scores and score_mean > 0.0 else None)
+        if phase.promotion_score_stat == "percentile" and recent_scores:
+            promotion_low_score = _percentile(recent_scores, phase.promotion_score_percentile)
+        else:
+            promotion_low_score = min(recent_scores) if recent_scores else 0.0
+        promotion_low_score_floor = (effective_threshold * phase.promotion_min_score_ratio if base_threshold is not None else None)
+        completion = self.get_completion_diagnostics()
+        return {
+            "curriculum/phase_idx": self._phase_idx,
+            "curriculum/phase_progress_ratio": threshold_ratio,
+            "curriculum/score_mean": score_mean,
+            "curriculum/score_min": min(recent_scores) if recent_scores else None,
+            "curriculum/score_cv": score_cv,
+            "curriculum/threshold_ratio": threshold_ratio,
+            "curriculum/steps_in_phase": self._steps_in_phase,
+            "curriculum/episodes_in_phase": self._episodes_in_phase,
+            "curriculum/rollback_bad_windows": self._rollback_bad_windows,
+            "curriculum/window_episode_count": recent_count,
+            "curriculum/is_final_phase": int(bool(completion.get("is_final_phase"))),
+            "curriculum/completion_ready": int(bool(completion.get("complete"))),
+            "curriculum/completion_score_mean": completion.get("active_score_mean"),
+            "curriculum/completion_ep_len_mean": completion.get("episode_length_mean"),
+            "curriculum/promotion_low_score": round(promotion_low_score, 4),
+            "curriculum/promotion_low_score_floor": (round(promotion_low_score_floor, 4) if promotion_low_score_floor is not None else None),
+            "curriculum/promotion_low_score_ok": int(promotion_low_score_floor is not None and promotion_low_score >= promotion_low_score_floor),
+        }
+
+    def _completion_base_threshold(self):
+        phase = self._PHASES[self._phase_idx]
+        if phase.threshold is not None:
+            return phase.threshold
+        if self._phase_idx <= 0:
+            return None
+        return self._PHASES[self._phase_idx - 1].threshold
+
+    def get_completion_diagnostics(self, window=None, min_episodes=None, min_score_ratio=None, min_episode_len_ratio=None):
+        from base.curriculum import mean as _mean, stdev as _stdev
+        window = self._completion_window if window is None else max(1, int(window))
+        min_episodes = self._completion_min_episodes if min_episodes is None else max(1, int(min_episodes))
+        min_score_ratio = self._completion_min_score_ratio if min_score_ratio is None else max(0.0, float(min_score_ratio))
+        min_episode_len_ratio = self._completion_min_episode_len_ratio if min_episode_len_ratio is None else max(0.0, float(min_episode_len_ratio))
+        phase = self._PHASES[self._phase_idx]
+        recent_count = min(len(self._scores), window)
+        recent_scores = self._scores[-recent_count:] if recent_count else []
+        recent_lengths = self._episode_lengths[-recent_count:] if recent_count else []
+        score_mean = _mean(recent_scores)
+        score_min = min(recent_scores) if recent_scores else None
+        score_std = _stdev(recent_scores)
+        score_cv = (score_std / max(score_mean, 1e-8) if recent_scores and score_mean > 0.0 else None)
+        length_mean = _mean([float(v) for v in recent_lengths])
+        base_threshold = self._completion_base_threshold()
+        score_floor = (base_threshold * self.threshold_mult * min_score_ratio if base_threshold is not None else None)
+        length_floor = phase.min_episode_steps * min_episode_len_ratio
+        reasons = []
+        if not self.is_final_phase:
+            reasons.append("not_final_phase")
+        if recent_count < min_episodes:
+            reasons.append(f"episodes={recent_count} < min_episodes={min_episodes}")
+        if score_floor is not None and score_mean < score_floor:
+            reasons.append(f"score_mean={score_mean:.3f} < completion_score_floor={score_floor:.3f}")
+        if length_mean < length_floor:
+            reasons.append(f"ep_len={length_mean:.1f} < completion_length_floor={length_floor:.1f}")
+        if score_min is not None and score_floor is not None and score_min < score_floor * phase.promotion_min_score_ratio:
+            reasons.append(f"score_min={score_min:.3f} < completion_min_score_floor={score_floor * phase.promotion_min_score_ratio:.3f}")
+        if score_cv is not None and score_cv > phase.promotion_max_score_cv:
+            reasons.append(f"score_cv={score_cv:.3f} > promotion_max_score_cv={phase.promotion_max_score_cv:.3f}")
+        return {"complete": len(reasons) == 0, "reasons": reasons, "is_final_phase": self.is_final_phase, "phase_idx": self._phase_idx, "phase_name": phase.name, "window": window, "episodes": recent_count, "min_episodes": min_episodes, "active_score_mean": round(score_mean, 4), "active_score_min": round(score_min, 4) if score_min is not None else None, "active_score_std": round(score_std, 4), "active_score_cv": round(score_cv, 4) if score_cv is not None else None, "episode_length_mean": round(length_mean, 1), "completion_base_threshold": base_threshold, "completion_score_floor": round(score_floor, 4) if score_floor is not None else None, "completion_length_floor": round(length_floor, 1), "min_score_ratio": min_score_ratio, "min_episode_len_ratio": min_episode_len_ratio}
+
+    def export_state(self) -> dict:
+        phase_idx = self._phase_idx
+        return {"phase_idx": phase_idx, "phase_name": self._PHASES[phase_idx].name, "scores_window": self._scores, "rollback_bad_windows": self._rollback_bad_windows, "ep_base": 0.0, "episode_scores": self._episode_scores, "episode_lengths": self._episode_lengths, "episode_base_rewards": self._episode_base_rewards, "episode_alive_rewards": self._episode_alive_rewards, "terminated_count": self._terminated_count, "truncated_count": self._truncated_count, "phase_events": self._phase_events, "steps_in_phase": self._steps_in_phase, "episodes_in_phase": self._episodes_in_phase}
+
+    def import_state(self, state: dict) -> None:
+        phase_idx = int(state.get("phase_idx", 0))
+        self._phase_idx = max(0, min(phase_idx, len(self._PHASES) - 1))
+        phase_name = state.get("phase_name")
+        if phase_name:
+            for idx, phase in enumerate(self._PHASES):
+                if phase.name == phase_name:
+                    self._phase_idx = idx
+                    break
+        self._scores = [float(v) for v in state.get("scores_window", [])]
+        self._rollback_bad_windows = int(state.get("rollback_bad_windows", 0))
+        self._episode_scores = [float(v) for v in state.get("episode_scores", [])]
+        self._episode_lengths = [int(v) for v in state.get("episode_lengths", [])]
+        self._episode_base_rewards = [float(v) for v in state.get("episode_base_rewards", [])]
+        self._episode_alive_rewards = [float(v) for v in state.get("episode_alive_rewards", [])]
+        self._terminated_count = int(state.get("terminated_count", 0))
+        self._truncated_count = int(state.get("truncated_count", 0))
+        self._phase_events = list(state.get("phase_events", []))
+        self._steps_in_phase = int(state.get("steps_in_phase", 0))
+        self._episodes_in_phase = int(state.get("episodes_in_phase", 0))
+
+    def save_status(self, path=None) -> None:
+        import json
+        from pathlib import Path
+        target = path or self._status_path
+        if target is None:
+            return
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text(json.dumps(self.export_state(), ensure_ascii=False, indent=2), encoding="utf-8")
