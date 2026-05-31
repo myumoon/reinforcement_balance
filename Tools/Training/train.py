@@ -838,6 +838,8 @@ def parse_args() -> argparse.Namespace:
                    help="SPALF 開始前のウォームアップエピソード数（default: 50）")
     p.add_argument("--spalf-max-score", type=float, default=2250.0,
                    help="スコア正規化の最大値（default: 2250.0）")
+    p.add_argument("--curriculum-spalf", action="store_true",
+                   help="HybridCurriculumSpalfCallback を使用（--spalf / --curriculum の代替）")
     p.add_argument("--eval-freq", type=int, default=50_000,
                    help="deterministic 評価の間隔 (timesteps, 0=無効, survivors のみ有効, default: 50000)")
     p.add_argument("--eval-episodes", type=int, default=5,
@@ -874,6 +876,11 @@ def main() -> None:
         raise ValueError("--init-vecnormalize は --init-model と組み合わせて使用してください")
     if args.curriculum and args.spalf:
         raise ValueError("--curriculum と --spalf は同時に使用できません")
+    if args.curriculum_spalf and (args.spalf or args.curriculum):
+        raise ValueError("--curriculum-spalf は --spalf / --curriculum と同時に指定できません。")
+    if args.curriculum_spalf and args.until_curriculum_complete:
+        raise ValueError("--curriculum-spalf では --until-curriculum-complete は使用できません。"
+                         "完了条件は --total-steps で制御してください。")
     if args.recurrent and args.frame_stack > 1:
         print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
               " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")
@@ -1043,7 +1050,7 @@ def main() -> None:
                 "n_lstm_layers": args.n_lstm_layers if args.recurrent else None,
                 "ent_coef": args.ent_coef,
                 "device": args.device,
-                "curriculum": args.curriculum,
+                "curriculum": args.curriculum or args.curriculum_spalf,
                 "until_curriculum_complete": args.until_curriculum_complete,
                 "curriculum_complete_window": args.curriculum_complete_window,
                 "curriculum_complete_min_episodes": args.curriculum_complete_min_episodes,
@@ -1057,7 +1064,7 @@ def main() -> None:
                 "noveld": args.noveld,
                 "noveld_beta": args.noveld_beta,
                 "noveld_alpha": args.noveld_alpha,
-                "spalf": args.spalf,
+                "spalf": args.spalf or args.curriculum_spalf,
                 "spalf_r_b": args.spalf_r_b,
                 "spalf_alpha": args.spalf_alpha,
                 "spalf_buffer_size": args.spalf_buffer_size,
@@ -1367,6 +1374,46 @@ def main() -> None:
     elif args.spalf:
         print("[WARN] --spalf は survivors ゲームかつ非 dry-run 時のみ有効です。無視します。")
 
+    if args.curriculum_spalf and args.game == "survivors" and not args.dry_run:
+        from games.survivors.hybrid_callback import HybridCurriculumSpalfCallback
+        # SubprocVecEnv では _get_raw_env(env) が None を返すが、
+        # ParamApplier は _on_training_start 後に training_env.env_method() を使うため問題なし
+        hybrid_cb = HybridCurriculumSpalfCallback(
+            raw_env=_get_raw_env(env),   # SubprocVecEnv では None（ParamApplier が env_method で補完）
+            frame_skip=args.frame_skip,
+            alive_reward=args.curriculum_alive_reward,
+            r_b=args.spalf_r_b,
+            alpha=args.spalf_alpha,
+            max_score=args.spalf_max_score,
+            spalf_buffer_size=args.spalf_buffer_size,
+            warmup_episodes=args.spalf_warmup_episodes,
+            spalf_status_path=str(spalf_status_path),
+            phase_window=args.curriculum_window,
+            threshold_mult=args.curriculum_threshold,
+            curriculum_status_path=str(curriculum_status_path),
+            wandb_logger=wandb_logger,
+        )
+        if args.resume:
+            # train.py の _save_training_status は curriculum_cb.export_state() を "curriculum" キーに保存する。
+            # curriculum_cb = hybrid_cb にするため、Hybrid の export_state() が "curriculum" に入る。
+            # Hybrid の export_state() は flat dict（phase_idx / spalf_state / extended_bounds_enabled 等）を返すため、
+            # resume_status.get("curriculum") をそのまま import_state() に渡せる。
+            _hybrid_raw = resume_status.get("curriculum") if resume_status else None
+            if _hybrid_raw:
+                hybrid_cb.import_state(_hybrid_raw)
+                print(f"[INFO] Hybrid state を復元: phase_idx={_hybrid_raw.get('phase_idx')}")
+        callbacks.append(hybrid_cb)
+        # curriculum_cb と spalf_cb として両方に接続（既存の完了停止・anneal・保存処理が動く）
+        curriculum_cb = hybrid_cb
+        spalf_cb = hybrid_cb
+        print(
+            f"[INFO] HybridCurriculumSpalfCallback 有効 "
+            f"(phase_window={args.curriculum_window}, threshold_mult={args.curriculum_threshold}, "
+            f"r_b={args.spalf_r_b}, alpha={args.spalf_alpha}, max_score={args.spalf_max_score})"
+        )
+    elif args.curriculum_spalf:
+        print("[WARN] --curriculum-spalf は survivors ゲームかつ非 dry-run 時のみ有効です。無視します。")
+
     if args.until_curriculum_complete:
         if curriculum_cb is None:
             raise ValueError("--until-curriculum-complete には survivors の --curriculum が必要です")
@@ -1412,7 +1459,7 @@ def main() -> None:
             check_freq=args.anneal_check_freq,
             min_steps=args.anneal_min_steps,
             min_weight=args.anneal_min_weight,
-            curriculum_cb=curriculum_cb if args.curriculum else None,
+            curriculum_cb=curriculum_cb if (args.curriculum or args.curriculum_spalf) else None,
         )
         anneal_state = resume_status.get("shaping_anneal") if resume_status else None
         if anneal_state:
