@@ -1,4 +1,0 @@
-{
-  "verdict": "NEEDS_CHANGES",
-  "summary": "SPALF の _on_training_start() が import_state() で復元した current_params を無視して Phase 0 を適用しており、resume 時に探索中の難易度が巻き戻る。加えて CurriculumStateModule.on_episode_end() への抽出で episode_base_rewards / episode_alive_rewards / terminated_count / truncated_count の更新が抜け、診断・W&B 進捗・resume 状態の統計が壊れるため、旧実装と同等の情報を state module に渡して記録する必要がある。"
-}

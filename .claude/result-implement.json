@@ -1,7 +1,0 @@
-{
-  "status": "DONE",
-  "branch": "feature-a-20260531015501",
-  "summary": "訓練基盤リファクタリング完了: param_applier.py / common/wandb_logger.py / common/sb_callback/noveld_callback.py / games/survivors/state_modules.py（BaseStateModule/EpisodeScoreTracker/SpalfStateModule/CurriculumStateModule）/ base/base_eval_callback.py 新規作成。spalf_callback.py・survivors_curriculum.py（CurriculumCallback改修+スタンドアロン関数追加）・survivors_eval_callback.py・train.py を新モジュール使用に改修。テスト8本追加。",
-  "intent": "挙動を一切変えずにコールバックのロジックを専用モジュールへ委譲し、次の Hybrid Curriculum+SPALF 実装の土台を整える。WandbLogger を依存注入することでロガーとアルゴリズムの疎結合を実現。",
-  "notes": "wandb_logger=None の場合は W&B へ何も送らない方針で統一。SurvivorsEvalCallback は _run_eval_and_log() + _sync_before_eval() に分離して BaseEvalCallback のフック設計に合わせた。テスト実行は Tools/Training を cwd として python -m pytest tests/ で実行すること（conda reinbalance 環境が必要）。"
-}
