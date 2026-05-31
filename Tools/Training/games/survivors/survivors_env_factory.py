@@ -27,13 +27,17 @@ class SurvivorsEnvFactory:
     def __call__(self):
         from games.survivors.survivors_env import SurvivorsEnv, SurvivorsMonitor
         env = SurvivorsEnv(host=self.host, port=self.port, frame_skip=self.frame_skip)
-        if self.reward_fn_path:
-            import importlib.util
-            path = self.reward_fn_path  # 絶対パスで渡すこと（child process の cwd に依存しない）
-            spec = importlib.util.spec_from_file_location("_reward_fn_mod", path)
-            if spec is None or spec.loader is None:
-                raise ImportError(f"reward_fn のロードに失敗しました: {path}")
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            env._reward_fn = mod.reward_shaping  # train.py の _load_reward_fn() と同じ属性名
-        return SurvivorsMonitor(env)
+        try:
+            if self.reward_fn_path:
+                import importlib.util
+                path = self.reward_fn_path  # 絶対パスで渡すこと（child process の cwd に依存しない）
+                spec = importlib.util.spec_from_file_location("_reward_fn_mod", path)
+                if spec is None or spec.loader is None:
+                    raise ImportError(f"reward_fn のロードに失敗しました: {path}")
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                env._reward_fn = mod.reward_shaping  # train.py の _load_reward_fn() と同じ属性名
+            return SurvivorsMonitor(env)
+        except Exception:
+            env.close()
+            raise
