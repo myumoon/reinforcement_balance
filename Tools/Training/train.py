@@ -1184,7 +1184,8 @@ def main() -> None:
                     print(f"[INFO] eval port  : {args.eval_port}")
                     print(f"[INFO] eval env は訓練 env から独立しています")
             except Exception:
-                # VecEnv 作成・検証中の例外時に子プロセスが残らないよう close する
+                # env が代入済み（SubprocVecEnv.__init__ 完了後）の場合のみ close できる。
+                # SubprocVecEnv.__init__ 内で例外が出た場合は env=None のままのため close 不可（既知制限）。
                 if env is not None:
                     env.close()
                 if eval_env is not None:
