@@ -879,10 +879,10 @@ def main() -> None:
     if args.curriculum and args.spalf:
         raise ValueError("--curriculum と --spalf は同時に使用できません")
     if args.curriculum_spalf and (args.spalf or args.curriculum):
-        p.error("--curriculum-spalf は --spalf / --curriculum と同時に指定できません。")
+        raise ValueError("--curriculum-spalf は --spalf / --curriculum と同時に指定できません。")
     if args.curriculum_spalf and args.until_curriculum_complete:
-        p.error("--curriculum-spalf では --until-curriculum-complete は使用できません。"
-                "完了条件は --total-steps で制御してください。")
+        raise ValueError("--curriculum-spalf では --until-curriculum-complete は使用できません。"
+                         "完了条件は --total-steps で制御してください。")
     if args.recurrent and args.frame_stack > 1:
         print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
               " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")

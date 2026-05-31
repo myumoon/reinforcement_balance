@@ -212,6 +212,12 @@ class HybridCurriculumSpalfCallback(BaseCallback):
             self._extended_bounds_enabled = True
             self._spalf.set_bounds(_phase_bounds(self._curriculum.current_phase, completion_ready=True))
             self._spalf.reset_buffers_for_phase_change()
+            # per-env 開始ベクトルを新しい拡張 bounds での current_param_vec に同期する
+            extended_vec = self._spalf.params_to_vec(self._spalf._current_params)
+            self._spalf._current_param_vec = extended_vec
+            n = len(self._ep_start_param_vec_per_env)
+            if n > 0:
+                self._ep_start_param_vec_per_env = [extended_vec.copy() for _ in range(n)]
             self._log_phase_event("completion_ready → 拡張 bounds へ切り替え")
 
         # EpisodeScoreTracker.process() は 4-tuple (env_idx, active_score, ep_len, ep_base) を返す
@@ -271,7 +277,12 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         phase_params = _phase_params_from_phase(self._curriculum.current_phase)
         self._apply_params(phase_params)
         self._spalf._current_params = phase_params
-        self._spalf._current_param_vec = self._spalf.params_to_vec(phase_params)
+        phase_vec = self._spalf.params_to_vec(phase_params)
+        self._spalf._current_param_vec = phase_vec
+        # フェーズ変更後の per-env 開始ベクトルを新しいフェーズパラメータで同期する
+        n = len(self._ep_start_param_vec_per_env)
+        if n > 0:
+            self._ep_start_param_vec_per_env = [phase_vec.copy() for _ in range(n)]
         # current_phase は int → _CURRICULUM_PHASES[...].name でフェーズ名を取得
         phase_name = _CURRICULUM_PHASES[self._curriculum.current_phase].name
         self._log_phase_event(f"{event}: Phase {self._curriculum.current_phase} {phase_name}")

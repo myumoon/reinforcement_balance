@@ -163,7 +163,7 @@ class SpalfStateModule(BaseStateModule):
             if key in ("min_enemies", "max_enemies", "max_enemy_type_id"):
                 val = int(round(val))
             elif key == "time_scaling":
-                val = float(vec[i]) >= 0.5
+                val = float(val) >= 0.5  # bounds 適用後の val を bool 化（ゼロ幅 bounds 時も lo を使う）
             params[key] = val
         if params["max_enemies"] < params["min_enemies"] + 1:
             params["max_enemies"] = params["min_enemies"] + 1
