@@ -1,0 +1,575 @@
+"""Survivors 訓練用ステートモジュール群。
+EpisodeScoreTracker / SpalfStateModule / CurriculumStateModule を提供する。
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import random
+from abc import ABC, abstractmethod
+from collections import deque
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+
+from games.survivors.survivors_difficulty import PARAM_BOUNDS, compute_difficulty_score
+
+from abc import ABC, abstractmethod
+
+class BaseStateModule(ABC):
+    """SpalfStateModule / CurriculumStateModule の共通インターフェース。"""
+
+    @abstractmethod
+    def get_wandb_metrics(self) -> dict:
+        """W&B ログ用メトリクス dict を返す（副作用なし）。"""
+
+    @abstractmethod
+    def export_state(self) -> dict:
+        """resume 用の状態を dict で返す。"""
+
+    @abstractmethod
+    def import_state(self, state: dict) -> None:
+        """export_state() の出力から状態を復元する。"""
+
+
+class EpisodeScoreTracker:
+    """per-env の base_reward 蓄積と active_score 計算。
+
+    SpalfCallback と CurriculumCallback で重複していた計算ロジックを統一する。
+    BaseStateModule は継承しない（計算ユーティリティのため）。
+    """
+
+    def __init__(self, frame_skip: int, alive_reward: float):
+        self.frame_skip = frame_skip
+        self.alive_reward = alive_reward
+        self._ep_base_per_env: list[float] = []
+
+    def reset(self, n_envs: int) -> None:
+        self._ep_base_per_env = [0.0] * n_envs
+
+    def process(self, infos: list[dict]) -> list[tuple[int, float, int]]:
+        """infos を処理して終了したエピソードの (env_idx, active_score, ep_len) を返す。"""
+        n = len(infos)
+        if len(self._ep_base_per_env) != n:
+            self._ep_base_per_env = [0.0] * n
+        results: list[tuple[int, float, int, float]] = []
+        for env_idx, info in enumerate(infos):
+            self._ep_base_per_env[env_idx] += info.get("base_reward", 0.0)
+            if "episode" not in info:
+                continue
+            ep_len = info["episode"]["l"]
+            ep_base = self._ep_base_per_env[env_idx]
+            alive_total = self.alive_reward * self.frame_skip * ep_len
+            active_score = max(0.0, ep_base - alive_total)
+            self._ep_base_per_env[env_idx] = 0.0
+            results.append((env_idx, active_score, ep_len, ep_base))
+        return results
+
+
+_PARAM_KEYS = list(PARAM_BOUNDS.keys())
+_N_PARAMS = len(_PARAM_KEYS)
+
+_PHASE0_PARAMS: dict = {
+    "min_enemies":        4,
+    "max_enemies":        6,
+    "speed_mult":         0.8,
+    "spawn_rate_mult":    1.0,
+    "max_enemy_type_id":  1,
+    "enemy_hp_scale":     0.5,
+    "enemy_damage_scale": 0.5,
+    "time_scaling":       False,
+}
+
+
+class SpalfStateModule(BaseStateModule):
+    """SPALF ALP-GMM ロジック・bounds 正規化・W&B ログ・状態管理を担当する。"""
+
+    def __init__(self, r_b: float, alpha: float, max_score: float,
+                 buffer_size: int, warmup_episodes: int,
+                 status_path=None, initial_bounds=None):
+        self._r_b = r_b
+        self._alpha = alpha
+        self._max_score = max(max_score, 1e-8)
+        self._buffer_size = buffer_size
+        self._warmup_episodes = warmup_episodes
+        self._status_path = status_path
+        self._active_bounds = initial_bounds or PARAM_BOUNDS
+        self._reward_history: deque = deque(maxlen=buffer_size)
+        self._alp_buffer: deque = deque(maxlen=buffer_size)
+        self._recent_reward_buffer: deque = deque(maxlen=buffer_size)
+        self._total_episodes: int = 0
+        self._gmm = None
+        self._component_mean_alp: np.ndarray = np.array([])
+        self._use_spalf_mode: bool = True
+        self._current_params: dict = dict(_PHASE0_PARAMS)
+        self._current_param_vec: np.ndarray = self.params_to_vec(_PHASE0_PARAMS)
+
+    def set_bounds(self, bounds: dict) -> None:
+        self._active_bounds = bounds
+
+    def reset_buffers(self) -> None:
+        self._reward_history.clear()
+        self._alp_buffer.clear()
+        self._recent_reward_buffer.clear()
+        self._total_episodes = 0
+        self._gmm = None
+        self._component_mean_alp = np.array([])
+
+    def params_to_vec(self, params: dict) -> np.ndarray:
+        vec = np.zeros(_N_PARAMS, dtype=np.float32)
+        for i, key in enumerate(_PARAM_KEYS):
+            lo, hi = self._active_bounds[key]
+            val = params.get(key, lo)
+            if isinstance(val, bool):
+                val = 1.0 if val else 0.0
+            vec[i] = (float(val) - lo) / (hi - lo)
+        return np.clip(vec, 0.0, 1.0)
+
+    def vec_to_params(self, vec: np.ndarray) -> dict:
+        params: dict = {}
+        for i, key in enumerate(_PARAM_KEYS):
+            lo, hi = self._active_bounds[key]
+            val = lo + float(vec[i]) * (hi - lo)
+            if key in ("min_enemies", "max_enemies", "max_enemy_type_id"):
+                val = int(round(val))
+            elif key == "time_scaling":
+                val = float(vec[i]) >= 0.5
+            params[key] = val
+        if params["max_enemies"] < params["min_enemies"] + 1:
+            params["max_enemies"] = params["min_enemies"] + 1
+        return params
+
+    def _f_alpha(self, x: float) -> float:
+        clamped = min(max(x / self._alpha, -500.0), 500.0)
+        return -self._alpha * (1.0 - math.exp(clamped))
+
+    def _compute_alp(self, score_norm_new: float, score_norm_old: float) -> float:
+        if self._use_spalf_mode:
+            return abs(self._f_alpha(score_norm_new) - self._f_alpha(score_norm_old))
+        return abs(score_norm_new - score_norm_old)
+
+    def _compute_alp_for_episode(self, score_norm: float, param_vec: np.ndarray) -> float:
+        if not self._reward_history:
+            r_old = 0.0
+        else:
+            vecs = np.array([b[0] for b in self._reward_history])
+            dists = np.linalg.norm(vecs - param_vec, axis=1)
+            nearest_idx = int(np.argmin(dists))
+            r_old = list(self._reward_history)[nearest_idx][1]
+        return self._compute_alp(score_norm, r_old)
+
+    def _fit_gmm(self) -> None:
+        try:
+            from sklearn.mixture import GaussianMixture
+        except ImportError:
+            print("[SPALF][WARN] scikit-learn がインストールされていません。GMM をスキップします。")
+            return
+        X = np.array([b[0] for b in self._alp_buffer])
+        alp_values = np.array([b[1] for b in self._alp_buffer])
+        K_MAX = min(10, len(self._alp_buffer) // 5)
+        best_gmm, best_bic = None, float("inf")
+        for k in range(1, K_MAX + 1):
+            try:
+                gmm = GaussianMixture(n_components=k, covariance_type="full", n_init=3, random_state=42)
+                gmm.fit(X)
+                bic = gmm.bic(X)
+                if bic < best_bic:
+                    best_bic, best_gmm = bic, gmm
+            except Exception:
+                continue
+        if best_gmm is None:
+            return
+        labels = best_gmm.predict(X)
+        self._component_mean_alp = np.array([
+            alp_values[labels == k].mean() if (labels == k).any() else 0.0
+            for k in range(best_gmm.n_components)
+        ])
+        self._gmm = best_gmm
+
+    def sample_next_params(self) -> tuple[dict, np.ndarray]:
+        use_random = (len(self._alp_buffer) < 50 or self._gmm is None or random.random() >= 0.8)
+        if use_random:
+            vec = np.random.uniform(0.0, 1.0, size=_N_PARAMS).astype(np.float32)
+        else:
+            weights = np.maximum(self._component_mean_alp, 0.0) + 1e-6
+            weights /= weights.sum()
+            k = np.random.choice(len(weights), p=weights)
+            mean_ = self._gmm.means_[k]
+            cov = self._gmm.covariances_[k]
+            vec = np.random.multivariate_normal(mean_, cov).astype(np.float32)
+            vec = np.clip(vec, 0.0, 1.0)
+        params = self.vec_to_params(vec)
+        return params, self.params_to_vec(params)
+
+    def on_episode_end(self, env_idx: int, active_score: float, ep_start_param_vec: np.ndarray) -> bool:
+        """戻り値: warmup 中か否か（True=warmup）"""
+        score_norm = active_score / self._max_score
+        self._total_episodes += 1
+        self._recent_reward_buffer.append(score_norm)
+        if self._recent_reward_buffer:
+            mean_norm = sum(self._recent_reward_buffer) / len(self._recent_reward_buffer)
+            self._use_spalf_mode = mean_norm < self._r_b
+        if self._total_episodes <= self._warmup_episodes:
+            return True
+        alp = self._compute_alp_for_episode(score_norm, ep_start_param_vec)
+        self._reward_history.append((ep_start_param_vec.copy(), score_norm))
+        self._alp_buffer.append((ep_start_param_vec.copy(), alp))
+        if self._total_episodes % 5 == 0 and len(self._alp_buffer) >= 10:
+            self._fit_gmm()
+        return False
+
+    def get_wandb_metrics(self) -> dict:
+        mean_norm = (sum(self._recent_reward_buffer) / len(self._recent_reward_buffer)
+            if self._recent_reward_buffer else 0.0)
+        alp_mean = (float(np.mean([b[1] for b in self._alp_buffer]))
+            if self._alp_buffer else 0.0)
+        mode = 0 if self._total_episodes <= self._warmup_episodes else (1 if self._use_spalf_mode else 2)
+        return {
+            "spalf/mode":                       mode,
+            "spalf/mean_reward_normalized":     mean_norm,
+            "spalf/buffer_size":                len(self._alp_buffer),
+            "spalf/alp_mean":                   alp_mean,
+            "spalf/current_min_enemies":        self._current_params.get("min_enemies", 0),
+            "spalf/current_max_enemies":        self._current_params.get("max_enemies", 0),
+            "spalf/current_speed_mult":         self._current_params.get("speed_mult", 0.0),
+            "spalf/current_spawn_rate_mult":    self._current_params.get("spawn_rate_mult", 0.0),
+            "spalf/current_max_enemy_type_id":  self._current_params.get("max_enemy_type_id", 0),
+            "spalf/current_enemy_hp_scale":     self._current_params.get("enemy_hp_scale", 0.0),
+            "spalf/current_enemy_damage_scale": self._current_params.get("enemy_damage_scale", 0.0),
+            "spalf/current_time_scaling":       int(bool(self._current_params.get("time_scaling", False))),
+            "survivors/difficulty_score":       compute_difficulty_score(self._current_params),
+            "spalf/score_norm_over1_ratio":     (
+                sum(1 for s in self._recent_reward_buffer if s > 1.0) / len(self._recent_reward_buffer)
+                if self._recent_reward_buffer else 0.0
+            ),
+        }
+
+    def export_state(self) -> dict:
+        wandb_run_id: Optional[str] = None
+        try:
+            import wandb
+            if wandb.run:
+                wandb_run_id = wandb.run.id
+        except ImportError:
+            pass
+        def _ser(p_: dict) -> dict:
+            return {k: (bool(v) if isinstance(v, (bool, np.bool_)) else v) for k, v in p_.items()}
+        return {
+            "reward_history": [[b[0].tolist(), float(b[1])] for b in self._reward_history],
+            "alp_buffer": [[b[0].tolist(), float(b[1])] for b in self._alp_buffer],
+            "recent_reward_buffer": list(self._recent_reward_buffer),
+            "total_episodes": self._total_episodes,
+            "current_params": _ser(self._current_params),
+            "use_spalf_mode": bool(self._use_spalf_mode),
+            "wandb_run_id": wandb_run_id,
+        }
+
+    def import_state(self, state: dict) -> None:
+        self._reward_history = deque(
+            [(np.array(b[0], dtype=np.float32), float(b[1])) for b in state.get("reward_history", [])],
+            maxlen=self._buffer_size,
+        )
+        self._alp_buffer = deque(
+            [(np.array(b[0], dtype=np.float32), float(b[1])) for b in state.get("alp_buffer", [])],
+            maxlen=self._buffer_size,
+        )
+        self._recent_reward_buffer = deque(
+            [float(v) for v in state.get("recent_reward_buffer", [])],
+            maxlen=self._buffer_size,
+        )
+        self._total_episodes = int(state.get("total_episodes", 0))
+        self._current_params = state.get("current_params", dict(_PHASE0_PARAMS))
+        self._use_spalf_mode = bool(state.get("use_spalf_mode", True))
+        self._current_param_vec = self.params_to_vec(self._current_params)
+        if len(self._alp_buffer) >= 10:
+            self._fit_gmm()
+
+    def save_status(self, path=None) -> None:
+        target = path or self._status_path
+        if target is None:
+            return
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text(
+            json.dumps(self.export_state(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+
+
+
+class CurriculumStateModule(BaseStateModule):
+    """カリキュラムのフェーズ管理・昇格・ロールバックロジックを担当するステートモジュール。
+
+    CurriculumCallback からフェーズ遷移ロジックを分離したクラス。
+    フェーズ定義 (PHASES) と判定ロジックは survivors_curriculum から参照する。
+    """
+
+    def __init__(
+        self,
+        window: int,
+        threshold_mult: float,
+        rollback_patience: int = 3,
+        status_path=None,
+    ):
+        from games.survivors.survivors_curriculum import PHASES
+        self._PHASES = PHASES
+        self.window = window
+        self.threshold_mult = threshold_mult
+        self.rollback_patience = rollback_patience
+        self.rollback_min_episodes = max(5, window // 2)
+        self._status_path = status_path
+
+        self._phase_idx: int = 0
+        self._scores: list[float] = []
+        self._rollback_bad_windows: int = 0
+        self._episode_scores: list[float] = []
+        self._episode_lengths: list[int] = []
+        self._episode_base_rewards: list[float] = []
+        self._episode_alive_rewards: list[float] = []
+        self._terminated_count: int = 0
+        self._truncated_count: int = 0
+        self._phase_events: list[dict] = []
+        self._steps_in_phase: int = 0
+        self._episodes_in_phase: int = 0
+        self._missing_episode_info_count: int = 0
+
+        self._completion_window: int = window
+        self._completion_min_episodes: int = window
+        self._completion_min_score_ratio: float = 1.0
+        self._completion_min_episode_len_ratio: float = 1.0
+
+    @property
+    def current_phase(self) -> int:
+        return self._phase_idx
+
+    @property
+    def is_final_phase(self) -> bool:
+        return self._phase_idx >= len(self._PHASES) - 1
+
+    def configure_completion(self, window, min_episodes, min_score_ratio, min_episode_len_ratio):
+        self._completion_window = max(1, int(window))
+        self._completion_min_episodes = max(1, int(min_episodes))
+        self._completion_min_score_ratio = max(0.0, float(min_score_ratio))
+        self._completion_min_episode_len_ratio = max(0.0, float(min_episode_len_ratio))
+
+    def on_episode_end(self, active_score: float, ep_len: int,
+                       base_reward: float = 0.0, alive_reward: float = 0.0,
+                       terminated: bool = True) -> None:
+        self._scores.append(active_score)
+        self._episode_scores.append(active_score)
+        self._episode_lengths.append(ep_len)
+        self._episode_base_rewards.append(base_reward)
+        self._episode_alive_rewards.append(alive_reward)
+        if terminated:
+            self._terminated_count += 1
+        else:
+            self._truncated_count += 1
+        self._episodes_in_phase += 1
+
+    def check_phase_transition(self):
+        from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
+        phase = self._PHASES[self._phase_idx]
+        effective_threshold = (phase.threshold or float("inf")) * self.threshold_mult
+        recent_scores = self._scores[-min(len(self._scores), self.window):]
+        recent_lengths = self._episode_lengths[-len(recent_scores):] if recent_scores else []
+        mean = _mean(recent_scores)
+        mean_len = _mean([float(v) for v in recent_lengths])
+        score_min = min(recent_scores) if recent_scores else 0.0
+        score_std = _stdev(recent_scores)
+        self.save_status()
+        if len(self._scores) < self.window:
+            return None
+        rollback, reason = self._should_rollback(phase, mean, mean_len, effective_threshold, len(recent_scores))
+        if rollback:
+            self._rollback_bad_windows += 1
+            if self._rollback_bad_windows >= self.rollback_patience:
+                self._rollback_phase(mean, effective_threshold, mean_len, reason)
+                return "rollback"
+        else:
+            self._rollback_bad_windows = 0
+        can_promote, promotion_reason = self._promotion_judgment(phase, mean, mean_len, score_min, score_std, effective_threshold, len(recent_scores), recent_scores)
+        if can_promote:
+            self._advance_phase(mean, effective_threshold, promotion_reason)
+            return "advance"
+        return None
+
+    def _should_rollback(self, phase, mean, mean_len, effective_threshold, recent_count):
+        if self._phase_idx <= 0 or recent_count < self.rollback_min_episodes:
+            return False, ""
+        score_floor, length_floor = self._rollback_floors(phase, effective_threshold)
+        if score_floor is not None and mean < score_floor:
+            return True, f"score={mean:.3f} < rollback_score_floor={score_floor:.3f}"
+        if length_floor is not None and mean_len < length_floor:
+            return True, f"ep_len={mean_len:.1f} < rollback_length_floor={length_floor:.1f}"
+        return False, ""
+
+    def _rollback_floors(self, phase, effective_threshold):
+        if phase.threshold is not None:
+            score_floor = effective_threshold * phase.rollback_score_ratio
+        elif phase.rollback_reference_threshold is not None:
+            score_floor = phase.rollback_reference_threshold * self.threshold_mult * phase.rollback_score_ratio
+        else:
+            score_floor = None
+        length_floor = (phase.min_episode_steps * phase.rollback_length_ratio if phase.min_episode_steps > 0 else None)
+        return score_floor, length_floor
+
+    def _promotion_judgment(self, phase, mean, mean_len, score_min, score_std, effective_threshold, recent_count, recent_scores=None):
+        from base.curriculum import percentile as _percentile
+        if phase.threshold is None or recent_count < self.window:
+            return False, ""
+        if mean < effective_threshold:
+            return False, f"score_mean={mean:.3f} < threshold={effective_threshold:.3f}"
+        if mean_len < phase.min_episode_steps:
+            return False, f"ep_len={mean_len:.1f} < min_episode_steps={phase.min_episode_steps}"
+        if phase.promotion_score_stat == "percentile" and recent_scores is not None:
+            low_score = _percentile(recent_scores, phase.promotion_score_percentile)
+            low_stat_label = f"score_p{int(phase.promotion_score_percentile)}"
+        else:
+            low_score = score_min
+            low_stat_label = "score_min"
+        min_score_floor = effective_threshold * phase.promotion_min_score_ratio
+        if low_score < min_score_floor:
+            return False, f"{low_stat_label}={low_score:.3f} < promotion_min_score_floor={min_score_floor:.3f}"
+        score_cv = score_std / max(mean, 1e-8)
+        if score_cv > phase.promotion_max_score_cv:
+            return False, f"score_cv={score_cv:.3f} > promotion_max_score_cv={phase.promotion_max_score_cv:.3f}"
+        return True, f"{low_stat_label}={low_score:.3f} >= {min_score_floor:.3f}, score_cv={score_cv:.3f} <= {phase.promotion_max_score_cv:.3f}"
+
+    def _advance_phase(self, mean, threshold, reason):
+        prev_name = self._PHASES[self._phase_idx].name
+        prev_idx = self._phase_idx
+        self._phase_idx = min(self._phase_idx + 1, len(self._PHASES) - 1)
+        self._scores.clear()
+        self._rollback_bad_windows = 0
+        self._steps_in_phase = 0
+        self._episodes_in_phase = 0
+        next_phase = self._PHASES[self._phase_idx]
+        self._phase_events.append({"event": "advance", "from_phase_idx": prev_idx, "from_phase_name": prev_name, "to_phase_idx": self._phase_idx, "to_phase_name": next_phase.name, "active_score_mean": round(mean, 4), "threshold": round(threshold, 4), "reason": reason})
+        msg = "[Curriculum] Phase " + str(self._phase_idx) + " 昇格: " + prev_name + " -> " + next_phase.name + " (score=" + str(round(mean, 3)) + " >= " + str(round(threshold, 1)) + ", " + reason + ")"
+        print(msg)
+
+    def _rollback_phase(self, mean, threshold, mean_len, reason):
+        prev_name = self._PHASES[self._phase_idx].name
+        prev_idx = self._phase_idx
+        self._phase_idx = max(self._phase_idx - 1, 0)
+        self._scores.clear()
+        self._rollback_bad_windows = 0
+        self._steps_in_phase = 0
+        self._episodes_in_phase = 0
+        next_phase = self._PHASES[self._phase_idx]
+        self._phase_events.append({"event": "rollback", "from_phase_idx": prev_idx, "from_phase_name": prev_name, "to_phase_idx": self._phase_idx, "to_phase_name": next_phase.name, "active_score_mean": round(mean, 4), "episode_length_mean": round(mean_len, 1), "threshold": round(threshold, 4), "reason": reason})
+        msg = "[Curriculum] Phase " + str(self._phase_idx) + " 降格: " + prev_name + " -> " + next_phase.name + " (" + reason + ", score=" + str(round(mean, 3)) + ", ep_len=" + str(round(mean_len, 1)) + ")"
+        print(msg)
+
+    def get_wandb_metrics(self) -> dict:
+        from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
+        phase = self._PHASES[self._phase_idx]
+        base_threshold = phase.threshold
+        effective_threshold = (base_threshold or float("inf")) * self.threshold_mult
+        recent_count = min(len(self._scores), self.window)
+        recent_scores = self._scores[-recent_count:] if recent_count else []
+        score_mean = _mean(recent_scores)
+        threshold_ratio = (score_mean / effective_threshold if base_threshold is not None and effective_threshold > 0.0 and recent_scores else None)
+        score_cv = (_stdev(recent_scores) / max(score_mean, 1e-8) if recent_scores and score_mean > 0.0 else None)
+        if phase.promotion_score_stat == "percentile" and recent_scores:
+            promotion_low_score = _percentile(recent_scores, phase.promotion_score_percentile)
+        else:
+            promotion_low_score = min(recent_scores) if recent_scores else 0.0
+        promotion_low_score_floor = (effective_threshold * phase.promotion_min_score_ratio if base_threshold is not None else None)
+        completion = self.get_completion_diagnostics()
+        return {
+            "curriculum/phase_idx": self._phase_idx,
+            "curriculum/phase_progress_ratio": threshold_ratio,
+            "curriculum/score_mean": score_mean,
+            "curriculum/score_min": min(recent_scores) if recent_scores else None,
+            "curriculum/score_cv": score_cv,
+            "curriculum/threshold_ratio": threshold_ratio,
+            "curriculum/steps_in_phase": self._steps_in_phase,
+            "curriculum/episodes_in_phase": self._episodes_in_phase,
+            "curriculum/rollback_bad_windows": self._rollback_bad_windows,
+            "curriculum/window_episode_count": recent_count,
+            "curriculum/is_final_phase": int(bool(completion.get("is_final_phase"))),
+            "curriculum/completion_ready": int(bool(completion.get("complete"))),
+            "curriculum/completion_score_mean": completion.get("active_score_mean"),
+            "curriculum/completion_ep_len_mean": completion.get("episode_length_mean"),
+            "curriculum/promotion_low_score": round(promotion_low_score, 4),
+            "curriculum/promotion_low_score_floor": (round(promotion_low_score_floor, 4) if promotion_low_score_floor is not None else None),
+            "curriculum/promotion_low_score_ok": int(promotion_low_score_floor is not None and promotion_low_score >= promotion_low_score_floor),
+        }
+
+    def _completion_base_threshold(self):
+        phase = self._PHASES[self._phase_idx]
+        if phase.threshold is not None:
+            return phase.threshold
+        if self._phase_idx <= 0:
+            return None
+        return self._PHASES[self._phase_idx - 1].threshold
+
+    def get_completion_diagnostics(self, window=None, min_episodes=None, min_score_ratio=None, min_episode_len_ratio=None):
+        from base.curriculum import mean as _mean, stdev as _stdev
+        window = self._completion_window if window is None else max(1, int(window))
+        min_episodes = self._completion_min_episodes if min_episodes is None else max(1, int(min_episodes))
+        min_score_ratio = self._completion_min_score_ratio if min_score_ratio is None else max(0.0, float(min_score_ratio))
+        min_episode_len_ratio = self._completion_min_episode_len_ratio if min_episode_len_ratio is None else max(0.0, float(min_episode_len_ratio))
+        phase = self._PHASES[self._phase_idx]
+        recent_count = min(len(self._scores), window)
+        recent_scores = self._scores[-recent_count:] if recent_count else []
+        recent_lengths = self._episode_lengths[-recent_count:] if recent_count else []
+        score_mean = _mean(recent_scores)
+        score_min = min(recent_scores) if recent_scores else None
+        score_std = _stdev(recent_scores)
+        score_cv = (score_std / max(score_mean, 1e-8) if recent_scores and score_mean > 0.0 else None)
+        length_mean = _mean([float(v) for v in recent_lengths])
+        base_threshold = self._completion_base_threshold()
+        score_floor = (base_threshold * self.threshold_mult * min_score_ratio if base_threshold is not None else None)
+        length_floor = phase.min_episode_steps * min_episode_len_ratio
+        reasons = []
+        if not self.is_final_phase:
+            reasons.append("not_final_phase")
+        if recent_count < min_episodes:
+            reasons.append(f"episodes={recent_count} < min_episodes={min_episodes}")
+        if score_floor is not None and score_mean < score_floor:
+            reasons.append(f"score_mean={score_mean:.3f} < completion_score_floor={score_floor:.3f}")
+        if length_mean < length_floor:
+            reasons.append(f"ep_len={length_mean:.1f} < completion_length_floor={length_floor:.1f}")
+        if score_min is not None and score_floor is not None and score_min < score_floor * phase.promotion_min_score_ratio:
+            reasons.append(f"score_min={score_min:.3f} < completion_min_score_floor={score_floor * phase.promotion_min_score_ratio:.3f}")
+        if score_cv is not None and score_cv > phase.promotion_max_score_cv:
+            reasons.append(f"score_cv={score_cv:.3f} > promotion_max_score_cv={phase.promotion_max_score_cv:.3f}")
+        return {"complete": len(reasons) == 0, "reasons": reasons, "is_final_phase": self.is_final_phase, "phase_idx": self._phase_idx, "phase_name": phase.name, "window": window, "episodes": recent_count, "min_episodes": min_episodes, "active_score_mean": round(score_mean, 4), "active_score_min": round(score_min, 4) if score_min is not None else None, "active_score_std": round(score_std, 4), "active_score_cv": round(score_cv, 4) if score_cv is not None else None, "episode_length_mean": round(length_mean, 1), "completion_base_threshold": base_threshold, "completion_score_floor": round(score_floor, 4) if score_floor is not None else None, "completion_length_floor": round(length_floor, 1), "min_score_ratio": min_score_ratio, "min_episode_len_ratio": min_episode_len_ratio}
+
+    def export_state(self) -> dict:
+        phase_idx = self._phase_idx
+        return {"phase_idx": phase_idx, "phase_name": self._PHASES[phase_idx].name, "scores_window": self._scores, "rollback_bad_windows": self._rollback_bad_windows, "ep_base": 0.0, "episode_scores": self._episode_scores, "episode_lengths": self._episode_lengths, "episode_base_rewards": self._episode_base_rewards, "episode_alive_rewards": self._episode_alive_rewards, "terminated_count": self._terminated_count, "truncated_count": self._truncated_count, "phase_events": self._phase_events, "steps_in_phase": self._steps_in_phase, "episodes_in_phase": self._episodes_in_phase}
+
+    def import_state(self, state: dict) -> None:
+        phase_idx = int(state.get("phase_idx", 0))
+        self._phase_idx = max(0, min(phase_idx, len(self._PHASES) - 1))
+        phase_name = state.get("phase_name")
+        if phase_name:
+            for idx, phase in enumerate(self._PHASES):
+                if phase.name == phase_name:
+                    self._phase_idx = idx
+                    break
+        self._scores = [float(v) for v in state.get("scores_window", [])]
+        self._rollback_bad_windows = int(state.get("rollback_bad_windows", 0))
+        self._episode_scores = [float(v) for v in state.get("episode_scores", [])]
+        self._episode_lengths = [int(v) for v in state.get("episode_lengths", [])]
+        self._episode_base_rewards = [float(v) for v in state.get("episode_base_rewards", [])]
+        self._episode_alive_rewards = [float(v) for v in state.get("episode_alive_rewards", [])]
+        self._terminated_count = int(state.get("terminated_count", 0))
+        self._truncated_count = int(state.get("truncated_count", 0))
+        self._phase_events = list(state.get("phase_events", []))
+        self._steps_in_phase = int(state.get("steps_in_phase", 0))
+        self._episodes_in_phase = int(state.get("episodes_in_phase", 0))
+
+    def save_status(self, path=None) -> None:
+        import json
+        from pathlib import Path
+        target = path or self._status_path
+        if target is None:
+            return
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text(json.dumps(self.export_state(), ensure_ascii=False, indent=2), encoding="utf-8")
+

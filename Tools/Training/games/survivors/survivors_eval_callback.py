@@ -4,7 +4,7 @@ import copy
 import json
 
 import numpy as np
-from stable_baselines3.common.callbacks import BaseCallback
+from base.base_eval_callback import BaseEvalCallback
 from stable_baselines3.common.vec_env import VecNormalize
 
 try:
@@ -17,7 +17,7 @@ except ImportError:
 _KILL_REWARD = 2.0
 
 
-class SurvivorsEvalCallback(BaseCallback):
+class SurvivorsEvalCallback(BaseEvalCallback):
     """deterministic policy で評価rolloutを実行し、W&B と SB3 logger へ記録する。
 
     eval_env が指定されている場合（n_envs > 1）:
@@ -45,18 +45,18 @@ class SurvivorsEvalCallback(BaseCallback):
         n_eval_episodes: int = 5,
         frame_skip: int = 1,
         alive_reward: float = 0.001,
+        wandb_logger=None,
         verbose: int = 1,
     ):
-        super().__init__(verbose=verbose)
-        self.eval_env = eval_env
-        self.eval_freq = max(1, eval_freq)
-        self.n_eval_episodes = max(1, n_eval_episodes)
+        super().__init__(
+            eval_env=eval_env,
+            eval_freq=eval_freq,
+            n_eval_episodes=n_eval_episodes,
+            wandb_logger=wandb_logger,
+            verbose=verbose,
+        )
         self.frame_skip = frame_skip
         self.alive_reward = alive_reward
-        self._last_eval_step: int = 0
-
-    def _on_step(self) -> bool:
-        return True
 
     def _sync_vecnormalize(self) -> None:
         """訓練側 VecNormalize の obs_rms/ret_rms を eval_env へコピーする。"""
@@ -125,21 +125,18 @@ class SurvivorsEvalCallback(BaseCallback):
             )
             print(f"[Eval] synced env params: {summary}")
 
-    def _on_rollout_end(self) -> None:
-        if self.num_timesteps - self._last_eval_step < self.eval_freq:
-            return
+    def _sync_before_eval(self) -> None:
+        """評価前の同期処理（BaseEvalCallback のオーバーライド）。"""
+        if self.eval_env is not None:
+            self._sync_vecnormalize()
+            self._sync_shaping()
+            self._sync_env_params()
 
-        self._last_eval_step = self.num_timesteps
+    def _run_eval_and_log(self) -> None:
         # eval_env が None の場合は training_env を使う（n_envs=1 旧互換）
         use_training_env = self.eval_env is None
         env = self.training_env if use_training_env else self.eval_env
         model = self.model
-
-        # eval_env 使用時のみ VecNormalize 統計と shaping_weight、curriculum params を同期する
-        if not use_training_env:
-            self._sync_vecnormalize()
-            self._sync_shaping()
-            self._sync_env_params()
 
         # 評価中は VecNormalize running stats を更新しない
         was_training = getattr(env, "training", None)
@@ -305,9 +302,8 @@ class SurvivorsEvalCallback(BaseCallback):
                 f"n_ep={metrics['n_episodes']}"
             )
 
-        if _WANDB_AVAILABLE and wandb.run:
-            payload["global_step"] = self.num_timesteps
-            wandb.log(payload, step=self.num_timesteps)
+        if self._wandb_logger:
+            self._wandb_logger.log(payload, step=self.num_timesteps)
 
         if getattr(self, "model", None) is not None:
             for k, v in payload.items():
