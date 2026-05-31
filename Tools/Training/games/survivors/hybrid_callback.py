@@ -220,10 +220,19 @@ class HybridCurriculumSpalfCallback(BaseCallback):
                 self._ep_start_param_vec_per_env = [extended_vec.copy() for _ in range(n)]
             self._log_phase_event("completion_ready → 拡張 bounds へ切り替え")
 
+        infos = self.locals["infos"]
         # EpisodeScoreTracker.process() は 4-tuple (env_idx, active_score, ep_len, ep_base) を返す
-        for env_idx, active_score, ep_len, _ep_base in episode_results:
-            # Curriculum モジュールへ通知（フェーズ判定用スコア蓄積）
-            self._curriculum.on_episode_end(active_score, ep_len)
+        for env_idx, active_score, ep_len, ep_base in episode_results:
+            # Curriculum モジュールへ通知（診断情報を既存 CurriculumCallback と同等に渡す）
+            info = infos[env_idx] if env_idx < len(infos) else {}
+            alive_r = self._score_tracker.alive_reward * self._score_tracker.frame_skip * ep_len
+            is_truncated = bool(info.get("TimeLimit.truncated", False))
+            self._curriculum.on_episode_end(
+                active_score, ep_len,
+                base_reward=ep_base,
+                alive_reward=alive_r,
+                terminated=not is_truncated,
+            )
             # SPALF モジュールへ通知（ALP 計算・バッファ更新）
             ep_param_vec = self._ep_start_param_vec_per_env[env_idx]
             is_warmup = self._spalf.on_episode_end(env_idx, active_score, ep_param_vec)

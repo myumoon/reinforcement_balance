@@ -233,16 +233,17 @@ class SpalfStateModule(BaseStateModule):
 
     def on_episode_end(self, env_idx: int, active_score: float, ep_start_param_vec: np.ndarray) -> bool:
         """戻り値: warmup 中か否か（True=warmup）"""
-        # per-phase warmup チェック（フェーズ切り替え後の N エピソードはランダムサンプリングを継続）
-        if self._phase_warmup_remaining > 0:
-            self._phase_warmup_remaining -= 1
-            return True  # per-phase warmup 扱い
         score_norm = active_score / self._max_score
         self._total_episodes += 1
         self._recent_reward_buffer.append(score_norm)
         if self._recent_reward_buffer:
             mean_norm = sum(self._recent_reward_buffer) / len(self._recent_reward_buffer)
             self._use_spalf_mode = mean_norm < self._r_b
+
+        # per-phase warmup 中は ALP/GMM 更新のみスキップ（統計量は上記で更新済み）
+        if self._phase_warmup_remaining > 0:
+            self._phase_warmup_remaining -= 1
+            return True
         if self._total_episodes <= self._warmup_episodes:
             return True
         alp = self._compute_alp_for_episode(score_norm, ep_start_param_vec)
