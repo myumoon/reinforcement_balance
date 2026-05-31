@@ -39,6 +39,7 @@ import torch
 
 from base.base_ue5_env import UE5ConnectionError
 from common.utils import _linear_schedule
+from common.wandb_logger import WandbLogger
 from curriculum_callback import CurriculumCallback
 
 try:
@@ -857,6 +858,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     _use_wandb = False
+    wandb_logger = WandbLogger(enabled=False)
     args = parse_args()
 
     if args.recurrent and not _SB3_CONTRIB_AVAILABLE:
@@ -991,6 +993,7 @@ def main() -> None:
     print(f"[INFO] config_hash: {config_hash}")
 
     _use_wandb = args.wandb and _WANDB_AVAILABLE
+    wandb_logger = WandbLogger(enabled=_use_wandb)
 
     # W&B 初期化:
     #   continue mode (is_branch=False): 同一 run_id で継続（run_dir/work/wandb_run_id.txt を読む）
@@ -1063,6 +1066,7 @@ def main() -> None:
             _wandb_init_kwargs["id"] = wandb_run_id
             _wandb_init_kwargs["resume"] = "must" if wandb_run_id else None
         wandb.init(**_wandb_init_kwargs)
+        wandb_logger.setup()
         # branch mode または新規 run のとき run_id を保存（continue mode は上書きしない）
         if is_branch or not wandb_run_id:
             _wandb_id_path.write_text(wandb.run.id)
@@ -1265,6 +1269,7 @@ def main() -> None:
                 n_eval_episodes=args.eval_episodes,
                 frame_skip=args.frame_skip,
                 alive_reward=args.curriculum_alive_reward,
+                wandb_logger=wandb_logger,
             ))
             if eval_env is not None:
                 print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
@@ -1282,6 +1287,7 @@ def main() -> None:
             threshold_mult=args.curriculum_threshold,
             alive_reward=args.curriculum_alive_reward,
             status_path=str(curriculum_status_path),
+            wandb_logger=wandb_logger,
         )
         curriculum_state = resume_status.get("curriculum") if resume_status else None
         if curriculum_state:
@@ -1311,6 +1317,7 @@ def main() -> None:
             buffer_size=args.spalf_buffer_size,
             warmup_episodes=args.spalf_warmup_episodes,
             status_path=str(spalf_status_path),
+            wandb_logger=wandb_logger,
         )
         if args.resume:
             _spalf_state_file = source_dir / "log" / "spalf_state.json"
@@ -1356,6 +1363,7 @@ def main() -> None:
             beta=args.noveld_beta,
             alpha=args.noveld_alpha,
             verbose=1,
+            wandb_logger=wandb_logger,
         )
         callbacks.append(noveld_cb)
         print(f"[INFO] NovelDCallback 有効 (beta={args.noveld_beta}, alpha={args.noveld_alpha})")
