@@ -105,6 +105,7 @@ class SpalfStateModule(BaseStateModule):
         self._use_spalf_mode: bool = True
         self._current_params: dict = dict(_PHASE0_PARAMS)
         self._current_param_vec: np.ndarray = self.params_to_vec(_PHASE0_PARAMS)
+        self._phase_warmup_remaining: int = 0
 
     def set_bounds(self, bounds: dict) -> None:
         self._active_bounds = bounds
@@ -117,6 +118,27 @@ class SpalfStateModule(BaseStateModule):
         self._gmm = None
         self._component_mean_alp = np.array([])
 
+    def reset_buffers_for_phase_change(self) -> None:
+        """フェーズ切り替え時に ALP バッファのみリセットする。
+
+        _recent_reward_buffer / _total_episodes / _use_spalf_mode は維持する
+        （前フェーズの習熟度を引き継ぐため）。
+        SpalfStateModule.reset_buffers() は全バッファをクリアするため、
+        Hybrid のフェーズ切り替えではこちらを使用すること。
+        """
+        self._reward_history.clear()
+        self._alp_buffer.clear()
+        self._gmm = None
+        self._component_mean_alp = np.array([])
+
+    def set_phase_warmup(self, n_episodes: int) -> None:
+        """フェーズ切り替え後の per-phase warmup を設定する。
+
+        n_episodes エピソードの間は ALP 計算をスキップしてランダムサンプリングを行う。
+        _total_episodes ベースではなく、呼び出しからのカウントダウンで管理する。
+        """
+        self._phase_warmup_remaining = n_episodes
+
     def params_to_vec(self, params: dict) -> np.ndarray:
         vec = np.zeros(_N_PARAMS, dtype=np.float32)
         for i, key in enumerate(_PARAM_KEYS):
@@ -124,6 +146,9 @@ class SpalfStateModule(BaseStateModule):
             val = params.get(key, lo)
             if isinstance(val, bool):
                 val = 1.0 if val else 0.0
+            if hi <= lo:          # ゼロ幅 bounds（固定値）→ 中央値 0.5 でマーク
+                vec[i] = 0.5
+                continue
             vec[i] = (float(val) - lo) / (hi - lo)
         return np.clip(vec, 0.0, 1.0)
 
@@ -131,7 +156,10 @@ class SpalfStateModule(BaseStateModule):
         params: dict = {}
         for i, key in enumerate(_PARAM_KEYS):
             lo, hi = self._active_bounds[key]
-            val = lo + float(vec[i]) * (hi - lo)
+            if hi <= lo:          # ゼロ幅 bounds → lo 固定
+                val = lo
+            else:
+                val = lo + float(vec[i]) * (hi - lo)
             if key in ("min_enemies", "max_enemies", "max_enemy_type_id"):
                 val = int(round(val))
             elif key == "time_scaling":
@@ -205,6 +233,10 @@ class SpalfStateModule(BaseStateModule):
 
     def on_episode_end(self, env_idx: int, active_score: float, ep_start_param_vec: np.ndarray) -> bool:
         """戻り値: warmup 中か否か（True=warmup）"""
+        # per-phase warmup チェック（フェーズ切り替え後の N エピソードはランダムサンプリングを継続）
+        if self._phase_warmup_remaining > 0:
+            self._phase_warmup_remaining -= 1
+            return True  # per-phase warmup 扱い
         score_norm = active_score / self._max_score
         self._total_episodes += 1
         self._recent_reward_buffer.append(score_norm)

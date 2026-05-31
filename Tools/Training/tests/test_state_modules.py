@@ -13,19 +13,22 @@ from games.survivors.state_modules import EpisodeScoreTracker, SpalfStateModule,
 
 class TestEpisodeScoreTracker:
     def test_basic_single_env(self):
+        """基本的な per-env 蓄積と active_score 計算（4-tuple 仕様）。"""
         tracker = EpisodeScoreTracker(frame_skip=4, alive_reward=0.001)
         tracker.reset(1)
         infos = [{"base_reward": 10.0, "episode": {"l": 100, "r": 10.0}}]
         results = tracker.process(infos)
         assert len(results) == 1
-        env_idx, active_score, ep_len = results[0]
+        env_idx, active_score, ep_len, ep_base = results[0]
         assert env_idx == 0
         assert ep_len == 100
         alive_total = 0.001 * 4 * 100
         expected = max(0.0, 10.0 - alive_total)
         assert abs(active_score - expected) < 1e-6
+        assert abs(ep_base - 10.0) < 1e-6
 
     def test_n_envs(self):
+        """n_envs=2 での独立蓄積（4-tuple 仕様）。"""
         tracker = EpisodeScoreTracker(frame_skip=1, alive_reward=0.0)
         tracker.reset(3)
         infos = [
@@ -139,7 +142,7 @@ class TestCurriculumStateModule:
         state = m.export_state()
         m2 = self._make(window=5)
         m2.import_state(state)
-        assert m2.phase_idx == m.current_phase
+        assert m2.current_phase == m.current_phase
         assert m2._rollback_bad_windows == m._rollback_bad_windows
         assert len(m2._scores) == len(m._scores)
 
@@ -153,3 +156,106 @@ class TestCurriculumStateModule:
         }
         for key in required_keys:
             assert key in state, f"missing key: {key}"
+
+
+class TestSpalfStateModuleHybridMethods:
+    """SpalfStateModule に追加した Hybrid 用メソッドのテスト。"""
+
+    def _make(self) -> SpalfStateModule:
+        return SpalfStateModule(r_b=0.1, alpha=0.2, max_score=2250.0,
+                                buffer_size=200, warmup_episodes=50)
+
+    def test_reset_buffers_for_phase_change_preserves_recent_reward(self):
+        """reset_buffers_for_phase_change は _recent_reward_buffer を維持すること。"""
+        m = self._make()
+        m._recent_reward_buffer.append(0.5)
+        m._recent_reward_buffer.append(0.3)
+        m._total_episodes = 10
+        m._use_spalf_mode = False
+        m._reward_history.append((np.zeros(8), 0.3))
+        m._alp_buffer.append((np.zeros(8), 0.1))
+
+        m.reset_buffers_for_phase_change()
+
+        # ALP バッファはクリアされること
+        assert len(m._reward_history) == 0
+        assert len(m._alp_buffer) == 0
+        assert m._gmm is None
+        # 習熟度情報は維持されること
+        assert len(m._recent_reward_buffer) == 2
+        assert m._total_episodes == 10
+        assert m._use_spalf_mode is False
+
+    def test_set_phase_warmup_triggers_warmup(self):
+        """set_phase_warmup 後の N エピソードは warmup として扱われること。"""
+        m = self._make()
+        # warmup_episodes を超えるほどエピソードを消費
+        m._total_episodes = 100
+        vec = np.zeros(8, dtype=np.float32)
+
+        m.set_phase_warmup(3)
+
+        # 3 エピソードは per-phase warmup
+        assert m.on_episode_end(0, 1000.0, vec) is True
+        assert m._phase_warmup_remaining == 2
+        assert m.on_episode_end(0, 1000.0, vec) is True
+        assert m._phase_warmup_remaining == 1
+        assert m.on_episode_end(0, 1000.0, vec) is True
+        assert m._phase_warmup_remaining == 0
+        # 4 回目は warmup 終了（global warmup_episodes も超えているので False）
+        result = m.on_episode_end(0, 1000.0, vec)
+        assert result is False
+
+    def test_phase_warmup_remaining_initialized_to_zero(self):
+        """初期状態では _phase_warmup_remaining が 0 であること。"""
+        m = self._make()
+        assert m._phase_warmup_remaining == 0
+
+    def test_params_to_vec_zero_width_bounds(self):
+        """ゼロ幅 bounds では params_to_vec が 0.5 を返すこと。"""
+        m = self._make()
+        from games.survivors.survivors_difficulty import PARAM_BOUNDS
+        # min_enemies だけゼロ幅に設定
+        bounds = dict(PARAM_BOUNDS)
+        bounds["min_enemies"] = (20.0, 20.0)  # lo == hi
+        m.set_bounds(bounds)
+        params = dict(_PHASE0_PARAMS)
+        params["min_enemies"] = 20
+        vec = m.params_to_vec(params)
+        # ゼロ幅キーは 0.5 になること
+        from games.survivors.state_modules import _PARAM_KEYS
+        idx = _PARAM_KEYS.index("min_enemies")
+        assert abs(vec[idx] - 0.5) < 1e-6
+
+    def test_vec_to_params_zero_width_bounds(self):
+        """ゼロ幅 bounds では vec_to_params が lo 固定値を返すこと。"""
+        m = self._make()
+        from games.survivors.survivors_difficulty import PARAM_BOUNDS
+        bounds = dict(PARAM_BOUNDS)
+        bounds["enemy_hp_scale"] = (1.5, 1.5)  # lo == hi
+        m.set_bounds(bounds)
+        vec = np.full(8, 0.7, dtype=np.float32)
+        params = m.vec_to_params(vec)
+        # ゼロ幅キーは lo 固定
+        assert abs(params["enemy_hp_scale"] - 1.5) < 1e-6
+
+    def test_set_bounds_affects_normalization(self):
+        """set_bounds で正規化が変わること。"""
+        m = self._make()
+        from games.survivors.survivors_difficulty import PARAM_BOUNDS
+        default_bounds = dict(PARAM_BOUNDS)
+        m.set_bounds(default_bounds)
+        params_mid = {"min_enemies": 22, "max_enemies": 78, "speed_mult": 1.0,
+                      "spawn_rate_mult": 2.5, "max_enemy_type_id": 5,
+                      "enemy_hp_scale": 1.25, "enemy_damage_scale": 1.25, "time_scaling": False}
+        vec_default = m.params_to_vec(params_mid)
+
+        narrow_bounds = dict(PARAM_BOUNDS)
+        narrow_bounds["min_enemies"] = (4.0, 44.0)  # 幅を変える
+        m.set_bounds(narrow_bounds)
+        vec_narrow = m.params_to_vec(params_mid)
+
+        # 幅が変わったので min_enemies の正規化値が変わるはず
+        from games.survivors.state_modules import _PARAM_KEYS
+        idx = _PARAM_KEYS.index("min_enemies")
+        assert abs(vec_default[idx] - vec_narrow[idx]) > 1e-3
