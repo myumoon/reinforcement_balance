@@ -62,7 +62,7 @@ class SpalfCallback(BaseCallback):
         ep_active_scores: list[float] = []
         ep_score_norms: list[float] = []
         ep_has_warmup: bool = False
-        for env_idx, active_score, ep_len in episode_results:
+        for env_idx, active_score, ep_len, _ep_base in episode_results:
             ep_param_vec = self._ep_start_param_vec_per_env[env_idx]
             is_warmup = self._spalf.on_episode_end(env_idx, active_score, ep_param_vec)
             score_norm = active_score / self._spalf._max_score

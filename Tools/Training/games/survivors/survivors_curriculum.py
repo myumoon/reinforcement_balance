@@ -192,14 +192,13 @@ class CurriculumCallback(BaseCallback):
         infos = self.locals["infos"]
         dones = self.locals.get("dones", [False] * len(infos))
         episode_results = self._score_tracker.process(infos)
-        for env_idx, active_score, ep_len in episode_results:
+        for env_idx, active_score, ep_len, ep_base in episode_results:
             info = infos[env_idx] if env_idx < len(infos) else {}
-            base_r = float(info.get("base_reward_ep", 0.0) or 0.0)
             alive_r = self.alive_reward * self.frame_skip * ep_len
             is_truncated = bool(info.get("TimeLimit.truncated", False))
             self._curriculum.on_episode_end(
                 active_score, ep_len,
-                base_reward=base_r,
+                base_reward=ep_base,
                 alive_reward=alive_r,
                 terminated=not is_truncated,
             )

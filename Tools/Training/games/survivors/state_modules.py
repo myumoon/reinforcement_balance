@@ -54,16 +54,17 @@ class EpisodeScoreTracker:
         n = len(infos)
         if len(self._ep_base_per_env) != n:
             self._ep_base_per_env = [0.0] * n
-        results: list[tuple[int, float, int]] = []
+        results: list[tuple[int, float, int, float]] = []
         for env_idx, info in enumerate(infos):
             self._ep_base_per_env[env_idx] += info.get("base_reward", 0.0)
             if "episode" not in info:
                 continue
             ep_len = info["episode"]["l"]
+            ep_base = self._ep_base_per_env[env_idx]
             alive_total = self.alive_reward * self.frame_skip * ep_len
-            active_score = max(0.0, self._ep_base_per_env[env_idx] - alive_total)
+            active_score = max(0.0, ep_base - alive_total)
             self._ep_base_per_env[env_idx] = 0.0
-            results.append((env_idx, active_score, ep_len))
+            results.append((env_idx, active_score, ep_len, ep_base))
         return results
 
 
