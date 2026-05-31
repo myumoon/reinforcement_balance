@@ -156,6 +156,43 @@ ASurvivorsGameView* ASurvivorsParallelSetupActor::SpawnGameView(ASurvivorsGame* 
 	return View;
 }
 
+/** Actor またはそのコンポーネントから "Game" ObjectProperty を探し値を設定する。
+ *  FollowPlayerComponent のように Blueprint コンポーネント側にプロパティが定義されている
+ *  ケースに対応するため、Actor 直接 → 各コンポーネントの順に検索する。
+ *  @return 設定に成功した場合 true */
+static bool SetGamePropertyOnActorOrComponent(AActor* Target, ASurvivorsGame* Game)
+{
+	if (!Target || !Game) return false;
+
+	// 1. Actor 自身に "Game" プロパティがあれば設定
+	if (FObjectProperty* Prop = CastField<FObjectProperty>(
+		Target->GetClass()->FindPropertyByName(TEXT("Game"))))
+	{
+		Prop->SetObjectPropertyValue(
+			Prop->ContainerPtrToValuePtr<void>(Target), Game);
+		return true;
+	}
+
+	// 2. 見つからなければ全コンポーネントを検索（Blueprint コンポーネント対応）
+	TArray<UActorComponent*> Components;
+	Target->GetComponents(Components);
+	for (UActorComponent* Comp : Components)
+	{
+		if (!Comp) continue;
+		if (FObjectProperty* Prop = CastField<FObjectProperty>(
+			Comp->GetClass()->FindPropertyByName(TEXT("Game"))))
+		{
+			Prop->SetObjectPropertyValue(
+				Prop->ContainerPtrToValuePtr<void>(Comp), Game);
+			UE_LOG(LogTemp, Log,
+				TEXT("[SurvivorsParallelSetup] %s の Game を %s に設定しました。"),
+				*Comp->GetName(), *Game->GetName());
+			return true;
+		}
+	}
+	return false;
+}
+
 void ASurvivorsParallelSetupActor::BindCameraToGame(ASurvivorsGame* Game)
 {
 	if (!Game) return;
@@ -173,20 +210,12 @@ void ASurvivorsParallelSetupActor::BindCameraToGame(ASurvivorsGame* Game)
 			return;
 		}
 
-		// Blueprint アクターのため reflection 経由で "Game" プロパティを設定してから BeginPlay を呼ぶ
-		FObjectProperty* Prop = CastField<FObjectProperty>(
-			CameraActor->GetClass()->FindPropertyByName(TEXT("Game")));
-
-		if (Prop)
-		{
-			Prop->SetObjectPropertyValue(
-				Prop->ContainerPtrToValuePtr<void>(CameraActor), Game);
-		}
-		else
+		// Actor または FollowPlayerComponent の "Game" プロパティに設定（BeginPlay 前）
+		if (!SetGamePropertyOnActorOrComponent(CameraActor, Game))
 		{
 			UE_LOG(LogTemp, Warning,
-				TEXT("[SurvivorsParallelSetup] FollowPlayerCameraClass (%s) に"
-				     " 'Game' プロパティが見つかりません。"),
+				TEXT("[SurvivorsParallelSetup] FollowPlayerCameraClass (%s) および"
+				     "そのコンポーネントに 'Game' プロパティが見つかりません。"),
 				*FollowPlayerCameraClass->GetName());
 		}
 
@@ -202,20 +231,14 @@ void ASurvivorsParallelSetupActor::BindCameraToGame(ASurvivorsGame* Game)
 	// フォールバック: レベル上の FollowPlayerCameraActor に reflection で設定
 	if (!FollowPlayerCameraActor) return;
 
-	FObjectProperty* Prop = CastField<FObjectProperty>(
-		FollowPlayerCameraActor->GetClass()->FindPropertyByName(TEXT("Game")));
-
-	if (!Prop)
+	if (!SetGamePropertyOnActorOrComponent(FollowPlayerCameraActor, Game))
 	{
 		UE_LOG(LogTemp, Warning,
-			TEXT("[SurvivorsParallelSetup] FollowPlayerCameraActor (%s) に"
-			     " 'Game' プロパティが見つかりません。"),
+			TEXT("[SurvivorsParallelSetup] FollowPlayerCameraActor (%s) および"
+			     "そのコンポーネントに 'Game' プロパティが見つかりません。"),
 			*FollowPlayerCameraActor->GetName());
 		return;
 	}
-
-	Prop->SetObjectPropertyValue(
-		Prop->ContainerPtrToValuePtr<void>(FollowPlayerCameraActor), Game);
 
 	UE_LOG(LogTemp, Log,
 		TEXT("[SurvivorsParallelSetup] FollowPlayerCamera.Game を %s に設定しました。"),
