@@ -840,8 +840,6 @@ def parse_args() -> argparse.Namespace:
                    help="スコア正規化の最大値（default: 2250.0）")
     p.add_argument("--curriculum-spalf", action="store_true",
                    help="HybridCurriculumSpalfCallback を使用（--spalf / --curriculum の代替）")
-    p.add_argument("--curriculum-spalf-window", type=int, default=20,
-                   help="フェーズ昇格判定ウィンドウ（エピソード数、デフォルト: 20）")
     p.add_argument("--eval-freq", type=int, default=50_000,
                    help="deterministic 評価の間隔 (timesteps, 0=無効, survivors のみ有効, default: 50000)")
     p.add_argument("--eval-episodes", type=int, default=5,
@@ -1067,6 +1065,7 @@ def main() -> None:
                 "noveld_beta": args.noveld_beta,
                 "noveld_alpha": args.noveld_alpha,
                 "spalf": args.spalf,
+                "curriculum_spalf": args.curriculum_spalf,
                 "spalf_r_b": args.spalf_r_b,
                 "spalf_alpha": args.spalf_alpha,
                 "spalf_buffer_size": args.spalf_buffer_size,
@@ -1390,8 +1389,8 @@ def main() -> None:
             spalf_buffer_size=args.spalf_buffer_size,
             warmup_episodes=args.spalf_warmup_episodes,
             spalf_status_path=str(spalf_status_path),
-            phase_window=args.curriculum_spalf_window,
-            threshold_mult=args.curriculum_threshold,       # 既存フラグを再利用（default 5.0）
+            phase_window=args.curriculum_window,
+            threshold_mult=args.curriculum_threshold,
             curriculum_status_path=str(curriculum_status_path),
             wandb_logger=wandb_logger,
         )
@@ -1410,7 +1409,7 @@ def main() -> None:
         spalf_cb = hybrid_cb
         print(
             f"[INFO] HybridCurriculumSpalfCallback 有効 "
-            f"(phase_window={args.curriculum_spalf_window}, threshold_mult={args.curriculum_threshold}, "
+            f"(phase_window={args.curriculum_window}, threshold_mult={args.curriculum_threshold}, "
             f"r_b={args.spalf_r_b}, alpha={args.spalf_alpha}, max_score={args.spalf_max_score})"
         )
     elif args.curriculum_spalf:
