@@ -53,6 +53,9 @@ Thumbs.db
 .claude/plan/
 .claude/worktree-dev-review/
 .claude/task-state.json
+.claude/result-*.json
+.claude/review-*.md
+.claude/snapshot-*.txt
 
 # ====================
 # ローカル
