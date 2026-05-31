@@ -1122,52 +1122,60 @@ def main() -> None:
 
             _reward_fn_path = str(args.reward_fn.resolve()) if args.reward_fn else None
 
-            if args.n_envs > 1:
-                env_fns = [
-                    SurvivorsEnvFactory(
-                        host=args.host,
-                        port=base_port + i,
-                        frame_skip=args.frame_skip,
-                        reward_fn_path=_reward_fn_path,
-                    )
-                    for i in range(args.n_envs)
-                ]
-                if args.vec_env_type == "subproc":
-                    env = SubprocVecEnv(env_fns, start_method="spawn")
-                    print(f"[INFO] survivors SubprocVecEnv: n_envs={args.n_envs}, "
-                          f"ports={list(range(base_port, base_port + args.n_envs))}")
+            try:
+                if args.n_envs > 1:
+                    env_fns = [
+                        SurvivorsEnvFactory(
+                            host=args.host,
+                            port=base_port + i,
+                            frame_skip=args.frame_skip,
+                            reward_fn_path=_reward_fn_path,
+                        )
+                        for i in range(args.n_envs)
+                    ]
+                    if args.vec_env_type == "subproc":
+                        env = SubprocVecEnv(env_fns, start_method="spawn")
+                        print(f"[INFO] survivors SubprocVecEnv: n_envs={args.n_envs}, "
+                              f"ports={list(range(base_port, base_port + args.n_envs))}")
+                    else:
+                        env = DummyVecEnv(env_fns)
+                        print(f"[INFO] survivors DummyVecEnv: n_envs={args.n_envs}, "
+                              f"ports={list(range(base_port, base_port + args.n_envs))}")
+                    # 全 env の obs_schema_hash が一致しているか確認（SubprocVecEnv でも env_method 経由で動作）
+                    hashes = env.env_method("get_obs_schema_hash")
+                    if len(set(hashes)) != 1:
+                        raise RuntimeError(
+                            f"[ERROR] 各 UE5 インスタンスの obs_schema_hash が一致しません: {hashes}\n"
+                            "全インスタンスが同じレベル・設定で起動されているか確認してください。"
+                        )
+                    print(f"[INFO] obs_schema_hash 一致確認: {hashes[0]}")
                 else:
-                    env = DummyVecEnv(env_fns)
-                    print(f"[INFO] survivors DummyVecEnv: n_envs={args.n_envs}, "
-                          f"ports={list(range(base_port, base_port + args.n_envs))}")
-                # 全 env の obs_schema_hash が一致しているか確認（SubprocVecEnv でも env_method 経由で動作）
-                hashes = env.env_method("get_obs_schema_hash")
-                if len(set(hashes)) != 1:
-                    raise RuntimeError(
-                        f"[ERROR] 各 UE5 インスタンスの obs_schema_hash が一致しません: {hashes}\n"
-                        "全インスタンスが同じレベル・設定で起動されているか確認してください。"
-                    )
-                print(f"[INFO] obs_schema_hash 一致確認: {hashes[0]}")
-            else:
-                env = DummyVecEnv([SurvivorsEnvFactory(
-                    host=args.host, port=base_port,
-                    frame_skip=args.frame_skip, reward_fn_path=_reward_fn_path,
-                )])
-            # eval 専用 env 作成（n_envs > 1 かつ eval_freq > 0 の場合のみ）
-            # n_envs == 1 は training_env を評価に転用する旧来の動作を維持する
-            if args.n_envs > 1 and args.eval_freq > 0:
-                eval_env = DummyVecEnv([SurvivorsEnvFactory(
-                    host=args.host, port=args.eval_port,
-                    frame_skip=args.frame_skip, reward_fn_path=_reward_fn_path,
-                )])
-                eval_hash = eval_env.env_method("get_obs_schema_hash")[0]
-                train_hash = env.env_method("get_obs_schema_hash")[0]
-                if eval_hash != train_hash:
-                    raise RuntimeError(
-                        f"[ERROR] eval env の obs_schema_hash が train env と一致しません。\n"
-                        f"  train: {train_hash}\n"
-                        f"  eval : {eval_hash}"
-                    )
+                    env = DummyVecEnv([SurvivorsEnvFactory(
+                        host=args.host, port=base_port,
+                        frame_skip=args.frame_skip, reward_fn_path=_reward_fn_path,
+                    )])
+                # eval 専用 env 作成（n_envs > 1 かつ eval_freq > 0 の場合のみ）
+                # n_envs == 1 は training_env を評価に転用する旧来の動作を維持する
+                if args.n_envs > 1 and args.eval_freq > 0:
+                    eval_env = DummyVecEnv([SurvivorsEnvFactory(
+                        host=args.host, port=args.eval_port,
+                        frame_skip=args.frame_skip, reward_fn_path=_reward_fn_path,
+                    )])
+                    eval_hash = eval_env.env_method("get_obs_schema_hash")[0]
+                    train_hash = env.env_method("get_obs_schema_hash")[0]
+                    if eval_hash != train_hash:
+                        raise RuntimeError(
+                            f"[ERROR] eval env の obs_schema_hash が train env と一致しません。\n"
+                            f"  train: {train_hash}\n"
+                            f"  eval : {eval_hash}"
+                        )
+            except Exception:
+                # VecEnv 作成・検証中の例外時に子プロセスが残らないよう close する
+                if env is not None:
+                    env.close()
+                if eval_env is not None:
+                    eval_env.close()
+                raise
                 print(f"[INFO] train ports: {list(range(base_port, base_port + args.n_envs))}")
                 print(f"[INFO] eval port  : {args.eval_port}")
                 print(f"[INFO] eval env は訓練 env から独立しています")
