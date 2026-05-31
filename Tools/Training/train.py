@@ -1122,6 +1122,17 @@ def main() -> None:
 
             _reward_fn_path = str(args.reward_fn.resolve()) if args.reward_fn else None
 
+            # SubprocVecEnv 起動前の preflight チェック:
+            # reward_fn_path の存在を確認することで、worker 初期化失敗の主要因を事前に潰す。
+            # UE5 ワーカー接続失敗（SubprocVecEnv.__init__ 内で代入前に例外）は SB3 の制約上
+            # ここでは回収できないため、UE5 インスタンスが全て起動済みであることをユーザーが保証すること。
+            if args.vec_env_type == "subproc" and _reward_fn_path:
+                from pathlib import Path as _Path
+                if not _Path(_reward_fn_path).exists():
+                    raise FileNotFoundError(
+                        f"--reward-fn ファイルが見つかりません（subproc 起動前チェック）: {_reward_fn_path}"
+                    )
+
             try:
                 if args.n_envs > 1:
                     env_fns = [
@@ -1169,6 +1180,9 @@ def main() -> None:
                             f"  train: {train_hash}\n"
                             f"  eval : {eval_hash}"
                         )
+                    print(f"[INFO] train ports: {list(range(base_port, base_port + args.n_envs))}")
+                    print(f"[INFO] eval port  : {args.eval_port}")
+                    print(f"[INFO] eval env は訓練 env から独立しています")
             except Exception:
                 # VecEnv 作成・検証中の例外時に子プロセスが残らないよう close する
                 if env is not None:
@@ -1176,9 +1190,6 @@ def main() -> None:
                 if eval_env is not None:
                     eval_env.close()
                 raise
-                print(f"[INFO] train ports: {list(range(base_port, base_port + args.n_envs))}")
-                print(f"[INFO] eval port  : {args.eval_port}")
-                print(f"[INFO] eval env は訓練 env から独立しています")
         else:
             from games.balance.balance_env import BalanceEnv
             env = make_vec_env(
