@@ -740,6 +740,8 @@ def parse_args() -> argparse.Namespace:
                    help="サーバーポート（未指定時はゲーム別デフォルト: balance=8765, coin=8766, survivors=8767）")
     p.add_argument("--n-envs", type=int, default=1,
                    help="並列 UE5 インスタンス数（--game survivors 専用, default: 1）")
+    p.add_argument("--vec-env-type", choices=["dummy", "subproc"], default="dummy",
+                   help="訓練 VecEnv の実装 (survivors n_envs>1 専用): dummy=DummyVecEnv, subproc=SubprocVecEnv")
     p.add_argument("--n-steps", type=int, default=4096,
                    help="1 rollout で各 env が収集するステップ数 (default: 4096)。"
                         "--n-envs > 1 では総 rollout = n_steps × n_envs になります")
@@ -903,6 +905,13 @@ def main() -> None:
         raise ValueError("--n-envs > 1 は survivors ゲームのみ対応しています")
     if args.n_envs > 1 and args.dry_run:
         raise ValueError("--n-envs > 1 は --dry-run と同時に使用できません")
+    if args.vec_env_type == "subproc":
+        if args.game != "survivors":
+            raise ValueError("--vec-env-type subproc は survivors ゲームのみ対応しています")
+        if args.dry_run:
+            raise ValueError("--vec-env-type subproc は --dry-run と併用できません")
+        if args.n_envs <= 1:
+            raise ValueError("--vec-env-type subproc は --n-envs > 1 が必要です")
 
     # eval port 解決（survivors + non-dry-run + eval_freq > 0 + n_envs > 1 の場合のみ eval 専用 env を作る）
     # n_envs == 1 では既存互換: eval 専用 env なし、training_env を評価に使用
@@ -1041,6 +1050,7 @@ def main() -> None:
                 "curriculum_complete_min_score_ratio": args.curriculum_complete_min_score_ratio,
                 "curriculum_complete_min_episode_len_ratio": args.curriculum_complete_min_episode_len_ratio,
                 "n_envs": args.n_envs,
+                "vec_env_type": args.vec_env_type,
                 "base_port": base_port,
                 "eval_port": args.eval_port,
                 "reward_fn": str(args.reward_fn) if args.reward_fn else None,
@@ -1083,7 +1093,9 @@ def main() -> None:
             reward_fn = _load_reward_fn(args.reward_fn)
             print(f"[INFO] 報酬シェーピング関数をロード: {args.reward_fn}")
 
+    env = None
     eval_env = None
+    model = None
 
     if args.dry_run:
         if args.game == "coin":
@@ -1105,63 +1117,80 @@ def main() -> None:
                 return e
             env = make_vec_env(_make_coin_env, n_envs=1)
         elif args.game == "survivors":
-            from games.survivors.survivors_env import SurvivorsEnv
-            from stable_baselines3.common.monitor import Monitor
             from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+            from games.survivors.survivors_env_factory import SurvivorsEnvFactory
 
-            class _SurvivorsMonitor(Monitor):
-                """Monitor + SurvivorsEnv 固有メソッドの明示フォワード。
-                gymnasium の __getattr__ 経由のフォワードは v1.0 で廃止されるため
-                set_params / set_shaping_weight を明示定義して非推奨警告を抑制する。"""
-                def set_params(self, **kwargs) -> bool:
-                    return self.env.set_params(**kwargs)
+            _reward_fn_path = str(args.reward_fn.resolve()) if args.reward_fn else None
 
-                def get_params(self) -> dict:
-                    return self.env.get_params()
-
-                def set_shaping_weight(self, weight: float) -> None:
-                    self.env.set_shaping_weight(weight)
-
-                def clear_reward_fn(self) -> None:
-                    self.env.clear_reward_fn()
-
-            def _make_survivors_fn(p: int):
-                def _init():
-                    e = SurvivorsEnv(host=args.host, port=p, frame_skip=args.frame_skip)
-                    e._reward_fn = reward_fn
-                    return _SurvivorsMonitor(e)
-                return _init
-
-            if args.n_envs > 1:
-                env_fns = [_make_survivors_fn(base_port + i) for i in range(args.n_envs)]
-                env = DummyVecEnv(env_fns)
-                print(f"[INFO] survivors マルチ env: n_envs={args.n_envs}, "
-                      f"ports={list(range(base_port, base_port + args.n_envs))}")
-                # 全 env の obs_schema_hash が一致しているか確認
-                hashes = env.env_method("get_obs_schema_hash")
-                if len(set(hashes)) != 1:
-                    raise RuntimeError(
-                        f"[ERROR] 各 UE5 インスタンスの obs_schema_hash が一致しません: {hashes}\n"
-                        "全インスタンスが同じレベル・設定で起動されているか確認してください。"
+            # SubprocVecEnv 起動前の preflight チェック:
+            # reward_fn_path の存在を確認することで、worker 初期化失敗の主要因を事前に潰す。
+            # UE5 ワーカー接続失敗（SubprocVecEnv.__init__ 内で代入前に例外）は SB3 の制約上
+            # ここでは回収できないため、UE5 インスタンスが全て起動済みであることをユーザーが保証すること。
+            if args.vec_env_type == "subproc" and _reward_fn_path:
+                from pathlib import Path as _Path
+                if not _Path(_reward_fn_path).exists():
+                    raise FileNotFoundError(
+                        f"--reward-fn ファイルが見つかりません（subproc 起動前チェック）: {_reward_fn_path}"
                     )
-                print(f"[INFO] obs_schema_hash 一致確認: {hashes[0]}")
-            else:
-                env = DummyVecEnv([_make_survivors_fn(base_port)])
-            # eval 専用 env 作成（n_envs > 1 かつ eval_freq > 0 の場合のみ）
-            # n_envs == 1 は training_env を評価に転用する旧来の動作を維持する
-            if args.n_envs > 1 and args.eval_freq > 0:
-                eval_env = DummyVecEnv([_make_survivors_fn(args.eval_port)])
-                eval_hash = eval_env.env_method("get_obs_schema_hash")[0]
-                train_hash = env.env_method("get_obs_schema_hash")[0]
-                if eval_hash != train_hash:
-                    raise RuntimeError(
-                        f"[ERROR] eval env の obs_schema_hash が train env と一致しません。\n"
-                        f"  train: {train_hash}\n"
-                        f"  eval : {eval_hash}"
-                    )
-                print(f"[INFO] train ports: {list(range(base_port, base_port + args.n_envs))}")
-                print(f"[INFO] eval port  : {args.eval_port}")
-                print(f"[INFO] eval env は訓練 env から独立しています")
+
+            try:
+                if args.n_envs > 1:
+                    env_fns = [
+                        SurvivorsEnvFactory(
+                            host=args.host,
+                            port=base_port + i,
+                            frame_skip=args.frame_skip,
+                            reward_fn_path=_reward_fn_path,
+                        )
+                        for i in range(args.n_envs)
+                    ]
+                    if args.vec_env_type == "subproc":
+                        env = SubprocVecEnv(env_fns, start_method="spawn")
+                        print(f"[INFO] survivors SubprocVecEnv: n_envs={args.n_envs}, "
+                              f"ports={list(range(base_port, base_port + args.n_envs))}")
+                    else:
+                        env = DummyVecEnv(env_fns)
+                        print(f"[INFO] survivors DummyVecEnv: n_envs={args.n_envs}, "
+                              f"ports={list(range(base_port, base_port + args.n_envs))}")
+                    # 全 env の obs_schema_hash が一致しているか確認（SubprocVecEnv でも env_method 経由で動作）
+                    hashes = env.env_method("get_obs_schema_hash")
+                    if len(set(hashes)) != 1:
+                        raise RuntimeError(
+                            f"[ERROR] 各 UE5 インスタンスの obs_schema_hash が一致しません: {hashes}\n"
+                            "全インスタンスが同じレベル・設定で起動されているか確認してください。"
+                        )
+                    print(f"[INFO] obs_schema_hash 一致確認: {hashes[0]}")
+                else:
+                    env = DummyVecEnv([SurvivorsEnvFactory(
+                        host=args.host, port=base_port,
+                        frame_skip=args.frame_skip, reward_fn_path=_reward_fn_path,
+                    )])
+                # eval 専用 env 作成（n_envs > 1 かつ eval_freq > 0 の場合のみ）
+                # n_envs == 1 は training_env を評価に転用する旧来の動作を維持する
+                if args.n_envs > 1 and args.eval_freq > 0:
+                    eval_env = DummyVecEnv([SurvivorsEnvFactory(
+                        host=args.host, port=args.eval_port,
+                        frame_skip=args.frame_skip, reward_fn_path=_reward_fn_path,
+                    )])
+                    eval_hash = eval_env.env_method("get_obs_schema_hash")[0]
+                    train_hash = env.env_method("get_obs_schema_hash")[0]
+                    if eval_hash != train_hash:
+                        raise RuntimeError(
+                            f"[ERROR] eval env の obs_schema_hash が train env と一致しません。\n"
+                            f"  train: {train_hash}\n"
+                            f"  eval : {eval_hash}"
+                        )
+                    print(f"[INFO] train ports: {list(range(base_port, base_port + args.n_envs))}")
+                    print(f"[INFO] eval port  : {args.eval_port}")
+                    print(f"[INFO] eval env は訓練 env から独立しています")
+            except Exception:
+                # env が代入済み（SubprocVecEnv.__init__ 完了後）の場合のみ close できる。
+                # SubprocVecEnv.__init__ 内で例外が出た場合は env=None のままのため close 不可（既知制限）。
+                if env is not None:
+                    env.close()
+                if eval_env is not None:
+                    eval_env.close()
+                raise
         else:
             from games.balance.balance_env import BalanceEnv
             env = make_vec_env(
@@ -1464,28 +1493,32 @@ def main() -> None:
         print("\n[WARN] UE5 HTTP 接続が復旧できませんでした。モデルを保存して終了します。")
         print(f"[WARN] {exit_error}")
     finally:
-        model.save(str(model_base_path))
-        final_model_zip = _model_zip_path(model_base_path)
-        print(f"[INFO] Model saved to {final_model_zip}")
-        vn = _find_vecnormalize(env)
-        final_vecnorm_path = None
-        if vn is not None:
-            vn.save(str(vecnorm_path))
-            final_vecnorm_path = vecnorm_path
-            print(f"[INFO] VecNormalize 統計を保存: {vecnorm_path}")
-        _write_status_for_model(
-            final_model_zip,
-            final_vecnorm_path,
-            model.num_timesteps,
-            exit_reason=exit_reason,
-            exit_error=exit_error,
-        )
-        if spalf_cb is not None:
-            spalf_cb._save_status()
-            print(f"[INFO] SPALF state を保存: {spalf_status_path}")
-        env.close()
-        if eval_env is not None:
-            eval_env.close()
+        try:
+            if model is not None:
+                model.save(str(model_base_path))
+                final_model_zip = _model_zip_path(model_base_path)
+                print(f"[INFO] Model saved to {final_model_zip}")
+                vn = _find_vecnormalize(env) if env is not None else None
+                final_vecnorm_path = None
+                if vn is not None:
+                    vn.save(str(vecnorm_path))
+                    final_vecnorm_path = vecnorm_path
+                    print(f"[INFO] VecNormalize 統計を保存: {vecnorm_path}")
+                _write_status_for_model(
+                    final_model_zip,
+                    final_vecnorm_path,
+                    model.num_timesteps,
+                    exit_reason=exit_reason,
+                    exit_error=exit_error,
+                )
+                if spalf_cb is not None:
+                    spalf_cb._save_status()
+                    print(f"[INFO] SPALF state を保存: {spalf_status_path}")
+        finally:
+            if env is not None:
+                env.close()
+            if eval_env is not None:
+                eval_env.close()
         if args.curriculum and curriculum_cb is not None and args.total_steps >= 20_000:
             current_episode_count = len(curriculum_cb.export_state().get("episode_scores", []))
             if current_episode_count <= resume_episode_count:

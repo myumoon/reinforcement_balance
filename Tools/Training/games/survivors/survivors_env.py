@@ -196,3 +196,39 @@ class SurvivorsEnv(BaseUE5Env):
 
     def _action_to_payload(self, action) -> dict:
         return {"action": [float(int(action))]}
+
+
+from stable_baselines3.common.monitor import Monitor
+
+
+class SurvivorsMonitor(Monitor):
+    """Monitor + SurvivorsEnv 固有メソッドの明示フォワード。
+
+    gymnasium の __getattr__ 経由のフォワードは v1.0 で廃止されるため
+    必要なメソッドを明示定義して非推奨警告を抑制する。
+    DummyVecEnv / SubprocVecEnv 両対応。
+    """
+
+    def set_params(self, **kwargs) -> bool:
+        return self.env.set_params(**kwargs)
+
+    def get_params(self) -> dict:
+        return self.env.get_params()
+
+    def set_shaping_weight(self, weight: float) -> None:
+        self.env.set_shaping_weight(weight)
+
+    def get_shaping_weight(self) -> float:
+        return self.env.get_shaping_weight()
+
+    def clear_reward_fn(self) -> None:
+        self.env.clear_reward_fn()
+
+    def get_obs_schema_hash(self) -> str:
+        return self.env.get_obs_schema_hash()
+
+    def get_offsets(self):
+        return self.env.get_offsets()
+
+    def get_obs_schema(self):
+        return self.env.get_obs_schema()
