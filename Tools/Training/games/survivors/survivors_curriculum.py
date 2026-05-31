@@ -207,10 +207,10 @@ class CurriculumCallback(BaseCallback):
             if event in ("advance", "rollback"):
                 self._param_applier.apply(_phase_to_params(self._curriculum.current_phase))
                 if self._wandb_logger:
-                    self._wandb_logger.log(
-                        self._curriculum.get_wandb_metrics(),
-                        step=self.num_timesteps,
-                    )
+                    metrics = self._curriculum.get_wandb_metrics()
+                    metrics["curriculum/phase_name"] = self._curriculum._PHASES[self._curriculum._phase_idx].name
+                    metrics["curriculum/event"] = event
+                    self._wandb_logger.log(metrics, step=self.num_timesteps)
         self._curriculum._steps_in_phase += 1
         return True
 

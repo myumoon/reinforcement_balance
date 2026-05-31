@@ -496,6 +496,16 @@ class CurriculumStateModule(BaseStateModule):
             "curriculum/promotion_low_score": round(promotion_low_score, 4),
             "curriculum/promotion_low_score_floor": (round(promotion_low_score_floor, 4) if promotion_low_score_floor is not None else None),
             "curriculum/promotion_low_score_ok": int(promotion_low_score_floor is not None and promotion_low_score >= promotion_low_score_floor),
+            "survivors/difficulty_score": compute_difficulty_score({
+                "min_enemies": phase.min_enemies,
+                "max_enemies": phase.max_enemies,
+                "speed_mult": phase.speed_mult,
+                "spawn_rate_mult": phase.spawn_rate_mult,
+                "max_enemy_type_id": phase.max_enemy_type_id,
+                "enemy_hp_scale": phase.enemy_hp_scale,
+                "enemy_damage_scale": phase.enemy_damage_scale,
+                "time_scaling": phase.time_scaling,
+            }),
         }
 
     def _completion_base_threshold(self):
