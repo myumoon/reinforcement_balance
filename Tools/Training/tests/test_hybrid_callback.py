@@ -327,3 +327,34 @@ class TestPhaseBoundsEdgeCases:
             params = _phase_params_from_phase(i)
             for key in _PARAM_KEYS:
                 assert key in params, f"phase_idx={i}: missing key={key}"
+
+
+class TestProgressMetricsKeyConsistency:
+    """CurriculumCallback と HybridCurriculumSpalfCallback の W&B メトリクスキーが一致することを保証する。"""
+
+    def test_curriculum_and_hybrid_progress_metric_keys_match(self):
+        """--curriculum と --curriculum-spalf の get_wandb_progress_metrics() キーセットが一致すること。
+
+        両 callback は CurriculumStateModule.get_wandb_progress_metrics() に委譲しているため、
+        エピソードを流さずキーセットだけ比較すれば追従漏れを検出できる。
+        """
+        from games.survivors.survivors_curriculum import CurriculumCallback
+
+        curriculum_cb = CurriculumCallback(
+            raw_env=None,
+            frame_skip=1,
+            window=20,
+            threshold_mult=5.0,
+            alive_reward=0.001,
+        )
+        hybrid_cb = _make_callback(phase_window=20, threshold_mult=5.0)
+
+        # num_timesteps は SB3 BaseCallback.__init__ で 0 に初期化される
+        # エピソードデータ無しでも get_wandb_progress_metrics() は全キーを返す
+        curriculum_metrics = curriculum_cb.get_wandb_progress_metrics()
+        hybrid_metrics = hybrid_cb.get_wandb_progress_metrics()
+
+        assert set(hybrid_metrics.keys()) == set(curriculum_metrics.keys()), (
+            f"キー差分: curriculum only={set(curriculum_metrics) - set(hybrid_metrics)}, "
+            f"hybrid only={set(hybrid_metrics) - set(curriculum_metrics)}"
+        )

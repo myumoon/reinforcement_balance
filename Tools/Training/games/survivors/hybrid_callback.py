@@ -336,6 +336,15 @@ class HybridCurriculumSpalfCallback(BaseCallback):
     def get_completion_diagnostics(self) -> dict:
         return self._curriculum.get_completion_diagnostics()
 
+    def get_diagnostics(self) -> dict:
+        return self._curriculum.get_diagnostics(self.num_timesteps)
+
+    def _compute_blocker_category(self, window_dict: dict, phase_threshold_is_none: bool) -> int:
+        return self._curriculum._compute_blocker_category(window_dict, phase_threshold_is_none)
+
+    def get_wandb_progress_metrics(self) -> dict:
+        return self._curriculum.get_wandb_progress_metrics(self.num_timesteps)
+
     # ---- 状態保存・復元 ----
 
     def export_state(self) -> dict:
