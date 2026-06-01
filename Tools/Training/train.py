@@ -881,6 +881,10 @@ def main() -> None:
     if args.curriculum_spalf and args.until_curriculum_complete:
         raise ValueError("--curriculum-spalf では --until-curriculum-complete は使用できません。"
                          "完了条件は --total-steps で制御してください。")
+    if args.curriculum_spalf and args.n_envs <= 1:
+        raise ValueError("--curriculum-spalf は --n-envs > 1 が必要です（probe eval 専用 env に使用）。")
+    if args.curriculum_spalf and args.eval_freq == 0:
+        raise ValueError("--curriculum-spalf は --eval-freq > 0 が必要です（probe eval に使用）。")
     if args.recurrent and args.frame_stack > 1:
         print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
               " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")
@@ -1408,6 +1412,24 @@ def main() -> None:
         spalf_cb = hybrid_cb
         if _use_wandb and survivors_curriculum_metrics_callback is not None:
             callbacks.append(survivors_curriculum_metrics_callback(hybrid_cb, log_freq=5_000))
+        # HybridPromotionProbeCallback: 固定 Phase probe による昇格判定（n_envs > 1 時のみ）
+        if args.n_envs > 1 and eval_env is not None:
+            from games.survivors.hybrid_promotion_probe_callback import HybridPromotionProbeCallback
+            probe_cb = HybridPromotionProbeCallback(
+                hybrid_cb=hybrid_cb,
+                eval_env=eval_env,
+                probe_freq=args.eval_freq,
+                n_probe_episodes=args.eval_episodes,
+                frame_skip=args.frame_skip,
+                alive_reward=args.curriculum_alive_reward,
+                deterministic=True,
+                wandb_logger=wandb_logger,
+            )
+            callbacks.append(probe_cb)
+            print(
+                f"[INFO] HybridPromotionProbeCallback 有効 "
+                f"(probe_freq={args.eval_freq:,}, n_probe_episodes={args.eval_episodes})"
+            )
         print(
             f"[INFO] HybridCurriculumSpalfCallback 有効 "
             f"(phase_window={args.curriculum_window}, threshold_mult={args.curriculum_threshold}, "

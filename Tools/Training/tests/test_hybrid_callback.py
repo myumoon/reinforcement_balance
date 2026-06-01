@@ -329,6 +329,79 @@ class TestPhaseBoundsEdgeCases:
                 assert key in params, f"phase_idx={i}: missing key={key}"
 
 
+class TestHybridProbePromotion:
+    """HybridCurriculumSpalfCallback の probe 昇格 API テスト。"""
+
+    def _setup_callback_with_mock_env(self, n_envs: int = 2, **kwargs):
+        cb = _make_callback(**kwargs)
+        mock_env = MagicMock()
+        mock_env.num_envs = n_envs
+        mock_env.env_method.return_value = [True] * n_envs
+        mock_model = MagicMock()
+        mock_model.get_env.return_value = mock_env
+        mock_model.num_timesteps = 0
+        cb.model = mock_model
+        cb._param_applier.set_training_env(mock_env)
+        cb._score_tracker.reset(n_envs)
+        initial_params = _phase_params_from_phase(0)
+        initial_vec = cb._spalf.params_to_vec(initial_params)
+        cb._ep_start_param_vec_per_env = [initial_vec.copy() for _ in range(n_envs)]
+        cb._spalf._current_params = initial_params
+        cb._spalf._current_param_vec = initial_vec
+        return cb
+
+    def test_on_step_does_not_advance_train_only(self):
+        """allow_promotion=False の _on_step では train episode だけで advance しないこと。"""
+        cb = self._setup_callback_with_mock_env(n_envs=2, warmup_episodes=0, phase_warmup_episodes=0)
+        phase0 = _CURRICULUM_PHASES[0]
+        threshold = (phase0.threshold or 1.0) * cb._curriculum.threshold_mult
+        high_score = threshold * 2.0
+
+        # window 分の高スコアを train window に入れる
+        for _ in range(3):
+            cb._curriculum.on_episode_end(high_score, ep_len=3000)
+
+        # _on_step の check_phase_transition(allow_promotion=False) を直接呼び出して検証
+        event = cb._curriculum.check_phase_transition(allow_promotion=False, promotion_source="train")
+        assert event is None, "allow_promotion=False では train scores だけで advance しないこと"
+        assert cb._curriculum.current_phase == 0
+
+    def test_on_promotion_probe_results_advances_phase(self):
+        """on_promotion_probe_results で昇格条件達成時に _on_phase_changed が呼ばれること。"""
+        cb = self._setup_callback_with_mock_env(n_envs=2, warmup_episodes=0, phase_warmup_episodes=0)
+        phase0 = _CURRICULUM_PHASES[0]
+        threshold = (phase0.threshold or 1.0) * cb._curriculum.threshold_mult
+        high_score = threshold * 2.0
+
+        results = [{"active_score": high_score, "ep_len": 3000, "base_reward": high_score}
+                   for _ in range(3)]
+        event = cb.on_promotion_probe_results(results)
+        assert event == "advance"
+        assert cb._curriculum.current_phase == 1
+
+    def test_probe_advance_updates_spalf_bounds(self):
+        """probe advance 後に SPALF bounds が新 phase 用に更新されること。"""
+        cb = self._setup_callback_with_mock_env(n_envs=2, warmup_episodes=0, phase_warmup_episodes=0)
+        phase0 = _CURRICULUM_PHASES[0]
+        threshold = (phase0.threshold or 1.0) * cb._curriculum.threshold_mult
+        high_score = threshold * 2.0
+
+        results = [{"active_score": high_score, "ep_len": 3000, "base_reward": high_score}
+                   for _ in range(3)]
+        cb.on_promotion_probe_results(results)
+
+        from games.survivors.hybrid_callback import _phase_bounds
+        expected = _phase_bounds(1)
+        assert cb._spalf._active_bounds == expected
+
+    def test_get_current_phase_params_returns_phase0(self):
+        """get_current_phase_params が phase 0 の固定 params を返すこと。"""
+        cb = _make_callback()
+        params = cb.get_current_phase_params()
+        phase0_params = _phase_params_from_phase(0)
+        assert params == phase0_params
+
+
 class TestProgressMetricsKeyConsistency:
     """CurriculumCallback と HybridCurriculumSpalfCallback の W&B メトリクスキーが一致することを保証する。"""
 

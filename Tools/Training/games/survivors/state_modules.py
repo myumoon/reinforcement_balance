@@ -372,6 +372,12 @@ class CurriculumStateModule(BaseStateModule):
         self._completion_min_score_ratio: float = 1.0
         self._completion_min_episode_len_ratio: float = 1.0
 
+        # probe window（HybridPromotionProbeCallback が書き込む昇格判定専用バッファ）
+        self._promotion_scores: list[float] = []
+        self._promotion_episode_lengths: list[int] = []
+        self._promotion_base_rewards: list[float] = []
+        self._promotion_events: list[dict] = []
+
     @property
     def current_phase(self) -> int:
         return self._phase_idx
@@ -400,7 +406,7 @@ class CurriculumStateModule(BaseStateModule):
             self._truncated_count += 1
         self._episodes_in_phase += 1
 
-    def check_phase_transition(self):
+    def check_phase_transition(self, *, allow_promotion: bool = True, promotion_source: str = "train"):
         from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
         phase = self._PHASES[self._phase_idx]
         effective_threshold = (phase.threshold or float("inf")) * self.threshold_mult
@@ -421,11 +427,76 @@ class CurriculumStateModule(BaseStateModule):
                 return "rollback"
         else:
             self._rollback_bad_windows = 0
+        if not allow_promotion:
+            return None
         can_promote, promotion_reason = self._promotion_judgment(phase, mean, mean_len, score_min, score_std, effective_threshold, len(recent_scores), recent_scores)
         if can_promote:
             self._advance_phase(mean, effective_threshold, promotion_reason)
             return "advance"
         return None
+
+    def on_promotion_probe_episode_end(
+        self, active_score: float, ep_len: int, base_reward: float = 0.0
+    ) -> None:
+        """probe episode の結果を promotion 判定専用バッファに追加する。"""
+        self._promotion_scores.append(active_score)
+        self._promotion_episode_lengths.append(ep_len)
+        self._promotion_base_rewards.append(base_reward)
+
+    def check_promotion_transition(self, *, promotion_source: str = "probe") -> str | None:
+        """probe scores のみで昇格判定を行う（rollback は発生しない）。
+
+        probe window が window 数に満たない場合、または昇格条件未達の場合は None を返す。
+        """
+        from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
+        phase = self._PHASES[self._phase_idx]
+        if phase.threshold is None:
+            return None
+        effective_threshold = phase.threshold * self.threshold_mult
+        recent_scores = self._promotion_scores[-min(len(self._promotion_scores), self.window):]
+        recent_lengths = self._promotion_episode_lengths[-len(recent_scores):] if recent_scores else []
+        if len(recent_scores) < self.window:
+            return None
+        mean = _mean(recent_scores)
+        mean_len = _mean([float(v) for v in recent_lengths])
+        score_min = min(recent_scores) if recent_scores else 0.0
+        score_std = _stdev(recent_scores)
+        can_promote, promotion_reason = self._promotion_judgment(
+            phase, mean, mean_len, score_min, score_std,
+            effective_threshold, len(recent_scores), recent_scores
+        )
+        if can_promote:
+            self._advance_phase(mean, effective_threshold, f"probe:{promotion_reason}")
+            return "advance"
+        return None
+
+    def clear_promotion_probe_window(self) -> None:
+        """probe window をクリアする（phase advance / rollback 時に呼ばれる）。"""
+        self._promotion_scores.clear()
+        self._promotion_episode_lengths.clear()
+        self._promotion_base_rewards.clear()
+
+    def get_promotion_probe_diagnostics(self) -> dict:
+        """probe window の現状を返す（W&B ログ・デバッグ用）。"""
+        from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
+        phase = self._PHASES[self._phase_idx]
+        n = len(self._promotion_scores)
+        recent = self._promotion_scores[-min(n, self.window):]
+        score_mean = _mean(recent) if recent else 0.0
+        score_std = _stdev(recent) if recent else 0.0
+        score_cv = score_std / max(score_mean, 1e-8) if recent and score_mean > 0.0 else None
+        threshold = (phase.threshold or float("inf")) * self.threshold_mult if phase.threshold else None
+        return {
+            "n_probe_episodes": n,
+            "window_required": self.window,
+            "score_mean": round(score_mean, 4),
+            "score_min": round(min(recent), 4) if recent else None,
+            "score_p10": round(_percentile(recent, 10.0), 4) if recent else None,
+            "score_cv": round(score_cv, 4) if score_cv is not None else None,
+            "ep_length_mean": round(_mean([float(v) for v in self._promotion_episode_lengths[-len(recent):]]), 1) if recent else None,
+            "threshold": round(threshold, 4) if threshold is not None else None,
+            "promotion_ready": threshold is not None and len(recent) >= self.window and score_mean >= threshold,
+        }
 
     def _should_rollback(self, phase, mean, mean_len, effective_threshold, recent_count):
         if self._phase_idx <= 0 or recent_count < self.rollback_min_episodes:
@@ -477,6 +548,7 @@ class CurriculumStateModule(BaseStateModule):
         self._rollback_bad_windows = 0
         self._steps_in_phase = 0
         self._episodes_in_phase = 0
+        self.clear_promotion_probe_window()
         next_phase = self._PHASES[self._phase_idx]
         self._phase_events.append({"event": "advance", "from_phase_idx": prev_idx, "from_phase_name": prev_name, "to_phase_idx": self._phase_idx, "to_phase_name": next_phase.name, "active_score_mean": round(mean, 4), "threshold": round(threshold, 4), "reason": reason})
         msg = "[Curriculum] Phase " + str(self._phase_idx) + " 昇格: " + prev_name + " -> " + next_phase.name + " (score=" + str(round(mean, 3)) + " >= " + str(round(threshold, 1)) + ", " + reason + ")"
@@ -490,6 +562,7 @@ class CurriculumStateModule(BaseStateModule):
         self._rollback_bad_windows = 0
         self._steps_in_phase = 0
         self._episodes_in_phase = 0
+        self.clear_promotion_probe_window()
         next_phase = self._PHASES[self._phase_idx]
         self._phase_events.append({"event": "rollback", "from_phase_idx": prev_idx, "from_phase_name": prev_name, "to_phase_idx": self._phase_idx, "to_phase_name": next_phase.name, "active_score_mean": round(mean, 4), "episode_length_mean": round(mean_len, 1), "threshold": round(threshold, 4), "reason": reason})
         msg = "[Curriculum] Phase " + str(self._phase_idx) + " 降格: " + prev_name + " -> " + next_phase.name + " (" + reason + ", score=" + str(round(mean, 3)) + ", ep_len=" + str(round(mean_len, 1)) + ")"
@@ -757,7 +830,26 @@ class CurriculumStateModule(BaseStateModule):
 
     def export_state(self) -> dict:
         phase_idx = self._phase_idx
-        return {"phase_idx": phase_idx, "phase_name": self._PHASES[phase_idx].name, "scores_window": self._scores, "rollback_bad_windows": self._rollback_bad_windows, "ep_base": 0.0, "episode_scores": self._episode_scores, "episode_lengths": self._episode_lengths, "episode_base_rewards": self._episode_base_rewards, "episode_alive_rewards": self._episode_alive_rewards, "terminated_count": self._terminated_count, "truncated_count": self._truncated_count, "phase_events": self._phase_events, "steps_in_phase": self._steps_in_phase, "episodes_in_phase": self._episodes_in_phase}
+        return {
+            "phase_idx": phase_idx,
+            "phase_name": self._PHASES[phase_idx].name,
+            "scores_window": self._scores,
+            "rollback_bad_windows": self._rollback_bad_windows,
+            "ep_base": 0.0,
+            "episode_scores": self._episode_scores,
+            "episode_lengths": self._episode_lengths,
+            "episode_base_rewards": self._episode_base_rewards,
+            "episode_alive_rewards": self._episode_alive_rewards,
+            "terminated_count": self._terminated_count,
+            "truncated_count": self._truncated_count,
+            "phase_events": self._phase_events,
+            "steps_in_phase": self._steps_in_phase,
+            "episodes_in_phase": self._episodes_in_phase,
+            "promotion_scores": self._promotion_scores,
+            "promotion_episode_lengths": self._promotion_episode_lengths,
+            "promotion_base_rewards": self._promotion_base_rewards,
+            "promotion_events": self._promotion_events,
+        }
 
     def import_state(self, state: dict) -> None:
         phase_idx = int(state.get("phase_idx", 0))
@@ -779,6 +871,10 @@ class CurriculumStateModule(BaseStateModule):
         self._phase_events = list(state.get("phase_events", []))
         self._steps_in_phase = int(state.get("steps_in_phase", 0))
         self._episodes_in_phase = int(state.get("episodes_in_phase", 0))
+        self._promotion_scores = [float(v) for v in state.get("promotion_scores", [])]
+        self._promotion_episode_lengths = [int(v) for v in state.get("promotion_episode_lengths", [])]
+        self._promotion_base_rewards = [float(v) for v in state.get("promotion_base_rewards", [])]
+        self._promotion_events = list(state.get("promotion_events", []))
 
     def save_status(self, path=None) -> None:
         import json
