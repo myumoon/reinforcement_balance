@@ -218,95 +218,18 @@ class CurriculumCallback(BaseCallback):
         return self._curriculum.get_completion_diagnostics(window, min_episodes, min_score_ratio, min_episode_len_ratio)
 
     def get_diagnostics(self) -> dict:
-        phase = PHASES[self._curriculum.current_phase]
-        base_threshold = phase.threshold
-        effective_threshold = (base_threshold or float("inf")) * self.threshold_mult
-        recent_count = min(len(self._curriculum._scores), self.window)
-        recent_scores = self._curriculum._scores[-recent_count:] if recent_count else []
-        recent_lengths = self._curriculum._episode_lengths[-recent_count:] if recent_count else []
-        score_mean = _mean(recent_scores)
-        score_std = _stdev(recent_scores)
-        length_mean = _mean([float(v) for v in recent_lengths])
-        score_floor, length_floor = self._curriculum._rollback_floors(phase, effective_threshold)
-        threshold_ratio = (score_mean / effective_threshold if base_threshold is not None and effective_threshold > 0.0 and recent_scores else None)
-        score_min = min(recent_scores) if recent_scores else None
-        score_cv = (score_std / max(score_mean, 1e-8) if recent_scores and score_mean > 0.0 else None)
-        if phase.promotion_score_stat == "percentile" and recent_scores:
-            promotion_low_score = _percentile(recent_scores, phase.promotion_score_percentile)
-        else:
-            promotion_low_score = score_min if score_min is not None else 0.0
-        promotion_low_score_floor = (effective_threshold * phase.promotion_min_score_ratio if base_threshold is not None else None)
-        promotion_low_score_ok = (promotion_low_score_floor is not None and promotion_low_score >= promotion_low_score_floor)
-        promotion_stable = (recent_count >= self.window and base_threshold is not None and promotion_low_score_floor is not None and promotion_low_score_ok and score_cv is not None and score_cv <= phase.promotion_max_score_cv)
-        c = self._curriculum
-        return {
-            "timestep": self.num_timesteps,
-            "phase_idx": c._phase_idx,
-            "phase_name": phase.name,
-            "window": self.window,
-            "threshold_mult": self.threshold_mult,
-            "rollback_patience": self.rollback_patience,
-            "rollback_min_episodes": self.rollback_min_episodes,
-            "rollback_bad_windows": c._rollback_bad_windows,
-            "episodes_total": len(c._episode_scores),
-            "terminated_episodes": c._terminated_count,
-            "truncated_episodes": c._truncated_count,
-            "current_window": {
-                "episodes": recent_count,
-                "required_episodes": self.window,
-                "active_score_mean": round(score_mean, 4),
-                "active_score_min": round(score_min, 4) if score_min is not None else None,
-                "active_score_max": round(max(recent_scores), 4) if recent_scores else None,
-                "active_score_std": round(score_std, 4),
-                "active_score_cv": round(score_cv, 4) if score_cv is not None else None,
-                "active_score_p10": round(_percentile(recent_scores, 10.0), 4) if recent_scores else None,
-                "active_score_p20": round(_percentile(recent_scores, 20.0), 4) if recent_scores else None,
-                "episode_length_mean": round(length_mean, 1),
-                "min_episode_steps": phase.min_episode_steps,
-                "base_threshold": base_threshold,
-                "effective_threshold": round(effective_threshold, 4) if base_threshold is not None else None,
-                "threshold_ratio": round(threshold_ratio, 4) if threshold_ratio is not None else None,
-                "promotion_min_score_ratio": phase.promotion_min_score_ratio,
-                "promotion_min_score_floor": round(promotion_low_score_floor, 4) if promotion_low_score_floor is not None else None,
-                "promotion_max_score_cv": phase.promotion_max_score_cv,
-                "promotion_score_stat": phase.promotion_score_stat,
-                "promotion_score_percentile": phase.promotion_score_percentile,
-                "promotion_low_score": round(promotion_low_score, 4),
-                "promotion_low_score_floor": round(promotion_low_score_floor, 4) if promotion_low_score_floor is not None else None,
-                "promotion_low_score_ok": promotion_low_score_ok,
-                "promotion_stability_ok": promotion_stable,
-                "rollback_score_floor": round(score_floor, 4) if score_floor is not None else None,
-                "rollback_length_floor": round(length_floor, 1) if length_floor is not None else None,
-                "rollback_bad_windows": c._rollback_bad_windows,
-                "ready_for_phase_judgment": (recent_count >= self.window and base_threshold is not None and score_mean >= effective_threshold and length_mean >= phase.min_episode_steps and promotion_stable),
-            },
-            "overall": {
-                "active_score_mean": round(_mean(c._episode_scores), 4),
-                "episode_length_mean": round(_mean([float(v) for v in c._episode_lengths]), 1),
-                "base_reward_mean": round(_mean(c._episode_base_rewards), 4),
-                "alive_reward_mean": round(_mean(c._episode_alive_rewards), 4),
-            },
-            "phase_events": c._phase_events,
-            "completion": self.get_completion_diagnostics(),
-            "params": {
-                "min_enemies": phase.min_enemies,
-                "max_enemies": phase.max_enemies,
-                "speed_mult": phase.speed_mult,
-                "spawn_rate_mult": phase.spawn_rate_mult,
-                "max_enemy_type_id": phase.max_enemy_type_id,
-                "enemy_hp_scale": phase.enemy_hp_scale,
-                "enemy_damage_scale": phase.enemy_damage_scale,
-                "time_scaling": phase.time_scaling,
-                "min_episode_steps": phase.min_episode_steps,
-                "rollback_score_ratio": phase.rollback_score_ratio,
-                "rollback_length_ratio": phase.rollback_length_ratio,
-                "promotion_min_score_ratio": phase.promotion_min_score_ratio,
-                "promotion_max_score_cv": phase.promotion_max_score_cv,
-                "promotion_score_stat": phase.promotion_score_stat,
-                "promotion_score_percentile": phase.promotion_score_percentile,
-            },
-            "recommendation": self.recommend_next_settings(),
+        d = self._curriculum.get_diagnostics(self.num_timesteps)
+        # recommend_next_settings は CurriculumCallback 固有（状態確認 CLI 向け）
+        d["recommendation"] = self.recommend_next_settings()
+        d["params"] = {
+            k: getattr(PHASES[self._curriculum.current_phase], k)
+            for k in ("min_enemies", "max_enemies", "speed_mult", "spawn_rate_mult",
+                      "max_enemy_type_id", "enemy_hp_scale", "enemy_damage_scale",
+                      "time_scaling", "min_episode_steps", "rollback_score_ratio",
+                      "rollback_length_ratio", "promotion_min_score_ratio",
+                      "promotion_max_score_cv", "promotion_score_stat", "promotion_score_percentile")
         }
+        return d
 
     def recommend_next_settings(self) -> dict:
         phase = PHASES[self._curriculum.current_phase]
@@ -328,74 +251,10 @@ class CurriculumCallback(BaseCallback):
         )
 
     def _compute_blocker_category(self, window_dict: dict, phase_threshold_is_none: bool) -> int:
-        if phase_threshold_is_none or self.is_final_phase:
-            return BLOCKER_NONE
-        recent_count = int(window_dict.get("episodes", 0) or 0)
-        required = int(window_dict.get("required_episodes", 1) or 1)
-        if recent_count < required:
-            return BLOCKER_NOT_ENOUGH_EP
-        score_mean = float(window_dict.get("active_score_mean") or 0.0)
-        threshold = float(window_dict.get("effective_threshold") or float("inf"))
-        if score_mean < threshold:
-            return BLOCKER_SCORE_MEAN_LOW
-        length_mean = float(window_dict.get("episode_length_mean") or 0.0)
-        min_ep_steps = int(window_dict.get("min_episode_steps") or 0)
-        if length_mean < min_ep_steps:
-            return BLOCKER_EP_LEN_LOW
-        promotion_low_score = window_dict.get("promotion_low_score")
-        min_score_floor = window_dict.get("promotion_low_score_floor")
-        if promotion_low_score is not None and min_score_floor is not None and promotion_low_score < min_score_floor:
-            return BLOCKER_SCORE_MIN_LOW
-        score_cv = window_dict.get("active_score_cv")
-        max_cv = window_dict.get("promotion_max_score_cv")
-        if score_cv is not None and max_cv is not None and score_cv > max_cv:
-            return BLOCKER_SCORE_CV_HIGH
-        return BLOCKER_NONE
+        return self._curriculum._compute_blocker_category(window_dict, phase_threshold_is_none)
 
     def get_wandb_progress_metrics(self) -> dict:
-        diagnostics = self.get_diagnostics()
-        window = diagnostics.get("current_window", {})
-        overall = diagnostics.get("overall", {})
-        completion = diagnostics.get("completion", {})
-        episodes_total = max(int(diagnostics.get("episodes_total", 0) or 0), 1)
-        terminated = int(diagnostics.get("terminated_episodes", 0) or 0)
-        truncated = int(diagnostics.get("truncated_episodes", 0) or 0)
-        phase = PHASES[self._curriculum.current_phase]
-        blocker = self._compute_blocker_category(window_dict=window, phase_threshold_is_none=(phase.threshold is None))
-        return {
-            "survivors/active_score_mean": window.get("active_score_mean"),
-            "survivors/active_score_min": window.get("active_score_min"),
-            "survivors/active_score_std": window.get("active_score_std"),
-            "survivors/active_score_cv": window.get("active_score_cv"),
-            "survivors/episode_length_mean": window.get("episode_length_mean"),
-            "survivors/base_reward_mean": overall.get("base_reward_mean"),
-            "survivors/alive_reward_mean": overall.get("alive_reward_mean"),
-            "survivors/terminated_ratio": terminated / episodes_total,
-            "survivors/truncated_ratio": truncated / episodes_total,
-            "curriculum/phase_idx": diagnostics.get("phase_idx"),
-            "curriculum/phase_progress_ratio": window.get("threshold_ratio"),
-            "curriculum/score_mean": window.get("active_score_mean"),
-            "curriculum/score_min": window.get("active_score_min"),
-            "curriculum/score_cv": window.get("active_score_cv"),
-            "curriculum/threshold_ratio": window.get("threshold_ratio"),
-            "curriculum/steps_in_phase": self._curriculum._steps_in_phase,
-            "curriculum/episodes_in_phase": self._curriculum._episodes_in_phase,
-            "curriculum/promotion_blocker": blocker,
-            "curriculum/ready_for_phase_judgment": int(bool(window.get("ready_for_phase_judgment"))),
-            "curriculum/promotion_stability_ok": int(bool(window.get("promotion_stability_ok"))),
-            "curriculum/active_score_p10": window.get("active_score_p10"),
-            "curriculum/active_score_p20": window.get("active_score_p20"),
-            "curriculum/promotion_low_score": window.get("promotion_low_score"),
-            "curriculum/promotion_low_score_floor": window.get("promotion_low_score_floor"),
-            "curriculum/promotion_low_score_ok": int(bool(window.get("promotion_low_score_ok"))),
-            "curriculum/promotion_score_percentile": window.get("promotion_score_percentile"),
-            "curriculum/rollback_bad_windows": diagnostics.get("rollback_bad_windows"),
-            "curriculum/window_episode_count": window.get("episodes"),
-            "curriculum/is_final_phase": int(bool(completion.get("is_final_phase"))),
-            "curriculum/completion_ready": int(bool(completion.get("complete"))),
-            "curriculum/completion_score_mean": completion.get("active_score_mean"),
-            "curriculum/completion_ep_len_mean": completion.get("episode_length_mean"),
-        }
+        return self._curriculum.get_wandb_progress_metrics(self.num_timesteps)
 
     def _log_wandb(self, mean, phase, event, mean_len=None, reason=None):
         try:
