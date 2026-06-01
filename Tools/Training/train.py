@@ -1406,6 +1406,8 @@ def main() -> None:
         # curriculum_cb と spalf_cb として両方に接続（既存の完了停止・anneal・保存処理が動く）
         curriculum_cb = hybrid_cb
         spalf_cb = hybrid_cb
+        if _use_wandb and survivors_curriculum_metrics_callback is not None:
+            callbacks.append(survivors_curriculum_metrics_callback(hybrid_cb, log_freq=5_000))
         print(
             f"[INFO] HybridCurriculumSpalfCallback 有効 "
             f"(phase_window={args.curriculum_window}, threshold_mult={args.curriculum_threshold}, "
