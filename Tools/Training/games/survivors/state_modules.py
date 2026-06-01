@@ -350,7 +350,10 @@ class CurriculumStateModule(BaseStateModule):
         self.window = window
         self.threshold_mult = threshold_mult
         self.rollback_patience = rollback_patience
-        self.rollback_min_episodes = max(5, window // 2)
+        # rollback 判定に必要な最低 episode 数。window の半分を基本とし、window を超えない。
+        # max(5, ...) を使うと window < 10 では rollback_min_episodes > window となり
+        # 必要数を永遠に満たせなくなるため、window を上限にする。
+        self.rollback_min_episodes = min(max(1, window // 2), window)
         self._status_path = status_path
 
         self._phase_idx: int = 0
