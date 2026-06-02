@@ -101,41 +101,42 @@ class HybridPromotionProbeCallback(BaseCallback):
         if was_training is not None:
             self._eval_env.training = False
 
-        obs = self._eval_env.reset()
         episode_results: list[dict] = []
+        try:
+            obs = self._eval_env.reset()
 
-        for _ in range(self.n_probe_episodes):
-            done = np.array([False])
-            lstm_states = None
-            episode_starts = np.ones((self._eval_env.num_envs,), dtype=bool)
-            ep_base = 0.0
-            ep_steps = 0
+            for _ in range(self.n_probe_episodes):
+                done = np.array([False])
+                lstm_states = None
+                episode_starts = np.ones((self._eval_env.num_envs,), dtype=bool)
+                ep_base = 0.0
+                ep_steps = 0
 
-            while not done[0]:
-                action, lstm_states = self.model.predict(
-                    obs,
-                    state=lstm_states,
-                    episode_start=episode_starts,
-                    deterministic=self.deterministic,
-                )
-                obs, _reward, done, info = self._eval_env.step(action)
-                episode_starts = done
-                ep_steps += 1
+                while not done[0]:
+                    action, lstm_states = self.model.predict(
+                        obs,
+                        state=lstm_states,
+                        episode_start=episode_starts,
+                        deterministic=self.deterministic,
+                    )
+                    obs, _reward, done, info = self._eval_env.step(action)
+                    episode_starts = done
+                    ep_steps += 1
 
-                si = info[0] if info else {}
-                ep_base += float(si.get("base_reward", 0.0) or 0.0)
+                    si = info[0] if info else {}
+                    ep_base += float(si.get("base_reward", 0.0) or 0.0)
 
-            alive_total = self.alive_reward * self.frame_skip * ep_steps
-            active_score = max(0.0, ep_base - alive_total)
+                alive_total = self.alive_reward * self.frame_skip * ep_steps
+                active_score = max(0.0, ep_base - alive_total)
 
-            episode_results.append({
-                "active_score": active_score,
-                "ep_len": ep_steps,
-                "base_reward": ep_base,
-            })
-
-        if was_training is not None:
-            self._eval_env.training = was_training
+                episode_results.append({
+                    "active_score": active_score,
+                    "ep_len": ep_steps,
+                    "base_reward": ep_base,
+                })
+        finally:
+            if was_training is not None:
+                self._eval_env.training = was_training
 
         event = self._hybrid_cb.on_promotion_probe_results(episode_results)
 

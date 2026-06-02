@@ -1419,7 +1419,7 @@ def main() -> None:
                 hybrid_cb=hybrid_cb,
                 eval_env=eval_env,
                 probe_freq=args.eval_freq,
-                n_probe_episodes=args.eval_episodes,
+                n_probe_episodes=args.curriculum_window,
                 frame_skip=args.frame_skip,
                 alive_reward=args.curriculum_alive_reward,
                 deterministic=True,
@@ -1428,7 +1428,7 @@ def main() -> None:
             callbacks.append(probe_cb)
             print(
                 f"[INFO] HybridPromotionProbeCallback 有効 "
-                f"(probe_freq={args.eval_freq:,}, n_probe_episodes={args.eval_episodes})"
+                f"(probe_freq={args.eval_freq:,}, n_probe_episodes={args.curriculum_window})"
             )
         print(
             f"[INFO] HybridCurriculumSpalfCallback 有効 "
