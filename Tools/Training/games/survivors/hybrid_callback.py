@@ -433,7 +433,11 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         self._log_promotion_probe_metrics(metrics, pre_diag=pre_diag, event=event)
 
     def _log_promotion_probe_metrics(self, metrics: dict, *, pre_diag: dict, event: str | None) -> None:
-        """probe eval の aggregate metrics を curriculum_probe/* として W&B に記録する。
+        """probe eval の昇格判定関連メトリクスを curriculum/* として W&B に記録する。
+
+        active_score_mean / ep_length_mean / n_episodes / phase_idx は eval/* および
+        curriculum/* に既出のため重複を避けて省略する。
+        昇格判定固有の 3 項目のみ curriculum/* に追記する。
 
         Args:
             metrics:  SurvivorsEvalCallback が返す aggregate_metrics
@@ -443,18 +447,9 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         if not self._wandb_logger or not self._wandb_logger.enabled:
             return
 
-        threshold = pre_diag.get("threshold")
-        scores = metrics.get("active_score", 0.0)
-        ep_len_mean = metrics.get("ep_length", 0.0)
-        n_episodes = int(metrics.get("n_episodes", 0))
-
         wandb_metrics = {
-            "curriculum_probe/active_score_mean": scores,
-            "curriculum_probe/ep_length_mean": ep_len_mean,
-            "curriculum_probe/n_episodes": n_episodes,
-            "curriculum_probe/phase_idx": pre_diag.get("phase_idx", self._curriculum.current_phase),
-            "curriculum_probe/threshold": threshold,
-            "curriculum_probe/promotion_ready": int(bool(pre_diag.get("promotion_ready"))),
-            "curriculum_probe/event": int(event == "advance"),
+            "curriculum/probe_threshold":        pre_diag.get("threshold"),
+            "curriculum/probe_promotion_ready":  int(bool(pre_diag.get("promotion_ready"))),
+            "curriculum/probe_event":            int(event == "advance"),
         }
         self._wandb_logger.log(wandb_metrics, step=self.num_timesteps)
