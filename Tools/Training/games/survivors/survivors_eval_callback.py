@@ -1,5 +1,7 @@
 """Survivors deterministic 評価rollout コールバック。"""
 
+from __future__ import annotations
+
 import copy
 import json
 from typing import Callable
