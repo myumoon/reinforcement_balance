@@ -409,3 +409,44 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         if event == "advance":
             self._on_phase_changed("advance")
         return event
+
+    def on_promotion_probe_eval_results(self, episode_results: list[dict], metrics: dict) -> None:
+        """SurvivorsEvalCallback の after_eval_callback として呼ばれるエントリポイント。
+
+        SurvivorsEvalCallback は ep_length キーを使う。
+        on_promotion_probe_results() は ep_len を読むため、ここで変換する。
+
+        Args:
+            episode_results: SurvivorsEvalCallback が返す episode_results（ep_length キー）
+            metrics:         SurvivorsEvalCallback が返す aggregate_metrics
+        """
+        # ep_length → ep_len 変換
+        normalized = [
+            {**r, "ep_len": r["ep_length"]} if "ep_length" in r else r
+            for r in episode_results
+        ]
+        self.on_promotion_probe_results(normalized)
+        self._log_promotion_probe_metrics(metrics)
+
+    def _log_promotion_probe_metrics(self, metrics: dict) -> None:
+        """probe eval の aggregate metrics を curriculum_probe/* として W&B に記録する。"""
+        if not self._wandb_logger or not self._wandb_logger.enabled:
+            return
+
+        diag = self._curriculum.get_promotion_probe_diagnostics()
+        threshold = diag.get("threshold")
+
+        # metrics から必要な値を取得
+        scores = metrics.get("active_score", 0.0)
+        ep_len_mean = metrics.get("ep_length", 0.0)
+        n_episodes = int(metrics.get("n_episodes", 0))
+
+        wandb_metrics = {
+            "curriculum_probe/active_score_mean": scores,
+            "curriculum_probe/ep_length_mean": ep_len_mean,
+            "curriculum_probe/n_episodes": n_episodes,
+            "curriculum_probe/phase_idx": self._curriculum.current_phase,
+            "curriculum_probe/threshold": threshold,
+            "curriculum_probe/promotion_ready": int(bool(diag.get("promotion_ready"))),
+        }
+        self._wandb_logger.log(wandb_metrics, step=self.num_timesteps)

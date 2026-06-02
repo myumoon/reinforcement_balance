@@ -2,6 +2,7 @@
 
 import copy
 import json
+from typing import Callable
 
 import numpy as np
 from base.base_eval_callback import BaseEvalCallback
@@ -17,6 +18,159 @@ except ImportError:
 _KILL_REWARD = 2.0
 
 
+def run_survivors_eval_episodes(
+    *,
+    model,
+    env,
+    n_eval_episodes: int,
+    frame_skip: int,
+    alive_reward: float,
+    deterministic: bool = True,
+) -> tuple[list[dict], dict, object]:
+    """Survivors 評価エピソードを実行して結果を返す。
+
+    Args:
+        model:            SB3 モデル
+        env:              評価用 VecEnv
+        n_eval_episodes:  評価エピソード数
+        frame_skip:       フレームスキップ数
+        alive_reward:     alive_reward 値（active_score 計算に使用）
+        deterministic:    deterministic policy を使うか
+
+    Returns:
+        (episode_results, aggregate_metrics, last_obs)
+        episode_results の各 dict は ep_length キーを持つ。
+        last_obs は最終エピソード終了時の obs（n_envs=1 旧互換パスで model._last_obs に使用）。
+    """
+    was_training = getattr(env, "training", None)
+    if was_training is not None:
+        env.training = False
+
+    try:
+        obs = env.reset()
+        episode_results: list[dict] = []
+
+        for _ in range(n_eval_episodes):
+            done = np.array([False])
+            lstm_states = None
+            episode_starts = np.ones((env.num_envs,), dtype=bool)
+
+            ep_base = 0.0
+            ep_shaped = 0.0
+            ep_damage = 0.0
+            ep_hp: list[float] = []
+            ep_gem_pickups = 0
+            ep_kills = 0
+            ep_prev_xp: float | None = None
+            ep_xp_sum = 0.0
+            ep_gem_dist_sum = 0.0
+            ep_gem_dist_count = 0
+            ep_enemy_dist_sum = 0.0
+            ep_enemy_dist_count = 0
+            ep_contact_sum = 0.0
+            ep_speed_sum = 0.0
+            ep_stationary_steps = 0
+            ep_steps = 0
+            is_truncated = False
+
+            while not done[0]:
+                action, lstm_states = model.predict(
+                    obs,
+                    state=lstm_states,
+                    episode_start=episode_starts,
+                    deterministic=deterministic,
+                )
+                obs, _reward, done, info = env.step(action)
+                episode_starts = done
+                ep_steps += 1
+
+                si = info[0] if info else {}
+
+                base_r = float(si.get("base_reward", 0.0) or 0.0)
+                ep_base += base_r
+                ep_shaped += float(si.get("shaped_reward", 0.0) or 0.0)
+                ep_damage += abs(float(si.get("hp_penalty", 0.0) or 0.0))
+
+                hp = si.get("player_hp")
+                if hp is not None:
+                    ep_hp.append(float(hp))
+
+                xp = float(si.get("xp_progress", 0.0) or 0.0)
+                ep_xp_sum += xp
+                if ep_prev_xp is not None and xp > ep_prev_xp + 0.005:
+                    ep_gem_pickups += 1
+                ep_prev_xp = xp
+
+                alive_step = alive_reward * frame_skip
+                if base_r - alive_step >= 1.9:
+                    ep_kills += max(1, int((base_r - alive_step + 0.05) / _KILL_REWARD))
+
+                gd = si.get("nearest_gem_distance")
+                if gd is not None:
+                    ep_gem_dist_sum += float(gd)
+                    ep_gem_dist_count += 1
+                ed = si.get("nearest_enemy_distance")
+                if ed is not None:
+                    ep_enemy_dist_sum += float(ed)
+                    ep_enemy_dist_count += 1
+
+                ep_contact_sum += float(si.get("contact_enemy_count", 0.0) or 0.0)
+                ep_speed_sum += float(si.get("move_speed", 0.0) or 0.0)
+                if si.get("is_stationary"):
+                    ep_stationary_steps += 1
+
+                if done[0]:
+                    is_truncated = bool(si.get("TimeLimit.truncated", False))
+
+            alive_total = alive_reward * frame_skip * ep_steps
+            active_score = max(0.0, ep_base - alive_total)
+
+            episode_results.append({
+                "ep_length":      ep_steps,
+                "active_score":   active_score,
+                "base_reward":    ep_base,
+                "shaped_reward":  ep_shaped,
+                "hp":             float(np.mean(ep_hp)) if ep_hp else 0.0,
+                "hp_min":         float(np.min(ep_hp)) if ep_hp else 0.0,
+                "damage_taken":   ep_damage,
+                "gem_pickups":    ep_gem_pickups,
+                "kills":          ep_kills,
+                "xp_progress":    ep_xp_sum / max(ep_steps, 1),
+                "gem_dist":       ep_gem_dist_sum / max(ep_gem_dist_count, 1),
+                "enemy_dist":     ep_enemy_dist_sum / max(ep_enemy_dist_count, 1),
+                "contact":        ep_contact_sum / max(ep_steps, 1),
+                "move_speed":     ep_speed_sum / max(ep_steps, 1),
+                "stationary":     ep_stationary_steps / max(ep_steps, 1),
+                "terminated":     int(not is_truncated),
+            })
+
+    finally:
+        # VecNormalize を元の状態に必ず戻す
+        if was_training is not None:
+            env.training = was_training
+
+    metrics = _aggregate_eval_results(episode_results)
+    return episode_results, metrics, obs
+
+
+def _aggregate_eval_results(results: list[dict]) -> dict:
+    """episode_results を集約して metrics dict を返す。"""
+    scalar_keys = [
+        "ep_length", "active_score", "base_reward", "shaped_reward",
+        "hp", "hp_min", "damage_taken",
+        "gem_pickups", "kills", "xp_progress",
+        "gem_dist", "enemy_dist", "contact",
+        "move_speed", "stationary",
+    ]
+    agg: dict = {}
+    for k in scalar_keys:
+        vals = [r[k] for r in results]
+        agg[k] = float(np.mean(vals))
+    agg["terminated_ratio"] = float(np.mean([r["terminated"] for r in results]))
+    agg["n_episodes"] = len(results)
+    return agg
+
+
 class SurvivorsEvalCallback(BaseEvalCallback):
     """deterministic policy で評価rolloutを実行し、W&B と SB3 logger へ記録する。
 
@@ -30,12 +184,15 @@ class SurvivorsEvalCallback(BaseEvalCallback):
         評価後に model._last_obs / _last_episode_starts を更新して次 rollout の起点を保証する。
 
     Args:
-        eval_env:         評価専用 VecEnv（n_envs > 1 時）。None なら training_env を使用。
-        eval_freq:        評価間隔（timesteps）。0 で無効。
-        n_eval_episodes:  評価エピソード数
-        frame_skip:       train.py の --frame-skip 値（active_score・kills推定に使用）
-        alive_reward:     alive_reward 値（active_score 計算に使用）
-        verbose:          1 で評価完了時にコンソールへ要約を表示
+        eval_env:             評価専用 VecEnv（n_envs > 1 時）。None なら training_env を使用。
+        eval_freq:            評価間隔（timesteps）。0 で無効。
+        n_eval_episodes:      評価エピソード数
+        frame_skip:           train.py の --frame-skip 値（active_score・kills推定に使用）
+        alive_reward:         alive_reward 値（active_score 計算に使用）
+        params_provider:      eval 直前に呼び出して phase params を取得する callable。
+                              None の場合は _sync_env_params() を使って train env から同期する。
+        after_eval_callback:  eval 完了後に (episode_results, metrics) で呼び出す callable。
+        verbose:              1 で評価完了時にコンソールへ要約を表示
     """
 
     def __init__(
@@ -46,6 +203,8 @@ class SurvivorsEvalCallback(BaseEvalCallback):
         frame_skip: int = 1,
         alive_reward: float = 0.001,
         wandb_logger=None,
+        params_provider: Callable[[], dict] | None = None,
+        after_eval_callback: Callable[[list[dict], dict], None] | None = None,
         verbose: int = 1,
     ):
         super().__init__(
@@ -57,6 +216,8 @@ class SurvivorsEvalCallback(BaseEvalCallback):
         )
         self.frame_skip = frame_skip
         self.alive_reward = alive_reward
+        self.params_provider = params_provider
+        self.after_eval_callback = after_eval_callback
 
     def _sync_vecnormalize(self) -> None:
         """訓練側 VecNormalize の obs_rms/ret_rms を eval_env へコピーする。"""
@@ -126,11 +287,25 @@ class SurvivorsEvalCallback(BaseEvalCallback):
             print(f"[Eval] synced env params: {summary}")
 
     def _sync_before_eval(self) -> None:
-        """評価前の同期処理（BaseEvalCallback のオーバーライド）。"""
+        """評価前の同期処理（BaseEvalCallback のオーバーライド）。
+
+        VecNormalize と shaping は params_provider の有無にかかわらず常に同期する。
+        params の同期は params_provider がある場合はそれを使い、ない場合は _sync_env_params() を呼ぶ。
+        """
         if self.eval_env is not None:
+            # VecNormalize と shaping は常に同期する
             self._sync_vecnormalize()
             self._sync_shaping()
-            self._sync_env_params()
+
+            # params のみ分岐
+            if self.params_provider is not None:
+                params = self.params_provider()  # 内部 key (min_enemies など)
+                # ParamApplier._KEY_MAP で UE5 API key に変換してから送る
+                from games.survivors.param_applier import ParamApplier
+                ue5_params = {ParamApplier._KEY_MAP.get(k, k): v for k, v in params.items()}
+                self.eval_env.env_method("set_params", **ue5_params)
+            else:
+                self._sync_env_params()
 
     def _run_eval_and_log(self) -> None:
         # eval_env が None の場合は training_env を使う（n_envs=1 旧互換）
@@ -138,136 +313,29 @@ class SurvivorsEvalCallback(BaseEvalCallback):
         env = self.training_env if use_training_env else self.eval_env
         model = self.model
 
-        # 評価中は VecNormalize running stats を更新しない
-        was_training = getattr(env, "training", None)
-        if was_training is not None:
-            env.training = False
-
-        obs = env.reset()
-        episode_results: list[dict] = []
-
-        for _ in range(self.n_eval_episodes):
-            done = np.array([False])
-            lstm_states = None
-            episode_starts = np.ones((env.num_envs,), dtype=bool)
-
-            ep_base = 0.0
-            ep_shaped = 0.0
-            ep_damage = 0.0
-            ep_hp: list[float] = []
-            ep_gem_pickups = 0
-            ep_kills = 0
-            ep_prev_xp: float | None = None
-            ep_xp_sum = 0.0
-            ep_gem_dist_sum = 0.0
-            ep_gem_dist_count = 0
-            ep_enemy_dist_sum = 0.0
-            ep_enemy_dist_count = 0
-            ep_contact_sum = 0.0
-            ep_speed_sum = 0.0
-            ep_stationary_steps = 0
-            ep_steps = 0
-            is_truncated = False
-
-            while not done[0]:
-                action, lstm_states = model.predict(
-                    obs,
-                    state=lstm_states,
-                    episode_start=episode_starts,
-                    deterministic=True,
-                )
-                obs, _reward, done, info = env.step(action)
-                episode_starts = done
-                ep_steps += 1
-
-                si = info[0] if info else {}
-
-                base_r = float(si.get("base_reward", 0.0) or 0.0)
-                ep_base += base_r
-                ep_shaped += float(si.get("shaped_reward", 0.0) or 0.0)
-                ep_damage += abs(float(si.get("hp_penalty", 0.0) or 0.0))
-
-                hp = si.get("player_hp")
-                if hp is not None:
-                    ep_hp.append(float(hp))
-
-                xp = float(si.get("xp_progress", 0.0) or 0.0)
-                ep_xp_sum += xp
-                if ep_prev_xp is not None and xp > ep_prev_xp + 0.005:
-                    ep_gem_pickups += 1
-                ep_prev_xp = xp
-
-                alive_step = self.alive_reward * self.frame_skip
-                if base_r - alive_step >= 1.9:
-                    ep_kills += max(1, int((base_r - alive_step + 0.05) / _KILL_REWARD))
-
-                gd = si.get("nearest_gem_distance")
-                if gd is not None:
-                    ep_gem_dist_sum += float(gd)
-                    ep_gem_dist_count += 1
-                ed = si.get("nearest_enemy_distance")
-                if ed is not None:
-                    ep_enemy_dist_sum += float(ed)
-                    ep_enemy_dist_count += 1
-
-                ep_contact_sum += float(si.get("contact_enemy_count", 0.0) or 0.0)
-                ep_speed_sum += float(si.get("move_speed", 0.0) or 0.0)
-                if si.get("is_stationary"):
-                    ep_stationary_steps += 1
-
-                if done[0]:
-                    is_truncated = bool(si.get("TimeLimit.truncated", False))
-
-            alive_total = self.alive_reward * self.frame_skip * ep_steps
-            active_score = max(0.0, ep_base - alive_total)
-
-            episode_results.append({
-                "ep_length":      ep_steps,
-                "active_score":   active_score,
-                "base_reward":    ep_base,
-                "shaped_reward":  ep_shaped,
-                "hp":             float(np.mean(ep_hp)) if ep_hp else 0.0,
-                "hp_min":         float(np.min(ep_hp)) if ep_hp else 0.0,
-                "damage_taken":   ep_damage,
-                "gem_pickups":    ep_gem_pickups,
-                "kills":          ep_kills,
-                "xp_progress":    ep_xp_sum / max(ep_steps, 1),
-                "gem_dist":       ep_gem_dist_sum / max(ep_gem_dist_count, 1),
-                "enemy_dist":     ep_enemy_dist_sum / max(ep_enemy_dist_count, 1),
-                "contact":        ep_contact_sum / max(ep_steps, 1),
-                "move_speed":     ep_speed_sum / max(ep_steps, 1),
-                "stationary":     ep_stationary_steps / max(ep_steps, 1),
-                "terminated":     int(not is_truncated),
-            })
-
-        # VecNormalize を元の状態に戻す
-        if was_training is not None:
-            env.training = was_training
+        episode_results, metrics, last_obs = run_survivors_eval_episodes(
+            model=model,
+            env=env,
+            n_eval_episodes=self.n_eval_episodes,
+            frame_skip=self.frame_skip,
+            alive_reward=self.alive_reward,
+            deterministic=True,
+        )
 
         if use_training_env:
             # n_envs=1 旧互換: model._last_obs を更新して次 rollout の起点を保証
-            model._last_obs = obs
+            # last_obs は最終エピソードの done 直後の obs（元実装と同等、追加 reset なし）
+            model._last_obs = last_obs
             model._last_episode_starts = np.ones((env.num_envs,), dtype=bool)
         # eval_env 使用時は訓練環境（model._last_obs 等）には一切触れない
 
-        metrics = self._aggregate(episode_results)
         self._log_results(metrics)
 
+        if self.after_eval_callback is not None:
+            self.after_eval_callback(episode_results, metrics)
+
     def _aggregate(self, results: list[dict]) -> dict:
-        scalar_keys = [
-            "ep_length", "active_score", "base_reward", "shaped_reward",
-            "hp", "hp_min", "damage_taken",
-            "gem_pickups", "kills", "xp_progress",
-            "gem_dist", "enemy_dist", "contact",
-            "move_speed", "stationary",
-        ]
-        agg: dict = {}
-        for k in scalar_keys:
-            vals = [r[k] for r in results]
-            agg[k] = float(np.mean(vals))
-        agg["terminated_ratio"] = float(np.mean([r["terminated"] for r in results]))
-        agg["n_episodes"] = len(results)
-        return agg
+        return _aggregate_eval_results(results)
 
     def _log_results(self, metrics: dict) -> None:
         payload = {
