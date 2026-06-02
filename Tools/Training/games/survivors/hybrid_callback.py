@@ -261,9 +261,10 @@ class HybridCurriculumSpalfCallback(BaseCallback):
             self._log_wandb_per_step(ep_active_scores, ep_score_norms, ep_has_warmup)
 
         # フェーズ遷移判定（エピソード終了があったステップのみ）
+        # allow_promotion=False: train episode での昇格は発生させない（probe path に委譲）
         if episode_results:
-            event = self._curriculum.check_phase_transition()
-            if event in ("advance", "rollback"):
+            event = self._curriculum.check_phase_transition(allow_promotion=False, promotion_source="train")
+            if event in ("rollback",):
                 self._on_phase_changed(event)
 
         return True
@@ -382,3 +383,29 @@ class HybridCurriculumSpalfCallback(BaseCallback):
             self._spalf.save_status()
         if hasattr(self._curriculum, 'save_status'):
             self._curriculum.save_status()
+
+    # ---- Probe 昇格 API ----
+
+    def get_current_phase_params(self) -> dict:
+        """現在フェーズの固定 params dict を返す（probe eval で eval_env に適用する）。"""
+        return _phase_params_from_phase(self._curriculum.current_phase)
+
+    def on_promotion_probe_results(self, episode_results: list[dict]) -> str | None:
+        """probe episode 結果を受け取り昇格判定を行う。
+
+        Args:
+            episode_results: {"active_score": float, "ep_len": int, "base_reward": float} のリスト
+
+        Returns:
+            "advance" | None
+        """
+        for result in episode_results:
+            self._curriculum.on_promotion_probe_episode_end(
+                active_score=result["active_score"],
+                ep_len=result["ep_len"],
+                base_reward=result.get("base_reward", 0.0),
+            )
+        event = self._curriculum.check_promotion_transition(promotion_source="probe")
+        if event == "advance":
+            self._on_phase_changed("advance")
+        return event

@@ -158,6 +158,120 @@ class TestCurriculumStateModule:
             assert key in state, f"missing key: {key}"
 
 
+class TestCurriculumStateModuleProbe:
+    """probe window と check_promotion_transition のテスト。"""
+
+    def _make(self, window=3):
+        return CurriculumStateModule(window=window, threshold_mult=1.0, rollback_patience=2)
+
+    def _get_high_score(self, m: CurriculumStateModule) -> float:
+        phase = m._PHASES[m.current_phase]
+        threshold = (phase.threshold or float("inf")) * m.threshold_mult
+        return threshold * 2.0
+
+    def test_probe_scores_only_advance(self):
+        """train scores が閾値未達でも probe scores が達成なら advance すること。"""
+        m = self._make(window=3)
+        high_score = self._get_high_score(m)
+        # train には低スコアのみ入れる（昇格しない）
+        for _ in range(3):
+            m.on_episode_end(1.0, ep_len=100)
+        assert m.check_phase_transition() is None
+
+        # probe window に高スコアを入れる
+        for _ in range(3):
+            m.on_promotion_probe_episode_end(high_score, ep_len=3000)
+        result = m.check_promotion_transition(promotion_source="probe")
+        assert result == "advance"
+        assert m.current_phase == 1
+
+    def test_allow_promotion_false_does_not_advance(self):
+        """allow_promotion=False では train scores が達成しても advance しないこと。"""
+        m = self._make(window=3)
+        high_score = self._get_high_score(m)
+        for _ in range(3):
+            m.on_episode_end(high_score, ep_len=3000)
+        result = m.check_phase_transition(allow_promotion=False, promotion_source="train")
+        assert result is None
+        assert m.current_phase == 0
+
+    def test_rollback_from_train_scores(self):
+        """rollback は train scores で動くこと（probe scores は関係しない）。
+
+        probe に高スコアを入れても _should_rollback の判定は train scores (self._scores) に基づく。
+        _rollback_phase を直接呼んで clear_promotion_probe_window が実行されることを確認する。
+        """
+        m = self._make(window=3)
+        # phase 1 に手動で設定
+        m._phase_idx = 1
+
+        # probe に高スコアを入れる（rollback には影響しないこと）
+        m.on_promotion_probe_episode_end(9999.0, ep_len=3000)
+        m.on_promotion_probe_episode_end(9999.0, ep_len=3000)
+        assert len(m._promotion_scores) == 2
+
+        # _rollback_phase を呼ぶと probe window がクリアされること
+        m._rollback_phase(mean=0.0, threshold=100.0, mean_len=100.0, reason="low_score")
+        assert m.current_phase == 0
+        assert len(m._promotion_scores) == 0
+
+    def test_probe_window_cleared_on_advance(self):
+        """phase advance 後に probe window がクリアされること。"""
+        m = self._make(window=3)
+        high_score = self._get_high_score(m)
+        for _ in range(3):
+            m.on_promotion_probe_episode_end(high_score, ep_len=3000)
+        m.check_promotion_transition()
+        assert len(m._promotion_scores) == 0
+
+    def test_probe_window_cleared_on_rollback(self):
+        """phase rollback 後に probe window がクリアされること。
+
+        _rollback_phase を直接呼んで clear_promotion_probe_window が実行されることを確認する。
+        """
+        m = self._make(window=3)
+        # probe window にデータを入れる
+        m.on_promotion_probe_episode_end(100.0, ep_len=500)
+        m.on_promotion_probe_episode_end(200.0, ep_len=600)
+        assert len(m._promotion_scores) == 2
+
+        # _rollback_phase を直接呼んで clear_promotion_probe_window が呼ばれることを確認
+        # （rollback 発生シナリオを直接テスト）
+        m._phase_idx = 1  # phase 1 に強制設定
+        m._rollback_phase(mean=0.0, threshold=100.0, mean_len=100.0, reason="test")
+        assert m.current_phase == 0
+        # rollback 後は probe window がクリアされること
+        assert len(m._promotion_scores) == 0
+
+    def test_export_import_with_probe_buffer(self):
+        """export/import で probe buffer が復元されること。"""
+        m = self._make(window=3)
+        m.on_promotion_probe_episode_end(100.0, ep_len=500, base_reward=100.0)
+        m.on_promotion_probe_episode_end(200.0, ep_len=600)
+
+        state = m.export_state()
+        assert "promotion_scores" in state
+        assert len(state["promotion_scores"]) == 2
+
+        m2 = self._make(window=3)
+        m2.import_state(state)
+        assert len(m2._promotion_scores) == 2
+        assert abs(m2._promotion_scores[0] - 100.0) < 1e-6
+        assert len(m2._promotion_episode_lengths) == 2
+        assert m2._promotion_episode_lengths[0] == 500
+
+    def test_check_promotion_transition_insufficient_window(self):
+        """probe window が window 数未満のとき None を返すこと。"""
+        m = self._make(window=3)
+        high_score = self._get_high_score(m)
+        # window=3 に対して 2 エピソードしか入れない
+        for _ in range(2):
+            m.on_promotion_probe_episode_end(high_score, ep_len=3000)
+        result = m.check_promotion_transition()
+        assert result is None
+        assert m.current_phase == 0
+
+
 class TestSpalfStateModuleHybridMethods:
     """SpalfStateModule に追加した Hybrid 用メソッドのテスト。"""
 
