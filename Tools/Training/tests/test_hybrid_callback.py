@@ -402,6 +402,146 @@ class TestHybridProbePromotion:
         assert params == phase0_params
 
 
+class TestOnPromotionProbeEvalResults:
+    """on_promotion_probe_eval_results のテスト。"""
+
+    def _setup_callback_with_mock_env(self, n_envs: int = 2, **kwargs):
+        cb = _make_callback(**kwargs)
+        mock_env = MagicMock()
+        mock_env.num_envs = n_envs
+        mock_env.env_method.return_value = [True] * n_envs
+        mock_model = MagicMock()
+        mock_model.get_env.return_value = mock_env
+        mock_model.num_timesteps = 0
+        cb.model = mock_model
+        cb._param_applier.set_training_env(mock_env)
+        cb._score_tracker.reset(n_envs)
+        initial_params = _phase_params_from_phase(0)
+        initial_vec = cb._spalf.params_to_vec(initial_params)
+        cb._ep_start_param_vec_per_env = [initial_vec.copy() for _ in range(n_envs)]
+        cb._spalf._current_params = initial_params
+        cb._spalf._current_param_vec = initial_vec
+        return cb
+
+    def test_ep_length_converted_to_ep_len_for_on_promotion_probe_results(self):
+        """ep_length が ep_len に変換されて on_promotion_probe_results に渡ること。"""
+        from unittest.mock import patch
+        cb = _make_callback()
+
+        episode_results = [
+            {"ep_length": 100, "active_score": 5.0, "base_reward": 5.0},
+            {"ep_length": 200, "active_score": 8.0, "base_reward": 8.0},
+        ]
+        metrics = {"active_score": 6.5, "ep_length": 150.0, "n_episodes": 2}
+
+        received: list[list[dict]] = []
+
+        with patch.object(cb, "on_promotion_probe_results", side_effect=lambda r: received.append(r)) as mock_probe, \
+             patch.object(cb, "_log_promotion_probe_metrics"):
+            cb.on_promotion_probe_eval_results(episode_results, metrics)
+
+        mock_probe.assert_called_once()
+        passed_results = received[0]
+        assert len(passed_results) == 2
+
+        # ep_length → ep_len 変換が行われていること
+        for r in passed_results:
+            assert "ep_len" in r, "ep_len キーが存在すること"
+            assert r["ep_len"] in (100, 200), "ep_length の値が ep_len に変換されること"
+
+        # ep_length も引き続き存在すること（元の結果を汚染しないこと）
+        assert passed_results[0]["ep_length"] == 100
+        assert passed_results[1]["ep_length"] == 200
+
+    def test_log_promotion_probe_metrics_called_with_metrics(self):
+        """_log_promotion_probe_metrics が metrics で呼ばれること。"""
+        from unittest.mock import patch
+        cb = _make_callback()
+
+        episode_results = [
+            {"ep_length": 100, "active_score": 5.0, "base_reward": 5.0},
+        ]
+        metrics = {"active_score": 5.0, "ep_length": 100.0, "n_episodes": 1}
+
+        with patch.object(cb, "on_promotion_probe_results", return_value=None), \
+             patch.object(cb, "_log_promotion_probe_metrics") as mock_log:
+            cb.on_promotion_probe_eval_results(episode_results, metrics)
+
+        mock_log.assert_called_once_with(metrics)
+
+
+class TestLogPromotionProbeMetrics:
+    """_log_promotion_probe_metrics の W&B ログテスト。"""
+
+    def test_curriculum_probe_metrics_logged_to_wandb(self):
+        """curriculum_probe/* が W&B に記録されること。"""
+        from common.wandb_logger import WandbLogger
+        from unittest.mock import patch
+
+        wandb_logger = MagicMock(spec=WandbLogger)
+        wandb_logger.enabled = True
+
+        cb = _make_callback(wandb_logger=wandb_logger)
+        # num_timesteps を設定
+        mock_model = MagicMock()
+        mock_model.num_timesteps = 1000
+        cb.model = mock_model
+
+        metrics = {
+            "active_score": 7.5,
+            "ep_length": 150.0,
+            "n_episodes": 5,
+        }
+
+        with patch.object(cb._curriculum, "get_promotion_probe_diagnostics") as mock_diag:
+            mock_diag.return_value = {
+                "threshold": 10.0,
+                "promotion_ready": False,
+                "n_probe_episodes": 5,
+            }
+            cb._log_promotion_probe_metrics(metrics)
+
+        wandb_logger.log.assert_called_once()
+        logged_metrics = wandb_logger.log.call_args[0][0]
+
+        # curriculum_probe/* キーが含まれること
+        assert "curriculum_probe/active_score_mean" in logged_metrics
+        assert "curriculum_probe/ep_length_mean" in logged_metrics
+        assert "curriculum_probe/n_episodes" in logged_metrics
+        assert "curriculum_probe/phase_idx" in logged_metrics
+        assert "curriculum_probe/threshold" in logged_metrics
+        assert "curriculum_probe/promotion_ready" in logged_metrics
+
+    def test_log_not_called_when_wandb_logger_none(self):
+        """wandb_logger が None の場合は何も記録しないこと。"""
+        cb = _make_callback(wandb_logger=None)
+        mock_model = MagicMock()
+        mock_model.num_timesteps = 1000
+        cb.model = mock_model
+
+        metrics = {"active_score": 5.0, "ep_length": 100.0, "n_episodes": 3}
+
+        # 例外なく動作すること
+        cb._log_promotion_probe_metrics(metrics)
+
+    def test_log_not_called_when_wandb_disabled(self):
+        """wandb_logger が disabled の場合は何も記録しないこと。"""
+        from common.wandb_logger import WandbLogger
+        wandb_logger = MagicMock(spec=WandbLogger)
+        wandb_logger.enabled = False
+
+        cb = _make_callback(wandb_logger=wandb_logger)
+        mock_model = MagicMock()
+        mock_model.num_timesteps = 1000
+        cb.model = mock_model
+
+        metrics = {"active_score": 5.0, "ep_length": 100.0, "n_episodes": 3}
+
+        cb._log_promotion_probe_metrics(metrics)
+
+        wandb_logger.log.assert_not_called()
+
+
 class TestProgressMetricsKeyConsistency:
     """CurriculumCallback と HybridCurriculumSpalfCallback の W&B メトリクスキーが一致することを保証する。"""
 

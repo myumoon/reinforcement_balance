@@ -1074,6 +1074,7 @@ def main() -> None:
                 "spalf_buffer_size": args.spalf_buffer_size,
                 "spalf_warmup_episodes": args.spalf_warmup_episodes,
                 "spalf_max_score": args.spalf_max_score,
+                "eval_episodes": args.curriculum_window if args.curriculum_spalf else args.eval_episodes,
                 "config_hash": config_hash,
                 "tensorboard_log": str(log_dir / "tensorboard"),
                 **ppo_kwargs,
@@ -1291,6 +1292,7 @@ def main() -> None:
     noveld_cb = None
     survivors_metrics_callback = None
     survivors_curriculum_metrics_callback = None
+    _survivors_eval_registered = False
     if args.game == "survivors" and not args.dry_run:
         from games.survivors.survivors_training_metrics import (
             ActionDistributionCallback,
@@ -1301,23 +1303,10 @@ def main() -> None:
         survivors_curriculum_metrics_callback = SurvivorsCurriculumProgressMetricsCallback
         callbacks.append(survivors_metrics_callback(log_freq=5_000, frame_skip=args.frame_skip))
         callbacks.append(ActionDistributionCallback(n_actions=9, log_freq=5_000))
-        if args.eval_freq > 0:
-            from games.survivors.survivors_eval_callback import SurvivorsEvalCallback
-            callbacks.append(SurvivorsEvalCallback(
-                eval_env=eval_env,  # None なら n_envs=1 旧互換（training_env を使用）
-                eval_freq=args.eval_freq,
-                n_eval_episodes=args.eval_episodes,
-                frame_skip=args.frame_skip,
-                alive_reward=args.curriculum_alive_reward,
-                wandb_logger=wandb_logger,
-            ))
-            if eval_env is not None:
-                print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
-                      f"n_eval_episodes={args.eval_episodes}, eval_port={args.eval_port}, "
-                      f"eval_env=isolated)")
-            else:
-                print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
-                      f"n_eval_episodes={args.eval_episodes}, eval_env=training_env[n_envs=1互換])")
+        # eval_callback は後で curriculum_spalf 用 hook と接続するため、ここでは登録を保留する。
+        # curriculum_spalf 時: curriculum_spalf ブロックで hook 付きで登録する。
+        # 通常時: 後続の _survivors_eval_registered フラグで登録する。
+        _survivors_eval_registered = False
 
     if args.curriculum and args.game == "survivors" and not args.dry_run:
         curriculum_cb = CurriculumCallback(
@@ -1412,23 +1401,28 @@ def main() -> None:
         spalf_cb = hybrid_cb
         if _use_wandb and survivors_curriculum_metrics_callback is not None:
             callbacks.append(survivors_curriculum_metrics_callback(hybrid_cb, log_freq=5_000))
-        # HybridPromotionProbeCallback: 固定 Phase probe による昇格判定（n_envs > 1 時のみ）
-        if args.n_envs > 1 and eval_env is not None:
-            from games.survivors.hybrid_promotion_probe_callback import HybridPromotionProbeCallback
-            probe_cb = HybridPromotionProbeCallback(
-                hybrid_cb=hybrid_cb,
+        # --curriculum-spalf 時: SurvivorsEvalCallback を probe 兼用で登録する
+        # HybridPromotionProbeCallback は登録しない（eval と probe を統合）
+        # eval_env が存在する場合のみ probe hook を付ける（n_envs > 1 のみ有効）
+        # eval_env is None の場合は通常の eval のみ（n_envs=1 旧互換、probe なし）
+        if args.eval_freq > 0 and eval_env is not None:
+            from games.survivors.survivors_eval_callback import SurvivorsEvalCallback
+            _eval_episodes_spalf = args.curriculum_window
+            callbacks.append(SurvivorsEvalCallback(
                 eval_env=eval_env,
-                probe_freq=args.eval_freq,
-                n_probe_episodes=args.curriculum_window,
+                eval_freq=args.eval_freq,
+                n_eval_episodes=_eval_episodes_spalf,
                 frame_skip=args.frame_skip,
                 alive_reward=args.curriculum_alive_reward,
-                deterministic=True,
                 wandb_logger=wandb_logger,
-            )
-            callbacks.append(probe_cb)
+                params_provider=hybrid_cb.get_current_phase_params,
+                after_eval_callback=hybrid_cb.on_promotion_probe_eval_results,
+            ))
+            _survivors_eval_registered = True
             print(
-                f"[INFO] HybridPromotionProbeCallback 有効 "
-                f"(probe_freq={args.eval_freq:,}, n_probe_episodes={args.curriculum_window})"
+                f"[INFO] SurvivorsEvalCallback (probe 統合) 有効 "
+                f"(eval_freq={args.eval_freq:,}, n_eval_episodes={_eval_episodes_spalf}, "
+                f"eval_port={args.eval_port}, eval_env=isolated)"
             )
         print(
             f"[INFO] HybridCurriculumSpalfCallback 有効 "
@@ -1437,6 +1431,27 @@ def main() -> None:
         )
     elif args.curriculum_spalf:
         print("[WARN] --curriculum-spalf は survivors ゲームかつ非 dry-run 時のみ有効です。無視します。")
+
+    # 通常時（非 curriculum_spalf）の eval 登録
+    # curriculum_spalf 時は上のブロックで既に登録済みのため、_survivors_eval_registered をチェックする。
+    if (args.game == "survivors" and not args.dry_run
+            and args.eval_freq > 0 and not _survivors_eval_registered):
+        from games.survivors.survivors_eval_callback import SurvivorsEvalCallback
+        callbacks.append(SurvivorsEvalCallback(
+            eval_env=eval_env,  # None なら n_envs=1 旧互換（training_env を使用）
+            eval_freq=args.eval_freq,
+            n_eval_episodes=args.eval_episodes,
+            frame_skip=args.frame_skip,
+            alive_reward=args.curriculum_alive_reward,
+            wandb_logger=wandb_logger,
+        ))
+        if eval_env is not None:
+            print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
+                  f"n_eval_episodes={args.eval_episodes}, eval_port={args.eval_port}, "
+                  f"eval_env=isolated)")
+        else:
+            print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
+                  f"n_eval_episodes={args.eval_episodes}, eval_env=training_env[n_envs=1互換])")
 
     if args.until_curriculum_complete:
         if curriculum_cb is None:
