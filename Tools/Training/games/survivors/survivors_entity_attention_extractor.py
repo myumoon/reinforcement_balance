@@ -22,10 +22,8 @@ _GLOBAL_KEYS_LEGACY = [
     "gem_density_mid_16dir",
 ]
 
-# アイテムセグメントキー: 新スキーマでは red/green/blue に分割されているが
-# attention extractor はまず red_gem_rel_pos を item_key として使用し、
-# 他のジェムタイプは self_info に含まれる（gem 全体をひとつの entity として扱う設計は維持）
-_ITEM_KEY_NEW    = "red_gem_rel_pos"
+# 新スキーマのジェム相対位置セグメント（この3つを結合して item として扱う）
+_GEM_REL_POS_KEYS_NEW = ["red_gem_rel_pos", "green_gem_rel_pos", "blue_gem_rel_pos"]
 _ITEM_KEY_LEGACY = "gem_rel_pos"
 
 
@@ -37,6 +35,8 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
 
     新スキーマ（708次元）と旧スキーマの両方に自動対応:
     - obs_schema に red_gem_rel_pos が存在する場合: 新スキーマとして処理
+      新スキーマでは red/green/blue の3セグメントを結合して item として扱い、
+      gem_pickup_radius（1次元スカラー）は結合対象から除外する。
     - 存在しない場合: 旧スキーマ（gem_rel_pos）として処理
     """
 
@@ -45,9 +45,15 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
         schema_map = {s["name"]: s["dim"] for s in (obs_schema or [])}
 
         # 新旧スキーマを自動判別
-        is_new_schema = "red_gem_rel_pos" in offsets
-        item_key = _ITEM_KEY_NEW if is_new_schema else _ITEM_KEY_LEGACY
-        global_keys = _GLOBAL_KEYS_NEW if is_new_schema else _GLOBAL_KEYS_LEGACY
+        self._is_new_schema = "red_gem_rel_pos" in offsets
+        global_keys = _GLOBAL_KEYS_NEW if self._is_new_schema else _GLOBAL_KEYS_LEGACY
+
+        if self._is_new_schema:
+            # 新スキーマ: item_key は red_gem_rel_pos を基準とし、
+            # _split_obs でオーバーライドして3セグメントを結合する
+            item_key = "red_gem_rel_pos"
+        else:
+            item_key = _ITEM_KEY_LEGACY
 
         super().__init__(
             observation_space,
@@ -57,6 +63,21 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
             use_polar=True,
             enemy_scalar_keys=["enemy_type", "enemy_hp"],
         )
+
+        if self._is_new_schema:
+            # 新スキーマ: red/green/blue gem の各セグメントスライスを保存し、
+            # _split_obs でこれらを結合して item を構成する
+            self._gem_slices: list[tuple[int, int]] = []
+            total_gem_dim = 0
+            for key in _GEM_REL_POS_KEYS_NEW:
+                if key in offsets:
+                    dim = schema_map.get(key, 0)
+                    if dim > 0:
+                        start = offsets[key]
+                        self._gem_slices.append((start, start + dim))
+                        total_gem_dim += dim
+            self._num_items = total_gem_dim // 2  # 2次元（dx,dy）ずつ
+
         # global セグメントの (start, end) リストを構築（自動判別済みの global_keys を使用）
         self._global_slices: list[tuple[int, int]] = []
         global_dim = 0
@@ -82,6 +103,32 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
             nn.Linear(self._self_dim + global_dim + e + e, features_dim),
             nn.ReLU(),
         )
+
+    def _split_obs(self, obs: torch.Tensor, B: int):
+        """obs をセグメントに分割して返す。
+
+        新スキーマでは red/green/blue gem セグメントを結合して item を構成する。
+        gem_pickup_radius（1次元スカラー）は item に含めない。
+        旧スキーマは基底クラスの _split_obs に委譲する。
+        """
+        if not self._is_new_schema:
+            return super()._split_obs(obs, B)
+
+        # 新スキーマ: red/green/blue gem セグメントを結合
+        gem_parts = [obs[:, s:e] for s, e in self._gem_slices]
+        if gem_parts:
+            gem_concat = torch.cat(gem_parts, dim=-1)  # [B, total_gem_dim]
+        else:
+            gem_concat = torch.zeros(B, 0, device=obs.device)
+        items = gem_concat.reshape(B, self._num_items, 2)
+
+        e_pos = obs[:, self._enemy_r_i:self._enemy_v_i].reshape(B, self._num_enemies, 2)
+        e_vel = obs[:, self._enemy_v_i:self._enemy_v_end].reshape(B, self._num_enemies, 2)
+        e_scalars = [
+            obs[:, s:s + self._num_enemies].reshape(B, self._num_enemies, 1)
+            for s in self._enemy_scalar_starts
+        ]
+        return items, e_pos, e_vel, e_scalars
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         B = obs.shape[0]

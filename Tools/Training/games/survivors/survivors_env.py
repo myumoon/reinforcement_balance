@@ -111,6 +111,9 @@ class SurvivorsEnv(BaseUE5Env):
         def nearest_distance(segment_name: str, default_offset: int, default_count: int) -> float | None:
             """セグメント名ベースで最近傍距離を計算する（obs インデックスハードコードを廃止）。"""
             start = offset(segment_name, default_offset)
+            if start < 0:
+                # セグメントが obs_schema に存在しない場合はスキップ
+                return None
             # dim から entity 数を計算（各エンティティは dx,dy の 2 次元）
             seg_dim = schema_dim(segment_name, default_count * 2)
             count = seg_dim // 2

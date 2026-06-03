@@ -40,13 +40,11 @@ void USurvivorsWeaponComponent::Reset()
 	GroundZones.Empty();
 	Projectiles.Reserve(64);
 
-	// 全スロットのインスタンスをリセット（初期化済みのもののみ）
+	// 全スロットのインスタンスをクリア（古いインスタンスが残らないよう null に設定）
+	// 初期武器の再装備は呼び出し元（SurvivorsGame::ResetState）が EquipWeapon で行う
 	for (int32 i = 0; i < WeaponInstances.Num(); ++i)
 	{
-		if (WeaponInstances[i])
-		{
-			WeaponInstances[i]->Reset();
-		}
+		WeaponInstances[i] = nullptr;
 	}
 }
 
