@@ -74,7 +74,8 @@ class SurvivorsEnv(BaseUE5Env):
         obs, base_reward, done, truncated, ue_info = super().step(action)
 
         # 永続 HP ダメージペナルティ（敵接触シグナルを強化）
-        # HP は [0,1] に正規化済み（÷100）。1 HP ダメージ = -1.0（クリップ前）
+        # HP は [0,1] に正規化済み。1 HP ダメージ = -1.0（クリップ前）
+        # schema ベースのオフセット（player_hp が常に存在するセグメント）
         hp_i = self._offsets.get("player_hp", 12)
         hp_penalty = 0.0
         if self._prev_obs is not None:
@@ -100,12 +101,26 @@ class SurvivorsEnv(BaseUE5Env):
         def offset(name: str, default: int) -> int:
             return self._offsets.get(name, default)
 
-        def nearest_distance(segment_name: str, default_offset: int, count: int) -> float | None:
+        def schema_dim(name: str, default: int) -> int:
+            """セグメント名から次元数を取得する。obs_schema が利用可能な場合に使用。"""
+            for seg in self._obs_schema:
+                if seg["name"] == name:
+                    return seg["dim"]
+            return default
+
+        def nearest_distance(segment_name: str, default_offset: int, default_count: int) -> float | None:
+            """セグメント名ベースで最近傍距離を計算する（obs インデックスハードコードを廃止）。"""
             start = offset(segment_name, default_offset)
+            # dim から entity 数を計算（各エンティティは dx,dy の 2 次元）
+            seg_dim = schema_dim(segment_name, default_count * 2)
+            count = seg_dim // 2
             best = None
             for i in range(count):
-                dx = float(obs[start + i * 2]) * 30.0
-                dy = float(obs[start + i * 2 + 1]) * 30.0
+                idx = start + i * 2
+                if idx + 1 >= len(obs):
+                    break
+                dx = float(obs[idx]) * 30.0
+                dy = float(obs[idx + 1]) * 30.0
                 dist = float(np.sqrt(dx * dx + dy * dy))
                 if dist < 0.01 and i > 0:
                     continue
@@ -113,16 +128,22 @@ class SurvivorsEnv(BaseUE5Env):
                     best = dist
             return best
 
-        enemy_rel_i = offset("enemy_rel_pos", 63)
+        # enemy_rel_pos のセグメント情報からエンティティ数を取得（新スキーマ対応）
+        enemy_rel_i = offset("enemy_rel_pos", -1)
+        enemy_count_from_schema = schema_dim("enemy_rel_pos", 64) // 2  # 新スキーマでは 32体
         contact_enemy_count = 0
-        for i in range(20):
-            dx = float(obs[enemy_rel_i + i * 2]) * 30.0
-            dy = float(obs[enemy_rel_i + i * 2 + 1]) * 30.0
-            dist = float(np.sqrt(dx * dx + dy * dy))
-            if dist < 0.01 and i > 0:
-                continue
-            if dist < 0.7:
-                contact_enemy_count += 1
+        if enemy_rel_i >= 0:
+            for i in range(enemy_count_from_schema):
+                idx = enemy_rel_i + i * 2
+                if idx + 1 >= len(obs):
+                    break
+                dx = float(obs[idx]) * 30.0
+                dy = float(obs[idx + 1]) * 30.0
+                dist = float(np.sqrt(dx * dx + dy * dy))
+                if dist < 0.01 and i > 0:
+                    continue
+                if dist < 0.7:
+                    contact_enemy_count += 1
 
         vel_i = offset("player_vel", 2)
         vx, vy = float(obs[vel_i]), float(obs[vel_i + 1])
@@ -131,12 +152,20 @@ class SurvivorsEnv(BaseUE5Env):
         wall_ray_i = offset("wall_rays", 4)
         wall_min = float(np.min(obs[wall_ray_i:wall_ray_i + 8]))
 
+        # 最近傍ジェム距離: 新スキーマでは red_gem_rel_pos / green_gem_rel_pos / blue_gem_rel_pos に分割
+        # 後方互換: 旧スキーマの gem_rel_pos も参照する
+        nearest_gem = None
+        for gem_seg in ("red_gem_rel_pos", "green_gem_rel_pos", "blue_gem_rel_pos", "gem_rel_pos"):
+            d = nearest_distance(gem_seg, -1, 10)
+            if d is not None and (nearest_gem is None or d < nearest_gem):
+                nearest_gem = d
+
         return {
             "player_hp": float(obs[offset("player_hp", 12)]),
-            "xp_progress": float(obs[offset("xp_progress", 21)]),
-            "observed_enemy_count": float(obs[offset("enemy_count", 20)]),
-            "nearest_gem_distance": nearest_distance("gem_rel_pos", 23, 20),
-            "nearest_enemy_distance": nearest_distance("enemy_rel_pos", 63, 20),
+            "xp_progress": float(obs[offset("xp_progress", -1)]) if offset("xp_progress", -1) >= 0 else 0.0,
+            "observed_enemy_count": float(obs[offset("enemy_count", -1)]) if offset("enemy_count", -1) >= 0 else 0.0,
+            "nearest_gem_distance": nearest_gem,
+            "nearest_enemy_distance": nearest_distance("enemy_rel_pos", -1, enemy_count_from_schema),
             "contact_enemy_count": contact_enemy_count,
             "move_speed": move_speed,
             "is_stationary": int(move_speed < 0.003),

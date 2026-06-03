@@ -9,6 +9,7 @@ class USurvivorsEnemyViewComponent;
 class USurvivorsGUIViewComponent;
 class USurvivorsGemViewComponent;
 class USurvivorsPlayerViewComponent;
+class USurvivorsWeaponViewComponent;
 
 /**
  * Coordinates Survivors visual components against an ASurvivorsGame simulation.
@@ -40,4 +41,7 @@ private:
 
 	UPROPERTY(VisibleAnywhere, Category = "SurvivorsGameView|Components")
 	TObjectPtr<USurvivorsGUIViewComponent> GUIView;
+
+	UPROPERTY(VisibleAnywhere, Category = "SurvivorsGameView|Components")
+	TObjectPtr<USurvivorsWeaponViewComponent> WeaponView;
 };

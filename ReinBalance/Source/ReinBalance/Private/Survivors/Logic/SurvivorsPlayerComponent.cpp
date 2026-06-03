@@ -1,6 +1,8 @@
 #include "Survivors/Logic/SurvivorsPlayerComponent.h"
 
 #include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
+#include "Survivors/Logic/Weapons/SurvivorsWeaponBase.h"
 
 USurvivorsPlayerComponent::USurvivorsPlayerComponent()
 {
@@ -16,15 +18,14 @@ void USurvivorsPlayerComponent::Reset()
 {
 	if (!Game) return;
 
-	Game->PlayerPos = FVector2D::ZeroVector;
-	Game->PlayerVel = FVector2D::ZeroVector;
-	Game->PlayerHP = Game->MaxPlayerHP;
-	Game->PlayerXP = 0.f;
+	Game->PlayerPos   = FVector2D::ZeroVector;
+	Game->PlayerVel   = FVector2D::ZeroVector;
+	Game->PlayerHP    = Game->MaxPlayerHP;
+	Game->PlayerXP    = 0.f;
 	Game->PlayerLevel = 1;
 
-	Game->WeaponSlots[0].Type = EWeaponType::Aura;
-	Game->WeaponSlots[0].Level = 1;
-	Game->AuraRadius = SurvivorsGameConstants::GarlicTable[0].AreaRadius;
+	// 武器スロット・パッシブスロットのリセットは ASurvivorsGame::ResetState() で実施済み
+	// ここでは開始武器の付与は行わない（ResetState で WeaponComponent::EquipWeapon を呼ぶ）
 }
 
 void USurvivorsPlayerComponent::ApplyAction(int32 ActionIdx)
@@ -94,7 +95,20 @@ void USurvivorsPlayerComponent::OnLevelUp(int32 NextLevel)
 {
 	if (!Game) return;
 
-	const int32 NewGarlicLv = FMath::Min(Game->WeaponSlots[0].Level + 1, SurvivorsGameConstants::MaxWeaponLevel);
-	Game->WeaponSlots[0].Level = NewGarlicLv;
-	Game->AuraRadius = SurvivorsGameConstants::GarlicTable[NewGarlicLv - 1].AreaRadius;
+	// W0 フェーズ（Garlic-only）: スロット0の武器をレベルアップ
+	// PR2 で BuildLevelUpChoices() / ApplyLevelUpChoice() に置き換える
+	if (Game->WeaponSlots[0].Type != EWeaponType::None)
+	{
+		const int32 NewLv = FMath::Min(
+			Game->WeaponSlots[0].Level.Value + 1,
+			SurvivorsGameConstants::MaxWeaponLevel);
+		Game->WeaponSlots[0].Level = FWeaponLevel(NewLv);
+
+		// WeaponComponent のインスタンスにもレベルを伝える
+		if (Game->WeaponComponent)
+		{
+			USurvivorsWeaponBase* WI = Game->WeaponComponent->GetWeaponInstance(0);
+			if (WI) WI->SetLevel(FWeaponLevel(NewLv));
+		}
+	}
 }
