@@ -267,6 +267,7 @@ class HybridCurriculumSpalfCallback(BaseCallback):
             if event in ("rollback",):
                 self._on_phase_changed(event)
 
+        self._curriculum._steps_in_phase += 1
         return True
 
     def _on_phase_changed(self, event: str) -> None:
