@@ -75,6 +75,7 @@ python train.py --game survivors --total-steps 500000
 |---|---|
 | [`docs/project_structure.md`](docs/project_structure.md) | ディレクトリ構成・モジュール依存関係・エンジン設定 |
 | [`docs/ue5_build.md`](docs/ue5_build.md) | UE5 ビルドコマンド・注意事項 |
+| [`docs/ue5_tests.md`](docs/ue5_tests.md) | UE5 テスト環境・注意事項 |
 | [`docs/train/overview.md`](docs/train/overview.md) | 訓練スクリプト概要・モジュール構成 |
 | [`docs/train/ue5_env.md`](docs/train/ue5_env.md) | UE5 HTTP API 仕様・`/params` の挙動 |
 | [`docs/train/impl_notes.md`](docs/train/impl_notes.md) | 実装上の注意点・既知の問題（コールバック・多並列・Resume・SPALF） |
