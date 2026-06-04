@@ -10,6 +10,11 @@ public class ReinBalance : ModuleRules
 	
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "NNE", "UMG", "Slate", "SlateCore" });
 
+		if (Target.Configuration != UnrealTargetConfiguration.Shipping)
+		{
+			PrivateDependencyModuleNames.AddRange(new string[] { "AutomationController" });
+		}
+
 		PrivateDependencyModuleNames.AddRange(new string[] {  });
 		
 		// Uncomment if you are using online features

@@ -187,14 +187,16 @@ void USurvivorsCollisionComponent::RegisterPickupTargets()
 void USurvivorsCollisionComponent::BuildEnemyGrid()
 {
 	if (!Game) return;
-	EnemyGrid.Rebuild(Game->PlayerPos, GetEffectiveHalfExtent(), CollisionCellSize);
+	const FVector2D Center = bUseFullFieldCollision ? FVector2D::ZeroVector : Game->PlayerPos;
+	EnemyGrid.Rebuild(Center, GetEffectiveHalfExtent(), CollisionCellSize);
 	RegisterEnemyTargets();
 }
 
 void USurvivorsCollisionComponent::BuildPickupGrid()
 {
 	if (!Game) return;
-	PickupGrid.Rebuild(Game->PlayerPos, GetEffectiveHalfExtent(), CollisionCellSize);
+	const FVector2D Center = bUseFullFieldCollision ? FVector2D::ZeroVector : Game->PlayerPos;
+	PickupGrid.Rebuild(Center, GetEffectiveHalfExtent(), CollisionCellSize);
 	RegisterPickupTargets();
 }
 

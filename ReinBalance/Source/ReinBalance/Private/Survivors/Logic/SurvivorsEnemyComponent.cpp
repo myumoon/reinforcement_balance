@@ -106,7 +106,7 @@ void USurvivorsEnemyComponent::ApplyContactHits(FSurvivorsHitFrame& HitFrame)
 		if (E.UniqueId != Ev.Target.UniqueId) continue;
 		if (E.bPendingRemove) continue;
 
-		Game->PlayerHP -= Ev.Damage * Game->EnemyDamageScale;
+		Game->PlayerHP -= Ev.Damage;  // ContactDamage はスポーン時に EnemyDamageScale 適用済み
 		E.PlayerLastHitTime = Game->ElapsedTime;
 	}
 
