@@ -18,6 +18,7 @@ import importlib
 import importlib.util
 import json
 import hashlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -483,31 +484,69 @@ class _WeaponCurriculumCallback(BaseCallback):
     weighted フェーズ（W0_to_W1 / W1_to_W2）では global_step に応じた線形補間で
     weapon_weights が変化するため、update_freq ステップごとに全 env に再送信する。
     固定フェーズ（W0〜W6）では _on_training_start のみ送信し、その後は no-op。
+
+    フェーズ開始ステップは output_dir/weapon_curriculum_status.json に永続化される。
+    --resume 時に同じ phase_key で再開すると保存済みの phase_start_step を復元するため、
+    遷移フェーズの補間進捗が巻き戻らない。
     """
 
     def __init__(
         self,
         phase_key: str,
         update_freq: int = 10_000,
+        output_dir: str = "",
     ):
         super().__init__(verbose=0)
         self._phase_key = phase_key
         self.update_freq = max(update_freq, 1)
         self._last_update = 0
         self._is_transition = False
-        self._phase_start_step: int = 0  # _on_training_start() でフェーズ開始時のステップ数を記録
+        self._phase_start_step: int = 0  # resume時に復元される絶対ステップ数
+        self._output_dir = output_dir
+        self._status_file = os.path.join(output_dir, "weapon_curriculum_status.json") if output_dir else ""
 
     def _on_training_start(self) -> None:
         from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
         phase = WEAPON_PHASES.get(self._phase_key, {})
         self._is_transition = phase.get("weapon_pool_mode") == "weighted"
-        # フェーズ開始時の累積ステップを記録する。
-        # --resume でチェックポイントから再開した場合でも、ここで設定することで
-        # 常にフェーズ内経過ステップ（elapsed）を基準に weapon_weights を補間できる。
+
+        # resume時: statusファイルから phase_start_step を復元
+        if self._status_file and os.path.exists(self._status_file):
+            try:
+                with open(self._status_file) as f:
+                    status = json.load(f)
+                if status.get("phase_key") == self._phase_key:
+                    # 同じフェーズから再開: 保存済みの start_step を使う
+                    self._phase_start_step = status.get("phase_start_step", self.num_timesteps)
+                    elapsed = self.num_timesteps - self._phase_start_step
+                    print(
+                        f"[INFO] WeaponCurriculumCallback: resume 復元 "
+                        f"phase={self._phase_key}, phase_start_step={self._phase_start_step}, "
+                        f"elapsed={elapsed}"
+                    )
+                    self._apply_params(elapsed)
+                    self._last_update = self.num_timesteps
+                    return
+            except (json.JSONDecodeError, KeyError, OSError):
+                pass
+
+        # 初回起動: 現在の num_timesteps を start_step として記録
         self._phase_start_step = self.num_timesteps
         elapsed = 0  # 訓練開始直後はフェーズ内経過ステップ = 0
         self._apply_params(elapsed)
         self._last_update = self.num_timesteps
+        self._save_status()
+
+    def _save_status(self) -> None:
+        """phase_start_step を weapon_curriculum_status.json に保存する。"""
+        if not self._status_file:
+            return
+        os.makedirs(self._output_dir, exist_ok=True)
+        with open(self._status_file, "w") as f:
+            json.dump({
+                "phase_key": self._phase_key,
+                "phase_start_step": self._phase_start_step,
+            }, f)
 
     def _on_step(self) -> bool:
         if not self._is_transition:
@@ -1387,6 +1426,7 @@ def main() -> None:
         weapon_curriculum_cb = _WeaponCurriculumCallback(
             phase_key=_weapon_phase_key,
             update_freq=args.checkpoint_freq,
+            output_dir=str(work_dir),
         )
         callbacks.append(weapon_curriculum_cb)
         print(f"[INFO] WeaponCurriculumCallback 有効 (phase={_weapon_phase_key}, update_freq={args.checkpoint_freq:,})")
