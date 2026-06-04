@@ -300,49 +300,7 @@ void USurvivorsWeaponComponent::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 
 void USurvivorsWeaponComponent::ApplyProjectileHits()
 {
-	if (!Game) return;
-
-	for (int32 i = Projectiles.Num() - 1; i >= 0; --i)
-	{
-		FProjectileState& P = Projectiles[i];
-		bool bShouldRemove = false;
-
-		for (int32 EIdx = Game->Enemies.Num() - 1; EIdx >= 0; --EIdx)
-		{
-			FEnemyState& E = Game->Enemies[EIdx];
-
-			// 非 piercing 弾: ヒット済みなら判定スキップ
-			if (!P.bPiercing)
-			{
-				bool bAlreadyHit = P.HitEnemyIds.Contains(E.UniqueId);
-				if (bAlreadyHit) continue;
-			}
-
-			const float HitR = P.Radius.Value + E.CollisionRadius;
-			if (FVector2D::DistSquared(P.Pos, E.Pos) < HitR * HitR)
-			{
-				E.HP -= P.Damage.Value;
-				if (!P.bPiercing)
-				{
-					P.HitEnemyIds.Add(E.UniqueId);
-					bShouldRemove = true;  // 非 piercing: 1体ヒットで消滅
-				}
-
-				if (E.HP <= 0.f)
-				{
-					Game->GemComponent->DropGem(E.TypeId, E.Pos);
-					Game->Enemies.RemoveAt(EIdx);
-					Game->LastReward += Game->KillReward;
-					if (!P.bPiercing) break;
-				}
-			}
-		}
-
-		if (bShouldRemove)
-		{
-			Projectiles.RemoveAt(i);
-		}
-	}
+	ensureMsgf(false, TEXT("ApplyProjectileHits() は非推奨。PhysicsStep 内の ComputeProjectileHits/ApplyWeaponHits を使うこと。HitFrame/Finalize を迂回するため直接呼び出し禁止。"));
 }
 
 TArray<FProjectileState> USurvivorsWeaponComponent::GetProjectileObsView() const
