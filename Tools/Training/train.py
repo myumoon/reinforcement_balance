@@ -488,6 +488,11 @@ class _WeaponCurriculumCallback(BaseCallback):
     フェーズ開始ステップは output_dir/weapon_curriculum_status.json に永続化される。
     --resume 時に同じ phase_key で再開すると保存済みの phase_start_step を復元するため、
     遷移フェーズの補間進捗が巻き戻らない。
+
+    branch resume 対応:
+      checkpoint_dir を指定すると、output_dir に status がない場合に checkpoint_dir の
+      weapon_curriculum_status.json からも復元を試みる。これにより W0_to_W1 / W1_to_W2 の
+      checkpoint から branch resume した際に phase_start_step が再初期化されるのを防ぐ。
     """
 
     def __init__(
@@ -495,6 +500,7 @@ class _WeaponCurriculumCallback(BaseCallback):
         phase_key: str,
         update_freq: int = 10_000,
         output_dir: str = "",
+        checkpoint_dir: str = "",
     ):
         super().__init__(verbose=0)
         self._phase_key = phase_key
@@ -504,13 +510,14 @@ class _WeaponCurriculumCallback(BaseCallback):
         self._phase_start_step: int = 0  # resume時に復元される絶対ステップ数
         self._output_dir = output_dir
         self._status_file = os.path.join(output_dir, "weapon_curriculum_status.json") if output_dir else ""
+        self._checkpoint_dir = checkpoint_dir
 
     def _on_training_start(self) -> None:
         from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
         phase = WEAPON_PHASES.get(self._phase_key, {})
         self._is_transition = phase.get("weapon_pool_mode") == "weighted"
 
-        # resume時: statusファイルから phase_start_step を復元
+        # (a) 同一run resume: output_dir に status があればそれを使う
         if self._status_file and os.path.exists(self._status_file):
             try:
                 with open(self._status_file) as f:
@@ -520,7 +527,7 @@ class _WeaponCurriculumCallback(BaseCallback):
                     self._phase_start_step = status.get("phase_start_step", self.num_timesteps)
                     elapsed = self.num_timesteps - self._phase_start_step
                     print(
-                        f"[INFO] WeaponCurriculumCallback: resume 復元 "
+                        f"[INFO] WeaponCurriculumCallback: resume 復元 (output_dir) "
                         f"phase={self._phase_key}, phase_start_step={self._phase_start_step}, "
                         f"elapsed={elapsed}"
                     )
@@ -530,7 +537,29 @@ class _WeaponCurriculumCallback(BaseCallback):
             except (json.JSONDecodeError, KeyError, OSError):
                 pass
 
-        # 初回起動: 現在の num_timesteps を start_step として記録
+        # (b) branch resume: チェックポイントディレクトリに status がないか探す
+        if self._checkpoint_dir:
+            ckpt_status = os.path.join(self._checkpoint_dir, "weapon_curriculum_status.json")
+            if os.path.exists(ckpt_status):
+                try:
+                    with open(ckpt_status) as f:
+                        status = json.load(f)
+                    if status.get("phase_key") == self._phase_key:
+                        self._phase_start_step = status.get("phase_start_step", self.num_timesteps)
+                        elapsed = self.num_timesteps - self._phase_start_step
+                        print(
+                            f"[INFO] WeaponCurriculumCallback: branch resume 復元 (checkpoint_dir) "
+                            f"phase={self._phase_key}, phase_start_step={self._phase_start_step}, "
+                            f"elapsed={elapsed}"
+                        )
+                        self._apply_params(elapsed)
+                        self._last_update = self.num_timesteps
+                        self._save_status()  # 新しいrun出力先にもコピー
+                        return
+                except (json.JSONDecodeError, KeyError, OSError):
+                    pass
+
+        # (c) 初回起動: 現在の num_timesteps を start_step として記録
         self._phase_start_step = self.num_timesteps
         elapsed = 0  # 訓練開始直後はフェーズ内経過ステップ = 0
         self._apply_params(elapsed)
@@ -538,15 +567,31 @@ class _WeaponCurriculumCallback(BaseCallback):
         self._save_status()
 
     def _save_status(self) -> None:
-        """phase_start_step を weapon_curriculum_status.json に保存する。"""
-        if not self._status_file:
+        """phase_start_step を weapon_curriculum_status.json に保存する。
+
+        output_dir（現在のrun出力先）に加え、checkpoint_dir が指定されている場合は
+        そちらにも保存する。checkpoint_dir への保存により次回 branch resume 時の
+        状態復元が可能になる。
+        """
+        save_paths = []
+        if self._status_file:
+            save_paths.append(self._status_file)
+        if self._checkpoint_dir:
+            ckpt_status = os.path.join(self._checkpoint_dir, "weapon_curriculum_status.json")
+            if ckpt_status not in save_paths:
+                save_paths.append(ckpt_status)
+
+        if not save_paths:
             return
-        os.makedirs(self._output_dir, exist_ok=True)
-        with open(self._status_file, "w") as f:
-            json.dump({
-                "phase_key": self._phase_key,
-                "phase_start_step": self._phase_start_step,
-            }, f)
+
+        data = {
+            "phase_key": self._phase_key,
+            "phase_start_step": self._phase_start_step,
+        }
+        for path in save_paths:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(data, f)
 
     def _on_step(self) -> bool:
         if not self._is_transition:
@@ -1422,11 +1467,18 @@ def main() -> None:
 
     # WeaponCurriculumCallback: 初回送信は _on_training_start で行い、
     # 遷移フェーズ（weighted）では update_freq ごとに weapon_weights を全 env に再送信する。
+    # branch resume 時: source_dir/work を checkpoint_dir として渡すことで、
+    # チェックポイントと同じ場所に保存された weapon_curriculum_status.json から
+    # phase_start_step を復元できる。
     if args.game == "survivors" and not args.dry_run:
+        # branch resume 時は source_dir が元 run ディレクトリを指すため work サブディレクトリを使用する。
+        # 同一 run resume / 新規 run 時は source_dir が None のため checkpoint_dir は空文字列とする。
+        _weapon_ckpt_dir = str(source_dir / "work") if (is_branch and source_dir is not None) else ""
         weapon_curriculum_cb = _WeaponCurriculumCallback(
             phase_key=_weapon_phase_key,
             update_freq=args.checkpoint_freq,
             output_dir=str(work_dir),
+            checkpoint_dir=_weapon_ckpt_dir,
         )
         callbacks.append(weapon_curriculum_cb)
         print(f"[INFO] WeaponCurriculumCallback 有効 (phase={_weapon_phase_key}, update_freq={args.checkpoint_freq:,})")
