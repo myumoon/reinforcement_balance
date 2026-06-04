@@ -22,6 +22,8 @@ ReinBalance/Content/*
 Tools/Training/.venv/
 Tools/Training/models/
 Tools/Training/results/
+Tools/Training/runs/
+Tools/Training/wandb/
 Tools/Training/eureka_results/
 Tools/Training/__pycache__/
 Tools/Training/**/__pycache__/
@@ -36,6 +38,7 @@ Tools/Training/**/__pycache__/
 ReinBalance/.vs/
 ReinBalance/.vsconfig
 ReinBalance/*.sln
+ReinBalance/*.user
 .idea/
 
 # ====================
@@ -57,6 +60,8 @@ Thumbs.db
 .claude/review-*.md
 .claude/snapshot-*.txt
 
+.codex/
+
 # ====================
 # ローカル
 # ====================
@@ -64,3 +69,4 @@ Thumbs.db
 .claude/result-*.json
 .claude/review-*.json
 .claude/snapshot-*.txt
+*.back
