@@ -216,6 +216,9 @@ private:
 	friend class USurvivorsWeaponComponent;
 	friend class USurvivorsWeaponBase;
 	friend class USurvivorsGarlicWeapon;
+#if WITH_AUTOMATION_TESTS
+	friend struct FSurvivorsGameTestAccess;
+#endif
 
 	// ---- 定数 ----
 	static constexpr int32 MaxEnemyObs    = SurvivorsGameConstants::MaxEnemyObs;
