@@ -84,10 +84,9 @@ void USurvivorsWeaponComponent::TickWeapons(float Dt)
 
 void USurvivorsWeaponComponent::TickAllWeapons(float Dt)
 {
-	// 後方互換のために残しているが、HitFrame 経由の当たり判定（Garlic/GroundZone）は実行しない。
-	// 正確な当たり判定には PhysicsStep 内の BuildEnemyGrid/ComputeAllWeaponHits/ApplyWeaponHits を使うこと。
+	ensureMsgf(false, TEXT("TickAllWeapons() は非推奨。PhysicsStep 内の TickWeapons/ComputeAllWeaponHits/ApplyWeaponHits を使うこと。"));
 	TickWeapons(Dt);
-	ApplyProjectileHits();
+	// ApplyProjectileHits() 削除: HitFrame を迂回して旧挙動を残すため
 }
 
 void USurvivorsWeaponComponent::TickProjectiles(float Dt)
@@ -235,7 +234,17 @@ void USurvivorsWeaponComponent::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 			if (!Game->Enemies.IsValidIndex(EIdx)) continue;
 			FEnemyState& E = Game->Enemies[EIdx];
 			if (E.UniqueId != Ev.Target.UniqueId) continue;
-			if (E.bPendingRemove) continue;
+			if (E.bPendingRemove)
+			{
+				// 死亡済み対象でも非 piercing 弾は消費する（次 tick への持ち越し防止）
+				if (Ev.Type == ESurvivorsHitType::ProjectileDamage
+					&& Projectiles.IsValidIndex(Ev.WeaponSlot)
+					&& !Projectiles[Ev.WeaponSlot].bPiercing)
+				{
+					ProjectilesToRemove.Add(Ev.WeaponSlot);
+				}
+				continue;
+			}
 
 			// ダメージ適用
 			E.HP -= Ev.Damage;

@@ -545,3 +545,48 @@ bool FSurvivorsGroundZoneHitCooldown::RunTest(const FString& Parameters)
 	S.Destroy();
 	return true;
 }
+
+// Garlic が同 tick で敵Aを倒し、非 piercing 弾も敵Aを狙っていた場合の挙動
+// 期待: 弾は死亡済み敵Aに当たって消費され、敵Bはダメージを受けない
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsMixedHitGarlicKillsProjectileConsumed,
+	"ReinBalance.Survivors.HitFrame.MixedHit_GarlicKills_ProjectileConsumedOnDeadEnemy",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FSurvivorsMixedHitGarlicKillsProjectileConsumed::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	// 敵A: PlayerPos(0,0) — Garlic 1発で死ぬ
+	// 敵B: (50,0) — Garlic 範囲外（Garlic range = 25+5 = 30 < 50）
+	S.AddEnemyAt(FVector2D(0.f, 0.f), /*HP=*/1.f);
+	S.AddEnemyAt(FVector2D(50.f, 0.f), /*HP=*/100.f);
+
+	// 非 piercing 弾を敵A位置(0,0)に配置（敵Bには届かない半径）
+	FProjectileState Proj;
+	Proj.Pos          = FVector2D(0.f, 0.f);
+	Proj.Radius       = FSimRadius(10.f);
+	Proj.Damage       = FDamage(20.f);
+	Proj.bPiercing    = false;
+	Proj.WeaponType   = EWeaponType::MagicWand;
+	Proj.WeaponSlotIdx= 1;
+	Proj.LifeTime     = FProjectileLifeTime(5.f);
+	FSurvivorsGameTestAccess::WeaponComp(S.Game)->SpawnProjectile(Proj);
+
+	S.RunWeaponHits();
+
+	// 敵A は Garlic で死亡 pending
+	TestTrue("Enemy A is pending remove after Garlic hit",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].bPendingRemove);
+
+	// 非 piercing 弾は死亡済み敵Aで消費される → 敵Bはダメージなし
+	TestEqual("Enemy B HP unchanged (projectile consumed on dead enemy A)",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[1].HP, 100.f);
+
+	// プロジェクタイルは消費済み（ApplyWeaponHits 内で削除される）
+	TestEqual("Projectile removed after hitting dead enemy A",
+		FSurvivorsGameTestAccess::WeaponComp(S.Game)->GetProjectileCount(), 0);
+
+	S.Destroy();
+	return true;
+}

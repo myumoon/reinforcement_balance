@@ -41,24 +41,7 @@ void USurvivorsEnemyComponent::ApplyAuraDamage()
 
 void USurvivorsEnemyComponent::ApplyContactDamage()
 {
-	if (!Game) return;
-
-	for (FEnemyState& E : Game->Enemies)
-	{
-		// Laurel シールドが有効な場合は接触ダメージを受けない
-		if (Game->bShieldActive) continue;
-
-		const float HitR = Game->PlayerRadius + E.CollisionRadius;
-		if (FVector2D::DistSquared(Game->PlayerPos, E.Pos) < HitR * HitR)
-		{
-			if (Game->ElapsedTime - E.PlayerLastHitTime >= SurvivorsGameConstants::ContactHitInterval)
-			{
-				Game->PlayerHP -= E.ContactDamage * Game->EnemyDamageScale;
-				E.PlayerLastHitTime = Game->ElapsedTime;
-			}
-		}
-	}
-	Game->PlayerHP = FMath::Max(Game->PlayerHP, 0.f);
+	ensureMsgf(false, TEXT("ApplyContactDamage() は非推奨。PhysicsStep 内の ComputeContactHits/ApplyContactHits を使うこと。"));
 }
 
 void USurvivorsEnemyComponent::ComputeContactHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame)
