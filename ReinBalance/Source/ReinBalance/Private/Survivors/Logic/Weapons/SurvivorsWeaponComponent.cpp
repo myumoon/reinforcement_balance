@@ -298,6 +298,20 @@ void USurvivorsWeaponComponent::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 	}
 }
 
+void USurvivorsWeaponComponent::UpdateProjectilesBySlot(int32 InSlotIdx, float Dt,
+	TFunctionRef<bool(FProjectileState&, float)> Callback)
+{
+	for (int32 i = Projectiles.Num() - 1; i >= 0; --i)
+	{
+		if (Projectiles[i].WeaponSlotIdx == InSlotIdx)
+		{
+			const bool bKeep = Callback(Projectiles[i], Dt);
+			if (!bKeep)
+				Projectiles.RemoveAt(i);
+		}
+	}
+}
+
 void USurvivorsWeaponComponent::ApplyProjectileHits()
 {
 	ensureMsgf(false, TEXT("ApplyProjectileHits() は非推奨。PhysicsStep 内の ComputeProjectileHits/ApplyWeaponHits を使うこと。HitFrame/Finalize を迂回するため直接呼び出し禁止。"));

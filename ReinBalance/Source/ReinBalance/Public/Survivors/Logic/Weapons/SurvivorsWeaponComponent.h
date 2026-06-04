@@ -78,6 +78,14 @@ public:
 	void SpawnProjectile(const FProjectileState& P) { Projectiles.Add(P); }
 	void SpawnGroundZone(const FGroundZoneState& Z) { GroundZones.Add(Z); }
 
+	/**
+	 * 指定スロットのプロジェクタイルを全てコールバックで更新する。
+	 * Axe の重力・Cross の折り返し・KingBible の軌道更新などに使用。
+	 * Callback は (FProjectileState&, float Dt) → bool (false で削除) を受け取る。
+	 */
+	void UpdateProjectilesBySlot(int32 InSlotIdx, float Dt,
+		TFunctionRef<bool(FProjectileState&, float)> Callback);
+
 private:
 	// ---- プロジェクタイル・ゾーン（全武器共有プール） ----
 	TArray<FProjectileState> Projectiles;

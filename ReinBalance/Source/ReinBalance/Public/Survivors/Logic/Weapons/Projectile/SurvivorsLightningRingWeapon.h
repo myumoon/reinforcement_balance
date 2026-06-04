@@ -1,12 +1,27 @@
 #pragma once
+#include "CoreMinimal.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponBase.h"
 #include "SurvivorsLightningRingWeapon.generated.h"
 
-/** TODO(PR2): LightningRing / ThunderLoop の実装 */
+/**
+ * LightningRing / ThunderLoop: 即時範囲攻撃（プロジェクタイル不要、ランダム敵 Amount 体に即ダメージ）
+ */
 UCLASS()
 class REINBALANCE_API USurvivorsLightningRingWeapon : public USurvivorsWeaponBase
 {
 	GENERATED_BODY()
 public:
-	virtual void Tick(float Dt) override {}
+	virtual void Tick(float Dt) override;
+	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
+	virtual void ComputeHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame) override;
+
+private:
+	float CachedDamage   = 40.f;
+	float CachedCooldown = 1.00f;
+	int32 CachedAmount   = 1;
+
+	// クールダウン終了時に発動フラグを Tick でセット
+	bool bPendingFire = false;
+
+	void CacheParams();
 };

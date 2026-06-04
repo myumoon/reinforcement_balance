@@ -11,6 +11,7 @@ class USurvivorsCollisionComponent;
 class USurvivorsEnemyComponent;
 class USurvivorsGemComponent;
 class USurvivorsObservationComponent;
+class USurvivorsPickupComponent;
 class USurvivorsPlayerComponent;
 class USurvivorsSpawnComponent;
 class USurvivorsWeaponComponent;
@@ -197,6 +198,32 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|TimeScaling")
 	bool bTimeScalingEnabled = true;
 
+	// ---- 訓練用パラメータ拡張（/params エンドポイント経由で設定） ----
+
+	/** 武器プール制御モード: "all" / "garlic_only" / "custom" */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	FString WeaponPoolMode = TEXT("garlic_only");
+
+	/** カスタムモード時の許可武器タイプ ID リスト */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	TArray<int32> AllowedWeaponTypes;
+
+	/** パッシブアイテムを有効にするか */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	bool bEnablePassives = false;
+
+	/** 進化システムを有効にするか */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	bool bEnableEvolutions = false;
+
+	/** リプレイ旧フェーズ比率（0.0〜1.0） */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	float ReplayOldPhaseFraction = 0.0f;
+
+	/** 開始武器選択モード: "garlic" / "random" / "custom" */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	FString StartingWeaponMode = TEXT("garlic");
+
 	UPROPERTY(EditAnywhere, Category = "Survivors|TimeScaling")
 	float HPScaleRatePerMin = 0.10f;
 
@@ -211,11 +238,18 @@ private:
 	friend class USurvivorsEnemyComponent;
 	friend class USurvivorsGemComponent;
 	friend class USurvivorsObservationComponent;
+	friend class USurvivorsPickupComponent;
 	friend class USurvivorsPlayerComponent;
 	friend class USurvivorsSpawnComponent;
 	friend class USurvivorsWeaponComponent;
 	friend class USurvivorsWeaponBase;
 	friend class USurvivorsGarlicWeapon;
+	friend class USurvivorsLaurelWeapon;
+	friend class USurvivorsKingBibleWeapon;
+	friend class USurvivorsPentagramWeapon;
+	friend class USurvivorsLightningRingWeapon;
+	friend class USurvivorsPeachoneWeapon;
+	friend class USurvivorsVandalierWeapon;
 #if WITH_AUTOMATION_TESTS
 	friend struct FSurvivorsGameTestAccess;
 #endif
@@ -294,6 +328,9 @@ private:
 
 	UPROPERTY(VisibleAnywhere, Category = "Survivors|Components")
 	TObjectPtr<USurvivorsWeaponComponent> WeaponComponent;
+
+	UPROPERTY(VisibleAnywhere, Category = "Survivors|Components")
+	TObjectPtr<USurvivorsPickupComponent> PickupComponent;
 
 	// ---- 内部メソッド ----
 	FVector2D RandomInsideField();

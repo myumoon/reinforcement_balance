@@ -1,12 +1,18 @@
 #pragma once
-#include "Survivors/Logic/Weapons/SurvivorsWeaponBase.h"
+#include "CoreMinimal.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsPeachoneWeapon.h"
 #include "SurvivorsEbonyWingsWeapon.generated.h"
 
-/** TODO(PR2): EbonyWings の実装 */
+/**
+ * EbonyWings: Peachone と同じ挙動・反時計回り・初期角度 π オフセット
+ */
 UCLASS()
-class REINBALANCE_API USurvivorsEbonyWingsWeapon : public USurvivorsWeaponBase
+class REINBALANCE_API USurvivorsEbonyWingsWeapon : public USurvivorsPeachoneWeapon
 {
 	GENERATED_BODY()
 public:
-	virtual void Tick(float Dt) override {}
+	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
+
+protected:
+	virtual void CacheParams() override;
 };

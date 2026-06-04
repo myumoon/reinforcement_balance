@@ -3,6 +3,7 @@
 #include "Survivors/Logic/SurvivorsEnemyComponent.h"
 #include "Survivors/Logic/SurvivorsGemComponent.h"
 #include "Survivors/Logic/SurvivorsObservationComponent.h"
+#include "Survivors/Logic/SurvivorsPickupComponent.h"
 #include "Survivors/Logic/SurvivorsPlayerComponent.h"
 #include "Survivors/Logic/SurvivorsSpawnComponent.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
@@ -18,6 +19,7 @@ ASurvivorsGame::ASurvivorsGame()
 	CollisionComponent = CreateDefaultSubobject<USurvivorsCollisionComponent>(TEXT("CollisionComponent"));
 	ObservationComponent = CreateDefaultSubobject<USurvivorsObservationComponent>(TEXT("ObservationComponent"));
 	WeaponComponent  = CreateDefaultSubobject<USurvivorsWeaponComponent>(TEXT("WeaponComponent"));
+	PickupComponent  = CreateDefaultSubobject<USurvivorsPickupComponent>(TEXT("PickupComponent"));
 
 	PlayerComponent->Initialize(this);
 	GemComponent->Initialize(this);
@@ -26,6 +28,7 @@ ASurvivorsGame::ASurvivorsGame()
 	CollisionComponent->Initialize(this);
 	ObservationComponent->Initialize(this);
 	WeaponComponent->Initialize(this);
+	PickupComponent->Initialize(this);
 
 	SpawnComponent->InitDefaultEnemyTable();
 	SpawnComponent->InitDefaultSpawnWaves();
@@ -167,6 +170,13 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 		GemComponent->ApplyPickupHits(HitFrame);
 	}
 	FinalizePickupRemovals();
+
+	// フロアアイテム・特殊アイテム収集
+	if (PickupComponent)
+	{
+		PickupComponent->CheckFloorPickups();
+		PickupComponent->CheckSpecialPickups();
+	}
 
 	if (PlayerHP <= 0.f)
 	{

@@ -154,6 +154,38 @@ private:
 		if (JsonObj->TryGetNumberField(TEXT("MaxEpisodeTime"), MaxEpisodeTime))
 			Game->MaxEpisodeTime = FMath::Clamp(static_cast<float>(MaxEpisodeTime), 30.f, 1800.f);
 
+		// PR2 拡張パラメータ
+		FString WeaponPoolMode;
+		if (JsonObj->TryGetStringField(TEXT("weapon_pool_mode"), WeaponPoolMode))
+			Game->WeaponPoolMode = WeaponPoolMode;
+
+		const TArray<TSharedPtr<FJsonValue>>* AllowedWeaponTypesArr;
+		if (JsonObj->TryGetArrayField(TEXT("allowed_weapon_types"), AllowedWeaponTypesArr))
+		{
+			Game->AllowedWeaponTypes.Empty();
+			for (const TSharedPtr<FJsonValue>& Val : *AllowedWeaponTypesArr)
+			{
+				if (Val.IsValid())
+					Game->AllowedWeaponTypes.Add(static_cast<int32>(Val->AsNumber()));
+			}
+		}
+
+		bool bEnablePassives;
+		if (JsonObj->TryGetBoolField(TEXT("enable_passives"), bEnablePassives))
+			Game->bEnablePassives = bEnablePassives;
+
+		bool bEnableEvolutions;
+		if (JsonObj->TryGetBoolField(TEXT("enable_evolutions"), bEnableEvolutions))
+			Game->bEnableEvolutions = bEnableEvolutions;
+
+		double ReplayOldPhaseFraction;
+		if (JsonObj->TryGetNumberField(TEXT("replay_old_phase_fraction"), ReplayOldPhaseFraction))
+			Game->ReplayOldPhaseFraction = FMath::Clamp(static_cast<float>(ReplayOldPhaseFraction), 0.f, 1.f);
+
+		FString StartingWeaponMode;
+		if (JsonObj->TryGetStringField(TEXT("starting_weapon_mode"), StartingWeaponMode))
+			Game->StartingWeaponMode = StartingWeaponMode;
+
 		OnComplete(MakeJsonResponse(TEXT("{\"status\":\"ok\"}")));
 		return true;
 	}
