@@ -523,7 +523,7 @@ class _WeaponCurriculumCallback(BaseCallback):
             )
 
 
-
+class _AnnealingShapingCallback(BaseCallback):
     """shaped_reward を線形アニーリングするコールバック。
 
     |shaped_reward_mean| / base_reward_mean の比率を check_freq ステップごとに計算し、
