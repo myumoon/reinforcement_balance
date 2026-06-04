@@ -7,6 +7,7 @@
 
 class ASurvivorsGame;
 class USurvivorsWeaponComponent;
+class USurvivorsCollisionComponent;
 
 /**
  * 全武器クラスの抽象基底クラス。
@@ -26,6 +27,9 @@ public:
 
 	/** 毎物理ステップ呼ばれる（クールダウン管理・発射判定・Tick処理） */
 	virtual void Tick(float Dt) PURE_VIRTUAL(USurvivorsWeaponBase::Tick, );
+
+	/** HitFrame フェーズ: 当たり判定を計算しイベントを HitFrame に追加する */
+	virtual void ComputeHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame) {}
 
 	/** 武器レベル変更時（パラメータ再キャッシュ用） */
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) {}

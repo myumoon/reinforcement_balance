@@ -103,6 +103,9 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	// 敵 UniqueId カウンタリセット
 	NextEnemyId = 0;
 
+	// ジェム UniqueId カウンタリセット
+	NextGemId = 0;
+
 	// フロアアイテムリセット（PR2 で本実装）
 	FloorPickups.Empty();
 	SpecialPickups.Empty();
@@ -128,7 +131,6 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 {
 	if (bDone || bTruncated) return;
-
 	LastReward = 0.f;
 
 	PlayerComponent->ApplyAction(ActionIdx);
@@ -136,13 +138,35 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 
 	ElapsedTime += SurvivorsGameConstants::PhysicsDt;
 	EnemyComponent->UpdateEnemies();
+	WeaponComponent->TickWeapons(SurvivorsGameConstants::PhysicsDt);
 
-	// 武器コンポーネントで全武器 Tick（Garlic 含む全武器をここで処理）
-	WeaponComponent->TickAllWeapons(SurvivorsGameConstants::PhysicsDt);
+	// WeaponHits（StepSpawn 前の敵のみ）
+	CollisionComponent->BuildEnemyGrid();
+	{
+		FSurvivorsHitFrame HitFrame;
+		WeaponComponent->ComputeAllWeaponHits(CollisionComponent, HitFrame);
+		WeaponComponent->ApplyWeaponHits(HitFrame);
+	}
+	FinalizePendingEnemies();
 
 	SpawnComponent->StepSpawn();
-	EnemyComponent->ApplyContactDamage();
-	GemComponent->CheckCollections();
+
+	// ContactHits（Spawn 後の全敵）
+	CollisionComponent->BuildEnemyGrid();
+	{
+		FSurvivorsHitFrame HitFrame;
+		EnemyComponent->ComputeContactHits(CollisionComponent, HitFrame);
+		EnemyComponent->ApplyContactHits(HitFrame);
+	}
+
+	// PickupHits（DropGem 済みジェムを含む）
+	CollisionComponent->BuildPickupGrid();
+	{
+		FSurvivorsHitFrame HitFrame;
+		GemComponent->ComputePickupHits(CollisionComponent, HitFrame);
+		GemComponent->ApplyPickupHits(HitFrame);
+	}
+	FinalizePickupRemovals();
 
 	if (PlayerHP <= 0.f)
 	{
@@ -156,6 +180,26 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 	{
 		bTruncated = true;
 		LastSpawnDebug.bTruncated = true;
+	}
+}
+
+void ASurvivorsGame::FinalizePendingEnemies()
+{
+	for (int32 i = Enemies.Num() - 1; i >= 0; --i)
+	{
+		if (Enemies[i].bPendingRemove)
+		{
+			GemComponent->DropGem(Enemies[i].TypeId, Enemies[i].Pos);
+			Enemies.RemoveAt(i);
+		}
+	}
+}
+
+void ASurvivorsGame::FinalizePickupRemovals()
+{
+	for (int32 i = Gems.Num() - 1; i >= 0; --i)
+	{
+		if (Gems[i].bPendingRemove) Gems.RemoveAt(i);
 	}
 }
 

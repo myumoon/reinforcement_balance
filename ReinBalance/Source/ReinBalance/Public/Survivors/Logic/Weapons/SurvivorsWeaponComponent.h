@@ -7,6 +7,7 @@
 
 class ASurvivorsGame;
 class USurvivorsWeaponBase;
+class USurvivorsCollisionComponent;
 
 /**
  * 全武器スロットを管理するコンポーネント兼ファクトリー。
@@ -33,16 +34,25 @@ public:
 
 	// ---- 毎ステップ処理 ----
 
-	/** 全武器 Tick() を呼ぶ（PhysicsStep から呼ぶ） */
+	/** 全武器 Tick() を呼ぶ（ダメージなし、クールダウン管理のみ） */
+	void TickWeapons(float Dt);
+
+	/** 後方互換: TickWeapons + ComputeAllWeaponHits + ApplyWeaponHits を一括実行（旧 TickAllWeapons） */
 	void TickAllWeapons(float Dt);
 
 	/** 全プロジェクタイル移動・寿命管理 */
 	void TickProjectiles(float Dt);
 
-	/** Santa Water ゾーン継続ダメージ */
+	/** Santa Water ゾーン寿命管理（ダメージ判定は ComputeGroundZoneHits に移管） */
 	void TickGroundZones(float Dt);
 
-	/** プロジェクタイル vs 敵 当たり判定 */
+	/** 全武器 ComputeHits を呼ぶ（HitFrame に当たり判定結果を収集） */
+	void ComputeAllWeaponHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame);
+
+	/** HitFrame のイベントを適用する（HP 更新・ノックバック・ドロップ） */
+	void ApplyWeaponHits(FSurvivorsHitFrame& HitFrame);
+
+	/** プロジェクタイル vs 敵 当たり判定（後方互換: 直接呼ぶ場合） */
 	void ApplyProjectileHits();
 
 	// ---- obs / view アクセサ ----
@@ -79,4 +89,7 @@ private:
 
 	/** ファクトリー: EWeaponType → 対応クラスのインスタンスを生成 */
 	USurvivorsWeaponBase* CreateWeaponInstance(EWeaponType Type);
+
+	void ComputeGroundZoneHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame);
+	void ComputeProjectileHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame);
 };
