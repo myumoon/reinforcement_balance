@@ -669,9 +669,14 @@ def _create_model(args, env, algo_class, default_policy: str, ppo_kwargs: dict):
         else:
             from games.coin.coin_entity_attention_extractor import CoinEntityAttentionExtractor
             extractor_class = CoinEntityAttentionExtractor
-        # survivors は 708 次元 obs に対応するため [512, 256] に拡大
+        # survivors は net_arch をフェーズ定義から読み込む（未定義時は [512, 256] にフォールバック）
         # coin は旧スキーマのまま [64, 64] を維持
-        survivors_net_arch = [512, 256] if args.game == "survivors" else [64, 64]
+        if args.game == "survivors":
+            from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
+            _weapon_phase_key = getattr(args, "weapon_phase", "W0")
+            survivors_net_arch = WEAPON_PHASES.get(_weapon_phase_key, {}).get("net_arch", [512, 256])
+        else:
+            survivors_net_arch = [64, 64]
         policy_kwargs = dict(
             features_extractor_class=extractor_class,
             features_extractor_kwargs=dict(features_dim=128, offsets=offsets, obs_schema=obs_schema),
@@ -851,6 +856,8 @@ def parse_args() -> argparse.Namespace:
                    help="BC 済みモデルを新規 PPO の初期重みとしてロード（--resume とは排他）")
     p.add_argument("--init-vecnormalize", type=Path, default=None,
                    help="--init-model と組み合わせて BC 時の VecNormalize 統計をロード")
+    p.add_argument("--weapon-phase", default="W0",
+                   help="武器カリキュラムのフェーズキー（W0〜W6 または W0_to_W1 等, default: W0）")
     p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
     p.add_argument("--wandb-project", default="rl-balance", help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None, help="W&B ラン名（未指定時は自動生成）")
@@ -1286,6 +1293,34 @@ def main() -> None:
                 f"ent_coef={ec_val}, n_steps={ns_val}, batch_size={bs_val}"
             )
     print(f"[INFO] SB3 model device: {model.device}")
+
+    # 武器カリキュラムパラメータを /params に送信（survivors かつ非 dry-run 時のみ）
+    if args.game == "survivors" and not args.dry_run:
+        from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES, get_params_for_phase
+        _weapon_phase_key = getattr(args, "weapon_phase", "W0")
+        if _weapon_phase_key not in WEAPON_PHASES:
+            raise ValueError(
+                f"--weapon-phase に未知のフェーズキーが指定されました: {_weapon_phase_key!r}\n"
+                f"有効なキー: {list(WEAPON_PHASES.keys())}"
+            )
+        _weapon_params = get_params_for_phase(_weapon_phase_key)
+        print(
+            f"[INFO] 武器カリキュラム: phase={_weapon_phase_key}, "
+            f"weapon_pool_mode={_weapon_params.get('weapon_pool_mode')}, "
+            f"enable_passives={_weapon_params.get('enable_passives')}, "
+            f"enable_evolutions={_weapon_params.get('enable_evolutions')}"
+        )
+        # VecEnv 経由で全 env に武器カリキュラムパラメータを送信する
+        _raw = _get_raw_env(env)
+        if _raw is not None:
+            _raw.set_params(**_weapon_params)
+        else:
+            # SubprocVecEnv など raw env に直接アクセスできない場合は env_method を使用
+            _inner_env = env
+            while hasattr(_inner_env, "venv"):
+                _inner_env = _inner_env.venv
+            if hasattr(_inner_env, "env_method"):
+                _inner_env.env_method("set_params", **_weapon_params)
 
     callbacks = []
     curriculum_cb = None
