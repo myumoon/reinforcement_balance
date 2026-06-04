@@ -214,7 +214,11 @@ private:
 	friend class USurvivorsPlayerComponent;
 	friend class USurvivorsSpawnComponent;
 	friend class USurvivorsWeaponComponent;
+	friend class USurvivorsWeaponBase;
 	friend class USurvivorsGarlicWeapon;
+#if WITH_AUTOMATION_TESTS
+	friend struct FSurvivorsGameTestAccess;
+#endif
 
 	// ---- 定数 ----
 	static constexpr int32 MaxEnemyObs    = SurvivorsGameConstants::MaxEnemyObs;
@@ -246,6 +250,9 @@ private:
 
 	// 敵 UniqueId カウンタ（スポーン時に採番）
 	int32                 NextEnemyId       = 0;
+
+	// ジェム UniqueId カウンタ（DropGem 時に採番）
+	int32                 NextGemId         = 0;
 
 	// フロアアイテム・特殊アイテム・破壊可能オブジェクト（PR2 で本実装）
 	TArray<FFloorPickupState>   FloorPickups;
@@ -303,6 +310,10 @@ private:
 
 	// 後方互換（既存の ApplyAuraDamage は WeaponComponent に移管されたが宣言は残す）
 	void      ApplyAuraDamage();
+
+	// HitFrame Finalize
+	void FinalizePendingEnemies();
+	void FinalizePickupRemovals();
 
 	// テーブル初期化
 	void  InitDefaultEnemyTable();

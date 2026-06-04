@@ -1,5 +1,6 @@
 #include "Survivors/Logic/Weapons/Projectile/SurvivorsGarlicWeapon.h"
 
+#include "Survivors/Logic/SurvivorsCollisionComponent.h"
 #include "Survivors/Logic/SurvivorsGame.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/SurvivorsGemComponent.h"
@@ -36,42 +37,49 @@ void USurvivorsGarlicWeapon::Tick(float Dt)
 {
 	if (!Game) return;
 
-	// パッシブ効果を適用（エリア半径 × AreaMult）
+	// クールダウン更新のみ（ダメージ処理は ComputeHits / ApplyWeaponHits に移管）
+	CooldownTimer.Value = FMath::Max(0.f, CooldownTimer.Value - Dt);
+}
+
+void USurvivorsGarlicWeapon::ComputeHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame)
+{
+	if (!Game || !CollComp) return;
+
 	const FPassiveEffects& PE = GetPassiveEffects();
-	const float EffectiveRadius = CachedAreaRadius * PE.AreaMult;
-	const float EffectiveDamage = CachedDamage     * PE.DamageMult;
+	const float EffRadius = CachedAreaRadius * PE.AreaMult;
+	const float EffDamage = CachedDamage * PE.DamageMult;
 
-	for (int32 i = Game->Enemies.Num() - 1; i >= 0; --i)
+	TArray<const FSurvivorsTargetProxy*> Contacts;
+	CollComp->QueryEnemyContacts(Game->PlayerPos, EffRadius, Contacts);
+
+	for (const FSurvivorsTargetProxy* Proxy : Contacts)
 	{
-		FEnemyState& E = Game->Enemies[i];
-		const float Dist = FVector2D::Distance(Game->PlayerPos, E.Pos);
-		if (Dist <= EffectiveRadius + E.CollisionRadius)
-		{
-			// スロット別ヒット時刻でクールダウン管理
-			const float LastHit = E.WeaponLastHitTime[SlotIdx].Seconds;
-			if (Game->ElapsedTime - LastHit >= CachedHitInterval)
-			{
-				E.HP -= EffectiveDamage;
-				E.WeaponLastHitTime[SlotIdx] = FSurvivorsElapsedTime(Game->ElapsedTime);
+		// narrowphase
+		if ((Game->PlayerPos - Proxy->Pos).SizeSquared() > FMath::Square(EffRadius + Proxy->Radius)) continue;
 
-				// ノックバック
-				if (Game->EnemyTypeTable.IsValidIndex(E.TypeId))
-				{
-					const float Resistance = Game->EnemyTypeTable[E.TypeId].KnockbackResistance;
-					if (Resistance < 1.f)
-					{
-						const FVector2D Dir = (E.Pos - Game->PlayerPos).GetSafeNormal();
-						E.Pos += Dir * SurvivorsGameConstants::GarlicKnockbackStrength * (1.f - Resistance);
-					}
-				}
+		// UniqueId 確認
+		const int32 EIdx = Proxy->Ref.IndexAtBuildTime;
+		if (!Game->Enemies.IsValidIndex(EIdx) || Game->Enemies[EIdx].UniqueId != Proxy->Ref.UniqueId) continue;
+		const FEnemyState& E = Game->Enemies[EIdx];
+		if (E.bPendingRemove) continue;
 
-				if (E.HP <= 0.f)
-				{
-					Game->GemComponent->DropGem(E.TypeId, E.Pos);
-					Game->Enemies.RemoveAt(i);
-					Game->LastReward += Game->KillReward;
-				}
-			}
-		}
+		// hit interval
+		if (Game->ElapsedTime - E.WeaponLastHitTime[SlotIdx].Seconds < CachedHitInterval) continue;
+
+		// knockback
+		const FVector2D KDir = (E.Pos - Game->PlayerPos).GetSafeNormal();
+		float KRes = 0.f;
+		if (Game->EnemyTypeTable.IsValidIndex(E.TypeId))
+			KRes = Game->EnemyTypeTable[E.TypeId].KnockbackResistance;
+
+		FSurvivorsHitEvent Ev;
+		Ev.Type = ESurvivorsHitType::WeaponAreaDamage;
+		Ev.Target = Proxy->Ref;
+		Ev.Damage = EffDamage;
+		Ev.WeaponSlot = SlotIdx;
+		Ev.KnockbackDir = KDir;
+		Ev.KnockbackStrength = SurvivorsGameConstants::GarlicKnockbackStrength;
+		Ev.KnockbackResistance = KRes;
+		HitFrame.Events.Add(Ev);
 	}
 }

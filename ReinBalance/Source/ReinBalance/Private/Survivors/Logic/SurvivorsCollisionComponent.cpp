@@ -4,6 +4,82 @@
 #include "Survivors/View/WallActor.h"
 #include "Kismet/GameplayStatics.h"
 
+// ============================================================================
+// FSurvivorsTargetGrid 実装
+// ============================================================================
+
+void FSurvivorsTargetGrid::Clear()
+{
+	for (FSurvivorsCollisionCell& Cell : Cells)
+	{
+		Cell.TargetIndices.Reset();
+	}
+	Targets.Reset();
+	MaxTargetRadius = 0.f;
+}
+
+void FSurvivorsTargetGrid::Rebuild(FVector2D Center, float HalfExtent, float InCellSize)
+{
+	CellSize = FMath::Max(InCellSize, 1.f);
+	NumX = FMath::CeilToInt(2.f * HalfExtent / CellSize);
+	NumY = NumX;
+	Origin = Center - FVector2D(HalfExtent, HalfExtent);
+
+	Cells.SetNum(NumX * NumY);
+	Clear();
+}
+
+FIntPoint FSurvivorsTargetGrid::WorldToCell(FVector2D Pos) const
+{
+	const FVector2D Local = Pos - Origin;
+	return FIntPoint(
+		FMath::FloorToInt(Local.X / CellSize),
+		FMath::FloorToInt(Local.Y / CellSize)
+	);
+}
+
+bool FSurvivorsTargetGrid::AddTarget(FSurvivorsTargetProxy Proxy)
+{
+	const FIntPoint Cell = WorldToCell(Proxy.Pos);
+	if (Cell.X < 0 || Cell.X >= NumX || Cell.Y < 0 || Cell.Y >= NumY)
+	{
+		return false;
+	}
+
+	const int32 TargetIndex = Targets.Add(Proxy);
+	Cells[Cell.Y * NumX + Cell.X].TargetIndices.Add(TargetIndex);
+	MaxTargetRadius = FMath::Max(MaxTargetRadius, Proxy.Radius);
+	return true;
+}
+
+void FSurvivorsTargetGrid::QueryContacts(FVector2D Pos, float QueryRadius, TArray<int32>& OutIndices) const
+{
+	if (NumX == 0 || NumY == 0) return;
+
+	const FVector2D MinPos = Pos - FVector2D(QueryRadius, QueryRadius);
+	const FVector2D MaxPos = Pos + FVector2D(QueryRadius, QueryRadius);
+
+	const FIntPoint MinCell(
+		FMath::Clamp(FMath::FloorToInt((MinPos.X - Origin.X) / CellSize), 0, NumX - 1),
+		FMath::Clamp(FMath::FloorToInt((MinPos.Y - Origin.Y) / CellSize), 0, NumY - 1)
+	);
+	const FIntPoint MaxCell(
+		FMath::Clamp(FMath::FloorToInt((MaxPos.X - Origin.X) / CellSize), 0, NumX - 1),
+		FMath::Clamp(FMath::FloorToInt((MaxPos.Y - Origin.Y) / CellSize), 0, NumY - 1)
+	);
+
+	for (int32 CY = MinCell.Y; CY <= MaxCell.Y; ++CY)
+	{
+		for (int32 CX = MinCell.X; CX <= MaxCell.X; ++CX)
+		{
+			for (int32 Idx : Cells[CY * NumX + CX].TargetIndices)
+			{
+				OutIndices.AddUnique(Idx);
+			}
+		}
+	}
+}
+
 USurvivorsCollisionComponent::USurvivorsCollisionComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -67,6 +143,80 @@ void USurvivorsCollisionComponent::ResolveWallCollisions()
 			else if (m == py1) { Game->PlayerPos.Y = Box.Min.Y - Game->PlayerRadius; Game->PlayerVel.Y = FMath::Min(Game->PlayerVel.Y, 0.f); }
 			else               { Game->PlayerPos.Y = Box.Max.Y + Game->PlayerRadius; Game->PlayerVel.Y = FMath::Max(Game->PlayerVel.Y, 0.f); }
 		}
+	}
+}
+
+// ============================================================================
+// LocalUniformGrid API
+// ============================================================================
+
+float USurvivorsCollisionComponent::GetEffectiveHalfExtent() const
+{
+	if (!Game) return CollisionHalfExtent;
+	return bUseFullFieldCollision ? Game->FieldHalfSize : CollisionHalfExtent;
+}
+
+void USurvivorsCollisionComponent::RegisterEnemyTargets()
+{
+	if (!Game) return;
+	for (int32 i = 0; i < Game->Enemies.Num(); ++i)
+	{
+		const FEnemyState& E = Game->Enemies[i];
+		FSurvivorsTargetProxy P;
+		P.Ref = { ESurvivorsCollisionOwnerKind::Enemy, E.UniqueId, i };
+		P.Pos = E.Pos;
+		P.Radius = E.CollisionRadius;
+		EnemyGrid.AddTarget(P);
+	}
+}
+
+void USurvivorsCollisionComponent::RegisterPickupTargets()
+{
+	if (!Game) return;
+	for (int32 i = 0; i < Game->Gems.Num(); ++i)
+	{
+		const FGemState& G = Game->Gems[i];
+		FSurvivorsTargetProxy P;
+		P.Ref = { ESurvivorsCollisionOwnerKind::Gem, G.UniqueId, i };
+		P.Pos = G.Pos;
+		P.Radius = 0.f;
+		PickupGrid.AddTarget(P);
+	}
+}
+
+void USurvivorsCollisionComponent::BuildEnemyGrid()
+{
+	if (!Game) return;
+	const FVector2D Center = bUseFullFieldCollision ? FVector2D::ZeroVector : Game->PlayerPos;
+	EnemyGrid.Rebuild(Center, GetEffectiveHalfExtent(), CollisionCellSize);
+	RegisterEnemyTargets();
+}
+
+void USurvivorsCollisionComponent::BuildPickupGrid()
+{
+	if (!Game) return;
+	const FVector2D Center = bUseFullFieldCollision ? FVector2D::ZeroVector : Game->PlayerPos;
+	PickupGrid.Rebuild(Center, GetEffectiveHalfExtent(), CollisionCellSize);
+	RegisterPickupTargets();
+}
+
+void USurvivorsCollisionComponent::QueryEnemyContacts(FVector2D Pos, float Radius, TArray<FSurvivorsTargetProxy const*>& Out) const
+{
+	TArray<int32> Indices;
+	EnemyGrid.QueryContacts(Pos, Radius + EnemyGrid.MaxTargetRadius, Indices);
+	for (int32 Idx : Indices)
+	{
+		Out.Add(&EnemyGrid.Targets[Idx]);
+	}
+}
+
+void USurvivorsCollisionComponent::QueryPickupContacts(FVector2D Pos, float Radius, TArray<FSurvivorsTargetProxy const*>& Out) const
+{
+	TArray<int32> Indices;
+	PickupGrid.QueryContacts(Pos, Radius + PickupGrid.MaxTargetRadius, Indices);
+	for (int32 Idx : Indices)
+	{
+		Out.Add(&PickupGrid.Targets[Idx]);
 	}
 }
 

@@ -1,6 +1,8 @@
 #include "Survivors/Logic/SurvivorsGemComponent.h"
 
+#include "Survivors/Logic/SurvivorsCollisionComponent.h"
 #include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/SurvivorsPlayerComponent.h"
 
 USurvivorsGemComponent::USurvivorsGemComponent()
@@ -26,22 +28,57 @@ void USurvivorsGemComponent::DropGem(int32 TypeId, FVector2D Pos)
 	const EGemType Type = (TypeId >= 0 && TypeId < UE_ARRAY_COUNT(SurvivorsGameConstants::GemDropTable))
 		? SurvivorsGameConstants::GemDropTable[TypeId]
 		: EGemType::Blue;
-	Game->Gems.Add({ Pos, Type });
+	FGemState G;
+	G.Pos = Pos;
+	G.Type = Type;
+	G.UniqueId = ++Game->NextGemId;
+	G.bPendingRemove = false;
+	Game->Gems.Add(G);
 }
 
 void USurvivorsGemComponent::CheckCollections()
 {
+	// ComputePickupHits / ApplyPickupHits に移管済み。後方互換のため空実装を残す。
+}
+
+void USurvivorsGemComponent::ComputePickupHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame)
+{
+	if (!Game || !CollComp) return;
+
+	TArray<const FSurvivorsTargetProxy*> Contacts;
+	CollComp->QueryPickupContacts(Game->PlayerPos, Game->GemPickupRadius, Contacts);
+
+	for (const FSurvivorsTargetProxy* Proxy : Contacts)
+	{
+		// narrowphase
+		if ((Game->PlayerPos - Proxy->Pos).SizeSquared() > FMath::Square(Game->GemPickupRadius)) continue;
+
+		const int32 GIdx = Proxy->Ref.IndexAtBuildTime;
+		if (!Game->Gems.IsValidIndex(GIdx) || Game->Gems[GIdx].UniqueId != Proxy->Ref.UniqueId) continue;
+		if (Game->Gems[GIdx].bPendingRemove) continue;
+
+		FSurvivorsHitEvent Ev;
+		Ev.Type = ESurvivorsHitType::PickupCollect;
+		Ev.Target = Proxy->Ref;
+		HitFrame.Events.Add(Ev);
+	}
+}
+
+void USurvivorsGemComponent::ApplyPickupHits(FSurvivorsHitFrame& HitFrame)
+{
 	if (!Game || !Game->PlayerComponent) return;
 
-	const float RadSq = Game->GemPickupRadius * Game->GemPickupRadius;
-	for (int32 i = Game->Gems.Num() - 1; i >= 0; --i)
+	for (const FSurvivorsHitEvent& Ev : HitFrame.Events)
 	{
-		if (FVector2D::DistSquared(Game->PlayerPos, Game->Gems[i].Pos) <= RadSq)
-		{
-			const float XPGain = SurvivorsGameConstants::GemXPValues[static_cast<uint8>(Game->Gems[i].Type)];
-			Game->PlayerComponent->ProcessXPGain(XPGain);
-			Game->LastReward += Game->ItemReward;
-			Game->Gems.RemoveAt(i);
-		}
+		if (Ev.Type != ESurvivorsHitType::PickupCollect) continue;
+
+		const int32 GIdx = Ev.Target.IndexAtBuildTime;
+		if (!Game->Gems.IsValidIndex(GIdx) || Game->Gems[GIdx].UniqueId != Ev.Target.UniqueId) continue;
+		if (Game->Gems[GIdx].bPendingRemove) continue;
+
+		Game->Gems[GIdx].bPendingRemove = true;
+		const float XPGain = SurvivorsGameConstants::GemXPValues[static_cast<uint8>(Game->Gems[GIdx].Type)];
+		Game->PlayerComponent->ProcessXPGain(XPGain);
+		Game->LastReward += Game->ItemReward;
 	}
 }

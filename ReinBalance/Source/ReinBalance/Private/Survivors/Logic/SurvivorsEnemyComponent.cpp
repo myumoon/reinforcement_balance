@@ -1,5 +1,6 @@
 #include "Survivors/Logic/SurvivorsEnemyComponent.h"
 
+#include "Survivors/Logic/SurvivorsCollisionComponent.h"
 #include "Survivors/Logic/SurvivorsGame.h"
 #include "Survivors/Logic/SurvivorsGemComponent.h"
 
@@ -40,24 +41,59 @@ void USurvivorsEnemyComponent::ApplyAuraDamage()
 
 void USurvivorsEnemyComponent::ApplyContactDamage()
 {
+	ensureMsgf(false, TEXT("ApplyContactDamage() は非推奨。PhysicsStep 内の ComputeContactHits/ApplyContactHits を使うこと。"));
+}
+
+void USurvivorsEnemyComponent::ComputeContactHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame)
+{
+	if (!Game || !CollComp) return;
+
+	TArray<const FSurvivorsTargetProxy*> Contacts;
+	CollComp->QueryEnemyContacts(Game->PlayerPos, Game->PlayerRadius, Contacts);
+
+	for (const FSurvivorsTargetProxy* Proxy : Contacts)
+	{
+		// narrowphase
+		if ((Game->PlayerPos - Proxy->Pos).SizeSquared() > FMath::Square(Game->PlayerRadius + Proxy->Radius)) continue;
+
+		const int32 EIdx = Proxy->Ref.IndexAtBuildTime;
+		if (!Game->Enemies.IsValidIndex(EIdx) || Game->Enemies[EIdx].UniqueId != Proxy->Ref.UniqueId) continue;
+		const FEnemyState& E = Game->Enemies[EIdx];
+		if (E.bPendingRemove) continue;
+
+		if (Game->ElapsedTime - E.PlayerLastHitTime >= SurvivorsGameConstants::ContactHitInterval)
+		{
+			FSurvivorsHitEvent Ev;
+			Ev.Type = ESurvivorsHitType::ContactDamage;
+			Ev.Target = Proxy->Ref;
+			Ev.Damage = E.ContactDamage;
+			HitFrame.Events.Add(Ev);
+		}
+	}
+}
+
+void USurvivorsEnemyComponent::ApplyContactHits(FSurvivorsHitFrame& HitFrame)
+{
 	if (!Game) return;
 
-	for (FEnemyState& E : Game->Enemies)
+	for (const FSurvivorsHitEvent& Ev : HitFrame.Events)
 	{
+		if (Ev.Type != ESurvivorsHitType::ContactDamage) continue;
+
 		// Laurel シールドが有効な場合は接触ダメージを受けない
 		if (Game->bShieldActive) continue;
 
-		const float HitR = Game->PlayerRadius + E.CollisionRadius;
-		if (FVector2D::DistSquared(Game->PlayerPos, E.Pos) < HitR * HitR)
-		{
-			if (Game->ElapsedTime - E.PlayerLastHitTime >= SurvivorsGameConstants::ContactHitInterval)
-			{
-				Game->PlayerHP -= E.ContactDamage * Game->EnemyDamageScale;
-				E.PlayerLastHitTime = Game->ElapsedTime;
-			}
-		}
+		const int32 EIdx = Ev.Target.IndexAtBuildTime;
+		if (!Game->Enemies.IsValidIndex(EIdx)) continue;
+		FEnemyState& E = Game->Enemies[EIdx];
+		if (E.UniqueId != Ev.Target.UniqueId) continue;
+		if (E.bPendingRemove) continue;
+
+		Game->PlayerHP -= Ev.Damage;  // ContactDamage はスポーン時に EnemyDamageScale 適用済み
+		E.PlayerLastHitTime = Game->ElapsedTime;
 	}
-	Game->PlayerHP = FMath::Max(Game->PlayerHP, 0.f);
+
+	Game->PlayerHP = FMath::Max(0.f, Game->PlayerHP);
 }
 
 float USurvivorsEnemyComponent::GetEnemySpeed(int32 TypeId) const

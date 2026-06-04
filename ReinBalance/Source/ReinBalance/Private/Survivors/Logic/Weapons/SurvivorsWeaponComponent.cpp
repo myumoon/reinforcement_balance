@@ -1,5 +1,6 @@
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 
+#include "Survivors/Logic/SurvivorsCollisionComponent.h"
 #include "Survivors/Logic/SurvivorsGame.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/SurvivorsGemComponent.h"
@@ -67,7 +68,7 @@ void USurvivorsWeaponComponent::UnequipWeapon(int32 SlotIdx)
 	WeaponInstances[SlotIdx] = nullptr;
 }
 
-void USurvivorsWeaponComponent::TickAllWeapons(float Dt)
+void USurvivorsWeaponComponent::TickWeapons(float Dt)
 {
 	for (int32 i = 0; i < WeaponInstances.Num(); ++i)
 	{
@@ -79,7 +80,13 @@ void USurvivorsWeaponComponent::TickAllWeapons(float Dt)
 
 	TickProjectiles(Dt);
 	TickGroundZones(Dt);
-	ApplyProjectileHits();
+}
+
+void USurvivorsWeaponComponent::TickAllWeapons(float Dt)
+{
+	ensureMsgf(false, TEXT("TickAllWeapons() は非推奨。PhysicsStep 内の TickWeapons/ComputeAllWeaponHits/ApplyWeaponHits を使うこと。"));
+	TickWeapons(Dt);
+	// ApplyProjectileHits() 削除: HitFrame を迂回して旧挙動を残すため
 }
 
 void USurvivorsWeaponComponent::TickProjectiles(float Dt)
@@ -111,80 +118,189 @@ void USurvivorsWeaponComponent::TickGroundZones(float Dt)
 		if (Z.LifeTime <= 0.f)
 		{
 			GroundZones.RemoveAt(i);
-			continue;
 		}
+	}
+}
 
-		// 範囲内の敵にクールダウン付きダメージ
-		for (int32 EIdx = Game->Enemies.Num() - 1; EIdx >= 0; --EIdx)
+void USurvivorsWeaponComponent::ComputeAllWeaponHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame)
+{
+	if (!CollComp) return;
+
+	for (int32 i = 0; i < WeaponInstances.Num(); ++i)
+	{
+		if (WeaponInstances[i])
 		{
-			FEnemyState& E = Game->Enemies[EIdx];
-			const float Dist = FVector2D::Distance(Z.Pos, E.Pos);
-			if (Dist <= Z.Radius + E.CollisionRadius)
-			{
-				const float* LastHit = Z.EnemyLastHitTime.Find(E.UniqueId);
-				const float  Now     = Game->ElapsedTime;
-				if (!LastHit || (Now - *LastHit) >= Z.HitCooldown)
-				{
-					E.HP -= Z.Damage;
-					Z.EnemyLastHitTime.Add(E.UniqueId, Now);
+			WeaponInstances[i]->ComputeHits(CollComp, HitFrame);
+		}
+	}
 
-					if (E.HP <= 0.f)
-					{
-						Game->GemComponent->DropGem(E.TypeId, E.Pos);
-						Game->Enemies.RemoveAt(EIdx);
-						Game->LastReward += Game->KillReward;
-					}
-				}
+	ComputeGroundZoneHits(CollComp, HitFrame);
+	ComputeProjectileHits(CollComp, HitFrame);
+}
+
+void USurvivorsWeaponComponent::ComputeGroundZoneHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame)
+{
+	if (!Game || !CollComp) return;
+
+	for (int32 ZIdx = 0; ZIdx < GroundZones.Num(); ++ZIdx)
+	{
+		const FGroundZoneState& Z = GroundZones[ZIdx];
+
+		TArray<const FSurvivorsTargetProxy*> Contacts;
+		CollComp->QueryEnemyContacts(Z.Pos, Z.Radius, Contacts);
+
+		for (const FSurvivorsTargetProxy* Proxy : Contacts)
+		{
+			// narrowphase
+			if ((Z.Pos - Proxy->Pos).SizeSquared() > FMath::Square(Z.Radius + Proxy->Radius)) continue;
+
+			// UniqueId 確認
+			const int32 EIdx = Proxy->Ref.IndexAtBuildTime;
+			if (!Game->Enemies.IsValidIndex(EIdx) || Game->Enemies[EIdx].UniqueId != Proxy->Ref.UniqueId) continue;
+			const FEnemyState& E = Game->Enemies[EIdx];
+			if (E.bPendingRemove) continue;
+
+			// EnemyLastHitTime チェック
+			const float* LastHit = Z.EnemyLastHitTime.Find(E.UniqueId);
+			const float Now = Game->ElapsedTime;
+			if (LastHit && (Now - *LastHit) < Z.HitCooldown) continue;
+
+			FSurvivorsHitEvent Ev;
+			Ev.Type = ESurvivorsHitType::GroundZoneDamage;
+			Ev.Target = Proxy->Ref;
+			Ev.Damage = Z.Damage;
+			Ev.WeaponSlot = ZIdx;  // GroundZone インデックスを WeaponSlot に格納
+			HitFrame.Events.Add(Ev);
+		}
+	}
+}
+
+void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame)
+{
+	if (!Game || !CollComp) return;
+
+	for (int32 PIdx = 0; PIdx < Projectiles.Num(); ++PIdx)
+	{
+		const FProjectileState& P = Projectiles[PIdx];
+
+		TArray<const FSurvivorsTargetProxy*> Contacts;
+		CollComp->QueryEnemyContacts(P.Pos, P.Radius.Value, Contacts);
+
+		for (const FSurvivorsTargetProxy* Proxy : Contacts)
+		{
+			// narrowphase
+			if ((P.Pos - Proxy->Pos).SizeSquared() > FMath::Square(P.Radius.Value + Proxy->Radius)) continue;
+
+			// UniqueId 確認
+			const int32 EIdx = Proxy->Ref.IndexAtBuildTime;
+			if (!Game->Enemies.IsValidIndex(EIdx) || Game->Enemies[EIdx].UniqueId != Proxy->Ref.UniqueId) continue;
+			const FEnemyState& E = Game->Enemies[EIdx];
+			if (E.bPendingRemove) continue;
+
+			// piercing 弾: ヒット済みならスキップ
+			if (P.HitEnemyIds.Contains(E.UniqueId)) continue;
+
+			FSurvivorsHitEvent Ev;
+			Ev.Type = ESurvivorsHitType::ProjectileDamage;
+			Ev.Target = Proxy->Ref;
+			Ev.Damage = P.Damage.Value;
+			Ev.WeaponSlot = PIdx;  // Projectile インデックスを WeaponSlot に格納
+			HitFrame.Events.Add(Ev);
+
+			// 非 piercing 弾: 最初の1体にだけヒットして終了
+			if (!P.bPiercing)
+			{
+				break;
 			}
 		}
 	}
 }
 
-void USurvivorsWeaponComponent::ApplyProjectileHits()
+void USurvivorsWeaponComponent::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 {
 	if (!Game) return;
 
-	for (int32 i = Projectiles.Num() - 1; i >= 0; --i)
+	// Projectile 削除フラグ管理
+	TSet<int32> ProjectilesToRemove;
+
+	for (const FSurvivorsHitEvent& Ev : HitFrame.Events)
 	{
-		FProjectileState& P = Projectiles[i];
-		bool bShouldRemove = false;
-
-		for (int32 EIdx = Game->Enemies.Num() - 1; EIdx >= 0; --EIdx)
+		if (Ev.Type == ESurvivorsHitType::WeaponAreaDamage
+			|| Ev.Type == ESurvivorsHitType::GroundZoneDamage
+			|| Ev.Type == ESurvivorsHitType::ProjectileDamage)
 		{
+			// UniqueId + IndexAtBuildTime で FEnemyState を特定
+			const int32 EIdx = Ev.Target.IndexAtBuildTime;
+			if (!Game->Enemies.IsValidIndex(EIdx)) continue;
 			FEnemyState& E = Game->Enemies[EIdx];
-
-			// 非 piercing 弾: ヒット済みなら判定スキップ
-			if (!P.bPiercing)
+			if (E.UniqueId != Ev.Target.UniqueId) continue;
+			if (E.bPendingRemove)
 			{
-				bool bAlreadyHit = P.HitEnemyIds.Contains(E.UniqueId);
-				if (bAlreadyHit) continue;
+				// 死亡済み対象でも非 piercing 弾は消費する（次 tick への持ち越し防止）
+				if (Ev.Type == ESurvivorsHitType::ProjectileDamage
+					&& Projectiles.IsValidIndex(Ev.WeaponSlot)
+					&& !Projectiles[Ev.WeaponSlot].bPiercing)
+				{
+					ProjectilesToRemove.Add(Ev.WeaponSlot);
+				}
+				continue;
 			}
 
-			const float HitR = P.Radius.Value + E.CollisionRadius;
-			if (FVector2D::DistSquared(P.Pos, E.Pos) < HitR * HitR)
-			{
-				E.HP -= P.Damage.Value;
-				if (!P.bPiercing)
-				{
-					P.HitEnemyIds.Add(E.UniqueId);
-					bShouldRemove = true;  // 非 piercing: 1体ヒットで消滅
-				}
+			// ダメージ適用
+			E.HP -= Ev.Damage;
 
-				if (E.HP <= 0.f)
+			// 最終ヒット時刻更新
+			if (Ev.Type == ESurvivorsHitType::WeaponAreaDamage)
+			{
+				if (E.WeaponLastHitTime[Ev.WeaponSlot].Seconds < Game->ElapsedTime)
+					E.WeaponLastHitTime[Ev.WeaponSlot] = FSurvivorsElapsedTime(Game->ElapsedTime);
+			}
+			else if (Ev.Type == ESurvivorsHitType::GroundZoneDamage)
+			{
+				if (GroundZones.IsValidIndex(Ev.WeaponSlot))
+					GroundZones[Ev.WeaponSlot].EnemyLastHitTime.Add(E.UniqueId, Game->ElapsedTime);
+			}
+			else if (Ev.Type == ESurvivorsHitType::ProjectileDamage)
+			{
+				if (Projectiles.IsValidIndex(Ev.WeaponSlot))
 				{
-					Game->GemComponent->DropGem(E.TypeId, E.Pos);
-					Game->Enemies.RemoveAt(EIdx);
-					Game->LastReward += Game->KillReward;
-					if (!P.bPiercing) break;
+					FProjectileState& P = Projectiles[Ev.WeaponSlot];
+					if (!P.bPiercing)
+					{
+						P.HitEnemyIds.Add(E.UniqueId);
+						ProjectilesToRemove.Add(Ev.WeaponSlot);
+					}
 				}
 			}
-		}
 
-		if (bShouldRemove)
-		{
-			Projectiles.RemoveAt(i);
+			// ノックバック
+			if (Ev.KnockbackStrength > 0.f && Ev.KnockbackResistance < 1.f)
+			{
+				E.Pos += Ev.KnockbackDir * Ev.KnockbackStrength * (1.f - Ev.KnockbackResistance);
+			}
+
+			// 死亡判定
+			if (E.HP <= 0.f)
+			{
+				E.bPendingRemove = true;
+				Game->LastReward += Game->KillReward;
+			}
 		}
 	}
+
+	// 削除対象プロジェクタイルを逆順で削除
+	TArray<int32> SortedRemoval = ProjectilesToRemove.Array();
+	SortedRemoval.Sort([](int32 A, int32 B) { return A > B; });
+	for (int32 Idx : SortedRemoval)
+	{
+		if (Projectiles.IsValidIndex(Idx))
+			Projectiles.RemoveAt(Idx);
+	}
+}
+
+void USurvivorsWeaponComponent::ApplyProjectileHits()
+{
+	ensureMsgf(false, TEXT("ApplyProjectileHits() は非推奨。PhysicsStep 内の ComputeProjectileHits/ApplyWeaponHits を使うこと。HitFrame/Finalize を迂回するため直接呼び出し禁止。"));
 }
 
 TArray<FProjectileState> USurvivorsWeaponComponent::GetProjectileObsView() const

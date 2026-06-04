@@ -17,6 +17,7 @@ class REINBALANCE_API USurvivorsGarlicWeapon : public USurvivorsWeaponBase
 public:
 	virtual void Tick(float Dt) override;
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
+	virtual void ComputeHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame) override;
 
 private:
 	/** レベル変更時にキャッシュする現在のパラメータ */
