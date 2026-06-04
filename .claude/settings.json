@@ -6,10 +6,15 @@
       "Edit(ReinBalance/Source/**)",
       "Write(ReinBalance.uproject)",
       "Edit(ReinBalance.uproject)",
+      "Write(.claude/**)",
+      "Edit(.claude/**)",
+      "Write(ReinBalance/Source/**)",
+      "Edit(ReinBalance/Source/**)",
       "Write(Tools/**)",
       "Edit(Tools/**)",
       "Bash(git:*)",
       "Bash(gh:*)",
+      "Bash(python:*)",
       "Bash(python3:*)",
       "Bash(.venv/bin/pip install:*)",
       "Bash(mkdir:*)",
@@ -31,7 +36,17 @@
       "Bash(for:*)",
       "Bash(curl:*)",
       "Bash(pkill:*)",
-      "Bash(true)"
+      "Bash(true)",
+      "Bash(wslpath *)",
+      "Bash(git check-ignore *)",
+      "Bash(git -C * diff *)",
+      "Bash(git -C * log *)",
+      "Bash(git -C * status *)",
+      "Bash(git -C * show *)",
+      "Bash(git -C * worktree *)",
+      "Bash(git -C * branch *)",
+      "Bash(git -C * rev-parse *)",
+      "Bash(codex:*)"
     ]
   }
 }
