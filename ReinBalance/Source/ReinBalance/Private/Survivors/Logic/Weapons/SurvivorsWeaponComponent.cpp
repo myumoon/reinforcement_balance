@@ -84,7 +84,8 @@ void USurvivorsWeaponComponent::TickWeapons(float Dt)
 
 void USurvivorsWeaponComponent::TickAllWeapons(float Dt)
 {
-	// 後方互換: 旧来の呼び出し（当たり判定含む）
+	// 後方互換のために残しているが、HitFrame 経由の当たり判定（Garlic/GroundZone）は実行しない。
+	// 正確な当たり判定には PhysicsStep 内の BuildEnemyGrid/ComputeAllWeaponHits/ApplyWeaponHits を使うこと。
 	TickWeapons(Dt);
 	ApplyProjectileHits();
 }
@@ -197,8 +198,8 @@ void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionCompone
 			const FEnemyState& E = Game->Enemies[EIdx];
 			if (E.bPendingRemove) continue;
 
-			// 非 piercing 弾: ヒット済みなら判定スキップ
-			if (!P.bPiercing && P.HitEnemyIds.Contains(E.UniqueId)) continue;
+			// piercing 弾: ヒット済みならスキップ
+			if (P.HitEnemyIds.Contains(E.UniqueId)) continue;
 
 			FSurvivorsHitEvent Ev;
 			Ev.Type = ESurvivorsHitType::ProjectileDamage;
@@ -206,6 +207,12 @@ void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionCompone
 			Ev.Damage = P.Damage.Value;
 			Ev.WeaponSlot = PIdx;  // Projectile インデックスを WeaponSlot に格納
 			HitFrame.Events.Add(Ev);
+
+			// 非 piercing 弾: 最初の1体にだけヒットして終了
+			if (!P.bPiercing)
+			{
+				break;
+			}
 		}
 	}
 }

@@ -19,9 +19,9 @@ bool FSurvivorsTargetGridBoundaryTest::RunTest(const FString& Parameters)
     P.Radius = 20.f;
     TestTrue("AddTarget succeeds", Grid.AddTarget(P));
 
-    // Source (0,0) 半径 10 + MaxTargetRadius(20) = 30 で query
+    // Source (0,0) QueryRadius = SourceRadius(0) + TargetCenter距離(128) + TargetRadius(20) = 148 で確実に届く
     TArray<int32> Results;
-    Grid.QueryContacts(FVector2D::ZeroVector, 30.f, Results);
+    Grid.QueryContacts(FVector2D::ZeroVector, 148.f, Results);
     TestTrue("Boundary target found", Results.Num() > 0);
     return true;
 }

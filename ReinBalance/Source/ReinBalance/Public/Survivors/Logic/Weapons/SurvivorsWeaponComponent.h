@@ -37,7 +37,8 @@ public:
 	/** 全武器 Tick() を呼ぶ（ダメージなし、クールダウン管理のみ） */
 	void TickWeapons(float Dt);
 
-	/** 後方互換: TickWeapons + ComputeAllWeaponHits + ApplyWeaponHits を一括実行（旧 TickAllWeapons） */
+	/** 後方互換のために残している。HitFrame 経由の当たり判定（Garlic/GroundZone）は実行しない。
+	 *  正確な当たり判定には PhysicsStep 内の BuildEnemyGrid/ComputeAllWeaponHits/ApplyWeaponHits を使うこと。 */
 	void TickAllWeapons(float Dt);
 
 	/** 全プロジェクタイル移動・寿命管理 */
