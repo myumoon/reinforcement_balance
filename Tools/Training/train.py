@@ -495,31 +495,41 @@ class _WeaponCurriculumCallback(BaseCallback):
         self.update_freq = max(update_freq, 1)
         self._last_update = 0
         self._is_transition = False
+        self._phase_start_step: int = 0  # _on_training_start() でフェーズ開始時のステップ数を記録
 
     def _on_training_start(self) -> None:
         from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
         phase = WEAPON_PHASES.get(self._phase_key, {})
         self._is_transition = phase.get("weapon_pool_mode") == "weighted"
-        self._apply_params(self.num_timesteps)
+        # フェーズ開始時の累積ステップを記録する。
+        # --resume でチェックポイントから再開した場合でも、ここで設定することで
+        # 常にフェーズ内経過ステップ（elapsed）を基準に weapon_weights を補間できる。
+        self._phase_start_step = self.num_timesteps
+        elapsed = 0  # 訓練開始直後はフェーズ内経過ステップ = 0
+        self._apply_params(elapsed)
         self._last_update = self.num_timesteps
 
     def _on_step(self) -> bool:
         if not self._is_transition:
             return True
         if self.num_timesteps - self._last_update >= self.update_freq:
-            self._apply_params(self.num_timesteps)
+            # フェーズ内経過ステップを計算して weapon_weights を補間する。
+            # 累積 num_timesteps ではなく elapsed を渡すことで、--resume 再開時に
+            # 遷移進捗がリセットされることなくフェーズ内の正しい位置から再開できる。
+            elapsed = self.num_timesteps - self._phase_start_step
+            self._apply_params(elapsed)
             self._last_update = self.num_timesteps
         return True
 
-    def _apply_params(self, global_step: int) -> None:
+    def _apply_params(self, elapsed: int) -> None:
         from games.survivors.survivors_weapon_curriculum import get_params_for_phase
-        params = get_params_for_phase(self._phase_key, global_step)
+        params = get_params_for_phase(self._phase_key, elapsed)
         self.training_env.env_method("set_params", **params)
         if self._is_transition:
             weights = params.get("weapon_weights", {})
             print(
                 f"[INFO] WeaponCurriculumCallback: phase={self._phase_key}, "
-                f"step={global_step}, weapon_weights={weights}"
+                f"elapsed={elapsed}, weapon_weights={weights}"
             )
 
 

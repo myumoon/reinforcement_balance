@@ -195,6 +195,25 @@ def get_weapon_weights(phase_key: str, phase_progress: float) -> dict[int, float
 
 
 def get_params_for_phase(phase_key: str, global_step: int = 0) -> dict:
+    """指定フェーズの武器カリキュラムパラメータを返す。
+
+    weighted フェーズ（W0_to_W1 / W1_to_W2）では global_step に応じて
+    weapon_weights を線形補間する。fixed フェーズでは weapon_weights は返さない。
+
+    Args:
+        phase_key: WEAPON_PHASES のキー（例: "W0", "W0_to_W1"）。
+        global_step: 現在のフェーズ内経過ステップ数。weighted フェーズでの補間に使用。
+            ※ 累積 num_timesteps ではなく、フェーズ開始からの相対ステップを渡すこと。
+
+    Returns:
+        UE5 の /params エンドポイントに送信するパラメータ辞書。
+
+    Note:
+        UE5 側の /params が以下のキーをサポートしている必要があります（Task A PR で実装）:
+        - weapon_pool_mode, allowed_weapon_types, enable_passives, enable_evolutions,
+          replay_old_phase_fraction, starting_weapon_mode, weapon_weights
+        UE5 側が未対応の場合、ゲームは Garlic-only で動作します。
+    """
     if phase_key not in WEAPON_PHASES:
         raise ValueError(f"Unknown weapon phase: {phase_key}")
     phase = WEAPON_PHASES[phase_key]
