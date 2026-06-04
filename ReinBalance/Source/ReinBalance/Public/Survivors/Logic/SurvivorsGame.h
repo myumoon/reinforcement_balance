@@ -72,6 +72,9 @@ public:
 	/** 後方互換: Garlic オーラ半径（WeaponSlots から取得）。View の DrawAura 用 */
 	float     GetAuraSize()    const;
 
+	const FWeaponSlot& GetWeaponSlot(int32 Idx) const { return WeaponSlots[Idx]; }
+	bool               IsShieldActive()          const { return bShieldActive; }
+
 	// ジェムアクセサ
 	int32     GetItemCount()       const { return Gems.Num(); }
 	FVector2D GetItemPos(int32 i)  const;

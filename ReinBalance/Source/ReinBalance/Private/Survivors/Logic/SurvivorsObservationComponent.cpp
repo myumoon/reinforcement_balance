@@ -3,8 +3,10 @@
 #include "Survivors/Logic/SurvivorsCollisionComponent.h"
 #include "Survivors/Logic/SurvivorsGame.h"
 #include "Survivors/Logic/SurvivorsPlayerComponent.h"
+#include "Survivors/Logic/Weapons/SurvivorsWeaponBase.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 #include "Misc/SecureHash.h"
+#include <algorithm>
 
 USurvivorsObservationComponent::USurvivorsObservationComponent()
 {
@@ -270,11 +272,13 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 		TArray<int32> Idx;
 		Idx.Reserve(Positions.Num());
 		for (int32 i = 0; i < Positions.Num(); ++i) Idx.Add(i);
-		Idx.Sort([&](int32 A, int32 B)
-		{
-			return FVector2D::DistSquared(Positions[A], Game->PlayerPos)
-				 < FVector2D::DistSquared(Positions[B], Game->PlayerPos);
-		});
+		const int32 TakeN = FMath::Min(MaxCount, Idx.Num());
+		std::partial_sort(Idx.GetData(), Idx.GetData() + TakeN, Idx.GetData() + Idx.Num(),
+			[&](int32 A, int32 B)
+			{
+				return FVector2D::DistSquared(Positions[A], Game->PlayerPos)
+					 < FVector2D::DistSquared(Positions[B], Game->PlayerPos);
+			});
 		for (int32 s = 0; s < MaxCount; ++s)
 		{
 			if (s < Idx.Num())
@@ -306,11 +310,16 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 	TArray<int32> EnemyIdx;
 	EnemyIdx.Reserve(Game->Enemies.Num());
 	for (int32 i = 0; i < Game->Enemies.Num(); ++i) EnemyIdx.Add(i);
-	EnemyIdx.Sort([this](int32 A, int32 B)
 	{
-		return FVector2D::DistSquared(Game->Enemies[A].Pos, Game->PlayerPos)
-			 < FVector2D::DistSquared(Game->Enemies[B].Pos, Game->PlayerPos);
-	});
+		const int32 TakeN = FMath::Min(MaxEnemyObs, EnemyIdx.Num());
+		std::partial_sort(EnemyIdx.GetData(), EnemyIdx.GetData() + TakeN,
+			EnemyIdx.GetData() + EnemyIdx.Num(),
+			[this](int32 A, int32 B)
+			{
+				return FVector2D::DistSquared(Game->Enemies[A].Pos, Game->PlayerPos)
+					 < FVector2D::DistSquared(Game->Enemies[B].Pos, Game->PlayerPos);
+			});
+	}
 
 	// ---- enemy_rel_pos (MaxEnemyObs * 2 = 64) ----
 	for (int32 Slot = 0; Slot < MaxEnemyObs; ++Slot)
@@ -411,17 +420,20 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 	{
 		TArray<FProjectileState> ProjView = Game->WeaponComponent->GetProjectileObsView();
 
-		// 武器 Level 高い順 → 距離近い順でソート
-		ProjView.StableSort([&](const FProjectileState& A, const FProjectileState& B)
-		{
-			const int32 LvA = (A.WeaponSlotIdx >= 0 && A.WeaponSlotIdx < MaxWeaponSlots)
-				? Game->WeaponSlots[A.WeaponSlotIdx].Level.Value : 0;
-			const int32 LvB = (B.WeaponSlotIdx >= 0 && B.WeaponSlotIdx < MaxWeaponSlots)
-				? Game->WeaponSlots[B.WeaponSlotIdx].Level.Value : 0;
-			if (LvA != LvB) return LvA > LvB;
-			return FVector2D::DistSquared(A.Pos, Game->PlayerPos)
-				 < FVector2D::DistSquared(B.Pos, Game->PlayerPos);
-		});
+		// 武器 Level 高い順 → 距離近い順でソート（top-N partial sort）
+		const int32 TakeProjN = FMath::Min(MaxProjectileObs, ProjView.Num());
+		std::partial_sort(ProjView.GetData(), ProjView.GetData() + TakeProjN,
+			ProjView.GetData() + ProjView.Num(),
+			[&](const FProjectileState& A, const FProjectileState& B)
+			{
+				const int32 LvA = (A.WeaponSlotIdx >= 0 && A.WeaponSlotIdx < MaxWeaponSlots)
+					? Game->WeaponSlots[A.WeaponSlotIdx].Level.Value : 0;
+				const int32 LvB = (B.WeaponSlotIdx >= 0 && B.WeaponSlotIdx < MaxWeaponSlots)
+					? Game->WeaponSlots[B.WeaponSlotIdx].Level.Value : 0;
+				if (LvA != LvB) return LvA > LvB;
+				return FVector2D::DistSquared(A.Pos, Game->PlayerPos)
+					 < FVector2D::DistSquared(B.Pos, Game->PlayerPos);
+			});
 
 		const float VNorm = Game->MoveSpeed > 0.f ? Game->MoveSpeed : 1.f;
 		for (int32 p = 0; p < MaxProjectileObs; ++p)

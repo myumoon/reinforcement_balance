@@ -136,7 +136,7 @@ void USurvivorsWeaponViewComponent::DrawWeaponAuras()
 
 	for (int32 s = 0; s < SurvivorsGameConstants::MaxWeaponSlots; ++s)
 	{
-		const FWeaponSlot& Slot = Game->WeaponSlots[s];
+		const FWeaponSlot& Slot = Game->GetWeaponSlot(s);
 		FColor Color  = FColor::Black;
 		float  Radius = 0.f;
 
@@ -180,7 +180,7 @@ void USurvivorsWeaponViewComponent::DrawGroundZones()
 
 void USurvivorsWeaponViewComponent::DrawLaurelShield()
 {
-	if (!Game || !GetWorld() || !Game->bShieldActive) return;
+	if (!Game || !GetWorld() || !Game->IsShieldActive()) return;
 
 	const float  Radius = (Game->PlayerRadius + 15.f) * Game->SimToUE;
 	const FVector Center = Converter.ToWorld(Game->GetPlayerPos(), FWorldLayerZ::Shield());

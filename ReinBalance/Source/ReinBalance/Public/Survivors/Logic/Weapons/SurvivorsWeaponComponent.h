@@ -63,11 +63,15 @@ public:
 	/** 武器インスタンスへのアクセス（obs の cooldown 取得用） */
 	USurvivorsWeaponBase* GetWeaponInstance(int32 SlotIdx) const;
 
+	/** 武器実装がプロジェクタイル・ゾーンを追加するための API */
+	void SpawnProjectile(const FProjectileState& P) { Projectiles.Add(P); }
+	void SpawnGroundZone(const FGroundZoneState& Z) { GroundZones.Add(Z); }
+
+private:
 	// ---- プロジェクタイル・ゾーン（全武器共有プール） ----
 	TArray<FProjectileState> Projectiles;
 	TArray<FGroundZoneState>  GroundZones;
 
-private:
 	UPROPERTY()
 	TArray<TObjectPtr<USurvivorsWeaponBase>> WeaponInstances;  // [MaxWeaponSlots]
 

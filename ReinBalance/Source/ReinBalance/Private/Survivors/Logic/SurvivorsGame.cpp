@@ -27,11 +27,6 @@ ASurvivorsGame::ASurvivorsGame()
 	ObservationComponent->Initialize(this);
 	WeaponComponent->Initialize(this);
 
-	// 開始武器を Garlic (Lv1) でスロット0に設定
-	WeaponSlots[0].Type  = EWeaponType::Garlic;
-	WeaponSlots[0].Level = FWeaponLevel(1);
-	WeaponComponent->EquipWeapon(0, EWeaponType::Garlic, 1);
-
 	SpawnComponent->InitDefaultEnemyTable();
 	SpawnComponent->InitDefaultSpawnWaves();
 }
@@ -353,8 +348,7 @@ void ASurvivorsGame::UpdateEnemies()
 
 void ASurvivorsGame::ApplyAuraDamage()
 {
-	// 旧 API は WeaponComponent::TickAllWeapons() に移管済み
-	// 呼び出し元が残っている場合の互換シム（通常は呼ばれない）
+	ensureMsgf(false, TEXT("ApplyAuraDamage() is deprecated. Use WeaponComponent->TickAllWeapons() directly."));
 	if (WeaponComponent)
 	{
 		WeaponComponent->TickAllWeapons(SurvivorsGameConstants::PhysicsDt);
