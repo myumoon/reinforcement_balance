@@ -65,6 +65,9 @@ WEAPON_PHASES: dict[str, dict] = {
     },
     "W0_to_W1": {
         "weapon_pool_mode": "weighted",
+        "allowed_weapon_types": [
+            WeaponType.GARLIC, WeaponType.KING_BIBLE, WeaponType.SANTA_WATER,
+        ],
         "enable_passives": False,
         "enable_evolutions": False,
         "replay_old_phase_fraction": 0.3,
@@ -85,6 +88,11 @@ WEAPON_PHASES: dict[str, dict] = {
     },
     "W1_to_W2": {
         "weapon_pool_mode": "weighted",
+        "allowed_weapon_types": [
+            WeaponType.GARLIC, WeaponType.WHIP, WeaponType.MAGIC_WAND,
+            WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS,
+            WeaponType.KING_BIBLE, WeaponType.SANTA_WATER,
+        ],
         "enable_passives": False,
         "enable_evolutions": False,
         "replay_old_phase_fraction": 0.25,

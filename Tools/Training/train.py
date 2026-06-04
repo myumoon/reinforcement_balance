@@ -477,7 +477,53 @@ class _CurriculumCompletionCallback(BaseCallback):
         }
 
 
-class _AnnealingShapingCallback(BaseCallback):
+class _WeaponCurriculumCallback(BaseCallback):
+    """武器カリキュラムの遷移フェーズで weapon_weights を訓練中に定期更新するコールバック。
+
+    weighted フェーズ（W0_to_W1 / W1_to_W2）では global_step に応じた線形補間で
+    weapon_weights が変化するため、update_freq ステップごとに全 env に再送信する。
+    固定フェーズ（W0〜W6）では _on_training_start のみ送信し、その後は no-op。
+    """
+
+    def __init__(
+        self,
+        phase_key: str,
+        update_freq: int = 10_000,
+    ):
+        super().__init__(verbose=0)
+        self._phase_key = phase_key
+        self.update_freq = max(update_freq, 1)
+        self._last_update = 0
+        self._is_transition = False
+
+    def _on_training_start(self) -> None:
+        from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
+        phase = WEAPON_PHASES.get(self._phase_key, {})
+        self._is_transition = phase.get("weapon_pool_mode") == "weighted"
+        self._apply_params(self.num_timesteps)
+        self._last_update = self.num_timesteps
+
+    def _on_step(self) -> bool:
+        if not self._is_transition:
+            return True
+        if self.num_timesteps - self._last_update >= self.update_freq:
+            self._apply_params(self.num_timesteps)
+            self._last_update = self.num_timesteps
+        return True
+
+    def _apply_params(self, global_step: int) -> None:
+        from games.survivors.survivors_weapon_curriculum import get_params_for_phase
+        params = get_params_for_phase(self._phase_key, global_step)
+        self.training_env.env_method("set_params", **params)
+        if self._is_transition:
+            weights = params.get("weapon_weights", {})
+            print(
+                f"[INFO] WeaponCurriculumCallback: phase={self._phase_key}, "
+                f"step={global_step}, weapon_weights={weights}"
+            )
+
+
+
     """shaped_reward を線形アニーリングするコールバック。
 
     |shaped_reward_mean| / base_reward_mean の比率を check_freq ステップごとに計算し、
@@ -1294,35 +1340,28 @@ def main() -> None:
             )
     print(f"[INFO] SB3 model device: {model.device}")
 
-    # 武器カリキュラムパラメータを /params に送信（survivors かつ非 dry-run 時のみ）
+    # 武器カリキュラムフェーズの検証（survivors かつ非 dry-run 時のみ）
+    # 実際のパラメータ送信は WeaponCurriculumCallback._on_training_start で行う。
+    # 遷移フェーズ（weapon_pool_mode="weighted"）では訓練中に定期的に weapon_weights を更新するため、
+    # コールバックで管理する。固定フェーズでも _on_training_start で全 env に初回送信を行う。
+    _weapon_phase_key = getattr(args, "weapon_phase", "W0")
     if args.game == "survivors" and not args.dry_run:
         from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES, get_params_for_phase
-        _weapon_phase_key = getattr(args, "weapon_phase", "W0")
         if _weapon_phase_key not in WEAPON_PHASES:
             raise ValueError(
                 f"--weapon-phase に未知のフェーズキーが指定されました: {_weapon_phase_key!r}\n"
                 f"有効なキー: {list(WEAPON_PHASES.keys())}"
             )
-        _weapon_params = get_params_for_phase(_weapon_phase_key)
+        _weapon_phase = WEAPON_PHASES[_weapon_phase_key]
         print(
             f"[INFO] 武器カリキュラム: phase={_weapon_phase_key}, "
-            f"weapon_pool_mode={_weapon_params.get('weapon_pool_mode')}, "
-            f"enable_passives={_weapon_params.get('enable_passives')}, "
-            f"enable_evolutions={_weapon_params.get('enable_evolutions')}"
+            f"weapon_pool_mode={_weapon_phase.get('weapon_pool_mode')}, "
+            f"enable_passives={_weapon_phase.get('enable_passives')}, "
+            f"enable_evolutions={_weapon_phase.get('enable_evolutions')}"
         )
-        # VecEnv 経由で全 env に武器カリキュラムパラメータを送信する
-        _raw = _get_raw_env(env)
-        if _raw is not None:
-            _raw.set_params(**_weapon_params)
-        else:
-            # SubprocVecEnv など raw env に直接アクセスできない場合は env_method を使用
-            _inner_env = env
-            while hasattr(_inner_env, "venv"):
-                _inner_env = _inner_env.venv
-            if hasattr(_inner_env, "env_method"):
-                _inner_env.env_method("set_params", **_weapon_params)
 
     callbacks = []
+    weapon_curriculum_cb = None
     curriculum_cb = None
     curriculum_completion_cb = None
     resume_episode_count = 0
@@ -1331,6 +1370,17 @@ def main() -> None:
     survivors_metrics_callback = None
     survivors_curriculum_metrics_callback = None
     _survivors_eval_registered = False
+
+    # WeaponCurriculumCallback: 初回送信は _on_training_start で行い、
+    # 遷移フェーズ（weighted）では update_freq ごとに weapon_weights を全 env に再送信する。
+    if args.game == "survivors" and not args.dry_run:
+        weapon_curriculum_cb = _WeaponCurriculumCallback(
+            phase_key=_weapon_phase_key,
+            update_freq=args.checkpoint_freq,
+        )
+        callbacks.append(weapon_curriculum_cb)
+        print(f"[INFO] WeaponCurriculumCallback 有効 (phase={_weapon_phase_key}, update_freq={args.checkpoint_freq:,})")
+
     if args.game == "survivors" and not args.dry_run:
         from games.survivors.survivors_training_metrics import (
             ActionDistributionCallback,
