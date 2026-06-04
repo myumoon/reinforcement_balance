@@ -669,10 +669,13 @@ def _create_model(args, env, algo_class, default_policy: str, ppo_kwargs: dict):
         else:
             from games.coin.coin_entity_attention_extractor import CoinEntityAttentionExtractor
             extractor_class = CoinEntityAttentionExtractor
+        # survivors は 708 次元 obs に対応するため [512, 256] に拡大
+        # coin は旧スキーマのまま [64, 64] を維持
+        survivors_net_arch = [512, 256] if args.game == "survivors" else [64, 64]
         policy_kwargs = dict(
             features_extractor_class=extractor_class,
             features_extractor_kwargs=dict(features_dim=128, offsets=offsets, obs_schema=obs_schema),
-            net_arch=[64, 64],
+            net_arch=survivors_net_arch,
         )
         if args.recurrent:
             policy_kwargs["lstm_hidden_size"] = args.lstm_hidden_size

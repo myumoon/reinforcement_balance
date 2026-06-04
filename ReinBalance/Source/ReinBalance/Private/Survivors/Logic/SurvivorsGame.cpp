@@ -5,17 +5,19 @@
 #include "Survivors/Logic/SurvivorsObservationComponent.h"
 #include "Survivors/Logic/SurvivorsPlayerComponent.h"
 #include "Survivors/Logic/SurvivorsSpawnComponent.h"
+#include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 
 ASurvivorsGame::ASurvivorsGame()
 {
 	PrimaryActorTick.bCanEverTick = false;
 
-	PlayerComponent = CreateDefaultSubobject<USurvivorsPlayerComponent>(TEXT("PlayerComponent"));
-	GemComponent = CreateDefaultSubobject<USurvivorsGemComponent>(TEXT("GemComponent"));
-	EnemyComponent = CreateDefaultSubobject<USurvivorsEnemyComponent>(TEXT("EnemyComponent"));
-	SpawnComponent = CreateDefaultSubobject<USurvivorsSpawnComponent>(TEXT("SpawnComponent"));
+	PlayerComponent  = CreateDefaultSubobject<USurvivorsPlayerComponent>(TEXT("PlayerComponent"));
+	GemComponent     = CreateDefaultSubobject<USurvivorsGemComponent>(TEXT("GemComponent"));
+	EnemyComponent   = CreateDefaultSubobject<USurvivorsEnemyComponent>(TEXT("EnemyComponent"));
+	SpawnComponent   = CreateDefaultSubobject<USurvivorsSpawnComponent>(TEXT("SpawnComponent"));
 	CollisionComponent = CreateDefaultSubobject<USurvivorsCollisionComponent>(TEXT("CollisionComponent"));
 	ObservationComponent = CreateDefaultSubobject<USurvivorsObservationComponent>(TEXT("ObservationComponent"));
+	WeaponComponent  = CreateDefaultSubobject<USurvivorsWeaponComponent>(TEXT("WeaponComponent"));
 
 	PlayerComponent->Initialize(this);
 	GemComponent->Initialize(this);
@@ -23,9 +25,7 @@ ASurvivorsGame::ASurvivorsGame()
 	SpawnComponent->Initialize(this);
 	CollisionComponent->Initialize(this);
 	ObservationComponent->Initialize(this);
-
-	WeaponSlots[0].Type  = EWeaponType::Aura;
-	WeaponSlots[0].Level = 1;
+	WeaponComponent->Initialize(this);
 
 	SpawnComponent->InitDefaultEnemyTable();
 	SpawnComponent->InitDefaultSpawnWaves();
@@ -35,10 +35,12 @@ void ASurvivorsGame::InitDefaultSpawnWaves()
 {
 	SpawnComponent->InitDefaultSpawnWaves();
 }
+
 void ASurvivorsGame::InitDefaultEnemyTable()
 {
 	SpawnComponent->InitDefaultEnemyTable();
 }
+
 void ASurvivorsGame::BeginPlay()
 {
 	Super::BeginPlay();
@@ -53,10 +55,12 @@ TArray<FSurvivorsObsSegment> ASurvivorsGame::GetObsSchema() const
 {
 	return ObservationComponent->GetObsSchema();
 }
+
 FString ASurvivorsGame::GetObsSchemaHash() const
 {
 	return ObservationComponent->GetObsSchemaHash();
 }
+
 int32 ASurvivorsGame::GetObsDim() const
 {
 	if (CachedObsDim >= 0) return CachedObsDim;
@@ -67,6 +71,7 @@ int32 ASurvivorsGame::GetObsDim() const
 	CachedObsDim = Total;
 	return CachedObsDim;
 }
+
 void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 {
 	if (Seed.IsSet())
@@ -74,16 +79,52 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	else
 		RandStream.GenerateNewSeed();
 
+	// 武器スロットをリセット
+	for (int32 i = 0; i < MaxWeaponSlots; ++i)
+	{
+		WeaponSlots[i].Type    = EWeaponType::None;
+		WeaponSlots[i].Level   = FWeaponLevel(0);
+		WeaponSlots[i].Cooldown= FCooldownSeconds(0.f);
+	}
+	// パッシブスロットをリセット
+	for (int32 i = 0; i < MaxPassiveSlots; ++i)
+	{
+		PassiveSlots[i].Type  = EPassiveItemType::None;
+		PassiveSlots[i].Level = 0;
+	}
+	CachedPassiveEffects = FPassiveEffects();
+
+	// シールド・リバイバルリセット
+	PlayerShieldTimer = 0.f;
+	bShieldActive     = false;
+	MaxRevivalCount   = 0;
+	UsedRevivalCount  = 0;
+
+	// 敵 UniqueId カウンタリセット
+	NextEnemyId = 0;
+
+	// フロアアイテムリセット（PR2 で本実装）
+	FloorPickups.Empty();
+	SpecialPickups.Empty();
+	Destructibles.Empty();
+
 	PlayerComponent->Reset();
 	GemComponent->Reset();
 	EnemyComponent->Reset();
 	SpawnComponent->Reset();
+	WeaponComponent->Reset();
+
+	// 開始武器: Garlic をスロット0に付与（weapon_pool_mode は PR2 で拡張）
+	WeaponSlots[0].Type  = EWeaponType::Garlic;
+	WeaponSlots[0].Level = FWeaponLevel(1);
+	WeaponComponent->EquipWeapon(0, EWeaponType::Garlic, 1);
 
 	ElapsedTime = 0.f;
-	LastReward = 0.f;
-	bDone = false;
-	bTruncated = false;
+	LastReward  = 0.f;
+	bDone       = false;
+	bTruncated  = false;
 }
+
 void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 {
 	if (bDone || bTruncated) return;
@@ -95,7 +136,10 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 
 	ElapsedTime += SurvivorsGameConstants::PhysicsDt;
 	EnemyComponent->UpdateEnemies();
-	EnemyComponent->ApplyAuraDamage();
+
+	// 武器コンポーネントで全武器 Tick（Garlic 含む全武器をここで処理）
+	WeaponComponent->TickAllWeapons(SurvivorsGameConstants::PhysicsDt);
+
 	SpawnComponent->StepSpawn();
 	EnemyComponent->ApplyContactDamage();
 	GemComponent->CheckCollections();
@@ -114,13 +158,15 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 		LastSpawnDebug.bTruncated = true;
 	}
 }
+
 TArray<float> ASurvivorsGame::GetObservation() const
 {
 	return ObservationComponent->GetObservation();
 }
-float ASurvivorsGame::GetReward() const { return LastReward; }
-bool  ASurvivorsGame::IsDone()   const { return bDone; }
-bool  ASurvivorsGame::IsTruncated() const { return bTruncated; }
+
+float ASurvivorsGame::GetReward()     const { return LastReward; }
+bool  ASurvivorsGame::IsDone()        const { return bDone; }
+bool  ASurvivorsGame::IsTruncated()   const { return bTruncated; }
 
 FString ASurvivorsGame::GetSpawnDebugJson() const
 {
@@ -158,6 +204,66 @@ EGemType ASurvivorsGame::GetItemGemType(int32 i) const
 	return Gems.IsValidIndex(i) ? Gems[i].Type : EGemType::Blue;
 }
 
+float ASurvivorsGame::GetAuraSize() const
+{
+	// 後方互換: スロット0〜5 から Garlic/SoulEater スロットを探して半径を返す
+	for (int32 s = 0; s < MaxWeaponSlots; ++s)
+	{
+		const FWeaponSlot& Slot = WeaponSlots[s];
+		if (Slot.Type == EWeaponType::Garlic || Slot.Type == EWeaponType::SoulEater)
+		{
+			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, MaxWeaponLevel);
+			if (Slot.Type == EWeaponType::SoulEater)
+				return SurvivorsGameConstants::SoulEaterTable[Lv - 1].AreaRadius.Value;
+			else
+				return SurvivorsGameConstants::GarlicTable[Lv - 1].AreaRadius.Value;
+		}
+	}
+	return 0.f;
+}
+
+// ---- プロジェクタイル / GroundZone アクセサ --------------------------------
+
+int32 ASurvivorsGame::GetProjectileCount() const
+{
+	return WeaponComponent ? WeaponComponent->GetProjectileCount() : 0;
+}
+
+FVector2D ASurvivorsGame::GetProjectilePos(int32 i) const
+{
+	return WeaponComponent ? WeaponComponent->GetProjectilePos(i) : FVector2D::ZeroVector;
+}
+
+FSimRadius ASurvivorsGame::GetProjectileRadius(int32 i) const
+{
+	return WeaponComponent ? WeaponComponent->GetProjectileRadius(i) : FSimRadius(0.f);
+}
+
+EWeaponType ASurvivorsGame::GetProjectileWeaponType(int32 i) const
+{
+	return WeaponComponent ? WeaponComponent->GetProjectileWeaponType(i) : EWeaponType::None;
+}
+
+int32 ASurvivorsGame::GetGroundZoneCount() const
+{
+	return WeaponComponent ? WeaponComponent->GetGroundZoneCount() : 0;
+}
+
+FVector2D ASurvivorsGame::GetGroundZonePos(int32 i) const
+{
+	return WeaponComponent ? WeaponComponent->GetGroundZonePos(i) : FVector2D::ZeroVector;
+}
+
+float ASurvivorsGame::GetGroundZoneRadius(int32 i) const
+{
+	return WeaponComponent ? WeaponComponent->GetGroundZoneRadius(i) : 0.f;
+}
+
+EWeaponType ASurvivorsGame::GetGroundZoneWeaponType(int32 i) const
+{
+	return WeaponComponent ? WeaponComponent->GetGroundZoneWeaponType(i) : EWeaponType::None;
+}
+
 // ---- 内部ユーティリティ -------------------------------------------------------
 
 float ASurvivorsGame::GetEnemySpeed(int32 TypeId) const
@@ -189,6 +295,7 @@ void ASurvivorsGame::OnLevelUp(int32 NextLevel)
 {
 	PlayerComponent->OnLevelUp(NextLevel);
 }
+
 FVector2D ASurvivorsGame::RandomInsideField()
 {
 	return SpawnComponent->RandomInsideField();
@@ -223,6 +330,7 @@ bool ASurvivorsGame::BuildSpawnWeights(const FSpawnWave& Wave, TArray<FEnemySpaw
 {
 	return SpawnComponent->BuildSpawnWeights(Wave, OutWeights, bOutUsedCurriculumPool);
 }
+
 void ASurvivorsGame::SpawnEnemy(const FSpawnWave& Wave)
 {
 	SpawnComponent->SpawnEnemy(Wave);
@@ -232,6 +340,7 @@ void ASurvivorsGame::SpawnBoss()
 {
 	SpawnComponent->SpawnBoss();
 }
+
 void ASurvivorsGame::UpdateEnemies()
 {
 	EnemyComponent->UpdateEnemies();
@@ -239,8 +348,13 @@ void ASurvivorsGame::UpdateEnemies()
 
 void ASurvivorsGame::ApplyAuraDamage()
 {
-	EnemyComponent->ApplyAuraDamage();
+	ensureMsgf(false, TEXT("ApplyAuraDamage() is deprecated. Use WeaponComponent->TickAllWeapons() directly."));
+	if (WeaponComponent)
+	{
+		WeaponComponent->TickAllWeapons(SurvivorsGameConstants::PhysicsDt);
+	}
 }
+
 void ASurvivorsGame::DropGem(int32 TypeId, FVector2D Pos)
 {
 	GemComponent->DropGem(TypeId, Pos);
@@ -255,10 +369,12 @@ void ASurvivorsGame::ApplyEnemyContactDamage()
 {
 	EnemyComponent->ApplyContactDamage();
 }
+
 void ASurvivorsGame::ResolveWallCollisions()
 {
 	CollisionComponent->ResolveWallCollisions();
 }
+
 float ASurvivorsGame::CastRayToObstacles(FVector2D Origin, FVector2D Dir) const
 {
 	return CollisionComponent->CastRayToObstacles(Origin, Dir);

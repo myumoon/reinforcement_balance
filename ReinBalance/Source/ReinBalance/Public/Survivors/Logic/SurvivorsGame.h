@@ -13,27 +13,16 @@ class USurvivorsGemComponent;
 class USurvivorsObservationComponent;
 class USurvivorsPlayerComponent;
 class USurvivorsSpawnComponent;
+class USurvivorsWeaponComponent;
+
 /**
  * Vampire Survivors 風サバイバルゲームのロジッククラス（ビジュアルなし）。
  *
  * 2D XY 平面上でプレイヤーが敵を倒しながらアイテムを集めて生き延びる。
- * ビジュアル表示は別クラスが担う（未実装）。
+ * ビジュアル表示は別クラスが担う。
  *
- * 行動: 離散5方向 (0=+Y, 1=-Y, 2=-X, 3=+X, 4=静止)
- * 観測: GetObsDim() 次元 = GetObsSchema() の dim 合計
- *   [0-1]    プレイヤー位置 (x,y) / FieldHalfSize
- *   [2-3]    プレイヤー速度 (vx,vy) / MoveSpeed（-1〜1 に正規化）
- *   [4-11]   8方向レイキャスト壁距離 (0~1)
- *   [12]     プレイヤー HP / MaxPlayerHP
- *   [13-18]  武器スロット × 3: (type_norm, level_norm) × MaxWeaponSlots
- *   [19]     現在の敵数 / MaxEnemyObs
- *   [20]     経過時間 elapsed_time / MaxGameTime (0~1)
- *   [21]     xp_progress (0~1, ジェム回収・レベルアップでリセット)
- *   [22]     player_level (0~1 = level / MaxPlayerLevel, 最大 MaxPlayerLevel=100)
- *   [23 .. 23+N*2-1]       ジェム相対位置 dx,dy × NumGemObs（近い順）
- *   [23+N*2 .. +M*6-1]     敵情報 (dx,dy,vx,vy,type_norm,hp_norm) × MaxEnemyObs
- *   [+16×3]  敵方向特徴: enemy_nearest_dist_16dir / enemy_density_near_16dir / enemy_density_mid_16dir
- *   [+16×3]  Gem方向特徴: gem_nearest_dist_16dir / gem_density_near_16dir / gem_density_mid_16dir
+ * 行動: 離散9方向 (0=+Y, 1=北東, 2=+X, 3=南東, 4=-Y, 5=南西, 6=-X, 7=北西, 8=静止)
+ * 観測: 708次元（GetObsSchema() のセグメント合計）
  */
 UCLASS()
 class REINBALANCE_API ASurvivorsGame : public AActor
@@ -43,7 +32,7 @@ class REINBALANCE_API ASurvivorsGame : public AActor
 public:
 	ASurvivorsGame();
 
-	/** 離散行動 (0〜4) を受けて 1 物理ステップ進める */
+	/** 離散行動 (0〜8) を受けて 1 物理ステップ進める */
 	void PhysicsStep(int32 ActionIdx);
 
 	/** 状態をリセット */
@@ -75,37 +64,64 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Survivors|Config")
 	FVector2D GetPlayerPos()   const { return PlayerPos; }
-	
+
 	FVector2D GetPlayerVel()   const { return PlayerVel; }
 	float     GetPlayerHP()    const { return PlayerHP; }
 	float     GetMaxPlayerHP() const { return MaxPlayerHP; }
-	float     GetAuraSize()    const { return AuraRadius; }
 
-	// View との互換維持のため GetItemCount/GetItemPos はジェムデータを返す
+	/** 後方互換: Garlic オーラ半径（WeaponSlots から取得）。View の DrawAura 用 */
+	float     GetAuraSize()    const;
+
+	const FWeaponSlot& GetWeaponSlot(int32 Idx) const { return WeaponSlots[Idx]; }
+	bool               IsShieldActive()          const { return bShieldActive; }
+
+	// ジェムアクセサ
 	int32     GetItemCount()       const { return Gems.Num(); }
 	FVector2D GetItemPos(int32 i)  const;
 	EGemType  GetItemGemType(int32 i) const;
 
+	// 敵アクセサ
 	int32     GetEnemyCount()         const { return Enemies.Num(); }
-	FVector2D GetEnemyPos(int32 i)    const
-	{
-		return Enemies.IsValidIndex(i) ? Enemies[i].Pos   : FVector2D::ZeroVector;
-	}
+	FVector2D GetEnemyPos(int32 i)    const { return Enemies.IsValidIndex(i) ? Enemies[i].Pos   : FVector2D::ZeroVector; }
 	int32     GetEnemyType(int32 i)   const { return Enemies.IsValidIndex(i) ? Enemies[i].TypeId : 0; }
 	float     GetEnemyHP(int32 i)     const { return Enemies.IsValidIndex(i) ? Enemies[i].HP    : 0.f; }
 	float     GetEnemyMaxHP(int32 i)  const { return Enemies.IsValidIndex(i) ? Enemies[i].MaxHP : 1.f; }
 
+	// プロジェクタイルアクセサ（WeaponComponent 経由）
+	int32     GetProjectileCount()              const;
+	FVector2D GetProjectilePos(int32 i)         const;
+	FSimRadius GetProjectileRadius(int32 i)     const;
+	EWeaponType GetProjectileWeaponType(int32 i)const;
+
+	// グラウンドゾーンアクセサ（WeaponComponent 経由）
+	int32     GetGroundZoneCount()              const;
+	FVector2D GetGroundZonePos(int32 i)         const;
+	float     GetGroundZoneRadius(int32 i)      const;
+	EWeaponType GetGroundZoneWeaponType(int32 i)const;
+
+	// フロアアイテムアクセサ
+	int32            GetFloorPickupCount()           const { return FloorPickups.Num(); }
+	FVector2D        GetFloorPickupPos(int32 i)      const { return FloorPickups.IsValidIndex(i) ? FloorPickups[i].Pos : FVector2D::ZeroVector; }
+	EFloorPickupType GetFloorPickupType(int32 i)     const { return FloorPickups.IsValidIndex(i) ? FloorPickups[i].Type : EFloorPickupType::FloorChicken; }
+
+	// 特殊アイテムアクセサ
+	int32              GetSpecialPickupCount()           const { return SpecialPickups.Num(); }
+	FVector2D          GetSpecialPickupPos(int32 i)      const { return SpecialPickups.IsValidIndex(i) ? SpecialPickups[i].Pos : FVector2D::ZeroVector; }
+	ESpecialPickupType GetSpecialPickupType(int32 i)     const { return SpecialPickups.IsValidIndex(i) ? SpecialPickups[i].Type : ESpecialPickupType::Rosary; }
+
+	// 破壊可能オブジェクトアクセサ
+	int32     GetDestructibleCount()          const { return Destructibles.Num(); }
+	FVector2D GetDestructiblePos(int32 i)     const { return Destructibles.IsValidIndex(i) ? Destructibles[i].Pos : FVector2D::ZeroVector; }
+	bool      IsDestructibleActive(int32 i)   const { return Destructibles.IsValidIndex(i) ? Destructibles[i].bActive : false; }
+
 	// ---- 報酬設定 ----
 
-	/** 生存報酬 (毎ステップ) */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
 	float AliveReward = 0.001f;
 
-	/** ジェム回収報酬（種類問わず固定） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
 	float ItemReward = 1.0f;
 
-	/** 敵撃破ボーナス */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
 	float KillReward = 2.0f;
 
@@ -114,116 +130,76 @@ public:
 
 	// ---- フィールド設定 ----
 
-	/** フィールド半幅 [u]。敵/アイテムスポーン範囲・obs 正規化基準として使用。外側境界は AWallActor で定義する。 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float FieldHalfSize = 1000.f;
 
-	/** シム座標(u) ↔ UE5 単位 変換スケール。SurvivorsGameView の SimToUE と一致させること。 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Survivors|Config")
 	float SimToUE = 5.f;
 
-	/** 常時維持する最小敵数（カリキュラム制御用, /params で上書き可能）。
-	 *  毎ステップ Enemies.Num() < MinActiveEnemies なら即時補充される。
-	 *  実効値は MaxActiveEnemies を超えない。 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	int32 MinActiveEnemies = 4;
 
-	/** 同時に存在できる最大敵数の上限（カリキュラム制御用, /params で上書き可能）。
-	 *  実効値 = min(CurrentWave.MaxEnemies, MaxActiveEnemies)。 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	int32 MaxActiveEnemies = 6;
 
-	/** スポーンレートグローバル倍率（カリキュラム制御用, /params で上書き可能） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float SpawnRateMult = 1.0f;
 
-	/** スポーン可能な敵 TypeId の上限（カリキュラム制御用, /params で上書き可能）。
-	 *  0=Bat のみ, 1=+Zombie, 2=+Skeleton, 4=+Ghost/Werewolf,
-	 *  6=+Mummy/Plant, 9=全通常敵, 10=GiantBat込み全種 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	int32 MaxEnemyTypeId = 10;
 
-	/** 敵 HP 倍率（カリキュラム制御用, /params で上書き可能）。
-	 *  TimeScaling による増加と乗算で合成される。デフォルト 1.0。 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float EnemyHPScale = 1.0f;
 
-	/** 敵接触ダメージ倍率（カリキュラム制御用, /params で上書き可能）。
-	 *  TimeScaling による増加と乗算で合成される。デフォルト 1.0。 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float EnemyDamageScale = 1.0f;
 
 	// ---- スポーン設定 ----
 
-	/** 円周スポーン: プレイヤーからの最小距離 [u] */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
 	float SpawnMinDistance = 400.f;
 
-	/** 円周スポーン: プレイヤーからの最大距離 [u] */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
 	float SpawnMaxDistance = 600.f;
 
-	/** GiantBat ボスのスポーン時刻 [秒] */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
 	float BossSpawnTime = 600.f;
 
-	/**
-	 * 時刻帯別スポーン設定テーブル（Mad Forest 10 Wave）。
-	 * TimeStart/TimeEnd は秒。各 Wave の SpawnRate は SpawnRateMult で乗算される。
-	 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
 	TArray<FSpawnWave> SpawnWaves;
 
-	/** 敵速度グローバル倍率（カリキュラム制御用, /params で上書き可能） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float EnemySpeedMult = 1.0f;
 
-	// ---- プレイヤー ----
+	// ---- プレイヤー設定 ----
 
-	/** プレイヤー最大 HP（Poe Ratcho） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
 	float MaxPlayerHP = 70.f;
 
-	/** プレイヤー移動速度 [u/s]（直接速度モデル, カリキュラム制御可） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
 	float MoveSpeed = 80.f;
 
-	/** プレイヤー衝突半径 [u]（AWallActor との押し出し計算に使用） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
 	float PlayerRadius = 10.f;
 
-	// ---- 武器 (Garlic オーラ) ----
-	// レベル別ステータスは GarlicTable[] (SurvivorsGame.cpp) で管理。
-	// Lv1: damage=5, hit_interval=1.30s, area_radius=25u
-	// Lv8: damage=20, hit_interval=0.95s, area_radius=60u
-
 	// ---- 敵設定 ----
 
-	/**
-	 * 敵11種のパラメーターテーブル（Mad Forest 準拠）。
-	 * type_id = インデックス: 0=Bat, 1=Zombie, ..., 10=GiantBat。
-	 * カリキュラム用に EditAnywhere・/params エンドポイントで変更可能。
-	 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
 	TArray<FEnemyTypeParams> EnemyTypeTable;
 
-	// ---- ジェム ----
+	// ---- ジェム設定 ----
 
-	/** ジェム自動回収半径 [u]（pickup_radius: 仕様 §4.1） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Item")
 	float GemPickupRadius = 30.f;
 
-	// ---- 時間スケーリング（仕様: enemies.md §1.1）----
+	// ---- 時間スケーリング ----
 
-	/** true = 時間経過で敵 HP/ダメージが増加。カリキュラム Phase A では false に設定 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|TimeScaling")
 	bool bTimeScalingEnabled = true;
 
-	/** HP 増加率 [割合/分]（デフォルト +10%/min、仕様 ★★） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|TimeScaling")
 	float HPScaleRatePerMin = 0.10f;
 
-	/** 接触ダメージ増加率 [割合/分]（デフォルト +5%/min、仕様 ★） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|TimeScaling")
 	float DamageScaleRatePerMin = 0.05f;
 
@@ -237,34 +213,53 @@ private:
 	friend class USurvivorsObservationComponent;
 	friend class USurvivorsPlayerComponent;
 	friend class USurvivorsSpawnComponent;
+	friend class USurvivorsWeaponComponent;
+	friend class USurvivorsGarlicWeapon;
 
 	// ---- 定数 ----
-	static constexpr int32 NumGemObs = SurvivorsGameConstants::NumGemObs;
-	static constexpr int32 MaxEnemyObs = SurvivorsGameConstants::MaxEnemyObs;
+	static constexpr int32 MaxEnemyObs    = SurvivorsGameConstants::MaxEnemyObs;
 	static constexpr int32 MaxWeaponSlots = SurvivorsGameConstants::MaxWeaponSlots;
-	static constexpr int32 MaxWeaponTypeSlots = SurvivorsGameConstants::MaxWeaponTypeSlots;
+	static constexpr int32 MaxPassiveSlots= SurvivorsGameConstants::MaxPassiveSlots;
 	static constexpr int32 MaxWeaponLevel = SurvivorsGameConstants::MaxWeaponLevel;
 	static constexpr int32 MaxPlayerLevel = SurvivorsGameConstants::MaxPlayerLevel;
-	static constexpr float PhysicsDt = SurvivorsGameConstants::PhysicsDt;
-	static constexpr float MaxGameTime = SurvivorsGameConstants::MaxGameTime;
+	static constexpr float PhysicsDt     = SurvivorsGameConstants::PhysicsDt;
+	static constexpr float MaxGameTime   = SurvivorsGameConstants::MaxGameTime;
 	static constexpr float ContactHitInterval = SurvivorsGameConstants::ContactHitInterval;
 
 	// ---- 状態 ----
 	FVector2D             PlayerPos;
 	FVector2D             PlayerVel;
-	float                 PlayerHP    = 100.f;
-	float                 PlayerXP    = 0.f;
-	int32                 PlayerLevel = 0;
-	float                 AuraRadius  = 25.0f; // キャッシュ: GetAuraSize() / View 用
-	FWeaponSlot           WeaponSlots[MaxWeaponSlots];
+	float                 PlayerHP         = 100.f;
+	float                 PlayerXP         = 0.f;
+	int32                 PlayerLevel      = 0;
+	FWeaponSlot           WeaponSlots[SurvivorsGameConstants::MaxWeaponSlots];
+	FPassiveSlot          PassiveSlots[SurvivorsGameConstants::MaxPassiveSlots];
+	FPassiveEffects       CachedPassiveEffects;
+
+	// シールド状態（Laurel 用）
+	float                 PlayerShieldTimer = 0.f;
+	bool                  bShieldActive     = false;
+
+	// リバイバル（Tirajisú 用）
+	int32                 MaxRevivalCount   = 0;
+	int32                 UsedRevivalCount  = 0;
+
+	// 敵 UniqueId カウンタ（スポーン時に採番）
+	int32                 NextEnemyId       = 0;
+
+	// フロアアイテム・特殊アイテム・破壊可能オブジェクト（PR2 で本実装）
+	TArray<FFloorPickupState>   FloorPickups;
+	TArray<FSpecialPickupState> SpecialPickups;
+	TArray<FDestructibleState>  Destructibles;
+
 	TArray<FGemState>     Gems;
 	TArray<FEnemyState>   Enemies;
 	float                 ElapsedTime      = 0.f;
 	float                 SpawnAccumulator = 0.f;
 	bool                  bBossSpawned     = false;
-	float                 LastReward  = 0.f;
-	bool                  bDone       = false;
-	bool                  bTruncated  = false;
+	float                 LastReward       = 0.f;
+	bool                  bDone            = false;
+	bool                  bTruncated       = false;
 	FRandomStream         RandStream;
 	FSurvivorsSpawnDebug  LastSpawnDebug;
 
@@ -290,6 +285,9 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "Survivors|Components")
 	TObjectPtr<USurvivorsObservationComponent> ObservationComponent;
 
+	UPROPERTY(VisibleAnywhere, Category = "Survivors|Components")
+	TObjectPtr<USurvivorsWeaponComponent> WeaponComponent;
+
 	// ---- 内部メソッド ----
 	FVector2D RandomInsideField();
 	FVector2D RandomOnEdge();
@@ -297,12 +295,14 @@ private:
 	void      SpawnEnemy(const FSpawnWave& Wave);
 	void      SpawnBoss();
 	void      UpdateEnemies();
-	void      ApplyAuraDamage();
 	void      DropGem(int32 TypeId, FVector2D Pos);
 	void      CheckGemCollections();
 	void      ApplyEnemyContactDamage();
 	void      ResolveWallCollisions();
 	float     CastRayToObstacles(FVector2D Origin, FVector2D Dir) const;
+
+	// 後方互換（既存の ApplyAuraDamage は WeaponComponent に移管されたが宣言は残す）
+	void      ApplyAuraDamage();
 
 	// テーブル初期化
 	void  InitDefaultEnemyTable();
@@ -314,13 +314,13 @@ private:
 	bool              BuildSpawnWeights(const FSpawnWave& Wave, TArray<FEnemySpawnWeight>& OutWeights, bool& bOutUsedCurriculumPool) const;
 	int32             SelectTypeByWeight(const TArray<FEnemySpawnWeight>& Weights);
 
-	// 敵タイプ別パラメータ取得（テーブルルックアップ）
+	// 敵タイプ別パラメータ取得
 	float GetEnemySpeed(int32 TypeId) const;
 	float GetEnemyTypeMaxHP(int32 TypeId) const;
 
-	// XP 処理（仕様: experience.md §1.1 区分線形テーブル）
-	float XPRequiredForLevel(int32 Level) const;  // Level-1 → Level に必要な XP
-	float CumulativeXPForLevel(int32 Level) const; // Lv1 から Level に達するまでの累計 XP
+	// XP 処理
+	float XPRequiredForLevel(int32 Level) const;
+	float CumulativeXPForLevel(int32 Level) const;
 	void  ProcessXPGain(float Amount);
 	void  OnLevelUp(int32 NextLevel);
 

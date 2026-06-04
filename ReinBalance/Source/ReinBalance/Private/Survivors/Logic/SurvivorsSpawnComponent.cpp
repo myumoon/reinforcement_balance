@@ -309,8 +309,10 @@ void USurvivorsSpawnComponent::SpawnEnemy(const FSpawnWave& Wave)
 	Enemy.MaxHP = MaxHP.Value;
 	Enemy.HP = Enemy.MaxHP;
 	Enemy.ContactDamage = ContactDamage.Value;
-	Enemy.GarlicLastHitTime = -1000.f;
 	Enemy.PlayerLastHitTime = -1000.f;
+	// UniqueId の採番（GroundZone の EnemyLastHitTime TMap キー用）
+	Enemy.UniqueId = Game->NextEnemyId++;
+	// WeaponLastHitTime は構造体デフォルトで -1000f に初期化済み
 	Game->Enemies.Add(Enemy);
 }
 
@@ -337,8 +339,8 @@ void USurvivorsSpawnComponent::SpawnBoss()
 	Boss.MaxHP = MaxHP.Value;
 	Boss.HP = Boss.MaxHP;
 	Boss.ContactDamage = ContactDamage.Value;
-	Boss.GarlicLastHitTime = -1000.f;
 	Boss.PlayerLastHitTime = -1000.f;
+	Boss.UniqueId = Game->NextEnemyId++;
 	Game->Enemies.Add(Boss);
 	UE_LOG(LogTemp, Log, TEXT("[SurvivorsGame] GiantBat spawned at t=%.1f"), Game->ElapsedTime);
 }

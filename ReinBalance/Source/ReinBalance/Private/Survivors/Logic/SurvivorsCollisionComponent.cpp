@@ -115,3 +115,39 @@ float USurvivorsCollisionComponent::CastRayToObstacles(FVector2D Origin, FVector
 
 	return tMin < TNumericLimits<float>::Max() ? tMin : 0.f;
 }
+
+bool USurvivorsCollisionComponent::ReflectOffWall(FVector2D& InOutPos, FVector2D& InOutVel, float Radius) const
+{
+	if (!Game) return false;
+
+	bool bReflected = false;
+
+	// フィールド境界での反射（AABB 法線）
+	const float HS = Game->FieldHalfSize - Radius;
+	if (InOutPos.X > HS)
+	{
+		InOutPos.X = HS;
+		InOutVel.X = -FMath::Abs(InOutVel.X);
+		bReflected = true;
+	}
+	else if (InOutPos.X < -HS)
+	{
+		InOutPos.X = -HS;
+		InOutVel.X = FMath::Abs(InOutVel.X);
+		bReflected = true;
+	}
+	if (InOutPos.Y > HS)
+	{
+		InOutPos.Y = HS;
+		InOutVel.Y = -FMath::Abs(InOutVel.Y);
+		bReflected = true;
+	}
+	else if (InOutPos.Y < -HS)
+	{
+		InOutPos.Y = -HS;
+		InOutVel.Y = FMath::Abs(InOutVel.Y);
+		bReflected = true;
+	}
+
+	return bReflected;
+}

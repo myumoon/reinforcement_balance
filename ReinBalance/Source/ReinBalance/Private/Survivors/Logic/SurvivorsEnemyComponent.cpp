@@ -30,43 +30,12 @@ void USurvivorsEnemyComponent::UpdateEnemies()
 	}
 }
 
+// ApplyAuraDamage() は USurvivorsWeaponComponent::TickAllWeapons() に移管済み。
+// 後方互換のため宣言は残すが、内部実装は空にしてコンパイルのみ通す。
 void USurvivorsEnemyComponent::ApplyAuraDamage()
 {
-	if (!Game || !Game->GemComponent) return;
-
-	const int32 GarlicLv = FMath::Clamp(Game->WeaponSlots[0].Level, 1, SurvivorsGameConstants::MaxWeaponLevel);
-	const FGarlicParams& GP = SurvivorsGameConstants::GarlicTable[GarlicLv - 1];
-
-	for (int32 i = Game->Enemies.Num() - 1; i >= 0; --i)
-	{
-		FEnemyState& E = Game->Enemies[i];
-		const float Dist = FVector2D::Distance(Game->PlayerPos, E.Pos);
-		if (Dist <= GP.AreaRadius + E.CollisionRadius)
-		{
-			if (Game->ElapsedTime - E.GarlicLastHitTime >= GP.HitInterval)
-			{
-				E.HP -= GP.Damage;
-				E.GarlicLastHitTime = Game->ElapsedTime;
-
-				if (Game->EnemyTypeTable.IsValidIndex(E.TypeId))
-				{
-					const float Resistance = Game->EnemyTypeTable[E.TypeId].KnockbackResistance;
-					if (Resistance < 1.f)
-					{
-						const FVector2D Dir = (E.Pos - Game->PlayerPos).GetSafeNormal();
-						E.Pos += Dir * SurvivorsGameConstants::GarlicKnockbackStrength * (1.f - Resistance);
-					}
-				}
-
-				if (E.HP <= 0.f)
-				{
-					Game->GemComponent->DropGem(E.TypeId, E.Pos);
-					Game->Enemies.RemoveAt(i);
-					Game->LastReward += Game->KillReward;
-				}
-			}
-		}
-	}
+	// WeaponComponent に移管済み。PhysicsStep から直接呼ばれないが
+	// SurvivorsGame.cpp の互換シムから呼ばれる可能性があるため空実装を残す。
 }
 
 void USurvivorsEnemyComponent::ApplyContactDamage()
@@ -75,12 +44,15 @@ void USurvivorsEnemyComponent::ApplyContactDamage()
 
 	for (FEnemyState& E : Game->Enemies)
 	{
+		// Laurel シールドが有効な場合は接触ダメージを受けない
+		if (Game->bShieldActive) continue;
+
 		const float HitR = Game->PlayerRadius + E.CollisionRadius;
 		if (FVector2D::DistSquared(Game->PlayerPos, E.Pos) < HitR * HitR)
 		{
 			if (Game->ElapsedTime - E.PlayerLastHitTime >= SurvivorsGameConstants::ContactHitInterval)
 			{
-				Game->PlayerHP -= E.ContactDamage;
+				Game->PlayerHP -= E.ContactDamage * Game->EnemyDamageScale;
 				E.PlayerLastHitTime = Game->ElapsedTime;
 			}
 		}

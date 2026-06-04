@@ -4,6 +4,7 @@
 #include "Survivors/View/SurvivorsGUIViewComponent.h"
 #include "Survivors/View/SurvivorsGemViewComponent.h"
 #include "Survivors/View/SurvivorsPlayerViewComponent.h"
+#include "Survivors/View/SurvivorsWeaponViewComponent.h"
 #include "Components/SceneComponent.h"
 
 ASurvivorsGameView::ASurvivorsGameView()
@@ -14,9 +15,10 @@ ASurvivorsGameView::ASurvivorsGameView()
 	SetRootComponent(SceneRoot);
 
 	PlayerView = CreateDefaultSubobject<USurvivorsPlayerViewComponent>(TEXT("PlayerView"));
-	GemView = CreateDefaultSubobject<USurvivorsGemViewComponent>(TEXT("GemView"));
-	EnemyView = CreateDefaultSubobject<USurvivorsEnemyViewComponent>(TEXT("EnemyView"));
-	GUIView = CreateDefaultSubobject<USurvivorsGUIViewComponent>(TEXT("GUIView"));
+	GemView    = CreateDefaultSubobject<USurvivorsGemViewComponent>(TEXT("GemView"));
+	EnemyView  = CreateDefaultSubobject<USurvivorsEnemyViewComponent>(TEXT("EnemyView"));
+	GUIView    = CreateDefaultSubobject<USurvivorsGUIViewComponent>(TEXT("GUIView"));
+	WeaponView = CreateDefaultSubobject<USurvivorsWeaponViewComponent>(TEXT("WeaponView"));
 }
 
 void ASurvivorsGameView::BeginPlay()
@@ -36,6 +38,7 @@ void ASurvivorsGameView::BeginPlay()
 	GemView->Initialize(Game, AttachParent);
 	EnemyView->Initialize(Game, AttachParent);
 	GUIView->Initialize(Game, AttachParent);
+	WeaponView->Initialize(Game, AttachParent);
 }
 
 void ASurvivorsGameView::Tick(float DeltaTime)
@@ -48,4 +51,5 @@ void ASurvivorsGameView::Tick(float DeltaTime)
 	GemView->UpdateView();
 	EnemyView->UpdateView();
 	GUIView->UpdateView();
+	WeaponView->UpdateView();
 }

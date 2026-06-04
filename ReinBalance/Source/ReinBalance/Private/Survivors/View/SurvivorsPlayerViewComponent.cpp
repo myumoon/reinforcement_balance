@@ -67,25 +67,10 @@ void USurvivorsPlayerViewComponent::UpdateView()
 
 void USurvivorsPlayerViewComponent::DrawAura()
 {
-	if (!Game || !GetWorld()) return;
-
-	const FVector2D PPos = Game->GetPlayerPos();
-	const float Radius = Game->GetAuraSize() * Game->SimToUE;
-
-	DrawDebugCircle(
-		GetWorld(),
-		FVector(PPos.X * Game->SimToUE, PPos.Y * Game->SimToUE, 2.f),
-		Radius,
-		48,
-		FColor(50, 150, 255, 255),
-		false,
-		0.f,
-		1,
-		3.f,
-		FVector(1.f, 0.f, 0.f),
-		FVector(0.f, 1.f, 0.f),
-		false
-	);
+	// 注意: Garlic オーラの描画は USurvivorsWeaponViewComponent::DrawWeaponAuras() に移管済み。
+	// このメソッドは後方互換のため残しているが、WeaponViewComponent が登録されている場合は
+	// GameView から呼ばれない（UpdateView の実装参照）。
+	// 単体で使用する場合の互換用として空実装のまま残す。
 }
 
 UMaterialInstanceDynamic* USurvivorsPlayerViewComponent::CreateColorMaterial(const FLinearColor& Color)
