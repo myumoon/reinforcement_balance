@@ -53,7 +53,11 @@ struct FSurvivorsTestWorld
 		FActorSpawnParameters P;
 		P.bNoFail = true;
 		Game = World->SpawnActor<ASurvivorsGame>(P);
-		return IsValid(Game);
+		if (!IsValid(Game)) return false;
+		// BeginPlay が呼ばれない場合のフォールバック（テスト環境ではタイミングが異なる）
+		// ResetState は public なので常に明示的に呼び出して初期状態を保証する
+		Game->ResetState(TOptional<int32>());
+		return true;
 	}
 
 	void Destroy()
@@ -193,10 +197,17 @@ bool FSurvivorsGridFullFieldCoversWorldBounds::RunTest(const FString& Parameters
 		P.Radius = 5.f;
 		TestTrue("FullField mode: enemy at origin inside ZeroVector+FieldHalfSize grid", Grid.AddTarget(P));
 
-		// プレイヤーが離れた位置にいても、全域が拾える
+		// 原点付近を query すれば拾える（FullField でもクエリ半径内にある必要がある）
 		TArray<int32> Results;
-		Grid.QueryContacts(FVector2D(800.f, 0.f), 5.f + Grid.MaxTargetRadius, Results);
-		TestEqual("FullField query from far position still finds enemy via MaxTargetRadius", Results.Num(), 1);
+		Grid.QueryContacts(FVector2D::ZeroVector, 10.f, Results);
+		TestEqual("FullField query at origin finds enemy", Results.Num(), 1);
+
+		// フィールド端 (900,0) の敵も登録できる（通常モードでは PlayerPos±200 外になる）
+		FSurvivorsTargetProxy P2;
+		P2.Ref = { ESurvivorsCollisionOwnerKind::Enemy, 2, 1 };
+		P2.Pos = FVector2D(900.f, 0.f);
+		P2.Radius = 5.f;
+		TestTrue("FullField mode: enemy at field edge (900,0) also inside grid", Grid.AddTarget(P2));
 	}
 	return true;
 }
