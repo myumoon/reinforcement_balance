@@ -552,9 +552,8 @@ class _WeaponCurriculumCallback(BaseCallback):
                             f"phase={self._phase_key}, phase_start_step={self._phase_start_step}, "
                             f"elapsed={elapsed}"
                         )
-                        self._apply_params(elapsed)
+                        self._apply_params(elapsed)  # 内部で _save_status() を呼ぶ
                         self._last_update = self.num_timesteps
-                        self._save_status()  # 新しいrun出力先にもコピー
                         return
                 except (json.JSONDecodeError, KeyError, OSError):
                     pass
@@ -562,36 +561,25 @@ class _WeaponCurriculumCallback(BaseCallback):
         # (c) 初回起動: 現在の num_timesteps を start_step として記録
         self._phase_start_step = self.num_timesteps
         elapsed = 0  # 訓練開始直後はフェーズ内経過ステップ = 0
-        self._apply_params(elapsed)
+        self._apply_params(elapsed)  # 内部で _save_status() を呼ぶ
         self._last_update = self.num_timesteps
-        self._save_status()
 
     def _save_status(self) -> None:
         """phase_start_step を weapon_curriculum_status.json に保存する。
 
-        output_dir（現在のrun出力先）に加え、checkpoint_dir が指定されている場合は
-        そちらにも保存する。checkpoint_dir への保存により次回 branch resume 時の
-        状態復元が可能になる。
+        output_dir（現在のrun出力先）のみに保存する。
+        checkpoint_dir は読み取り専用として扱い、元 run の状態を保護する。
         """
-        save_paths = []
-        if self._status_file:
-            save_paths.append(self._status_file)
-        if self._checkpoint_dir:
-            ckpt_status = os.path.join(self._checkpoint_dir, "weapon_curriculum_status.json")
-            if ckpt_status not in save_paths:
-                save_paths.append(ckpt_status)
-
-        if not save_paths:
+        if not self._status_file:
             return
 
-        data = {
-            "phase_key": self._phase_key,
-            "phase_start_step": self._phase_start_step,
-        }
-        for path in save_paths:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w") as f:
-                json.dump(data, f)
+        os.makedirs(self._output_dir, exist_ok=True)
+        with open(self._status_file, "w") as f:
+            json.dump({
+                "phase_key": self._phase_key,
+                "phase_start_step": self._phase_start_step,
+            }, f)
+        # checkpoint_dir には書き込まない（元 run の状態を保護）
 
     def _on_step(self) -> bool:
         if not self._is_transition:
@@ -606,9 +594,17 @@ class _WeaponCurriculumCallback(BaseCallback):
         return True
 
     def _apply_params(self, elapsed: int) -> None:
+        import logging
         from games.survivors.survivors_weapon_curriculum import get_params_for_phase
         params = get_params_for_phase(self._phase_key, elapsed)
-        self.training_env.env_method("set_params", **params)
+        results = self.training_env.env_method("set_params", params)
+        # results は List[bool] または List[None] など環境実装次第
+        if any(r is False for r in results):
+            logging.getLogger(__name__).warning(
+                "weapon curriculum params rejected by %d envs (UE5 may not support these params yet)",
+                sum(1 for r in results if r is False)
+            )
+        self._save_status()
         if self._is_transition:
             weights = params.get("weapon_weights", {})
             print(
