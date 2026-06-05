@@ -13,6 +13,7 @@ from games.survivors.survivors_source_of_truth import (
     build_survivors_source_of_truth,
     render_source_of_truth_markdown,
 )
+from games.survivors.survivors_weapon_curriculum import WeaponType
 
 
 class SurvivorsEurekaConfig(EurekaGameConfig):
@@ -109,7 +110,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         return (
             f"2D フィールド（±15m の正方形）でプレイヤーが敵を倒しながらアイテムを集めて生き延びるゲームです。\n"
             f"- プレイヤーは離散9方向（0=北, 1=北東, 2=東, 3=南東, 4=南, 5=南西, 6=西, 7=北西, 8=静止）で移動\n"
-            f"- プレイヤーはGarlicオーラで自動攻撃し、敵を倒せる\n"
+            f"- プレイヤーは weapon_slots の武器（近距離オーラ・方向性発射・エリア攻撃・防御シールド等）で自動攻撃し、敵を倒せる\n"
             f"- 敵に接触すると毎ティック HP が減少し、HP=0 でエピソード終了\n"
             f"- 敵はフィールド外周からスポーンし、プレイヤーに向かって移動する（同時敵数とスポーン頻度はカリキュラムで変化）\n"
             f"- 敵を倒すとGemがドロップし、Gem取得でXPとItemRewardを得る\n"
@@ -125,7 +126,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"**最優先目標**: 1エピソードで「アイテムを取り敵を倒しながら生き延びる」こと。\n"
             f"- 死ぬとエピソード終了するため、HP 管理が最重要\n"
             f"- ただし壁際に逃げ続けるだけでは得点が低い\n"
-            f"- 敵をオーラ範囲に引き込んで倒しつつアイテムを取る積極的行動が最善\n"
+            f"- 装備武器の特性（近距離/遠距離/エリア）に応じた間合いで敵を処理しつつアイテムを取る積極的行動が最善\n"
             f"- **評価指標: item_kill_score** = (base_reward - AliveReward×ep_len) の平均\n"
             f"  純粋なGem+Kill スコア。生存だけでは 0.0、Gem1個で {item_reward:.1f}、Kill1体で {kill_reward:.1f}"
         )
@@ -266,6 +267,66 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"- スポーン間隔と同時敵数はカリキュラム/paramsで変化するため、固定のMaxActiveEnemiesを前提にしないこと"
         )
 
+    def _prompt_section_weapon_profiles(self) -> str:
+        wpn_i = self._offsets.get("weapon_slots", 23)
+        W = WeaponType
+        melee   = [W.GARLIC, W.WHIP, W.KING_BIBLE, W.SOUL_EATER, W.BLOODY_TEAR, W.UNHOLY_VESPERS]
+        ranged  = [W.MAGIC_WAND, W.KNIFE, W.AXE, W.CROSS, W.FIRE_WAND,
+                   W.PEACHONE, W.EBONY_WINGS, W.HOLY_WAND, W.THOUSAND_EDGE,
+                   W.DEATH_SPIRAL, W.HEAVEN_SWORD, W.HELLFIRE, W.NO_FUTURE, W.VANDALIER]
+        area    = [W.SANTA_WATER, W.RUNETRACER, W.LIGHTNING_RING, W.PENTAGRAM,
+                   W.LA_BORRA, W.THUNDER_LOOP, W.GORGEOUS_MOON]
+        defensive = [W.LAUREL]
+
+        def ids_str(ids):
+            return ", ".join(str(i) for i in ids)
+
+        def norms_str(ids):
+            return ", ".join(f"{i/64:.3f}" for i in ids)
+
+        return (
+            f"reward_fn は obs[{wpn_i}:{wpn_i+18}] (weapon_slots, 6スロット×3要素) を読み取り、\n"
+            f"装備中の武器タイプから立ち回り傾向を推定して、敵密度・距離シェーピングの重みを変えること。\n"
+            f"各スロットの type_norm = EWeaponType_id / 64。type_norm=0 は空スロット。\n"
+            f"\n"
+            f"武器カテゴリと EWeaponType_id / type_norm:\n"
+            f"\n"
+            f"**近距離型 (melee/aura)** — ID: {ids_str(melee)}\n"
+            f"  type_norm: {norms_str(melee)}\n"
+            f"  立ち回り: 敵を安全な密度範囲（過密でない）で引き付けてGemを回収。\n"
+            f"           近距離敵接近への過剰なペナルティは避け、適度な巻き込みを許容すること。\n"
+            f"\n"
+            f"**遠距離・方向性型 (ranged/directional)** — ID: {ids_str(ranged)}\n"
+            f"  type_norm: {norms_str(ranged)}\n"
+            f"  立ち回り: 敵との中距離維持を評価。近距離敵密度が高い方向を近距離型より強く避けること。\n"
+            f"           カイト行動（敵群の外縁から攻撃しながら移動）を小さく補助してよい。\n"
+            f"\n"
+            f"**エリア・ゾーン型 (area/zone)** — ID: {ids_str(area)}\n"
+            f"  type_norm: {norms_str(area)}\n"
+            f"  立ち回り: 敵群の外周を回りながらGemを回収。ゾーン攻撃が届く範囲に敵を誘導しつつ、\n"
+            f"           過密方向への突入は避けること。中距離維持が基本。\n"
+            f"\n"
+            f"**防御型 (defensive)** — ID: {ids_str(defensive)}\n"
+            f"  type_norm: {norms_str(defensive)}\n"
+            f"  立ち回り: shield_active (obs[13]=1) 時はGem回収を強め、\n"
+            f"           shield_timer_norm (obs[14]) が低い時は安全回避を優先すること。\n"
+            f"\n"
+            f"実装指針:\n"
+            f"- 各スロットの type_norm (0は空スロット) を上記カテゴリ範囲テーブルに照合し、\n"
+            f"  カテゴリ別の占有スロット数を集計すること。最多占有カテゴリを主力として採用する。\n"
+            f"  例: melee_count=3, ranged_count=1, area_count=2 → 主力=melee\n"
+            f"- カテゴリが混在する場合は、各カテゴリの占有スロット数を総スロット数で割った比率で\n"
+            f"  敵密度ペナルティ重みを按分すること。\n"
+            f"  例: melee=3/6=0.5, ranged=2/6=0.33, area=1/6=0.17 の場合、\n"
+            f"  penalty_weight = melee_w * 0.5 + ranged_w * 0.33 + area_w * 0.17\n"
+            f"- 全武器に同一の敵距離・密度ペナルティ係数を適用しないこと。\n"
+            f"- 武器カテゴリごとの大きな固定報酬オフセットは加えず、\n"
+            f"  Gem接近・敵密度回避・間合い維持の重み係数だけを小さく変えること。\n"
+            f"- 近距離型: 安全密度閾値を低め（近い敵をより許容）に設定。\n"
+            f"- 遠距離型: 安全密度閾値を高め（敵密度に敏感）に設定。\n"
+            f"- エリア型: 中間的な設定でゾーン制圧行動を評価。\n"
+        )
+
     def _prompt_section_scale_constraints(self) -> str:
         max_hp_penalty = self._player_constant("MaxPlayerHP", 70.0)
         return (
@@ -300,6 +361,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             self._titled_section("obs インデックス一覧",  self._prompt_section_obs_index()),
             self._titled_section("固定報酬（C++ 側）",    self._prompt_section_fixed_rewards()),
             self._titled_section("物理定数",              self._prompt_section_physics()),
+            self._titled_section("武器タイプ別立ち回り指針", self._prompt_section_weapon_profiles()),
             self._titled_section("スケール制約",           self._prompt_section_scale_constraints()),
             self._titled_section("メトリクスの意味",       self.metrics_description()),
         ])
@@ -313,6 +375,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             self._titled_section("obs インデックス一覧",  self._prompt_section_obs_index()),
             self._titled_section("固定報酬（C++ 側）",    self._prompt_section_fixed_rewards()),
             self._titled_section("物理定数",              self._prompt_section_physics()),
+            self._titled_section("武器タイプ別立ち回り指針", self._prompt_section_weapon_profiles()),
         ])
 
     def _build_prompt_dynamic(self, prev_metrics: dict | None, iteration: int,
