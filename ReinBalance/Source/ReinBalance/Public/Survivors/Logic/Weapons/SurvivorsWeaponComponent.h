@@ -78,6 +78,9 @@ public:
 	void SpawnProjectile(const FProjectileState& P) { Projectiles.Add(P); }
 	void SpawnGroundZone(const FGroundZoneState& Z) { GroundZones.Add(Z); }
 
+	/** 武器実装がプロジェクタイルを直接操作するための API（ComputeHits 内で使用） */
+	TArray<FProjectileState>& GetProjectiles() { return Projectiles; }
+
 	/**
 	 * 指定スロットのプロジェクタイルを全てコールバックで更新する。
 	 * Axe の重力・Cross の折り返し・KingBible の軌道更新などに使用。

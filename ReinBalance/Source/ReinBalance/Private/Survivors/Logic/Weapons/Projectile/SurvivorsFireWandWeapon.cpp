@@ -1,5 +1,6 @@
 #include "Survivors/Logic/Weapons/Projectile/SurvivorsFireWandWeapon.h"
 
+#include "Survivors/Logic/SurvivorsCollisionComponent.h"
 #include "Survivors/Logic/SurvivorsGame.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
@@ -98,6 +99,61 @@ void USurvivorsFireWandWeapon::Tick(float Dt)
 	P.WeaponType    = WeaponType;
 	P.WeaponSlotIdx = SlotIdx;
 	P.LifeTime      = FProjectileLifeTime(LifeTime);
-	P.bPiercing     = true;   // 爆発前に ApplyWeaponHits で削除されないよう貫通設定
+	P.bPiercing     = true;   // 爆発前に ComputeProjectileHits で削除されないよう貫通設定
 	WeaponComp->SpawnProjectile(P);
+}
+
+void USurvivorsFireWandWeapon::ComputeHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame)
+{
+	if (!Game || !WeaponComp || !CollComp) return;
+
+	const FPassiveEffects& PE = GetPassiveEffects();
+	const float EffExplosionRadius = CachedExplosionRadius * PE.AreaMult;
+	const float EffDamage          = CachedDamage * PE.DamageMult;
+	const float EffDuration        = 0.2f * PE.DurationMult;
+
+	// 逆順でループして弾を削除しながら処理する
+	TArray<FProjectileState>& Projectiles = WeaponComp->GetProjectiles();
+	for (int32 i = Projectiles.Num() - 1; i >= 0; --i)
+	{
+		FProjectileState& P = Projectiles[i];
+		if (P.WeaponSlotIdx != SlotIdx) continue;
+		if (P.WeaponType != EWeaponType::FireWand && P.WeaponType != EWeaponType::Hellfire) continue;
+
+		// 敵との接触確認
+		TArray<const FSurvivorsTargetProxy*> Contacts;
+		CollComp->QueryEnemyContacts(P.Pos, P.Radius.Value, Contacts);
+
+		bool bHitEnemy = false;
+		for (const FSurvivorsTargetProxy* Proxy : Contacts)
+		{
+			// narrowphase
+			if ((P.Pos - Proxy->Pos).SizeSquared() > FMath::Square(P.Radius.Value + Proxy->Radius)) continue;
+
+			// UniqueId 確認
+			const int32 EIdx = Proxy->Ref.IndexAtBuildTime;
+			if (!Game->Enemies.IsValidIndex(EIdx) || Game->Enemies[EIdx].UniqueId != Proxy->Ref.UniqueId) continue;
+			if (Game->Enemies[EIdx].bPendingRemove) continue;
+
+			bHitEnemy = true;
+			break;
+		}
+
+		if (bHitEnemy || P.bPendingExplosion)
+		{
+			// 爆発 GroundZone を生成して範囲ダメージを与える
+			FGroundZoneState Z;
+			Z.Pos           = P.Pos;
+			Z.Radius        = EffExplosionRadius;
+			Z.Damage        = EffDamage;
+			Z.LifeTime      = EffDuration;
+			Z.HitCooldown   = EffDuration;  // 1 回だけヒット
+			Z.WeaponSlotIdx = SlotIdx;
+			Z.WeaponType    = WeaponType;
+			WeaponComp->SpawnGroundZone(Z);
+
+			// 弾を削除
+			Projectiles.RemoveAt(i);
+		}
+	}
 }

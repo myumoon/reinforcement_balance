@@ -16,6 +16,13 @@ public:
 	virtual void Tick(float Dt) override;
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
 
+	/**
+	 * 敵接触時に即爆発させる。
+	 * ComputeProjectileHits は FireWand/Hellfire 弾をスキップするため、
+	 * ここで完全に処理する。
+	 */
+	virtual void ComputeHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame) override;
+
 private:
 	float CachedDamage          = 40.f;
 	float CachedCooldown        = 1.40f;

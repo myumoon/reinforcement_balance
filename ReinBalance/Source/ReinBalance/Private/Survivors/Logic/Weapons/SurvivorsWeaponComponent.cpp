@@ -195,7 +195,10 @@ void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionCompone
 
 	for (int32 PIdx = 0; PIdx < Projectiles.Num(); ++PIdx)
 	{
-		const FProjectileState& P = Projectiles[PIdx];
+		FProjectileState& P = Projectiles[PIdx];
+
+		// FireWand/Hellfire 弾は USurvivorsFireWandWeapon::ComputeHits() で完全に処理されるためスキップ
+		if (P.WeaponType == EWeaponType::FireWand || P.WeaponType == EWeaponType::Hellfire) continue;
 
 		TArray<const FSurvivorsTargetProxy*> Contacts;
 		CollComp->QueryEnemyContacts(P.Pos, P.Radius.Value, Contacts);
@@ -211,7 +214,7 @@ void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionCompone
 			const FEnemyState& E = Game->Enemies[EIdx];
 			if (E.bPendingRemove) continue;
 
-			// piercing 弾: ヒット済みならスキップ
+			// piercing/非piercing 問わずヒット済みならスキップ（毎 tick 多重ダメージ防止）
 			if (P.HitEnemyIds.Contains(E.UniqueId)) continue;
 
 			FSurvivorsHitEvent Ev;
@@ -220,6 +223,9 @@ void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionCompone
 			Ev.Damage = P.Damage.Value;
 			Ev.WeaponSlot = PIdx;  // Projectile インデックスを WeaponSlot に格納
 			HitFrame.Events.Add(Ev);
+
+			// piercing/非piercing 問わず HitEnemyIds に記録（同一弾では1回のみダメージ）
+			P.HitEnemyIds.Add(E.UniqueId);
 
 			// 非 piercing 弾: 最初の1体にだけヒットして終了
 			if (!P.bPiercing)
