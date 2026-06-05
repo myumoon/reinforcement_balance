@@ -78,3 +78,8 @@ python train.py --game survivors --total-steps 500000
 | [`docs/train/overview.md`](docs/train/overview.md) | 訓練スクリプト概要・モジュール構成 |
 | [`docs/train/ue5_env.md`](docs/train/ue5_env.md) | UE5 HTTP API 仕様・`/params` の挙動 |
 | [`docs/train/impl_notes.md`](docs/train/impl_notes.md) | 実装上の注意点・既知の問題（コールバック・多並列・Resume・SPALF） |
+
+## プラン
+
+プランは `.claude/docs/plans/{日時}_{プラン名}.md` として作成してください。
+プランの工程が多くフォルダが必要であれば `.claude/docs/plans/{日時}_{タスク名}/{index:02d}_{プラン名}.md` としてください。
