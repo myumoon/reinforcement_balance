@@ -95,13 +95,27 @@ void USurvivorsWeaponComponent::TickProjectiles(float Dt)
 	{
 		FProjectileState& P = Projectiles[i];
 
-		// King Bible / Orbit 系は Pos を AngleRad から再計算するため WeaponBase::Tick で行う
-		// それ以外は速度で移動
+		// King Bible / Orbit 系は Pos を WeaponBase::Tick で更新するためここでは移動しない
 		P.Pos += P.Vel * Dt;
 		P.LifeTime.Tick(Dt);
 
 		if (P.LifeTime.IsExpired())
 		{
+			// FireWand は LifeTime 切れ時に爆発が必要。bPendingExplosion フラグを立てて
+			// 次の WeaponBase::Tick（TickWeapons 内で TickProjectiles より先に呼ばれる）
+			// で爆発処理させる。既に爆発処理済みなら削除する。
+			if (P.WeaponType == EWeaponType::FireWand || P.WeaponType == EWeaponType::Hellfire)
+			{
+				if (!P.bPendingExplosion)
+				{
+					// 爆発予約: このフレームは削除しない
+					P.bPendingExplosion = true;
+					// LifeTime を 0 に固定して次 Tick で削除されないようにする
+					// （bPendingExplosion チェックで処理後に false→削除される）
+					continue;
+				}
+				// bPendingExplosion == true: 既に処理済み（FireWandWeapon::Tick で爆発生成＆削除）
+			}
 			Projectiles.RemoveAt(i);
 		}
 	}
@@ -181,7 +195,10 @@ void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionCompone
 
 	for (int32 PIdx = 0; PIdx < Projectiles.Num(); ++PIdx)
 	{
-		const FProjectileState& P = Projectiles[PIdx];
+		FProjectileState& P = Projectiles[PIdx];
+
+		// FireWand/Hellfire 弾は USurvivorsFireWandWeapon::ComputeHits() で完全に処理されるためスキップ
+		if (P.WeaponType == EWeaponType::FireWand || P.WeaponType == EWeaponType::Hellfire) continue;
 
 		TArray<const FSurvivorsTargetProxy*> Contacts;
 		CollComp->QueryEnemyContacts(P.Pos, P.Radius.Value, Contacts);
@@ -197,7 +214,7 @@ void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionCompone
 			const FEnemyState& E = Game->Enemies[EIdx];
 			if (E.bPendingRemove) continue;
 
-			// piercing 弾: ヒット済みならスキップ
+			// piercing/非piercing 問わずヒット済みならスキップ（毎 tick 多重ダメージ防止）
 			if (P.HitEnemyIds.Contains(E.UniqueId)) continue;
 
 			FSurvivorsHitEvent Ev;
@@ -206,6 +223,9 @@ void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionCompone
 			Ev.Damage = P.Damage.Value;
 			Ev.WeaponSlot = PIdx;  // Projectile インデックスを WeaponSlot に格納
 			HitFrame.Events.Add(Ev);
+
+			// piercing/非piercing 問わず HitEnemyIds に記録（同一弾では1回のみダメージ）
+			P.HitEnemyIds.Add(E.UniqueId);
 
 			// 非 piercing 弾: 最初の1体にだけヒットして終了
 			if (!P.bPiercing)
@@ -295,6 +315,20 @@ void USurvivorsWeaponComponent::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 	{
 		if (Projectiles.IsValidIndex(Idx))
 			Projectiles.RemoveAt(Idx);
+	}
+}
+
+void USurvivorsWeaponComponent::UpdateProjectilesBySlot(int32 InSlotIdx, float Dt,
+	TFunctionRef<bool(FProjectileState&, float)> Callback)
+{
+	for (int32 i = Projectiles.Num() - 1; i >= 0; --i)
+	{
+		if (Projectiles[i].WeaponSlotIdx == InSlotIdx)
+		{
+			const bool bKeep = Callback(Projectiles[i], Dt);
+			if (!bKeep)
+				Projectiles.RemoveAt(i);
+		}
 	}
 }
 

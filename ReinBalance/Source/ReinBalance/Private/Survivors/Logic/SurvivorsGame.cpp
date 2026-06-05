@@ -3,9 +3,35 @@
 #include "Survivors/Logic/SurvivorsEnemyComponent.h"
 #include "Survivors/Logic/SurvivorsGemComponent.h"
 #include "Survivors/Logic/SurvivorsObservationComponent.h"
+#include "Survivors/Logic/SurvivorsPickupComponent.h"
 #include "Survivors/Logic/SurvivorsPlayerComponent.h"
 #include "Survivors/Logic/SurvivorsSpawnComponent.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
+
+// ---- 加重サンプリングヘルパー -----------------------------------------------
+
+/**
+ * WeaponWeights から加重ランダムサンプリング（1つの武器IDを返す）。
+ * weights が空または合計 0 の場合は -1 を返す。
+ */
+static int32 WeightedSampleWeaponId(const TMap<int32, float>& Weights, FRandomStream& RandStream)
+{
+	float Total = 0.f;
+	for (const auto& Pair : Weights) Total += Pair.Value;
+	if (Total <= 0.f) return -1;
+
+	float Rand = RandStream.FRandRange(0.f, Total);
+	float Cumulative = 0.f;
+	for (const auto& Pair : Weights)
+	{
+		Cumulative += Pair.Value;
+		if (Rand <= Cumulative) return Pair.Key;
+	}
+	// フォールバック（浮動小数点誤差対策）
+	return Weights.CreateConstIterator()->Key;
+}
+
+// -----------------------------------------------------------------------------
 
 ASurvivorsGame::ASurvivorsGame()
 {
@@ -18,6 +44,7 @@ ASurvivorsGame::ASurvivorsGame()
 	CollisionComponent = CreateDefaultSubobject<USurvivorsCollisionComponent>(TEXT("CollisionComponent"));
 	ObservationComponent = CreateDefaultSubobject<USurvivorsObservationComponent>(TEXT("ObservationComponent"));
 	WeaponComponent  = CreateDefaultSubobject<USurvivorsWeaponComponent>(TEXT("WeaponComponent"));
+	PickupComponent  = CreateDefaultSubobject<USurvivorsPickupComponent>(TEXT("PickupComponent"));
 
 	PlayerComponent->Initialize(this);
 	GemComponent->Initialize(this);
@@ -26,6 +53,7 @@ ASurvivorsGame::ASurvivorsGame()
 	CollisionComponent->Initialize(this);
 	ObservationComponent->Initialize(this);
 	WeaponComponent->Initialize(this);
+	PickupComponent->Initialize(this);
 
 	SpawnComponent->InitDefaultEnemyTable();
 	SpawnComponent->InitDefaultSpawnWaves();
@@ -94,6 +122,10 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	}
 	CachedPassiveEffects = FPassiveEffects();
 
+	// パッシブリセット後にベース値を復元（累積増幅防止）
+	MaxPlayerHP      = BaseMaxPlayerHPConst;
+	GemPickupRadius  = BaseGemPickupRadiusConst;
+
 	// シールド・リバイバルリセット
 	PlayerShieldTimer = 0.f;
 	bShieldActive     = false;
@@ -117,12 +149,87 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	SpawnComponent->Reset();
 	WeaponComponent->Reset();
 
-	// 開始武器: Garlic をスロット0に付与（weapon_pool_mode は PR2 で拡張）
-	WeaponSlots[0].Type  = EWeaponType::Garlic;
-	WeaponSlots[0].Level = FWeaponLevel(1);
-	WeaponComponent->EquipWeapon(0, EWeaponType::Garlic, 1);
+	// 開始武器: StartingWeaponMode / WeaponPoolMode に基づいて選択
+	// WeaponPoolMode の受け付け値（SurvivorsHttpEnvService で正規化済み）:
+	//   "garlic_only"         → Garlic のみ
+	//   "fixed_subset"        → AllowedWeaponTypes を使用
+	//   "all_base"            → 全基本武器（Garlic〜Laurel）
+	//   "all_with_evolutions" → all_base と同じ（進化後武器は進化システムで処理）
+	//   "weighted"            → fixed_subset 扱い（weights=0 の武器は Python 側で除外済み）
+	{
+		static const TArray<EWeaponType> AllBaseWeapons = {
+			EWeaponType::Garlic,  EWeaponType::Whip,   EWeaponType::MagicWand,
+			EWeaponType::Knife,   EWeaponType::Axe,    EWeaponType::Cross,
+			EWeaponType::KingBible, EWeaponType::FireWand, EWeaponType::SantaWater,
+			EWeaponType::Runetracer, EWeaponType::LightningRing, EWeaponType::Pentagram,
+			EWeaponType::Peachone, EWeaponType::EbonyWings, EWeaponType::Laurel,
+		};
 
-	ElapsedTime = 0.f;
+		EWeaponType StartWeapon = EWeaponType::Garlic;  // デフォルト
+
+		// "fixed_subset" と "weighted" は同じプール（AllowedWeaponTypes）を使用
+		const bool bUseAllowedSubset =
+			(WeaponPoolMode == TEXT("fixed_subset") || WeaponPoolMode == TEXT("weighted"))
+			&& AllowedWeaponTypes.Num() > 0;
+
+		// weighted モードかつ重みが設定済みかどうか
+		const bool bWeightedMode =
+			WeaponPoolMode == TEXT("weighted") && !WeaponWeights.IsEmpty();
+
+		// "pool_random" は "random" と同等に扱う（Python W3/W4/W5/W6 で使用）
+		if (StartingWeaponMode.Equals(TEXT("random"), ESearchCase::IgnoreCase) ||
+			StartingWeaponMode.Equals(TEXT("pool_random"), ESearchCase::IgnoreCase))
+		{
+			// weapon_pool_mode に従ったプールからランダム選択
+			if (WeaponPoolMode == TEXT("garlic_only"))
+			{
+				StartWeapon = EWeaponType::Garlic;
+			}
+			else if (bWeightedMode)
+			{
+				// weighted モード: WeaponWeights による加重サンプリング
+				const int32 SampledId = WeightedSampleWeaponId(WeaponWeights, RandStream);
+				StartWeapon = (SampledId > 0)
+					? static_cast<EWeaponType>(SampledId)
+					: EWeaponType::Garlic;
+			}
+			else if (bUseAllowedSubset)
+			{
+				const int32 Idx = RandStream.RandRange(0, AllowedWeaponTypes.Num() - 1);
+				StartWeapon = static_cast<EWeaponType>(AllowedWeaponTypes[Idx]);
+			}
+			else  // "all_base" / "all_with_evolutions" / デフォルト
+			{
+				const int32 Idx = RandStream.RandRange(0, AllBaseWeapons.Num() - 1);
+				StartWeapon = AllBaseWeapons[Idx];
+			}
+		}
+		else if (WeaponPoolMode == TEXT("garlic_only"))
+		{
+			StartWeapon = EWeaponType::Garlic;
+		}
+		else if (bWeightedMode)
+		{
+			// weighted モード: WeaponWeights による加重サンプリング（deterministic でなく重み比例）
+			const int32 SampledId = WeightedSampleWeaponId(WeaponWeights, RandStream);
+			StartWeapon = (SampledId > 0)
+				? static_cast<EWeaponType>(SampledId)
+				: EWeaponType::Garlic;
+		}
+		else if (bUseAllowedSubset)
+		{
+			// fixed_subset の先頭を開始武器とする（deterministic）
+			StartWeapon = static_cast<EWeaponType>(AllowedWeaponTypes[0]);
+		}
+		// else: "all_base" / "all_with_evolutions" / デフォルト → Garlic
+
+		WeaponSlots[0].Type  = StartWeapon;
+		WeaponSlots[0].Level = FWeaponLevel(1);
+		WeaponComponent->EquipWeapon(0, StartWeapon, 1);
+	}
+
+	ElapsedTime           = 0.f;
+	GlobalFreezeUntilTime = -1.f;
 	LastReward  = 0.f;
 	bDone       = false;
 	bTruncated  = false;
@@ -135,6 +242,12 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 
 	PlayerComponent->ApplyAction(ActionIdx);
 	CollisionComponent->ResolveWallCollisions();
+
+	// Pummarola: HP 再生（RegenPerSec → 毎フレーム回復）
+	if (CachedPassiveEffects.RegenPerSec > 0.f)
+	{
+		PlayerHP = FMath::Min(PlayerHP + CachedPassiveEffects.RegenPerSec * SurvivorsGameConstants::PhysicsDt, MaxPlayerHP);
+	}
 
 	ElapsedTime += SurvivorsGameConstants::PhysicsDt;
 	EnemyComponent->UpdateEnemies();
@@ -167,6 +280,13 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 		GemComponent->ApplyPickupHits(HitFrame);
 	}
 	FinalizePickupRemovals();
+
+	// フロアアイテム・特殊アイテム収集
+	if (PickupComponent)
+	{
+		PickupComponent->CheckFloorPickups();
+		PickupComponent->CheckSpecialPickups();
+	}
 
 	if (PlayerHP <= 0.f)
 	{

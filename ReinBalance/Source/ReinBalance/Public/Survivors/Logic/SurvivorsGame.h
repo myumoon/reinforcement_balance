@@ -11,6 +11,7 @@ class USurvivorsCollisionComponent;
 class USurvivorsEnemyComponent;
 class USurvivorsGemComponent;
 class USurvivorsObservationComponent;
+class USurvivorsPickupComponent;
 class USurvivorsPlayerComponent;
 class USurvivorsSpawnComponent;
 class USurvivorsWeaponComponent;
@@ -197,6 +198,36 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|TimeScaling")
 	bool bTimeScalingEnabled = true;
 
+	// ---- 訓練用パラメータ拡張（/params エンドポイント経由で設定） ----
+
+	/** 武器プール制御モード: "all" / "garlic_only" / "custom" */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	FString WeaponPoolMode = TEXT("garlic_only");
+
+	/** カスタムモード時の許可武器タイプ ID リスト */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	TArray<int32> AllowedWeaponTypes;
+
+	/** weighted モード時の武器 ID → 重み マップ（重み > 0 の武器のみ保持） */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	TMap<int32, float> WeaponWeights;
+
+	/** パッシブアイテムを有効にするか */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	bool bEnablePassives = false;
+
+	/** 進化システムを有効にするか */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	bool bEnableEvolutions = false;
+
+	/** リプレイ旧フェーズ比率（0.0〜1.0） */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	float ReplayOldPhaseFraction = 0.0f;
+
+	/** 開始武器選択モード: "garlic" / "random" / "custom" */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	FString StartingWeaponMode = TEXT("garlic");
+
 	UPROPERTY(EditAnywhere, Category = "Survivors|TimeScaling")
 	float HPScaleRatePerMin = 0.10f;
 
@@ -211,11 +242,27 @@ private:
 	friend class USurvivorsEnemyComponent;
 	friend class USurvivorsGemComponent;
 	friend class USurvivorsObservationComponent;
+	friend class USurvivorsPickupComponent;
 	friend class USurvivorsPlayerComponent;
 	friend class USurvivorsSpawnComponent;
 	friend class USurvivorsWeaponComponent;
 	friend class USurvivorsWeaponBase;
 	friend class USurvivorsGarlicWeapon;
+	friend class USurvivorsWhipWeapon;
+	friend class USurvivorsMagicWandWeapon;
+	friend class USurvivorsKnifeWeapon;
+	friend class USurvivorsAxeWeapon;
+	friend class USurvivorsCrossWeapon;
+	friend class USurvivorsKingBibleWeapon;
+	friend class USurvivorsFireWandWeapon;
+	friend class USurvivorsSantaWaterWeapon;
+	friend class USurvivorsRunetracerWeapon;
+	friend class USurvivorsLightningRingWeapon;
+	friend class USurvivorsPentagramWeapon;
+	friend class USurvivorsPeachoneWeapon;
+	friend class USurvivorsEbonyWingsWeapon;
+	friend class USurvivorsVandalierWeapon;
+	friend class USurvivorsLaurelWeapon;
 #if WITH_AUTOMATION_TESTS
 	friend struct FSurvivorsGameTestAccess;
 #endif
@@ -230,6 +277,10 @@ private:
 	static constexpr float MaxGameTime   = SurvivorsGameConstants::MaxGameTime;
 	static constexpr float ContactHitInterval = SurvivorsGameConstants::ContactHitInterval;
 
+	// パッシブ再計算用ベース値（累積増幅を防ぐため MaxPlayerHP / GemPickupRadius の初期値を保持）
+	static constexpr float BaseMaxPlayerHPConst    = 70.f;  // MaxPlayerHP UPROPERTY のデフォルト値
+	static constexpr float BaseGemPickupRadiusConst= 30.f;  // GemPickupRadius UPROPERTY のデフォルト値
+
 	// ---- 状態 ----
 	FVector2D             PlayerPos;
 	FVector2D             PlayerVel;
@@ -239,6 +290,9 @@ private:
 	FWeaponSlot           WeaponSlots[SurvivorsGameConstants::MaxWeaponSlots];
 	FPassiveSlot          PassiveSlots[SurvivorsGameConstants::MaxPassiveSlots];
 	FPassiveEffects       CachedPassiveEffects;
+
+	/** Orologion グローバルフリーズ終了時刻（-1 = フリーズなし） */
+	float                 GlobalFreezeUntilTime = -1.f;
 
 	// シールド状態（Laurel 用）
 	float                 PlayerShieldTimer = 0.f;
@@ -294,6 +348,9 @@ private:
 
 	UPROPERTY(VisibleAnywhere, Category = "Survivors|Components")
 	TObjectPtr<USurvivorsWeaponComponent> WeaponComponent;
+
+	UPROPERTY(VisibleAnywhere, Category = "Survivors|Components")
+	TObjectPtr<USurvivorsPickupComponent> PickupComponent;
 
 	// ---- 内部メソッド ----
 	FVector2D RandomInsideField();

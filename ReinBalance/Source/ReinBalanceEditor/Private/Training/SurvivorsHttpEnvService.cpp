@@ -154,6 +154,112 @@ private:
 		if (JsonObj->TryGetNumberField(TEXT("MaxEpisodeTime"), MaxEpisodeTime))
 			Game->MaxEpisodeTime = FMath::Clamp(static_cast<float>(MaxEpisodeTime), 30.f, 1800.f);
 
+		// PR2 拡張パラメータ
+		// weapon_pool_mode: 受け付ける値は以下の5値。未知値は "garlic_only" にフォールバック。
+		//   "garlic_only"         → Garlic のみをレベルアップ候補に出す
+		//   "fixed_subset"        → allowed_weapon_types で指定した武器のみ
+		//   "all_base"            → 全基本武器（Garlic〜Laurel）
+		//   "all_with_evolutions" → all_base と同じ扱い（進化後武器は進化システムで処理）
+		//   "weighted"            → weights=0 の武器を除外した固定サブセット扱い
+		FString WeaponPoolMode;
+		if (JsonObj->TryGetStringField(TEXT("weapon_pool_mode"), WeaponPoolMode))
+		{
+			static const TSet<FString> ValidPoolModes = {
+				TEXT("garlic_only"), TEXT("fixed_subset"), TEXT("all_base"),
+				TEXT("all_with_evolutions"), TEXT("weighted")
+			};
+			if (ValidPoolModes.Contains(WeaponPoolMode))
+				Game->WeaponPoolMode = WeaponPoolMode;
+			else
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("SurvivorsHttpEnvService: 未知の weapon_pool_mode \"%s\" -> \"garlic_only\" にフォールバック"),
+					*WeaponPoolMode);
+				Game->WeaponPoolMode = TEXT("garlic_only");
+			}
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* AllowedWeaponTypesArr;
+		if (JsonObj->TryGetArrayField(TEXT("allowed_weapon_types"), AllowedWeaponTypesArr))
+		{
+			// 基本武器 ID の有効範囲（進化後武器 ID=16〜 はデフォルトで除外）
+			static const TSet<int32> ValidBaseWeaponIds = {
+				1,   // Garlic
+				2,   // Whip
+				3,   // MagicWand
+				4,   // Knife
+				5,   // Axe
+				6,   // Cross
+				7,   // KingBible
+				8,   // FireWand
+				9,   // SantaWater
+				10,  // Runetracer
+				11,  // LightningRing
+				12,  // Pentagram
+				13,  // Peachone
+				14,  // EbonyWings
+				15,  // Laurel
+			};
+
+			Game->AllowedWeaponTypes.Empty();
+			for (const TSharedPtr<FJsonValue>& Val : *AllowedWeaponTypesArr)
+			{
+				if (!Val.IsValid()) continue;
+				const int32 Id = static_cast<int32>(Val->AsNumber());
+				if (ValidBaseWeaponIds.Contains(Id))
+					Game->AllowedWeaponTypes.Add(Id);
+				// 無効 ID は無視
+			}
+
+			// fixed_subset モードで空になった場合は Garlic にフォールバック
+			if (Game->WeaponPoolMode.Equals(TEXT("fixed_subset")) && Game->AllowedWeaponTypes.IsEmpty())
+				Game->AllowedWeaponTypes.Add(1);  // Garlic fallback
+		}
+
+		// weapon_weights: weighted モード時に重み0以下の武器を AllowedWeaponTypes から除外する
+		// Python 側が weights={id: weight, ...} を送る; 重み0の武器は除外する
+		const TSharedPtr<FJsonObject>* WeaponWeightsObj;
+		if (JsonObj->TryGetObjectField(TEXT("weapon_weights"), WeaponWeightsObj) && WeaponWeightsObj)
+		{
+			// 有効な武器 ID のうち重み > 0 のもののみ AllowedWeaponTypes に残す
+			// また WeaponWeights マップに重みを保存する（加重サンプリング用）
+			Game->AllowedWeaponTypes.Empty();
+			Game->WeaponWeights.Empty();
+			for (const auto& Pair : (*WeaponWeightsObj)->Values)
+			{
+				const int32 Id = FCString::Atoi(*Pair.Key);
+				const float Weight = Pair.Value.IsValid() ? static_cast<float>(Pair.Value->AsNumber()) : 0.f;
+				if (Weight > 0.f)
+				{
+					Game->AllowedWeaponTypes.Add(Id);
+					Game->WeaponWeights.Add(Id, Weight);
+				}
+			}
+
+			// weighted モードで空になった場合は Garlic にフォールバック
+			if (Game->WeaponPoolMode.Equals(TEXT("weighted")) && Game->AllowedWeaponTypes.IsEmpty())
+			{
+				Game->AllowedWeaponTypes.Add(1);  // Garlic fallback
+				Game->WeaponWeights.Add(1, 1.f);
+			}
+		}
+
+		bool bEnablePassives;
+		if (JsonObj->TryGetBoolField(TEXT("enable_passives"), bEnablePassives))
+			Game->bEnablePassives = bEnablePassives;
+
+		bool bEnableEvolutions;
+		if (JsonObj->TryGetBoolField(TEXT("enable_evolutions"), bEnableEvolutions))
+			Game->bEnableEvolutions = bEnableEvolutions;
+
+		double ReplayOldPhaseFraction;
+		if (JsonObj->TryGetNumberField(TEXT("replay_old_phase_fraction"), ReplayOldPhaseFraction))
+			Game->ReplayOldPhaseFraction = FMath::Clamp(static_cast<float>(ReplayOldPhaseFraction), 0.f, 1.f);
+
+		FString StartingWeaponMode;
+		if (JsonObj->TryGetStringField(TEXT("starting_weapon_mode"), StartingWeaponMode))
+			Game->StartingWeaponMode = StartingWeaponMode;
+
 		OnComplete(MakeJsonResponse(TEXT("{\"status\":\"ok\"}")));
 		return true;
 	}

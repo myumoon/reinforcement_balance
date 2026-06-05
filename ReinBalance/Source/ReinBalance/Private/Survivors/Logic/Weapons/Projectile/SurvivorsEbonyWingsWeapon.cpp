@@ -1,0 +1,23 @@
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsEbonyWingsWeapon.h"
+#include "Survivors/Logic/SurvivorsGameConstants.h"
+
+void USurvivorsEbonyWingsWeapon::OnLevelChanged(FWeaponLevel NewLevel)
+{
+	CacheParams();
+}
+
+void USurvivorsEbonyWingsWeapon::CacheParams()
+{
+	const int32 Lv  = FMath::Clamp(Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
+	const int32 Idx = Lv - 1;
+
+	// EbonyWings は Peachone と同じパラメータ・逆回転・π オフセット
+	const SurvivorsGameConstants::FPeachoneParams& P = SurvivorsGameConstants::PeachoneTable[Idx];
+	CachedDamage      = P.Damage;
+	CachedCooldown    = P.Cooldown;
+	CachedOrbitRadius = P.OrbitRadius;
+	CachedBombRadius  = P.BombRadius;
+
+	RotDir   = -1.f;        // 反時計回り
+	PhaseOff = UE_PI;       // π オフセット
+}

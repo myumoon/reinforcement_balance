@@ -24,8 +24,12 @@ void USurvivorsEnemyComponent::UpdateEnemies()
 {
 	if (!Game) return;
 
+	const bool bGlobalFreeze = (Game->ElapsedTime < Game->GlobalFreezeUntilTime);
 	for (FEnemyState& E : Game->Enemies)
 	{
+		// 個別フリーズまたはグローバルフリーズ（Orologion）中は移動スキップ
+		if (E.bFrozen || bGlobalFreeze) continue;
+
 		E.Vel = (Game->PlayerPos - E.Pos).GetSafeNormal() * GetEnemySpeed(E.TypeId);
 		E.Pos += E.Vel * SurvivorsGameConstants::PhysicsDt;
 	}
@@ -89,7 +93,9 @@ void USurvivorsEnemyComponent::ApplyContactHits(FSurvivorsHitFrame& HitFrame)
 		if (E.UniqueId != Ev.Target.UniqueId) continue;
 		if (E.bPendingRemove) continue;
 
-		Game->PlayerHP -= Ev.Damage;  // ContactDamage はスポーン時に EnemyDamageScale 適用済み
+		// Armor によるダメージ軽減（ContactDamage はスポーン時に EnemyDamageScale 適用済み）
+		const float ActualDamage = FMath::Max(0.f, Ev.Damage - Game->CachedPassiveEffects.ArmorFlat);
+		Game->PlayerHP -= ActualDamage;
 		E.PlayerLastHitTime = Game->ElapsedTime;
 	}
 
