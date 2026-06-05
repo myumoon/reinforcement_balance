@@ -511,11 +511,25 @@ class _WeaponCurriculumCallback(BaseCallback):
         self._output_dir = output_dir
         self._status_file = os.path.join(output_dir, "weapon_curriculum_status.json") if output_dir else ""
         self._checkpoint_dir = checkpoint_dir
+        # EpisodeLogger: log_combination_rewards=True のフェーズでエピソードをJSONLに記録する
+        from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
+        _phase = WEAPON_PHASES.get(phase_key, {})
+        self._episode_logger = None
+        if _phase.get("log_combination_rewards") and output_dir:
+            from games.survivors.survivors_episode_logger import EpisodeLogger
+            _log_dir = os.path.join(output_dir, "episode_logs")
+            self._episode_logger = EpisodeLogger(output_dir=_log_dir)
+        # エピソードごとの報酬累積（env インデックス別）
+        self._ep_total_reward: list[float] = []
+        self._ep_id = 0
 
     def _on_training_start(self) -> None:
         from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
         phase = WEAPON_PHASES.get(self._phase_key, {})
         self._is_transition = phase.get("weapon_pool_mode") == "weighted"
+        # ep_total_reward を env 数に合わせて初期化
+        n = self.training_env.num_envs
+        self._ep_total_reward = [0.0] * n
 
         # (a) 同一run resume: output_dir に status があればそれを使う
         if self._status_file and os.path.exists(self._status_file):
@@ -582,6 +596,28 @@ class _WeaponCurriculumCallback(BaseCallback):
         # checkpoint_dir には書き込まない（元 run の状態を保護）
 
     def _on_step(self) -> bool:
+        # EpisodeLogger: エピソード終了時に報酬をJSONLに記録する
+        if self._episode_logger is not None:
+            infos = self.locals.get("infos", [])
+            dones = self.locals.get("dones", [])
+            rewards = self.locals.get("rewards", [])
+            n = len(infos)
+            if len(self._ep_total_reward) != n:
+                self._ep_total_reward = [0.0] * n
+            for i, (info, done, reward) in enumerate(zip(infos, dones, rewards)):
+                self._ep_total_reward[i] += float(reward)
+                if done:
+                    self._ep_id += 1
+                    self._episode_logger.log_episode({
+                        "schema_version": "v1.0",
+                        "episode_id": self._ep_id,
+                        "training_phase": self._phase_key,
+                        "training_step": self.num_timesteps,
+                        "total_reward": self._ep_total_reward[i],
+                        "survival_time": float(info.get("survival_time", 0.0)),
+                    })
+                    self._ep_total_reward[i] = 0.0
+
         if not self._is_transition:
             return True
         if self.num_timesteps - self._last_update >= self.update_freq:

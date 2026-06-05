@@ -228,5 +228,11 @@ def get_params_for_phase(phase_key: str, global_step: int = 0) -> dict:
     if phase.get("weapon_pool_mode") == "weighted":
         transition_steps = phase.get("transition_steps", 2_000_000)
         progress = min(global_step / max(transition_steps, 1), 1.0)
-        params["weapon_weights"] = get_weapon_weights(phase_key, progress)
+        weights = get_weapon_weights(phase_key, progress)
+        params["weapon_weights"] = weights
+        # 重み > 0 の武器 ID のみ allowed_weapon_types に含める
+        # （重み=0 の武器がプール入りすると遷移設計が崩れるため除外する）
+        params["allowed_weapon_types"] = [
+            wid for wid, w in weights.items() if w > 1e-6
+        ]
     return params
