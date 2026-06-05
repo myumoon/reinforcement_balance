@@ -8,7 +8,7 @@ public class ReinBalance : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "NNE", "UMG", "Slate", "SlateCore" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "NNE", "UMG", "Slate", "SlateCore", "ReinBalanceLogic" });
 
 		PrivateDependencyModuleNames.AddRange(new string[] {  });
 		
