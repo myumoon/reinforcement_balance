@@ -4,7 +4,10 @@
 PPO モデルを保存する。PPO 本番訓練は実行しない。
 
 使い方（Tools/Training/ から実行）:
-    python games/survivors/run_bc.py --version-name v7 --run-name bc_run1 --episodes 100 --epochs 30
+    # EUREKA 初期値として使う場合は --entity-attention が必須
+    # (eureka_loop.py --init-model と architecture を一致させるため)
+    python games/survivors/run_bc.py --version-name v7 --run-name bc_run1 \\
+        --entity-attention --episodes 100 --epochs 30
 
 出力:
     runs/survivors/<version-name>/bc/<run-name>/

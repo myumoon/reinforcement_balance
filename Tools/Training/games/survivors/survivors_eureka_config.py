@@ -444,11 +444,13 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         phase_def = WEAPON_PHASES.get(weapon_phase, {})
         net_arch = phase_def.get("net_arch", [512, 256])  # デフォルト [512, 256]
 
+        _obs_segments = (self._obs_schema or {}).get("segments", [])
         policy_kwargs = dict(
             features_extractor_class=SurvivorsEntityAttentionExtractor,
             features_extractor_kwargs=dict(
                 features_dim=128,
                 offsets=self._offsets,
+                obs_schema=_obs_segments,
             ),
             net_arch=net_arch,
         )
