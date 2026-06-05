@@ -406,13 +406,15 @@ TArray<FLevelUpChoice> USurvivorsPlayerComponent::BuildLevelUpChoices()
 {
 	if (!Game) return {};
 
-	// 全パッシブタイプを候補として列挙
+	// 全パッシブタイプを候補として列挙（EPassiveItemType::Spinach=1 〜 TorronasBox=17 の全17値）
+	// Clover(12) は Cross→HeavenSword、Crown(13) は Pentagram→GorgeousMoon の進化に必要
 	static const EPassiveItemType AllPassiveTypes[] = {
 		EPassiveItemType::Spinach,  EPassiveItemType::Armor,        EPassiveItemType::HollowHeart,
 		EPassiveItemType::Pummarola, EPassiveItemType::EmptyTome,   EPassiveItemType::Candelabrador,
 		EPassiveItemType::Bracer,   EPassiveItemType::Spellbinder,  EPassiveItemType::Duplicator,
-		EPassiveItemType::Wings,    EPassiveItemType::Attractorb,   EPassiveItemType::Tirajisu,
-		EPassiveItemType::TorronasBox,
+		EPassiveItemType::Wings,    EPassiveItemType::Attractorb,   EPassiveItemType::Clover,
+		EPassiveItemType::Crown,    EPassiveItemType::StoneMask,    EPassiveItemType::SkullOManiac,
+		EPassiveItemType::Tirajisu, EPassiveItemType::TorronasBox,
 	};
 
 	// --- 候補プールを事前構築 ---
@@ -455,6 +457,13 @@ TArray<FLevelUpChoice> USurvivorsPlayerComponent::BuildLevelUpChoices()
 	}
 
 	// 新規武器候補（weapon_pool_mode に基づいてフィルタリング）
+	// weapon_pool_mode の受け付け値:
+	//   "garlic_only"         → Garlic のみ
+	//   "fixed_subset"        → AllowedWeaponTypes を使用
+	//   "all_base"            → 全基本武器（Garlic〜Laurel）
+	//   "all_with_evolutions" → all_base と同じ（進化後武器は進化システムで処理）
+	//   "weighted"            → fixed_subset 扱い（weights=0 の武器は Python 側で除外済み）
+	//   未知値                → SurvivorsHttpEnvService で "garlic_only" にフォールバック済み
 	TArray<FLevelUpChoice> NewWeapons;
 	{
 		int32 EmptySlots = 0;
@@ -468,12 +477,14 @@ TArray<FLevelUpChoice> USurvivorsPlayerComponent::BuildLevelUpChoices()
 			{
 				AllowedPool = { EWeaponType::Garlic };
 			}
-			else if (Game->WeaponPoolMode == TEXT("fixed_subset") && Game->AllowedWeaponTypes.Num() > 0)
+			else if ((Game->WeaponPoolMode == TEXT("fixed_subset") || Game->WeaponPoolMode == TEXT("weighted"))
+				&& Game->AllowedWeaponTypes.Num() > 0)
 			{
+				// "weighted" は Python 側が weights=0 の武器を除外して allowed_weapon_types を送信する
 				for (int32 Id : Game->AllowedWeaponTypes)
 					AllowedPool.Add(static_cast<EWeaponType>(Id));
 			}
-			else  // "all_base" / "all_with_evolutions" / デフォルト
+			else  // "all_base" / "all_with_evolutions" / デフォルト（garlic_only フォールバック後）
 			{
 				AllowedPool = {
 					EWeaponType::Garlic,  EWeaponType::Whip,   EWeaponType::MagicWand,

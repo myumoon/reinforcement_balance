@@ -155,9 +155,29 @@ private:
 			Game->MaxEpisodeTime = FMath::Clamp(static_cast<float>(MaxEpisodeTime), 30.f, 1800.f);
 
 		// PR2 拡張パラメータ
+		// weapon_pool_mode: 受け付ける値は以下の5値。未知値は "garlic_only" にフォールバック。
+		//   "garlic_only"         → Garlic のみをレベルアップ候補に出す
+		//   "fixed_subset"        → allowed_weapon_types で指定した武器のみ
+		//   "all_base"            → 全基本武器（Garlic〜Laurel）
+		//   "all_with_evolutions" → all_base と同じ扱い（進化後武器は進化システムで処理）
+		//   "weighted"            → weights=0 の武器を除外した固定サブセット扱い
 		FString WeaponPoolMode;
 		if (JsonObj->TryGetStringField(TEXT("weapon_pool_mode"), WeaponPoolMode))
-			Game->WeaponPoolMode = WeaponPoolMode;
+		{
+			static const TSet<FString> ValidPoolModes = {
+				TEXT("garlic_only"), TEXT("fixed_subset"), TEXT("all_base"),
+				TEXT("all_with_evolutions"), TEXT("weighted")
+			};
+			if (ValidPoolModes.Contains(WeaponPoolMode))
+				Game->WeaponPoolMode = WeaponPoolMode;
+			else
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("SurvivorsHttpEnvService: 未知の weapon_pool_mode \"%s\" -> \"garlic_only\" にフォールバック"),
+					*WeaponPoolMode);
+				Game->WeaponPoolMode = TEXT("garlic_only");
+			}
+		}
 
 		const TArray<TSharedPtr<FJsonValue>>* AllowedWeaponTypesArr;
 		if (JsonObj->TryGetArrayField(TEXT("allowed_weapon_types"), AllowedWeaponTypesArr))

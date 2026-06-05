@@ -125,6 +125,12 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	WeaponComponent->Reset();
 
 	// 開始武器: StartingWeaponMode / WeaponPoolMode に基づいて選択
+	// WeaponPoolMode の受け付け値（SurvivorsHttpEnvService で正規化済み）:
+	//   "garlic_only"         → Garlic のみ
+	//   "fixed_subset"        → AllowedWeaponTypes を使用
+	//   "all_base"            → 全基本武器（Garlic〜Laurel）
+	//   "all_with_evolutions" → all_base と同じ（進化後武器は進化システムで処理）
+	//   "weighted"            → fixed_subset 扱い（weights=0 の武器は Python 側で除外済み）
 	{
 		static const TArray<EWeaponType> AllBaseWeapons = {
 			EWeaponType::Garlic,  EWeaponType::Whip,   EWeaponType::MagicWand,
@@ -136,6 +142,11 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 
 		EWeaponType StartWeapon = EWeaponType::Garlic;  // デフォルト
 
+		// "fixed_subset" と "weighted" は同じプール（AllowedWeaponTypes）を使用
+		const bool bUseAllowedSubset =
+			(WeaponPoolMode == TEXT("fixed_subset") || WeaponPoolMode == TEXT("weighted"))
+			&& AllowedWeaponTypes.Num() > 0;
+
 		if (StartingWeaponMode == TEXT("random"))
 		{
 			// weapon_pool_mode に従ったプールからランダム選択
@@ -143,12 +154,12 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 			{
 				StartWeapon = EWeaponType::Garlic;
 			}
-			else if (WeaponPoolMode == TEXT("fixed_subset") && AllowedWeaponTypes.Num() > 0)
+			else if (bUseAllowedSubset)
 			{
 				const int32 Idx = RandStream.RandRange(0, AllowedWeaponTypes.Num() - 1);
 				StartWeapon = static_cast<EWeaponType>(AllowedWeaponTypes[Idx]);
 			}
-			else  // "all_base" / デフォルト
+			else  // "all_base" / "all_with_evolutions" / デフォルト
 			{
 				const int32 Idx = RandStream.RandRange(0, AllBaseWeapons.Num() - 1);
 				StartWeapon = AllBaseWeapons[Idx];
@@ -158,12 +169,12 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 		{
 			StartWeapon = EWeaponType::Garlic;
 		}
-		else if (WeaponPoolMode == TEXT("fixed_subset") && AllowedWeaponTypes.Num() > 0)
+		else if (bUseAllowedSubset)
 		{
-			// fixed_subset の先頭を開始武器とする（deterministic）
+			// fixed_subset / weighted の先頭を開始武器とする（deterministic）
 			StartWeapon = static_cast<EWeaponType>(AllowedWeaponTypes[0]);
 		}
-		// else: "garlic" / "all_base" / デフォルト → Garlic
+		// else: "all_base" / "all_with_evolutions" / デフォルト → Garlic
 
 		WeaponSlots[0].Type  = StartWeapon;
 		WeaponSlots[0].Level = FWeaponLevel(1);
