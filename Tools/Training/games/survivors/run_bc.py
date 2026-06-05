@@ -34,6 +34,9 @@ if str(_TRAINING_DIR) not in sys.path:
 
 import numpy as np
 
+from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES, get_params_for_phase
+from games.survivors.weapon_curriculum_callback import WeaponCurriculumCallback
+
 try:
     from sb3_contrib import RecurrentPPO
     _SB3_CONTRIB_AVAILABLE = True
@@ -111,6 +114,12 @@ def _parse_args() -> argparse.Namespace:
             "例: games/survivors/bc_schedule_default.json"
         ),
     )
+    p.add_argument(
+        "--weapon-phase",
+        default="W0",
+        choices=list(WEAPON_PHASES.keys()),
+        help="武器カリキュラムフェーズ (default: W0). survivors game のみ有効。",
+    )
 
     if pre_args.config:
         from common.config import load_yaml_config, apply_yaml_defaults
@@ -181,6 +190,16 @@ def main() -> None:
     # PPO モデル作成（BC 用: ハイパーパラメータは最低限, 構造のみが重要）
     model = _make_model(args, env)
     print(f"[INFO] モデル作成完了 (device={model.device})")
+
+    # weapon_phase の適用（survivors game 向け）
+    _weapon_phase_key = args.weapon_phase if hasattr(args, "weapon_phase") else "W0"
+    if _weapon_phase_key in WEAPON_PHASES:
+        _weapon_params = get_params_for_phase(_weapon_phase_key, global_step=0)
+        try:
+            env.env_method("set_params", **_weapon_params)
+            print(f"[BC] weapon_phase={_weapon_phase_key} を UE5 に送信しました: {list(_weapon_params.keys())}")
+        except Exception as exc:
+            print(f"[BC] weapon_phase 送信に失敗（続行）: {exc}")
 
     # BC パラメータスケジュール読み込み
     params_schedule: list[tuple[int, dict]] | None = None
@@ -338,6 +357,10 @@ def _make_model(args, env):
     algo_class = RecurrentPPO if args.recurrent else PPO
     default_policy = "MlpLstmPolicy" if args.recurrent else "MlpPolicy"
 
+    # weapon_phase に応じた net_arch を取得（EntityAttention 以外のデフォルト MLP に適用）
+    _weapon_phase_key = args.weapon_phase if hasattr(args, "weapon_phase") else "W0"
+    _phase_net_arch = WEAPON_PHASES.get(_weapon_phase_key, {}).get("net_arch", [512, 256])
+
     # BC 用の最低限 PPO kwargs（アーキテクチャのみ重要）
     ppo_kwargs: dict = {"verbose": 0, "device": args.device}
 
@@ -362,6 +385,9 @@ def _make_model(args, env):
             "lstm_hidden_size": args.lstm_hidden_size,
             "n_lstm_layers":    args.n_lstm_layers,
         }
+    else:
+        ppo_kwargs["policy_kwargs"] = {"net_arch": _phase_net_arch}
+        print(f"[INFO] net_arch={_phase_net_arch} (weapon_phase={_weapon_phase_key})")
 
     return algo_class(default_policy, env, **ppo_kwargs)
 

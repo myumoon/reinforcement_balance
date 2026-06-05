@@ -76,6 +76,20 @@ def _parse_args() -> argparse.Namespace:
                    help="保存ディレクトリ名（未指定時はタイムスタンプ自動生成）")
     p.add_argument("--resume", metavar="RUN_NAME", default=None,
                    help="前回中断したランを再開する（state.json が必要）。--run-name と排他")
+    p.add_argument(
+        "--init-model",
+        type=Path,
+        default=None,
+        metavar="MODEL_ZIP",
+        help="BC 済み初期ポリシーの .zip パス。指定すると各イテレーションでこのポリシーから訓練を開始する。",
+    )
+    p.add_argument(
+        "--init-vecnormalize",
+        type=Path,
+        default=None,
+        metavar="VECNORM_PKL",
+        help="初期 VecNormalize 統計 .pkl パス。--init-model と併用する。",
+    )
     p.add_argument("--llm", choices=["anthropic", "openai"], default="anthropic",
                    help="LLMバックエンド（default: anthropic）")
     p.add_argument("--model", default=None,
@@ -867,6 +881,48 @@ def main() -> None:
             # --- PPO 訓練 ---
             model = game_config.make_model(env, device=args.device)
             print(f"[INFO] SB3 model device: {model.device}")
+
+            # --init-model が指定されている場合、BC 済みポリシーの重みをロード
+            init_model_path = getattr(args, "init_model", None)
+            init_vecnorm_path = getattr(args, "init_vecnormalize", None)
+            if init_model_path is not None and Path(init_model_path).exists():
+                try:
+                    # policy の重みのみロード（model 自体は既存 env/device で作成済み）
+                    loaded = type(model).load(
+                        str(init_model_path),
+                        env=env,
+                        device=args.device,
+                    )
+                    model.policy.load_state_dict(loaded.policy.state_dict())
+                    print(f"[INFO] BC 済みポリシーをロードしました: {init_model_path}")
+
+                    # VecNormalize 統計もロード
+                    if init_vecnorm_path is not None and Path(init_vecnorm_path).exists():
+                        from stable_baselines3.common.vec_env import VecNormalize as _VN_init
+                        vec_norm_init = env if isinstance(env, _VN_init) else None
+                        if vec_norm_init is None:
+                            _inner = env
+                            while _inner is not None:
+                                if isinstance(_inner, _VN_init):
+                                    vec_norm_init = _inner
+                                    break
+                                _inner = getattr(_inner, "venv", None)
+                        if vec_norm_init is not None:
+                            loaded_vn = _VN_init.load(str(init_vecnorm_path), env)
+                            vec_norm_init.obs_rms = loaded_vn.obs_rms
+                            vec_norm_init.ret_rms = loaded_vn.ret_rms
+                            vec_norm_init.clip_obs = loaded_vn.clip_obs
+                            vec_norm_init.clip_reward = loaded_vn.clip_reward
+                            vec_norm_init.norm_obs = loaded_vn.norm_obs
+                            vec_norm_init.norm_reward = loaded_vn.norm_reward
+                            print(f"[INFO] VecNormalize 統計をロードしました: {init_vecnorm_path}")
+                        else:
+                            print("[WARN] VecNormalize ラッパーが見つからないため統計ロードをスキップ")
+                except Exception as exc:
+                    print(f"[WARN] --init-model のロードに失敗（fresh policy で続行）: {exc}")
+            elif init_model_path is not None:
+                print(f"[WARN] --init-model ファイルが見つかりません（fresh policy で続行）: {init_model_path}")
+
             metrics_cb = _EurekaMetricsCallback(
                 compute_metric=game_config.compute_primary_metric,
                 eval_freq=args.eval_freq,
@@ -900,6 +956,15 @@ def main() -> None:
             # weapon_phase の適用（survivors game かつ --weapon-phase 指定時）
             _weapon_phase_key = getattr(args, "weapon_phase", "W0")
             if args.game == "survivors" and _weapon_phase_key in WEAPON_PHASES:
+                from games.survivors.survivors_weapon_curriculum import get_params_for_phase as _get_wparams
+                # 初回 /params 送信（WeaponCurriculumCallback の最初の更新前に確実に適用）
+                _initial_weapon_params = _get_wparams(_weapon_phase_key, global_step=0)
+                try:
+                    env.env_method("set_params", **_initial_weapon_params)
+                    print(f"[INFO] weapon_phase={_weapon_phase_key} 初回 set_params 送信完了")
+                except Exception as exc:
+                    print(f"[WARN] weapon phase 初回 set_params 失敗: {exc}")
+
                 _weapon_phase_cb = WeaponCurriculumCallback(
                     phase_key=_weapon_phase_key,
                     update_freq=10_000,
