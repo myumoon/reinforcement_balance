@@ -361,7 +361,7 @@ def _make_model(args, env):
         policy_kwargs: dict = dict(
             features_extractor_class=SurvivorsEntityAttentionExtractor,
             features_extractor_kwargs=dict(features_dim=128, offsets=offsets, obs_schema=obs_schema),
-            net_arch=[64, 64],
+            net_arch=[512, 256],  # BC/EUREKA/train で architecture を統一
         )
         if args.recurrent:
             policy_kwargs["lstm_hidden_size"] = args.lstm_hidden_size

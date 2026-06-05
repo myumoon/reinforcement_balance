@@ -149,6 +149,8 @@ def _parse_args() -> argparse.Namespace:
     args = p.parse_args()
     if args.game_config is None:
         p.error("--game-config を指定してください（CLI または --config の YAML 内）")
+    if getattr(args, "init_vecnormalize", None) is not None and getattr(args, "init_model", None) is None:
+        p.error("--init-vecnormalize は --init-model と併用してください")
     return args
 
 
@@ -880,7 +882,13 @@ def main() -> None:
 
             # --- PPO 訓練 ---
             _weapon_phase_key = getattr(args, "weapon_phase", "W0")
-            model = game_config.make_model(env, device=args.device, weapon_phase=_weapon_phase_key)
+            # weapon_phase を受け付けるゲームconfig（survivors 等）のみ渡す
+            import inspect as _inspect
+            _make_model_sig = _inspect.signature(game_config.make_model)
+            if "weapon_phase" in _make_model_sig.parameters:
+                model = game_config.make_model(env, device=args.device, weapon_phase=_weapon_phase_key)
+            else:
+                model = game_config.make_model(env, device=args.device)
             print(f"[INFO] SB3 model device: {model.device}")
 
             # --init-model が指定されている場合、BC 済みポリシーの重みをロード
