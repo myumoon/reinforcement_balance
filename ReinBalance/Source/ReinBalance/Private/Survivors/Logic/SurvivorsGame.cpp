@@ -97,6 +97,10 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	}
 	CachedPassiveEffects = FPassiveEffects();
 
+	// パッシブリセット後にベース値を復元（累積増幅防止）
+	MaxPlayerHP      = BaseMaxPlayerHPConst;
+	GemPickupRadius  = BaseGemPickupRadiusConst;
+
 	// シールド・リバイバルリセット
 	PlayerShieldTimer = 0.f;
 	bShieldActive     = false;
@@ -180,6 +184,12 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 
 	PlayerComponent->ApplyAction(ActionIdx);
 	CollisionComponent->ResolveWallCollisions();
+
+	// Pummarola: HP 再生（RegenPerSec → 毎フレーム回復）
+	if (CachedPassiveEffects.RegenPerSec > 0.f)
+	{
+		PlayerHP = FMath::Min(PlayerHP + CachedPassiveEffects.RegenPerSec * SurvivorsGameConstants::PhysicsDt, MaxPlayerHP);
+	}
 
 	ElapsedTime += SurvivorsGameConstants::PhysicsDt;
 	EnemyComponent->UpdateEnemies();

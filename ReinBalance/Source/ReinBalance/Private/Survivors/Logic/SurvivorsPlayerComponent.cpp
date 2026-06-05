@@ -47,7 +47,9 @@ void USurvivorsPlayerComponent::ApplyAction(int32 ActionIdx)
 		case 7: MoveDir = FVector2D(-1.f,  1.f).GetSafeNormal(); break; // 北西
 		default: break; // 8=静止
 	}
-	Game->PlayerVel = MoveDir * Game->MoveSpeed;
+	// Wings パッシブによる移動速度補正（MoveSpeedMult はベース 1.0 に加算）
+	const float EffectiveMoveSpeed = Game->MoveSpeed * (1.f + Game->CachedPassiveEffects.MoveSpeedMult);
+	Game->PlayerVel = MoveDir * EffectiveMoveSpeed;
 	Game->PlayerPos += Game->PlayerVel * SurvivorsGameConstants::PhysicsDt;
 }
 
@@ -380,6 +382,23 @@ void USurvivorsPlayerComponent::EvolveWeapon(int32 SlotIdx, EWeaponType EvolvedT
 	if (Game->WeaponComponent)
 	{
 		Game->WeaponComponent->EquipWeapon(SlotIdx, EvolvedType, 1);
+	}
+
+	// Vandalier Union 進化: EbonyWings スロットを解放
+	if (EvolvedType == EWeaponType::Vandalier)
+	{
+		for (int32 k = 0; k < SurvivorsGameConstants::MaxWeaponSlots; ++k)
+		{
+			if (Game->WeaponSlots[k].Type == EWeaponType::EbonyWings)
+			{
+				Game->WeaponSlots[k] = FWeaponSlot{};  // スロットをクリア
+				if (Game->WeaponComponent)
+				{
+					Game->WeaponComponent->UnequipWeapon(k);
+				}
+				break;
+			}
+		}
 	}
 }
 

@@ -93,7 +93,9 @@ void USurvivorsEnemyComponent::ApplyContactHits(FSurvivorsHitFrame& HitFrame)
 		if (E.UniqueId != Ev.Target.UniqueId) continue;
 		if (E.bPendingRemove) continue;
 
-		Game->PlayerHP -= Ev.Damage;  // ContactDamage はスポーン時に EnemyDamageScale 適用済み
+		// Armor によるダメージ軽減（ContactDamage はスポーン時に EnemyDamageScale 適用済み）
+		const float ActualDamage = FMath::Max(0.f, Ev.Damage - Game->CachedPassiveEffects.ArmorFlat);
+		Game->PlayerHP -= ActualDamage;
 		E.PlayerLastHitTime = Game->ElapsedTime;
 	}
 
