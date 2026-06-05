@@ -31,26 +31,6 @@ static int32 WeightedSampleWeaponId(const TMap<int32, float>& Weights, FRandomSt
 	return Weights.CreateConstIterator()->Key;
 }
 
-/**
- * weights 配列からインデックスを重みに比例してサンプリング。
- * weights が空または合計 0 の場合は 0 を返す。
- */
-static int32 WeightedSampleIndex(const TArray<float>& Weights, FRandomStream& RandStream)
-{
-	float Total = 0.f;
-	for (float W : Weights) Total += W;
-	if (Total <= 0.f) return 0;
-
-	float Rand = RandStream.FRandRange(0.f, Total);
-	float Cumulative = 0.f;
-	for (int32 i = 0; i < Weights.Num(); ++i)
-	{
-		Cumulative += Weights[i];
-		if (Rand <= Cumulative) return i;
-	}
-	return Weights.Num() - 1;  // フォールバック（浮動小数点誤差対策）
-}
-
 // -----------------------------------------------------------------------------
 
 ASurvivorsGame::ASurvivorsGame()
