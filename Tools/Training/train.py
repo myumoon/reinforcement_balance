@@ -597,7 +597,7 @@ class _WeaponCurriculumCallback(BaseCallback):
         import logging
         from games.survivors.survivors_weapon_curriculum import get_params_for_phase
         params = get_params_for_phase(self._phase_key, elapsed)
-        results = self.training_env.env_method("set_params", params)
+        results = self.training_env.env_method("set_params", **params)
         # results は List[bool] または List[None] など環境実装次第
         if any(r is False for r in results):
             logging.getLogger(__name__).warning(
