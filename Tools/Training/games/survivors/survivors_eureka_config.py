@@ -434,10 +434,15 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"- episode_length_min / max: 最短・最長エピソード長"
         )
 
-    def make_model(self, env, device: str = "auto"):
+    def make_model(self, env, device: str = "auto", weapon_phase: str = "W0"):
+        """weapon_phase に対応した net_arch でモデルを生成する。"""
         from stable_baselines3 import PPO
         from common.utils import _linear_schedule
         from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
+        from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
+
+        phase_def = WEAPON_PHASES.get(weapon_phase, {})
+        net_arch = phase_def.get("net_arch", [512, 256])  # デフォルト [512, 256]
 
         policy_kwargs = dict(
             features_extractor_class=SurvivorsEntityAttentionExtractor,
@@ -445,8 +450,9 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
                 features_dim=128,
                 offsets=self._offsets,
             ),
-            net_arch=[64, 64],
+            net_arch=net_arch,
         )
+        print(f"[INFO] make_model: weapon_phase={weapon_phase}, net_arch={net_arch}")
         return PPO(
             "MlpPolicy", env,
             policy_kwargs=policy_kwargs,

@@ -176,6 +176,17 @@ TRANSITION_WEAPON_WEIGHTS: dict[str, dict] = {
 }
 
 
+# BC 専用固定 preset（W5 相当: 全基本武器+パッシブ+進化、weighted transition なし）
+BC_WEAPON_PRESET: dict = {
+    "weapon_pool_mode": "all_base",
+    "allowed_weapon_types": ALL_BASE_WEAPONS,
+    "enable_passives": True,
+    "enable_evolutions": True,
+    "replay_old_phase_fraction": 0.0,
+    "starting_weapon_mode": "pool_random",
+}
+
+
 def get_weapon_weights(phase_key: str, phase_progress: float) -> dict[int, float]:
     if phase_key not in TRANSITION_WEAPON_WEIGHTS:
         return {}

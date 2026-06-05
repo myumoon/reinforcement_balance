@@ -879,7 +879,8 @@ def main() -> None:
                 _get_raw_env(env)._reward_fn = None
 
             # --- PPO 訓練 ---
-            model = game_config.make_model(env, device=args.device)
+            _weapon_phase_key = getattr(args, "weapon_phase", "W0")
+            model = game_config.make_model(env, device=args.device, weapon_phase=_weapon_phase_key)
             print(f"[INFO] SB3 model device: {model.device}")
 
             # --init-model が指定されている場合、BC 済みポリシーの重みをロード
@@ -919,9 +920,14 @@ def main() -> None:
                         else:
                             print("[WARN] VecNormalize ラッパーが見つからないため統計ロードをスキップ")
                 except Exception as exc:
-                    print(f"[WARN] --init-model のロードに失敗（fresh policy で続行）: {exc}")
+                    # fatal: BC 初期化失敗は続行しない
+                    raise RuntimeError(
+                        f"--init-model のロードに失敗しました: {exc}\n"
+                        f"BC モデルと EUREKA モデルの policy architecture が一致していることを確認してください。\n"
+                        f"特に net_arch, EntityAttention の有無が同じである必要があります。"
+                    ) from exc
             elif init_model_path is not None:
-                print(f"[WARN] --init-model ファイルが見つかりません（fresh policy で続行）: {init_model_path}")
+                raise FileNotFoundError(f"--init-model で指定されたファイルが存在しません: {init_model_path}")
 
             metrics_cb = _EurekaMetricsCallback(
                 compute_metric=game_config.compute_primary_metric,
