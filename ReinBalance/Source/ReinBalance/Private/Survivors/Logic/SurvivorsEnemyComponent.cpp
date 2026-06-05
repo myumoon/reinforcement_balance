@@ -26,6 +26,9 @@ void USurvivorsEnemyComponent::UpdateEnemies()
 
 	for (FEnemyState& E : Game->Enemies)
 	{
+		// Orologion フリーズ中は移動スキップ
+		if (E.bFrozen) continue;
+
 		E.Vel = (Game->PlayerPos - E.Pos).GetSafeNormal() * GetEnemySpeed(E.TypeId);
 		E.Pos += E.Vel * SurvivorsGameConstants::PhysicsDt;
 	}

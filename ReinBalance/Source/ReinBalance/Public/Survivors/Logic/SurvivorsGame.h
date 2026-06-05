@@ -244,12 +244,21 @@ private:
 	friend class USurvivorsWeaponComponent;
 	friend class USurvivorsWeaponBase;
 	friend class USurvivorsGarlicWeapon;
-	friend class USurvivorsLaurelWeapon;
+	friend class USurvivorsWhipWeapon;
+	friend class USurvivorsMagicWandWeapon;
+	friend class USurvivorsKnifeWeapon;
+	friend class USurvivorsAxeWeapon;
+	friend class USurvivorsCrossWeapon;
 	friend class USurvivorsKingBibleWeapon;
-	friend class USurvivorsPentagramWeapon;
+	friend class USurvivorsFireWandWeapon;
+	friend class USurvivorsSantaWaterWeapon;
+	friend class USurvivorsRunetracerWeapon;
 	friend class USurvivorsLightningRingWeapon;
+	friend class USurvivorsPentagramWeapon;
 	friend class USurvivorsPeachoneWeapon;
+	friend class USurvivorsEbonyWingsWeapon;
 	friend class USurvivorsVandalierWeapon;
+	friend class USurvivorsLaurelWeapon;
 #if WITH_AUTOMATION_TESTS
 	friend struct FSurvivorsGameTestAccess;
 #endif
@@ -263,6 +272,10 @@ private:
 	static constexpr float PhysicsDt     = SurvivorsGameConstants::PhysicsDt;
 	static constexpr float MaxGameTime   = SurvivorsGameConstants::MaxGameTime;
 	static constexpr float ContactHitInterval = SurvivorsGameConstants::ContactHitInterval;
+
+	// パッシブ再計算用ベース値（累積増幅を防ぐため MaxPlayerHP / GemPickupRadius の初期値を保持）
+	static constexpr float BaseMaxPlayerHPConst    = 70.f;  // MaxPlayerHP UPROPERTY のデフォルト値
+	static constexpr float BaseGemPickupRadiusConst= 30.f;  // GemPickupRadius UPROPERTY のデフォルト値
 
 	// ---- 状態 ----
 	FVector2D             PlayerPos;

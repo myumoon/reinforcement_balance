@@ -28,7 +28,7 @@ public:
 	void RecalcPassiveEffects();
 
 	/** BuildLevelUpChoices: レベルアップ時の選択肢を生成する（3択）*/
-	TArray<TPair<EWeaponType, int32>> BuildLevelUpChoices();
+	TArray<FLevelUpChoice> BuildLevelUpChoices();
 
 	/** 進化可能な武器スロットを返す */
 	TArray<int32> GetEvolvableWeapons() const;
@@ -36,8 +36,8 @@ public:
 	/** 武器を進化させる */
 	void EvolveWeapon(int32 SlotIdx, EWeaponType EvolvedType);
 
-	/** レベルアップ選択肢を適用する（武器レベルアップ・進化・新規取得） */
-	void ApplyLevelUpChoice(EWeaponType WeaponType, int32 NewLevel);
+	/** レベルアップ選択肢を適用する（武器・パッシブ兼用） */
+	void ApplyLevelUpChoice(const FLevelUpChoice& Choice);
 
 private:
 	UPROPERTY()

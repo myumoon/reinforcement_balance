@@ -224,6 +224,26 @@ enum class ESpecialPickupType : uint8
 	Vacuum    = 2,  // 全ジェムを引き寄せ
 };
 
+// ---- レベルアップ選択肢 -------------------------------------------------------
+
+struct FLevelUpChoice
+{
+	enum class EChoiceType : uint8
+	{
+		WeaponNew,
+		WeaponUpgrade,
+		WeaponEvolve,
+		PassiveNew,
+		PassiveUpgrade,
+	};
+
+	EChoiceType      ChoiceType  = EChoiceType::WeaponNew;
+	EWeaponType      WeaponType  = EWeaponType::None;
+	EPassiveItemType PassiveType = EPassiveItemType::None;
+	int32            SlotIdx     = -1;
+	int32            NewLevel    = 1;
+};
+
 // ---- 構造体定義 --------------------------------------------------------------
 
 struct FWeaponSlot
@@ -251,6 +271,7 @@ struct FProjectileState
 	FProjectileLifeTime  LifeTime;                                         // 残寿命（秒）
 	FBounceCount         BounceCount;                                      // Runetracer バウンス残回数
 	bool                 bPiercing     = false;
+	bool                 bPendingExplosion = false;  // FireWand 爆発待機フラグ（LifeTime 切れで爆発予約、次 Tick で処理）
 	FOrbitAngleRad       AngleRad;                                         // King Bible 等の軌道角度
 	FSurvivorsElapsedTime LastHitTime  = FSurvivorsElapsedTime(-1000.f);   // 範囲武器クールダウン
 	TArray<int32>        HitEnemyIds;  // 非 piercing 弾のヒット済み UniqueId（TSet より線形探索が速い）

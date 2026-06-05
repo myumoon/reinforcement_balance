@@ -120,10 +120,51 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	SpawnComponent->Reset();
 	WeaponComponent->Reset();
 
-	// 開始武器: Garlic をスロット0に付与（weapon_pool_mode は PR2 で拡張）
-	WeaponSlots[0].Type  = EWeaponType::Garlic;
-	WeaponSlots[0].Level = FWeaponLevel(1);
-	WeaponComponent->EquipWeapon(0, EWeaponType::Garlic, 1);
+	// 開始武器: StartingWeaponMode / WeaponPoolMode に基づいて選択
+	{
+		static const TArray<EWeaponType> AllBaseWeapons = {
+			EWeaponType::Garlic,  EWeaponType::Whip,   EWeaponType::MagicWand,
+			EWeaponType::Knife,   EWeaponType::Axe,    EWeaponType::Cross,
+			EWeaponType::KingBible, EWeaponType::FireWand, EWeaponType::SantaWater,
+			EWeaponType::Runetracer, EWeaponType::LightningRing, EWeaponType::Pentagram,
+			EWeaponType::Peachone, EWeaponType::EbonyWings, EWeaponType::Laurel,
+		};
+
+		EWeaponType StartWeapon = EWeaponType::Garlic;  // デフォルト
+
+		if (StartingWeaponMode == TEXT("random"))
+		{
+			// weapon_pool_mode に従ったプールからランダム選択
+			if (WeaponPoolMode == TEXT("garlic_only"))
+			{
+				StartWeapon = EWeaponType::Garlic;
+			}
+			else if (WeaponPoolMode == TEXT("fixed_subset") && AllowedWeaponTypes.Num() > 0)
+			{
+				const int32 Idx = RandStream.RandRange(0, AllowedWeaponTypes.Num() - 1);
+				StartWeapon = static_cast<EWeaponType>(AllowedWeaponTypes[Idx]);
+			}
+			else  // "all_base" / デフォルト
+			{
+				const int32 Idx = RandStream.RandRange(0, AllBaseWeapons.Num() - 1);
+				StartWeapon = AllBaseWeapons[Idx];
+			}
+		}
+		else if (WeaponPoolMode == TEXT("garlic_only"))
+		{
+			StartWeapon = EWeaponType::Garlic;
+		}
+		else if (WeaponPoolMode == TEXT("fixed_subset") && AllowedWeaponTypes.Num() > 0)
+		{
+			// fixed_subset の先頭を開始武器とする（deterministic）
+			StartWeapon = static_cast<EWeaponType>(AllowedWeaponTypes[0]);
+		}
+		// else: "garlic" / "all_base" / デフォルト → Garlic
+
+		WeaponSlots[0].Type  = StartWeapon;
+		WeaponSlots[0].Level = FWeaponLevel(1);
+		WeaponComponent->EquipWeapon(0, StartWeapon, 1);
+	}
 
 	ElapsedTime = 0.f;
 	LastReward  = 0.f;

@@ -95,13 +95,27 @@ void USurvivorsWeaponComponent::TickProjectiles(float Dt)
 	{
 		FProjectileState& P = Projectiles[i];
 
-		// King Bible / Orbit 系は Pos を AngleRad から再計算するため WeaponBase::Tick で行う
-		// それ以外は速度で移動
+		// King Bible / Orbit 系は Pos を WeaponBase::Tick で更新するためここでは移動しない
 		P.Pos += P.Vel * Dt;
 		P.LifeTime.Tick(Dt);
 
 		if (P.LifeTime.IsExpired())
 		{
+			// FireWand は LifeTime 切れ時に爆発が必要。bPendingExplosion フラグを立てて
+			// 次の WeaponBase::Tick（TickWeapons 内で TickProjectiles より先に呼ばれる）
+			// で爆発処理させる。既に爆発処理済みなら削除する。
+			if (P.WeaponType == EWeaponType::FireWand || P.WeaponType == EWeaponType::Hellfire)
+			{
+				if (!P.bPendingExplosion)
+				{
+					// 爆発予約: このフレームは削除しない
+					P.bPendingExplosion = true;
+					// LifeTime を 0 に固定して次 Tick で削除されないようにする
+					// （bPendingExplosion チェックで処理後に false→削除される）
+					continue;
+				}
+				// bPendingExplosion == true: 既に処理済み（FireWandWeapon::Tick で爆発生成＆削除）
+			}
 			Projectiles.RemoveAt(i);
 		}
 	}

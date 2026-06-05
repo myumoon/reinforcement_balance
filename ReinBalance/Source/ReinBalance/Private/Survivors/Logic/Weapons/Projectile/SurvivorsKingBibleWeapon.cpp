@@ -37,86 +37,59 @@ void USurvivorsKingBibleWeapon::CacheParams()
 
 void USurvivorsKingBibleWeapon::RebuildOrbProjectiles()
 {
-	// 既存のオーブプロジェクタイルを削除して再構築
-	// ※ WeaponComp が初期化前は何もしない
-	if (!WeaponComp || !Game) return;
+	// KingBible はオーブを Projectiles に登録しない。
+	// ComputeHits() で直接当たり判定を行うため、Projectiles への追加は不要。
+	// （登録すると ComputeProjectileHits と二重判定になる）
+	// View 表示は GetOrbPositions() アクセサを使う。
+	if (!Game) return;
 
-	// 既存スロットのプロジェクタイルを全削除
-	WeaponComp->UpdateProjectilesBySlot(SlotIdx, 0.f, [](FProjectileState& P, float) -> bool
-	{
-		return false;  // 全削除
-	});
-
+	// オーブ位置キャッシュを再計算
 	const FPassiveEffects& PE = GetPassiveEffects();
 	const float EffRadius = CachedOrbitRadius * PE.AreaMult;
 	const int32 EffAmount = CachedAmount + static_cast<int32>(PE.ExtraAmount);
 
+	OrbPositions.SetNum(EffAmount);
 	for (int32 i = 0; i < EffAmount; ++i)
 	{
-		const float Angle = MasterAngle + (TWO_PI * i / EffAmount);
-		FProjectileState P;
-		P.Pos           = Game->PlayerPos + FVector2D(FMath::Cos(Angle) * EffRadius, FMath::Sin(Angle) * EffRadius);
-		P.Vel           = FVector2D::ZeroVector;
-		P.Radius        = FSimRadius(10.f);
-		P.Damage        = FDamage(CachedDamage * PE.DamageMult);
-		P.WeaponType    = WeaponType;
-		P.WeaponSlotIdx = SlotIdx;
-		P.LifeTime      = FProjectileLifeTime(99999.f);  // 常時アクティブ（武器削除まで）
-		P.bPiercing     = true;
-		P.AngleRad      = FOrbitAngleRad(Angle);  // 現在の軌道角度
-		WeaponComp->SpawnProjectile(P);
+		const float Angle  = MasterAngle + (TWO_PI * i / EffAmount);
+		OrbPositions[i]    = Game->PlayerPos + FVector2D(FMath::Cos(Angle) * EffRadius, FMath::Sin(Angle) * EffRadius);
 	}
 }
 
 void USurvivorsKingBibleWeapon::Tick(float Dt)
 {
-	if (!Game || !WeaponComp) return;
+	if (!Game) return;
 
 	const FPassiveEffects& PE = GetPassiveEffects();
-	const float EffRotSpeed = CachedRotSpeed;
 	const float EffRadius   = CachedOrbitRadius * PE.AreaMult;
 	const int32 EffAmount   = CachedAmount + static_cast<int32>(PE.ExtraAmount);
 
-	// 角度を更新し、プロジェクタイル位置を再計算
-	MasterAngle += EffRotSpeed * Dt;
+	// 角度を更新してオーブ位置キャッシュを更新
+	MasterAngle += CachedRotSpeed * Dt;
 
-	int32 OrbIdx = 0;
-	WeaponComp->UpdateProjectilesBySlot(SlotIdx, Dt, [&](FProjectileState& P, float InDt) -> bool
+	OrbPositions.SetNum(EffAmount);
+	for (int32 i = 0; i < EffAmount; ++i)
 	{
-		if (OrbIdx < EffAmount)
-		{
-			const float Angle = MasterAngle + (TWO_PI * OrbIdx / EffAmount);
-			P.Pos     = Game->PlayerPos + FVector2D(FMath::Cos(Angle) * EffRadius, FMath::Sin(Angle) * EffRadius);
-			P.AngleRad = FOrbitAngleRad(Angle);
-			P.LifeTime = FProjectileLifeTime(99999.f);  // リセット（常時アクティブ）
-		}
-		++OrbIdx;
-		return true;
-	});
-
-	// オーブ数が増えた場合（レベルアップ後）は追加生成
-	const int32 CurrentCount = WeaponComp->GetProjectileCount();
-	// 簡略: Count 管理は RebuildOrbProjectiles で行うため OnLevelChanged から呼ばれる
+		const float Angle  = MasterAngle + (TWO_PI * i / EffAmount);
+		OrbPositions[i]    = Game->PlayerPos + FVector2D(FMath::Cos(Angle) * EffRadius, FMath::Sin(Angle) * EffRadius);
+	}
 }
 
 void USurvivorsKingBibleWeapon::ComputeHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame)
 {
-	// KingBible のプロジェクタイルは常時アクティブなため WeaponComponent::ComputeProjectileHits が呼ぶ
-	// ただし hit_interval（WeaponLastHitTime）による連打抑制が必要
-	// ComputeProjectileHits ではそれがないため、ここで実装する
+	// KingBible は Projectiles を使わず ComputeHits のみでヒット判定を行う。
+	// WeaponLastHitTime[SlotIdx] でヒット間隔（OrbHitInterval）を管理して毎フレームダメージを防ぐ。
 
 	if (!Game || !CollComp) return;
 
 	const FPassiveEffects& PE = GetPassiveEffects();
-	const float EffDamage = CachedDamage * PE.DamageMult;
-	const float EffRadius = CachedOrbitRadius * PE.AreaMult;
-	const int32 EffAmount = CachedAmount + static_cast<int32>(PE.ExtraAmount);
+	const float EffDamage  = CachedDamage * PE.DamageMult;
+	static constexpr float OrbRadius = 10.f;
 
-	for (int32 OrbIdx = 0; OrbIdx < EffAmount; ++OrbIdx)
+	// OrbPositions は Tick() で更新済み
+	for (int32 OrbIdx = 0; OrbIdx < OrbPositions.Num(); ++OrbIdx)
 	{
-		const float Angle = MasterAngle + (TWO_PI * OrbIdx / EffAmount);
-		const FVector2D OrbPos = Game->PlayerPos + FVector2D(FMath::Cos(Angle) * EffRadius, FMath::Sin(Angle) * EffRadius);
-		const float OrbRadius = 10.f;
+		const FVector2D& OrbPos = OrbPositions[OrbIdx];
 
 		TArray<const FSurvivorsTargetProxy*> Contacts;
 		CollComp->QueryEnemyContacts(OrbPos, OrbRadius, Contacts);
@@ -130,16 +103,16 @@ void USurvivorsKingBibleWeapon::ComputeHits(USurvivorsCollisionComponent* CollCo
 			const FEnemyState& E = Game->Enemies[EIdx];
 			if (E.bPendingRemove) continue;
 
-			// ヒット間隔チェック（WeaponLastHitTime[SlotIdx] を流用）
+			// ヒット間隔チェック（SlotIdx ベースで管理）
 			if (Game->ElapsedTime - E.WeaponLastHitTime[SlotIdx].Seconds < OrbHitInterval) continue;
 
 			FSurvivorsHitEvent Ev;
-			Ev.Type      = ESurvivorsHitType::WeaponAreaDamage;
-			Ev.Target    = Proxy->Ref;
-			Ev.Damage    = EffDamage;
+			Ev.Type       = ESurvivorsHitType::WeaponAreaDamage;
+			Ev.Target     = Proxy->Ref;
+			Ev.Damage     = EffDamage;
 			Ev.WeaponSlot = SlotIdx;
 			HitFrame.Events.Add(Ev);
-			break;  // 1 オーブにつき 1 ヒット/フレーム
+			break;  // 1 オーブにつき 1 ヒット/フレーム（複数オーブが同一敵に重なるケースを制限）
 		}
 	}
 }

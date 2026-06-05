@@ -38,27 +38,29 @@ void USurvivorsFireWandWeapon::Tick(float Dt)
 
 	const FPassiveEffects& PE = GetPassiveEffects();
 
-	// 寿命切れプロジェクタイルを GroundZone 爆発に変換（UpdateProjectilesBySlot で処理）
 	const float EffExplosionRadius = CachedExplosionRadius * PE.AreaMult;
 	const float EffDamage          = CachedDamage * PE.DamageMult;
 	const float EffDuration        = 0.2f * PE.DurationMult;  // 爆発は短時間
 
-	// 寿命切れ弾を検出して爆発 GroundZone 生成
-	// （WeaponComponent::TickProjectiles が寿命切れを削除する前に処理する必要があるが、
-	//  Tick の呼び出しは TickWeapons 内で TickProjectiles より先）
+	// 寿命切れ弾を検出して爆発 GroundZone 生成。
+	// TickProjectiles が LifeTime 切れ時に bPendingExplosion = true を立ててから
+	// このフラグで処理するか、Tick が先の場合は IsExpired() で直接処理する。
+	// どちらも安全に動作するよう両方のケースをカバーする。
 	WeaponComp->UpdateProjectilesBySlot(SlotIdx, 0.f, [&](FProjectileState& P, float) -> bool
 	{
-		if (P.LifeTime.IsExpired())
+		// bPendingExplosion（TickProjectiles が前フレームで立てた爆発予約）または
+		// IsExpired()（WeaponBase::Tick が TickProjectiles より先に呼ばれた場合）
+		if (P.bPendingExplosion || P.LifeTime.IsExpired())
 		{
 			// 爆発 GroundZone 生成
 			FGroundZoneState Z;
-			Z.Pos          = P.Pos;
-			Z.Radius       = EffExplosionRadius;
-			Z.Damage       = EffDamage;
-			Z.LifeTime     = EffDuration;
-			Z.HitCooldown  = EffDuration;  // 1 回だけヒット
+			Z.Pos           = P.Pos;
+			Z.Radius        = EffExplosionRadius;
+			Z.Damage        = EffDamage;
+			Z.LifeTime      = EffDuration;
+			Z.HitCooldown   = EffDuration;  // 1 回だけヒット
 			Z.WeaponSlotIdx = SlotIdx;
-			Z.WeaponType   = WeaponType;
+			Z.WeaponType    = WeaponType;
 			WeaponComp->SpawnGroundZone(Z);
 			return false;  // 削除
 		}
