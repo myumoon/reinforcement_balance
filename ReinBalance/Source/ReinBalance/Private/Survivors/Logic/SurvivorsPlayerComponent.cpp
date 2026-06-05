@@ -123,8 +123,39 @@ void USurvivorsPlayerComponent::OnLevelUp(int32 NextLevel)
 	TArray<FLevelUpChoice> Choices = BuildLevelUpChoices();
 	if (Choices.Num() == 0) return;
 
-	// ランダムに1択を選ぶ
-	const int32 ChoiceIdx = Game->RandStream.RandRange(0, Choices.Num() - 1);
+	int32 ChoiceIdx;
+
+	// weighted モード: 各候補の武器重みでサンプリング
+	if (Game->WeaponPoolMode.Equals(TEXT("weighted"), ESearchCase::IgnoreCase)
+		&& !Game->WeaponWeights.IsEmpty())
+	{
+		TArray<float> ChoiceWeights;
+		ChoiceWeights.Reserve(Choices.Num());
+
+		for (const FLevelUpChoice& C : Choices)
+		{
+			float W = 1.f;  // デフォルト（パッシブ・進化候補のデフォルト重み）
+
+			// 武器候補: WeaponWeights から重みを取得
+			if (C.WeaponType != EWeaponType::None)
+			{
+				const int32 Id = static_cast<int32>(C.WeaponType);
+				const float* Found = Game->WeaponWeights.Find(Id);
+				if (Found && *Found > 0.f) W = *Found;
+				else W = 0.01f;  // WeaponWeights にない武器（進化後武器など）は最小確率
+			}
+
+			ChoiceWeights.Add(W);
+		}
+
+		ChoiceIdx = WeightedSampleIndex(ChoiceWeights, Game->RandStream);
+	}
+	else
+	{
+		// 通常モード: 一様ランダム
+		ChoiceIdx = Game->RandStream.RandRange(0, Choices.Num() - 1);
+	}
+
 	const FLevelUpChoice& Choice = Choices[ChoiceIdx];
 
 	ApplyLevelUpChoice(Choice);
