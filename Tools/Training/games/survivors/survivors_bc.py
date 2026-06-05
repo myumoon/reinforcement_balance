@@ -169,16 +169,26 @@ def rule_policy(obs: np.ndarray, offsets: dict, rng: np.random.Generator | None 
     """
     DIR_COUNT = 16
     o_en = offsets["enemy_density_near_16dir"]
-    o_gn = offsets["gem_density_near_16dir"]
     o_nd = offsets["enemy_nearest_dist_16dir"]
     o_em = offsets.get("enemy_density_mid_16dir")
     o_wr = offsets.get("wall_rays")
     o_pp = offsets.get("player_pos")
-    o_gd = offsets.get("gem_nearest_dist_16dir")
-    o_gm = offsets.get("gem_density_mid_16dir")
+
+    # gem_density_all_16dir (48 dims = near[0:16] / mid[16:32] / distant[32:48]) は
+    # PR2 以降のスキーマ。旧 gem_density_near_16dir / mid / gem_nearest_dist_16dir を統合。
+    _gem_all = offsets.get("gem_density_all_16dir")
+    if _gem_all is not None:
+        o_gn = _gem_all           # near: gem_density_all_16dir[0:16]
+        o_gm = _gem_all + DIR_COUNT   # mid:  gem_density_all_16dir[16:32]
+        o_gd = None               # 旧 gem_nearest_dist_16dir は統合済み（未使用）
+    else:
+        # フォールバック: 旧スキーマ（PR1 以前）
+        o_gn = offsets.get("gem_density_near_16dir")
+        o_gm = offsets.get("gem_density_mid_16dir")
+        o_gd = offsets.get("gem_nearest_dist_16dir")
 
     enemy_near = obs[o_en:o_en + DIR_COUNT].astype(np.float64)
-    gem_near   = obs[o_gn:o_gn + DIR_COUNT].astype(np.float64)
+    gem_near   = obs[o_gn:o_gn + DIR_COUNT].astype(np.float64) if o_gn is not None else np.zeros(DIR_COUNT)
     enemy_nd   = obs[o_nd:o_nd + DIR_COUNT].astype(np.float64)
 
     nd_min = float(np.min(enemy_nd))
@@ -350,11 +360,20 @@ def bc_warmup(
         if verbose:
             print("[BC] _offsets が取得できないため BC をスキップします")
         return {}
-    required = {"enemy_density_near_16dir", "gem_density_near_16dir", "enemy_nearest_dist_16dir"}
-    missing = required - set(offsets.keys())
-    if missing:
+    # gem_density_all_16dir (PR2) または gem_density_near_16dir (旧) のどちらかが必要
+    required_enemy = {"enemy_density_near_16dir", "enemy_nearest_dist_16dir"}
+    has_gem_density = (
+        "gem_density_all_16dir" in offsets
+        or "gem_density_near_16dir" in offsets
+    )
+    missing = required_enemy - set(offsets.keys())
+    if missing or not has_gem_density:
+        if missing:
+            missing_str = ", ".join(sorted(missing))
+        else:
+            missing_str = "gem_density_all_16dir / gem_density_near_16dir のいずれも存在しない"
         if verbose:
-            print(f"[BC] 必要な obs セグメントが存在しないため BC をスキップします: {missing}")
+            print(f"[BC] 必要な obs セグメントが存在しないため BC をスキップします: {missing_str}")
         return {}
 
     vec_norm = _find_vecnormalize(env)
