@@ -14,7 +14,7 @@ struct FSurvivorsObsSegment
 struct FDamage
 {
 	float Value = 0.f;
-	explicit FDamage(float InValue = 0.f) : Value(InValue) {}
+	explicit constexpr FDamage(float InValue = 0.f) : Value(InValue) {}
 };
 
 struct FSurvivorsElapsedTime
@@ -46,7 +46,7 @@ struct FPlayerLevel
 struct FSimRadius
 {
 	float Value = 0.f;
-	explicit FSimRadius(float InValue = 0.f) : Value(InValue) {}
+	explicit constexpr FSimRadius(float InValue = 0.f) : Value(InValue) {}
 };
 
 // クールダウン残時間（秒）── FSurvivorsElapsedTime と区別
@@ -81,6 +81,59 @@ struct FBounceCount
 	explicit FBounceCount(int32 InValue = 0) : Value(InValue) {}
 	bool HasBounces() const { return Value > 0; }
 	void Consume() { --Value; }
+};
+
+// ---- HitFrame 型定義 ---------------------------------------------------------
+
+UENUM()
+enum class ESurvivorsCollisionOwnerKind : uint8
+{
+	Player      = 0,
+	Enemy       = 1,
+	Gem         = 2,
+	Projectile  = 3,
+	GroundZone  = 4,
+};
+
+UENUM()
+enum class ESurvivorsCollisionLayer : uint8
+{
+	Enemy  = 0,
+	Pickup = 1,
+};
+
+struct FSurvivorsCollisionRef
+{
+	ESurvivorsCollisionOwnerKind Kind  = ESurvivorsCollisionOwnerKind::Enemy;
+	int32                        UniqueId          = 0;
+	int32                        IndexAtBuildTime  = 0;
+};
+
+UENUM()
+enum class ESurvivorsHitType : uint8
+{
+	ContactDamage    = 0,
+	WeaponAreaDamage = 1,
+	ProjectileDamage = 2,
+	GroundZoneDamage = 3,
+	PickupCollect    = 4,
+};
+
+struct FSurvivorsHitEvent
+{
+	ESurvivorsHitType    Type               = ESurvivorsHitType::ContactDamage;
+	FSurvivorsCollisionRef Target;
+	float                Damage             = 0.f;
+	int32                WeaponSlot         = 0;
+	FVector2D            KnockbackDir       = FVector2D::ZeroVector;
+	float                KnockbackStrength  = 0.f;
+	float                KnockbackResistance= 0.f;
+};
+
+struct FSurvivorsHitFrame
+{
+	TArray<FSurvivorsHitEvent> Events;
+	void Reset() { Events.Reset(); }
 };
 
 // ---- Enum 定義 ---------------------------------------------------------------
@@ -269,6 +322,7 @@ struct FEnemyState
 	float     PlayerLastHitTime = -1000.f;
 	int32     UniqueId       = 0;  // スポーン時にゲームグローバルカウンタで割り当て
 	bool      bFrozen        = false;  // フリーズ状態（将来 freeze 武器用、現在は常に false）
+	bool      bPendingRemove = false;  // Apply フェーズで死亡マーク済み（Finalize で削除）
 	// 武器スロット別最終ヒット時刻（MaxWeaponSlots=6 に対応）
 	FSurvivorsElapsedTime WeaponLastHitTime[6] = {
 		FSurvivorsElapsedTime(-1000.f), FSurvivorsElapsedTime(-1000.f),
@@ -280,7 +334,9 @@ struct FEnemyState
 struct FGemState
 {
 	FVector2D Pos;
-	EGemType Type = EGemType::Blue;
+	EGemType  Type       = EGemType::Blue;
+	int32     UniqueId   = 0;
+	bool      bPendingRemove = false;
 };
 
 // ---- 既存強型（後方互換維持） ------------------------------------------------
@@ -394,4 +450,46 @@ struct FSurvivorsSpawnDebug
 	bool bUsedCurriculumEnemyPool = false;
 	bool bSpawnBlocked = false;
 	bool bTruncated = false;
+};
+
+// ---- LocalUniformGrid 型定義 -------------------------------------------------
+
+/** Grid に登録するターゲット（Enemy / Gem 兼用） */
+struct FSurvivorsTargetProxy
+{
+	FSurvivorsCollisionRef Ref;
+	FVector2D              Pos;
+	float                  Radius = 0.f;
+};
+
+/** Grid の1セル */
+struct FSurvivorsCollisionCell
+{
+	TArray<int32> TargetIndices;
+};
+
+/** LocalUniformGrid（PlayerPos 中心の局所グリッド） */
+struct FSurvivorsTargetGrid
+{
+	FVector2D Origin;
+	float     CellSize         = 128.f;
+	int32     NumX             = 0;
+	int32     NumY             = 0;
+	float     MaxTargetRadius  = 0.f;
+
+	TArray<FSurvivorsCollisionCell> Cells;
+	TArray<FSurvivorsTargetProxy>   Targets;
+
+	void Clear();
+	void Rebuild(FVector2D Center, float HalfExtent, float InCellSize);
+
+	/** Grid 範囲内にターゲットを追加。Grid 外なら false を返す */
+	bool AddTarget(FSurvivorsTargetProxy Proxy);
+
+	/** (Pos, QueryRadius) に重なるセルのターゲットインデックスを収集する。
+	 *  QueryRadius = SourceRadius + MaxTargetRadius を推奨（セル境界漏れ防止） */
+	void QueryContacts(FVector2D Pos, float QueryRadius, TArray<int32>& OutIndices) const;
+
+private:
+	FIntPoint WorldToCell(FVector2D Pos) const;
 };
