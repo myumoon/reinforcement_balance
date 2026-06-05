@@ -105,5 +105,5 @@ ReinBalanceLogicTests  ← TestTargetRules / TestModuleRules
 ## BuildGraph について
 
 ローカル UE 5.4（Launcher 版）では `Engine/Build/LowLevelTests.xml` が存在しないため、
-BuildGraph 導線は使用しない。実行導線は `Tools/RunLowLevelTests.ps1` のみ。
+BuildGraph 導線は使用しない。実行導線は `Tools/Tests/RunLowLevelTests.ps1` のみ。
 `LowLevelTests.xml` が確認できる環境に移行した後の任意導線とする。
