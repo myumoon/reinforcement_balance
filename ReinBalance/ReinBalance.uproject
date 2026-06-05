@@ -5,6 +5,11 @@
 	"Description": "",
 	"Modules": [
 		{
+			"Name": "ReinBalanceLogic",
+			"Type": "Runtime",
+			"LoadingPhase": "PreDefault"
+		},
+		{
 			"Name": "ReinBalance",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
