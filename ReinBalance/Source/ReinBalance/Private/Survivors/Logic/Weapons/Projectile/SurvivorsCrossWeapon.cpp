@@ -37,8 +37,8 @@ void USurvivorsCrossWeapon::Tick(float Dt)
 	const FPassiveEffects& PE = GetPassiveEffects();
 
 	// --- 既存プロジェクタイルの折り返し処理 ---
-	// AngleRad.Value に発射時の残り LifeTime（折り返しフラグ用）を格納
-	// bPiercing が false になったら折り返し済み
+	// AngleRad.Value に発射時の初期 LifeTime を格納
+	// bHasReversed で折り返し済みを管理（bPiercing は共通の ApplyWeaponHits 削除判定に使用するため流用しない）
 	WeaponComp->UpdateProjectilesBySlot(SlotIdx, Dt, [](FProjectileState& P, float InDt) -> bool
 	{
 		// AngleRad.Value = 初期 LifeTime（秒）
@@ -47,10 +47,10 @@ void USurvivorsCrossWeapon::Tick(float Dt)
 		const float Elapsed      = InitLifeTime - P.LifeTime.Seconds;
 
 		// LifeTime の半分を過ぎたら折り返す（1度だけ）
-		if (!P.bPiercing && Elapsed >= HalfTime)
+		if (!P.bHasReversed && Elapsed >= HalfTime)
 		{
-			P.Vel     = -P.Vel;
-			P.bPiercing = true;  // 折り返し済みフラグ（bPiercing を流用）
+			P.Vel        = -P.Vel;
+			P.bHasReversed = true;  // 折り返し済みフラグ
 		}
 		return true;
 	});
@@ -87,7 +87,8 @@ void USurvivorsCrossWeapon::Tick(float Dt)
 	P.WeaponType    = WeaponType;
 	P.WeaponSlotIdx = SlotIdx;
 	P.LifeTime      = FProjectileLifeTime(EffLifeTime);
-	P.bPiercing     = false;  // false = まだ折り返していない
+	P.bPiercing     = true;   // 貫通扱いにして敵ヒット時に削除されないようにする
+	P.bHasReversed  = false;  // 折り返し済みフラグ（初期は未折り返し）
 	P.AngleRad      = FOrbitAngleRad(EffLifeTime);  // 流用: 初期 LifeTime を格納
 	WeaponComp->SpawnProjectile(P);
 }

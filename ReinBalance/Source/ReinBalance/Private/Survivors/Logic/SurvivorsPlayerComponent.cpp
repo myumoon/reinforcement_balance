@@ -47,8 +47,8 @@ void USurvivorsPlayerComponent::ApplyAction(int32 ActionIdx)
 		case 7: MoveDir = FVector2D(-1.f,  1.f).GetSafeNormal(); break; // 北西
 		default: break; // 8=静止
 	}
-	// Wings パッシブによる移動速度補正（MoveSpeedMult はベース 1.0 に加算）
-	const float EffectiveMoveSpeed = Game->MoveSpeed * (1.f + Game->CachedPassiveEffects.MoveSpeedMult);
+	// Wings パッシブによる移動速度補正（MoveSpeedMult は最終倍率: デフォルト 1.0 = 変化なし）
+	const float EffectiveMoveSpeed = Game->MoveSpeed * Game->CachedPassiveEffects.MoveSpeedMult;
 	Game->PlayerVel = MoveDir * EffectiveMoveSpeed;
 	Game->PlayerPos += Game->PlayerVel * SurvivorsGameConstants::PhysicsDt;
 }
