@@ -287,6 +287,9 @@ private:
 	FPassiveSlot          PassiveSlots[SurvivorsGameConstants::MaxPassiveSlots];
 	FPassiveEffects       CachedPassiveEffects;
 
+	/** Orologion グローバルフリーズ終了時刻（-1 = フリーズなし） */
+	float                 GlobalFreezeUntilTime = -1.f;
+
 	// シールド状態（Laurel 用）
 	float                 PlayerShieldTimer = 0.f;
 	bool                  bShieldActive     = false;

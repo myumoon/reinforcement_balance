@@ -162,12 +162,38 @@ private:
 		const TArray<TSharedPtr<FJsonValue>>* AllowedWeaponTypesArr;
 		if (JsonObj->TryGetArrayField(TEXT("allowed_weapon_types"), AllowedWeaponTypesArr))
 		{
+			// 基本武器 ID の有効範囲（進化後武器 ID=16〜 はデフォルトで除外）
+			static const TSet<int32> ValidBaseWeaponIds = {
+				1,   // Garlic
+				2,   // Whip
+				3,   // MagicWand
+				4,   // Knife
+				5,   // Axe
+				6,   // Cross
+				7,   // KingBible
+				8,   // FireWand
+				9,   // SantaWater
+				10,  // Runetracer
+				11,  // LightningRing
+				12,  // Pentagram
+				13,  // Peachone
+				14,  // EbonyWings
+				15,  // Laurel
+			};
+
 			Game->AllowedWeaponTypes.Empty();
 			for (const TSharedPtr<FJsonValue>& Val : *AllowedWeaponTypesArr)
 			{
-				if (Val.IsValid())
-					Game->AllowedWeaponTypes.Add(static_cast<int32>(Val->AsNumber()));
+				if (!Val.IsValid()) continue;
+				const int32 Id = static_cast<int32>(Val->AsNumber());
+				if (ValidBaseWeaponIds.Contains(Id))
+					Game->AllowedWeaponTypes.Add(Id);
+				// 無効 ID は無視
 			}
+
+			// fixed_subset モードで空になった場合は Garlic にフォールバック
+			if (Game->WeaponPoolMode.Equals(TEXT("fixed_subset")) && Game->AllowedWeaponTypes.IsEmpty())
+				Game->AllowedWeaponTypes.Add(1);  // Garlic fallback
 		}
 
 		bool bEnablePassives;

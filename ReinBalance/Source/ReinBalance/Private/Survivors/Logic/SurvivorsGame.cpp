@@ -166,7 +166,8 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 		WeaponComponent->EquipWeapon(0, StartWeapon, 1);
 	}
 
-	ElapsedTime = 0.f;
+	ElapsedTime           = 0.f;
+	GlobalFreezeUntilTime = -1.f;
 	LastReward  = 0.f;
 	bDone       = false;
 	bTruncated  = false;

@@ -98,6 +98,6 @@ void USurvivorsFireWandWeapon::Tick(float Dt)
 	P.WeaponType    = WeaponType;
 	P.WeaponSlotIdx = SlotIdx;
 	P.LifeTime      = FProjectileLifeTime(LifeTime);
-	P.bPiercing     = false;
+	P.bPiercing     = true;   // 爆発前に ApplyWeaponHits で削除されないよう貫通設定
 	WeaponComp->SpawnProjectile(P);
 }

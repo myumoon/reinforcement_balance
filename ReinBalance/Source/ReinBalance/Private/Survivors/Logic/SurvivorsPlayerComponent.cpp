@@ -385,10 +385,21 @@ void USurvivorsPlayerComponent::EvolveWeapon(int32 SlotIdx, EWeaponType EvolvedT
 
 TArray<FLevelUpChoice> USurvivorsPlayerComponent::BuildLevelUpChoices()
 {
-	TArray<FLevelUpChoice> Choices;
-	if (!Game) return Choices;
+	if (!Game) return {};
 
-	// 1. 進化候補を優先追加（bEnableEvolutions が有効な場合のみ）
+	// 全パッシブタイプを候補として列挙
+	static const EPassiveItemType AllPassiveTypes[] = {
+		EPassiveItemType::Spinach,  EPassiveItemType::Armor,        EPassiveItemType::HollowHeart,
+		EPassiveItemType::Pummarola, EPassiveItemType::EmptyTome,   EPassiveItemType::Candelabrador,
+		EPassiveItemType::Bracer,   EPassiveItemType::Spellbinder,  EPassiveItemType::Duplicator,
+		EPassiveItemType::Wings,    EPassiveItemType::Attractorb,   EPassiveItemType::Tirajisu,
+		EPassiveItemType::TorronasBox,
+	};
+
+	// --- 候補プールを事前構築 ---
+
+	// 進化候補
+	TArray<FLevelUpChoice> Evolutions;
 	if (Game->bEnableEvolutions)
 	{
 		for (int32 EvolveSlot : GetEvolvableWeapons())
@@ -402,40 +413,30 @@ TArray<FLevelUpChoice> USurvivorsPlayerComponent::BuildLevelUpChoices()
 					C.WeaponType = Rule.EvolvedWeapon;
 					C.SlotIdx    = EvolveSlot;
 					C.NewLevel   = 1;
-					Choices.Add(C);
+					Evolutions.Add(C);
 					break;
 				}
 			}
-			if (Choices.Num() >= 3) break;
 		}
 	}
 
-	// 2. 既存武器のレベルアップ候補
-	if (Choices.Num() < 3)
+	// 既存武器アップグレード候補
+	TArray<FLevelUpChoice> WeaponUpgrades;
+	for (int32 i = 0; i < SurvivorsGameConstants::MaxWeaponSlots; ++i)
 	{
-		for (int32 i = 0; i < SurvivorsGameConstants::MaxWeaponSlots && Choices.Num() < 3; ++i)
-		{
-			if (Game->WeaponSlots[i].Type == EWeaponType::None) continue;
-			if (Game->WeaponSlots[i].Level.IsMax()) continue;
+		if (Game->WeaponSlots[i].Type == EWeaponType::None) continue;
+		if (Game->WeaponSlots[i].Level.IsMax()) continue;
 
-			const EWeaponType WType = Game->WeaponSlots[i].Type;
-			bool bAlready = false;
-			for (const FLevelUpChoice& C : Choices)
-				if (C.WeaponType == WType) { bAlready = true; break; }
-			if (!bAlready)
-			{
-				FLevelUpChoice C;
-				C.ChoiceType = FLevelUpChoice::EChoiceType::WeaponUpgrade;
-				C.WeaponType = WType;
-				C.SlotIdx    = i;
-				C.NewLevel   = Game->WeaponSlots[i].Level.Value + 1;
-				Choices.Add(C);
-			}
-		}
+		FLevelUpChoice C;
+		C.ChoiceType = FLevelUpChoice::EChoiceType::WeaponUpgrade;
+		C.WeaponType = Game->WeaponSlots[i].Type;
+		C.SlotIdx    = i;
+		C.NewLevel   = Game->WeaponSlots[i].Level.Value + 1;
+		WeaponUpgrades.Add(C);
 	}
 
-	// 3. 新規武器候補（weapon_pool_mode に基づいてフィルタリング、空きスロットがある場合）
-	if (Choices.Num() < 3)
+	// 新規武器候補（weapon_pool_mode に基づいてフィルタリング）
+	TArray<FLevelUpChoice> NewWeapons;
 	{
 		int32 EmptySlots = 0;
 		for (int32 i = 0; i < SurvivorsGameConstants::MaxWeaponSlots; ++i)
@@ -443,7 +444,6 @@ TArray<FLevelUpChoice> USurvivorsPlayerComponent::BuildLevelUpChoices()
 
 		if (EmptySlots > 0)
 		{
-			// 許可武器リストを weapon_pool_mode に基づいて構築
 			TArray<EWeaponType> AllowedPool;
 			if (Game->WeaponPoolMode == TEXT("garlic_only"))
 			{
@@ -467,91 +467,135 @@ TArray<FLevelUpChoice> USurvivorsPlayerComponent::BuildLevelUpChoices()
 
 			for (EWeaponType WT : AllowedPool)
 			{
-				if (Choices.Num() >= 3) break;
 				bool bOwned = false;
 				for (int32 i = 0; i < SurvivorsGameConstants::MaxWeaponSlots; ++i)
 					if (Game->WeaponSlots[i].Type == WT) { bOwned = true; break; }
 				if (bOwned) continue;
 
-				bool bAlready = false;
-				for (const FLevelUpChoice& C : Choices)
-					if (C.WeaponType == WT) { bAlready = true; break; }
-				if (!bAlready)
-				{
-					FLevelUpChoice C;
-					C.ChoiceType = FLevelUpChoice::EChoiceType::WeaponNew;
-					C.WeaponType = WT;
-					C.NewLevel   = 1;
-					Choices.Add(C);
-				}
+				FLevelUpChoice C;
+				C.ChoiceType = FLevelUpChoice::EChoiceType::WeaponNew;
+				C.WeaponType = WT;
+				C.NewLevel   = 1;
+				NewWeapons.Add(C);
 			}
 		}
 	}
 
-	// 4. パッシブ選択肢で補充（bEnablePassives が有効な場合）
-	if (Game->bEnablePassives && Choices.Num() < 3)
+	// パッシブアップグレード候補（既存パッシブで MaxLevel 未満のもの）
+	TArray<FLevelUpChoice> PassiveUpgrades;
+	// パッシブ新規候補（空きスロットあり・未所持）
+	TArray<FLevelUpChoice> PassiveNew;
+	if (Game->bEnablePassives)
 	{
-		// 全パッシブタイプを候補として列挙
-		static const EPassiveItemType AllPassives[] = {
-			EPassiveItemType::Spinach,  EPassiveItemType::Armor,        EPassiveItemType::HollowHeart,
-			EPassiveItemType::Pummarola, EPassiveItemType::EmptyTome,   EPassiveItemType::Candelabrador,
-			EPassiveItemType::Bracer,   EPassiveItemType::Spellbinder,  EPassiveItemType::Duplicator,
-			EPassiveItemType::Wings,    EPassiveItemType::Attractorb,   EPassiveItemType::Tirajisu,
-			EPassiveItemType::TorronasBox,
-		};
-
-		// まず MaxLevel 未満の既存パッシブをレベルアップ候補に追加
-		for (int32 i = 0; i < SurvivorsGameConstants::MaxPassiveSlots && Choices.Num() < 3; ++i)
+		for (int32 i = 0; i < SurvivorsGameConstants::MaxPassiveSlots; ++i)
 		{
 			const FPassiveSlot& PS = Game->PassiveSlots[i];
 			if (PS.Type == EPassiveItemType::None || PS.Level <= 0) continue;
 			const int32 MaxLv = SurvivorsGameConstants::PassiveMaxLevel[static_cast<int32>(PS.Type)];
 			if (PS.Level >= MaxLv) continue;
 
-			// 既に Choices に含まれていないか確認
-			bool bAlready = false;
-			for (const FLevelUpChoice& C : Choices)
-				if (C.ChoiceType == FLevelUpChoice::EChoiceType::PassiveUpgrade && C.PassiveType == PS.Type)
-				{ bAlready = true; break; }
-			if (!bAlready)
-			{
-				FLevelUpChoice C;
-				C.ChoiceType  = FLevelUpChoice::EChoiceType::PassiveUpgrade;
-				C.PassiveType = PS.Type;
-				C.SlotIdx     = i;
-				C.NewLevel    = PS.Level + 1;
-				Choices.Add(C);
-			}
+			FLevelUpChoice C;
+			C.ChoiceType  = FLevelUpChoice::EChoiceType::PassiveUpgrade;
+			C.PassiveType = PS.Type;
+			C.SlotIdx     = i;
+			C.NewLevel    = PS.Level + 1;
+			PassiveUpgrades.Add(C);
 		}
 
-		// 空きパッシブスロットがあれば未所持パッシブを追加
 		int32 EmptyPassiveSlots = 0;
 		for (int32 i = 0; i < SurvivorsGameConstants::MaxPassiveSlots; ++i)
 			if (Game->PassiveSlots[i].Type == EPassiveItemType::None) ++EmptyPassiveSlots;
 
 		if (EmptyPassiveSlots > 0)
 		{
-			for (EPassiveItemType PT : AllPassives)
+			for (EPassiveItemType PT : AllPassiveTypes)
 			{
-				if (Choices.Num() >= 3) break;
 				bool bOwned = false;
 				for (int32 i = 0; i < SurvivorsGameConstants::MaxPassiveSlots; ++i)
 					if (Game->PassiveSlots[i].Type == PT) { bOwned = true; break; }
 				if (bOwned) continue;
 
-				bool bAlready = false;
-				for (const FLevelUpChoice& C : Choices)
-					if (C.ChoiceType == FLevelUpChoice::EChoiceType::PassiveNew && C.PassiveType == PT)
-					{ bAlready = true; break; }
-				if (!bAlready)
+				FLevelUpChoice C;
+				C.ChoiceType  = FLevelUpChoice::EChoiceType::PassiveNew;
+				C.PassiveType = PT;
+				C.NewLevel    = 1;
+				PassiveNew.Add(C);
+			}
+		}
+	}
+
+	// --- 優先順位に従って Choices を構築 ---
+	TArray<FLevelUpChoice> Choices;
+
+	// 1. 進化を優先（最大1件）
+	for (const FLevelUpChoice& C : Evolutions)
+	{
+		if (Choices.Num() >= 3) break;
+		Choices.Add(C);
+	}
+
+	// 2. パッシブを最低1件確保（bEnablePassives かつ候補あり）
+	if (Game->bEnablePassives && Choices.Num() < 3)
+	{
+		TArray<FLevelUpChoice> AllPassiveCandidates;
+		AllPassiveCandidates.Append(PassiveUpgrades);
+		AllPassiveCandidates.Append(PassiveNew);
+		if (AllPassiveCandidates.Num() > 0)
+		{
+			const int32 Idx = Game->RandStream.RandRange(0, AllPassiveCandidates.Num() - 1);
+			Choices.Add(AllPassiveCandidates[Idx]);
+		}
+	}
+
+	// 3. 残りを武器（アップグレード→新規）で補充
+	TArray<FLevelUpChoice> WeaponPool;
+	WeaponPool.Append(WeaponUpgrades);
+	WeaponPool.Append(NewWeapons);
+	// 進化・パッシブで既に追加した武器タイプとの重複除去
+	for (int32 j = WeaponPool.Num() - 1; j >= 0; --j)
+	{
+		for (const FLevelUpChoice& Existing : Choices)
+		{
+			if (Existing.WeaponType == WeaponPool[j].WeaponType && Existing.WeaponType != EWeaponType::None)
+			{
+				WeaponPool.RemoveAt(j);
+				break;
+			}
+		}
+	}
+	while (Choices.Num() < 3 && WeaponPool.Num() > 0)
+	{
+		const int32 Idx = Game->RandStream.RandRange(0, WeaponPool.Num() - 1);
+		Choices.Add(WeaponPool[Idx]);
+		WeaponPool.RemoveAt(Idx);
+	}
+
+	// 4. それでも不足ならパッシブ候補で補充（ステップ2で使ったものとの重複を避ける）
+	if (Game->bEnablePassives && Choices.Num() < 3)
+	{
+		TArray<FLevelUpChoice> AllPassiveCandidates;
+		AllPassiveCandidates.Append(PassiveUpgrades);
+		AllPassiveCandidates.Append(PassiveNew);
+		// ステップ2で追加済みのパッシブを除外
+		for (int32 j = AllPassiveCandidates.Num() - 1; j >= 0; --j)
+		{
+			for (const FLevelUpChoice& Existing : Choices)
+			{
+				if (Existing.ChoiceType != FLevelUpChoice::EChoiceType::WeaponNew &&
+					Existing.ChoiceType != FLevelUpChoice::EChoiceType::WeaponUpgrade &&
+					Existing.ChoiceType != FLevelUpChoice::EChoiceType::WeaponEvolve &&
+					Existing.PassiveType == AllPassiveCandidates[j].PassiveType)
 				{
-					FLevelUpChoice C;
-					C.ChoiceType  = FLevelUpChoice::EChoiceType::PassiveNew;
-					C.PassiveType = PT;
-					C.NewLevel    = 1;
-					Choices.Add(C);
+					AllPassiveCandidates.RemoveAt(j);
+					break;
 				}
 			}
+		}
+		while (Choices.Num() < 3 && AllPassiveCandidates.Num() > 0)
+		{
+			const int32 Idx = Game->RandStream.RandRange(0, AllPassiveCandidates.Num() - 1);
+			Choices.Add(AllPassiveCandidates[Idx]);
+			AllPassiveCandidates.RemoveAt(Idx);
 		}
 	}
 

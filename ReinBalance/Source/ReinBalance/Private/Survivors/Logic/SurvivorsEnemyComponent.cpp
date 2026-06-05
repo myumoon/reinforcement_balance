@@ -24,10 +24,11 @@ void USurvivorsEnemyComponent::UpdateEnemies()
 {
 	if (!Game) return;
 
+	const bool bGlobalFreeze = (Game->ElapsedTime < Game->GlobalFreezeUntilTime);
 	for (FEnemyState& E : Game->Enemies)
 	{
-		// Orologion フリーズ中は移動スキップ
-		if (E.bFrozen) continue;
+		// 個別フリーズまたはグローバルフリーズ（Orologion）中は移動スキップ
+		if (E.bFrozen || bGlobalFreeze) continue;
 
 		E.Vel = (Game->PlayerPos - E.Pos).GetSafeNormal() * GetEnemySpeed(E.TypeId);
 		E.Pos += E.Vel * SurvivorsGameConstants::PhysicsDt;

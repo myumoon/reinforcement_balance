@@ -99,10 +99,9 @@ void USurvivorsPickupComponent::CheckSpecialPickups()
 			break;
 
 		case ESpecialPickupType::Orologion:
-			// 全敵フリーズ: bFrozen = true → UpdateEnemies() で移動スキップ
-			// TODO: フリーズ解除タイマー（10秒後に bFrozen = false）は未実装
-			for (FEnemyState& E : Game->Enemies)
-				E.bFrozen = true;
+			// 10秒グローバルフリーズ（ElapsedTime でタイマー管理）
+			// UpdateEnemies() でグローバルフリーズ時刻を確認し自動解除される
+			Game->GlobalFreezeUntilTime = Game->ElapsedTime + 10.f;
 			break;
 
 		default:
