@@ -8,6 +8,31 @@
 #include "Survivors/Logic/SurvivorsSpawnComponent.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 
+// ---- 加重サンプリングヘルパー -----------------------------------------------
+
+/**
+ * WeaponWeights から加重ランダムサンプリング（1つの武器IDを返す）。
+ * weights が空または合計 0 の場合は -1 を返す。
+ */
+static int32 WeightedSampleWeaponId(const TMap<int32, float>& Weights, FRandomStream& RandStream)
+{
+	float Total = 0.f;
+	for (const auto& Pair : Weights) Total += Pair.Value;
+	if (Total <= 0.f) return -1;
+
+	float Rand = RandStream.FRandRange(0.f, Total);
+	float Cumulative = 0.f;
+	for (const auto& Pair : Weights)
+	{
+		Cumulative += Pair.Value;
+		if (Rand <= Cumulative) return Pair.Key;
+	}
+	// フォールバック（浮動小数点誤差対策）
+	return Weights.CreateConstIterator()->Key;
+}
+
+// -----------------------------------------------------------------------------
+
 ASurvivorsGame::ASurvivorsGame()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -147,6 +172,10 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 			(WeaponPoolMode == TEXT("fixed_subset") || WeaponPoolMode == TEXT("weighted"))
 			&& AllowedWeaponTypes.Num() > 0;
 
+		// weighted モードかつ重みが設定済みかどうか
+		const bool bWeightedMode =
+			WeaponPoolMode == TEXT("weighted") && !WeaponWeights.IsEmpty();
+
 		// "pool_random" は "random" と同等に扱う（Python W3/W4/W5/W6 で使用）
 		if (StartingWeaponMode.Equals(TEXT("random"), ESearchCase::IgnoreCase) ||
 			StartingWeaponMode.Equals(TEXT("pool_random"), ESearchCase::IgnoreCase))
@@ -155,6 +184,14 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 			if (WeaponPoolMode == TEXT("garlic_only"))
 			{
 				StartWeapon = EWeaponType::Garlic;
+			}
+			else if (bWeightedMode)
+			{
+				// weighted モード: WeaponWeights による加重サンプリング
+				const int32 SampledId = WeightedSampleWeaponId(WeaponWeights, RandStream);
+				StartWeapon = (SampledId > 0)
+					? static_cast<EWeaponType>(SampledId)
+					: EWeaponType::Garlic;
 			}
 			else if (bUseAllowedSubset)
 			{
@@ -171,9 +208,17 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 		{
 			StartWeapon = EWeaponType::Garlic;
 		}
+		else if (bWeightedMode)
+		{
+			// weighted モード: WeaponWeights による加重サンプリング（deterministic でなく重み比例）
+			const int32 SampledId = WeightedSampleWeaponId(WeaponWeights, RandStream);
+			StartWeapon = (SampledId > 0)
+				? static_cast<EWeaponType>(SampledId)
+				: EWeaponType::Garlic;
+		}
 		else if (bUseAllowedSubset)
 		{
-			// fixed_subset / weighted の先頭を開始武器とする（deterministic）
+			// fixed_subset の先頭を開始武器とする（deterministic）
 			StartWeapon = static_cast<EWeaponType>(AllowedWeaponTypes[0]);
 		}
 		// else: "all_base" / "all_with_evolutions" / デフォルト → Garlic

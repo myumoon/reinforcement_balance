@@ -598,11 +598,64 @@ TArray<FLevelUpChoice> USurvivorsPlayerComponent::BuildLevelUpChoices()
 			}
 		}
 	}
+
+	// weighted モード: WeaponWeights による加重サンプリング
+	// WeaponPool 内の NewWeapons エントリには重みを適用し、WeaponUpgrades は一様扱い（重み=1）
+	const bool bWeightedLevelUp =
+		Game->WeaponPoolMode.Equals(TEXT("weighted"), ESearchCase::IgnoreCase)
+		&& !Game->WeaponWeights.IsEmpty();
+
 	while (Choices.Num() < 3 && WeaponPool.Num() > 0)
 	{
-		const int32 Idx = Game->RandStream.RandRange(0, WeaponPool.Num() - 1);
-		Choices.Add(WeaponPool[Idx]);
-		WeaponPool.RemoveAt(Idx);
+		int32 SelectedIdx = 0;
+		if (bWeightedLevelUp)
+		{
+			// WeaponPool の各エントリに重みを付与して加重サンプリング
+			// WeaponUpgrade（既存武器のレベルアップ）は重み1.0として扱う
+			float Total = 0.f;
+			for (const FLevelUpChoice& C : WeaponPool)
+			{
+				if (C.ChoiceType == FLevelUpChoice::EChoiceType::WeaponNew)
+				{
+					const float* W = Game->WeaponWeights.Find(static_cast<int32>(C.WeaponType));
+					Total += (W && *W > 0.f) ? *W : 1.f;
+				}
+				else
+				{
+					Total += 1.f;  // WeaponUpgrade は均等確率
+				}
+			}
+
+			if (Total > 0.f)
+			{
+				float Rand = Game->RandStream.FRandRange(0.f, Total);
+				float Cumulative = 0.f;
+				for (int32 j = 0; j < WeaponPool.Num(); ++j)
+				{
+					const FLevelUpChoice& C = WeaponPool[j];
+					float W = 1.f;
+					if (C.ChoiceType == FLevelUpChoice::EChoiceType::WeaponNew)
+					{
+						const float* WPtr = Game->WeaponWeights.Find(static_cast<int32>(C.WeaponType));
+						W = (WPtr && *WPtr > 0.f) ? *WPtr : 1.f;
+					}
+					Cumulative += W;
+					if (Rand <= Cumulative)
+					{
+						SelectedIdx = j;
+						break;
+					}
+				}
+			}
+			// else: Total == 0 は起こらないが念のため SelectedIdx = 0 のまま
+		}
+		else
+		{
+			SelectedIdx = Game->RandStream.RandRange(0, WeaponPool.Num() - 1);
+		}
+
+		Choices.Add(WeaponPool[SelectedIdx]);
+		WeaponPool.RemoveAt(SelectedIdx);
 	}
 
 	// 4. それでも不足ならパッシブ候補で補充（ステップ2で使ったものとの重複を避ける）

@@ -208,6 +208,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
 	TArray<int32> AllowedWeaponTypes;
 
+	/** weighted モード時の武器 ID → 重み マップ（重み > 0 の武器のみ保持） */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	TMap<int32, float> WeaponWeights;
+
 	/** パッシブアイテムを有効にするか */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
 	bool bEnablePassives = false;

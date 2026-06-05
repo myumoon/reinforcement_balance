@@ -222,18 +222,26 @@ private:
 		if (JsonObj->TryGetObjectField(TEXT("weapon_weights"), WeaponWeightsObj) && WeaponWeightsObj)
 		{
 			// 有効な武器 ID のうち重み > 0 のもののみ AllowedWeaponTypes に残す
+			// また WeaponWeights マップに重みを保存する（加重サンプリング用）
 			Game->AllowedWeaponTypes.Empty();
+			Game->WeaponWeights.Empty();
 			for (const auto& Pair : (*WeaponWeightsObj)->Values)
 			{
 				const int32 Id = FCString::Atoi(*Pair.Key);
 				const float Weight = Pair.Value.IsValid() ? static_cast<float>(Pair.Value->AsNumber()) : 0.f;
 				if (Weight > 0.f)
+				{
 					Game->AllowedWeaponTypes.Add(Id);
+					Game->WeaponWeights.Add(Id, Weight);
+				}
 			}
 
 			// weighted モードで空になった場合は Garlic にフォールバック
 			if (Game->WeaponPoolMode.Equals(TEXT("weighted")) && Game->AllowedWeaponTypes.IsEmpty())
+			{
 				Game->AllowedWeaponTypes.Add(1);  // Garlic fallback
+				Game->WeaponWeights.Add(1, 1.f);
+			}
 		}
 
 		bool bEnablePassives;
