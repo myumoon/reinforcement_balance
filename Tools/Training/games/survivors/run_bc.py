@@ -4,7 +4,10 @@
 PPO モデルを保存する。PPO 本番訓練は実行しない。
 
 使い方（Tools/Training/ から実行）:
-    python games/survivors/run_bc.py --version-name v7 --run-name bc_run1 --episodes 100 --epochs 30
+    # EUREKA 初期値として使う場合は --entity-attention が必須
+    # (eureka_loop.py --init-model と architecture を一致させるため)
+    python games/survivors/run_bc.py --version-name v7 --run-name bc_run1 \\
+        --entity-attention --episodes 100 --epochs 30
 
 出力:
     runs/survivors/<version-name>/bc/<run-name>/
@@ -33,6 +36,8 @@ if str(_TRAINING_DIR) not in sys.path:
     sys.path.insert(0, str(_TRAINING_DIR))
 
 import numpy as np
+
+from games.survivors.survivors_weapon_curriculum import BC_WEAPON_PRESET
 
 try:
     from sb3_contrib import RecurrentPPO
@@ -111,7 +116,6 @@ def _parse_args() -> argparse.Namespace:
             "例: games/survivors/bc_schedule_default.json"
         ),
     )
-
     if pre_args.config:
         from common.config import load_yaml_config, apply_yaml_defaults
         apply_yaml_defaults(p, load_yaml_config(pre_args.config))
@@ -181,6 +185,13 @@ def main() -> None:
     # PPO モデル作成（BC 用: ハイパーパラメータは最低限, 構造のみが重要）
     model = _make_model(args, env)
     print(f"[INFO] モデル作成完了 (device={model.device})")
+
+    # BC 専用 preset を UE5 に送信（weapon_phase 引数不要）
+    try:
+        env.env_method("set_params", **BC_WEAPON_PRESET)
+        print("[BC] BC 専用 weapon preset（全基本武器+パッシブ+進化）を UE5 に送信しました")
+    except Exception as exc:
+        print(f"[BC] BC weapon preset 送信に失敗（続行）: {exc}")
 
     # BC パラメータスケジュール読み込み
     params_schedule: list[tuple[int, dict]] | None = None
@@ -338,6 +349,9 @@ def _make_model(args, env):
     algo_class = RecurrentPPO if args.recurrent else PPO
     default_policy = "MlpLstmPolicy" if args.recurrent else "MlpPolicy"
 
+    # BC は固定 net_arch [512, 256] を使用（BC_WEAPON_PRESET に合わせた BC 専用アーキテクチャ）
+    _phase_net_arch = [512, 256]
+
     # BC 用の最低限 PPO kwargs（アーキテクチャのみ重要）
     ppo_kwargs: dict = {"verbose": 0, "device": args.device}
 
@@ -350,7 +364,7 @@ def _make_model(args, env):
         policy_kwargs: dict = dict(
             features_extractor_class=SurvivorsEntityAttentionExtractor,
             features_extractor_kwargs=dict(features_dim=128, offsets=offsets, obs_schema=obs_schema),
-            net_arch=[64, 64],
+            net_arch=[512, 256],  # BC/EUREKA/train で architecture を統一
         )
         if args.recurrent:
             policy_kwargs["lstm_hidden_size"] = args.lstm_hidden_size
@@ -362,6 +376,9 @@ def _make_model(args, env):
             "lstm_hidden_size": args.lstm_hidden_size,
             "n_lstm_layers":    args.n_lstm_layers,
         }
+    else:
+        ppo_kwargs["policy_kwargs"] = {"net_arch": _phase_net_arch}
+        print(f"[INFO] net_arch={_phase_net_arch} (BC 専用固定 net_arch)")
 
     return algo_class(default_policy, env, **ppo_kwargs)
 

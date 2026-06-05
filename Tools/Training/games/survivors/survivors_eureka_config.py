@@ -131,76 +131,112 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         )
 
     def _prompt_section_obs_index(self) -> str:
+        # 708次元 obs スキーマ（PR2 全武器対応版）に合わせた説明を生成する。
+        # セグメント開始オフセットは _offsets dict（実 C++ schema から取得）を優先し、
+        # 取得できない場合は PR2 schema の既定値にフォールバックする。
         o = self._offsets
         max_player_hp = self._player_constant("MaxPlayerHP", 70.0)
         item_reward = self._reward_constant("ItemReward", 1.0)
         max_player_level = self._observation_constant("MaxPlayerLevel", 100)
-        hp_i       = o.get("player_hp", 12)
-        wpn_i      = o.get("weapon_slots", 13)
-        ecnt_i     = o.get("enemy_count", 19)
-        spawn_i    = o.get("spawn_timer", 20)
-        xp_i       = o.get("xp_progress", 21)
-        item_i     = o.get("gem_rel_pos", 23)
-        er_i       = o.get("enemy_rel_pos", item_i + 40)
-        ev_i       = o.get("enemy_vel", er_i + 40)
-        et_i       = o.get("enemy_type", ev_i + 40)
-        ehp_i      = o.get("enemy_hp", et_i + 20)
-        max_enemy  = (ev_i - er_i) // 2
-        num_items  = (er_i - item_i) // 2
-        end_i      = ehp_i + max_enemy
-        end_i      = o.get("enemy_nearest_dist_16dir", end_i)
+
+        # --- PR2 schema オフセット（デフォルト値は schema 計算値） ---
+        hp_i        = o.get("player_hp",               12)
+        wpn_i       = o.get("weapon_slots",             23)   # 18 dims: (type,level,cd)×6
+        psvslot_i   = o.get("passive_slots",            41)   # 12 dims: (type,level)×6
+        ecnt_i      = o.get("enemy_count",              53)
+        elapsed_i   = o.get("elapsed_time",             54)
+        xp_i        = o.get("xp_progress",              55)
+        plvl_i      = o.get("player_level",             56)
+        red_gem_i   = o.get("red_gem_rel_pos",          58)   # 20 dims: ×10 gems
+        grn_gem_i   = o.get("green_gem_rel_pos",        78)   # 24 dims: ×12 gems
+        blu_gem_i   = o.get("blue_gem_rel_pos",        102)   # 24 dims: ×12 gems
+        gem_pr_i    = o.get("gem_pickup_radius",       126)   # 1 dim
+        er_i        = o.get("enemy_rel_pos",           127)   # 64 dims: ×32 enemies
+        ev_i        = o.get("enemy_vel",               191)   # 64 dims
+        et_i        = o.get("enemy_type",              255)   # 32 dims
+        ehp_i       = o.get("enemy_hp",               287)   # 32 dims
+        efz_i       = o.get("enemy_frozen",            319)   # 32 dims
+        end_i       = o.get("enemy_nearest_dist_16dir", 351)
+        end_dn_i    = o.get("enemy_density_near_16dir", 367)
+        end_dm_i    = o.get("enemy_density_mid_16dir",  383)
+        gem_da_i    = o.get("gem_density_all_16dir",   399)   # 48 dims
+        gem_drg_i   = o.get("red_green_gem_density_16dir", 447)  # 48 dims
+        proj_i      = o.get("projectiles",             495)   # 160 dims: (dx,dy,r,vx,vy)×32
+        fp_i        = o.get("floor_pickups",           655)   # 24 dims
+        sp_i        = o.get("special_pickups",         679)   # 9 dims
+        dest_i      = o.get("destructibles",           688)   # 20 dims
+
+        max_enemy   = (ev_i - er_i) // 2   # = 32
 
         return (
-            f"  obs[0:2]   = player_pos (x,y) / FieldHalfSize(15m) → [-1, 1]\n"
-            f"  obs[2:4]   = player_vel (vx,vy)\n"
-            f"  obs[4:12]  = wall_rays 8方向 (0~1, 1=遠い・0=壁が近い)\n"
-            f"  obs[{hp_i}]     = player_hp / MaxPlayerHP={max_player_hp} (0~1)\n"
-            f"  obs[{wpn_i}:{wpn_i+6}] = weapon_slots × 3: (type_norm, level_norm) 各 [0,1]\n"
-            f"             Phase1: obs[{wpn_i}]=0.125(Aura), obs[{wpn_i+1}]=0.125(Lv1), 他は0\n"
-            f"  obs[{ecnt_i}]    = 敵数 / {max_enemy}\n"
-            f"  obs[{spawn_i}]    = スポーンタイマー (0~1)\n"
-            f"  obs[{xp_i}]    = xp_progress (0~1): アイテム取得で増加。レベルアップ時に 0 にリセット\n"
-            f"             XPRequiredForLevel は Source of Truth のC++ snippetを参照すること\n"
-            f"  obs[{o.get('player_level', xp_i+1)}]    = player_level (0~1 = level/{max_player_level})\n"
-            f"  ⚠ Garlic半径・ダメージ・hit interval は GarlicTable 由来。手書き線形式を仮定しないこと\n"
+            f"**obs 合計: 708 次元（PR2 全武器・パッシブ対応スキーマ）**\n"
             f"\n"
-            f"**⚠ Phase1 固定値（reward_fn で参照しないこと）**\n"
-            f"  obs[{wpn_i}:{wpn_i+6}] weapon_slots: 常に [0.125, 0.125, 0, 0, 0, 0] 固定\n"
+            f"**プレイヤー状態**\n"
+            f"  obs[0:2]    = player_pos (x,y) / FieldHalfSize → [-1, 1]\n"
+            f"  obs[2:4]    = player_vel (vx,vy) / MoveSpeed\n"
+            f"  obs[4:12]   = wall_rays 8方向 (0=壁近い, 1=遠い)\n"
+            f"  obs[{hp_i}]      = player_hp / MaxPlayerHP={max_player_hp} (0~1)\n"
+            f"  obs[13]     = shield_active (0/1, Laurel シールド中=1)\n"
+            f"  obs[14]     = shield_timer_norm (残シールド時間 0~1)\n"
+            f"  obs[15]     = revival_remaining_norm (Tirajisu リバイバル残数 0~1)\n"
+            f"  obs[16]     = armor_flat_norm (Armor パッシブ合計 0~1)\n"
+            f"  obs[17]     = regen_per_sec_norm (Pummarola 回復量 0~1)\n"
+            f"  obs[18:23]  = passive_effect_summary 5次元: "
+            f"(damage_mult, cooldown_reduction, area_mult, move_speed_mult, magnet_mult) 各0~1\n"
             f"\n"
-            f"  ⚠ Gem取得検知: obs[{xp_i}] > prev_obs[{xp_i}] または base_reward >= {item_reward}\n"
-            f"    （レベルアップ直後は obs[{xp_i}] が 0 に戻るため base_reward 判定を推奨）\n"
+            f"**武器・パッシブスロット**\n"
+            f"  obs[{wpn_i}:{wpn_i+18}] = weapon_slots × 6スロット: (type_norm, level_norm, cooldown_norm) 各 [0,1]\n"
+            f"    type_norm  = EWeaponType_id / 64 (Garlic=1/64≈0.016, None=0)\n"
+            f"    level_norm = level / 8\n"
+            f"    cooldown_norm = 残クールダウン / max_cooldown\n"
+            f"    空スロット = (0, 0, 0)\n"
+            f"  obs[{psvslot_i}:{psvslot_i+12}] = passive_slots × 6スロット: (type_norm, level_norm) 各 [0,1]\n"
+            f"    type_norm = EPassiveItemType_id / 32\n"
             f"\n"
-            f"  obs[{item_i}:{item_i+2}] = 最近アイテムへの相対位置 (dx, dy) / 30m → [-1, 1]\n"
-            f"  obs[{er_i}:{er_i+2}] = 最近敵への相対位置 (dx, dy)\n"
-            f"  obs[{ev_i}:{ev_i+2}] = 最近敵の速度 (vx, vy)\n"
-            f"  obs[{et_i}]    = 最近敵の種類 (0.0=Slime遅い, 0.5=Zombie速い, 1.0=Ghost予測)\n"
-            f"  obs[{ehp_i}]    = 最近敵の HP (0~1, 0=瀕死)\n"
+            f"**ゲーム進行**\n"
+            f"  obs[{ecnt_i}]     = 敵数 / {max_enemy}\n"
+            f"  obs[{elapsed_i}]     = elapsed_time / MaxGameTime (0~1)\n"
+            f"  obs[{xp_i}]     = xp_progress (0~1): レベルアップ時 0 にリセット\n"
+            f"  obs[{plvl_i}]     = player_level / {max_player_level} (0~1)\n"
+            f"  obs[57]     = stage_id_norm (0=MadForest)\n"
             f"\n"
-            f"**複数エンティティへのアクセス（i=0が最近傍、距離昇順）**\n"
-            f"  アイテム（最大{num_items}個）: obs[{item_i}+i*2], obs[{item_i}+i*2+1] = dx,dy\n"
-            f"  敵（最大{max_enemy}体）:\n"
-            f"    obs[{er_i}+i*2], obs[{er_i}+i*2+1] = dx,dy\n"
-            f"    obs[{ev_i}+i*2], obs[{ev_i}+i*2+1] = vx,vy\n"
-            f"    obs[{et_i}+i]   = type\n"
-            f"    obs[{ehp_i}+i]   = hp/max_hp\n"
+            f"**Gem 相対位置（距離昇順、未出現スロットは 0 パディング）**\n"
+            f"  obs[{red_gem_i}:{red_gem_i+20}]  = red_gem_rel_pos: 最近傍 Red ×10 (dx,dy)/DN\n"
+            f"  obs[{grn_gem_i}:{grn_gem_i+24}]  = green_gem_rel_pos: 最近傍 Green ×12 (dx,dy)/DN\n"
+            f"  obs[{blu_gem_i}:{blu_gem_i+24}]  = blue_gem_rel_pos: 最近傍 Blue ×12 (dx,dy)/DN\n"
+            f"  obs[{gem_pr_i}]   = gem_pickup_radius / MaxGemPickupRadius (Attractorb で増加)\n"
             f"\n"
-            f"**方向別密度/最近傍距離（16方向×6セグメント、全Phaseで利用可能）**\n"
-            f"  16方向はC++の atan2 + PI シフトで計算される扇形ビン（Dir0=-X側, Dir8=+X側）\n"
-            f"  obs[{o.get('enemy_nearest_dist_16dir', end_i)}:{o.get('enemy_nearest_dist_16dir', end_i)+16}]\n"
-            f"    = enemy_nearest_dist_16dir: 各方向の最近傍敵距離 (0=危険・接触近い, 1=24m以内に敵なし)\n"
-            f"  obs[{o.get('enemy_density_near_16dir', end_i+16)}:{o.get('enemy_density_near_16dir', end_i+16)+16}]\n"
-            f"    = enemy_density_near_16dir: 0〜6m の距離重み付き敵密度 (0=空, 1=高密度)\n"
-            f"  obs[{o.get('enemy_density_mid_16dir', end_i+32)}:{o.get('enemy_density_mid_16dir', end_i+32)+16}]\n"
-            f"    = enemy_density_mid_16dir: 6〜14m の距離重み付き敵密度 (0=空, 1=高密度)\n"
-            f"  obs[{o.get('gem_nearest_dist_16dir', end_i+48)}:{o.get('gem_nearest_dist_16dir', end_i+48)+16}]\n"
-            f"    = gem_nearest_dist_16dir: 各方向の最近傍Gem距離 (0=近くにGem, 1=24m以内にGemなし)\n"
-            f"  obs[{o.get('gem_density_near_16dir', end_i+64)}:{o.get('gem_density_near_16dir', end_i+64)+16}]\n"
-            f"    = gem_density_near_16dir: 0〜6m の距離重み付きGem密度 (0=空, 1=高密度)\n"
-            f"  obs[{o.get('gem_density_mid_16dir', end_i+80)}:{o.get('gem_density_mid_16dir', end_i+80)+16}]\n"
-            f"    = gem_density_mid_16dir: 6〜14m の距離重み付きGem密度 (0=空, 1=高密度)\n"
-            f"  ⚠ Phase6以降の包囲脱出・壁際回避で特に重要。\n"
-            f"     enemy_nearest_dist が低い方向=危険、高い方向=隙間。\n"
-            f"     低PhaseではGem方向への過度な誘導を避けること。"
+            f"**敵情報（i=0 が最近傍、最大{max_enemy}体、未出現スロットは 0 パディング）**\n"
+            f"  obs[{er_i}+i*2 : {er_i}+i*2+2] = enemy_rel_pos: (dx,dy)/DN\n"
+            f"  obs[{ev_i}+i*2 : {ev_i}+i*2+2] = enemy_vel: (vx,vy)/MoveSpeed\n"
+            f"  obs[{et_i}+i]    = enemy_type (0~1)\n"
+            f"  obs[{ehp_i}+i]   = enemy_hp (0~1, 0=瀕死)\n"
+            f"  obs[{efz_i}+i]   = enemy_frozen (0/1, Orologion フリーズ中=1)\n"
+            f"\n"
+            f"**方向別密度/最近傍距離（16方向）**\n"
+            f"  obs[{end_i}:{end_i+16}]   = enemy_nearest_dist_16dir (0=危険, 1=安全)\n"
+            f"  obs[{end_dn_i}:{end_dn_i+16}]  = enemy_density_near_16dir (0~6m密度)\n"
+            f"  obs[{end_dm_i}:{end_dm_i+16}]  = enemy_density_mid_16dir (6~14m密度)\n"
+            f"  obs[{gem_da_i}:{gem_da_i+48}]   = gem_density_all_16dir (全Gem ×3密度特徴量)\n"
+            f"  obs[{gem_drg_i}:{gem_drg_i+48}]  = red_green_gem_density_16dir (Red+Green ×3)\n"
+            f"\n"
+            f"**プロジェクタイル（武器弾・GroundZone 混在、Level高い順→距離近い順）**\n"
+            f"  obs[{proj_i}:{proj_i+160}] = projectiles ×32: (dx,dy,radius_norm,vx_norm,vy_norm) 各5次元\n"
+            f"    未使用スロット = (0,0,0,0,0)\n"
+            f"\n"
+            f"**フロアアイテム・特殊アイテム・破壊物**\n"
+            f"  obs[{fp_i}:{fp_i+24}]   = floor_pickups ×8: (dx,dy,type_norm) 各3次元\n"
+            f"  obs[{sp_i}:{sp_i+9}]    = special_pickups ×3: (dx,dy,type_norm)\n"
+            f"  obs[{dest_i}:{dest_i+20}]  = destructibles ×10: (dx,dy)\n"
+            f"\n"
+            f"**Gem 取得検知**\n"
+            f"  obs[{xp_i}] > prev_obs[{xp_i}] または base_reward >= {item_reward}\n"
+            f"  （レベルアップ直後は obs[{xp_i}] が 0 に戻るため base_reward 判定を推奨）\n"
+            f"\n"
+            f"**⚠ 注意事項**\n"
+            f"  weapon_slots の type_norm は武器フェーズにより変化する（W0: Garlic のみ、W6: 全武器）\n"
+            f"  reward_fn は特定武器の固定値を仮定しないこと（obs スキーマは永続固定だが武器構成は可変）\n"
+            f"  Garlic等の武器パラメータは Source of Truth のC++ snippetを参照すること"
         )
 
     def _prompt_section_fixed_rewards(self) -> str:
@@ -245,7 +281,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"\n"
             f"- 敵接近ペナルティは [-0.05, 0.0] 程度まで\n"
             f"- アイテム接近ボーナスは 1ステップあたり [-0.03, 0.03] 程度まで（アイテム10個に対して設計）\n"
-            f"  距離計算例: dist_m = np.sqrt(obs[{self._offsets.get('gem_rel_pos', 23)}]**2 + obs[{self._offsets.get('gem_rel_pos', 23)+1}]**2) * 30\n"
+            f"  Gem 距離計算は obs schema の segment offset（red_gem_rel_pos 等）を Source of Truth から取得して使うこと\n"
             f"- Gem 回収は待機による偶然取得ではなく、最近 Gem への距離短縮と取得後の次 Gem 追従を明示的に評価すること\n"
             f"- 敵が多い場合は、Gem 方向へ直進するだけでなく、敵密度が低い方向から回り込んで Gem に近づく行動を評価すること\n"
             f"- item_kill_score = 0 は「生存のみ」。reward_fn は item_kill_score を上げることを目標とすること\n"
@@ -398,19 +434,27 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"- episode_length_min / max: 最短・最長エピソード長"
         )
 
-    def make_model(self, env, device: str = "auto"):
+    def make_model(self, env, device: str = "auto", weapon_phase: str = "W0"):
+        """weapon_phase に対応した net_arch でモデルを生成する。"""
         from stable_baselines3 import PPO
         from common.utils import _linear_schedule
         from games.survivors.survivors_entity_attention_extractor import SurvivorsEntityAttentionExtractor
+        from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
 
+        phase_def = WEAPON_PHASES.get(weapon_phase, {})
+        net_arch = phase_def.get("net_arch", [512, 256])  # デフォルト [512, 256]
+
+        _obs_segments = (self._obs_schema or {}).get("segments", [])
         policy_kwargs = dict(
             features_extractor_class=SurvivorsEntityAttentionExtractor,
             features_extractor_kwargs=dict(
                 features_dim=128,
                 offsets=self._offsets,
+                obs_schema=_obs_segments,
             ),
-            net_arch=[64, 64],
+            net_arch=net_arch,
         )
+        print(f"[INFO] make_model: weapon_phase={weapon_phase}, net_arch={net_arch}")
         return PPO(
             "MlpPolicy", env,
             policy_kwargs=policy_kwargs,

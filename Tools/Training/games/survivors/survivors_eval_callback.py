@@ -293,6 +293,11 @@ class SurvivorsEvalCallback(BaseEvalCallback):
 
         VecNormalize と shaping は params_provider の有無にかかわらず常に同期する。
         params の同期は params_provider がある場合はそれを使い、ない場合は _sync_env_params() を呼ぶ。
+
+        params_provider がある場合（curriculum-spalf 使用時）:
+            training env から現在の全 params（weapon params を含む）を取得し、
+            params_provider() の difficulty params で上書きして merge する。
+            これにより weapon params が eval env に届かない問題を解消する。
         """
         if self.eval_env is not None:
             # VecNormalize と shaping は常に同期する
@@ -301,11 +306,26 @@ class SurvivorsEvalCallback(BaseEvalCallback):
 
             # params のみ分岐
             if self.params_provider is not None:
-                params = self.params_provider()  # 内部 key (min_enemies など)
-                # ParamApplier._KEY_MAP で UE5 API key に変換してから送る
+                # Step 1: training env から現在の全 params（weapon params 含む）を取得
+                merged_params: dict = {}
+                try:
+                    params_list = self.training_env.env_method("get_params")
+                    params_list = [p for p in params_list if p]
+                    if params_list:
+                        merged_params = dict(params_list[0])
+                except Exception as exc:
+                    print(f"[Eval] training env から全 params 取得に失敗（weapon params なしで続行）: {exc}")
+
+                # Step 2: params_provider() の difficulty params で上書きして merge
+                difficulty_params = self.params_provider()  # 内部 key (min_enemies など)
                 from games.survivors.param_applier import ParamApplier
-                ue5_params = {ParamApplier._KEY_MAP.get(k, k): v for k, v in params.items()}
-                self.eval_env.env_method("set_params", **ue5_params)
+                ue5_difficulty_params = {
+                    ParamApplier._KEY_MAP.get(k, k): v for k, v in difficulty_params.items()
+                }
+                merged_params.update(ue5_difficulty_params)
+
+                # Step 3: merge した params を eval env に送信
+                self.eval_env.env_method("set_params", **merged_params)
             else:
                 self._sync_env_params()
 

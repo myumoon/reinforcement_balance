@@ -18,6 +18,7 @@ import importlib
 import importlib.util
 import json
 import hashlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -41,6 +42,7 @@ from base.base_ue5_env import UE5ConnectionError
 from common.utils import _linear_schedule
 from common.wandb_logger import WandbLogger
 from curriculum_callback import CurriculumCallback
+from games.survivors.weapon_curriculum_callback import WeaponCurriculumCallback as _WeaponCurriculumCallback
 
 try:
     import wandb
@@ -669,9 +671,14 @@ def _create_model(args, env, algo_class, default_policy: str, ppo_kwargs: dict):
         else:
             from games.coin.coin_entity_attention_extractor import CoinEntityAttentionExtractor
             extractor_class = CoinEntityAttentionExtractor
-        # survivors は 708 次元 obs に対応するため [512, 256] に拡大
+        # survivors は net_arch をフェーズ定義から読み込む（未定義時は [512, 256] にフォールバック）
         # coin は旧スキーマのまま [64, 64] を維持
-        survivors_net_arch = [512, 256] if args.game == "survivors" else [64, 64]
+        if args.game == "survivors":
+            from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
+            _weapon_phase_key = getattr(args, "weapon_phase", "W0")
+            survivors_net_arch = WEAPON_PHASES.get(_weapon_phase_key, {}).get("net_arch", [512, 256])
+        else:
+            survivors_net_arch = [64, 64]
         policy_kwargs = dict(
             features_extractor_class=extractor_class,
             features_extractor_kwargs=dict(features_dim=128, offsets=offsets, obs_schema=obs_schema),
@@ -851,6 +858,8 @@ def parse_args() -> argparse.Namespace:
                    help="BC 済みモデルを新規 PPO の初期重みとしてロード（--resume とは排他）")
     p.add_argument("--init-vecnormalize", type=Path, default=None,
                    help="--init-model と組み合わせて BC 時の VecNormalize 統計をロード")
+    p.add_argument("--weapon-phase", default="W0",
+                   help="武器カリキュラムのフェーズキー（W0〜W6 または W0_to_W1 等, default: W0）")
     p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
     p.add_argument("--wandb-project", default="rl-balance", help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None, help="W&B ラン名（未指定時は自動生成）")
@@ -1287,7 +1296,28 @@ def main() -> None:
             )
     print(f"[INFO] SB3 model device: {model.device}")
 
+    # 武器カリキュラムフェーズの検証（survivors かつ非 dry-run 時のみ）
+    # 実際のパラメータ送信は WeaponCurriculumCallback._on_training_start で行う。
+    # 遷移フェーズ（weapon_pool_mode="weighted"）では訓練中に定期的に weapon_weights を更新するため、
+    # コールバックで管理する。固定フェーズでも _on_training_start で全 env に初回送信を行う。
+    _weapon_phase_key = getattr(args, "weapon_phase", "W0")
+    if args.game == "survivors" and not args.dry_run:
+        from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES, get_params_for_phase
+        if _weapon_phase_key not in WEAPON_PHASES:
+            raise ValueError(
+                f"--weapon-phase に未知のフェーズキーが指定されました: {_weapon_phase_key!r}\n"
+                f"有効なキー: {list(WEAPON_PHASES.keys())}"
+            )
+        _weapon_phase = WEAPON_PHASES[_weapon_phase_key]
+        print(
+            f"[INFO] 武器カリキュラム: phase={_weapon_phase_key}, "
+            f"weapon_pool_mode={_weapon_phase.get('weapon_pool_mode')}, "
+            f"enable_passives={_weapon_phase.get('enable_passives')}, "
+            f"enable_evolutions={_weapon_phase.get('enable_evolutions')}"
+        )
+
     callbacks = []
+    weapon_curriculum_cb = None
     curriculum_cb = None
     curriculum_completion_cb = None
     resume_episode_count = 0
@@ -1296,6 +1326,25 @@ def main() -> None:
     survivors_metrics_callback = None
     survivors_curriculum_metrics_callback = None
     _survivors_eval_registered = False
+
+    # WeaponCurriculumCallback: 初回送信は _on_training_start で行い、
+    # 遷移フェーズ（weighted）では update_freq ごとに weapon_weights を全 env に再送信する。
+    # branch resume 時: source_dir/work を checkpoint_dir として渡すことで、
+    # チェックポイントと同じ場所に保存された weapon_curriculum_status.json から
+    # phase_start_step を復元できる。
+    if args.game == "survivors" and not args.dry_run:
+        # branch resume 時は source_dir が元 run ディレクトリを指すため work サブディレクトリを使用する。
+        # 同一 run resume / 新規 run 時は source_dir が None のため checkpoint_dir は空文字列とする。
+        _weapon_ckpt_dir = str(source_dir / "work") if (is_branch and source_dir is not None) else ""
+        weapon_curriculum_cb = _WeaponCurriculumCallback(
+            phase_key=_weapon_phase_key,
+            update_freq=args.checkpoint_freq,
+            output_dir=str(work_dir),
+            checkpoint_dir=_weapon_ckpt_dir,
+        )
+        callbacks.append(weapon_curriculum_cb)
+        print(f"[INFO] WeaponCurriculumCallback 有効 (phase={_weapon_phase_key}, update_freq={args.checkpoint_freq:,})")
+
     if args.game == "survivors" and not args.dry_run:
         from games.survivors.survivors_training_metrics import (
             ActionDistributionCallback,

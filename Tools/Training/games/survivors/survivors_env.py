@@ -203,14 +203,22 @@ class SurvivorsEnv(BaseUE5Env):
         """カリキュラム用パラメータを /params エンドポイントで更新する。
 
         Args:
-            MinActiveEnemies   (int):   毎ステップ即時維持する最小敵数
-            MaxActiveEnemies   (int):   同時存在できる最大敵数
-            EnemySpeedMult     (float): 敵速度の倍率
-            SpawnRateMult      (float): スポーンレートの倍率（通常スポーン部分）
-            MaxEnemyTypeId     (int):   スポーン可能な敵 TypeId の上限 (0-10)
-            EnemyHPScale       (float): 敵HP倍率 (0.1-10.0, TimeScaling と乗算合成)
-            EnemyDamageScale   (float): 敵接触ダメージ倍率 (0.1-10.0, TimeScaling と乗算合成)
-            TimeScalingEnabled (bool):  時間経過による HP/ダメージ増加の有効化
+            MinActiveEnemies    (int):   毎ステップ即時維持する最小敵数
+            MaxActiveEnemies    (int):   同時存在できる最大敵数
+            EnemySpeedMult      (float): 敵速度の倍率
+            SpawnRateMult       (float): スポーンレートの倍率（通常スポーン部分）
+            MaxEnemyTypeId      (int):   スポーン可能な敵 TypeId の上限 (0-10)
+            EnemyHPScale        (float): 敵HP倍率 (0.1-10.0, TimeScaling と乗算合成)
+            EnemyDamageScale    (float): 敵接触ダメージ倍率 (0.1-10.0, TimeScaling と乗算合成)
+            TimeScalingEnabled  (bool):  時間経過による HP/ダメージ増加の有効化
+            weapon_pool_mode    (str):   武器プールモード（"garlic_only" / "fixed_subset" /
+                                         "weighted" / "all_base" / "all_with_evolutions"）
+            allowed_weapon_types (list[int]): 使用可能な武器タイプのリスト（EWeaponType integer 値）
+            enable_passives     (bool):  パッシブアイテムの有効化
+            enable_evolutions   (bool):  進化武器の有効化
+            replay_old_phase_fraction (float): 旧フェーズリプレイの割合 (0.0-1.0)
+            starting_weapon_mode (str):  開始武器選択モード（"pool_random" など）
+            weapon_weights      (dict):  武器タイプ int → 重み float の辞書（"weighted" モード用）
         Returns:
             True if successful
         """

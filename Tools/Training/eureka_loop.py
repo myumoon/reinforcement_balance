@@ -28,6 +28,9 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
+from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
+from games.survivors.weapon_curriculum_callback import WeaponCurriculumCallback
+
 try:
     import wandb
     _WANDB_AVAILABLE = True
@@ -73,6 +76,20 @@ def _parse_args() -> argparse.Namespace:
                    help="保存ディレクトリ名（未指定時はタイムスタンプ自動生成）")
     p.add_argument("--resume", metavar="RUN_NAME", default=None,
                    help="前回中断したランを再開する（state.json が必要）。--run-name と排他")
+    p.add_argument(
+        "--init-model",
+        type=Path,
+        default=None,
+        metavar="MODEL_ZIP",
+        help="BC 済み初期ポリシーの .zip パス。指定すると各イテレーションでこのポリシーから訓練を開始する。",
+    )
+    p.add_argument(
+        "--init-vecnormalize",
+        type=Path,
+        default=None,
+        metavar="VECNORM_PKL",
+        help="初期 VecNormalize 統計 .pkl パス。--init-model と併用する。",
+    )
     p.add_argument("--llm", choices=["anthropic", "openai"], default="anthropic",
                    help="LLMバックエンド（default: anthropic）")
     p.add_argument("--model", default=None,
@@ -110,6 +127,12 @@ def _parse_args() -> argparse.Namespace:
                    help="Stage 昇格の active_score 閾値 (default: 5.0, 目安: 撃破数×2.0+収集数×3.0)")
     p.add_argument("--curriculum-alive-reward", type=float, default=0.001,
                    help="生存ボーナスの1物理ステップあたりの値 (default: 0.001, UE5側と合わせる)")
+    p.add_argument(
+        "--weapon-phase",
+        default="W0",
+        choices=list(WEAPON_PHASES.keys()),
+        help="武器カリキュラムフェーズ (default: W0). survivors game のみ有効。",
+    )
     p.add_argument("--initial-observation", default=None,
                    help="1回目イテレーションでLLMに伝える訓練課題テキスト（直接指定）")
     p.add_argument("--initial-observation-file", type=Path, default=None,
@@ -126,6 +149,8 @@ def _parse_args() -> argparse.Namespace:
     args = p.parse_args()
     if args.game_config is None:
         p.error("--game-config を指定してください（CLI または --config の YAML 内）")
+    if getattr(args, "init_vecnormalize", None) is not None and getattr(args, "init_model", None) is None:
+        p.error("--init-vecnormalize は --init-model と併用してください")
     return args
 
 
@@ -856,8 +881,62 @@ def main() -> None:
                 _get_raw_env(env)._reward_fn = None
 
             # --- PPO 訓練 ---
-            model = game_config.make_model(env, device=args.device)
+            _weapon_phase_key = getattr(args, "weapon_phase", "W0")
+            # weapon_phase を受け付けるゲームconfig（survivors 等）のみ渡す
+            import inspect as _inspect
+            _make_model_sig = _inspect.signature(game_config.make_model)
+            if "weapon_phase" in _make_model_sig.parameters:
+                model = game_config.make_model(env, device=args.device, weapon_phase=_weapon_phase_key)
+            else:
+                model = game_config.make_model(env, device=args.device)
             print(f"[INFO] SB3 model device: {model.device}")
+
+            # --init-model が指定されている場合、BC 済みポリシーの重みをロード
+            init_model_path = getattr(args, "init_model", None)
+            init_vecnorm_path = getattr(args, "init_vecnormalize", None)
+            if init_model_path is not None and Path(init_model_path).exists():
+                try:
+                    # policy の重みのみロード（model 自体は既存 env/device で作成済み）
+                    loaded = type(model).load(
+                        str(init_model_path),
+                        env=env,
+                        device=args.device,
+                    )
+                    model.policy.load_state_dict(loaded.policy.state_dict())
+                    print(f"[INFO] BC 済みポリシーをロードしました: {init_model_path}")
+
+                    # VecNormalize 統計もロード
+                    if init_vecnorm_path is not None and Path(init_vecnorm_path).exists():
+                        from stable_baselines3.common.vec_env import VecNormalize as _VN_init
+                        vec_norm_init = env if isinstance(env, _VN_init) else None
+                        if vec_norm_init is None:
+                            _inner = env
+                            while _inner is not None:
+                                if isinstance(_inner, _VN_init):
+                                    vec_norm_init = _inner
+                                    break
+                                _inner = getattr(_inner, "venv", None)
+                        if vec_norm_init is not None:
+                            loaded_vn = _VN_init.load(str(init_vecnorm_path), env)
+                            vec_norm_init.obs_rms = loaded_vn.obs_rms
+                            vec_norm_init.ret_rms = loaded_vn.ret_rms
+                            vec_norm_init.clip_obs = loaded_vn.clip_obs
+                            vec_norm_init.clip_reward = loaded_vn.clip_reward
+                            vec_norm_init.norm_obs = loaded_vn.norm_obs
+                            vec_norm_init.norm_reward = loaded_vn.norm_reward
+                            print(f"[INFO] VecNormalize 統計をロードしました: {init_vecnorm_path}")
+                        else:
+                            print("[WARN] VecNormalize ラッパーが見つからないため統計ロードをスキップ")
+                except Exception as exc:
+                    # fatal: BC 初期化失敗は続行しない
+                    raise RuntimeError(
+                        f"--init-model のロードに失敗しました: {exc}\n"
+                        f"BC モデルと EUREKA モデルの policy architecture が一致していることを確認してください。\n"
+                        f"特に net_arch, EntityAttention の有無が同じである必要があります。"
+                    ) from exc
+            elif init_model_path is not None:
+                raise FileNotFoundError(f"--init-model で指定されたファイルが存在しません: {init_model_path}")
+
             metrics_cb = _EurekaMetricsCallback(
                 compute_metric=game_config.compute_primary_metric,
                 eval_freq=args.eval_freq,
@@ -887,6 +966,31 @@ def main() -> None:
                           f"frame_skip={args.frame_skip}, alive_reward={args.curriculum_alive_reward})")
                 else:
                     print("[WARN] --curriculum はこの game_config では未対応です。無視します。")
+
+            # weapon_phase の適用（survivors game かつ --weapon-phase 指定時）
+            _weapon_phase_key = getattr(args, "weapon_phase", "W0")
+            if args.game == "survivors" and _weapon_phase_key in WEAPON_PHASES:
+                from games.survivors.survivors_weapon_curriculum import get_params_for_phase as _get_wparams
+                # 初回 /params 送信（WeaponCurriculumCallback の最初の更新前に確実に適用）
+                _initial_weapon_params = _get_wparams(_weapon_phase_key, global_step=0)
+                try:
+                    env.env_method("set_params", **_initial_weapon_params)
+                    print(f"[INFO] weapon_phase={_weapon_phase_key} 初回 set_params 送信完了")
+                except Exception as exc:
+                    print(f"[WARN] weapon phase 初回 set_params 失敗: {exc}")
+
+                _weapon_phase_cb = WeaponCurriculumCallback(
+                    phase_key=_weapon_phase_key,
+                    update_freq=10_000,
+                    output_dir=str(iter_dir),
+                    checkpoint_dir="",
+                )
+                loop_callbacks.append(_weapon_phase_cb)
+                print(
+                    f"[INFO] WeaponCurriculumCallback 有効 "
+                    f"(phase={_weapon_phase_key}, update_freq=10000)"
+                )
+
             model.learn(total_timesteps=training_steps, callback=loop_callbacks,
                         reset_num_timesteps=True)
 

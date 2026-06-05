@@ -50,9 +50,12 @@ def _extract_garlic_table(text: str) -> list[dict[str, float]]:
     if not table:
         return []
     rows = []
+    # C++の形式: { FDamage(5.f), 1.30f, FSimRadius(25.f) }
+    # または旧形式: { 5.f, 1.30f, 25.f }
+    # 数値をラッパー関数（FDamage, FSimRadius 等）の有無に関わらず抽出する。
+    _num = r"(?:[A-Za-z_]\w*\s*\(\s*)?([0-9]+(?:\.[0-9]*)?)f?\s*\)?"
     for damage, interval, radius in re.findall(
-        r"\{\s*([0-9]+(?:\.[0-9]*)?)f?\s*,\s*([0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
-        r"([0-9]+(?:\.[0-9]*)?)f?\s*\}",
+        rf"\{{\s*{_num}\s*,\s*{_num}\s*,\s*{_num}\s*\}}",
         table,
     ):
         rows.append({
