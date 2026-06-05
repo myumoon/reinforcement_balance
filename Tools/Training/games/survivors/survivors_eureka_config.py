@@ -281,7 +281,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"\n"
             f"- 敵接近ペナルティは [-0.05, 0.0] 程度まで\n"
             f"- アイテム接近ボーナスは 1ステップあたり [-0.03, 0.03] 程度まで（アイテム10個に対して設計）\n"
-            f"  距離計算例: dist_m = np.sqrt(obs[{self._offsets.get('gem_rel_pos', 23)}]**2 + obs[{self._offsets.get('gem_rel_pos', 23)+1}]**2) * 30\n"
+            f"  Gem 距離計算は obs schema の segment offset（red_gem_rel_pos 等）を Source of Truth から取得して使うこと\n"
             f"- Gem 回収は待機による偶然取得ではなく、最近 Gem への距離短縮と取得後の次 Gem 追従を明示的に評価すること\n"
             f"- 敵が多い場合は、Gem 方向へ直進するだけでなく、敵密度が低い方向から回り込んで Gem に近づく行動を評価すること\n"
             f"- item_kill_score = 0 は「生存のみ」。reward_fn は item_kill_score を上げることを目標とすること\n"
