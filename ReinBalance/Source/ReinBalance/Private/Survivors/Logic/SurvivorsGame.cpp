@@ -147,7 +147,9 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 			(WeaponPoolMode == TEXT("fixed_subset") || WeaponPoolMode == TEXT("weighted"))
 			&& AllowedWeaponTypes.Num() > 0;
 
-		if (StartingWeaponMode == TEXT("random"))
+		// "pool_random" は "random" と同等に扱う（Python W3/W4/W5/W6 で使用）
+		if (StartingWeaponMode.Equals(TEXT("random"), ESearchCase::IgnoreCase) ||
+			StartingWeaponMode.Equals(TEXT("pool_random"), ESearchCase::IgnoreCase))
 		{
 			// weapon_pool_mode に従ったプールからランダム選択
 			if (WeaponPoolMode == TEXT("garlic_only"))

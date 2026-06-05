@@ -97,8 +97,10 @@ void USurvivorsPlayerComponent::OnLevelUp(int32 NextLevel)
 {
 	if (!Game) return;
 
-	// bEnableEvolutions / bEnablePassives が無効な場合は W0 フェーズ互換（Garlic-only）
-	if (!Game->bEnablePassives && !Game->bEnableEvolutions)
+	// WeaponPoolMode が "garlic_only" の場合は W0 フェーズ互換（Garlic-only）
+	// W1〜W3 は enable_passives=false / enable_evolutions=false のまま複数武器を扱うため、
+	// bEnablePassives / bEnableEvolutions の組み合わせではなく WeaponPoolMode で判断する。
+	if (Game->WeaponPoolMode.Equals(TEXT("garlic_only"), ESearchCase::IgnoreCase))
 	{
 		// 旧動作: スロット0の武器を単純レベルアップ
 		if (Game->WeaponSlots[0].Type != EWeaponType::None)
@@ -391,7 +393,10 @@ void USurvivorsPlayerComponent::EvolveWeapon(int32 SlotIdx, EWeaponType EvolvedT
 		{
 			if (Game->WeaponSlots[k].Type == EWeaponType::EbonyWings)
 			{
-				Game->WeaponSlots[k] = FWeaponSlot{};  // スロットをクリア
+				// FWeaponLevel / FCooldownSeconds は explicit ctor を持つため個別代入
+				Game->WeaponSlots[k].Type     = EWeaponType::None;
+				Game->WeaponSlots[k].Level    = FWeaponLevel(0);
+				Game->WeaponSlots[k].Cooldown = FCooldownSeconds(0.f);
 				if (Game->WeaponComponent)
 				{
 					Game->WeaponComponent->UnequipWeapon(k);

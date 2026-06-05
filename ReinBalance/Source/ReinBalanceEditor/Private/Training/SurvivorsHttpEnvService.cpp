@@ -216,6 +216,26 @@ private:
 				Game->AllowedWeaponTypes.Add(1);  // Garlic fallback
 		}
 
+		// weapon_weights: weighted モード時に重み0以下の武器を AllowedWeaponTypes から除外する
+		// Python 側が weights={id: weight, ...} を送る; 重み0の武器は除外する
+		const TSharedPtr<FJsonObject>* WeaponWeightsObj;
+		if (JsonObj->TryGetObjectField(TEXT("weapon_weights"), WeaponWeightsObj) && WeaponWeightsObj)
+		{
+			// 有効な武器 ID のうち重み > 0 のもののみ AllowedWeaponTypes に残す
+			Game->AllowedWeaponTypes.Empty();
+			for (const auto& Pair : (*WeaponWeightsObj)->Values)
+			{
+				const int32 Id = FCString::Atoi(*Pair.Key);
+				const float Weight = Pair.Value.IsValid() ? static_cast<float>(Pair.Value->AsNumber()) : 0.f;
+				if (Weight > 0.f)
+					Game->AllowedWeaponTypes.Add(Id);
+			}
+
+			// weighted モードで空になった場合は Garlic にフォールバック
+			if (Game->WeaponPoolMode.Equals(TEXT("weighted")) && Game->AllowedWeaponTypes.IsEmpty())
+				Game->AllowedWeaponTypes.Add(1);  // Garlic fallback
+		}
+
 		bool bEnablePassives;
 		if (JsonObj->TryGetBoolField(TEXT("enable_passives"), bEnablePassives))
 			Game->bEnablePassives = bEnablePassives;
