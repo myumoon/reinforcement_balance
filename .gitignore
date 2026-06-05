@@ -5,6 +5,7 @@ ReinBalance/Binaries/
 ReinBalance/Intermediate/
 ReinBalance/DerivedDataCache/
 ReinBalance/Saved/
+ReinBalance/ReinBalance/
 ReinBalance/Plugins/*/Binaries/
 ReinBalance/Plugins/*/Intermediate/
 
