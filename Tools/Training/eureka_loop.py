@@ -28,6 +28,9 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
+from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
+from games.survivors.weapon_curriculum_callback import WeaponCurriculumCallback
+
 try:
     import wandb
     _WANDB_AVAILABLE = True
@@ -110,6 +113,12 @@ def _parse_args() -> argparse.Namespace:
                    help="Stage 昇格の active_score 閾値 (default: 5.0, 目安: 撃破数×2.0+収集数×3.0)")
     p.add_argument("--curriculum-alive-reward", type=float, default=0.001,
                    help="生存ボーナスの1物理ステップあたりの値 (default: 0.001, UE5側と合わせる)")
+    p.add_argument(
+        "--weapon-phase",
+        default="W0",
+        choices=list(WEAPON_PHASES.keys()),
+        help="武器カリキュラムフェーズ (default: W0). survivors game のみ有効。",
+    )
     p.add_argument("--initial-observation", default=None,
                    help="1回目イテレーションでLLMに伝える訓練課題テキスト（直接指定）")
     p.add_argument("--initial-observation-file", type=Path, default=None,
@@ -887,6 +896,22 @@ def main() -> None:
                           f"frame_skip={args.frame_skip}, alive_reward={args.curriculum_alive_reward})")
                 else:
                     print("[WARN] --curriculum はこの game_config では未対応です。無視します。")
+
+            # weapon_phase の適用（survivors game かつ --weapon-phase 指定時）
+            _weapon_phase_key = getattr(args, "weapon_phase", "W0")
+            if args.game == "survivors" and _weapon_phase_key in WEAPON_PHASES:
+                _weapon_phase_cb = WeaponCurriculumCallback(
+                    phase_key=_weapon_phase_key,
+                    update_freq=10_000,
+                    output_dir=str(iter_dir),
+                    checkpoint_dir="",
+                )
+                loop_callbacks.append(_weapon_phase_cb)
+                print(
+                    f"[INFO] WeaponCurriculumCallback 有効 "
+                    f"(phase={_weapon_phase_key}, update_freq=10000)"
+                )
+
             model.learn(total_timesteps=training_steps, callback=loop_callbacks,
                         reset_num_timesteps=True)
 
