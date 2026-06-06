@@ -931,22 +931,24 @@ WEAPON_PHASE_AUTO_SEQUENCE: list[str] = [
     "W0", "W0_to_W1", "W1", "W1_to_W2", "W2", "W3", "W4", "W5", "W6",
 ]
 
-_WEAPON_AUTO_STATUS_FILENAME = "weapon_phase_auto_status.json"
-
 
 class WeaponPhaseAutoStateModule(BaseStateModule):
     """武器フェーズ自動昇格の状態管理モジュール。
 
-    CurriculumStateModule の current_phase を監視し、stagnation_steps ステップ以上
-    変化しなかった場合に WEAPON_PHASE_AUTO_SEQUENCE を1段階進める。
+    固定フェーズ（W0/W1 等）では CurriculumStateModule の current_phase を監視し、
+    stagnation_steps ステップ以上変化しなかった場合に次フェーズへ進める。
+    遷移フェーズ（W0_to_W1 等）では カリキュラム状態に関わらず transition_steps
+    経過後に自動で次の固定フェーズへ移行する（補間を必ず完走させるため）。
 
     設計上の分離:
     - 本モジュールは「状態管理」のみを担う（set_params 送信は担わない）
     - カリキュラム降格は rollback_fn（外部注入）に委譲する
       - --curriculum 時: CurriculumCallback.rollback_one_phase（state + enemy params 適用）
-      - --curriculum-spalf 時: HybridCurriculumSpalfCallback.rollback_one_phase（state + SPALF更新 + params 適用）
+      - --curriculum-spalf 時: HybridCurriculumSpalfCallback.rollback_one_phase
+        （state + SPALF更新 + params 適用）
     - 武器パラメータの set_params 送信は WeaponPhaseAutoCallback（SB3コールバック側）が担う
     - on_step() が新しい武器フェーズキーを返した時点で、コールバックが set_params を呼ぶ
+    - 状態永続化は train_status_{step}_steps.json 経由のみ（ファイル直接書き込みは行わない）
     """
 
     def __init__(
@@ -954,23 +956,21 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         curriculum: "CurriculumStateModule",
         stagnation_steps: int = 500_000,
         rollback_fn: "Callable[[str], None] | None" = None,
-        status_path: "str | None" = None,
     ) -> None:
         """
         Args:
             curriculum: 停滞検出に使用する CurriculumStateModule（read-only）。
-            stagnation_steps: カリキュラムフェーズが変化しない場合に停滞とみなすステップ数。
+            stagnation_steps: 固定フェーズでカリキュラムが変化しない場合に停滞とみなすステップ数。
+                遷移フェーズでは使用されない（transition_steps を使う）。
             rollback_fn: 武器フェーズ昇格時に呼ぶカリキュラム降格関数。
                 None の場合は curriculum.rollback_one_phase を使用（--curriculum 単体向け）。
                 --curriculum-spalf では HybridCurriculumSpalfCallback.rollback_one_phase を渡すこと。
-            status_path: 状態ファイルのパス。None の場合は状態の永続化を行わない。
         """
         self._curriculum = curriculum
         self._stagnation_steps = max(stagnation_steps, 1)
         self._rollback_fn: Callable[[str], None] = (
             rollback_fn if rollback_fn is not None else curriculum.rollback_one_phase
         )
-        self._status_path = status_path
 
         self._weapon_phase_seq_idx: int = 0
         self._last_curriculum_phase: int = -1  # 初回 on_step でリセットされる
@@ -1013,40 +1013,54 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
     def on_step(self, num_timesteps: int) -> "str | None":
         """毎ステップ呼ぶ。武器フェーズが昇格した場合は新フェーズキーを返す。
 
+        - 遷移フェーズ中（W0_to_W1 等）: transition_steps 経過で次フェーズへ自動進行。
+          カリキュラム停滞判定は行わない（補間を必ず完走させるため）。
+        - 固定フェーズ中（W0/W1 等）: カリキュラム current_phase が stagnation_steps
+          ステップ変化しない場合に次フェーズへ進める。
+
         Returns:
             新しい武器フェーズキー（コールバック側が set_params を呼ぶ）、変化なければ None。
         """
+        if self.is_final_weapon_phase:
+            return None
+
+        if self.is_transition:
+            # 遷移フェーズ: transition_steps 経過で次のフェーズへ自動進行
+            WEAPON_PHASES, _ = _get_weapon_phases()
+            transition_steps = WEAPON_PHASES.get(self.current_phase_key, {}).get(
+                "transition_steps", 2_000_000
+            )
+            if self.get_transition_elapsed(num_timesteps) >= transition_steps:
+                return self._advance(num_timesteps, reason="transition_complete")
+            return None
+
+        # 固定フェーズ: カリキュラム停滞で次へ
         curr = self._curriculum.current_phase
         if curr != self._last_curriculum_phase:
-            # カリキュラムフェーズが変化 → 停滞タイマーをリセット
             self._last_curriculum_phase = curr
             self._stagnation_start_step = num_timesteps
             return None
-
-        if (not self.is_final_weapon_phase
-                and num_timesteps - self._stagnation_start_step >= self._stagnation_steps):
-            return self._advance(num_timesteps)
+        if num_timesteps - self._stagnation_start_step >= self._stagnation_steps:
+            return self._advance(num_timesteps, reason="curriculum_stagnation")
         return None
 
-    def _advance(self, num_timesteps: int) -> str:
+    def _advance(self, num_timesteps: int, reason: str = "") -> str:
         old_key = self.current_phase_key
         self._weapon_phase_seq_idx += 1
         new_key = self.current_phase_key
         self._phase_start_step = num_timesteps
 
         print(
-            f"[WeaponPhaseAuto] 武器フェーズ昇格: {old_key} -> {new_key} "
-            f"(停滞 {self._stagnation_steps:,} step 検出)"
+            f"[WeaponPhaseAuto] 武器フェーズ昇格: {old_key} -> {new_key} ({reason})"
         )
 
         # カリキュラム降格（state + enemy params 適用は rollback_fn に委譲）
         self._rollback_fn(f"weapon_phase_advanced_to_{new_key}")
 
-        # 降格後のフェーズを記録し、停滞タイマーをリセット
+        # 降格後のフェーズを記録し、停滞タイマーをリセット（固定フェーズ用）
         self._last_curriculum_phase = self._curriculum.current_phase
         self._stagnation_start_step = num_timesteps
 
-        self.save_status()
         return new_key
 
     # ------------------------------------------------------------------ #
@@ -1055,11 +1069,8 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
 
     def get_wandb_metrics(self) -> dict:
         return {
-            "weapon_auto/phase_idx": self._weapon_phase_seq_idx,
+            "weapon_auto/phase_seq_idx": self._weapon_phase_seq_idx,
             "weapon_auto/phase_key": self.current_phase_key,
-            "weapon_auto/stagnation_steps_elapsed": max(
-                0, self._stagnation_start_step
-            ),
         }
 
     def export_state(self) -> dict:
@@ -1073,12 +1084,5 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         self._phase_start_step = int(state.get("phase_start_step", 0))
 
     def save_status(self, path=None) -> None:
-        target = path or self._status_path
-        if target is None:
-            return
-        Path(target).parent.mkdir(parents=True, exist_ok=True)
-        Path(target).write_text(
-            json.dumps(self.export_state(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        pass  # 状態永続化は train_status_{step}_steps.json に委譲する
 

@@ -338,6 +338,7 @@ def _save_training_status(
     curriculum_completion: dict | None = None,
     mirror_paths: list[Path] | None = None,
     noveld_state_path: Path | None = None,
+    weapon_auto_module=None,
 ) -> None:
     # run_dir からの相対パスで記録することで新旧両構成に対応
     def _rel(p: Path) -> str:
@@ -357,6 +358,7 @@ def _save_training_status(
         "shaping_anneal": anneal_cb.export_state() if anneal_cb is not None else None,
         "curriculum_completion": curriculum_completion,
         "noveld_state_path": _rel(noveld_state_path) if noveld_state_path is not None else None,
+        "weapon_phase_auto": weapon_auto_module.export_state() if weapon_auto_module is not None else None,
     }
     if exit_reason is not None:
         data["last_exit_reason"] = exit_reason
@@ -1496,6 +1498,8 @@ def main() -> None:
     # --curriculum または --curriculum-spalf が必要。
     # WeaponPhaseAutoStateModule に CurriculumStateModule を渡し、rollback_fn は
     # 各コールバックの rollback_one_phase を使用することで HybridCallback への直接依存を排除する。
+    # resume 状態は train_status_{step}_steps.json の "weapon_phase_auto" キーから復元する。
+    _weapon_auto_module = None
     if args.game == "survivors" and not args.dry_run and _weapon_phase_key == "auto":
         if curriculum_cb is None:
             raise ValueError(
@@ -1503,18 +1507,22 @@ def main() -> None:
             )
         from games.survivors.state_modules import WeaponPhaseAutoStateModule
         from games.survivors.weapon_phase_auto_callback import WeaponPhaseAutoCallback
-        _auto_status_path = str(work_dir / "weapon_phase_auto_status.json") if work_dir else None
-        _auto_ckpt_dir = str(source_dir / "work") if (is_branch and source_dir is not None) else ""
         _weapon_auto_module = WeaponPhaseAutoStateModule(
             curriculum=curriculum_cb._curriculum,
             stagnation_steps=args.weapon_phase_auto_stagnation_steps,
             rollback_fn=curriculum_cb.rollback_one_phase,
-            status_path=_auto_status_path,
         )
+        # train_status_{step}_steps.json の "weapon_phase_auto" から状態を復元
+        _weapon_auto_raw = resume_status.get("weapon_phase_auto") if resume_status else None
+        if _weapon_auto_raw:
+            _weapon_auto_module.import_state(_weapon_auto_raw)
+            print(
+                f"[INFO] weapon_phase_auto state を復元: "
+                f"phase={_weapon_auto_module.current_phase_key} "
+                f"(seq_idx={_weapon_auto_module._weapon_phase_seq_idx})"
+            )
         _weapon_auto_cb = WeaponPhaseAutoCallback(
             module=_weapon_auto_module,
-            output_dir=str(work_dir),
-            checkpoint_dir=_auto_ckpt_dir,
             weapon_update_freq=args.checkpoint_freq,
         )
         callbacks.append(_weapon_auto_cb)
@@ -1641,6 +1649,7 @@ def main() -> None:
                 status_dir / f"train_status_{timestep}_steps.json",
             ],
             noveld_state_path=noveld_pt_path,
+            weapon_auto_module=_weapon_auto_module,
         )
 
     checkpoint_cb = _RunCheckpointCallback(
