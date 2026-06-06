@@ -165,7 +165,7 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 			EWeaponType::Peachone, EWeaponType::EbonyWings, EWeaponType::Laurel,
 		};
 
-		EWeaponType StartWeapon = EWeaponType::Garlic;  // デフォルト
+		EWeaponType StartWeapon = EWeaponType::Garlic;
 
 		// "fixed_subset" と "weighted" は同じプール（AllowedWeaponTypes）を使用
 		const bool bUseAllowedSubset =
@@ -204,9 +204,14 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 				StartWeapon = AllBaseWeapons[Idx];
 			}
 		}
-		else if (WeaponPoolMode == TEXT("garlic_only"))
+		else if (StartingWeaponMode.Equals(TEXT("garlic"), ESearchCase::IgnoreCase) ||
+			WeaponPoolMode == TEXT("garlic_only"))
 		{
 			StartWeapon = EWeaponType::Garlic;
+		}
+		else if (StartingWeaponMode.Equals(TEXT("whip"), ESearchCase::IgnoreCase))
+		{
+			StartWeapon = EWeaponType::Whip;
 		}
 		else if (bWeightedMode)
 		{
@@ -288,6 +293,12 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 		PickupComponent->CheckSpecialPickups();
 	}
 
+	if (PlayerHP <= 0.f && UsedRevivalCount < MaxRevivalCount)
+	{
+		++UsedRevivalCount;
+		PlayerHP = MaxPlayerHP * 0.5f;
+	}
+
 	if (PlayerHP <= 0.f)
 	{
 		bDone = true;
@@ -309,7 +320,20 @@ void ASurvivorsGame::FinalizePendingEnemies()
 	{
 		if (Enemies[i].bPendingRemove)
 		{
-			GemComponent->DropGem(Enemies[i].TypeId, Enemies[i].Pos);
+			const bool bDropsChest = EnemyTypeTable.IsValidIndex(Enemies[i].TypeId)
+				&& EnemyTypeTable[Enemies[i].TypeId].bIsBoss;
+			if (bDropsChest)
+			{
+				FSpecialPickupState Chest;
+				Chest.Pos = Enemies[i].Pos;
+				Chest.Type = ESpecialPickupType::TreasureChest;
+				Chest.bActive = true;
+				SpecialPickups.Add(Chest);
+			}
+			else
+			{
+				GemComponent->DropGem(Enemies[i].TypeId, Enemies[i].Pos);
+			}
 			Enemies.RemoveAt(i);
 		}
 	}

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Survivors/Logic/SurvivorsWikiSpec.h"
 #include "Survivors/Logic/SurvivorsTypes.h"
 
 // ---- Garlic パラメータ構造体 -------------------------------------------------
@@ -19,12 +20,15 @@ namespace SurvivorsGameConstants
 	// ---- 基本定数 ----
 	static constexpr int32 MaxWeaponSlots                = 6;   // 3 → 6 に拡大
 	static constexpr int32 MaxPassiveSlots               = 6;   // 新規
-	static constexpr int32 MaxWeaponLevel                = 8;
+	static constexpr int32 MaxWeaponLevel                = SurvivorsWikiSpec::BaseWeaponMaxLevel;
 	static constexpr int32 MaxPlayerLevel                = 100;
 	static constexpr float PhysicsDt                    = 1.f / 60.f;
 	static constexpr float MaxGameTime                  = 1800.f;
 	static constexpr float ContactHitInterval           = 0.5f;
 	static constexpr float GarlicKnockbackStrength      = 10.f;
+	static constexpr float StandardMaxPlayerHP          = SurvivorsWikiSpec::StandardMaxPlayerHP;
+	static constexpr float StandardMoveSpeed            = SurvivorsWikiSpec::StandardMoveSpeed;
+	static constexpr float BaseGemPickupRadius          = SurvivorsWikiSpec::BaseGemPickupRadius;
 
 	// ---- obs 正規化用予約枠定数 ----
 	// obs の type_norm = id / MaxWeaponTypeCountReserved で正規化する
@@ -487,14 +491,59 @@ namespace SurvivorsGameConstants
 	// アイテム別最大レベルテーブル（EPassiveItemType のインデックスと対応）
 	// None=0, Spinach=5, Armor=5, HollowHeart=5, Pummarola=5, EmptyTome=5,
 	// Candelabrador=5, Bracer=5, Spellbinder=5, Duplicator=2, Wings=5,
-	// Attractorb=5, Clover=5, Crown=5, StoneMask=5, SkullOManiac=5, Tirajisu=2, TorronasBox=9
-	inline constexpr int32 PassiveMaxLevel[18] = {
-		0, 5, 5, 5, 5, 5, 5, 5, 5, 2, 5, 5, 5, 5, 5, 5, 2, 9
-	};
+	// Attractorb=5, Clover=5, Crown=5, StoneMask=0(coin対象外), SkullOManiac=5, Tirajisu=2, TorronasBox=9
+	inline constexpr const int32 (&PassiveMaxLevel)[18] = SurvivorsWikiSpec::PassiveMaxLevel;
+
+	inline constexpr const float (&AttractorbPickupRadiusMult)[5] = SurvivorsWikiSpec::AttractorbPickupRadiusMult;
+
+	inline constexpr int32 GetWeaponMaxLevel(EWeaponType Type)
+	{
+		switch (Type)
+		{
+		case EWeaponType::None:
+			return 0;
+		case EWeaponType::Laurel:
+			return SurvivorsWikiSpec::LaurelMaxLevel;
+		case EWeaponType::SoulEater:
+		case EWeaponType::BloodyTear:
+		case EWeaponType::HolyWand:
+		case EWeaponType::ThousandEdge:
+		case EWeaponType::DeathSpiral:
+		case EWeaponType::HeavenSword:
+		case EWeaponType::UnholyVespers:
+		case EWeaponType::Hellfire:
+		case EWeaponType::LaBorra:
+		case EWeaponType::NoFuture:
+		case EWeaponType::ThunderLoop:
+		case EWeaponType::GorgeousMoon:
+		case EWeaponType::Vandalier:
+			return SurvivorsWikiSpec::EvolvedWeaponMaxLevel;
+		default:
+			return MaxWeaponLevel;
+		}
+	}
 
 	// ---- ジェム・基本定数 ---------------------------------------------------
 
-	inline constexpr float GemXPValues[3] = { 1.f, 5.f, 10.f };
+	inline constexpr const float (&GemXPValues)[3] = SurvivorsWikiSpec::GemXPValues;
+	static constexpr float BlueGemMaxXP                  = SurvivorsWikiSpec::BlueGemMaxXP;
+	static constexpr float GreenGemMaxXP                 = SurvivorsWikiSpec::GreenGemMaxXP;
+	static constexpr int32 RedGemMinMultiplier           = SurvivorsWikiSpec::RedGemMinMultiplier;
+	static constexpr int32 RedGemMaxMultiplier           = SurvivorsWikiSpec::RedGemMaxMultiplier;
+
+	inline constexpr EGemType GemTypeForExperience(float XP)
+	{
+		switch (SurvivorsWikiSpec::GemColorForExperience(XP))
+		{
+		case SurvivorsWikiSpec::EGemColor::Blue:
+			return EGemType::Blue;
+		case SurvivorsWikiSpec::EGemColor::Green:
+			return EGemType::Green;
+		case SurvivorsWikiSpec::EGemColor::Red:
+		default:
+			return EGemType::Red;
+		}
+	}
 
 	inline constexpr EGemType GemDropTable[11] = {
 		EGemType::Blue,

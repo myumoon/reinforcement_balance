@@ -4,6 +4,7 @@
 #include "Survivors/Logic/SurvivorsGame.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/SurvivorsPlayerComponent.h"
+#include "Survivors/Logic/SurvivorsWikiSpec.h"
 
 USurvivorsGemComponent::USurvivorsGemComponent()
 {
@@ -25,12 +26,35 @@ void USurvivorsGemComponent::DropGem(int32 TypeId, FVector2D Pos)
 {
 	if (!Game) return;
 
-	const EGemType Type = (TypeId >= 0 && TypeId < UE_ARRAY_COUNT(SurvivorsGameConstants::GemDropTable))
+	const EGemType ConfiguredType = (TypeId >= 0 && TypeId < UE_ARRAY_COUNT(SurvivorsGameConstants::GemDropTable))
 		? SurvivorsGameConstants::GemDropTable[TypeId]
 		: EGemType::Blue;
+	const float EnemyXPDrop = Game->EnemyTypeTable.IsValidIndex(TypeId)
+		? Game->EnemyTypeTable[TypeId].XPDrop
+		: SurvivorsGameConstants::GemXPValues[0];
+	const EGemType Type = ConfiguredType == EGemType::Red
+		? EGemType::Red
+		: SurvivorsGameConstants::GemTypeForExperience(EnemyXPDrop);
+	float BaseExperienceValue = SurvivorsGameConstants::GemXPValues[static_cast<uint8>(Type)];
+	if (Game->EnemyTypeTable.IsValidIndex(TypeId))
+	{
+		if (Type == EGemType::Red)
+		{
+			BaseExperienceValue = FMath::Max(1.f, EnemyXPDrop);
+		}
+		else if (Type == EGemType::Blue)
+		{
+			BaseExperienceValue = FMath::Clamp(EnemyXPDrop, 1.f, SurvivorsGameConstants::BlueGemMaxXP);
+		}
+		else
+		{
+			BaseExperienceValue = FMath::Clamp(EnemyXPDrop, SurvivorsGameConstants::BlueGemMaxXP + 1.f, SurvivorsGameConstants::GreenGemMaxXP);
+		}
+	}
 	FGemState G;
 	G.Pos = Pos;
 	G.Type = Type;
+	G.BaseExperienceValue = BaseExperienceValue;
 	G.UniqueId = ++Game->NextGemId;
 	G.bPendingRemove = false;
 	Game->Gems.Add(G);
@@ -77,7 +101,14 @@ void USurvivorsGemComponent::ApplyPickupHits(FSurvivorsHitFrame& HitFrame)
 		if (Game->Gems[GIdx].bPendingRemove) continue;
 
 		Game->Gems[GIdx].bPendingRemove = true;
-		const float XPGain = SurvivorsGameConstants::GemXPValues[static_cast<uint8>(Game->Gems[GIdx].Type)];
+		float XPGain = Game->Gems[GIdx].BaseExperienceValue;
+		if (Game->Gems[GIdx].Type == EGemType::Red)
+		{
+			const int32 Mult = Game->RandStream.RandRange(
+				SurvivorsGameConstants::RedGemMinMultiplier,
+				SurvivorsGameConstants::RedGemMaxMultiplier);
+			XPGain = SurvivorsWikiSpec::RedGemExperienceForMultiplier(XPGain, Mult);
+		}
 		Game->PlayerComponent->ProcessXPGain(XPGain);
 		Game->LastReward += Game->ItemReward;
 	}

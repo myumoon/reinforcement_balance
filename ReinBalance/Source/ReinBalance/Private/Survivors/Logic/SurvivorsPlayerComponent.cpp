@@ -1,6 +1,7 @@
 #include "Survivors/Logic/SurvivorsPlayerComponent.h"
 
 #include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/Logic/SurvivorsWikiSpec.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponBase.h"
 
@@ -76,35 +77,22 @@ void USurvivorsPlayerComponent::ApplyAction(int32 ActionIdx)
 
 float USurvivorsPlayerComponent::XPRequiredForLevel(int32 Level) const
 {
-	if (Level <= 1) return 0.f;
-	if (Level == 2) return 5.f;
-	float Value = 5.f;
-	for (int32 Lv = 3; Lv <= Level; ++Lv)
-	{
-		if      (Lv <= 20) Value += 10.f;
-		else if (Lv <= 40) Value += 13.f;
-		else if (Lv <= 60) Value += 16.f;
-		else if (Lv <= 80) Value += 19.f;
-		else               Value += 22.f;
-	}
-	return Value;
+	return SurvivorsWikiSpec::XPRequiredForLevel(Level);
 }
 
 float USurvivorsPlayerComponent::CumulativeXPForLevel(int32 Level) const
 {
-	float Total = 0.f;
-	for (int32 Lv = 2; Lv <= Level; ++Lv)
-	{
-		Total += XPRequiredForLevel(Lv);
-	}
-	return Total;
+	return SurvivorsWikiSpec::CumulativeXPForLevel(Level);
 }
 
 void USurvivorsPlayerComponent::ProcessXPGain(float Amount)
 {
 	if (!Game) return;
 
-	Game->PlayerXP += Amount;
+	Game->PlayerXP += SurvivorsWikiSpec::EffectiveXPGain(
+		Amount,
+		Game->CachedPassiveEffects.GrowthMult,
+		Game->PlayerLevel);
 	while (true)
 	{
 		const float NextThreshold = CumulativeXPForLevel(Game->PlayerLevel + 1);
@@ -128,7 +116,7 @@ void USurvivorsPlayerComponent::OnLevelUp(int32 NextLevel)
 		{
 			const int32 NewLv = FMath::Min(
 				Game->WeaponSlots[0].Level.Value + 1,
-				SurvivorsGameConstants::MaxWeaponLevel);
+				SurvivorsGameConstants::GetWeaponMaxLevel(Game->WeaponSlots[0].Type));
 			Game->WeaponSlots[0].Level = FWeaponLevel(NewLv);
 
 			if (Game->WeaponComponent)
@@ -247,7 +235,7 @@ void USurvivorsPlayerComponent::ApplyLevelUpChoice(const FLevelUpChoice& Choice)
 			{
 				if (Game->WeaponSlots[i].Type == Choice.WeaponType)
 				{
-					const int32 NewLv = FMath::Min(Choice.NewLevel, SurvivorsGameConstants::MaxWeaponLevel);
+					const int32 NewLv = FMath::Min(Choice.NewLevel, SurvivorsGameConstants::GetWeaponMaxLevel(Choice.WeaponType));
 					Game->WeaponSlots[i].Level = FWeaponLevel(NewLv);
 					USurvivorsWeaponBase* WI = Game->WeaponComponent->GetWeaponInstance(i);
 					if (WI) WI->SetLevel(FWeaponLevel(NewLv));
@@ -301,7 +289,7 @@ FPassiveEffects USurvivorsPlayerComponent::ComputePassiveEffects() const
 			PE.HpMult += 0.20f * Lv;
 			break;
 		case EPassiveItemType::Pummarola:
-			PE.RegenPerSec += 0.5f * Lv;
+			PE.RegenPerSec += SurvivorsWikiSpec::PummarolaRecoveryForLevel(Lv);
 			break;
 		case EPassiveItemType::EmptyTome:
 			PE.CooldownMult -= 0.08f * Lv;
@@ -314,31 +302,41 @@ FPassiveEffects USurvivorsPlayerComponent::ComputePassiveEffects() const
 			PE.SpeedMult += 0.10f * Lv;
 			break;
 		case EPassiveItemType::Spellbinder:
-			PE.DurationMult += 0.15f * Lv;
+			PE.DurationMult += SurvivorsWikiSpec::SpellbinderDurationBonusForLevel(Lv);
 			break;
 		case EPassiveItemType::Duplicator:
 			PE.ExtraAmount += 1.f * Lv;
 			break;
 		case EPassiveItemType::Wings:
-			PE.MoveSpeedMult += 0.05f * Lv;
+			PE.MoveSpeedMult += SurvivorsWikiSpec::WingsMoveSpeedBonusForLevel(Lv);
 			break;
 		case EPassiveItemType::Attractorb:
-			PE.PickupRadiusMult += 0.15f * Lv;
+			PE.PickupRadiusMult = SurvivorsWikiSpec::AttractorbPickupRadiusMultiplierForLevel(Lv);
 			break;
 		case EPassiveItemType::Tirajisu:
 			// MaxLevel=2
 			PE.MaxRevivalCount += FMath::Min(Lv, 2);
 			break;
 		case EPassiveItemType::TorronasBox:
-			PE.AreaMult     += 0.01f * Lv;
-			PE.CooldownMult -= 0.01f * Lv;
-			PE.DurationMult += 0.01f * Lv;
+			{
+				const float Omni = SurvivorsWikiSpec::TorronasOmniBonusForLevel(Lv);
+				PE.DamageMult    += Omni;
+				PE.AreaMult      += Omni;
+				PE.SpeedMult     += Omni;
+				PE.DurationMult  += Omni;
+				PE.CooldownMult  = FMath::Max(PE.CooldownMult - Omni, 0.4f);
+				PE.CurseMult += SurvivorsWikiSpec::TorronasCurseBonusForLevel(Lv);
+			}
 			break;
 		case EPassiveItemType::Crown:
-		case EPassiveItemType::StoneMask:
+			PE.GrowthMult += SurvivorsWikiSpec::CrownGrowthPerLevel * static_cast<float>(Lv);
+			break;
 		case EPassiveItemType::SkullOManiac:
+			PE.CurseMult += SurvivorsWikiSpec::SkullCurseBonusForLevel(Lv);
+			break;
+		case EPassiveItemType::StoneMask:
 		case EPassiveItemType::Clover:
-			// スタブ（将来実装用）
+			// Coin/Greed と Luck は今回対象外。Clover は Cross 進化キーとしてのみ機能する。
 			break;
 		default:
 			break;
@@ -385,7 +383,7 @@ TArray<int32> USurvivorsPlayerComponent::GetEvolvableWeapons() const
 		{
 			const FWeaponSlot& WSlot = Game->WeaponSlots[SlotIdx];
 			if (WSlot.Type != Rule.BaseWeapon) continue;
-			if (!WSlot.Level.IsMax()) continue;  // Lv8 必須
+			if (WSlot.Level.Value < SurvivorsGameConstants::GetWeaponMaxLevel(WSlot.Type)) continue;
 
 			// Union 判定（Vandalier の場合）
 			if (Rule.UnionPartner != EWeaponType::None)
@@ -394,7 +392,7 @@ TArray<int32> USurvivorsPlayerComponent::GetEvolvableWeapons() const
 				for (int32 i = 0; i < SurvivorsGameConstants::MaxWeaponSlots; ++i)
 				{
 					if (Game->WeaponSlots[i].Type == Rule.UnionPartner &&
-						Game->WeaponSlots[i].Level.IsMax())
+						Game->WeaponSlots[i].Level.Value >= SurvivorsGameConstants::GetWeaponMaxLevel(Game->WeaponSlots[i].Type))
 					{
 						bHasPartner = true;
 						break;
@@ -427,7 +425,8 @@ TArray<int32> USurvivorsPlayerComponent::GetEvolvableWeapons() const
 void USurvivorsPlayerComponent::EvolveWeapon(int32 SlotIdx, EWeaponType EvolvedType)
 {
 	if (!Game) return;
-	if (!Game->WeaponSlots[SlotIdx].Level.IsMax()) return;  // Lv8 でなければ進化不可
+	const EWeaponType BaseType = Game->WeaponSlots[SlotIdx].Type;
+	if (Game->WeaponSlots[SlotIdx].Level.Value < SurvivorsGameConstants::GetWeaponMaxLevel(BaseType)) return;
 
 	// スロットを進化後武器に置き換え・レベルを 1 にリセット
 	Game->WeaponSlots[SlotIdx].Type  = EvolvedType;
@@ -476,34 +475,15 @@ TArray<FLevelUpChoice> USurvivorsPlayerComponent::BuildLevelUpChoices()
 
 	// --- 候補プールを事前構築 ---
 
-	// 進化候補
+	// 進化は Treasure Chest 取得時のみ判定する。
 	TArray<FLevelUpChoice> Evolutions;
-	if (Game->bEnableEvolutions)
-	{
-		for (int32 EvolveSlot : GetEvolvableWeapons())
-		{
-			for (const SurvivorsGameConstants::FEvolutionRule& Rule : SurvivorsGameConstants::EvolutionTable)
-			{
-				if (Rule.BaseWeapon == Game->WeaponSlots[EvolveSlot].Type)
-				{
-					FLevelUpChoice C;
-					C.ChoiceType = FLevelUpChoice::EChoiceType::WeaponEvolve;
-					C.WeaponType = Rule.EvolvedWeapon;
-					C.SlotIdx    = EvolveSlot;
-					C.NewLevel   = 1;
-					Evolutions.Add(C);
-					break;
-				}
-			}
-		}
-	}
 
 	// 既存武器アップグレード候補
 	TArray<FLevelUpChoice> WeaponUpgrades;
 	for (int32 i = 0; i < SurvivorsGameConstants::MaxWeaponSlots; ++i)
 	{
 		if (Game->WeaponSlots[i].Type == EWeaponType::None) continue;
-		if (Game->WeaponSlots[i].Level.IsMax()) continue;
+		if (Game->WeaponSlots[i].Level.Value >= SurvivorsGameConstants::GetWeaponMaxLevel(Game->WeaponSlots[i].Type)) continue;
 
 		FLevelUpChoice C;
 		C.ChoiceType = FLevelUpChoice::EChoiceType::WeaponUpgrade;
@@ -597,6 +577,9 @@ TArray<FLevelUpChoice> USurvivorsPlayerComponent::BuildLevelUpChoices()
 		{
 			for (EPassiveItemType PT : AllPassiveTypes)
 			{
+				const int32 MaxLv = SurvivorsGameConstants::PassiveMaxLevel[static_cast<int32>(PT)];
+				if (MaxLv <= 0) continue;
+
 				bool bOwned = false;
 				for (int32 i = 0; i < SurvivorsGameConstants::MaxPassiveSlots; ++i)
 					if (Game->PassiveSlots[i].Type == PT) { bOwned = true; break; }

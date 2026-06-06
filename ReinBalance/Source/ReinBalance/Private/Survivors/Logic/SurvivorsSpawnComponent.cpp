@@ -26,13 +26,14 @@ void USurvivorsSpawnComponent::InitDefaultSpawnWaves()
 
 	Game->SpawnWaves.Empty();
 	struct FWD { int32 T; float W; };
-	auto AddWave = [this](float TS, float TE, float SR, int32 ME, const FWD* Ws, int32 WCount)
+	auto AddWave = [this](float TS, float TE, float SR, int32 MinE, int32 MaxE, const FWD* Ws, int32 WCount)
 	{
 		FSpawnWave Wave;
 		Wave.TimeStart = TS;
 		Wave.TimeEnd = TE;
 		Wave.SpawnRate = SR;
-		Wave.MaxEnemies = ME;
+		Wave.MinEnemies = MinE;
+		Wave.MaxEnemies = MaxE;
 		for (int32 i = 0; i < WCount; ++i)
 		{
 			FEnemySpawnWeight EW;
@@ -43,35 +44,33 @@ void USurvivorsSpawnComponent::InitDefaultSpawnWaves()
 		Game->SpawnWaves.Add(MoveTemp(Wave));
 	};
 
-	{ const FWD w[]={{0,1.0f}};                                                                 AddWave(  0.f,   30.f, 1.0f,  50, w, UE_ARRAY_COUNT(w)); }
-	{ const FWD w[]={{0,0.7f},{1,0.3f}};                                                        AddWave( 30.f,   60.f, 1.5f,  80, w, UE_ARRAY_COUNT(w)); }
-	{ const FWD w[]={{0,0.4f},{1,0.3f},{2,0.2f},{3,0.1f}};                                     AddWave( 60.f,  120.f, 2.5f, 120, w, UE_ARRAY_COUNT(w)); }
-	{ const FWD w[]={{1,0.3f},{2,0.3f},{3,0.2f},{4,0.2f}};                                     AddWave(120.f,  180.f, 3.5f, 160, w, UE_ARRAY_COUNT(w)); }
-	{ const FWD w[]={{2,0.25f},{3,0.2f},{4,0.3f},{5,0.25f}};                                   AddWave(180.f,  240.f, 4.0f, 200, w, UE_ARRAY_COUNT(w)); }
-	{ const FWD w[]={{4,0.3f},{5,0.3f},{6,0.3f},{3,0.1f}};                                     AddWave(240.f,  300.f, 4.5f, 250, w, UE_ARRAY_COUNT(w)); }
-	{ const FWD w[]={{4,0.25f},{5,0.2f},{6,0.2f},{7,0.35f}};                                   AddWave(300.f,  420.f, 5.0f, 300, w, UE_ARRAY_COUNT(w)); }
-	{ const FWD w[]={{5,0.2f},{6,0.2f},{7,0.3f},{8,0.3f}};                                     AddWave(420.f,  480.f, 6.0f, 400, w, UE_ARRAY_COUNT(w)); }
-	{ const FWD w[]={{6,0.15f},{7,0.25f},{8,0.3f},{9,0.3f}};                                   AddWave(480.f,  600.f, 7.0f, 500, w, UE_ARRAY_COUNT(w)); }
-	{ const FWD w[]={{7,0.25f},{8,0.35f},{9,0.4f}};                                             AddWave(600.f, 1800.f, 8.0f, 600, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{0,1.0f}};                                                                 AddWave(  0.f,   60.f, 1.0f,  15,  80, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{0,0.6f},{1,0.4f}};                                                        AddWave( 60.f,  120.f, 1.5f,  25, 120, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{0,0.3f},{1,0.4f},{2,0.3f}};                                               AddWave(120.f,  180.f, 2.0f,  35, 160, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{1,0.3f},{2,0.3f},{3,0.25f},{4,0.15f}};                                   AddWave(180.f,  300.f, 2.5f,  50, 220, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{2,0.2f},{3,0.3f},{4,0.3f},{5,0.2f}};                                     AddWave(300.f,  420.f, 3.2f,  80, 300, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{4,0.2f},{5,0.3f},{6,0.2f},{7,0.3f}};                                     AddWave(420.f,  600.f, 4.0f, 120, 420, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{5,0.2f},{6,0.25f},{7,0.25f},{8,0.3f}};                                   AddWave(600.f,  900.f, 5.0f, 180, 520, w, UE_ARRAY_COUNT(w)); }
+	{ const FWD w[]={{6,0.2f},{7,0.2f},{8,0.3f},{9,0.3f}};                                     AddWave(900.f, 1800.f, 6.0f, 240, 600, w, UE_ARRAY_COUNT(w)); }
 }
 
 void USurvivorsSpawnComponent::InitDefaultEnemyTable()
 {
 	if (!Game) return;
 
-	struct FRow { const TCHAR* Name; float HP; float Spd; float Dmg; float R; float KB; bool Boss; };
+	struct FRow { const TCHAR* Name; float HP; float Spd; float Dmg; float XP; float R; float KB; bool Boss; };
 	static const FRow Rows[] = {
-		{ TEXT("Bat"),        1.f,    70.f,  2.f, 10.f, 0.f, false },
-		{ TEXT("Zombie"),     4.f,    40.f,  3.f, 12.f, 0.f, false },
-		{ TEXT("Skeleton"),   6.f,    45.f,  4.f, 12.f, 0.f, false },
-		{ TEXT("Ghost"),      3.f,    88.f,  3.f, 10.f, 0.f, false },
-		{ TEXT("Werewolf"),  10.f,    80.f,  5.f, 14.f, 0.f, false },
-		{ TEXT("Mummy"),     15.f,    36.f,  6.f, 14.f, 0.f, false },
-		{ TEXT("Plant"),     20.f,    32.f,  7.f, 14.f, 0.f, false },
-		{ TEXT("BatSwarm"),   2.f,   104.f,  3.f,  8.f, 0.f, false },
-		{ TEXT("FireBeast"), 30.f,    64.f, 10.f, 16.f, 0.f, false },
-		{ TEXT("MedusaHead"),25.f,    96.f, 10.f, 12.f, 0.f, false },
-		{ TEXT("GiantBat"), 3000.f,  48.f, 12.f, 32.f, 1.f, true  },
+		{ TEXT("Bat"),        1.f,    85.f,  2.f, 2.f, 10.f, 0.f, false },
+		{ TEXT("Zombie"),    10.f,    45.f,  5.f, 2.f, 12.f, 0.f, false },
+		{ TEXT("Skeleton"),  10.f,    55.f,  5.f, 2.f, 12.f, 0.f, false },
+		{ TEXT("Ghost"),      3.f,    95.f,  3.f, 2.f, 10.f, 0.f, false },
+		{ TEXT("Werewolf"),  30.f,    80.f, 10.f, 9.f, 14.f, 0.f, false },
+		{ TEXT("Mummy"),     40.f,    38.f, 10.f, 9.f, 14.f, 0.f, false },
+		{ TEXT("Plant"),     25.f,    35.f, 10.f, 9.f, 14.f, 0.f, false },
+		{ TEXT("BatSwarm"),   2.f,   120.f,  3.f, 2.f,  8.f, 0.f, false },
+		{ TEXT("FireBeast"), 60.f,    65.f, 15.f, 9.f, 16.f, 0.f, false },
+		{ TEXT("MedusaHead"),50.f,    95.f, 15.f, 9.f, 12.f, 0.f, false },
+		{ TEXT("GiantBat"), 3000.f,  55.f, 20.f, 2.f, 32.f, 1.f, true  },
 	};
 
 	Game->EnemyTypeTable.Empty();
@@ -82,9 +81,13 @@ void USurvivorsSpawnComponent::InitDefaultEnemyTable()
 		P.BaseHP = R.HP;
 		P.Speed = R.Spd;
 		P.ContactDamage = R.Dmg;
+		P.XPDrop = R.XP;
 		P.CollisionRadius = R.R;
 		P.KnockbackResistance = R.KB;
 		P.bIsBoss = R.Boss;
+		P.bResistsFreeze = R.Boss;
+		P.bResistsInstantKill = R.Boss;
+		P.bResistsDebuff = R.Boss;
 		Game->EnemyTypeTable.Add(P);
 	}
 }
@@ -111,8 +114,10 @@ void USurvivorsSpawnComponent::StepSpawn()
 
 	if (Wave)
 	{
-		const int32 EffMin = FMath::Min(Game->MinActiveEnemies, Game->MaxActiveEnemies);
-		const int32 EffMax = FMath::Min(Wave->MaxEnemies, Game->MaxActiveEnemies);
+		const int32 WaveMin = Wave->MinEnemies > 0 ? Wave->MinEnemies : Game->MinActiveEnemies;
+		const float CurseMult = FMath::Max(0.f, Game->CachedPassiveEffects.CurseMult);
+		const int32 EffMin = FMath::Min(FMath::RoundToInt(static_cast<float>(WaveMin) * CurseMult), Game->MaxActiveEnemies);
+		const int32 EffMax = FMath::Min(FMath::RoundToInt(static_cast<float>(Wave->MaxEnemies) * CurseMult), Game->MaxActiveEnemies);
 		TArray<FEnemySpawnWeight> SpawnWeights;
 		bool bUsedCurriculumPool = false;
 		BuildSpawnWeights(*Wave, SpawnWeights, bUsedCurriculumPool);
@@ -132,7 +137,7 @@ void USurvivorsSpawnComponent::StepSpawn()
 
 		if (Game->Enemies.Num() < EffMax)
 		{
-			Game->SpawnAccumulator += Wave->SpawnRate * Game->SpawnRateMult * SurvivorsGameConstants::PhysicsDt;
+			Game->SpawnAccumulator += Wave->SpawnRate * Game->SpawnRateMult * CurseMult * SurvivorsGameConstants::PhysicsDt;
 			while (!SpawnWeights.IsEmpty() && Game->SpawnAccumulator >= 1.f && Game->Enemies.Num() < EffMax)
 			{
 				SpawnEnemy(*Wave);
@@ -299,8 +304,9 @@ void USurvivorsSpawnComponent::SpawnEnemy(const FSpawnWave& Wave)
 	const FSurvivorsElapsedTime CurrentElapsed(Game->ElapsedTime);
 	const float TimeHPMult = Game->bTimeScalingEnabled ? 1.f + Game->HPScaleRatePerMin * (CurrentElapsed.Seconds / 60.f) : 1.f;
 	const float TimeDmgMult = Game->bTimeScalingEnabled ? 1.f + Game->DamageScaleRatePerMin * (CurrentElapsed.Seconds / 60.f) : 1.f;
-	const FHp MaxHP(Params.BaseHP * Game->EnemyHPScale * TimeHPMult);
-	const FDamage ContactDamage(Params.ContactDamage * Game->EnemyDamageScale * TimeDmgMult);
+	const float CurseMult = FMath::Max(0.f, Game->CachedPassiveEffects.CurseMult);
+	const FHp MaxHP(Params.BaseHP * Game->EnemyHPScale * TimeHPMult * CurseMult);
+	const FDamage ContactDamage(Params.ContactDamage * Game->EnemyDamageScale * TimeDmgMult * CurseMult);
 
 	FEnemyState Enemy;
 	Enemy.Pos = RandomSpawnPos();
@@ -329,8 +335,9 @@ void USurvivorsSpawnComponent::SpawnBoss()
 	const FSurvivorsElapsedTime CurrentElapsed(Game->ElapsedTime);
 	const float TimeHPMult = Game->bTimeScalingEnabled ? 1.f + Game->HPScaleRatePerMin * (CurrentElapsed.Seconds / 60.f) : 1.f;
 	const float TimeDmgMult = Game->bTimeScalingEnabled ? 1.f + Game->DamageScaleRatePerMin * (CurrentElapsed.Seconds / 60.f) : 1.f;
-	const FHp MaxHP(Params.BaseHP * Game->EnemyHPScale * TimeHPMult);
-	const FDamage ContactDamage(Params.ContactDamage * Game->EnemyDamageScale * TimeDmgMult);
+	const float CurseMult = FMath::Max(0.f, Game->CachedPassiveEffects.CurseMult);
+	const FHp MaxHP(Params.BaseHP * Game->EnemyHPScale * TimeHPMult * CurseMult);
+	const FDamage ContactDamage(Params.ContactDamage * Game->EnemyDamageScale * TimeDmgMult * CurseMult);
 
 	FEnemyState Boss;
 	Boss.Pos = RandomSpawnPos();

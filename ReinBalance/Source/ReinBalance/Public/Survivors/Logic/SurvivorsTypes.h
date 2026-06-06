@@ -123,9 +123,10 @@ enum class EFloorPickupType : uint8
 UENUM(BlueprintType)
 enum class ESpecialPickupType : uint8
 {
-	Rosary    = 0,  // 画面内全敵を即撃破
-	Orologion = 1,  // 全敵10秒フリーズ
-	Vacuum    = 2,  // 全ジェムを引き寄せ
+	Rosary        = 0,  // 画面内全敵を即撃破
+	Orologion     = 1,  // 全敵10秒フリーズ
+	Vacuum        = 2,  // 全ジェムを引き寄せ
+	TreasureChest = 3,  // 進化判定
 };
 
 // ---- レベルアップ選択肢 -------------------------------------------------------
@@ -230,6 +231,8 @@ struct FPassiveEffects
 	float MoveSpeedMult     = 1.f;
 	float PickupRadiusMult  = 1.f;
 	float HpMult            = 1.f;
+	float GrowthMult        = 1.f;
+	float CurseMult         = 1.f;
 	float RegenPerSec       = 0.f;
 	float ArmorFlat         = 0.f;
 	int32 MaxRevivalCount   = 0;   // Tirajisú: 最大リバイバル数
@@ -261,6 +264,7 @@ struct FGemState
 {
 	FVector2D Pos;
 	EGemType  Type       = EGemType::Blue;
+	float     BaseExperienceValue = 2.f;
 	int32     UniqueId   = 0;
 	bool      bPendingRemove = false;
 };
@@ -317,10 +321,22 @@ struct FEnemyTypeParams
 	float ContactDamage = 5.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	float XPDrop = 2.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	float CollisionRadius = 10.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	float KnockbackResistance = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	bool bResistsFreeze = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	bool bResistsInstantKill = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	bool bResistsDebuff = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	bool bIsBoss = false;
@@ -351,6 +367,9 @@ struct FSpawnWave
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	float SpawnRate = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	int32 MinEnemies = 0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	int32 MaxEnemies = 50;
