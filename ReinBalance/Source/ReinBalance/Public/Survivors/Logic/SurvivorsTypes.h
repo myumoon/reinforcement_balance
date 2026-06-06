@@ -461,6 +461,7 @@ struct FSurvivorsSpawnDebug
 	float MaxEpisodeTime = 0.f;
 	int32 EnemyCount = 0;
 	int32 CurrentWaveIndex = INDEX_NONE;
+	int32 TotalWaveCount = 0;
 	int32 MinActiveEnemies = 0;
 	int32 MaxActiveEnemies = 0;
 	int32 EffectiveMinEnemies = 0;

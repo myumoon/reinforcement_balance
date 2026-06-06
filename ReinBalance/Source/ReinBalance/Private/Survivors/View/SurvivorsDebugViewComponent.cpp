@@ -55,9 +55,9 @@ void USurvivorsDebugViewComponent::DrawSection_Game(int32& Key) const
 
 	const FSurvivorsSpawnDebug& SpawnDebug = Game->GetSpawnDebug();
 	const int32  CurrentWave = SpawnDebug.CurrentWaveIndex + 1;
-	const int32  TotalWaves  = Game->SpawnWaves.Num();
-	const float  Elapsed     = Game->GetElapsedTime();
-	const float  MaxTime     = Game->MaxEpisodeTime;
+	const int32  TotalWaves  = SpawnDebug.TotalWaveCount;
+	const float  Elapsed     = SpawnDebug.ElapsedTime;
+	const float  MaxTime     = SpawnDebug.MaxEpisodeTime;
 
 	AddLine(Key++,
 		FString::Printf(TEXT("%-14s %d/%d"), TEXT("Wave"), CurrentWave, TotalWaves),
@@ -79,8 +79,7 @@ void USurvivorsDebugViewComponent::DrawSection_Status(int32& Key) const
 	const float MaxHP = Game->GetMaxPlayerHP();
 	const float ShieldTimer = Game->GetPlayerShieldTimer();
 
-	// XP 分母: 現在レベルから次レベルに必要な XP
-	const float XPNeeded = Game->XPRequiredForLevel(Level + 1);
+	const float XPNeeded = Game->GetXPRequiredForNextLevel();
 
 	AddLine(Key++,
 		FString::Printf(TEXT("%-10s %.0f/%.0f"), TEXT("XP"), XP, XPNeeded),
@@ -142,10 +141,7 @@ void USurvivorsDebugViewComponent::DrawSection_Slots(int32& Key) const
 		{
 			const FString Name    = GetEnumShortName(Slot.Type);
 			const int32 PLv       = Slot.Level;
-			const int32 TypeIndex = static_cast<int32>(Slot.Type);
-			const int32 MaxLv     = (TypeIndex >= 0 && TypeIndex < 18)
-				? SurvivorsGameConstants::PassiveMaxLevel[TypeIndex]
-				: 5;
+			const int32 MaxLv = Game->GetPassiveItemMaxLevel(Slot.Type);
 			AddLine(Key++,
 				FString::Printf(TEXT("[%d] P.%-14s Lv%d/%d"), 6 + i, *Name, PLv, MaxLv),
 				GetPassiveItemColor(Slot.Type));
@@ -159,7 +155,8 @@ void USurvivorsDebugViewComponent::DrawSection_Enemy(int32& Key) const
 	Key = DebugKeyBase + 40;
 	AddLine(Key++, TEXT("--- Enemy ---"), FLinearColor::White);
 
-	const int32 MaxEnemyTypeId = Game->MaxEnemyTypeId;
+	const FSurvivorsSpawnDebug& SpawnDebugEnemy = Game->GetSpawnDebug();
+	const int32 MaxEnemyTypeId = SpawnDebugEnemy.MaxEnemyTypeId;
 	AddLine(Key++,
 		FString::Printf(TEXT("%-24s %d"), TEXT("MaxEnemyId"), MaxEnemyTypeId),
 		FLinearColor::White);
@@ -171,18 +168,8 @@ void USurvivorsDebugViewComponent::DrawSection_Enemy(int32& Key) const
 		const int32* Count = EnemyCounts.Find(TypeId);
 		if (!Count || *Count <= 0) continue;
 
-		FString Name;
-		if (Game->EnemyTypeTable.IsValidIndex(TypeId) && !Game->EnemyTypeTable[TypeId].Name.IsEmpty())
-		{
-			Name = FString::Printf(TEXT("%s(ID:%d)"), *Game->EnemyTypeTable[TypeId].Name, TypeId);
-		}
-		else
-		{
-			Name = FString::Printf(TEXT("ID:%d"), TypeId);
-		}
-
 		AddLine(Key++,
-			FString::Printf(TEXT("  %-22s %d"), *Name, *Count),
+			FString::Printf(TEXT("  %-22s %d"), *Game->GetEnemyTypeName(TypeId), *Count),
 			GetEnemyTypeColor(TypeId));
 	}
 

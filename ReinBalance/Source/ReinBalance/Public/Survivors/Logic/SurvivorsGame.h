@@ -128,7 +128,14 @@ public:
 	/** TypeId → 生存数のマップ。デバッグ表示用（毎フレームの呼び出しを想定） */
 	TMap<int32, int32> GetEnemyCountByType() const;
 
-	float XPRequiredForLevel(int32 Level) const;
+	/** 現在レベルから次レベルへ必要な XP。デバッグ表示用 */
+	float GetXPRequiredForNextLevel() const;
+
+	/** パッシブアイテムの最大レベル。デバッグ表示用 */
+	int32 GetPassiveItemMaxLevel(EPassiveItemType Type) const;
+
+	/** 敵タイプ名。未設定または範囲外なら "ID:{TypeId}" を返す。デバッグ表示用 */
+	FString GetEnemyTypeName(int32 TypeId) const;
 
 	// ---- 報酬設定 ----
 
@@ -402,6 +409,7 @@ private:
 	float GetEnemyTypeMaxHP(int32 TypeId) const;
 
 	// XP 処理
+	float XPRequiredForLevel(int32 Level) const;
 	float CumulativeXPForLevel(int32 Level) const;
 	void  ProcessXPGain(float Amount);
 	void  OnLevelUp(int32 NextLevel);

@@ -556,3 +556,27 @@ TMap<int32, int32> ASurvivorsGame::GetEnemyCountByType() const
 	}
 	return Result;
 }
+
+float ASurvivorsGame::GetXPRequiredForNextLevel() const
+{
+	return XPRequiredForLevel(PlayerLevel + 1);
+}
+
+int32 ASurvivorsGame::GetPassiveItemMaxLevel(EPassiveItemType Type) const
+{
+	const int32 TypeIndex = static_cast<int32>(Type);
+	if (TypeIndex > 0 && TypeIndex < UE_ARRAY_COUNT(SurvivorsGameConstants::PassiveMaxLevel))
+	{
+		return SurvivorsGameConstants::PassiveMaxLevel[TypeIndex];
+	}
+	return 1;
+}
+
+FString ASurvivorsGame::GetEnemyTypeName(int32 TypeId) const
+{
+	if (EnemyTypeTable.IsValidIndex(TypeId) && !EnemyTypeTable[TypeId].Name.IsEmpty())
+	{
+		return FString::Printf(TEXT("%s(ID:%d)"), *EnemyTypeTable[TypeId].Name, TypeId);
+	}
+	return FString::Printf(TEXT("ID:%d"), TypeId);
+}

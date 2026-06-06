@@ -104,6 +104,7 @@ void USurvivorsSpawnComponent::StepSpawn()
 	Game->LastSpawnDebug.MinActiveEnemies = Game->MinActiveEnemies;
 	Game->LastSpawnDebug.MaxActiveEnemies = Game->MaxActiveEnemies;
 	Game->LastSpawnDebug.MaxEnemyTypeId = Game->MaxEnemyTypeId;
+	Game->LastSpawnDebug.TotalWaveCount = Game->SpawnWaves.Num();
 	Game->LastSpawnDebug.SpawnAccumulator = Game->SpawnAccumulator;
 	Game->LastSpawnDebug.bHasCurrentWave = Wave != nullptr;
 	Game->LastSpawnDebug.bTruncated = Game->bTruncated;
