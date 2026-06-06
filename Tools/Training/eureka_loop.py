@@ -68,9 +68,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--game-config", default=None,
                    help="ゲーム設定ファイルのパス（--config YAML または直接指定）")
     p.add_argument("--iterations", type=int, default=5, help="ループ回数（default: 5）")
-    p.add_argument("--game",         required=True,
+    p.add_argument("--game",         default=None,
                    help="ゲーム種別 (survivors/coin/balance)")
-    p.add_argument("--version-name", required=True,
+    p.add_argument("--version-name", default=None,
                    help="バージョン名（runs/<game>/<version-name>/eureka/<run-name>/ に保存）")
     p.add_argument("--run-name", default=None,
                    help="保存ディレクトリ名（未指定時はタイムスタンプ自動生成）")
@@ -149,6 +149,10 @@ def _parse_args() -> argparse.Namespace:
     args = p.parse_args()
     if args.game_config is None:
         p.error("--game-config を指定してください（CLI または --config の YAML 内）")
+    if args.game is None:
+        p.error("--game を指定してください（CLI または --config の YAML 内）")
+    if args.version_name is None:
+        p.error("--version-name を指定してください（CLI または --config の YAML 内）")
     if getattr(args, "init_vecnormalize", None) is not None and getattr(args, "init_model", None) is None:
         p.error("--init-vecnormalize は --init-model と併用してください")
     return args
