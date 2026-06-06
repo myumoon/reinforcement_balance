@@ -543,3 +543,16 @@ float ASurvivorsGame::CastRayToObstacles(FVector2D Origin, FVector2D Dir) const
 {
 	return CollisionComponent->CastRayToObstacles(Origin, Dir);
 }
+
+TMap<int32, int32> ASurvivorsGame::GetEnemyCountByType() const
+{
+	TMap<int32, int32> Result;
+	for (const FEnemyState& E : Enemies)
+	{
+		if (!E.bPendingRemove)
+		{
+			Result.FindOrAdd(E.TypeId)++;
+		}
+	}
+	return Result;
+}

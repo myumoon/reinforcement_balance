@@ -1,5 +1,6 @@
 #include "Survivors/View/SurvivorsGameView.h"
 
+#include "Survivors/View/SurvivorsDebugViewComponent.h"
 #include "Survivors/View/SurvivorsEnemyViewComponent.h"
 #include "Survivors/View/SurvivorsGUIViewComponent.h"
 #include "Survivors/View/SurvivorsGemViewComponent.h"
@@ -14,6 +15,7 @@ ASurvivorsGameView::ASurvivorsGameView()
 	USceneComponent* SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
 	SetRootComponent(SceneRoot);
 
+	DebugView  = CreateDefaultSubobject<USurvivorsDebugViewComponent>(TEXT("DebugView"));
 	PlayerView = CreateDefaultSubobject<USurvivorsPlayerViewComponent>(TEXT("PlayerView"));
 	GemView    = CreateDefaultSubobject<USurvivorsGemViewComponent>(TEXT("GemView"));
 	EnemyView  = CreateDefaultSubobject<USurvivorsEnemyViewComponent>(TEXT("EnemyView"));
@@ -34,6 +36,7 @@ void ASurvivorsGameView::BeginPlay()
 	}
 
 	USceneComponent* AttachParent = RootComponent;
+	DebugView->Initialize(Game);
 	PlayerView->Initialize(Game, AttachParent);
 	GemView->Initialize(Game, AttachParent);
 	EnemyView->Initialize(Game, AttachParent);
@@ -47,6 +50,7 @@ void ASurvivorsGameView::Tick(float DeltaTime)
 
 	if (!Game) return;
 
+	DebugView->UpdateView();
 	PlayerView->UpdateView();
 	GemView->UpdateView();
 	EnemyView->UpdateView();

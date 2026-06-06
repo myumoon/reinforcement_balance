@@ -1,6 +1,7 @@
 #include "Survivors/View/SurvivorsEnemyViewComponent.h"
 
 #include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/View/SurvivorsViewPalette.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SceneComponent.h"
 #include "Engine/StaticMesh.h"
@@ -69,7 +70,7 @@ UInstancedStaticMeshComponent* USurvivorsEnemyViewComponent::EnsureEnemyComponen
 	if (EnemyInstancesByType[Slot]) return EnemyInstancesByType[Slot];
 	if (!AttachParentComponent) return nullptr;
 
-	const FLinearColor TypeColor = GetEnemyTypeColor(Slot);
+	const FLinearColor TypeColor = ::GetEnemyTypeColor(Slot);
 	UInstancedStaticMeshComponent* Comp = NewObject<UInstancedStaticMeshComponent>(
 		GetOwner(), *FString::Printf(TEXT("EnemyType_%d_Instances"), Slot));
 	Comp->RegisterComponent();
@@ -86,24 +87,6 @@ UInstancedStaticMeshComponent* USurvivorsEnemyViewComponent::EnsureEnemyComponen
 	return Comp;
 }
 
-FLinearColor USurvivorsEnemyViewComponent::GetEnemyTypeColor(int32 Type)
-{
-	switch (Type)
-	{
-		case 0:  return FLinearColor(1.f,  0.f,  0.f,  1.f);
-		case 1:  return FLinearColor(1.f,  0.4f, 0.f,  1.f);
-		case 2:  return FLinearColor(0.7f, 0.f,  0.5f, 1.f);
-		case 3:  return FLinearColor(0.2f, 0.6f, 1.f,  1.f);
-		case 4:  return FLinearColor(0.8f, 0.8f, 0.2f, 1.f);
-		case 5:  return FLinearColor(0.5f, 0.9f, 0.4f, 1.f);
-		case 6:  return FLinearColor(0.8f, 0.5f, 0.9f, 1.f);
-		case 7:  return FLinearColor(0.4f, 0.9f, 0.9f, 1.f);
-		case 8:  return FLinearColor(0.9f, 0.7f, 0.3f, 1.f);
-		case 9:  return FLinearColor(0.9f, 0.3f, 0.7f, 1.f);
-		case 10: return FLinearColor(0.6f, 0.2f, 1.f,  1.f);
-		default: return FLinearColor(0.5f, 0.5f, 0.5f, 1.f);
-	}
-}
 
 FVector USurvivorsEnemyViewComponent::GetEnemyTypeScale(int32 Type)
 {
