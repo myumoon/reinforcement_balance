@@ -1,5 +1,6 @@
 #pragma once
 #include "CoreMinimal.h"
+#include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponBase.h"
 #include "SurvivorsCrossWeapon.generated.h"
 
@@ -18,6 +19,9 @@ private:
 	float CachedDamage   = 50.f;
 	float CachedCooldown = 1.50f;
 	float CachedSpeed    = 160.f;
+	float CachedRadius   = 12.f;
+	int32 CachedAmount   = 1;
+	float CachedKnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;
 
 	void CacheParams();
 };

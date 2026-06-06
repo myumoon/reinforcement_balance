@@ -19,6 +19,7 @@ private:
 	float CachedCooldown  = 4.00f;
 	float CachedSpeed     = 180.f;
 	float CachedArcHeight = 120.f;
+	int32 CachedAmount    = 1;
 	int32 CachedPierce    = 3;
 
 	void CacheParams();

@@ -18,20 +18,40 @@ void USurvivorsKingBibleWeapon::CacheParams()
 	if (WeaponType == EWeaponType::UnholyVespers)
 	{
 		const SurvivorsGameConstants::FKingBibleParams& P = SurvivorsGameConstants::UnholyVespersTable[Idx];
-		CachedDamage      = P.Damage;
-		CachedOrbitRadius = P.OrbitRadius;
-		CachedAmount      = P.Amount;
-		CachedRotSpeed    = P.RotSpeed;
+		CachedDamage            = P.Damage;
+		CachedCooldown          = P.Cooldown;
+		CachedDuration          = P.Duration;
+		CachedOrbitRadius       = P.OrbitRadius;
+		CachedAmount            = P.Amount;
+		CachedRotSpeed          = P.RotSpeed;
+		CachedKnockbackStrength = P.KnockbackStrength;
 	}
 	else
 	{
 		const SurvivorsGameConstants::FKingBibleParams& P = SurvivorsGameConstants::KingBibleTable[Idx];
-		CachedDamage      = P.Damage;
-		CachedOrbitRadius = P.OrbitRadius;
-		CachedAmount      = P.Amount;
-		CachedRotSpeed    = P.RotSpeed;
+		CachedDamage            = P.Damage;
+		CachedCooldown          = P.Cooldown;
+		CachedDuration          = P.Duration;
+		CachedOrbitRadius       = P.OrbitRadius;
+		CachedAmount            = P.Amount;
+		CachedRotSpeed          = P.RotSpeed;
+		CachedKnockbackStrength = P.KnockbackStrength;
 	}
 
+	RebuildOrbProjectiles();
+}
+
+void USurvivorsKingBibleWeapon::ActivateOrbs(const FPassiveEffects& PE)
+{
+	bOrbsActive = true;
+	ActiveTimer = CachedDuration * PE.DurationMult;
+
+	// King Bible の次回発動は「基礎Cooldown + 基礎Duration」後。
+	// Unholy Vespers はCooldownがDurationに依存しないため、基礎Cooldownのみで再発動する。
+	const float CooldownInterval = (WeaponType == EWeaponType::UnholyVespers)
+		? CachedCooldown * PE.CooldownMult
+		: CachedCooldown * PE.CooldownMult + CachedDuration;
+	CooldownTimer = FCooldownSeconds(FMath::Max(SurvivorsGameConstants::PhysicsDt, CooldownInterval));
 	RebuildOrbProjectiles();
 }
 
@@ -42,11 +62,16 @@ void USurvivorsKingBibleWeapon::RebuildOrbProjectiles()
 	// （登録すると ComputeProjectileHits と二重判定になる）
 	// View 表示は GetOrbPositions() アクセサを使う。
 	if (!Game) return;
+	if (!bOrbsActive)
+	{
+		OrbPositions.Reset();
+		return;
+	}
 
 	// オーブ位置キャッシュを再計算
 	const FPassiveEffects& PE = GetPassiveEffects();
 	const float EffRadius = CachedOrbitRadius * PE.AreaMult;
-	const int32 EffAmount = CachedAmount + static_cast<int32>(PE.ExtraAmount);
+	const int32 EffAmount = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 
 	OrbPositions.SetNum(EffAmount);
 	for (int32 i = 0; i < EffAmount; ++i)
@@ -61,8 +86,27 @@ void USurvivorsKingBibleWeapon::Tick(float Dt)
 	if (!Game) return;
 
 	const FPassiveEffects& PE = GetPassiveEffects();
+	CooldownTimer.Value = FMath::Max(0.f, CooldownTimer.Value - Dt);
+
+	if (bOrbsActive)
+	{
+		ActiveTimer = FMath::Max(0.f, ActiveTimer - Dt);
+		if (ActiveTimer <= 0.f)
+		{
+			bOrbsActive = false;
+			OrbPositions.Reset();
+		}
+	}
+
+	if (CooldownTimer.IsReady())
+	{
+		ActivateOrbs(PE);
+	}
+
+	if (!bOrbsActive) return;
+
 	const float EffRadius   = CachedOrbitRadius * PE.AreaMult;
-	const int32 EffAmount   = CachedAmount + static_cast<int32>(PE.ExtraAmount);
+	const int32 EffAmount   = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 
 	// 角度を更新してオーブ位置キャッシュを更新
 	MasterAngle += CachedRotSpeed * Dt;
@@ -80,7 +124,7 @@ void USurvivorsKingBibleWeapon::ComputeHits(USurvivorsCollisionComponent* CollCo
 	// KingBible は Projectiles を使わず ComputeHits のみでヒット判定を行う。
 	// WeaponLastHitTime[SlotIdx] でヒット間隔（OrbHitInterval）を管理して毎フレームダメージを防ぐ。
 
-	if (!Game || !CollComp) return;
+	if (!Game || !CollComp || !bOrbsActive) return;
 
 	const FPassiveEffects& PE = GetPassiveEffects();
 	const float EffDamage  = CachedDamage * PE.DamageMult;
@@ -112,7 +156,7 @@ void USurvivorsKingBibleWeapon::ComputeHits(USurvivorsCollisionComponent* CollCo
 			Ev.Damage            = EffDamage;
 			Ev.WeaponSlot        = SlotIdx;
 			Ev.KnockbackDir      = (Proxy->Pos - Game->PlayerPos).GetSafeNormal();
-			Ev.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
+			Ev.KnockbackStrength = CachedKnockbackStrength;
 			HitFrame.Events.Add(Ev);
 			break;  // 1 オーブにつき 1 ヒット/フレーム（複数オーブが同一敵に重なるケースを制限）
 		}

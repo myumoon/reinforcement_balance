@@ -21,6 +21,8 @@ void USurvivorsRunetracerWeapon::CacheParams()
 		CachedDamage    = P.Damage;
 		CachedCooldown  = P.Cooldown;
 		CachedSpeed     = P.Speed;
+		CachedDuration  = P.Duration;
+		CachedAmount    = P.Amount;
 		CachedMaxBounce = P.MaxBounce;
 	}
 	else
@@ -29,6 +31,8 @@ void USurvivorsRunetracerWeapon::CacheParams()
 		CachedDamage    = P.Damage;
 		CachedCooldown  = P.Cooldown;
 		CachedSpeed     = P.Speed;
+		CachedDuration  = P.Duration;
+		CachedAmount    = P.Amount;
 		CachedMaxBounce = P.MaxBounce;
 	}
 }
@@ -63,26 +67,32 @@ void USurvivorsRunetracerWeapon::Tick(float Dt)
 	if (!CooldownTimer.IsReady()) return;
 
 	const FPassiveEffects& PE = GetPassiveEffects();
-	CooldownTimer = FCooldownSeconds(CachedCooldown * PE.CooldownMult);
+	const float CooldownInterval = (WeaponType == EWeaponType::NoFuture)
+		? CachedCooldown * PE.CooldownMult + CachedDuration
+		: CachedCooldown * PE.CooldownMult;
+	CooldownTimer = FCooldownSeconds(CooldownInterval);
 
 	const float EffDamage = CachedDamage * PE.DamageMult;
 	const float EffSpeed  = CachedSpeed  * PE.SpeedMult;
-	const float LifeTime  = 5.0f * PE.DurationMult;
+	const float LifeTime  = CachedDuration * PE.DurationMult;
+	const int32 EffAmount = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 
-	// ランダム方向に発射
-	const float Angle = Game->RandStream.FRand() * TWO_PI;
-	const FVector2D Dir = FVector2D(FMath::Cos(Angle), FMath::Sin(Angle));
+	for (int32 i = 0; i < EffAmount; ++i)
+	{
+		const float Angle = Game->RandStream.FRand() * TWO_PI;
+		const FVector2D Dir = FVector2D(FMath::Cos(Angle), FMath::Sin(Angle));
 
-	FProjectileState P;
-	P.Pos           = Game->PlayerPos;
-	P.Vel           = Dir * EffSpeed;
-	P.Radius        = FSimRadius(10.f);
-	P.Damage        = FDamage(EffDamage);
-	P.WeaponType    = WeaponType;
-	P.WeaponSlotIdx = SlotIdx;
-	P.LifeTime      = FProjectileLifeTime(LifeTime);
-	P.bPiercing         = true;  // AoE: 無限貫通
-	P.BounceCount       = FBounceCount(CachedMaxBounce + static_cast<int32>(PE.ExtraAmount));
-	P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
-	WeaponComp->SpawnProjectile(P);
+		FProjectileState P;
+		P.Pos               = Game->PlayerPos;
+		P.Vel               = Dir * EffSpeed;
+		P.Radius            = FSimRadius(10.f * PE.AreaMult);
+		P.Damage            = FDamage(EffDamage);
+		P.WeaponType        = WeaponType;
+		P.WeaponSlotIdx     = SlotIdx;
+		P.LifeTime          = FProjectileLifeTime(LifeTime);
+		P.bPiercing         = true;  // AoE: 無限貫通
+		P.BounceCount       = FBounceCount(CachedMaxBounce);
+		P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
+		WeaponComp->SpawnProjectile(P);
+	}
 }

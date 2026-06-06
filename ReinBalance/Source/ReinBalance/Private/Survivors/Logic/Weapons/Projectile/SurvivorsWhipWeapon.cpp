@@ -22,6 +22,7 @@ void USurvivorsWhipWeapon::CacheParams()
 		CachedCooldown = P.Cooldown;
 		CachedWidth    = P.Width;
 		CachedHeight   = P.Height;
+		CachedAmount   = P.Amount;
 	}
 	else
 	{
@@ -30,6 +31,7 @@ void USurvivorsWhipWeapon::CacheParams()
 		CachedCooldown = P.Cooldown;
 		CachedWidth    = P.Width;
 		CachedHeight   = P.Height;
+		CachedAmount   = P.Amount;
 	}
 }
 
@@ -49,27 +51,21 @@ void USurvivorsWhipWeapon::Tick(float Dt)
 	const float EffWidth  = CachedWidth  * PE.AreaMult;
 	const float EffHeight = CachedHeight * PE.AreaMult;
 	const float LifeTime  = 0.20f * PE.DurationMult;
+	const int32 EffAmount = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 
-	// 左右 2 方向に piercing 矩形プロジェクタイル（近似: 横長楕円として Radius=Width で扱う）
-	// 左方向
+	float FaceSign = 1.f;
+	if (!Game->PlayerVel.IsNearlyZero())
 	{
-		FProjectileState P;
-		P.Pos               = Game->PlayerPos;
-		P.Vel               = FVector2D(-EffWidth * 2.f / LifeTime, 0.f);
-		P.Radius            = FSimRadius(EffHeight);
-		P.Damage            = FDamage(EffDamage);
-		P.WeaponType        = WeaponType;
-		P.WeaponSlotIdx     = SlotIdx;
-		P.LifeTime          = FProjectileLifeTime(LifeTime);
-		P.bPiercing         = true;   // AoE: 無限貫通
-		P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
-		WeaponComp->SpawnProjectile(P);
+		FaceSign = (Game->PlayerVel.X >= 0.f) ? 1.f : -1.f;
 	}
-	// 右方向
+
+	for (int32 i = 0; i < EffAmount; ++i)
 	{
+		const float DirSign = (i % 2 == 0) ? FaceSign : -FaceSign;
+
 		FProjectileState P;
 		P.Pos               = Game->PlayerPos;
-		P.Vel               = FVector2D(EffWidth * 2.f / LifeTime, 0.f);
+		P.Vel               = FVector2D(DirSign * EffWidth * 2.f / LifeTime, 0.f);
 		P.Radius            = FSimRadius(EffHeight);
 		P.Damage            = FDamage(EffDamage);
 		P.WeaponType        = WeaponType;

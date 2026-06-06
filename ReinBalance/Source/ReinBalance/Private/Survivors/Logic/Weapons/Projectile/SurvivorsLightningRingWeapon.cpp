@@ -19,6 +19,7 @@ void USurvivorsLightningRingWeapon::CacheParams()
 		const SurvivorsGameConstants::FLightningRingParams& P = SurvivorsGameConstants::ThunderLoopTable[Idx];
 		CachedDamage   = P.Damage;
 		CachedCooldown = P.Cooldown;
+		CachedRadius   = P.Radius;
 		CachedAmount   = P.Amount;
 	}
 	else
@@ -26,6 +27,7 @@ void USurvivorsLightningRingWeapon::CacheParams()
 		const SurvivorsGameConstants::FLightningRingParams& P = SurvivorsGameConstants::LightningRingTable[Idx];
 		CachedDamage   = P.Damage;
 		CachedCooldown = P.Cooldown;
+		CachedRadius   = P.Radius;
 		CachedAmount   = P.Amount;
 	}
 }
@@ -51,6 +53,7 @@ void USurvivorsLightningRingWeapon::ComputeHits(USurvivorsCollisionComponent* Co
 	CooldownTimer = FCooldownSeconds(CachedCooldown * PE.CooldownMult);
 
 	const float EffDamage = CachedDamage * PE.DamageMult;
+	const float EffRadius = CachedRadius * PE.AreaMult;
 	const int32 EffAmount = CachedAmount + static_cast<int32>(PE.ExtraAmount);
 
 	// ランダムに EffAmount 体の敵を選んでダメージ
@@ -70,23 +73,33 @@ void USurvivorsLightningRingWeapon::ComputeHits(USurvivorsCollisionComponent* Co
 		EnemyIndices.Swap(i, SwapIdx);
 	}
 
+	TSet<int32> HitEnemyIds;
 	for (int32 i = 0; i < SelectCount; ++i)
 	{
-		const int32 EIdx = EnemyIndices[i];
-		const FEnemyState& E = Game->Enemies[EIdx];
+		const int32 StrikeIdx = EnemyIndices[i];
+		const FEnemyState& StrikeTarget = Game->Enemies[StrikeIdx];
 
-		FSurvivorsCollisionRef Ref;
-		Ref.Kind             = ESurvivorsCollisionOwnerKind::Enemy;
-		Ref.UniqueId         = E.UniqueId;
-		Ref.IndexAtBuildTime = EIdx;
+		TArray<const FSurvivorsTargetProxy*> Contacts;
+		CollComp->QueryEnemyContacts(StrikeTarget.Pos, EffRadius, Contacts);
 
-		FSurvivorsHitEvent Ev;
-		Ev.Type              = ESurvivorsHitType::WeaponAreaDamage;
-		Ev.Target            = Ref;
-		Ev.Damage            = EffDamage;
-		Ev.WeaponSlot        = SlotIdx;
-		Ev.KnockbackDir      = (E.Pos - Game->PlayerPos).GetSafeNormal();
-		Ev.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
-		HitFrame.Events.Add(Ev);
+		for (const FSurvivorsTargetProxy* Proxy : Contacts)
+		{
+			if ((StrikeTarget.Pos - Proxy->Pos).SizeSquared() > FMath::Square(EffRadius + Proxy->Radius)) continue;
+
+			const int32 EIdx = Proxy->Ref.IndexAtBuildTime;
+			if (!Game->Enemies.IsValidIndex(EIdx) || Game->Enemies[EIdx].UniqueId != Proxy->Ref.UniqueId) continue;
+			const FEnemyState& E = Game->Enemies[EIdx];
+			if (E.bPendingRemove || HitEnemyIds.Contains(E.UniqueId)) continue;
+
+			FSurvivorsHitEvent Ev;
+			Ev.Type              = ESurvivorsHitType::WeaponAreaDamage;
+			Ev.Target            = Proxy->Ref;
+			Ev.Damage            = EffDamage;
+			Ev.WeaponSlot        = SlotIdx;
+			Ev.KnockbackDir      = (E.Pos - Game->PlayerPos).GetSafeNormal();
+			Ev.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
+			HitFrame.Events.Add(Ev);
+			HitEnemyIds.Add(E.UniqueId);
+		}
 	}
 }

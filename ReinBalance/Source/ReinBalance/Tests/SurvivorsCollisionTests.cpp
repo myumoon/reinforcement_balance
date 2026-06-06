@@ -9,6 +9,7 @@
 #include "Survivors/Logic/SurvivorsPickupComponent.h"
 #include "Survivors/Logic/SurvivorsPlayerComponent.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsKingBibleWeapon.h"
 
 // ============================================================
 // テストヘルパー: ASurvivorsGame の private 状態へのアクセサ
@@ -133,6 +134,14 @@ struct FSurvivorsTestWorld
 		GC->ApplyPickupHits(HF);
 	}
 };
+
+static void EquipTestWeapon(ASurvivorsGame* Game, EWeaponType Type, int32 Level)
+{
+	FWeaponSlot* Weapons = FSurvivorsGameTestAccess::WeaponSlots(Game);
+	Weapons[0].Type = Type;
+	Weapons[0].Level = FWeaponLevel(Level);
+	FSurvivorsGameTestAccess::WeaponComp(Game)->EquipWeapon(0, Type, Level);
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsWikiLevelRequirements,
 	"ReinBalance.Survivors.Wiki.LevelRequirements",
@@ -259,6 +268,86 @@ bool FSurvivorsWikiChestEvolvesWeapon::RunTest(const FString& Parameters)
 		static_cast<int32>(Weapons[0].Type),
 		static_cast<int32>(EWeaponType::BloodyTear));
 	TestEqual("Evolved weapon level is 1", Weapons[0].Level.Value, 1);
+
+	S.Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsWeaponSpecProjectileAmounts,
+	"ReinBalance.Survivors.Wiki.WeaponSpecProjectileAmounts",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsWeaponSpecProjectileAmounts::RunTest(const FString& Parameters)
+{
+	struct FCase
+	{
+		EWeaponType Type;
+		int32 Level;
+		int32 ExpectedProjectiles;
+		const TCHAR* Label;
+	};
+
+	const FCase Cases[] = {
+		{ EWeaponType::Whip,         1, 1, TEXT("Whip Lv1 Amount=1") },
+		{ EWeaponType::Whip,         2, 2, TEXT("Whip Lv2 Amount=2") },
+		{ EWeaponType::Axe,          8, 3, TEXT("Axe Lv8 Amount=3") },
+		{ EWeaponType::DeathSpiral,  1, 9, TEXT("Death Spiral Amount=9") },
+		{ EWeaponType::Cross,        7, 3, TEXT("Cross Lv7 Amount=3") },
+		{ EWeaponType::HeavenSword,  1, 1, TEXT("Heaven Sword Amount=1") },
+		{ EWeaponType::Runetracer,   7, 3, TEXT("Runetracer Lv7 Amount=3") },
+		{ EWeaponType::NoFuture,     1, 1, TEXT("NO FUTURE Amount=1") },
+	};
+
+	for (const FCase& Case : Cases)
+	{
+		FSurvivorsTestWorld S;
+		if (!TestTrue(FString::Printf(TEXT("%s world created"), Case.Label), S.Create())) return false;
+
+		EquipTestWeapon(S.Game, Case.Type, Case.Level);
+		FSurvivorsGameTestAccess::WeaponComp(S.Game)->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+
+		TestEqual(FString::Printf(TEXT("%s projectile count"), Case.Label),
+			FSurvivorsGameTestAccess::WeaponComp(S.Game)->GetProjectileCount(),
+			Case.ExpectedProjectiles);
+
+		S.Destroy();
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsKingBibleDurationCooldown,
+	"ReinBalance.Survivors.Wiki.KingBible_DurationCooldown",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsKingBibleDurationCooldown::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	EquipTestWeapon(S.Game, EWeaponType::KingBible, 1);
+	auto* Weapon = Cast<USurvivorsKingBibleWeapon>(
+		FSurvivorsGameTestAccess::WeaponComp(S.Game)->GetWeaponInstance(0));
+	if (!TestTrue("King Bible instance created", Weapon != nullptr))
+	{
+		S.Destroy();
+		return false;
+	}
+
+	FSurvivorsGameTestAccess::WeaponComp(S.Game)->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("King Bible Lv1 starts with 1 active orb", Weapon->GetOrbPositions().Num(), 1);
+
+	const int32 TicksPastDuration = FMath::CeilToInt(3.1f / SurvivorsGameConstants::PhysicsDt);
+	for (int32 i = 0; i < TicksPastDuration; ++i)
+	{
+		FSurvivorsGameTestAccess::WeaponComp(S.Game)->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	}
+	TestEqual("King Bible orbs disappear after Duration", Weapon->GetOrbPositions().Num(), 0);
+
+	const int32 TicksToNextCycle = FMath::CeilToInt(3.1f / SurvivorsGameConstants::PhysicsDt);
+	for (int32 i = 0; i < TicksToNextCycle; ++i)
+	{
+		FSurvivorsGameTestAccess::WeaponComp(S.Game)->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	}
+	TestEqual("King Bible orbs reactivate after Duration + Cooldown cycle", Weapon->GetOrbPositions().Num(), 1);
 
 	S.Destroy();
 	return true;
