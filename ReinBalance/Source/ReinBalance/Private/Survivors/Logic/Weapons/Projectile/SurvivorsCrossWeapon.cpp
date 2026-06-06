@@ -87,8 +87,9 @@ void USurvivorsCrossWeapon::Tick(float Dt)
 	P.WeaponType    = WeaponType;
 	P.WeaponSlotIdx = SlotIdx;
 	P.LifeTime      = FProjectileLifeTime(EffLifeTime);
-	P.bPiercing     = true;   // 貫通扱いにして敵ヒット時に削除されないようにする
-	P.bHasReversed  = false;  // 折り返し済みフラグ（初期は未折り返し）
-	P.AngleRad      = FOrbitAngleRad(EffLifeTime);  // 流用: 初期 LifeTime を格納
+	P.bPiercing         = true;   // AoE: 無限貫通
+	P.bHasReversed      = false;
+	P.AngleRad          = FOrbitAngleRad(EffLifeTime);  // 流用: 初期 LifeTime を格納
+	P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
 	WeaponComp->SpawnProjectile(P);
 }

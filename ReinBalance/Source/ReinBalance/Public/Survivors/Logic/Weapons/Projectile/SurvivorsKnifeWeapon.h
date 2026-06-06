@@ -15,10 +15,11 @@ public:
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
 
 private:
-	float CachedDamage   = 15.f;
-	float CachedCooldown = 0.35f;
+	float CachedDamage   = 6.5f;
+	float CachedCooldown = 1.00f;
 	float CachedSpeed    = 400.f;
 	int32 CachedAmount   = 1;
+	int32 CachedPierce   = 1;
 
 	void CacheParams();
 };

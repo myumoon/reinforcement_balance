@@ -39,8 +39,8 @@ private:
 	// オーブ位置キャッシュ（Tick で更新、ComputeHits で参照）
 	TArray<FVector2D> OrbPositions;
 
-	// ヒット間隔（オーブの高頻度当たり判定を制限）
-	static constexpr float OrbHitInterval  = 0.5f;
+	// ヒット間隔: 仕様 Hitbox Delay=1.7s（同一オーブが同一敵を再ヒットするまでの間隔）
+	static constexpr float OrbHitInterval  = 1.7f;
 	static constexpr float OrbVisualRadius = 10.f;
 
 	void CacheParams();

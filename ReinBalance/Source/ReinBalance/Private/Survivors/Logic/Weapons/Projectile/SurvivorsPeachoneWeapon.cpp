@@ -76,10 +76,12 @@ void USurvivorsPeachoneWeapon::ComputeHits(USurvivorsCollisionComponent* CollCom
 		if (Game->Enemies[EIdx].bPendingRemove) continue;
 
 		FSurvivorsHitEvent Ev;
-		Ev.Type      = ESurvivorsHitType::WeaponAreaDamage;
-		Ev.Target    = Proxy->Ref;
-		Ev.Damage    = EffDamage;
-		Ev.WeaponSlot = SlotIdx;
+		Ev.Type              = ESurvivorsHitType::WeaponAreaDamage;
+		Ev.Target            = Proxy->Ref;
+		Ev.Damage            = EffDamage;
+		Ev.WeaponSlot        = SlotIdx;
+		Ev.KnockbackDir      = (Proxy->Pos - Game->PlayerPos).GetSafeNormal();
+		Ev.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_2;  // Knockback=2
 		HitFrame.Events.Add(Ev);
 	}
 }

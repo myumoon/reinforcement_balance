@@ -149,37 +149,44 @@ namespace SurvivorsGameConstants
 		{ 40.f, 1.35f, 65.f, 15.f },  // Lv8 (未使用)
 	};
 
+	// ノックバック強度定数 (シム座標単位): 仕様の Knockback 値をシミュレーション値に変換
+	// 仕様 Knockback=1 を基準とし、フィールド幅(2000u)・敵速度(100u/s)に対して妥当な値
+	static constexpr float KnockbackSim_Half = 10.f;  // Knockback=0.5（Knife）
+	static constexpr float KnockbackSim_1    = 20.f;  // Knockback=1（標準）
+	static constexpr float KnockbackSim_2    = 40.f;  // Knockback=2（Peachone/EbonyWings）
+
 	struct FMagicWandParams
 	{
 		float Damage;
 		float Cooldown;
 		float Speed;
 		int32 Amount;
+		int32 Pierce;  // 貫通数: 1=単体命中, N=N体貫通
 	};
 
-	// MagicWand: Speed は全レベル固定 300u(100%)。Lv3 で CD-0.2、各 Lv で Amount 増加
+	// MagicWand: Speed は全レベル固定 300u(100%)。Lv3 で CD-0.2、各 Lv で Amount/Pierce 増加
 	inline constexpr FMagicWandParams MagicWandTable[MaxWeaponLevel] = {
-		{ 10.f, 1.20f, 300.f, 1 },  // Lv1: D=10, CD=1.20, Amount=1
-		{ 10.f, 1.20f, 300.f, 2 },  // Lv2: Amount+1
-		{ 10.f, 1.00f, 300.f, 2 },  // Lv3: CD-0.20
-		{ 10.f, 1.00f, 300.f, 3 },  // Lv4: Amount+1
-		{ 20.f, 1.00f, 300.f, 3 },  // Lv5: D+10
-		{ 20.f, 1.00f, 300.f, 4 },  // Lv6: Amount+1
-		{ 20.f, 1.00f, 300.f, 4 },  // Lv7: Pierce+1 (コード側で管理)
-		{ 30.f, 1.00f, 300.f, 4 },  // Lv8: D+10
+		{ 10.f, 1.20f, 300.f, 1, 1 },  // Lv1: D=10, CD=1.20, Amount=1, Pierce=1
+		{ 10.f, 1.20f, 300.f, 2, 1 },  // Lv2: Amount+1
+		{ 10.f, 1.00f, 300.f, 2, 1 },  // Lv3: CD-0.20
+		{ 10.f, 1.00f, 300.f, 3, 1 },  // Lv4: Amount+1
+		{ 20.f, 1.00f, 300.f, 3, 1 },  // Lv5: D+10
+		{ 20.f, 1.00f, 300.f, 4, 1 },  // Lv6: Amount+1
+		{ 20.f, 1.00f, 300.f, 4, 2 },  // Lv7: Pierce+1
+		{ 30.f, 1.00f, 300.f, 4, 2 },  // Lv8: D+10
 	};
 
-	// HolyWand (MagicWand 進化): Damage=30, CD=0.5s, Speed=600u(200%), Amount=4
+	// HolyWand (MagicWand 進化): Damage=30, CD=0.5s, Speed=600u(200%), Amount=4, Pierce=2
 	// 進化武器は MaxLevel=1 のため Lv1 のみ参照される
 	inline constexpr FMagicWandParams HolyWandTable[MaxWeaponLevel] = {
-		{ 30.f, 0.50f, 600.f, 4 },  // Lv1
-		{ 30.f, 0.50f, 600.f, 4 },  // Lv2 (未使用)
-		{ 30.f, 0.50f, 600.f, 4 },  // Lv3 (未使用)
-		{ 30.f, 0.50f, 600.f, 4 },  // Lv4 (未使用)
-		{ 30.f, 0.50f, 600.f, 4 },  // Lv5 (未使用)
-		{ 30.f, 0.50f, 600.f, 4 },  // Lv6 (未使用)
-		{ 30.f, 0.50f, 600.f, 4 },  // Lv7 (未使用)
-		{ 30.f, 0.50f, 600.f, 4 },  // Lv8 (未使用)
+		{ 30.f, 0.50f, 600.f, 4, 2 },  // Lv1
+		{ 30.f, 0.50f, 600.f, 4, 2 },  // Lv2 (未使用)
+		{ 30.f, 0.50f, 600.f, 4, 2 },  // Lv3 (未使用)
+		{ 30.f, 0.50f, 600.f, 4, 2 },  // Lv4 (未使用)
+		{ 30.f, 0.50f, 600.f, 4, 2 },  // Lv5 (未使用)
+		{ 30.f, 0.50f, 600.f, 4, 2 },  // Lv6 (未使用)
+		{ 30.f, 0.50f, 600.f, 4, 2 },  // Lv7 (未使用)
+		{ 30.f, 0.50f, 600.f, 4, 2 },  // Lv8 (未使用)
 	};
 
 	struct FKnifeParams
@@ -188,31 +195,33 @@ namespace SurvivorsGameConstants
 		float Cooldown;
 		float Speed;
 		int32 Amount;
+		int32 Pierce;  // 貫通数: 1=単体命中, 2=2体貫通, 3=3体貫通
 	};
 
 	// Knife: CD=1.0s 全レベル固定、Speed=400u(100%) 全レベル固定
+	// Pierce: Lv1=1体, Lv5=2体, Lv8=3体
 	inline constexpr FKnifeParams KnifeTable[MaxWeaponLevel] = {
-		{  6.5f, 1.00f, 400.f, 1 },  // Lv1: D=6.5, Amount=1
-		{  6.5f, 1.00f, 400.f, 2 },  // Lv2: Amount+1
-		{ 11.5f, 1.00f, 400.f, 3 },  // Lv3: D+5, Amount+1
-		{ 11.5f, 1.00f, 400.f, 4 },  // Lv4: Amount+1
-		{ 11.5f, 1.00f, 400.f, 4 },  // Lv5: Pierce+1 (コード側で管理)
-		{ 11.5f, 1.00f, 400.f, 5 },  // Lv6: Amount+1
-		{ 16.5f, 1.00f, 400.f, 6 },  // Lv7: D+5, Amount+1
-		{ 16.5f, 1.00f, 400.f, 6 },  // Lv8: Pierce+1 (コード側で管理)
+		{  6.5f, 1.00f, 400.f, 1, 1 },  // Lv1: D=6.5, Amount=1, Pierce=1
+		{  6.5f, 1.00f, 400.f, 2, 1 },  // Lv2: Amount+1
+		{ 11.5f, 1.00f, 400.f, 3, 1 },  // Lv3: D+5, Amount+1
+		{ 11.5f, 1.00f, 400.f, 4, 1 },  // Lv4: Amount+1
+		{ 11.5f, 1.00f, 400.f, 4, 2 },  // Lv5: Pierce+1
+		{ 11.5f, 1.00f, 400.f, 5, 2 },  // Lv6: Amount+1
+		{ 16.5f, 1.00f, 400.f, 6, 2 },  // Lv7: D+5, Amount+1
+		{ 16.5f, 1.00f, 400.f, 6, 3 },  // Lv8: Pierce+1
 	};
 
-	// ThousandEdge (Knife 進化): Damage=16.5, CD=0.35s, Speed=600u(150%), Amount=6
+	// ThousandEdge (Knife 進化): Damage=16.5, CD=0.35s, Speed=600u(150%), Amount=6, Pierce=3
 	// 進化武器は MaxLevel=1 のため Lv1 のみ参照される
 	inline constexpr FKnifeParams ThousandEdgeTable[MaxWeaponLevel] = {
-		{ 16.5f, 0.35f, 600.f, 6 },  // Lv1
-		{ 16.5f, 0.35f, 600.f, 6 },  // Lv2 (未使用)
-		{ 16.5f, 0.35f, 600.f, 6 },  // Lv3 (未使用)
-		{ 16.5f, 0.35f, 600.f, 6 },  // Lv4 (未使用)
-		{ 16.5f, 0.35f, 600.f, 6 },  // Lv5 (未使用)
-		{ 16.5f, 0.35f, 600.f, 6 },  // Lv6 (未使用)
-		{ 16.5f, 0.35f, 600.f, 6 },  // Lv7 (未使用)
-		{ 16.5f, 0.35f, 600.f, 6 },  // Lv8 (未使用)
+		{ 16.5f, 0.35f, 600.f, 6, 3 },  // Lv1
+		{ 16.5f, 0.35f, 600.f, 6, 3 },  // Lv2 (未使用)
+		{ 16.5f, 0.35f, 600.f, 6, 3 },  // Lv3 (未使用)
+		{ 16.5f, 0.35f, 600.f, 6, 3 },  // Lv4 (未使用)
+		{ 16.5f, 0.35f, 600.f, 6, 3 },  // Lv5 (未使用)
+		{ 16.5f, 0.35f, 600.f, 6, 3 },  // Lv6 (未使用)
+		{ 16.5f, 0.35f, 600.f, 6, 3 },  // Lv7 (未使用)
+		{ 16.5f, 0.35f, 600.f, 6, 3 },  // Lv8 (未使用)
 	};
 
 	struct FAxeParams
@@ -221,32 +230,33 @@ namespace SurvivorsGameConstants
 		float Cooldown;
 		float Speed;
 		float ArcHeight;  // 最大弧高さ（シム座標）
+		int32 Pierce;     // 貫通数: Lv1=3, Lv4=5, Lv7=7
 	};
 
 	// Axe: CD=4.0s 全レベル固定、Speed=180u(100%) 全レベル固定
-	// Amount/Pierce はコード側で管理（構造体に含まない）
+	// Pierce: Lv1=3体, Lv4=5体, Lv7=7体。Amount はコード側で管理
 	inline constexpr FAxeParams AxeTable[MaxWeaponLevel] = {
-		{  20.f, 4.00f, 180.f, 120.f },  // Lv1: D=20
-		{  20.f, 4.00f, 180.f, 120.f },  // Lv2: Amount+1 (コード側で管理)
-		{  40.f, 4.00f, 180.f, 120.f },  // Lv3: D+20
-		{  40.f, 4.00f, 180.f, 120.f },  // Lv4: Pierce+2 (コード側で管理)
-		{  40.f, 4.00f, 180.f, 120.f },  // Lv5: Amount+1 (コード側で管理)
-		{  60.f, 4.00f, 180.f, 120.f },  // Lv6: D+20
-		{  60.f, 4.00f, 180.f, 120.f },  // Lv7: Pierce+2 (コード側で管理)
-		{  80.f, 4.00f, 180.f, 120.f },  // Lv8: D+20
+		{  20.f, 4.00f, 180.f, 120.f, 3 },  // Lv1: D=20, Pierce=3
+		{  20.f, 4.00f, 180.f, 120.f, 3 },  // Lv2: Amount+1
+		{  40.f, 4.00f, 180.f, 120.f, 3 },  // Lv3: D+20
+		{  40.f, 4.00f, 180.f, 120.f, 5 },  // Lv4: Pierce+2
+		{  40.f, 4.00f, 180.f, 120.f, 5 },  // Lv5: Amount+1
+		{  60.f, 4.00f, 180.f, 120.f, 5 },  // Lv6: D+20
+		{  60.f, 4.00f, 180.f, 120.f, 7 },  // Lv7: Pierce+2
+		{  80.f, 4.00f, 180.f, 120.f, 7 },  // Lv8: D+20
 	};
 
-	// DeathSpiral (Axe 進化): Damage=60, CD=4.0s, Speed=144u(80%), ArcHeight=144u(Area120%)
+	// DeathSpiral (Axe 進化): Damage=60, CD=4.0s, Speed=144u(80%), ArcHeight=144u, Pierce=1000(無限貫通)
 	// 進化武器は MaxLevel=1 のため Lv1 のみ参照される
 	inline constexpr FAxeParams DeathSpiralTable[MaxWeaponLevel] = {
-		{  60.f, 4.00f, 144.f, 144.f },  // Lv1
-		{  60.f, 4.00f, 144.f, 144.f },  // Lv2 (未使用)
-		{  60.f, 4.00f, 144.f, 144.f },  // Lv3 (未使用)
-		{  60.f, 4.00f, 144.f, 144.f },  // Lv4 (未使用)
-		{  60.f, 4.00f, 144.f, 144.f },  // Lv5 (未使用)
-		{  60.f, 4.00f, 144.f, 144.f },  // Lv6 (未使用)
-		{  60.f, 4.00f, 144.f, 144.f },  // Lv7 (未使用)
-		{  60.f, 4.00f, 144.f, 144.f },  // Lv8 (未使用)
+		{  60.f, 4.00f, 144.f, 144.f, 1000 },  // Lv1
+		{  60.f, 4.00f, 144.f, 144.f, 1000 },  // Lv2 (未使用)
+		{  60.f, 4.00f, 144.f, 144.f, 1000 },  // Lv3 (未使用)
+		{  60.f, 4.00f, 144.f, 144.f, 1000 },  // Lv4 (未使用)
+		{  60.f, 4.00f, 144.f, 144.f, 1000 },  // Lv5 (未使用)
+		{  60.f, 4.00f, 144.f, 144.f, 1000 },  // Lv6 (未使用)
+		{  60.f, 4.00f, 144.f, 144.f, 1000 },  // Lv7 (未使用)
+		{  60.f, 4.00f, 144.f, 144.f, 1000 },  // Lv8 (未使用)
 	};
 
 	struct FCrossParams

@@ -22,6 +22,7 @@ void USurvivorsMagicWandWeapon::CacheParams()
 		CachedCooldown = P.Cooldown;
 		CachedSpeed    = P.Speed;
 		CachedAmount   = P.Amount;
+		CachedPierce   = P.Pierce;
 	}
 	else
 	{
@@ -30,6 +31,7 @@ void USurvivorsMagicWandWeapon::CacheParams()
 		CachedCooldown = P.Cooldown;
 		CachedSpeed    = P.Speed;
 		CachedAmount   = P.Amount;
+		CachedPierce   = P.Pierce;
 	}
 }
 
@@ -78,14 +80,16 @@ void USurvivorsMagicWandWeapon::Tick(float Dt)
 		}
 
 		FProjectileState P;
-		P.Pos         = Game->PlayerPos;
-		P.Vel         = Dir * EffSpeed;
-		P.Radius      = FSimRadius(8.f);
-		P.Damage      = FDamage(EffDamage);
-		P.WeaponType  = WeaponType;
-		P.WeaponSlotIdx = SlotIdx;
-		P.LifeTime    = FProjectileLifeTime(LifeTime);
-		P.bPiercing   = false;
+		P.Pos               = Game->PlayerPos;
+		P.Vel               = Dir * EffSpeed;
+		P.Radius            = FSimRadius(8.f);
+		P.Damage            = FDamage(EffDamage);
+		P.WeaponType        = WeaponType;
+		P.WeaponSlotIdx     = SlotIdx;
+		P.LifeTime          = FProjectileLifeTime(LifeTime);
+		P.bPiercing         = false;
+		P.MaxPierceCount    = CachedPierce;  // Pierce=1 から最大2まで増加
+		P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
 		WeaponComp->SpawnProjectile(P);
 	}
 }
