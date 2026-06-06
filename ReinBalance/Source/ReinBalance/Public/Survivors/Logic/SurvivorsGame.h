@@ -134,8 +134,8 @@ public:
 	/** パッシブアイテムの最大レベル。デバッグ表示用 */
 	int32 GetPassiveItemMaxLevel(EPassiveItemType Type) const;
 
-	/** 敵タイプ名。未設定または範囲外なら "ID:{TypeId}" を返す。デバッグ表示用 */
-	FString GetEnemyTypeName(int32 TypeId) const;
+	/** デバッグ表示用ラベル "Name(ID:n)" を返す。未設定・範囲外なら "ID:n" */
+	FString GetEnemyTypeDebugLabel(int32 TypeId) const;
 
 	// ---- 報酬設定 ----
 

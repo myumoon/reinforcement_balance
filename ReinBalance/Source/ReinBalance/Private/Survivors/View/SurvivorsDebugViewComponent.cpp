@@ -169,7 +169,7 @@ void USurvivorsDebugViewComponent::DrawSection_Enemy(int32& Key) const
 		if (!Count || *Count <= 0) continue;
 
 		AddLine(Key++,
-			FString::Printf(TEXT("  %-22s %d"), *Game->GetEnemyTypeName(TypeId), *Count),
+			FString::Printf(TEXT("  %-22s %d"), *Game->GetEnemyTypeDebugLabel(TypeId), *Count),
 			GetEnemyTypeColor(TypeId));
 	}
 

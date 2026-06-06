@@ -565,14 +565,14 @@ float ASurvivorsGame::GetXPRequiredForNextLevel() const
 int32 ASurvivorsGame::GetPassiveItemMaxLevel(EPassiveItemType Type) const
 {
 	const int32 TypeIndex = static_cast<int32>(Type);
-	if (TypeIndex > 0 && TypeIndex < UE_ARRAY_COUNT(SurvivorsGameConstants::PassiveMaxLevel))
+	if (TypeIndex >= 0 && TypeIndex < UE_ARRAY_COUNT(SurvivorsGameConstants::PassiveMaxLevel))
 	{
 		return SurvivorsGameConstants::PassiveMaxLevel[TypeIndex];
 	}
-	return 1;
+	return 0;
 }
 
-FString ASurvivorsGame::GetEnemyTypeName(int32 TypeId) const
+FString ASurvivorsGame::GetEnemyTypeDebugLabel(int32 TypeId) const
 {
 	if (EnemyTypeTable.IsValidIndex(TypeId) && !EnemyTypeTable[TypeId].Name.IsEmpty())
 	{
