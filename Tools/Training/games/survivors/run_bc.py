@@ -65,8 +65,8 @@ def _parse_args() -> argparse.Namespace:
         description="Survivors BC 専用 CLI: ルールベース方策でBC済みモデルを作成する"
     )
     p.add_argument("--config",        type=Path,  default=None,    help="YAML config（bc_train_config_run.yaml 等）")
-    p.add_argument("--version-name",  required=True,               help="バージョン名（runs/survivors/<version-name>/bc/<run-name>/ に保存）")
-    p.add_argument("--run-name",      required=True,               help="run 名")
+    p.add_argument("--version-name",  default=None,                help="バージョン名（runs/survivors/<version-name>/bc/<run-name>/ に保存）")
+    p.add_argument("--run-name",      default=None,                help="run 名")
     p.add_argument("--episodes",     type=int,   default=100,     help="デモ収集エピソード数 (default: 100)")
     p.add_argument("--epochs",       type=int,   default=30,      help="BC 訓練エポック数 (default: 30)")
     p.add_argument("--lr",           type=float, default=3e-4,    help="BC Adam 学習率 (default: 3e-4)")
@@ -120,7 +120,12 @@ def _parse_args() -> argparse.Namespace:
         from common.config import load_yaml_config, apply_yaml_defaults
         apply_yaml_defaults(p, load_yaml_config(pre_args.config))
 
-    return p.parse_args()
+    args = p.parse_args()
+    if args.version_name is None:
+        p.error("--version-name を指定してください（CLI または --config の YAML 内）")
+    if args.run_name is None:
+        p.error("--run-name を指定してください（CLI または --config の YAML 内）")
+    return args
 
 
 # ──────────────────────────────────────────────
