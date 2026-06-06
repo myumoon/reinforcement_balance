@@ -5,6 +5,7 @@
 #include "SurvivorsGameView.generated.h"
 
 class ASurvivorsGame;
+class USurvivorsDebugViewComponent;
 class USurvivorsEnemyViewComponent;
 class USurvivorsGUIViewComponent;
 class USurvivorsGemViewComponent;
@@ -30,6 +31,9 @@ protected:
 	virtual void Tick(float DeltaTime) override;
 
 private:
+	UPROPERTY(VisibleAnywhere, Category = "SurvivorsGameView|Components")
+	TObjectPtr<USurvivorsDebugViewComponent> DebugView;
+
 	UPROPERTY(VisibleAnywhere, Category = "SurvivorsGameView|Components")
 	TObjectPtr<USurvivorsPlayerViewComponent> PlayerView;
 

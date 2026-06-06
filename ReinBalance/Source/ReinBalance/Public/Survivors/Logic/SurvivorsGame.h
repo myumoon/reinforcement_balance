@@ -115,6 +115,28 @@ public:
 	FVector2D GetDestructiblePos(int32 i)     const { return Destructibles.IsValidIndex(i) ? Destructibles[i].Pos : FVector2D::ZeroVector; }
 	bool      IsDestructibleActive(int32 i)   const { return Destructibles.IsValidIndex(i) ? Destructibles[i].bActive : false; }
 
+	// ---- ビュー / デバッグ向けアクセサー ----
+
+	float              GetPlayerXP()              const { return PlayerXP; }
+	int32              GetPlayerLevel()            const { return PlayerLevel; }
+	float              GetPlayerShieldTimer()      const { return PlayerShieldTimer; }
+	float              GetElapsedTime()            const { return ElapsedTime; }
+	float              GetLastReward()             const { return LastReward; }
+	/** Idx は 0..MaxPassiveSlots-1。範囲チェックは呼び出し側で行う */
+	const FPassiveSlot& GetPassiveSlot(int32 Idx) const { return PassiveSlots[Idx]; }
+
+	/** TypeId → 生存数のマップ。デバッグ表示用（毎フレームの呼び出しを想定） */
+	TMap<int32, int32> GetEnemyCountByType() const;
+
+	/** 現在レベルから次レベルへ必要な XP。デバッグ表示用 */
+	float GetXPRequiredForNextLevel() const;
+
+	/** パッシブアイテムの最大レベル。デバッグ表示用 */
+	int32 GetPassiveItemMaxLevel(EPassiveItemType Type) const;
+
+	/** デバッグ表示用ラベル "Name(ID:n)" を返す。未設定・範囲外なら "ID:n" */
+	FString GetEnemyTypeDebugLabel(int32 TypeId) const;
+
 	// ---- 報酬設定 ----
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")

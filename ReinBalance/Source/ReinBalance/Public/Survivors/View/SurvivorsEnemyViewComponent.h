@@ -46,7 +46,6 @@ private:
 
 	void LoadAssets();
 	UInstancedStaticMeshComponent* EnsureEnemyComponent(int32 Type);
-	static FLinearColor GetEnemyTypeColor(int32 Type);
 	static FVector GetEnemyTypeScale(int32 Type);
 	UMaterialInstanceDynamic* CreateEnemyMaterial(const FLinearColor& TypeColor);
 };

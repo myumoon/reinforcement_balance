@@ -543,3 +543,40 @@ float ASurvivorsGame::CastRayToObstacles(FVector2D Origin, FVector2D Dir) const
 {
 	return CollisionComponent->CastRayToObstacles(Origin, Dir);
 }
+
+TMap<int32, int32> ASurvivorsGame::GetEnemyCountByType() const
+{
+	TMap<int32, int32> Result;
+	for (const FEnemyState& E : Enemies)
+	{
+		if (!E.bPendingRemove)
+		{
+			Result.FindOrAdd(E.TypeId)++;
+		}
+	}
+	return Result;
+}
+
+float ASurvivorsGame::GetXPRequiredForNextLevel() const
+{
+	return XPRequiredForLevel(PlayerLevel + 1);
+}
+
+int32 ASurvivorsGame::GetPassiveItemMaxLevel(EPassiveItemType Type) const
+{
+	const int32 TypeIndex = static_cast<int32>(Type);
+	if (TypeIndex >= 0 && TypeIndex < UE_ARRAY_COUNT(SurvivorsGameConstants::PassiveMaxLevel))
+	{
+		return SurvivorsGameConstants::PassiveMaxLevel[TypeIndex];
+	}
+	return 0;
+}
+
+FString ASurvivorsGame::GetEnemyTypeDebugLabel(int32 TypeId) const
+{
+	if (EnemyTypeTable.IsValidIndex(TypeId) && !EnemyTypeTable[TypeId].Name.IsEmpty())
+	{
+		return FString::Printf(TEXT("%s(ID:%d)"), *EnemyTypeTable[TypeId].Name, TypeId);
+	}
+	return FString::Printf(TEXT("ID:%d"), TypeId);
+}

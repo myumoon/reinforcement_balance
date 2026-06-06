@@ -16,14 +16,18 @@ void ATrainingRenderToggleActor::Tick(float DeltaTime)
 	if (!World) return;
 
 	APlayerController* PC = World->GetFirstPlayerController();
-	if (!PC) return;
 
-	const bool bKeyDown = PC->IsInputKeyDown(ToggleKey);
-	if (bKeyDown && !bKeyWasDown)
+	const bool bCtrlDown  = PC && (PC->IsInputKeyDown(EKeys::LeftControl) || PC->IsInputKeyDown(EKeys::RightControl));
+	const bool bShiftDown = PC && (PC->IsInputKeyDown(EKeys::LeftShift)   || PC->IsInputKeyDown(EKeys::RightShift));
+	const bool bKeyDown   = PC && PC->IsInputKeyDown(ToggleKey);
+	// Ctrl または Shift が押されている場合はデバッグオーバーレイトグル（Ctrl+F10）に委譲
+	const bool bTriggered = bKeyDown && !bCtrlDown && !bShiftDown;
+
+	if (bTriggered && !bKeyWasDown)
 	{
 		ToggleRendering();
 	}
-	bKeyWasDown = bKeyDown;
+	bKeyWasDown = bTriggered;
 }
 
 void ATrainingRenderToggleActor::ToggleRendering()
