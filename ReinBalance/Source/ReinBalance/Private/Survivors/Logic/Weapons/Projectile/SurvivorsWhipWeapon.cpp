@@ -54,27 +54,29 @@ void USurvivorsWhipWeapon::Tick(float Dt)
 	// 左方向
 	{
 		FProjectileState P;
-		P.Pos         = Game->PlayerPos;
-		P.Vel         = FVector2D(-EffWidth * 2.f / LifeTime, 0.f);
-		P.Radius      = FSimRadius(EffHeight);
-		P.Damage      = FDamage(EffDamage);
-		P.WeaponType  = WeaponType;
-		P.WeaponSlotIdx = SlotIdx;
-		P.LifeTime    = FProjectileLifeTime(LifeTime);
-		P.bPiercing   = true;
+		P.Pos               = Game->PlayerPos;
+		P.Vel               = FVector2D(-EffWidth * 2.f / LifeTime, 0.f);
+		P.Radius            = FSimRadius(EffHeight);
+		P.Damage            = FDamage(EffDamage);
+		P.WeaponType        = WeaponType;
+		P.WeaponSlotIdx     = SlotIdx;
+		P.LifeTime          = FProjectileLifeTime(LifeTime);
+		P.bPiercing         = true;   // AoE: 無限貫通
+		P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
 		WeaponComp->SpawnProjectile(P);
 	}
 	// 右方向
 	{
 		FProjectileState P;
-		P.Pos         = Game->PlayerPos;
-		P.Vel         = FVector2D(EffWidth * 2.f / LifeTime, 0.f);
-		P.Radius      = FSimRadius(EffHeight);
-		P.Damage      = FDamage(EffDamage);
-		P.WeaponType  = WeaponType;
-		P.WeaponSlotIdx = SlotIdx;
-		P.LifeTime    = FProjectileLifeTime(LifeTime);
-		P.bPiercing   = true;
+		P.Pos               = Game->PlayerPos;
+		P.Vel               = FVector2D(EffWidth * 2.f / LifeTime, 0.f);
+		P.Radius            = FSimRadius(EffHeight);
+		P.Damage            = FDamage(EffDamage);
+		P.WeaponType        = WeaponType;
+		P.WeaponSlotIdx     = SlotIdx;
+		P.LifeTime          = FProjectileLifeTime(LifeTime);
+		P.bPiercing         = true;   // AoE: 無限貫通
+		P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
 		WeaponComp->SpawnProjectile(P);
 	}
 }

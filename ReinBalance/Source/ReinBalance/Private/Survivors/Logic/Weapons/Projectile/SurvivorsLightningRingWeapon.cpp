@@ -81,10 +81,12 @@ void USurvivorsLightningRingWeapon::ComputeHits(USurvivorsCollisionComponent* Co
 		Ref.IndexAtBuildTime = EIdx;
 
 		FSurvivorsHitEvent Ev;
-		Ev.Type      = ESurvivorsHitType::WeaponAreaDamage;
-		Ev.Target    = Ref;
-		Ev.Damage    = EffDamage;
-		Ev.WeaponSlot = SlotIdx;
+		Ev.Type              = ESurvivorsHitType::WeaponAreaDamage;
+		Ev.Target            = Ref;
+		Ev.Damage            = EffDamage;
+		Ev.WeaponSlot        = SlotIdx;
+		Ev.KnockbackDir      = (E.Pos - Game->PlayerPos).GetSafeNormal();
+		Ev.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
 		HitFrame.Events.Add(Ev);
 	}
 }
