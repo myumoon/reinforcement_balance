@@ -17,16 +17,22 @@ void USurvivorsCrossWeapon::CacheParams()
 	if (WeaponType == EWeaponType::HeavenSword)
 	{
 		const SurvivorsGameConstants::FCrossParams& P = SurvivorsGameConstants::HeavenSwordTable[Idx];
-		CachedDamage   = P.Damage;
-		CachedCooldown = P.Cooldown;
-		CachedSpeed    = P.Speed;
+		CachedDamage            = P.Damage;
+		CachedCooldown          = P.Cooldown;
+		CachedSpeed             = P.Speed;
+		CachedRadius            = P.Radius;
+		CachedAmount            = P.Amount;
+		CachedKnockbackStrength = P.KnockbackStrength;
 	}
 	else
 	{
 		const SurvivorsGameConstants::FCrossParams& P = SurvivorsGameConstants::CrossTable[Idx];
-		CachedDamage   = P.Damage;
-		CachedCooldown = P.Cooldown;
-		CachedSpeed    = P.Speed;
+		CachedDamage            = P.Damage;
+		CachedCooldown          = P.Cooldown;
+		CachedSpeed             = P.Speed;
+		CachedRadius            = P.Radius;
+		CachedAmount            = P.Amount;
+		CachedKnockbackStrength = P.KnockbackStrength;
 	}
 }
 
@@ -64,6 +70,8 @@ void USurvivorsCrossWeapon::Tick(float Dt)
 	const float EffDamage  = CachedDamage * PE.DamageMult;
 	const float EffSpeed   = CachedSpeed  * PE.SpeedMult;
 	const float EffLifeTime = 2.0f * PE.DurationMult;
+	const float EffRadius  = CachedRadius * PE.AreaMult;
+	const int32 EffAmount  = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 
 	// 最近傍敵の方向へ発射
 	FVector2D Dir = FVector2D(1.f, 0.f);
@@ -79,17 +87,27 @@ void USurvivorsCrossWeapon::Tick(float Dt)
 		}
 	}
 
-	FProjectileState P;
-	P.Pos           = Game->PlayerPos;
-	P.Vel           = Dir * EffSpeed;
-	P.Radius        = FSimRadius(12.f);
-	P.Damage        = FDamage(EffDamage);
-	P.WeaponType    = WeaponType;
-	P.WeaponSlotIdx = SlotIdx;
-	P.LifeTime      = FProjectileLifeTime(EffLifeTime);
-	P.bPiercing         = true;   // AoE: 無限貫通
-	P.bHasReversed      = false;
-	P.AngleRad          = FOrbitAngleRad(EffLifeTime);  // 流用: 初期 LifeTime を格納
-	P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
-	WeaponComp->SpawnProjectile(P);
+	const float BaseAngle = FMath::Atan2(Dir.Y, Dir.X);
+	for (int32 i = 0; i < EffAmount; ++i)
+	{
+		const float Spread = (EffAmount <= 1)
+			? 0.f
+			: FMath::DegreesToRadians(12.f) * (static_cast<float>(i) - 0.5f * static_cast<float>(EffAmount - 1));
+		const float Angle = BaseAngle + Spread;
+		const FVector2D ShotDir(FMath::Cos(Angle), FMath::Sin(Angle));
+
+		FProjectileState P;
+		P.Pos               = Game->PlayerPos;
+		P.Vel               = ShotDir * EffSpeed;
+		P.Radius            = FSimRadius(EffRadius);
+		P.Damage            = FDamage(EffDamage);
+		P.WeaponType        = WeaponType;
+		P.WeaponSlotIdx     = SlotIdx;
+		P.LifeTime          = FProjectileLifeTime(EffLifeTime);
+		P.bPiercing         = true;   // AoE: 無限貫通
+		P.bHasReversed      = false;
+		P.AngleRad          = FOrbitAngleRad(EffLifeTime);  // 流用: 初期 LifeTime を格納
+		P.KnockbackStrength = CachedKnockbackStrength;
+		WeaponComp->SpawnProjectile(P);
+	}
 }

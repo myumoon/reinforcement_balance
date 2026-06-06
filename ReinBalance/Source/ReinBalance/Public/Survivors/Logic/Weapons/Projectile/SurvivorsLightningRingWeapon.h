@@ -18,6 +18,7 @@ public:
 private:
 	float CachedDamage   = 40.f;
 	float CachedCooldown = 1.00f;
+	float CachedRadius   = 30.f;
 	int32 CachedAmount   = 1;
 
 	// クールダウン終了時に発動フラグを Tick でセット

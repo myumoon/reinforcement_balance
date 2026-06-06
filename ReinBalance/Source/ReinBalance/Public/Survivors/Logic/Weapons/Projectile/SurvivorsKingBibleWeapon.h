@@ -1,5 +1,6 @@
 #pragma once
 #include "CoreMinimal.h"
+#include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponBase.h"
 #include "SurvivorsKingBibleWeapon.generated.h"
 
@@ -29,12 +30,18 @@ public:
 
 private:
 	float CachedDamage      = 10.f;
+	float CachedCooldown    = 3.f;
+	float CachedDuration    = 3.f;
 	float CachedOrbitRadius = 50.f;
 	int32 CachedAmount      = 1;
 	float CachedRotSpeed    = 2.0f;  // rad/sec
+	float CachedKnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;
 
 	// 基準軌道角度（Tick で更新）
 	float MasterAngle = 0.f;
+
+	float ActiveTimer = 0.f;
+	bool bOrbsActive = false;
 
 	// オーブ位置キャッシュ（Tick で更新、ComputeHits で参照）
 	TArray<FVector2D> OrbPositions;
@@ -45,4 +52,5 @@ private:
 
 	void CacheParams();
 	void RebuildOrbProjectiles();
+	void ActivateOrbs(const FPassiveEffects& PE);
 };
