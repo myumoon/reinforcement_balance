@@ -676,7 +676,9 @@ def _create_model(args, env, algo_class, default_policy: str, ppo_kwargs: dict):
         if args.game == "survivors":
             from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
             _weapon_phase_key = getattr(args, "weapon_phase", "W0")
-            survivors_net_arch = WEAPON_PHASES.get(_weapon_phase_key, {}).get("net_arch", [512, 256])
+            # "auto" の場合は W0 の net_arch をデフォルトとして使用する
+            _lookup_key = "W0" if _weapon_phase_key == "auto" else _weapon_phase_key
+            survivors_net_arch = WEAPON_PHASES.get(_lookup_key, {}).get("net_arch", [512, 256])
         else:
             survivors_net_arch = [64, 64]
         policy_kwargs = dict(
@@ -859,7 +861,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--init-vecnormalize", type=Path, default=None,
                    help="--init-model と組み合わせて BC 時の VecNormalize 統計をロード")
     p.add_argument("--weapon-phase", default="W0",
-                   help="武器カリキュラムのフェーズキー（W0〜W6 または W0_to_W1 等, default: W0）")
+                   help="武器カリキュラムのフェーズキー（W0〜W6 または W0_to_W1 等, 'auto' で自動昇格, default: W0）")
+    p.add_argument("--weapon-phase-auto-stagnation-steps", type=int, default=500_000,
+                   help="--weapon-phase auto 時: カリキュラム停滞とみなすステップ数 (default: 500000)")
     p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
     p.add_argument("--wandb-project", default="rl-balance", help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None, help="W&B ラン名（未指定時は自動生成）")
@@ -1297,16 +1301,17 @@ def main() -> None:
     print(f"[INFO] SB3 model device: {model.device}")
 
     # 武器カリキュラムフェーズの検証（survivors かつ非 dry-run 時のみ）
+    # "auto" の場合は WeaponPhaseAutoCallback が管理するため固定フェーズ検証をスキップ。
     # 実際のパラメータ送信は WeaponCurriculumCallback._on_training_start で行う。
     # 遷移フェーズ（weapon_pool_mode="weighted"）では訓練中に定期的に weapon_weights を更新するため、
     # コールバックで管理する。固定フェーズでも _on_training_start で全 env に初回送信を行う。
     _weapon_phase_key = getattr(args, "weapon_phase", "W0")
-    if args.game == "survivors" and not args.dry_run:
+    if args.game == "survivors" and not args.dry_run and _weapon_phase_key != "auto":
         from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES, get_params_for_phase
         if _weapon_phase_key not in WEAPON_PHASES:
             raise ValueError(
                 f"--weapon-phase に未知のフェーズキーが指定されました: {_weapon_phase_key!r}\n"
-                f"有効なキー: {list(WEAPON_PHASES.keys())}"
+                f"有効なキー: {list(WEAPON_PHASES.keys())} または 'auto'"
             )
         _weapon_phase = WEAPON_PHASES[_weapon_phase_key]
         print(
@@ -1315,6 +1320,8 @@ def main() -> None:
             f"enable_passives={_weapon_phase.get('enable_passives')}, "
             f"enable_evolutions={_weapon_phase.get('enable_evolutions')}"
         )
+    elif args.game == "survivors" and not args.dry_run and _weapon_phase_key == "auto":
+        print(f"[INFO] 武器カリキュラム: phase=auto (WeaponPhaseAutoCallback が管理)")
 
     callbacks = []
     weapon_curriculum_cb = None
@@ -1329,10 +1336,11 @@ def main() -> None:
 
     # WeaponCurriculumCallback: 初回送信は _on_training_start で行い、
     # 遷移フェーズ（weighted）では update_freq ごとに weapon_weights を全 env に再送信する。
+    # --weapon-phase auto 時は WeaponPhaseAutoCallback が代わりに管理するためスキップ。
     # branch resume 時: source_dir/work を checkpoint_dir として渡すことで、
     # チェックポイントと同じ場所に保存された weapon_curriculum_status.json から
     # phase_start_step を復元できる。
-    if args.game == "survivors" and not args.dry_run:
+    if args.game == "survivors" and not args.dry_run and _weapon_phase_key != "auto":
         # branch resume 時は source_dir が元 run ディレクトリを指すため work サブディレクトリを使用する。
         # 同一 run resume / 新規 run 時は source_dir が None のため checkpoint_dir は空文字列とする。
         _weapon_ckpt_dir = str(source_dir / "work") if (is_branch and source_dir is not None) else ""
@@ -1483,6 +1491,29 @@ def main() -> None:
         )
     elif args.curriculum_spalf:
         print("[WARN] --curriculum-spalf は survivors ゲームかつ非 dry-run 時のみ有効です。無視します。")
+
+    # WeaponPhaseAutoCallback: --weapon-phase auto かつ --curriculum-spalf が有効な場合に登録
+    # hybrid_cb が None の場合（--curriculum-spalf 未指定）はエラーとする
+    if args.game == "survivors" and not args.dry_run and _weapon_phase_key == "auto":
+        if not args.curriculum_spalf or curriculum_cb is None:
+            raise ValueError(
+                "--weapon-phase auto は --curriculum-spalf と組み合わせて使用してください。"
+            )
+        from games.survivors.weapon_phase_auto_callback import WeaponPhaseAutoCallback
+        _auto_ckpt_dir = str(source_dir / "work") if (is_branch and source_dir is not None) else ""
+        _weapon_auto_cb = WeaponPhaseAutoCallback(
+            hybrid_cb=curriculum_cb,
+            stagnation_steps=args.weapon_phase_auto_stagnation_steps,
+            output_dir=str(work_dir),
+            checkpoint_dir=_auto_ckpt_dir,
+            weapon_update_freq=args.checkpoint_freq,
+        )
+        callbacks.append(_weapon_auto_cb)
+        print(
+            f"[INFO] WeaponPhaseAutoCallback 有効 "
+            f"(stagnation_steps={args.weapon_phase_auto_stagnation_steps:,}, "
+            f"weapon_update_freq={args.checkpoint_freq:,})"
+        )
 
     # 通常時（非 curriculum_spalf）の eval 登録
     # curriculum_spalf 時は上のブロックで既に登録済みのため、_survivors_eval_registered をチェックする。

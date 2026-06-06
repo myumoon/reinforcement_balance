@@ -329,6 +329,10 @@ class HybridCurriculumSpalfCallback(BaseCallback):
     # ---- CurriculumCallback 互換 API ----
 
     @property
+    def current_phase(self) -> int:
+        return self._curriculum.current_phase
+
+    @property
     def is_final_phase(self) -> bool:
         return self._curriculum.is_final_phase
 
@@ -377,6 +381,15 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         self._spalf.import_state(state.get("spalf_state", {}))
         # 4. _ep_start_param_vec_per_env は _on_training_start で n_envs が確定してから初期化する
         self._pending_resume_state = True  # _on_training_start で current_param_vec から再構築する
+
+    def rollback_one_phase(self, reason: str = "weapon_phase_advanced") -> None:
+        """武器フェーズ昇格に伴うカリキュラム1フェーズ強制降格。
+
+        CurriculumStateModule.force_rollback_one() を呼び出した後、
+        SPALF の探索範囲と敵難易度パラメータを新しいフェーズに合わせて更新する。
+        """
+        self._curriculum.force_rollback_one(reason)
+        self._on_phase_changed("forced_rollback")
 
     def _save_status(self) -> None:
         """全モジュールのステータスを保存する。"""

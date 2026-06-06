@@ -571,6 +571,30 @@ class CurriculumStateModule(BaseStateModule):
         msg = "[Curriculum] Phase " + str(self._phase_idx) + " 降格: " + prev_name + " -> " + next_phase.name + " (" + reason + ", score=" + str(round(mean, 3)) + ", ep_len=" + str(round(mean_len, 1)) + ")"
         print(msg)
 
+    def force_rollback_one(self, reason: str = "external") -> None:
+        """外部トリガーによる1フェーズ強制降格（スコア判定なし）。"""
+        if self._phase_idx <= 0:
+            print(f"[Curriculum] 強制降格スキップ: 既に最初のフェーズです ({reason})")
+            return
+        prev_name = self._PHASES[self._phase_idx].name
+        prev_idx = self._phase_idx
+        self._phase_idx = max(self._phase_idx - 1, 0)
+        self._scores.clear()
+        self._rollback_bad_windows = 0
+        self._steps_in_phase = 0
+        self._episodes_in_phase = 0
+        self.clear_promotion_probe_window()
+        next_phase = self._PHASES[self._phase_idx]
+        self._phase_events.append({
+            "event": "forced_rollback",
+            "from_phase_idx": prev_idx,
+            "from_phase_name": prev_name,
+            "to_phase_idx": self._phase_idx,
+            "to_phase_name": next_phase.name,
+            "reason": reason,
+        })
+        print(f"[Curriculum] 強制降格: {prev_name} -> {next_phase.name} ({reason})")
+
     def get_wandb_metrics(self) -> dict:
         from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
         phase = self._PHASES[self._phase_idx]
