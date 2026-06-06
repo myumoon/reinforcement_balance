@@ -1,6 +1,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Survivors/Logic/SurvivorsCollisionTypes.h"
+#include "Survivors/Logic/SurvivorsValueTypes.h"
 #include "SurvivorsTypes.generated.h"
 
 struct FSurvivorsObsSegment
@@ -9,105 +11,7 @@ struct FSurvivorsObsSegment
 	int32 Dim;
 };
 
-// ---- 前方宣言が必要な既存強型（後続の構造体で参照する） ---------------------
-
-struct FDamage
-{
-	float Value = 0.f;
-	explicit constexpr FDamage(float InValue = 0.f) : Value(InValue) {}
-};
-
-struct FSurvivorsElapsedTime
-{
-	float Seconds = 0.f;
-	explicit FSurvivorsElapsedTime(float InSeconds = 0.f) : Seconds(InSeconds) {}
-};
-
-// ---- 新規強型定義 -------------------------------------------------------------
-
-// 武器レベル（1〜8）── FPlayerLevel と混同しないために分離
-struct FWeaponLevel
-{
-	int32 Value = 1;
-	explicit FWeaponLevel(int32 InValue = 1) : Value(InValue) {}
-	// IsMax は SurvivorsGameConstants::MaxWeaponLevel(8) を参照するため
-	// inline で実装。循環参照を避けるため直値を使用。
-	bool IsMax() const { return Value >= 8; }
-};
-
-// プレイヤーレベル（1〜MaxPlayerLevel）
-struct FPlayerLevel
-{
-	int32 Value = 1;
-	explicit FPlayerLevel(int32 InValue = 1) : Value(InValue) {}
-};
-
-// シム空間の半径（u）── UE ワールド半径（cm）と混同しないために分離
-struct FSimRadius
-{
-	float Value = 0.f;
-	explicit constexpr FSimRadius(float InValue = 0.f) : Value(InValue) {}
-};
-
-// クールダウン残時間（秒）── FSurvivorsElapsedTime と区別
-struct FCooldownSeconds
-{
-	float Value = 0.f;
-	explicit FCooldownSeconds(float InValue = 0.f) : Value(InValue) {}
-	bool IsReady() const { return Value <= 0.f; }
-};
-
-// プロジェクタイル残寿命（秒）
-struct FProjectileLifeTime
-{
-	float Seconds = 0.f;
-	explicit FProjectileLifeTime(float InSeconds = 0.f) : Seconds(InSeconds) {}
-	bool IsExpired() const { return Seconds <= 0.f; }
-	void Tick(float Dt) { Seconds -= Dt; }
-};
-
-// 周回角度（ラジアン）── King Bible / Peachone の軌道位置
-struct FOrbitAngleRad
-{
-	float Value = 0.f;
-	explicit FOrbitAngleRad(float InValue = 0.f) : Value(InValue) {}
-	void Advance(float RadPerSec, float Dt) { Value += RadPerSec * Dt; }
-};
-
-// バウンス残回数 ── Runetracer 用
-struct FBounceCount
-{
-	int32 Value = 0;
-	explicit FBounceCount(int32 InValue = 0) : Value(InValue) {}
-	bool HasBounces() const { return Value > 0; }
-	void Consume() { --Value; }
-};
-
 // ---- HitFrame 型定義 ---------------------------------------------------------
-
-UENUM()
-enum class ESurvivorsCollisionOwnerKind : uint8
-{
-	Player      = 0,
-	Enemy       = 1,
-	Gem         = 2,
-	Projectile  = 3,
-	GroundZone  = 4,
-};
-
-UENUM()
-enum class ESurvivorsCollisionLayer : uint8
-{
-	Enemy  = 0,
-	Pickup = 1,
-};
-
-struct FSurvivorsCollisionRef
-{
-	ESurvivorsCollisionOwnerKind Kind  = ESurvivorsCollisionOwnerKind::Enemy;
-	int32                        UniqueId          = 0;
-	int32                        IndexAtBuildTime  = 0;
-};
 
 UENUM()
 enum class ESurvivorsHitType : uint8
@@ -473,46 +377,4 @@ struct FSurvivorsSpawnDebug
 	bool bUsedCurriculumEnemyPool = false;
 	bool bSpawnBlocked = false;
 	bool bTruncated = false;
-};
-
-// ---- LocalUniformGrid 型定義 -------------------------------------------------
-
-/** Grid に登録するターゲット（Enemy / Gem 兼用） */
-struct FSurvivorsTargetProxy
-{
-	FSurvivorsCollisionRef Ref;
-	FVector2D              Pos;
-	float                  Radius = 0.f;
-};
-
-/** Grid の1セル */
-struct FSurvivorsCollisionCell
-{
-	TArray<int32> TargetIndices;
-};
-
-/** LocalUniformGrid（PlayerPos 中心の局所グリッド） */
-struct FSurvivorsTargetGrid
-{
-	FVector2D Origin;
-	float     CellSize         = 128.f;
-	int32     NumX             = 0;
-	int32     NumY             = 0;
-	float     MaxTargetRadius  = 0.f;
-
-	TArray<FSurvivorsCollisionCell> Cells;
-	TArray<FSurvivorsTargetProxy>   Targets;
-
-	void Clear();
-	void Rebuild(FVector2D Center, float HalfExtent, float InCellSize);
-
-	/** Grid 範囲内にターゲットを追加。Grid 外なら false を返す */
-	bool AddTarget(FSurvivorsTargetProxy Proxy);
-
-	/** (Pos, QueryRadius) に重なるセルのターゲットインデックスを収集する。
-	 *  QueryRadius = SourceRadius + MaxTargetRadius を推奨（セル境界漏れ防止） */
-	void QueryContacts(FVector2D Pos, float QueryRadius, TArray<int32>& OutIndices) const;
-
-private:
-	FIntPoint WorldToCell(FVector2D Pos) const;
 };
