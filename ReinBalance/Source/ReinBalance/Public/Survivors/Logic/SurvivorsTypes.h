@@ -180,7 +180,11 @@ struct FProjectileState
 	bool                 bPendingExplosion = false;  // FireWand 爆発待機フラグ（LifeTime 切れで爆発予約、次 Tick で処理）
 	FOrbitAngleRad       AngleRad;                                         // King Bible 等の軌道角度
 	FSurvivorsElapsedTime LastHitTime  = FSurvivorsElapsedTime(-1000.f);   // 範囲武器クールダウン
-	TArray<int32>        HitEnemyIds;  // 非 piercing 弾のヒット済み UniqueId（TSet より線形探索が速い）
+	TArray<int32>        HitEnemyIds;  // ヒット済み UniqueId（同一弾で同一敵への多重ヒット防止）
+	// 貫通設定: 0=無限貫通(bPiercing=true と同義), N>0=N体まで命中後に消滅
+	// bPiercing=false かつ MaxPierceCount=0 の場合は bPiercing の挙動（1体で消滅）を使用
+	int32                MaxPierceCount = 0;
+	float                KnockbackStrength = 0.f;    // ノックバック強度（シム座標単位）
 };
 
 // グラウンドゾーン（Santa Water / La Borra 用）

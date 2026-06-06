@@ -107,10 +107,12 @@ void USurvivorsKingBibleWeapon::ComputeHits(USurvivorsCollisionComponent* CollCo
 			if (Game->ElapsedTime - E.WeaponLastHitTime[SlotIdx].Seconds < OrbHitInterval) continue;
 
 			FSurvivorsHitEvent Ev;
-			Ev.Type       = ESurvivorsHitType::WeaponAreaDamage;
-			Ev.Target     = Proxy->Ref;
-			Ev.Damage     = EffDamage;
-			Ev.WeaponSlot = SlotIdx;
+			Ev.Type              = ESurvivorsHitType::WeaponAreaDamage;
+			Ev.Target            = Proxy->Ref;
+			Ev.Damage            = EffDamage;
+			Ev.WeaponSlot        = SlotIdx;
+			Ev.KnockbackDir      = (Proxy->Pos - Game->PlayerPos).GetSafeNormal();
+			Ev.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
 			HitFrame.Events.Add(Ev);
 			break;  // 1 オーブにつき 1 ヒット/フレーム（複数オーブが同一敵に重なるケースを制限）
 		}

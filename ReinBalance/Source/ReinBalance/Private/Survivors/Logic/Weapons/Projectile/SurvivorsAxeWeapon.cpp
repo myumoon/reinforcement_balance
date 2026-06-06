@@ -21,6 +21,7 @@ void USurvivorsAxeWeapon::CacheParams()
 		CachedCooldown  = P.Cooldown;
 		CachedSpeed     = P.Speed;
 		CachedArcHeight = P.ArcHeight;
+		CachedPierce    = P.Pierce;
 	}
 	else
 	{
@@ -29,6 +30,7 @@ void USurvivorsAxeWeapon::CacheParams()
 		CachedCooldown  = P.Cooldown;
 		CachedSpeed     = P.Speed;
 		CachedArcHeight = P.ArcHeight;
+		CachedPierce    = P.Pierce;
 	}
 }
 
@@ -40,12 +42,13 @@ void USurvivorsAxeWeapon::Tick(float Dt)
 
 	// --- 既存プロジェクタイルへ重力適用 ---
 	// AngleRad.Value に重力加速度を格納して流用
-	WeaponComp->UpdateProjectilesBySlot(SlotIdx, Dt, [](FProjectileState& P, float InDt) -> bool
+	const float FieldBottom = -(Game->FieldHalfSize + 20.f);  // 画面下端 + マージン
+	WeaponComp->UpdateProjectilesBySlot(SlotIdx, Dt, [FieldBottom](FProjectileState& P, float InDt) -> bool
 	{
 		// AngleRad.Value = 重力加速度 (負値)
 		P.Vel.Y += P.AngleRad.Value * InDt;
-		// LifeTime は TickProjectiles で更新済み（ここでは更新不要）
-		return true;  // 削除しない（寿命切れは TickProjectiles で処理）
+		// 画面下端を超えたら削除
+		return P.Pos.Y > FieldBottom;
 	});
 
 	// --- クールダウン ---
@@ -58,13 +61,13 @@ void USurvivorsAxeWeapon::Tick(float Dt)
 	const float EffSpeed     = CachedSpeed     * PE.SpeedMult;
 	const float EffArcHeight = CachedArcHeight * PE.AreaMult;
 
-	// LifeTime: 上昇+下降の合計時間（頂点でY速度=0になる条件から逆算）
-	// 初速Y = gravity * (LifeTime/2) → LifeTime = 2 * InitVelY / (-gravity)
-	// gravity = -2 * ArcHeight / (halfT^2), halfT = ArcHeight / InitVelY
-	// 簡略: LifeTime = 2 * ArcHeight / InitVelY, InitVelY = EffSpeed
+	// 放物線パラメータ計算
+	// 頂点に達するまでの時間 = HalfTime = ArcHeight / InitVelY
+	// 画面下端まで落下する時間は UpdateProjectilesBySlot 内の位置チェックで管理するため
+	// LifeTime は十分大きな値（画面外に出るまでの余裕）を設定する
 	const float InitVelY = EffSpeed;
 	const float HalfTime = EffArcHeight / InitVelY;
-	const float LifeTime = HalfTime * 2.f;
+	const float LifeTime = 20.f;  // 位置ベースで削除するため大きめに設定
 	const float GravityY = -InitVelY / HalfTime;  // 負値
 
 	// 横方向は最近傍敵の X 方向
@@ -82,14 +85,16 @@ void USurvivorsAxeWeapon::Tick(float Dt)
 	}
 
 	FProjectileState P;
-	P.Pos           = Game->PlayerPos;
-	P.Vel           = FVector2D(HorizDir * EffSpeed * 0.4f, InitVelY);
-	P.Radius        = FSimRadius(10.f);
-	P.Damage        = FDamage(EffDamage);
-	P.WeaponType    = WeaponType;
-	P.WeaponSlotIdx = SlotIdx;
-	P.LifeTime      = FProjectileLifeTime(LifeTime);
-	P.bPiercing     = false;
-	P.AngleRad      = FOrbitAngleRad(GravityY);  // 流用: 重力加速度を格納
+	P.Pos               = Game->PlayerPos;
+	P.Vel               = FVector2D(HorizDir * EffSpeed * 0.4f, InitVelY);
+	P.Radius            = FSimRadius(10.f);
+	P.Damage            = FDamage(EffDamage);
+	P.WeaponType        = WeaponType;
+	P.WeaponSlotIdx     = SlotIdx;
+	P.LifeTime          = FProjectileLifeTime(LifeTime);
+	P.bPiercing         = false;
+	P.MaxPierceCount    = CachedPierce;
+	P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
+	P.AngleRad          = FOrbitAngleRad(GravityY);  // 流用: 重力加速度を格納
 	WeaponComp->SpawnProjectile(P);
 }

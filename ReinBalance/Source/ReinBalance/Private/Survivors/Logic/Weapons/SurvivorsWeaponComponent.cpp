@@ -222,13 +222,24 @@ void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionCompone
 			Ev.Target = Proxy->Ref;
 			Ev.Damage = P.Damage.Value;
 			Ev.WeaponSlot = PIdx;  // Projectile インデックスを WeaponSlot に格納
+			// ノックバック: プロジェクタイルの進行方向へ押し出す
+			if (P.KnockbackStrength > 0.f)
+			{
+				Ev.KnockbackDir      = P.Vel.GetSafeNormal();
+				Ev.KnockbackStrength = P.KnockbackStrength;
+			}
 			HitFrame.Events.Add(Ev);
 
-			// piercing/非piercing 問わず HitEnemyIds に記録（同一弾では1回のみダメージ）
+			// HitEnemyIds に記録（同一弾では1回のみダメージ）
 			P.HitEnemyIds.Add(E.UniqueId);
 
-			// 非 piercing 弾: 最初の1体にだけヒットして終了
-			if (!P.bPiercing)
+			// 貫通数チェック: MaxPierceCount > 0 の場合、N 体命中で終了
+			if (P.MaxPierceCount > 0 && P.HitEnemyIds.Num() >= P.MaxPierceCount)
+			{
+				break;
+			}
+			// 従来の非 piercing 弾: 最初の1体にだけヒットして終了
+			else if (P.MaxPierceCount == 0 && !P.bPiercing)
 			{
 				break;
 			}
@@ -256,12 +267,15 @@ void USurvivorsWeaponComponent::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 			if (E.UniqueId != Ev.Target.UniqueId) continue;
 			if (E.bPendingRemove)
 			{
-				// 死亡済み対象でも非 piercing 弾は消費する（次 tick への持ち越し防止）
+				// 死亡済み対象でも消費数にカウントして貫通限界なら削除（持ち越し防止）
 				if (Ev.Type == ESurvivorsHitType::ProjectileDamage
-					&& Projectiles.IsValidIndex(Ev.WeaponSlot)
-					&& !Projectiles[Ev.WeaponSlot].bPiercing)
+					&& Projectiles.IsValidIndex(Ev.WeaponSlot))
 				{
-					ProjectilesToRemove.Add(Ev.WeaponSlot);
+					const FProjectileState& P = Projectiles[Ev.WeaponSlot];
+					const bool bLimitedPierce = P.MaxPierceCount > 0 && P.HitEnemyIds.Num() >= P.MaxPierceCount;
+					const bool bNonPiercing   = P.MaxPierceCount == 0 && !P.bPiercing;
+					if (bLimitedPierce || bNonPiercing)
+						ProjectilesToRemove.Add(Ev.WeaponSlot);
 				}
 				continue;
 			}
@@ -285,9 +299,10 @@ void USurvivorsWeaponComponent::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 				if (Projectiles.IsValidIndex(Ev.WeaponSlot))
 				{
 					FProjectileState& P = Projectiles[Ev.WeaponSlot];
-					if (!P.bPiercing)
+					const bool bLimitedPierce = P.MaxPierceCount > 0 && P.HitEnemyIds.Num() >= P.MaxPierceCount;
+					const bool bNonPiercing   = P.MaxPierceCount == 0 && !P.bPiercing;
+					if (bLimitedPierce || bNonPiercing)
 					{
-						P.HitEnemyIds.Add(E.UniqueId);
 						ProjectilesToRemove.Add(Ev.WeaponSlot);
 					}
 				}

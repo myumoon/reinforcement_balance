@@ -21,6 +21,7 @@ void USurvivorsKnifeWeapon::CacheParams()
 		CachedCooldown = P.Cooldown;
 		CachedSpeed    = P.Speed;
 		CachedAmount   = P.Amount;
+		CachedPierce   = P.Pierce;
 	}
 	else
 	{
@@ -29,6 +30,7 @@ void USurvivorsKnifeWeapon::CacheParams()
 		CachedCooldown = P.Cooldown;
 		CachedSpeed    = P.Speed;
 		CachedAmount   = P.Amount;
+		CachedPierce   = P.Pierce;
 	}
 }
 
@@ -75,14 +77,16 @@ void USurvivorsKnifeWeapon::Tick(float Dt)
 		}
 
 		FProjectileState P;
-		P.Pos         = Game->PlayerPos;
-		P.Vel         = Dir * EffSpeed;
-		P.Radius      = FSimRadius(6.f);
-		P.Damage      = FDamage(EffDamage);
-		P.WeaponType  = WeaponType;
-		P.WeaponSlotIdx = SlotIdx;
-		P.LifeTime    = FProjectileLifeTime(LifeTime);
-		P.bPiercing   = true;  // Knife は piercing
+		P.Pos               = Game->PlayerPos;
+		P.Vel               = Dir * EffSpeed;
+		P.Radius            = FSimRadius(6.f);
+		P.Damage            = FDamage(EffDamage);
+		P.WeaponType        = WeaponType;
+		P.WeaponSlotIdx     = SlotIdx;
+		P.LifeTime          = FProjectileLifeTime(LifeTime);
+		P.bPiercing         = false;
+		P.MaxPierceCount    = CachedPierce;  // Pierce=1 から最大3まで増加
+		P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_Half;  // Knockback=0.5
 		WeaponComp->SpawnProjectile(P);
 	}
 }

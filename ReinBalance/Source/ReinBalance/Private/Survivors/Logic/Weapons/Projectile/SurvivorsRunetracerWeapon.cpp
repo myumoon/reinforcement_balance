@@ -81,7 +81,8 @@ void USurvivorsRunetracerWeapon::Tick(float Dt)
 	P.WeaponType    = WeaponType;
 	P.WeaponSlotIdx = SlotIdx;
 	P.LifeTime      = FProjectileLifeTime(LifeTime);
-	P.bPiercing     = true;  // Runetracer は貫通
-	P.BounceCount   = FBounceCount(CachedMaxBounce + static_cast<int32>(PE.ExtraAmount));
+	P.bPiercing         = true;  // AoE: 無限貫通
+	P.BounceCount       = FBounceCount(CachedMaxBounce + static_cast<int32>(PE.ExtraAmount));
+	P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
 	WeaponComp->SpawnProjectile(P);
 }
