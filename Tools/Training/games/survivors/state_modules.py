@@ -1,5 +1,6 @@
 """Survivors 訓練用ステートモジュール群。
-EpisodeScoreTracker / SpalfStateModule / CurriculumStateModule を提供する。
+EpisodeScoreTracker / SpalfStateModule / CurriculumStateModule /
+WeaponPhaseAutoStateModule を提供する。
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import random
 from abc import ABC, abstractmethod
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -571,6 +572,34 @@ class CurriculumStateModule(BaseStateModule):
         msg = "[Curriculum] Phase " + str(self._phase_idx) + " 降格: " + prev_name + " -> " + next_phase.name + " (" + reason + ", score=" + str(round(mean, 3)) + ", ep_len=" + str(round(mean_len, 1)) + ")"
         print(msg)
 
+    def rollback_one_phase(self, reason: str = "external") -> None:
+        """外部トリガーによる1フェーズ強制降格（スコア判定なし）。
+
+        WeaponPhaseAutoStateModule など外部モジュールから武器フェーズ昇格に伴い呼ばれる。
+        phase_idx のみを更新するため、敵難易度パラメータ適用は呼び出し元が担う。
+        """
+        if self._phase_idx <= 0:
+            print(f"[Curriculum] 強制降格スキップ: 既に最初のフェーズです ({reason})")
+            return
+        prev_name = self._PHASES[self._phase_idx].name
+        prev_idx = self._phase_idx
+        self._phase_idx = max(self._phase_idx - 1, 0)
+        self._scores.clear()
+        self._rollback_bad_windows = 0
+        self._steps_in_phase = 0
+        self._episodes_in_phase = 0
+        self.clear_promotion_probe_window()
+        next_phase = self._PHASES[self._phase_idx]
+        self._phase_events.append({
+            "event": "forced_rollback",
+            "from_phase_idx": prev_idx,
+            "from_phase_name": prev_name,
+            "to_phase_idx": self._phase_idx,
+            "to_phase_name": next_phase.name,
+            "reason": reason,
+        })
+        print(f"[Curriculum] 強制降格: {prev_name} -> {next_phase.name} ({reason})")
+
     def get_wandb_metrics(self) -> dict:
         from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
         phase = self._PHASES[self._phase_idx]
@@ -887,4 +916,173 @@ class CurriculumStateModule(BaseStateModule):
             return
         Path(target).parent.mkdir(parents=True, exist_ok=True)
         Path(target).write_text(json.dumps(self.export_state(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# WeaponPhaseAutoStateModule
+# ---------------------------------------------------------------------------
+
+# 循環インポートを避けるため実行時にのみロード
+def _get_weapon_phases():
+    from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES, get_params_for_phase
+    return WEAPON_PHASES, get_params_for_phase
+
+WEAPON_PHASE_AUTO_SEQUENCE: list[str] = [
+    "W0", "W0_to_W1", "W1", "W1_to_W2", "W2", "W3", "W4", "W5", "W6",
+]
+
+
+class WeaponPhaseAutoStateModule(BaseStateModule):
+    """武器フェーズ自動昇格の状態管理モジュール。
+
+    固定フェーズ（W0/W1 等）では CurriculumStateModule の current_phase を監視し、
+    stagnation_steps ステップ以上変化しなかった場合に次フェーズへ進める。
+    遷移フェーズ（W0_to_W1 等）では カリキュラム状態に関わらず transition_steps
+    経過後に自動で次の固定フェーズへ移行する（補間を必ず完走させるため）。
+
+    設計上の分離:
+    - 本モジュールは「状態管理」のみを担う（set_params 送信は担わない）
+    - カリキュラム降格は rollback_fn（外部注入）に委譲する
+      - --curriculum 時: CurriculumCallback.rollback_one_phase（state + enemy params 適用）
+      - --curriculum-spalf 時: HybridCurriculumSpalfCallback.rollback_one_phase
+        （state + SPALF更新 + params 適用）
+    - 武器パラメータの set_params 送信は WeaponPhaseAutoCallback（SB3コールバック側）が担う
+    - on_step() が新しい武器フェーズキーを返した時点で、コールバックが set_params を呼ぶ
+    - 状態永続化は train_status_{step}_steps.json 経由のみ（ファイル直接書き込みは行わない）
+    """
+
+    def __init__(
+        self,
+        curriculum: "CurriculumStateModule",
+        stagnation_steps: int = 500_000,
+        rollback_fn: "Callable[[str], None] | None" = None,
+    ) -> None:
+        """
+        Args:
+            curriculum: 停滞検出に使用する CurriculumStateModule（read-only）。
+            stagnation_steps: 固定フェーズでカリキュラムが変化しない場合に停滞とみなすステップ数。
+                遷移フェーズでは使用されない（transition_steps を使う）。
+            rollback_fn: 武器フェーズ昇格時に呼ぶカリキュラム降格関数。
+                None の場合は curriculum.rollback_one_phase を使用（--curriculum 単体向け）。
+                --curriculum-spalf では HybridCurriculumSpalfCallback.rollback_one_phase を渡すこと。
+        """
+        self._curriculum = curriculum
+        self._stagnation_steps = max(stagnation_steps, 1)
+        self._rollback_fn: Callable[[str], None] = (
+            rollback_fn if rollback_fn is not None else curriculum.rollback_one_phase
+        )
+
+        self._weapon_phase_seq_idx: int = 0
+        self._last_curriculum_phase: int = -1  # 初回 on_step でリセットされる
+        self._stagnation_start_step: int = 0
+        self._phase_start_step: int = 0        # 現在の武器フェーズ開始時の num_timesteps
+
+    # ------------------------------------------------------------------ #
+    # Properties                                                           #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def current_phase_key(self) -> str:
+        """現在の武器フェーズキー（WEAPON_PHASE_AUTO_SEQUENCE のいずれか）。"""
+        idx = min(self._weapon_phase_seq_idx, len(WEAPON_PHASE_AUTO_SEQUENCE) - 1)
+        return WEAPON_PHASE_AUTO_SEQUENCE[idx]
+
+    @property
+    def is_final_weapon_phase(self) -> bool:
+        return self._weapon_phase_seq_idx >= len(WEAPON_PHASE_AUTO_SEQUENCE) - 1
+
+    @property
+    def is_transition(self) -> bool:
+        """現在が遷移フェーズ（weapon_pool_mode="weighted"）かどうか。"""
+        WEAPON_PHASES, _ = _get_weapon_phases()
+        return WEAPON_PHASES.get(self.current_phase_key, {}).get("weapon_pool_mode") == "weighted"
+
+    def get_transition_elapsed(self, num_timesteps: int) -> int:
+        """現在の武器フェーズ開始からの経過ステップ数（遷移フェーズの補間に使用）。"""
+        return max(0, num_timesteps - self._phase_start_step)
+
+    # ------------------------------------------------------------------ #
+    # Core logic                                                           #
+    # ------------------------------------------------------------------ #
+
+    def reset_stagnation_timer(self, num_timesteps: int) -> None:
+        """停滞タイマーを現在ステップでリセットする（resume 時の _on_training_start で呼ぶ）。"""
+        self._last_curriculum_phase = self._curriculum.current_phase
+        self._stagnation_start_step = num_timesteps
+
+    def on_step(self, num_timesteps: int) -> "str | None":
+        """毎ステップ呼ぶ。武器フェーズが昇格した場合は新フェーズキーを返す。
+
+        - 遷移フェーズ中（W0_to_W1 等）: transition_steps 経過で次フェーズへ自動進行。
+          カリキュラム停滞判定は行わない（補間を必ず完走させるため）。
+        - 固定フェーズ中（W0/W1 等）: カリキュラム current_phase が stagnation_steps
+          ステップ変化しない場合に次フェーズへ進める。
+
+        Returns:
+            新しい武器フェーズキー（コールバック側が set_params を呼ぶ）、変化なければ None。
+        """
+        if self.is_final_weapon_phase:
+            return None
+
+        if self.is_transition:
+            # 遷移フェーズ: transition_steps 経過で次のフェーズへ自動進行
+            WEAPON_PHASES, _ = _get_weapon_phases()
+            transition_steps = WEAPON_PHASES.get(self.current_phase_key, {}).get(
+                "transition_steps", 2_000_000
+            )
+            if self.get_transition_elapsed(num_timesteps) >= transition_steps:
+                return self._advance(num_timesteps, reason="transition_complete")
+            return None
+
+        # 固定フェーズ: カリキュラム停滞で次へ
+        curr = self._curriculum.current_phase
+        if curr != self._last_curriculum_phase:
+            self._last_curriculum_phase = curr
+            self._stagnation_start_step = num_timesteps
+            return None
+        if num_timesteps - self._stagnation_start_step >= self._stagnation_steps:
+            return self._advance(num_timesteps, reason="curriculum_stagnation")
+        return None
+
+    def _advance(self, num_timesteps: int, reason: str = "") -> str:
+        old_key = self.current_phase_key
+        self._weapon_phase_seq_idx += 1
+        new_key = self.current_phase_key
+        self._phase_start_step = num_timesteps
+
+        print(
+            f"[WeaponPhaseAuto] 武器フェーズ昇格: {old_key} -> {new_key} ({reason})"
+        )
+
+        # カリキュラム降格（state + enemy params 適用は rollback_fn に委譲）
+        self._rollback_fn(f"weapon_phase_advanced_to_{new_key}")
+
+        # 降格後のフェーズを記録し、停滞タイマーをリセット（固定フェーズ用）
+        self._last_curriculum_phase = self._curriculum.current_phase
+        self._stagnation_start_step = num_timesteps
+
+        return new_key
+
+    # ------------------------------------------------------------------ #
+    # BaseStateModule interface                                            #
+    # ------------------------------------------------------------------ #
+
+    def get_wandb_metrics(self) -> dict:
+        return {
+            "weapon_auto/phase_seq_idx": self._weapon_phase_seq_idx,
+            "weapon_auto/phase_key": self.current_phase_key,
+        }
+
+    def export_state(self) -> dict:
+        return {
+            "weapon_phase_seq_idx": self._weapon_phase_seq_idx,
+            "phase_start_step": self._phase_start_step,
+        }
+
+    def import_state(self, state: dict) -> None:
+        self._weapon_phase_seq_idx = int(state.get("weapon_phase_seq_idx", 0))
+        self._phase_start_step = int(state.get("phase_start_step", 0))
+
+    def save_status(self, path=None) -> None:
+        pass  # 状態永続化は train_status_{step}_steps.json に委譲する
 
