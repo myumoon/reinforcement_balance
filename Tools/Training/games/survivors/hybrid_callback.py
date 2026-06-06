@@ -385,10 +385,10 @@ class HybridCurriculumSpalfCallback(BaseCallback):
     def rollback_one_phase(self, reason: str = "weapon_phase_advanced") -> None:
         """武器フェーズ昇格に伴うカリキュラム1フェーズ強制降格。
 
-        CurriculumStateModule.force_rollback_one() を呼び出した後、
+        CurriculumStateModule.rollback_one_phase() でフェーズ状態を更新した後、
         SPALF の探索範囲と敵難易度パラメータを新しいフェーズに合わせて更新する。
         """
-        self._curriculum.force_rollback_one(reason)
+        self._curriculum.rollback_one_phase(reason)
         self._on_phase_changed("forced_rollback")
 
     def _save_status(self) -> None:

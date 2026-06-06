@@ -185,6 +185,17 @@ class CurriculumCallback(BaseCallback):
     def import_state(self, state: dict) -> None:
         self._curriculum.import_state(state)
 
+    def rollback_one_phase(self, reason: str = "weapon_phase_advanced") -> None:
+        """武器フェーズ昇格に伴うカリキュラム1フェーズ強制降格。
+
+        CurriculumStateModule.rollback_one_phase() でフェーズ状態を更新した後、
+        敵難易度パラメータを新しいフェーズに合わせて適用する。
+        HybridCurriculumSpalfCallback.rollback_one_phase() と同じインターフェースを持ち、
+        WeaponPhaseAutoStateModule の rollback_fn として使用できる。
+        """
+        self._curriculum.rollback_one_phase(reason)
+        self._param_applier.apply(_phase_to_params(self._curriculum.current_phase))
+
     def _save_status(self, *a):
         self._curriculum.save_status()
 

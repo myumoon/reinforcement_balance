@@ -1492,18 +1492,27 @@ def main() -> None:
     elif args.curriculum_spalf:
         print("[WARN] --curriculum-spalf は survivors ゲームかつ非 dry-run 時のみ有効です。無視します。")
 
-    # WeaponPhaseAutoCallback: --weapon-phase auto かつ --curriculum-spalf が有効な場合に登録
-    # hybrid_cb が None の場合（--curriculum-spalf 未指定）はエラーとする
+    # WeaponPhaseAutoCallback: --weapon-phase auto 時に登録
+    # --curriculum または --curriculum-spalf が必要。
+    # WeaponPhaseAutoStateModule に CurriculumStateModule を渡し、rollback_fn は
+    # 各コールバックの rollback_one_phase を使用することで HybridCallback への直接依存を排除する。
     if args.game == "survivors" and not args.dry_run and _weapon_phase_key == "auto":
-        if not args.curriculum_spalf or curriculum_cb is None:
+        if curriculum_cb is None:
             raise ValueError(
-                "--weapon-phase auto は --curriculum-spalf と組み合わせて使用してください。"
+                "--weapon-phase auto は --curriculum または --curriculum-spalf と組み合わせて使用してください。"
             )
+        from games.survivors.state_modules import WeaponPhaseAutoStateModule
         from games.survivors.weapon_phase_auto_callback import WeaponPhaseAutoCallback
+        _auto_status_path = str(work_dir / "weapon_phase_auto_status.json") if work_dir else None
         _auto_ckpt_dir = str(source_dir / "work") if (is_branch and source_dir is not None) else ""
-        _weapon_auto_cb = WeaponPhaseAutoCallback(
-            hybrid_cb=curriculum_cb,
+        _weapon_auto_module = WeaponPhaseAutoStateModule(
+            curriculum=curriculum_cb._curriculum,
             stagnation_steps=args.weapon_phase_auto_stagnation_steps,
+            rollback_fn=curriculum_cb.rollback_one_phase,
+            status_path=_auto_status_path,
+        )
+        _weapon_auto_cb = WeaponPhaseAutoCallback(
+            module=_weapon_auto_module,
             output_dir=str(work_dir),
             checkpoint_dir=_auto_ckpt_dir,
             weapon_update_freq=args.checkpoint_freq,

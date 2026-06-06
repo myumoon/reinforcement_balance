@@ -1,5 +1,6 @@
 """Survivors 訓練用ステートモジュール群。
-EpisodeScoreTracker / SpalfStateModule / CurriculumStateModule を提供する。
+EpisodeScoreTracker / SpalfStateModule / CurriculumStateModule /
+WeaponPhaseAutoStateModule を提供する。
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import random
 from abc import ABC, abstractmethod
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -571,8 +572,12 @@ class CurriculumStateModule(BaseStateModule):
         msg = "[Curriculum] Phase " + str(self._phase_idx) + " 降格: " + prev_name + " -> " + next_phase.name + " (" + reason + ", score=" + str(round(mean, 3)) + ", ep_len=" + str(round(mean_len, 1)) + ")"
         print(msg)
 
-    def force_rollback_one(self, reason: str = "external") -> None:
-        """外部トリガーによる1フェーズ強制降格（スコア判定なし）。"""
+    def rollback_one_phase(self, reason: str = "external") -> None:
+        """外部トリガーによる1フェーズ強制降格（スコア判定なし）。
+
+        WeaponPhaseAutoStateModule など外部モジュールから武器フェーズ昇格に伴い呼ばれる。
+        phase_idx のみを更新するため、敵難易度パラメータ適用は呼び出し元が担う。
+        """
         if self._phase_idx <= 0:
             print(f"[Curriculum] 強制降格スキップ: 既に最初のフェーズです ({reason})")
             return
@@ -911,4 +916,169 @@ class CurriculumStateModule(BaseStateModule):
             return
         Path(target).parent.mkdir(parents=True, exist_ok=True)
         Path(target).write_text(json.dumps(self.export_state(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# WeaponPhaseAutoStateModule
+# ---------------------------------------------------------------------------
+
+# 循環インポートを避けるため実行時にのみロード
+def _get_weapon_phases():
+    from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES, get_params_for_phase
+    return WEAPON_PHASES, get_params_for_phase
+
+WEAPON_PHASE_AUTO_SEQUENCE: list[str] = [
+    "W0", "W0_to_W1", "W1", "W1_to_W2", "W2", "W3", "W4", "W5", "W6",
+]
+
+_WEAPON_AUTO_STATUS_FILENAME = "weapon_phase_auto_status.json"
+
+
+class WeaponPhaseAutoStateModule(BaseStateModule):
+    """武器フェーズ自動昇格の状態管理モジュール。
+
+    CurriculumStateModule の current_phase を監視し、stagnation_steps ステップ以上
+    変化しなかった場合に WEAPON_PHASE_AUTO_SEQUENCE を1段階進める。
+
+    設計上の分離:
+    - 本モジュールは「状態管理」のみを担う（set_params 送信は担わない）
+    - カリキュラム降格は rollback_fn（外部注入）に委譲する
+      - --curriculum 時: CurriculumCallback.rollback_one_phase（state + enemy params 適用）
+      - --curriculum-spalf 時: HybridCurriculumSpalfCallback.rollback_one_phase（state + SPALF更新 + params 適用）
+    - 武器パラメータの set_params 送信は WeaponPhaseAutoCallback（SB3コールバック側）が担う
+    - on_step() が新しい武器フェーズキーを返した時点で、コールバックが set_params を呼ぶ
+    """
+
+    def __init__(
+        self,
+        curriculum: "CurriculumStateModule",
+        stagnation_steps: int = 500_000,
+        rollback_fn: "Callable[[str], None] | None" = None,
+        status_path: "str | None" = None,
+    ) -> None:
+        """
+        Args:
+            curriculum: 停滞検出に使用する CurriculumStateModule（read-only）。
+            stagnation_steps: カリキュラムフェーズが変化しない場合に停滞とみなすステップ数。
+            rollback_fn: 武器フェーズ昇格時に呼ぶカリキュラム降格関数。
+                None の場合は curriculum.rollback_one_phase を使用（--curriculum 単体向け）。
+                --curriculum-spalf では HybridCurriculumSpalfCallback.rollback_one_phase を渡すこと。
+            status_path: 状態ファイルのパス。None の場合は状態の永続化を行わない。
+        """
+        self._curriculum = curriculum
+        self._stagnation_steps = max(stagnation_steps, 1)
+        self._rollback_fn: Callable[[str], None] = (
+            rollback_fn if rollback_fn is not None else curriculum.rollback_one_phase
+        )
+        self._status_path = status_path
+
+        self._weapon_phase_seq_idx: int = 0
+        self._last_curriculum_phase: int = -1  # 初回 on_step でリセットされる
+        self._stagnation_start_step: int = 0
+        self._phase_start_step: int = 0        # 現在の武器フェーズ開始時の num_timesteps
+
+    # ------------------------------------------------------------------ #
+    # Properties                                                           #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def current_phase_key(self) -> str:
+        """現在の武器フェーズキー（WEAPON_PHASE_AUTO_SEQUENCE のいずれか）。"""
+        idx = min(self._weapon_phase_seq_idx, len(WEAPON_PHASE_AUTO_SEQUENCE) - 1)
+        return WEAPON_PHASE_AUTO_SEQUENCE[idx]
+
+    @property
+    def is_final_weapon_phase(self) -> bool:
+        return self._weapon_phase_seq_idx >= len(WEAPON_PHASE_AUTO_SEQUENCE) - 1
+
+    @property
+    def is_transition(self) -> bool:
+        """現在が遷移フェーズ（weapon_pool_mode="weighted"）かどうか。"""
+        WEAPON_PHASES, _ = _get_weapon_phases()
+        return WEAPON_PHASES.get(self.current_phase_key, {}).get("weapon_pool_mode") == "weighted"
+
+    def get_transition_elapsed(self, num_timesteps: int) -> int:
+        """現在の武器フェーズ開始からの経過ステップ数（遷移フェーズの補間に使用）。"""
+        return max(0, num_timesteps - self._phase_start_step)
+
+    # ------------------------------------------------------------------ #
+    # Core logic                                                           #
+    # ------------------------------------------------------------------ #
+
+    def reset_stagnation_timer(self, num_timesteps: int) -> None:
+        """停滞タイマーを現在ステップでリセットする（resume 時の _on_training_start で呼ぶ）。"""
+        self._last_curriculum_phase = self._curriculum.current_phase
+        self._stagnation_start_step = num_timesteps
+
+    def on_step(self, num_timesteps: int) -> "str | None":
+        """毎ステップ呼ぶ。武器フェーズが昇格した場合は新フェーズキーを返す。
+
+        Returns:
+            新しい武器フェーズキー（コールバック側が set_params を呼ぶ）、変化なければ None。
+        """
+        curr = self._curriculum.current_phase
+        if curr != self._last_curriculum_phase:
+            # カリキュラムフェーズが変化 → 停滞タイマーをリセット
+            self._last_curriculum_phase = curr
+            self._stagnation_start_step = num_timesteps
+            return None
+
+        if (not self.is_final_weapon_phase
+                and num_timesteps - self._stagnation_start_step >= self._stagnation_steps):
+            return self._advance(num_timesteps)
+        return None
+
+    def _advance(self, num_timesteps: int) -> str:
+        old_key = self.current_phase_key
+        self._weapon_phase_seq_idx += 1
+        new_key = self.current_phase_key
+        self._phase_start_step = num_timesteps
+
+        print(
+            f"[WeaponPhaseAuto] 武器フェーズ昇格: {old_key} -> {new_key} "
+            f"(停滞 {self._stagnation_steps:,} step 検出)"
+        )
+
+        # カリキュラム降格（state + enemy params 適用は rollback_fn に委譲）
+        self._rollback_fn(f"weapon_phase_advanced_to_{new_key}")
+
+        # 降格後のフェーズを記録し、停滞タイマーをリセット
+        self._last_curriculum_phase = self._curriculum.current_phase
+        self._stagnation_start_step = num_timesteps
+
+        self.save_status()
+        return new_key
+
+    # ------------------------------------------------------------------ #
+    # BaseStateModule interface                                            #
+    # ------------------------------------------------------------------ #
+
+    def get_wandb_metrics(self) -> dict:
+        return {
+            "weapon_auto/phase_idx": self._weapon_phase_seq_idx,
+            "weapon_auto/phase_key": self.current_phase_key,
+            "weapon_auto/stagnation_steps_elapsed": max(
+                0, self._stagnation_start_step
+            ),
+        }
+
+    def export_state(self) -> dict:
+        return {
+            "weapon_phase_seq_idx": self._weapon_phase_seq_idx,
+            "phase_start_step": self._phase_start_step,
+        }
+
+    def import_state(self, state: dict) -> None:
+        self._weapon_phase_seq_idx = int(state.get("weapon_phase_seq_idx", 0))
+        self._phase_start_step = int(state.get("phase_start_step", 0))
+
+    def save_status(self, path=None) -> None:
+        target = path or self._status_path
+        if target is None:
+            return
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text(
+            json.dumps(self.export_state(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
