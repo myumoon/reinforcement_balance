@@ -1,6 +1,8 @@
 #include "Survivors/Logic/SurvivorsPickupComponent.h"
 #include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/SurvivorsGemComponent.h"
+#include "Survivors/Logic/SurvivorsPlayerComponent.h"
 
 USurvivorsPickupComponent::USurvivorsPickupComponent()
 {
@@ -77,7 +79,9 @@ void USurvivorsPickupComponent::CheckSpecialPickups()
 			// 全敵を即撃破
 			for (FEnemyState& E : Game->Enemies)
 			{
-				if (!E.bPendingRemove)
+				const bool bResistsInstantKill = Game->EnemyTypeTable.IsValidIndex(E.TypeId)
+					&& Game->EnemyTypeTable[E.TypeId].bResistsInstantKill;
+				if (!E.bPendingRemove && !bResistsInstantKill)
 				{
 					E.HP            = 0.f;
 					E.bPendingRemove = true;
@@ -102,6 +106,26 @@ void USurvivorsPickupComponent::CheckSpecialPickups()
 			// 10秒グローバルフリーズ（ElapsedTime でタイマー管理）
 			// UpdateEnemies() でグローバルフリーズ時刻を確認し自動解除される
 			Game->GlobalFreezeUntilTime = Game->ElapsedTime + 10.f;
+			break;
+
+		case ESpecialPickupType::TreasureChest:
+			if (Game->bEnableEvolutions && Game->PlayerComponent)
+			{
+				const TArray<int32> EvolvableSlots = Game->PlayerComponent->GetEvolvableWeapons();
+				if (EvolvableSlots.Num() > 0)
+				{
+					const int32 SlotIdx = EvolvableSlots[Game->RandStream.RandRange(0, EvolvableSlots.Num() - 1)];
+					const EWeaponType BaseType = Game->WeaponSlots[SlotIdx].Type;
+					for (const SurvivorsGameConstants::FEvolutionRule& Rule : SurvivorsGameConstants::EvolutionTable)
+					{
+						if (Rule.BaseWeapon == BaseType)
+						{
+							Game->PlayerComponent->EvolveWeapon(SlotIdx, Rule.EvolvedWeapon);
+							break;
+						}
+					}
+				}
+			}
 			break;
 
 		default:

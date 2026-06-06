@@ -160,10 +160,10 @@ public:
 	float SimToUE = 5.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	int32 MinActiveEnemies = 4;
+	int32 MinActiveEnemies = 0;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	int32 MaxActiveEnemies = 6;
+	int32 MaxActiveEnemies = 600;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float SpawnRateMult = 1.0f;
@@ -186,7 +186,7 @@ public:
 	float SpawnMaxDistance = 600.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
-	float BossSpawnTime = 600.f;
+	float BossSpawnTime = 300.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
 	TArray<FSpawnWave> SpawnWaves;
@@ -197,10 +197,10 @@ public:
 	// ---- プレイヤー設定 ----
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
-	float MaxPlayerHP = 70.f;
+	float MaxPlayerHP = 100.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
-	float MoveSpeed = 80.f;
+	float MoveSpeed = 100.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
 	float PlayerRadius = 10.f;
@@ -218,13 +218,13 @@ public:
 	// ---- 時間スケーリング ----
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|TimeScaling")
-	bool bTimeScalingEnabled = true;
+	bool bTimeScalingEnabled = false;
 
 	// ---- 訓練用パラメータ拡張（/params エンドポイント経由で設定） ----
 
 	/** 武器プール制御モード: "all" / "garlic_only" / "custom" */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
-	FString WeaponPoolMode = TEXT("garlic_only");
+	FString WeaponPoolMode = TEXT("all_base");
 
 	/** カスタムモード時の許可武器タイプ ID リスト */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
@@ -236,11 +236,11 @@ public:
 
 	/** パッシブアイテムを有効にするか */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
-	bool bEnablePassives = false;
+	bool bEnablePassives = true;
 
 	/** 進化システムを有効にするか */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
-	bool bEnableEvolutions = false;
+	bool bEnableEvolutions = true;
 
 	/** リプレイ旧フェーズ比率（0.0〜1.0） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
@@ -300,8 +300,8 @@ private:
 	static constexpr float ContactHitInterval = SurvivorsGameConstants::ContactHitInterval;
 
 	// パッシブ再計算用ベース値（累積増幅を防ぐため MaxPlayerHP / GemPickupRadius の初期値を保持）
-	static constexpr float BaseMaxPlayerHPConst    = 70.f;  // MaxPlayerHP UPROPERTY のデフォルト値
-	static constexpr float BaseGemPickupRadiusConst= 30.f;  // GemPickupRadius UPROPERTY のデフォルト値
+	static constexpr float BaseMaxPlayerHPConst    = SurvivorsGameConstants::StandardMaxPlayerHP;
+	static constexpr float BaseGemPickupRadiusConst= SurvivorsGameConstants::BaseGemPickupRadius;
 
 	// ---- 状態 ----
 	FVector2D             PlayerPos;

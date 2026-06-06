@@ -192,8 +192,11 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 		const FWeaponSlot& Slot = Game->WeaponSlots[s];
 		// type_norm: id / MaxWeaponTypeCountReserved(64)
 		Obs.Add(static_cast<float>(static_cast<uint8>(Slot.Type)) / static_cast<float>(MaxWeaponTypeCountReserved));
-		// level_norm: level / MaxWeaponLevel
-		Obs.Add(static_cast<float>(Slot.Level.Value) / static_cast<float>(MaxWeaponLevel));
+		// level_norm: level / item-specific max level
+		const int32 WeaponMaxLevel = SurvivorsGameConstants::GetWeaponMaxLevel(Slot.Type);
+		Obs.Add(WeaponMaxLevel > 0
+			? static_cast<float>(Slot.Level.Value) / static_cast<float>(WeaponMaxLevel)
+			: 0.f);
 		// cooldown_norm: 武器インスタンスから取得
 		if (Game->WeaponComponent)
 		{
@@ -302,7 +305,7 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 	// ---- gem_pickup_radius (1) ----
 	// PickupRadius / 最大値（パッシブで増加する場合の上限を想定）
 	{
-		const float MaxPickupRadius = 150.f;  // 暫定: Attractorb 5Lv で約 2.5x の 75u 想定
+		const float MaxPickupRadius = 150.f;  // Attractorb Lv5 は 30u * 3.980025 = 約119.4u
 		Obs.Add(FMath::Clamp(Game->GemPickupRadius / MaxPickupRadius, 0.f, 1.f));
 	}
 
@@ -496,7 +499,7 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 				const FSpecialPickupState& SP = Game->SpecialPickups[SPIdx[s]];
 				Obs.Add((SP.Pos.X - Game->PlayerPos.X) / DN);
 				Obs.Add((SP.Pos.Y - Game->PlayerPos.Y) / DN);
-				Obs.Add(static_cast<float>(static_cast<uint8>(SP.Type)) / 3.f);  // 0=Rosary, 1=Orologion, 2=Vacuum
+				Obs.Add(static_cast<float>(static_cast<uint8>(SP.Type)) / 4.f);  // 0=Rosary, 1=Orologion, 2=Vacuum, 3=TreasureChest
 			}
 			else { Obs.Add(0.f); Obs.Add(0.f); Obs.Add(0.f); }
 		}

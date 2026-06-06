@@ -28,7 +28,9 @@ void USurvivorsEnemyComponent::UpdateEnemies()
 	for (FEnemyState& E : Game->Enemies)
 	{
 		// 個別フリーズまたはグローバルフリーズ（Orologion）中は移動スキップ
-		if (E.bFrozen || bGlobalFreeze) continue;
+		const bool bResistsFreeze = Game->EnemyTypeTable.IsValidIndex(E.TypeId)
+			&& Game->EnemyTypeTable[E.TypeId].bResistsFreeze;
+		if (E.bFrozen || (bGlobalFreeze && !bResistsFreeze)) continue;
 
 		E.Vel = (Game->PlayerPos - E.Pos).GetSafeNormal() * GetEnemySpeed(E.TypeId);
 		E.Pos += E.Vel * SurvivorsGameConstants::PhysicsDt;
@@ -104,8 +106,9 @@ void USurvivorsEnemyComponent::ApplyContactHits(FSurvivorsHitFrame& HitFrame)
 
 float USurvivorsEnemyComponent::GetEnemySpeed(int32 TypeId) const
 {
-	if (!Game || !Game->EnemyTypeTable.IsValidIndex(TypeId)) return 50.f * (Game ? Game->EnemySpeedMult : 1.f);
-	return Game->EnemyTypeTable[TypeId].Speed * Game->EnemySpeedMult;
+	const float CurseMult = Game ? FMath::Max(0.f, Game->CachedPassiveEffects.CurseMult) : 1.f;
+	if (!Game || !Game->EnemyTypeTable.IsValidIndex(TypeId)) return 50.f * (Game ? Game->EnemySpeedMult : 1.f) * CurseMult;
+	return Game->EnemyTypeTable[TypeId].Speed * Game->EnemySpeedMult * CurseMult;
 }
 
 float USurvivorsEnemyComponent::GetEnemyTypeMaxHP(int32 TypeId) const

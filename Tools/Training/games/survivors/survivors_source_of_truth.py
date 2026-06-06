@@ -89,6 +89,7 @@ def _extract_enemy_types(text: str) -> list[dict[str, Any]]:
         r"(?P<hp>[0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
         r"(?P<speed>[0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
         r"(?P<damage>[0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
+        r"(?P<xp>[0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
         r"(?P<radius>[0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
         r"(?P<knockback>[0-9]+(?:\.[0-9]*)?)f?\s*,\s*"
         r"(?P<boss>true|false)\s*\}",
@@ -100,6 +101,7 @@ def _extract_enemy_types(text: str) -> list[dict[str, Any]]:
             "base_hp": float(match.group("hp")),
             "speed": float(match.group("speed")),
             "contact_damage": float(match.group("damage")),
+            "xp_drop": float(match.group("xp")),
             "collision_radius": float(match.group("radius")),
             "knockback_resistance": float(match.group("knockback")),
             "is_boss": match.group("boss") == "true",
@@ -181,6 +183,7 @@ def build_survivors_source_of_truth(
 
     game_h_path = "ReinBalance/Source/ReinBalance/Public/Survivors/Logic/SurvivorsGame.h"
     constants_h_path = "ReinBalance/Source/ReinBalance/Public/Survivors/Logic/SurvivorsGameConstants.h"
+    wiki_spec_h_path = "ReinBalance/Source/ReinBalanceLogic/Public/Survivors/Logic/SurvivorsWikiSpec.h"
     gem_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsGemComponent.cpp"
     enemy_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsEnemyComponent.cpp"
     obs_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsObservationComponent.cpp"
@@ -189,6 +192,7 @@ def build_survivors_source_of_truth(
 
     game_h = _read(repo_root, game_h_path)
     constants_h = _read(repo_root, constants_h_path)
+    wiki_spec_h = _read(repo_root, wiki_spec_h_path)
     gem_cpp = _read(repo_root, gem_cpp_path)
     enemy_cpp = _read(repo_root, enemy_cpp_path)
     obs_cpp = _read(repo_root, obs_cpp_path)
@@ -244,7 +248,10 @@ def build_survivors_source_of_truth(
     kill_reward = reward_constants["KillReward"]
     alive_reward = reward_constants["AliveReward"]
     garlic_table_values = _extract_garlic_table(constants_h)
-    gem_xp_values = _extract_float_array_values(constants_h, "GemXPValues")
+    gem_xp_values = (
+        _extract_float_array_values(constants_h, "GemXPValues")
+        or _extract_float_array_values(wiki_spec_h, "GemXPValues")
+    )
     enemy_types = _extract_enemy_types(spawn_cpp)
     directional_density = _directional_density_semantics(
         observation_constants.get("EnemyDensityDirCount")
@@ -257,15 +264,19 @@ def build_survivors_source_of_truth(
         _snippet(enemy_cpp, enemy_cpp_path, "enemy kill reward", r"LastReward\s*\+=\s*Game->KillReward"),
         _snippet(obs_cpp, obs_cpp_path, "observation schema", r"enemy_nearest_dist_16dir", context=8),
         _snippet(obs_cpp, obs_cpp_path, "directional density bin formula", r"AngleRad", context=10),
-        _snippet(player_cpp, player_cpp_path, "XPRequiredForLevel", r"XPRequiredForLevel", context=18),
+        _snippet(wiki_spec_h, wiki_spec_h_path, "XPRequiredForLevel", r"XPRequiredForLevel", context=18),
         _snippet(spawn_cpp, spawn_cpp_path, "EnemyTypeTable", r"static const FRow Rows\[\]", context=18),
     ]
     garlic_table = _extract_inline_array(constants_h, "GarlicTable")
     gem_xp_snippet = _extract_inline_array(constants_h, "GemXPValues")
+    gem_xp_snippet_path = constants_h_path
+    if not gem_xp_snippet:
+        gem_xp_snippet = _extract_inline_array(wiki_spec_h, "GemXPValues")
+        gem_xp_snippet_path = wiki_spec_h_path
     if garlic_table:
         snippets.append(
             {
-                "path": constants_h_path,
+                "path": gem_xp_snippet_path,
                 "symbol": "GarlicTable",
                 "line": None,
                 "code": garlic_table,
@@ -384,7 +395,7 @@ def render_source_of_truth_markdown(sot: dict[str, Any] | None) -> str:
         "- Gem 単体取得は ItemReward=1.0 なので base_reward >= 1.0 で検出可能です。",
         "- `base_reward >= 2.9` を Gem 取得条件にしてはいけません。",
         "- `remaining / 3.0` で Item 数を推定してはいけません。",
-        "- MaxPlayerHP は 70.0 です。`obs[12] * 100.0` のような旧値計算を使わないでください。",
+        f"- MaxPlayerHP は {player.get('MaxPlayerHP')} です。`obs[12]` からHP絶対値へ戻す場合はこの値を使ってください。",
         "",
         "### Source snippets",
     ]

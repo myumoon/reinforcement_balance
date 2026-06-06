@@ -75,11 +75,11 @@ def validate_survivors_reward_code(code: str, source_of_truth: dict[str, Any] | 
                     )
                 )
 
-    if max_player_hp == 70.0:
+    if max_player_hp == 100.0:
         hp_patterns = [
-            r"obs\s*\[\s*12\s*\]\s*\*\s*100\.0\b",
-            r"\bMAX_PLAYER_HP\s*=\s*100\.0\b",
-            r"\b_MAX_PLAYER_HP\s*=\s*100\.0\b",
+            r"obs\s*\[\s*12\s*\]\s*\*\s*70\.0\b",
+            r"\bMAX_PLAYER_HP\s*=\s*70\.0\b",
+            r"\b_MAX_PLAYER_HP\s*=\s*70\.0\b",
         ]
         for pattern in hp_patterns:
             if _matches(code, pattern):
@@ -87,7 +87,7 @@ def validate_survivors_reward_code(code: str, source_of_truth: dict[str, Any] | 
                     _finding(
                         "error",
                         "MAX_HP_MISMATCH",
-                        "MaxPlayerHP is 70.0 in C++, but reward_fn appears to use 100.0.",
+                        "MaxPlayerHP is 100.0 in C++, but reward_fn appears to use stale 70.0.",
                         pattern,
                     )
                 )
