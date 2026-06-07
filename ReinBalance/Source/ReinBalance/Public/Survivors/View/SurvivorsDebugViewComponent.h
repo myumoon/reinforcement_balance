@@ -16,6 +16,15 @@ UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class REINBALANCE_API USurvivorsDebugViewComponent : public UActorComponent
 {
 	GENERATED_BODY()
+	
+	/** デバッグ描画用の行情報 */
+	struct FDebugLine
+	{
+		int32        Key;
+		FString      Text;
+		FLinearColor Color;
+	};
+	
 public:
 	USurvivorsDebugViewComponent();
 
@@ -39,13 +48,14 @@ private:
 	void DrawDebugOverlay() const;
 
 	// 各カテゴリ描画ヘルパー
-	void DrawSection_Game(int32& Key) const;
-	void DrawSection_Status(int32& Key) const;
-	void DrawSection_Slots(int32& Key) const;
-	void DrawSection_Enemy(int32& Key) const;
-	void DrawSection_Train(int32& Key) const;
+	void DrawSection_Game(int32& Key, TArray<FDebugLine>& pendingLines) const;
+	void DrawSection_Status(int32& Key, TArray<FDebugLine>& pendingLines) const;
+	void DrawSection_Slots(int32& Key, TArray<FDebugLine>& pendingLines) const;
+	void DrawSection_Enemy(int32& Key, TArray<FDebugLine>& pendingLines) const;
+	void DrawSection_Train(int32& Key, TArray<FDebugLine>& pendingLines) const;
 
-	static void AddLine(int32 Key, const FString& Text, FLinearColor Color);
+	static void AddLine(TArray<FDebugLine>& lines, int32 Key, const FString& Text, FLinearColor Color);
+	static void DrawDebugOverlay(TArrayView<const FDebugLine> lines, UEngine* engine);
 
 	// ラベル幅定数（FString::Printf の %-Ns フォーマット用）
 	static constexpr int32 LabelWidth_Game   = 14;
