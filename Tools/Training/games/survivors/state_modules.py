@@ -973,7 +973,8 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         )
 
         self._weapon_phase_seq_idx: int = 0
-        self._last_curriculum_phase: int = -1  # 初回 on_step でリセットされる
+        self._last_curriculum_phase: int = -1  # 初回 on_step でリセットされる（後方互換用、未使用）
+        self._max_curriculum_phase: int = self._curriculum.current_phase  # 最大到達フェーズ（rollback でリセットしない）
         self._stagnation_start_step: int = 0
         self._phase_start_step: int = 0        # 現在の武器フェーズ開始時の num_timesteps
 
@@ -1008,6 +1009,7 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
     def reset_stagnation_timer(self, num_timesteps: int) -> None:
         """停滞タイマーを現在ステップでリセットする（resume 時の _on_training_start で呼ぶ）。"""
         self._last_curriculum_phase = self._curriculum.current_phase
+        self._max_curriculum_phase = self._curriculum.current_phase
         self._stagnation_start_step = num_timesteps
 
     def on_step(self, num_timesteps: int) -> "str | None":
@@ -1034,10 +1036,12 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
                 return self._advance(num_timesteps, reason="transition_complete")
             return None
 
-        # 固定フェーズ: カリキュラム停滞で次へ
+        # 固定フェーズ: カリキュラム最大到達フェーズが更新された時のみタイマーリセット
+        # rollback でカリキュラムフェーズが下がってもタイマーはリセットしない
+        # （Phase 10/11 振動でタイマーが永遠にリセットされるのを防ぐ）
         curr = self._curriculum.current_phase
-        if curr != self._last_curriculum_phase:
-            self._last_curriculum_phase = curr
+        if curr > self._max_curriculum_phase:
+            self._max_curriculum_phase = curr
             self._stagnation_start_step = num_timesteps
             return None
         if num_timesteps - self._stagnation_start_step >= self._stagnation_steps:
@@ -1058,7 +1062,9 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         self._rollback_fn(f"weapon_phase_advanced_to_{new_key}")
 
         # 降格後のフェーズを記録し、停滞タイマーをリセット（固定フェーズ用）
+        # _max_curriculum_phase もリセット（新しい武器フェーズで停滞計測をやり直す）
         self._last_curriculum_phase = self._curriculum.current_phase
+        self._max_curriculum_phase = self._curriculum.current_phase
         self._stagnation_start_step = num_timesteps
 
         return new_key
@@ -1068,20 +1074,48 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
     # ------------------------------------------------------------------ #
 
     def get_wandb_metrics(self) -> dict:
+        """BaseStateModule インターフェース実装。stagnation_countdown は -1（不明）を返す。
+        正確な値が必要な場合は get_wandb_metrics_with_step() を使うこと。
+        """
+        return self.get_wandb_metrics_with_step(num_timesteps=self._stagnation_start_step)
+
+    def get_wandb_metrics_with_step(self, num_timesteps: int) -> dict:
+        """num_timesteps を受け取って stagnation_countdown を正確に計算するメトリクスを返す。"""
+        WEAPON_PHASES, _ = _get_weapon_phases()
+        phase_key = self.current_phase_key
+        phase_idx = self._weapon_phase_seq_idx
+        # weapon_curriculum/use_weapon_num: 現フェーズの allowed_weapon_types の武器種類数
+        use_weapon_num = len(WEAPON_PHASES.get(phase_key, {}).get("allowed_weapon_types", []))
+        # weapon_curriculum/phase_stagnation_countdown: 遷移フェーズは -1、固定フェーズは残りステップ数
+        if self.is_transition:
+            stagnation_countdown = -1
+        else:
+            stagnation_countdown = max(
+                0, self._stagnation_steps - (num_timesteps - self._stagnation_start_step)
+            )
         return {
-            "weapon_auto/phase_seq_idx": self._weapon_phase_seq_idx,
-            "weapon_auto/phase_key": self.current_phase_key,
+            "weapon_auto/phase_seq_idx": phase_idx,
+            "weapon_auto/phase_key": phase_key,
+            "weapon_curriculum/phase_idx": phase_idx,
+            "weapon_curriculum/use_weapon_num": use_weapon_num,
+            "weapon_curriculum/phase_stagnation_countdown": stagnation_countdown,
         }
 
     def export_state(self) -> dict:
         return {
             "weapon_phase_seq_idx": self._weapon_phase_seq_idx,
             "phase_start_step": self._phase_start_step,
+            "max_curriculum_phase": self._max_curriculum_phase,
+            "stagnation_start_step": self._stagnation_start_step,
         }
 
     def import_state(self, state: dict) -> None:
         self._weapon_phase_seq_idx = int(state.get("weapon_phase_seq_idx", 0))
         self._phase_start_step = int(state.get("phase_start_step", 0))
+        self._max_curriculum_phase = int(
+            state.get("max_curriculum_phase", self._curriculum.current_phase)
+        )
+        self._stagnation_start_step = int(state.get("stagnation_start_step", 0))
 
     def save_status(self, path=None) -> None:
         pass  # 状態永続化は train_status_{step}_steps.json に委譲する

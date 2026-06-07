@@ -1524,6 +1524,8 @@ def main() -> None:
         _weapon_auto_cb = WeaponPhaseAutoCallback(
             module=_weapon_auto_module,
             weapon_update_freq=args.checkpoint_freq,
+            wandb_logger=wandb_logger,
+            wandb_log_freq=args.checkpoint_freq,
         )
         callbacks.append(_weapon_auto_cb)
         print(
