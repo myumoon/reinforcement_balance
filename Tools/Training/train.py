@@ -540,7 +540,11 @@ class _AnnealingShapingCallback(BaseCallback):
         """env[0] から shaping_weight を取得する（export_state 用）。"""
         if self.training_env is None:
             return self._pending_shaping_weight if self._pending_shaping_weight is not None else 1.0
-        return self.training_env.env_method("get_shaping_weight")[0]
+        try:
+            return self.training_env.env_method("get_shaping_weight")[0]
+        except (EOFError, BrokenPipeError, OSError):
+            # Ctrl+C後などでワーカープロセスが終了済みの場合
+            return self._pending_shaping_weight if self._pending_shaping_weight is not None else 1.0
 
     def export_state(self) -> dict:
         return {
@@ -1691,13 +1695,16 @@ def main() -> None:
                     vn.save(str(vecnorm_path))
                     final_vecnorm_path = vecnorm_path
                     print(f"[INFO] VecNormalize 統計を保存: {vecnorm_path}")
-                _write_status_for_model(
-                    final_model_zip,
-                    final_vecnorm_path,
-                    model.num_timesteps,
-                    exit_reason=exit_reason,
-                    exit_error=exit_error,
-                )
+                try:
+                    _write_status_for_model(
+                        final_model_zip,
+                        final_vecnorm_path,
+                        model.num_timesteps,
+                        exit_reason=exit_reason,
+                        exit_error=exit_error,
+                    )
+                except Exception as e:
+                    print(f"[WARN] 終了時の status 保存に失敗しました（モデル本体は保存済み）: {e}")
                 if spalf_cb is not None:
                     spalf_cb._save_status()
                     print(f"[INFO] SPALF state を保存: {spalf_status_path}")
