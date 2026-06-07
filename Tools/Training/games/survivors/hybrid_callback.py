@@ -401,8 +401,17 @@ class HybridCurriculumSpalfCallback(BaseCallback):
     # ---- Probe 昇格 API ----
 
     def get_current_phase_params(self) -> dict:
-        """現在フェーズの固定 params dict を返す（probe eval で eval_env に適用する）。"""
-        return _phase_params_from_phase(self._curriculum.current_phase)
+        """probe eval で eval_env に適用する params dict を返す。
+
+        次フェーズの lo パラメータ（難易度下限）で probe を実施することで、
+        昇格後の環境に対応できるかを事前に検証する。
+        最終フェーズでは次フェーズが存在しないため現フェーズのパラメータを返す。
+        """
+        current = self._curriculum.current_phase
+        next_phase = current + 1
+        if next_phase >= len(_CURRICULUM_PHASES):
+            return _phase_params_from_phase(current)
+        return _phase_params_from_phase(next_phase)
 
     def on_promotion_probe_results(self, episode_results: list[dict]) -> str | None:
         """probe episode 結果を受け取り昇格判定を行う。

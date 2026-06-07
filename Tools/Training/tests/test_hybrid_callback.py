@@ -394,12 +394,26 @@ class TestHybridProbePromotion:
         expected = _phase_bounds(1)
         assert cb._spalf._active_bounds == expected
 
-    def test_get_current_phase_params_returns_phase0(self):
-        """get_current_phase_params が phase 0 の固定 params を返すこと。"""
+    def test_get_current_phase_params_returns_next_phase(self):
+        """get_current_phase_params が次フェーズ（phase 1）の params を返すこと。
+
+        仕様変更: probe eval は昇格後の環境を事前検証するため、
+        現フェーズ(0)ではなく次フェーズ(1)のパラメータを返す。
+        """
         cb = _make_callback()
+        # 初期状態は phase 0 なので次フェーズ (phase 1) のパラメータを返す
         params = cb.get_current_phase_params()
-        phase0_params = _phase_params_from_phase(0)
-        assert params == phase0_params
+        phase1_params = _phase_params_from_phase(1)
+        assert params == phase1_params
+
+    def test_get_current_phase_params_returns_current_at_final_phase(self):
+        """最終フェーズでは次フェーズが存在しないため現フェーズの params を返すこと。"""
+        cb = _make_callback()
+        last_idx = len(_CURRICULUM_PHASES) - 1
+        cb._curriculum._phase_idx = last_idx
+        params = cb.get_current_phase_params()
+        final_params = _phase_params_from_phase(last_idx)
+        assert params == final_params
 
 
 class TestOnPromotionProbeEvalResults:
@@ -454,7 +468,7 @@ class TestOnPromotionProbeEvalResults:
         assert passed_results[1]["ep_length"] == 200
 
     def test_log_promotion_probe_metrics_called_with_metrics(self):
-        """_log_promotion_probe_metrics が metrics で呼ばれること。"""
+        """_log_promotion_probe_metrics が metrics・pre_diag・event で呼ばれること。"""
         from unittest.mock import patch
         cb = _make_callback()
 
@@ -463,20 +477,33 @@ class TestOnPromotionProbeEvalResults:
         ]
         metrics = {"active_score": 5.0, "ep_length": 100.0, "n_episodes": 1}
 
-        with patch.object(cb, "on_promotion_probe_results", return_value=None), \
+        with patch.object(cb, "on_promotion_probe_results", return_value=None) as mock_probe, \
              patch.object(cb, "_log_promotion_probe_metrics") as mock_log:
             cb.on_promotion_probe_eval_results(episode_results, metrics)
 
-        mock_log.assert_called_once_with(metrics)
+        mock_log.assert_called_once()
+        call_kwargs = mock_log.call_args
+        # 第1引数が metrics であること
+        assert call_kwargs[0][0] == metrics
+        # pre_diag / event キーワード引数が渡されること
+        assert "pre_diag" in call_kwargs[1]
+        assert "event" in call_kwargs[1]
 
 
 class TestLogPromotionProbeMetrics:
     """_log_promotion_probe_metrics の W&B ログテスト。"""
 
+    def _make_pre_diag(self) -> dict:
+        """テスト用の probe diagnostics を返す。"""
+        return {
+            "threshold": 10.0,
+            "promotion_ready": False,
+            "n_probe_episodes": 5,
+        }
+
     def test_curriculum_probe_metrics_logged_to_wandb(self):
-        """curriculum_probe/* が W&B に記録されること。"""
+        """curriculum/* probe 関連メトリクスが W&B に記録されること。"""
         from common.wandb_logger import WandbLogger
-        from unittest.mock import patch
 
         wandb_logger = MagicMock(spec=WandbLogger)
         wandb_logger.enabled = True
@@ -492,25 +519,17 @@ class TestLogPromotionProbeMetrics:
             "ep_length": 150.0,
             "n_episodes": 5,
         }
+        pre_diag = self._make_pre_diag()
 
-        with patch.object(cb._curriculum, "get_promotion_probe_diagnostics") as mock_diag:
-            mock_diag.return_value = {
-                "threshold": 10.0,
-                "promotion_ready": False,
-                "n_probe_episodes": 5,
-            }
-            cb._log_promotion_probe_metrics(metrics)
+        cb._log_promotion_probe_metrics(metrics, pre_diag=pre_diag, event=None)
 
         wandb_logger.log.assert_called_once()
         logged_metrics = wandb_logger.log.call_args[0][0]
 
-        # curriculum_probe/* キーが含まれること
-        assert "curriculum_probe/active_score_mean" in logged_metrics
-        assert "curriculum_probe/ep_length_mean" in logged_metrics
-        assert "curriculum_probe/n_episodes" in logged_metrics
-        assert "curriculum_probe/phase_idx" in logged_metrics
-        assert "curriculum_probe/threshold" in logged_metrics
-        assert "curriculum_probe/promotion_ready" in logged_metrics
+        # curriculum/* probe キーが含まれること
+        assert "curriculum/probe_threshold" in logged_metrics
+        assert "curriculum/probe_promotion_ready" in logged_metrics
+        assert "curriculum/probe_event" in logged_metrics
 
     def test_log_not_called_when_wandb_logger_none(self):
         """wandb_logger が None の場合は何も記録しないこと。"""
@@ -520,9 +539,10 @@ class TestLogPromotionProbeMetrics:
         cb.model = mock_model
 
         metrics = {"active_score": 5.0, "ep_length": 100.0, "n_episodes": 3}
+        pre_diag = self._make_pre_diag()
 
         # 例外なく動作すること
-        cb._log_promotion_probe_metrics(metrics)
+        cb._log_promotion_probe_metrics(metrics, pre_diag=pre_diag, event=None)
 
     def test_log_not_called_when_wandb_disabled(self):
         """wandb_logger が disabled の場合は何も記録しないこと。"""
@@ -536,8 +556,9 @@ class TestLogPromotionProbeMetrics:
         cb.model = mock_model
 
         metrics = {"active_score": 5.0, "ep_length": 100.0, "n_episodes": 3}
+        pre_diag = self._make_pre_diag()
 
-        cb._log_promotion_probe_metrics(metrics)
+        cb._log_promotion_probe_metrics(metrics, pre_diag=pre_diag, event=None)
 
         wandb_logger.log.assert_not_called()
 

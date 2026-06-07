@@ -12,10 +12,15 @@ resume 対応:
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from stable_baselines3.common.callbacks import BaseCallback
 
 from games.survivors.survivors_weapon_curriculum import get_params_for_phase
 from games.survivors.state_modules import WeaponPhaseAutoStateModule
+
+if TYPE_CHECKING:
+    from common.wandb_logger import WandbLogger
 
 
 class WeaponPhaseAutoCallback(BaseCallback):
@@ -30,30 +35,45 @@ class WeaponPhaseAutoCallback(BaseCallback):
         self,
         module: WeaponPhaseAutoStateModule,
         weapon_update_freq: int = 10_000,
+        wandb_logger: "WandbLogger | None" = None,
+        wandb_log_freq: int = 10_000,
     ):
         """
         Args:
             module: WeaponPhaseAutoStateModule インスタンス（状態管理を委譲）。
             weapon_update_freq: 遷移フェーズ中に weapon_weights を更新するステップ間隔。
+            wandb_logger: W&B ログ用ロガー（None の場合はログなし）。
+            wandb_log_freq: 武器カリキュラムメトリクスの定期ログ間隔（ステップ数）。
         """
         super().__init__(verbose=0)
         self._module = module
         self._weapon_update_freq = max(weapon_update_freq, 1)
         self._last_weapon_update: int = 0
+        self._wandb_logger = wandb_logger
+        self._wandb_log_freq = max(wandb_log_freq, 1)
+        self._last_wandb_log: int = -1
+        if wandb_logger:
+            wandb_logger.add_metric_prefix("weapon_curriculum/")
 
     # ------------------------------------------------------------------ #
     # SB3 callbacks                                                        #
     # ------------------------------------------------------------------ #
 
     def _on_training_start(self) -> None:
-        # module の状態は train.py が import_state() で復元済み。
-        # 停滞タイマーは常にリセット（resume 時も含む）し、初回 set_params を送信する。
-        self._module.reset_stagnation_timer(self.num_timesteps)
+        # module の状態は train.py が import_state() で復元済みの場合がある。
+        # 復元済み（resume）の場合は max_curriculum_phase / stagnation_start_step を
+        # 上書きしないようにタイマーリセットをスキップする。
+        # 新規訓練時のみ停滞タイマーをリセットする。
+        if not self._module._state_restored:
+            self._module.reset_stagnation_timer(self.num_timesteps)
         self._last_weapon_update = self.num_timesteps
 
         # 遷移フェーズは phase_start_step からの elapsed で補間位置を復元
         elapsed = self._module.get_transition_elapsed(self.num_timesteps)
         self._apply_weapon_phase(elapsed)
+
+        # 初回 W&B ログ
+        self._log_wandb_metrics()
 
         print(
             f"[WeaponPhaseAuto] 有効 phase={self._module.current_phase_key}, "
@@ -67,6 +87,8 @@ class WeaponPhaseAutoCallback(BaseCallback):
             # 武器フェーズ昇格 → 新フェーズの初期パラメータを送信
             self._apply_weapon_phase(elapsed=0)
             self._last_weapon_update = self.num_timesteps
+            # フェーズ遷移時は W&B にログを記録
+            self._log_wandb_metrics()
         elif (self._module.is_transition
               and self.num_timesteps - self._last_weapon_update >= self._weapon_update_freq):
             # 遷移フェーズ中: weapon_weights を定期更新
@@ -74,11 +96,23 @@ class WeaponPhaseAutoCallback(BaseCallback):
             self._apply_weapon_phase(elapsed)
             self._last_weapon_update = self.num_timesteps
 
+        # 定期ログ（wandb_log_freq ステップごと）
+        if self._last_wandb_log < 0 or self.num_timesteps - self._last_wandb_log >= self._wandb_log_freq:
+            self._log_wandb_metrics()
+
         return True
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
+
+    def _log_wandb_metrics(self) -> None:
+        """武器カリキュラムメトリクスを W&B に記録する。"""
+        if not self._wandb_logger or not self._wandb_logger.enabled:
+            return
+        metrics = self._module.get_wandb_metrics_with_step(self.num_timesteps)
+        self._wandb_logger.log(metrics, step=self.num_timesteps)
+        self._last_wandb_log = self.num_timesteps
 
     def _apply_weapon_phase(self, elapsed: int) -> None:
         phase_key = self._module.current_phase_key
