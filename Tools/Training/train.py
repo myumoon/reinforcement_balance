@@ -511,6 +511,7 @@ class _AnnealingShapingCallback(BaseCallback):
         self._ep_base_per_env: list[float] = []    # env ごとのエピソード内累積
         self._ep_shaped_per_env: list[float] = []
         self._pending_shaping_weight: float | None = None  # import_state → _on_training_start で適用
+        self._cached_shaping_weight: float | None = None   # _set_shaping_weight 呼び出し時に更新
         self._sum_base = 0.0
         self._sum_shaped = 0.0
         self._ep_count = 0
@@ -529,6 +530,7 @@ class _AnnealingShapingCallback(BaseCallback):
 
     def _set_shaping_weight(self, weight: float) -> None:
         """全 env に shaping_weight を設定する。"""
+        self._cached_shaping_weight = weight
         self.training_env.env_method("set_shaping_weight", weight)
 
     def _clear_reward_fn(self) -> None:
@@ -543,7 +545,9 @@ class _AnnealingShapingCallback(BaseCallback):
         try:
             return self.training_env.env_method("get_shaping_weight")[0]
         except (EOFError, BrokenPipeError, OSError):
-            # Ctrl+C後などでワーカープロセスが終了済みの場合
+            # Ctrl+C後などでワーカープロセスが終了済みの場合: キャッシュ → pending → デフォルトの順で返す
+            if self._cached_shaping_weight is not None:
+                return self._cached_shaping_weight
             return self._pending_shaping_weight if self._pending_shaping_weight is not None else 1.0
 
     def export_state(self) -> dict:
