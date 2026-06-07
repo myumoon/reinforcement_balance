@@ -60,9 +60,12 @@ class WeaponPhaseAutoCallback(BaseCallback):
     # ------------------------------------------------------------------ #
 
     def _on_training_start(self) -> None:
-        # module の状態は train.py が import_state() で復元済み。
-        # 停滞タイマーは常にリセット（resume 時も含む）し、初回 set_params を送信する。
-        self._module.reset_stagnation_timer(self.num_timesteps)
+        # module の状態は train.py が import_state() で復元済みの場合がある。
+        # 復元済み（resume）の場合は max_curriculum_phase / stagnation_start_step を
+        # 上書きしないようにタイマーリセットをスキップする。
+        # 新規訓練時のみ停滞タイマーをリセットする。
+        if not self._module._state_restored:
+            self._module.reset_stagnation_timer(self.num_timesteps)
         self._last_weapon_update = self.num_timesteps
 
         # 遷移フェーズは phase_start_step からの elapsed で補間位置を復元

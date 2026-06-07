@@ -977,6 +977,7 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         self._max_curriculum_phase: int = self._curriculum.current_phase  # 最大到達フェーズ（rollback でリセットしない）
         self._stagnation_start_step: int = 0
         self._phase_start_step: int = 0        # 現在の武器フェーズ開始時の num_timesteps
+        self._state_restored: bool = False     # import_state() で復元済みか否か
 
     # ------------------------------------------------------------------ #
     # Properties                                                           #
@@ -1116,6 +1117,7 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
             state.get("max_curriculum_phase", self._curriculum.current_phase)
         )
         self._stagnation_start_step = int(state.get("stagnation_start_step", 0))
+        self._state_restored = True  # 復元済みフラグを立てる
 
     def save_status(self, path=None) -> None:
         pass  # 状態永続化は train_status_{step}_steps.json に委譲する
