@@ -201,6 +201,6 @@ void USurvivorsDebugViewComponent::AddLine(int32 Key, const FString& Text, FLine
 {
 	if (GEngine)
 	{
-		GEngine->AddOnScreenDebugMessage(Key, 0.0f, Color.ToFColor(true), Text);
+		GEngine->AddOnScreenDebugMessage(Key, 0.0f, Color.ToFColor(true), Text, false);
 	}
 }
