@@ -34,6 +34,7 @@ public:
 	ASurvivorsGame();
 
 	/** 離散行動 (0〜8) を受けて 1 物理ステップ進める */
+	UFUNCTION(BlueprintCallable, Category = "Survivors|Control")
 	void PhysicsStep(int32 ActionIdx);
 
 	/** 状態をリセット */
@@ -213,7 +214,7 @@ public:
 	// ---- ジェム設定 ----
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Item")
-	float GemPickupRadius = 30.f;
+	float GemPickupRadius = 60.f;
 
 	// ---- 時間スケーリング ----
 
