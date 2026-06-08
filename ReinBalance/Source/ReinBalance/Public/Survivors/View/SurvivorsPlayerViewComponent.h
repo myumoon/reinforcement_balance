@@ -40,7 +40,7 @@ private:
 
 	void LoadAssets();
 	void SetupPlayerMesh(USceneComponent* AttachParent);
-	void DrawAura();
+	void DrawGemPickupRadius(const FVector2D& PlayerPos);
 
 	UMaterialInstanceDynamic* CreateColorMaterial(const FLinearColor& Color);
 };

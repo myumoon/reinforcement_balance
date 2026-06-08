@@ -31,31 +31,8 @@ public:
 
 	/** スロット idx の武器を外す */
 	void UnequipWeapon(int32 SlotIdx);
-
-	// ---- 毎ステップ処理 ----
-
-	/** 全武器 Tick() を呼ぶ（ダメージなし、クールダウン管理のみ） */
-	void TickWeapons(float Dt);
-
-	/** 後方互換のために残している。HitFrame 経由の当たり判定（Garlic/GroundZone）は実行しない。
-	 *  正確な当たり判定には PhysicsStep 内の BuildEnemyGrid/ComputeAllWeaponHits/ApplyWeaponHits を使うこと。 */
-	void TickAllWeapons(float Dt);
-
-	/** 全プロジェクタイル移動・寿命管理 */
-	void TickProjectiles(float Dt);
-
-	/** Santa Water ゾーン寿命管理（ダメージ判定は ComputeGroundZoneHits に移管） */
-	void TickGroundZones(float Dt);
-
-	/** 全武器 ComputeHits を呼ぶ（HitFrame に当たり判定結果を収集） */
-	void ComputeAllWeaponHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame);
-
-	/** HitFrame のイベントを適用する（HP 更新・ノックバック・ドロップ） */
-	void ApplyWeaponHits(FSurvivorsHitFrame& HitFrame);
-
-	/** プロジェクタイル vs 敵 当たり判定（後方互換: 直接呼ぶ場合） */
-	void ApplyProjectileHits();
-
+	
+public:
 	// ---- obs / view アクセサ ----
 
 	/** obs 生成用: プロジェクタイル + GroundZone を統一ビューで返す */
@@ -74,6 +51,7 @@ public:
 	/** 武器インスタンスへのアクセス（obs の cooldown 取得用） */
 	USurvivorsWeaponBase* GetWeaponInstance(int32 SlotIdx) const;
 
+	// todo: 弾の管理は専用のクラスを作成し、武器生成時にコンストラクタで渡すようにしたい
 	/** 武器実装がプロジェクタイル・ゾーンを追加するための API */
 	void SpawnProjectile(const FProjectileState& P) { Projectiles.Add(P); }
 	void SpawnGroundZone(const FGroundZoneState& Z) { GroundZones.Add(Z); }
@@ -88,6 +66,33 @@ public:
 	 */
 	void UpdateProjectilesBySlot(int32 InSlotIdx, float Dt,
 		TFunctionRef<bool(FProjectileState&, float)> Callback);
+
+
+	// ---- 毎ステップ処理 ----
+
+	/** 全武器 Tick() を呼ぶ（ダメージなし、クールダウン管理のみ） */
+	void TickWeapons(float Dt);
+
+	/** 後方互換のために残している。HitFrame 経由の当たり判定（Garlic/GroundZone）は実行しない。
+	 *  正確な当たり判定には PhysicsStep 内の BuildEnemyGrid/ComputeAllWeaponHits/ApplyWeaponHits を使うこと。 */
+	void TickAllWeapons(float Dt);
+	
+	/** 全武器 ComputeHits を呼ぶ（HitFrame に当たり判定結果を収集） */
+	void ComputeAllWeaponHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame);
+
+	/** HitFrame のイベントを適用する（HP 更新・ノックバック・ドロップ） */
+	void ApplyWeaponHits(FSurvivorsHitFrame& HitFrame);
+	
+private:
+
+	/** 全プロジェクタイル移動・寿命管理 */
+	void TickProjectiles(float Dt);
+
+	/** Santa Water ゾーン寿命管理（ダメージ判定は ComputeGroundZoneHits に移管） */
+	void TickGroundZones(float Dt);
+
+	/** プロジェクタイル vs 敵 当たり判定（後方互換: 直接呼ぶ場合） */
+	void ApplyProjectileHits();
 
 private:
 	// ---- プロジェクタイル・ゾーン（全武器共有プール） ----

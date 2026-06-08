@@ -62,15 +62,16 @@ void USurvivorsPlayerViewComponent::UpdateView()
 		PlayerMesh->SetRelativeRotation(FRotator(-90.f, Yaw, 0.f));
 	}
 
-	DrawAura();
+	DrawGemPickupRadius(PPos);
 }
 
-void USurvivorsPlayerViewComponent::DrawAura()
+void USurvivorsPlayerViewComponent::DrawGemPickupRadius(const FVector2D& PlayerPos)
 {
-	// 注意: Garlic オーラの描画は USurvivorsWeaponViewComponent::DrawWeaponAuras() に移管済み。
-	// このメソッドは後方互換のため残しているが、WeaponViewComponent が登録されている場合は
-	// GameView から呼ばれない（UpdateView の実装参照）。
-	// 単体で使用する場合の互換用として空実装のまま残す。
+	if (!Game || !GetWorld()) return;
+
+	const float Radius = Game->GemPickupRadius * Game->SimToUE;
+	//const FVector Center = Converter.ToWorld(PlayerPos, FWorldLayerZ::GemMagnet());
+	DrawDebugCircle(GetWorld(), PlayerMesh->GetRelativeLocation(), Radius, 32, FColor::Cyan, false, -1.f, 0, 2.f, FVector::XAxisVector, FVector::YAxisVector, false);
 }
 
 UMaterialInstanceDynamic* USurvivorsPlayerViewComponent::CreateColorMaterial(const FLinearColor& Color)

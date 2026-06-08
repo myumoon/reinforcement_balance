@@ -34,6 +34,7 @@ public:
 	ASurvivorsGame();
 
 	/** 離散行動 (0〜8) を受けて 1 物理ステップ進める */
+	UFUNCTION(BlueprintCallable, Category = "Survivors|Control")
 	void PhysicsStep(int32 ActionIdx);
 
 	/** 状態をリセット */
@@ -210,10 +211,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
 	TArray<FEnemyTypeParams> EnemyTypeTable;
 
-	// ---- ジェム設定 ----
+	// ---- 取得設定 ----
 
+	UPROPERTY(BlueprintReadOnly, Category = "Survivors|Item")
+	float GemPickupRadius = ASurvivorsGame::BaseGemPickupRadiusConst;
+	
 	UPROPERTY(EditAnywhere, Category = "Survivors|Item")
-	float GemPickupRadius = 30.f;
+	float FloorPickupRadius = 30.f;
 
 	// ---- 時間スケーリング ----
 
@@ -287,6 +291,9 @@ private:
 	friend class USurvivorsLaurelWeapon;
 #if WITH_AUTOMATION_TESTS
 	friend struct FSurvivorsGameTestAccess;
+#endif
+#if UE_EDITOR
+	friend class UDebugSurvivorsSlotComponent;
 #endif
 
 	// ---- 定数 ----

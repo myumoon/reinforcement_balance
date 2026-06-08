@@ -18,7 +18,7 @@ void USurvivorsPickupComponent::CheckFloorPickups()
 {
 	if (!Game) return;
 
-	const float PickupRadius = Game->GemPickupRadius;
+	const float PickupRadius = Game->FloorPickupRadius;
 
 	for (FFloorPickupState& Pickup : Game->FloorPickups)
 	{
@@ -62,7 +62,7 @@ void USurvivorsPickupComponent::CheckSpecialPickups()
 {
 	if (!Game) return;
 
-	const float PickupRadius = Game->GemPickupRadius;
+	const float PickupRadius = Game->FloorPickupRadius;
 
 	for (FSpecialPickupState& Pickup : Game->SpecialPickups)
 	{
