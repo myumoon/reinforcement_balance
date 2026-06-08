@@ -211,10 +211,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Enemy")
 	TArray<FEnemyTypeParams> EnemyTypeTable;
 
-	// ---- ジェム設定 ----
+	// ---- 取得設定 ----
 
+	UPROPERTY(BlueprintReadOnly, Category = "Survivors|Item")
+	float GemPickupRadius = ASurvivorsGame::BaseGemPickupRadiusConst;
+	
 	UPROPERTY(EditAnywhere, Category = "Survivors|Item")
-	float GemPickupRadius = 60.f;
+	float FloorPickupRadius = 30.f;
 
 	// ---- 時間スケーリング ----
 
