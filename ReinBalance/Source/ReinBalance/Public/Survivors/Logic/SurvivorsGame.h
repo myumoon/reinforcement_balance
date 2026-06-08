@@ -292,6 +292,9 @@ private:
 #if WITH_AUTOMATION_TESTS
 	friend struct FSurvivorsGameTestAccess;
 #endif
+#if UE_EDITOR
+	friend class UDebugSurvivorsSlotComponent;
+#endif
 
 	// ---- 定数 ----
 	static constexpr int32 MaxEnemyObs    = SurvivorsGameConstants::MaxEnemyObs;
