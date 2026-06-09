@@ -65,6 +65,7 @@ void USurvivorsWeaponViewComponent::UpdateView()
 	DrawWeaponAuras();
 	DrawGroundZones();
 	DrawLaurelShield();
+	DrawOrbitOrbs();
 }
 
 void USurvivorsWeaponViewComponent::AddProjectileInstances()
@@ -186,6 +187,24 @@ void USurvivorsWeaponViewComponent::DrawLaurelShield()
 	const FVector Center = Converter.ToWorld(Game->GetPlayerPos(), FWorldLayerZ::Shield());
 	DrawDebugCircle(GetWorld(), Center, Radius, 32, FColor(80, 255, 120), false, 0.f, 1, 4.f,
 		FVector(1, 0, 0), FVector(0, 1, 0));
+}
+
+void USurvivorsWeaponViewComponent::DrawOrbitOrbs()
+{
+	if (!Game || !GetWorld()) return;
+
+	const int32 OrbCount = Game->GetOrbitOrbCount();
+	for (int32 i = 0; i < OrbCount; ++i)
+	{
+		const EWeaponType WType   = Game->GetOrbitOrbWeaponType(i);
+		const FLinearColor LColor = GetWeaponColor(WType);
+		const FColor Color        = LColor.ToFColor(true);
+		const float SimRadius     = FMath::Max(Game->GetOrbitOrbVisualRadius(i), 8.f);
+		const float WorldRadius   = SimRadius * Game->SimToUE;
+		const FVector Center      = Converter.ToWorld(Game->GetOrbitOrbPos(i), FWorldLayerZ::Projectile());
+		DrawDebugCircle(GetWorld(), Center, WorldRadius, 32, Color, false, 0.f, 1, 2.f,
+			FVector(1, 0, 0), FVector(0, 1, 0));
+	}
 }
 
 UMaterialInstanceDynamic* USurvivorsWeaponViewComponent::CreateColorMaterial(const FLinearColor& Color)

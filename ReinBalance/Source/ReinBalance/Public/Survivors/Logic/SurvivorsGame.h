@@ -101,6 +101,12 @@ public:
 	float     GetGroundZoneRadius(int32 i)      const;
 	EWeaponType GetGroundZoneWeaponType(int32 i)const;
 
+	// 軌道オーブアクセサ（KingBible / Peachone / EbonyWings / Vandalier）
+	int32       GetOrbitOrbCount()                    const;
+	FVector2D   GetOrbitOrbPos(int32 i)               const;
+	EWeaponType GetOrbitOrbWeaponType(int32 i)        const;
+	float       GetOrbitOrbVisualRadius(int32 i)      const;
+
 	// フロアアイテムアクセサ
 	int32            GetFloorPickupCount()           const { return FloorPickups.Num(); }
 	FVector2D        GetFloorPickupPos(int32 i)      const { return FloorPickups.IsValidIndex(i) ? FloorPickups[i].Pos : FVector2D::ZeroVector; }

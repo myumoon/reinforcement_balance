@@ -452,6 +452,26 @@ EWeaponType ASurvivorsGame::GetGroundZoneWeaponType(int32 i) const
 	return WeaponComponent ? WeaponComponent->GetGroundZoneWeaponType(i) : EWeaponType::None;
 }
 
+int32 ASurvivorsGame::GetOrbitOrbCount() const
+{
+	return WeaponComponent ? WeaponComponent->GetOrbitOrbCount() : 0;
+}
+
+FVector2D ASurvivorsGame::GetOrbitOrbPos(int32 i) const
+{
+	return WeaponComponent ? WeaponComponent->GetOrbitOrbPos(i) : FVector2D::ZeroVector;
+}
+
+EWeaponType ASurvivorsGame::GetOrbitOrbWeaponType(int32 i) const
+{
+	return WeaponComponent ? WeaponComponent->GetOrbitOrbWeaponType(i) : EWeaponType::None;
+}
+
+float ASurvivorsGame::GetOrbitOrbVisualRadius(int32 i) const
+{
+	return WeaponComponent ? WeaponComponent->GetOrbitOrbVisualRadius(i) : 0.f;
+}
+
 // ---- 内部ユーティリティ -------------------------------------------------------
 
 float ASurvivorsGame::GetEnemySpeed(int32 TypeId) const

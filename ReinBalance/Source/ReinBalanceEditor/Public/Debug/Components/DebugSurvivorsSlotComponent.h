@@ -8,6 +8,8 @@
 #include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "DebugSurvivorsSlotComponent.generated.h"
 
+class ASurvivorsGame;
+
 
 USTRUCT()
 struct FDebugWeaponParam
