@@ -10,15 +10,15 @@
 UENUM()
 enum class EViewPalette : uint8
 {
-	Golden      = 0,   // Garlic, Cross, HeavenSword, UnholyVespers, HolyWand
-	WarmOrange  = 1,   // Whip, FireWand, Axe, Hellfire, BloodyTear, DeathSpiral
-	CoolBlue    = 2,   // MagicWand, SantaWater, LaBorra
-	SilverWhite = 3,   // Knife, KingBible, ThousandEdge
-	Purple      = 4,   // Runetracer, Pentagram, NoFuture, GorgeousMoon
-	Yellow      = 5,   // LightningRing, ThunderLoop
-	Pink        = 6,   // Peachone, Vandalier
-	DarkNavy    = 7,   // EbonyWings
-	Green       = 8,   // Laurel, SoulEater
+	Brown       = 0,   // Whip, BloodyTear
+	DarkBlue    = 1,   // MagicWand, HolyWand
+	Gray        = 2,   // Knife, ThousandEdge, Axe, DeathSpiral, Runetracer, NoFuture
+	Cyan        = 3,   // Cross, HeavenSword, SantaWater, LaBorra
+	Blue        = 4,   // KingBible, UnholyVespers
+	Orange      = 5,   // FireWand, Hellfire
+	Yellow      = 6,   // Garlic, SoulEater, Laurel, LightningRing, ThunderLoop
+	Purple      = 7,   // Pentagram, GorgeousMoon, EbonyWings
+	BluishWhite = 8,   // Peachone, Vandalier
 	PickupHeal  = 9,   // FloorChicken (暖黄), LittleHeart (同 ISM でスケール差)
 	PickupSpec  = 10,  // Rosary (白系), Orologion, Vacuum
 	Destructible= 11,  // 破壊可能オブジェクト（橙）
@@ -27,15 +27,15 @@ enum class EViewPalette : uint8
 
 /** パレット → 代表色（ISM マテリアル色として使用） */
 inline const FLinearColor ViewPaletteColors[static_cast<int32>(EViewPalette::Count)] = {
-	FLinearColor(1.00f, 0.86f, 0.31f),  // Golden
-	FLinearColor(1.00f, 0.39f, 0.08f),  // WarmOrange
-	FLinearColor(0.39f, 0.71f, 1.00f),  // CoolBlue
-	FLinearColor(0.84f, 0.84f, 1.00f),  // SilverWhite
-	FLinearColor(0.78f, 0.20f, 0.82f),  // Purple
-	FLinearColor(1.00f, 0.90f, 0.12f),  // Yellow
-	FLinearColor(1.00f, 0.59f, 0.59f),  // Pink
-	FLinearColor(0.20f, 0.12f, 0.47f),  // DarkNavy
-	FLinearColor(0.31f, 0.86f, 0.24f),  // Green
+	FLinearColor(0.55f, 0.27f, 0.07f),  // Brown
+	FLinearColor(0.09f, 0.28f, 0.71f),  // DarkBlue
+	FLinearColor(0.60f, 0.60f, 0.60f),  // Gray
+	FLinearColor(0.40f, 0.85f, 1.00f),  // Cyan
+	FLinearColor(0.16f, 0.40f, 0.92f),  // Blue
+	FLinearColor(1.00f, 0.55f, 0.10f),  // Orange
+	FLinearColor(1.00f, 0.90f, 0.10f),  // Yellow
+	FLinearColor(0.65f, 0.15f, 0.85f),  // Purple
+	FLinearColor(0.82f, 0.88f, 1.00f),  // BluishWhite
 	FLinearColor(1.00f, 0.71f, 0.20f),  // PickupHeal (暖黄)
 	FLinearColor(0.90f, 0.90f, 0.95f),  // PickupSpec (白系)
 	FLinearColor(1.00f, 0.59f, 0.20f),  // Destructible (橙)
@@ -46,44 +46,44 @@ inline EViewPalette GetWeaponPalette(EWeaponType Type)
 {
 	switch (Type)
 	{
-	case EWeaponType::Garlic:
-	case EWeaponType::Cross:
-	case EWeaponType::HeavenSword:
-	case EWeaponType::HolyWand:
-	case EWeaponType::UnholyVespers:   return EViewPalette::Golden;
-
 	case EWeaponType::Whip:
-	case EWeaponType::FireWand:
-	case EWeaponType::Axe:
-	case EWeaponType::Hellfire:
-	case EWeaponType::BloodyTear:
-	case EWeaponType::DeathSpiral:     return EViewPalette::WarmOrange;
+	case EWeaponType::BloodyTear:       return EViewPalette::Brown;
 
 	case EWeaponType::MagicWand:
-	case EWeaponType::SantaWater:
-	case EWeaponType::LaBorra:         return EViewPalette::CoolBlue;
+	case EWeaponType::HolyWand:         return EViewPalette::DarkBlue;
 
 	case EWeaponType::Knife:
-	case EWeaponType::KingBible:
-	case EWeaponType::ThousandEdge:    return EViewPalette::SilverWhite;
-
+	case EWeaponType::ThousandEdge:
+	case EWeaponType::Axe:
+	case EWeaponType::DeathSpiral:
 	case EWeaponType::Runetracer:
-	case EWeaponType::Pentagram:
-	case EWeaponType::NoFuture:
-	case EWeaponType::GorgeousMoon:    return EViewPalette::Purple;
+	case EWeaponType::NoFuture:         return EViewPalette::Gray;
 
+	case EWeaponType::Cross:
+	case EWeaponType::HeavenSword:
+	case EWeaponType::SantaWater:
+	case EWeaponType::LaBorra:          return EViewPalette::Cyan;
+
+	case EWeaponType::KingBible:
+	case EWeaponType::UnholyVespers:    return EViewPalette::Blue;
+
+	case EWeaponType::FireWand:
+	case EWeaponType::Hellfire:         return EViewPalette::Orange;
+
+	case EWeaponType::Garlic:
+	case EWeaponType::SoulEater:
+	case EWeaponType::Laurel:
 	case EWeaponType::LightningRing:
-	case EWeaponType::ThunderLoop:     return EViewPalette::Yellow;
+	case EWeaponType::ThunderLoop:      return EViewPalette::Yellow;
+
+	case EWeaponType::Pentagram:
+	case EWeaponType::GorgeousMoon:
+	case EWeaponType::EbonyWings:       return EViewPalette::Purple;
 
 	case EWeaponType::Peachone:
-	case EWeaponType::Vandalier:       return EViewPalette::Pink;
+	case EWeaponType::Vandalier:        return EViewPalette::BluishWhite;
 
-	case EWeaponType::EbonyWings:      return EViewPalette::DarkNavy;
-
-	case EWeaponType::Laurel:
-	case EWeaponType::SoulEater:       return EViewPalette::Green;
-
-	default:                           return EViewPalette::SilverWhite;
+	default:                            return EViewPalette::Gray;
 	}
 }
 
