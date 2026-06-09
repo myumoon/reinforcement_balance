@@ -10,8 +10,20 @@ class ISurvivorsDebugSlot
 {
 public:
 	virtual ~ISurvivorsDebugSlot() = default;
+
+	/** true のとき、レベルアップ時に新規武器の追加をスキップする */
 	virtual bool GetSkipGetWeaponOnLevelUp() const = 0;
+
+	/** true のとき、レベルアップ時に新規パッシブアイテムの追加をスキップする */
 	virtual bool GetSkipGetPassiveItemOnLevelUp() const = 0;
+
+	/**
+	 * true のとき、レベルアップ時に既存スロットのレベルアップ（武器強化・進化・
+	 * パッシブ強化）をすべてスキップする。
+	 * "garlic_only" モードでは WeaponNew / PassiveNew の選択肢が存在しないため、
+	 * このフラグが true の場合はレベルアップ処理全体をスキップすることになる。
+	 * 通常モードでは WeaponUpgrade / WeaponEvolve / PassiveUpgrade が対象となる。
+	 */
 	virtual bool GetSkipSlotLevelUp() const = 0;
 };
 

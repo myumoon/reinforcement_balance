@@ -117,6 +117,9 @@ void USurvivorsPlayerComponent::OnLevelUp(int32 NextLevel)
 #if WITH_EDITOR
 		if (ISurvivorsDebugSlot* Debug = FSurvivorsDebugRegistry::GetSlotComponent())
 		{
+			// garlic_only モードではスロット0の武器強化のみが行われる（WeaponNew/PassiveNew 選択肢なし）。
+			// SkipSlotLevelUp が true の場合、このモードでは選択できる候補が存在しないため
+			// レベルアップ処理全体をスキップする。
 			if (Debug->GetSkipSlotLevelUp()) return;
 		}
 #endif
@@ -159,6 +162,10 @@ void USurvivorsPlayerComponent::OnLevelUp(int32 NextLevel)
 					return !bSkipWeaponGet;
 				case FLevelUpChoice::EChoiceType::PassiveNew:
 					return !bSkipPassiveGet;
+				// WeaponUpgrade / WeaponEvolve / PassiveUpgrade はいずれも「既存スロットの強化」であり、
+				// SkipSlotLevelUp（スロットレベルアップをスキップ）の対象としてまとめて扱う。
+				// PassiveUpgrade がここに含まれるのは、パッシブアイテムの強化も
+				// 「スロット強化」カテゴリに属するためであり、新規取得（PassiveNew）とは区別される。
 				case FLevelUpChoice::EChoiceType::WeaponUpgrade:
 				case FLevelUpChoice::EChoiceType::WeaponEvolve:
 				case FLevelUpChoice::EChoiceType::PassiveUpgrade:
