@@ -146,37 +146,7 @@ void USurvivorsPlayerComponent::OnLevelUp(int32 NextLevel)
 
 #if WITH_EDITOR
 	if (ISurvivorsDebugSlot* Debug = FSurvivorsDebugRegistry::GetSlotComponent())
-	{
-		const bool bSkipWeaponGet  = Debug->GetSkipGetWeaponOnLevelUp();
-		const bool bSkipPassiveGet = Debug->GetSkipGetPassiveItemOnLevelUp();
-		const bool bSkipSlotLvUp   = Debug->GetSkipSlotLevelUp();
-
-		if (bSkipWeaponGet || bSkipPassiveGet || bSkipSlotLvUp)
-		{
-			Choices = Choices.FilterByPredicate([bSkipWeaponGet, bSkipPassiveGet, bSkipSlotLvUp]
-				(const FLevelUpChoice& C)
-			{
-				switch (C.ChoiceType)
-				{
-				case FLevelUpChoice::EChoiceType::WeaponNew:
-					return !bSkipWeaponGet;
-				case FLevelUpChoice::EChoiceType::PassiveNew:
-					return !bSkipPassiveGet;
-				// WeaponUpgrade / WeaponEvolve / PassiveUpgrade はいずれも「既存スロットの強化」であり、
-				// SkipSlotLevelUp（スロットレベルアップをスキップ）の対象としてまとめて扱う。
-				// PassiveUpgrade がここに含まれるのは、パッシブアイテムの強化も
-				// 「スロット強化」カテゴリに属するためであり、新規取得（PassiveNew）とは区別される。
-				case FLevelUpChoice::EChoiceType::WeaponUpgrade:
-				case FLevelUpChoice::EChoiceType::WeaponEvolve:
-				case FLevelUpChoice::EChoiceType::PassiveUpgrade:
-					return !bSkipSlotLvUp;
-				default:
-					return true;
-				}
-			});
-			if (Choices.Num() == 0) return;
-		}
-	}
+		if (Debug->FilterLevelUpChoices(Choices)) return;
 #endif
 
 	int32 ChoiceIdx;

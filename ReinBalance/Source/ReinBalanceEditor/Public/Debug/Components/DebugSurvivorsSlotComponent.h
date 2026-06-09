@@ -81,5 +81,6 @@ public:
 	virtual bool GetSkipGetWeaponOnLevelUp() const override { return SkipGetWeaponOnLevelUp; }
 	virtual bool GetSkipGetPassiveItemOnLevelUp() const override { return SkipGetPassiveItemOnLevelUp; }
 	virtual bool GetSkipSlotLevelUp() const override { return SkipSlotLevelUp; }
+	virtual bool FilterLevelUpChoices(TArray<FLevelUpChoice>& Choices) const override;
 #endif
 };

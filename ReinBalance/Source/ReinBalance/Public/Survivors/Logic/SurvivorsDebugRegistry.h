@@ -2,6 +2,7 @@
 
 #pragma once
 #include "CoreMinimal.h"
+#include "Survivors/Logic/SurvivorsTypes.h"
 
 #if WITH_EDITOR
 
@@ -25,6 +26,12 @@ public:
 	 * 通常モードでは WeaponUpgrade / WeaponEvolve / PassiveUpgrade が対象となる。
 	 */
 	virtual bool GetSkipSlotLevelUp() const = 0;
+
+	/**
+	 * フラグに基づき Choices をインプレースでフィルタリングする。
+	 * 全候補が除外されて Choices が空になった場合 true を返す。
+	 */
+	virtual bool FilterLevelUpChoices(TArray<FLevelUpChoice>& Choices) const = 0;
 };
 
 /**
