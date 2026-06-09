@@ -3,6 +3,7 @@
 
 #include "Debug/Components/DebugSurvivorsSlotComponent.h"
 #include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/Logic/SurvivorsDebugRegistry.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 
 // Sets default values for this component's properties
@@ -16,16 +17,22 @@ UDebugSurvivorsSlotComponent::UDebugSurvivorsSlotComponent()
 void UDebugSurvivorsSlotComponent::BeginPlay()
 {
 	Super::BeginPlay();
-	
+
 	if (Game == nullptr)
 	{
 		return;
 	}
-	
+
 	SetupWeapons();
 	SetupPassiveItems();
-	// todo: SkipGetWeaponOnLevelUp を適用
-	// todo: SkipGetPassiveItemOnLevelUp を適用
+	FSurvivorsDebugRegistry::RegisterSlotComponent(this);
+}
+
+// Called when the game ends
+void UDebugSurvivorsSlotComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	FSurvivorsDebugRegistry::UnregisterSlotComponent(this);
+	Super::EndPlay(EndPlayReason);
 }
 
 

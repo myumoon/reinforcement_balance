@@ -4,6 +4,9 @@
 #include "Survivors/Logic/SurvivorsWikiSpec.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponBase.h"
+#if WITH_EDITOR
+#include "Survivors/Logic/SurvivorsDebugRegistry.h"
+#endif
 
 namespace
 {
@@ -111,6 +114,12 @@ void USurvivorsPlayerComponent::OnLevelUp(int32 NextLevel)
 	// bEnablePassives / bEnableEvolutions の組み合わせではなく WeaponPoolMode で判断する。
 	if (Game->WeaponPoolMode.Equals(TEXT("garlic_only"), ESearchCase::IgnoreCase))
 	{
+#if WITH_EDITOR
+		if (ISurvivorsDebugSlot* Debug = FSurvivorsDebugRegistry::GetSlotComponent())
+		{
+			if (Debug->GetSkipSlotLevelUp()) return;
+		}
+#endif
 		// 旧動作: スロット0の武器を単純レベルアップ
 		if (Game->WeaponSlots[0].Type != EWeaponType::None)
 		{
@@ -131,6 +140,37 @@ void USurvivorsPlayerComponent::OnLevelUp(int32 NextLevel)
 	// PR2: BuildLevelUpChoices → ランダム選択 → ApplyChoice → RecalcPassiveEffects
 	TArray<FLevelUpChoice> Choices = BuildLevelUpChoices();
 	if (Choices.Num() == 0) return;
+
+#if WITH_EDITOR
+	if (ISurvivorsDebugSlot* Debug = FSurvivorsDebugRegistry::GetSlotComponent())
+	{
+		const bool bSkipWeaponGet  = Debug->GetSkipGetWeaponOnLevelUp();
+		const bool bSkipPassiveGet = Debug->GetSkipGetPassiveItemOnLevelUp();
+		const bool bSkipSlotLvUp   = Debug->GetSkipSlotLevelUp();
+
+		if (bSkipWeaponGet || bSkipPassiveGet || bSkipSlotLvUp)
+		{
+			Choices = Choices.FilterByPredicate([bSkipWeaponGet, bSkipPassiveGet, bSkipSlotLvUp]
+				(const FLevelUpChoice& C)
+			{
+				switch (C.ChoiceType)
+				{
+				case FLevelUpChoice::EChoiceType::WeaponNew:
+					return !bSkipWeaponGet;
+				case FLevelUpChoice::EChoiceType::PassiveNew:
+					return !bSkipPassiveGet;
+				case FLevelUpChoice::EChoiceType::WeaponUpgrade:
+				case FLevelUpChoice::EChoiceType::WeaponEvolve:
+				case FLevelUpChoice::EChoiceType::PassiveUpgrade:
+					return !bSkipSlotLvUp;
+				default:
+					return true;
+				}
+			});
+			if (Choices.Num() == 0) return;
+		}
+	}
+#endif
 
 	int32 ChoiceIdx;
 

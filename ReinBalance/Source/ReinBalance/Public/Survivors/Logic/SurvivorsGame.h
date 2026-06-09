@@ -292,7 +292,7 @@ private:
 #if WITH_AUTOMATION_TESTS
 	friend struct FSurvivorsGameTestAccess;
 #endif
-#if UE_EDITOR
+#if WITH_EDITOR
 	friend class UDebugSurvivorsSlotComponent;
 #endif
 
