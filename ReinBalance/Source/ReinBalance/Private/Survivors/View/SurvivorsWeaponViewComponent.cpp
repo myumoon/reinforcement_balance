@@ -10,6 +10,20 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
+// パレット色の FColor 定数（DrawDebug 用）
+namespace WeaponViewColors
+{
+	static constexpr FColor Brown      ( 140,  69,  18);
+	static constexpr FColor DarkBlue   (  23,  71, 181);
+	static constexpr FColor Gray       ( 153, 153, 153);
+	static constexpr FColor Cyan       ( 102, 217, 255);
+	static constexpr FColor Blue       (  41, 102, 235);
+	static constexpr FColor Orange     ( 255, 140,  26);
+	static constexpr FColor Yellow     ( 255, 230,  26);
+	static constexpr FColor Purple     ( 166,  38, 217);
+	static constexpr FColor BluishWhite( 209, 224, 255);
+}
+
 USurvivorsWeaponViewComponent::USurvivorsWeaponViewComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -50,10 +64,10 @@ void USurvivorsWeaponViewComponent::UpdateView()
 	for (auto& ISM : PaletteISMs)
 		if (ISM) ISM->ClearInstances();
 
-	// 2. プロジェクタイルを ISM に追加
+	// 2. 球プロジェクタイルを ISM に追加（Whip/BloodyTear は除外）
 	AddProjectileInstances();
 
-	// 3. フロアアイテム・特殊アイテム・破壊物（PR2 で本実装、現在は空）
+	// 3. フロアアイテム・特殊アイテム・破壊物
 	AddPickupInstances();
 	AddDestructibleInstances();
 
@@ -61,11 +75,14 @@ void USurvivorsWeaponViewComponent::UpdateView()
 	for (auto& ISM : PaletteISMs)
 		if (ISM) ISM->MarkRenderStateDirty();
 
-	// 5. 円形オブジェクト（DrawDebugCircle）
+	// 5. DrawDebug 系（ISM 非使用）
+	DrawWhipInstances();
 	DrawWeaponAuras();
 	DrawGroundZones();
 	DrawLaurelShield();
 	DrawOrbitOrbs();
+	DrawLightningRings();
+	DrawPentagramFields();
 }
 
 void USurvivorsWeaponViewComponent::AddProjectileInstances()
@@ -74,13 +91,17 @@ void USurvivorsWeaponViewComponent::AddProjectileInstances()
 
 	for (int32 i = 0; i < Game->GetProjectileCount(); ++i)
 	{
-		const EWeaponType  WType   = Game->GetProjectileWeaponType(i);
-		const int32        PIdx    = static_cast<int32>(GetWeaponPalette(WType));
-		const FSimRadius   SimR    = Game->GetProjectileRadius(i);
-		const float        WorldR  = FMath::Max(Converter.Radius(SimR), 6.f);
-		const FVector      Pos3D   = Converter.ToWorld(Game->GetProjectilePos(i), FWorldLayerZ::Projectile());
+		const EWeaponType WType = Game->GetProjectileWeaponType(i);
+
+		// Whip / BloodyTear は DrawWhipInstances() で矩形描画するため除外
+		if (WType == EWeaponType::Whip || WType == EWeaponType::BloodyTear) continue;
+
+		const int32      PIdx   = static_cast<int32>(GetWeaponPalette(WType));
+		const FSimRadius SimR   = Game->GetProjectileRadius(i);
+		const float      WorldR = FMath::Max(Converter.Radius(SimR), 6.f);
+		const FVector    Pos3D  = Converter.ToWorld(Game->GetProjectilePos(i), FWorldLayerZ::Projectile());
 		// UE の Sphere メッシュの基本スケール 1.0 = 半径 50cm → WorldR/50 でスケーリング
-		const FTransform   T(FRotator::ZeroRotator, Pos3D, FVector(WorldR / 50.f));
+		const FTransform T(FRotator::ZeroRotator, Pos3D, FVector(WorldR / 50.f));
 		if (PaletteISMs.IsValidIndex(PIdx) && PaletteISMs[PIdx])
 			PaletteISMs[PIdx]->AddInstance(T);
 	}
@@ -131,6 +152,25 @@ void USurvivorsWeaponViewComponent::AddDestructibleInstances()
 	}
 }
 
+void USurvivorsWeaponViewComponent::DrawWhipInstances()
+{
+	if (!Game || !GetWorld()) return;
+
+	for (int32 i = 0; i < Game->GetProjectileCount(); ++i)
+	{
+		const EWeaponType WType = Game->GetProjectileWeaponType(i);
+		if (WType != EWeaponType::Whip && WType != EWeaponType::BloodyTear) continue;
+
+		const FSimRadius SimR   = Game->GetProjectileRadius(i);
+		const float      WorldR = FMath::Max(Converter.Radius(SimR), 6.f);
+		const FVector    Pos3D  = Converter.ToWorld(Game->GetProjectilePos(i), FWorldLayerZ::Projectile());
+
+		// 横線スイープを矩形で表現: X 幅=高さの 3 倍、Y 高さ、Z は薄く
+		const FVector HalfExtents(WorldR * 3.f, WorldR, WorldR * 0.4f);
+		DrawDebugBox(GetWorld(), Pos3D, HalfExtents, WeaponViewColors::Brown, false, 0.f, 1, 2.f);
+	}
+}
+
 void USurvivorsWeaponViewComponent::DrawWeaponAuras()
 {
 	if (!Game || !GetWorld()) return;
@@ -144,13 +184,13 @@ void USurvivorsWeaponViewComponent::DrawWeaponAuras()
 		if (Slot.Type == EWeaponType::Garlic)
 		{
 			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
-			Color  = FColor(255, 220, 80);
+			Color  = WeaponViewColors::Yellow;
 			Radius = SurvivorsGameConstants::GarlicTable[Lv - 1].AreaRadius.Value * Game->SimToUE;
 		}
 		else if (Slot.Type == EWeaponType::SoulEater)
 		{
 			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
-			Color  = FColor(140, 220, 60);
+			Color  = FColor(220, 255, 50);  // Garlic と区別するため黄緑寄り
 			Radius = SurvivorsGameConstants::SoulEaterTable[Lv - 1].AreaRadius.Value * Game->SimToUE;
 		}
 
@@ -169,9 +209,10 @@ void USurvivorsWeaponViewComponent::DrawGroundZones()
 
 	for (int32 i = 0; i < Game->GetGroundZoneCount(); ++i)
 	{
-		const EWeaponType WType  = Game->GetGroundZoneWeaponType(i);
+		const EWeaponType WType = Game->GetGroundZoneWeaponType(i);
+		// SantaWater / LaBorra ともに Cyan（LaBorra は少し濃い）
 		const FColor Color = (WType == EWeaponType::LaBorra)
-			? FColor(0, 50, 200) : FColor(30, 80, 220);
+			? FColor(60, 190, 240) : WeaponViewColors::Cyan;
 		const float  Radius = Game->GetGroundZoneRadius(i) * Game->SimToUE;
 		const FVector Center = Converter.ToWorld(Game->GetGroundZonePos(i), FWorldLayerZ::GroundZone());
 		DrawDebugCircle(GetWorld(), Center, Radius, 32, Color, false, 0.f, 1, 2.f,
@@ -204,6 +245,53 @@ void USurvivorsWeaponViewComponent::DrawOrbitOrbs()
 		const FVector Center      = Converter.ToWorld(Game->GetOrbitOrbPos(i), FWorldLayerZ::Projectile());
 		DrawDebugCircle(GetWorld(), Center, WorldRadius, 32, Color, false, 0.f, 1, 2.f,
 			FVector(1, 0, 0), FVector(0, 1, 0));
+	}
+}
+
+void USurvivorsWeaponViewComponent::DrawLightningRings()
+{
+	if (!Game || !GetWorld()) return;
+
+	for (int32 s = 0; s < SurvivorsGameConstants::MaxWeaponSlots; ++s)
+	{
+		const FWeaponSlot& Slot = Game->GetWeaponSlot(s);
+		float SimRadius = 0.f;
+
+		if (Slot.Type == EWeaponType::LightningRing)
+		{
+			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
+			SimRadius = SurvivorsGameConstants::LightningRingTable[Lv - 1].Radius;
+		}
+		else if (Slot.Type == EWeaponType::ThunderLoop)
+		{
+			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
+			SimRadius = SurvivorsGameConstants::ThunderLoopTable[Lv - 1].Radius;
+		}
+
+		if (SimRadius > 0.f)
+		{
+			const float  WorldRadius = SimRadius * Game->SimToUE;
+			const FVector Center = Converter.ToWorld(Game->GetPlayerPos(), FWorldLayerZ::Aura());
+			DrawDebugCircle(GetWorld(), Center, WorldRadius, 48, WeaponViewColors::Yellow,
+				false, 0.f, 1, 2.f, FVector(1, 0, 0), FVector(0, 1, 0));
+		}
+	}
+}
+
+void USurvivorsWeaponViewComponent::DrawPentagramFields()
+{
+	if (!Game || !GetWorld()) return;
+
+	for (int32 s = 0; s < SurvivorsGameConstants::MaxWeaponSlots; ++s)
+	{
+		const FWeaponSlot& Slot = Game->GetWeaponSlot(s);
+		if (Slot.Type != EWeaponType::Pentagram && Slot.Type != EWeaponType::GorgeousMoon) continue;
+
+		// Radius=9999 はフィールド全域: FieldHalfSize でキャップして表示
+		const float WorldRadius = Game->FieldHalfSize * Game->SimToUE * 0.95f;
+		const FVector Center = Converter.ToWorld(Game->GetPlayerPos(), FWorldLayerZ::Aura());
+		DrawDebugCircle(GetWorld(), Center, WorldRadius, 64, WeaponViewColors::Purple,
+			false, 0.f, 1, 2.f, FVector(1, 0, 0), FVector(0, 1, 0));
 	}
 }
 
