@@ -132,6 +132,9 @@ public:
 	/** Idx は 0..MaxPassiveSlots-1。範囲チェックは呼び出し側で行う */
 	const FPassiveSlot& GetPassiveSlot(int32 Idx) const { return PassiveSlots[Idx]; }
 
+	/** パッシブ効果キャッシュ（View からの参照用） */
+	const FPassiveEffects& GetCachedPassiveEffects() const { return CachedPassiveEffects; }
+
 	/** TypeId → 生存数のマップ。デバッグ表示用（毎フレームの呼び出しを想定） */
 	TMap<int32, int32> GetEnemyCountByType() const;
 
