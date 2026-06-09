@@ -3,6 +3,7 @@
 
 #include "Debug/Components/DebugSurvivorsSlotComponent.h"
 #include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/Logic/SurvivorsDebugRegistry.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 
 // Sets default values for this component's properties
@@ -16,16 +17,22 @@ UDebugSurvivorsSlotComponent::UDebugSurvivorsSlotComponent()
 void UDebugSurvivorsSlotComponent::BeginPlay()
 {
 	Super::BeginPlay();
-	
+
 	if (Game == nullptr)
 	{
 		return;
 	}
-	
+
 	SetupWeapons();
 	SetupPassiveItems();
-	// todo: SkipGetWeaponOnLevelUp を適用
-	// todo: SkipGetPassiveItemOnLevelUp を適用
+	FSurvivorsDebugRegistry::RegisterSlotComponent(this);
+}
+
+// Called when the game ends
+void UDebugSurvivorsSlotComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	FSurvivorsDebugRegistry::UnregisterSlotComponent(this);
+	Super::EndPlay(EndPlayReason);
 }
 
 
@@ -35,6 +42,39 @@ void UDebugSurvivorsSlotComponent::TickComponent(float DeltaTime, ELevelTick Tic
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 }
 	
+#if WITH_EDITOR
+bool UDebugSurvivorsSlotComponent::FilterLevelUpChoices(TArray<FLevelUpChoice>& Choices) const
+{
+	if (!SkipGetWeaponOnLevelUp && !SkipGetPassiveItemOnLevelUp && !SkipSlotLevelUp)
+	{
+		return false;
+	}
+
+	const bool bSkipWeaponGet  = SkipGetWeaponOnLevelUp;
+	const bool bSkipPassiveGet = SkipGetPassiveItemOnLevelUp;
+	const bool bSkipSlotLvUp   = SkipSlotLevelUp;
+
+	Choices = Choices.FilterByPredicate([bSkipWeaponGet, bSkipPassiveGet, bSkipSlotLvUp]
+		(const FLevelUpChoice& C)
+	{
+		switch (C.ChoiceType)
+		{
+		case FLevelUpChoice::EChoiceType::WeaponNew:      return !bSkipWeaponGet;
+		case FLevelUpChoice::EChoiceType::PassiveNew:     return !bSkipPassiveGet;
+		// WeaponUpgrade / WeaponEvolve / PassiveUpgrade はいずれも「既存スロットの強化」であり、
+		// SkipSlotLevelUp の対象としてまとめて扱う。PassiveUpgrade がここに含まれるのは、
+		// パッシブアイテムの強化も「スロット強化」カテゴリに属するためであり、
+		// 新規取得（PassiveNew）とは区別される。
+		case FLevelUpChoice::EChoiceType::WeaponUpgrade:
+		case FLevelUpChoice::EChoiceType::WeaponEvolve:
+		case FLevelUpChoice::EChoiceType::PassiveUpgrade: return !bSkipSlotLvUp;
+		default:                                           return true;
+		}
+	});
+	return Choices.Num() == 0;
+}
+#endif
+
 // 武器を設定
 void UDebugSurvivorsSlotComponent::SetupWeapons()
 {

@@ -4,6 +4,9 @@
 #include "Survivors/Logic/SurvivorsWikiSpec.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponBase.h"
+#if WITH_EDITOR
+#include "Survivors/Logic/SurvivorsDebugRegistry.h"
+#endif
 
 namespace
 {
@@ -111,6 +114,15 @@ void USurvivorsPlayerComponent::OnLevelUp(int32 NextLevel)
 	// bEnablePassives / bEnableEvolutions の組み合わせではなく WeaponPoolMode で判断する。
 	if (Game->WeaponPoolMode.Equals(TEXT("garlic_only"), ESearchCase::IgnoreCase))
 	{
+#if WITH_EDITOR
+		if (ISurvivorsDebugSlot* Debug = FSurvivorsDebugRegistry::GetSlotComponent())
+		{
+			// garlic_only モードではスロット0の武器強化のみが行われる（WeaponNew/PassiveNew 選択肢なし）。
+			// SkipSlotLevelUp が true の場合、このモードでは選択できる候補が存在しないため
+			// レベルアップ処理全体をスキップする。
+			if (Debug->GetSkipSlotLevelUp()) return;
+		}
+#endif
 		// 旧動作: スロット0の武器を単純レベルアップ
 		if (Game->WeaponSlots[0].Type != EWeaponType::None)
 		{
@@ -131,6 +143,11 @@ void USurvivorsPlayerComponent::OnLevelUp(int32 NextLevel)
 	// PR2: BuildLevelUpChoices → ランダム選択 → ApplyChoice → RecalcPassiveEffects
 	TArray<FLevelUpChoice> Choices = BuildLevelUpChoices();
 	if (Choices.Num() == 0) return;
+
+#if WITH_EDITOR
+	if (ISurvivorsDebugSlot* Debug = FSurvivorsDebugRegistry::GetSlotComponent())
+		if (Debug->FilterLevelUpChoices(Choices)) return;
+#endif
 
 	int32 ChoiceIdx;
 
