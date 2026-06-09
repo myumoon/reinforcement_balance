@@ -31,11 +31,9 @@ struct FDebugPassiveParam
 };
 
 
+// ReinBalanceEditor は Editor 専用モジュールのため WITH_EDITOR は常に true
 UCLASS( ClassGroup=(Custom), meta=(BlueprintSpawnableComponent) )
-class REINBALANCEEDITOR_API UDebugSurvivorsSlotComponent : public USceneComponent
-#if WITH_EDITOR
-	, public ISurvivorsDebugSlot
-#endif
+class REINBALANCEEDITOR_API UDebugSurvivorsSlotComponent : public USceneComponent, public ISurvivorsDebugSlot
 {
 	GENERATED_BODY()
 
@@ -79,10 +77,8 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Debug")
 	bool SkipSlotLevelUp;
 
-#if WITH_EDITOR
 	virtual bool GetSkipGetWeaponOnLevelUp() const override { return SkipGetWeaponOnLevelUp; }
 	virtual bool GetSkipGetPassiveItemOnLevelUp() const override { return SkipGetPassiveItemOnLevelUp; }
 	virtual bool GetSkipSlotLevelUp() const override { return SkipSlotLevelUp; }
 	virtual bool FilterLevelUpChoices(TArray<FLevelUpChoice>& Choices) const override;
-#endif
 };
