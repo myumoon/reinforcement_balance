@@ -23,6 +23,16 @@ void USurvivorsVandalierWeapon::CacheParams()
 	CachedBombRadius  = P.BombRadius + 10.f;
 }
 
+FVector2D USurvivorsVandalierWeapon::GetOrbitOrbPos(int32 OrbIdx) const
+{
+	if (!Game || OrbIdx < 0 || OrbIdx >= 2) return FVector2D::ZeroVector;
+	const FPassiveEffects& PE = GetPassiveEffects();
+	const float EffOrbitRadius = CachedOrbitRadius * PE.AreaMult;
+	return Game->PlayerPos + FVector2D(
+		FMath::Cos(OrbitAngle[OrbIdx]) * EffOrbitRadius,
+		FMath::Sin(OrbitAngle[OrbIdx]) * EffOrbitRadius);
+}
+
 void USurvivorsVandalierWeapon::Tick(float Dt)
 {
 	if (!Game) return;

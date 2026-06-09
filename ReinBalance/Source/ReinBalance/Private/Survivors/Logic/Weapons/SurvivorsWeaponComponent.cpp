@@ -423,6 +423,56 @@ USurvivorsWeaponBase* USurvivorsWeaponComponent::GetWeaponInstance(int32 SlotIdx
 	return WeaponInstances.IsValidIndex(SlotIdx) ? WeaponInstances[SlotIdx].Get() : nullptr;
 }
 
+int32 USurvivorsWeaponComponent::GetOrbitOrbCount() const
+{
+	int32 Total = 0;
+	for (const auto& W : WeaponInstances)
+		if (W) Total += W->GetOrbitOrbCount();
+	return Total;
+}
+
+FVector2D USurvivorsWeaponComponent::GetOrbitOrbPos(int32 GlobalIdx) const
+{
+	int32 Offset = 0;
+	for (const auto& W : WeaponInstances)
+	{
+		if (!W) continue;
+		const int32 Count = W->GetOrbitOrbCount();
+		if (GlobalIdx < Offset + Count)
+			return W->GetOrbitOrbPos(GlobalIdx - Offset);
+		Offset += Count;
+	}
+	return FVector2D::ZeroVector;
+}
+
+EWeaponType USurvivorsWeaponComponent::GetOrbitOrbWeaponType(int32 GlobalIdx) const
+{
+	int32 Offset = 0;
+	for (const auto& W : WeaponInstances)
+	{
+		if (!W) continue;
+		const int32 Count = W->GetOrbitOrbCount();
+		if (GlobalIdx < Offset + Count)
+			return W->GetWeaponType();
+		Offset += Count;
+	}
+	return EWeaponType::None;
+}
+
+float USurvivorsWeaponComponent::GetOrbitOrbVisualRadius(int32 GlobalIdx) const
+{
+	int32 Offset = 0;
+	for (const auto& W : WeaponInstances)
+	{
+		if (!W) continue;
+		const int32 Count = W->GetOrbitOrbCount();
+		if (GlobalIdx < Offset + Count)
+			return W->GetOrbitOrbVisualRadius();
+		Offset += Count;
+	}
+	return 0.f;
+}
+
 USurvivorsWeaponBase* USurvivorsWeaponComponent::CreateWeaponInstance(EWeaponType Type)
 {
 	switch (Type)

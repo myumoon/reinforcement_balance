@@ -28,6 +28,11 @@ public:
 	/** View 向けアクセサ: オーブ当たり半径 */
 	static constexpr float GetOrbRadius() { return OrbVisualRadius; }
 
+	// ---- 軌道オーブ View API ----
+	virtual int32     GetOrbitOrbCount()           const override { return OrbPositions.Num(); }
+	virtual FVector2D GetOrbitOrbPos(int32 OrbIdx) const override { return OrbPositions.IsValidIndex(OrbIdx) ? OrbPositions[OrbIdx] : FVector2D::ZeroVector; }
+	virtual float     GetOrbitOrbVisualRadius()    const override { return OrbVisualRadius; }
+
 private:
 	float CachedDamage      = 10.f;
 	float CachedCooldown    = 3.f;

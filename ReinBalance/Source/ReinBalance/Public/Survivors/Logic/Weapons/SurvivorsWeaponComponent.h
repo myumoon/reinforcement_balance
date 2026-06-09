@@ -48,6 +48,12 @@ public:
 	float     GetGroundZoneRadius(int32 i)      const;
 	EWeaponType GetGroundZoneWeaponType(int32 i)const;
 
+	/** 全スロットの軌道オーブ総数（KingBible / Peachone / EbonyWings / Vandalier） */
+	int32       GetOrbitOrbCount()               const;
+	FVector2D   GetOrbitOrbPos(int32 GlobalIdx)  const;
+	EWeaponType GetOrbitOrbWeaponType(int32 GlobalIdx) const;
+	float       GetOrbitOrbVisualRadius(int32 GlobalIdx) const;
+
 	/** 武器インスタンスへのアクセス（obs の cooldown 取得用） */
 	USurvivorsWeaponBase* GetWeaponInstance(int32 SlotIdx) const;
 

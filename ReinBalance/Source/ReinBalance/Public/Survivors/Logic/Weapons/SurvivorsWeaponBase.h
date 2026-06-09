@@ -34,6 +34,14 @@ public:
 	/** 武器レベル変更時（パラメータ再キャッシュ用） */
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) {}
 
+	// ---- 軌道オーブ View API（KingBible / Peachone / EbonyWings / Vandalier） ----
+	/** この武器が持つ軌道オーブ数（0 = オーブなし） */
+	virtual int32     GetOrbitOrbCount()                const { return 0; }
+	/** i 番目のオーブのシム座標位置 */
+	virtual FVector2D GetOrbitOrbPos(int32 OrbIdx)      const { return FVector2D::ZeroVector; }
+	/** オーブの表示半径（シム単位） */
+	virtual float     GetOrbitOrbVisualRadius()         const { return 0.f; }
+
 	// ---- アクセサ ----
 	EWeaponType  GetWeaponType() const { return WeaponType; }
 	void         SetWeaponType(EWeaponType InType);

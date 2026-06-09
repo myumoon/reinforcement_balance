@@ -65,4 +65,7 @@ private:
 
 	/** Laurel シールド円を DrawDebugCircle で描画 */
 	void DrawLaurelShield();
+
+	/** KingBible / Peachone / EbonyWings / Vandalier の軌道オーブを DrawDebugCircle で描画 */
+	void DrawOrbitOrbs();
 };

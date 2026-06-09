@@ -16,6 +16,11 @@ public:
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
 	virtual void ComputeHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame) override;
 
+	// ---- 軌道オーブ View API ----
+	virtual int32     GetOrbitOrbCount()           const override { return 2; }
+	virtual FVector2D GetOrbitOrbPos(int32 OrbIdx) const override;
+	virtual float     GetOrbitOrbVisualRadius()    const override { return CachedBombRadius; }
+
 private:
 	float CachedDamage      = 55.f;
 	float CachedCooldown    = 1.6f;
