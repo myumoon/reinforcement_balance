@@ -185,13 +185,13 @@ void USurvivorsWeaponViewComponent::DrawWeaponAuras()
 		{
 			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
 			Color  = WeaponViewColors::Yellow;
-			Radius = SurvivorsGameConstants::GarlicTable[Lv - 1].AreaRadius.Value * Game->SimToUE;
+			Radius = SurvivorsGameConstants::GarlicTable[Lv - 1].AreaRadius.Value * Game->GetCachedPassiveEffects().AreaMult * Game->SimToUE;
 		}
 		else if (Slot.Type == EWeaponType::SoulEater)
 		{
 			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
 			Color  = FColor(220, 255, 50);  // Garlic と区別するため黄緑寄り
-			Radius = SurvivorsGameConstants::SoulEaterTable[Lv - 1].AreaRadius.Value * Game->SimToUE;
+			Radius = SurvivorsGameConstants::SoulEaterTable[Lv - 1].AreaRadius.Value * Game->GetCachedPassiveEffects().AreaMult * Game->SimToUE;
 		}
 
 		if (Radius > 0.f)
@@ -260,12 +260,12 @@ void USurvivorsWeaponViewComponent::DrawLightningRings()
 		if (Slot.Type == EWeaponType::LightningRing)
 		{
 			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
-			SimRadius = SurvivorsGameConstants::LightningRingTable[Lv - 1].Radius;
+			SimRadius = SurvivorsGameConstants::LightningRingTable[Lv - 1].Radius * Game->GetCachedPassiveEffects().AreaMult;
 		}
 		else if (Slot.Type == EWeaponType::ThunderLoop)
 		{
 			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
-			SimRadius = SurvivorsGameConstants::ThunderLoopTable[Lv - 1].Radius;
+			SimRadius = SurvivorsGameConstants::ThunderLoopTable[Lv - 1].Radius * Game->GetCachedPassiveEffects().AreaMult;
 		}
 
 		if (SimRadius > 0.f)

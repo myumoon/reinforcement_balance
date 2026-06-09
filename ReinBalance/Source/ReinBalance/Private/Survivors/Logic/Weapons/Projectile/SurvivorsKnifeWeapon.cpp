@@ -79,7 +79,7 @@ void USurvivorsKnifeWeapon::Tick(float Dt)
 		FProjectileState P;
 		P.Pos               = Game->PlayerPos;
 		P.Vel               = Dir * EffSpeed;
-		P.Radius            = FSimRadius(6.f);
+		P.Radius            = FSimRadius(6.f * PE.AreaMult);
 		P.Damage            = FDamage(EffDamage);
 		P.WeaponType        = WeaponType;
 		P.WeaponSlotIdx     = SlotIdx;

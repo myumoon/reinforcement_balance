@@ -82,7 +82,7 @@ void USurvivorsMagicWandWeapon::Tick(float Dt)
 		FProjectileState P;
 		P.Pos               = Game->PlayerPos;
 		P.Vel               = Dir * EffSpeed;
-		P.Radius            = FSimRadius(8.f);
+		P.Radius            = FSimRadius(8.f * PE.AreaMult);
 		P.Damage            = FDamage(EffDamage);
 		P.WeaponType        = WeaponType;
 		P.WeaponSlotIdx     = SlotIdx;
