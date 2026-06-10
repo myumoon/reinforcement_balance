@@ -73,7 +73,8 @@ BLOCKER_SCORE_MIN_LOW = 4  # promotion_low_score (score_min or score_p10) < prom
 BLOCKER_SCORE_CV_HIGH = 5  # score_cv > promotion_max_score_cv
 
 PHASES: list[_Phase] = [
-    _Phase("入門",              4,   6, 0.8, 1.0,  1, 0.50, 0.50, False,  600,   30.0),
+    _Phase("入門",              4,   6, 0.8, 1.0,  1, 0.50, 0.50, False,  600,   30.0,
+           promotion_min_score_ratio=0.0, promotion_max_score_cv=float('inf')),
     _Phase("Gem回収開始",       6,  10, 0.9, 1.4,  2, 0.75, 0.75, False, 1200,  100.0),
     _Phase("Gem追従強化",       7,  14, 0.9, 1.7,  3, 0.85, 0.85, False, 1800,  250.0),
     _Phase("通常序盤",          8,  20, 1.0, 2.0,  4, 1.00, 1.00, False, 2400,  800.0),
