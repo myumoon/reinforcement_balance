@@ -928,16 +928,16 @@ def _get_weapon_phases():
     return WEAPON_PHASES, get_params_for_phase
 
 WEAPON_PHASE_AUTO_SEQUENCE: list[str] = [
-    "W0", "W0_to_W1", "W1", "W1_to_W2", "W2", "W3", "W4", "W5", "W6",
+    "W1", "W1_to_W2", "W2", "W3", "W4", "W5", "W6",
 ]
 
 
 class WeaponPhaseAutoStateModule(BaseStateModule):
     """武器フェーズ自動昇格の状態管理モジュール。
 
-    固定フェーズ（W0/W1 等）では CurriculumStateModule の current_phase を監視し、
+    固定フェーズ（W1/W2 等）では CurriculumStateModule の current_phase を監視し、
     stagnation_steps ステップ以上変化しなかった場合に次フェーズへ進める。
-    遷移フェーズ（W0_to_W1 等）では カリキュラム状態に関わらず transition_steps
+    遷移フェーズ（W1_to_W2 等）では カリキュラム状態に関わらず transition_steps
     経過後に自動で次の固定フェーズへ移行する（補間を必ず完走させるため）。
 
     設計上の分離:
@@ -1016,9 +1016,9 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
     def on_step(self, num_timesteps: int) -> "str | None":
         """毎ステップ呼ぶ。武器フェーズが昇格した場合は新フェーズキーを返す。
 
-        - 遷移フェーズ中（W0_to_W1 等）: transition_steps 経過で次フェーズへ自動進行。
+        - 遷移フェーズ中（W1_to_W2 等）: transition_steps 経過で次フェーズへ自動進行。
           カリキュラム停滞判定は行わない（補間を必ず完走させるため）。
-        - 固定フェーズ中（W0/W1 等）: カリキュラム current_phase が stagnation_steps
+        - 固定フェーズ中（W1/W2 等）: カリキュラム current_phase が stagnation_steps
           ステップ変化しない場合に次フェーズへ進める。
 
         Returns:

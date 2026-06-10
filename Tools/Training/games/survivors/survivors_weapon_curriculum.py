@@ -83,7 +83,7 @@ WEAPON_PHASES: dict[str, dict] = {
         ],
         "enable_passives": False,
         "enable_evolutions": False,
-        "replay_old_phase_fraction": 0.2,
+        "replay_old_phase_fraction": 0.0,  # v08: W0廃止により古いフェーズが存在しないため0.0に変更
         "log_combination_rewards": True,
     },
     "W1_to_W2": {
