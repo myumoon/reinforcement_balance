@@ -2,7 +2,7 @@ import numpy as np
 
 def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) -> float:
     """
-    Survivors reward shaping v7 iteration 0.
+    Survivors reward shaping v8 iteration 0.
     Guides agent toward safe gem collection with weapon-type-aware enemy density handling.
     HP penalty is applied externally; this function provides small directional shaping only.
     """
@@ -11,7 +11,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     # ============================================================
     # 0. Parse observation segments (Source of Truth offsets)
     # ============================================================
-    player_pos = obs[0:2]          # x,y normalised to [-1,1]
+    # player_pos = obs[0:2]        # x,y normalised to [-1,1]  (未使用: 将来の位置ベース報酬用に予約)
     player_vel = obs[2:4]          # vx,vy / MoveSpeed
     wall_rays = obs[4:12]          # 8 directions, 0=wall close, 1=far
     player_hp_norm = obs[12]       # HP / 100.0
@@ -22,19 +22,19 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     weapon_slots_raw = obs[23:41].reshape(6, 3)
 
     # Game state
-    enemy_count_norm = obs[53]     # / 32
-    elapsed_norm = obs[54]
+    # enemy_count_norm = obs[53]   # / 32  (未使用: 将来の敵数ベース報酬用に予約)
+    # elapsed_norm = obs[54]       # (未使用: 将来の時間ベース報酬用に予約)
     xp_progress = obs[55]
-    player_level_norm = obs[56]
+    # player_level_norm = obs[56]  # (未使用: 将来のレベルベース報酬用に予約)
 
     # Gem relative positions
     red_gem_rel = obs[58:78].reshape(10, 2)
     green_gem_rel = obs[78:102].reshape(12, 2)
     blue_gem_rel = obs[102:126].reshape(12, 2)
-    gem_pickup_radius_norm = obs[126]
+    # gem_pickup_radius_norm = obs[126]  # (未使用: 将来のPickup半径ベース報酬用に予約)
 
     # Enemy relative positions (top-32 nearest)
-    enemy_rel = obs[127:191].reshape(32, 2)
+    # enemy_rel = obs[127:191].reshape(32, 2)  # (未使用: 将来の位置ベース敵回避用に予約)
 
     # 16-dir density/distance features
     enemy_nearest_16 = obs[351:367]      # 0=danger close, 1=safe far
@@ -48,7 +48,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     gem_density_near_16 = gem_density_all[1]  # near gem density per dir
     gem_density_mid_16 = gem_density_all[2]   # mid gem density per dir
 
-    prev_player_hp_norm = prev_obs[12]
+    # prev_player_hp_norm = prev_obs[12]  # (未使用: 将来のHP変化ベース報酬用に予約)
 
     # ============================================================
     # 1. Weapon category classification
