@@ -19,7 +19,7 @@ public:
 	// ---- 軌道オーブ View API ----
 	virtual int32     GetOrbitOrbCount()           const override { return 2; }
 	virtual FVector2D GetOrbitOrbPos(int32 OrbIdx) const override;
-	virtual float     GetOrbitOrbVisualRadius()    const override { return CachedBombRadius; }
+	virtual float     GetOrbitOrbVisualRadius()    const override { return CachedBombRadius * GetPassiveEffects().AreaMult; }
 
 private:
 	float CachedDamage      = 55.f;
