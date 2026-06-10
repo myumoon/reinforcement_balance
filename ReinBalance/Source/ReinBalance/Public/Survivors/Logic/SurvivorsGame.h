@@ -141,6 +141,9 @@ public:
 	/** 現在レベルから次レベルへ必要な XP。デバッグ表示用 */
 	float GetXPRequiredForNextLevel() const;
 
+	/** 現在レベル内で取得済みの XP（累積 XP から現在レベル開始時の XP を引いた値）。デバッグ表示用 */
+	float GetCurrentLevelXP() const;
+
 	/** パッシブアイテムの最大レベル。デバッグ表示用 */
 	int32 GetPassiveItemMaxLevel(EPassiveItemType Type) const;
 

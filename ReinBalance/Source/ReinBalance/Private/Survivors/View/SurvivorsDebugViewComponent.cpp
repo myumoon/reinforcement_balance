@@ -81,16 +81,16 @@ void USurvivorsDebugViewComponent::DrawSection_Status(int32& Key, TArray<FDebugL
 	Key = DebugKeyBase + 10;
 	AddLine(pendingLines, Key++, TEXT("--- Status ---"), FLinearColor::White);
 
-	const float XP    = Game->GetPlayerXP();
 	const int32 Level = Game->GetPlayerLevel();
 	const float HP    = Game->GetPlayerHP();
 	const float MaxHP = Game->GetMaxPlayerHP();
 	const float ShieldTimer = Game->GetPlayerShieldTimer();
 
-	const float XPNeeded = Game->GetXPRequiredForNextLevel();
+	const float CurrentLevelXP = Game->GetCurrentLevelXP();
+	const float XPNeeded       = Game->GetXPRequiredForNextLevel();
 
 	AddLine(pendingLines, Key++,
-		FString::Printf(TEXT("%-10s %.0f/%.0f"), TEXT("XP"), XP, XPNeeded),
+		FString::Printf(TEXT("%-10s %.0f/%.0f"), TEXT("XP"), CurrentLevelXP, XPNeeded),
 		FLinearColor::White);
 
 	AddLine(pendingLines, Key++,

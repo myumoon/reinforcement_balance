@@ -606,6 +606,11 @@ float ASurvivorsGame::GetXPRequiredForNextLevel() const
 	return XPRequiredForLevel(PlayerLevel + 1);
 }
 
+float ASurvivorsGame::GetCurrentLevelXP() const
+{
+	return PlayerXP - CumulativeXPForLevel(PlayerLevel);
+}
+
 int32 ASurvivorsGame::GetPassiveItemMaxLevel(EPassiveItemType Type) const
 {
 	const int32 TypeIndex = static_cast<int32>(Type);
