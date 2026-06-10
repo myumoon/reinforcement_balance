@@ -81,7 +81,7 @@ WEAPON_PHASES: dict[str, dict] = {
         "allowed_weapon_types": [
             WeaponType.GARLIC, WeaponType.KING_BIBLE, WeaponType.SANTA_WATER,
         ],
-        "enable_passives": False,
+        "enable_passives": True,
         "enable_evolutions": False,
         "replay_old_phase_fraction": 0.0,  # v08: W0廃止により古いフェーズが存在しないため0.0に変更
         "log_combination_rewards": True,
@@ -93,7 +93,7 @@ WEAPON_PHASES: dict[str, dict] = {
             WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS,
             WeaponType.KING_BIBLE, WeaponType.SANTA_WATER,
         ],
-        "enable_passives": False,
+        "enable_passives": True,
         "enable_evolutions": False,
         "replay_old_phase_fraction": 0.25,
         "transition_steps": 2_000_000,
@@ -108,7 +108,7 @@ WEAPON_PHASES: dict[str, dict] = {
             WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS,
             WeaponType.KING_BIBLE, WeaponType.SANTA_WATER,
         ],
-        "enable_passives": False,
+        "enable_passives": True,
         "enable_evolutions": False,
         "replay_old_phase_fraction": 0.2,
         "log_combination_rewards": True,
@@ -116,8 +116,8 @@ WEAPON_PHASES: dict[str, dict] = {
     "W3": {
         "weapon_pool_mode": "all_base",
         "allowed_weapon_types": ALL_BASE_WEAPONS,
-        "enable_passives": False,
-        "enable_evolutions": False,
+        "enable_passives": True,
+        "enable_evolutions": True,
         "replay_old_phase_fraction": 0.25,
         "log_combination_rewards": True,
     },
@@ -125,19 +125,11 @@ WEAPON_PHASES: dict[str, dict] = {
         "weapon_pool_mode": "all_base",
         "allowed_weapon_types": ALL_BASE_WEAPONS,
         "enable_passives": True,
-        "enable_evolutions": False,
-        "replay_old_phase_fraction": 0.25,
-        "log_combination_rewards": True,
-    },
-    "W5": {
-        "weapon_pool_mode": "all_base",
-        "allowed_weapon_types": ALL_BASE_WEAPONS,
-        "enable_passives": True,
         "enable_evolutions": True,
         "replay_old_phase_fraction": 0.3,
         "log_combination_rewards": True,
     },
-    "W6": {
+    "W5": {
         "weapon_pool_mode": "all_with_evolutions",
         "allowed_weapon_types": ALL_BASE_WEAPONS + ALL_EVOLVED_WEAPONS,
         "enable_passives": True,
