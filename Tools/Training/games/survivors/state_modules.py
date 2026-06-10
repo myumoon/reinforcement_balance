@@ -928,7 +928,7 @@ def _get_weapon_phases():
     return WEAPON_PHASES, get_params_for_phase
 
 WEAPON_PHASE_AUTO_SEQUENCE: list[str] = [
-    "W0", "W0_to_W1", "W1", "W1_to_W2", "W2", "W3", "W4", "W5", "W6",
+    "W1", "W1_to_W2", "W2", "W3", "W4", "W5", "W6",
 ]
 
 
