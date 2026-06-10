@@ -194,7 +194,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
                        closest_gem_dist(prev_green),
                        closest_gem_dist(prev_blue))
 
-    if curr_min_gem < 50.0 and prev_min_gem < 50.0:
+    if curr_min_gem < float('inf') and prev_min_gem < float('inf'):
         # Reward for getting closer to nearest gem
         gem_approach_delta = prev_min_gem - curr_min_gem
         # Scale: normalize roughly by move speed (80 units/step * dt)
@@ -212,8 +212,10 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     # 6. Gem pickup celebration (small bonus for successful collection)
     # ============================================================
     if base_reward >= 1.0:
-        # Gem was picked up this step; small bonus to reinforce approach behavior
-        # Scale by how many gems (base_reward can be > 1 if multiple pickups)
+        # Gem was picked up this step; small bonus to reinforce approach behavior.
+        # Note: KillReward=2.0 also satisfies base_reward >= 1.0, so kill-only steps
+        # fire this with gem_count_est=2.0 (over-signal). Max impact is +0.04/step,
+        # which is acceptable as kills often co-occur with gem drops.
         gem_count_est = min(base_reward, 5.0)  # cap at 5
         shaped += 0.02 * gem_count_est
 
