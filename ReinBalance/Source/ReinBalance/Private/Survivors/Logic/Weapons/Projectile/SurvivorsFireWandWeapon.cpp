@@ -22,6 +22,7 @@ void USurvivorsFireWandWeapon::CacheParams()
 		CachedCooldown        = P.Cooldown;
 		CachedSpeed           = P.Speed;
 		CachedExplosionRadius = P.ExplosionRadius;
+		CachedAmount          = P.Amount;
 	}
 	else
 	{
@@ -30,6 +31,7 @@ void USurvivorsFireWandWeapon::CacheParams()
 		CachedCooldown        = P.Cooldown;
 		CachedSpeed           = P.Speed;
 		CachedExplosionRadius = P.ExplosionRadius;
+		CachedAmount          = P.Amount;
 	}
 }
 
@@ -76,31 +78,42 @@ void USurvivorsFireWandWeapon::Tick(float Dt)
 
 	const float EffSpeed    = CachedSpeed * PE.SpeedMult;
 	const float LifeTime    = 1.2f * PE.DurationMult;
+	const int32 EffAmount   = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 
-	// 最近傍敵の方向へ発射
+	// ランダムな敵方向へ、近接同時に扇状発射する。
 	FVector2D Dir = FVector2D(0.f, 1.f);
-	float MinDistSq = MAX_FLT;
-	for (const FEnemyState& E : Game->Enemies)
+	TArray<int32> Candidates;
+	for (int32 EIdx = 0; EIdx < Game->Enemies.Num(); ++EIdx)
 	{
+		const FEnemyState& E = Game->Enemies[EIdx];
 		if (E.bPendingRemove) continue;
-		const float Dsq = (E.Pos - Game->PlayerPos).SizeSquared();
-		if (Dsq < MinDistSq)
-		{
-			MinDistSq = Dsq;
-			Dir = (E.Pos - Game->PlayerPos).GetSafeNormal();
-		}
+		Candidates.Add(EIdx);
+	}
+	if (Candidates.Num() > 0)
+	{
+		const int32 ChoiceIdx = Game->RandStream.RandRange(0, Candidates.Num() - 1);
+		Dir = (Game->Enemies[Candidates[ChoiceIdx]].Pos - Game->PlayerPos).GetSafeNormal();
 	}
 
-	FProjectileState P;
-	P.Pos           = Game->PlayerPos;
-	P.Vel           = Dir * EffSpeed;
-	P.Radius        = FSimRadius(8.f);
-	P.Damage        = FDamage(0.f);  // 直撃ダメージなし（爆発で処理）
-	P.WeaponType    = WeaponType;
-	P.WeaponSlotIdx = SlotIdx;
-	P.LifeTime      = FProjectileLifeTime(LifeTime);
-	P.bPiercing     = true;   // 爆発前に ComputeProjectileHits で削除されないよう貫通設定
-	WeaponComp->SpawnProjectile(P);
+	const float BaseAngle = FMath::Atan2(Dir.Y, Dir.X);
+	const float AngleStep = FMath::DegreesToRadians(12.f);
+	for (int32 i = 0; i < EffAmount; ++i)
+	{
+		const float Offset = (static_cast<float>(i) - 0.5f * static_cast<float>(EffAmount - 1)) * AngleStep;
+		const float Angle = BaseAngle + Offset;
+		const FVector2D ShotDir(FMath::Cos(Angle), FMath::Sin(Angle));
+
+		FProjectileState P;
+		P.Pos           = Game->PlayerPos;
+		P.Vel           = ShotDir * EffSpeed;
+		P.Radius        = FSimRadius(8.f);
+		P.Damage        = FDamage(0.f);  // 直撃ダメージなし（爆発で処理）
+		P.WeaponType    = WeaponType;
+		P.WeaponSlotIdx = SlotIdx;
+		P.LifeTime      = FProjectileLifeTime(LifeTime);
+		P.bPiercing     = true;   // 爆発前に ComputeProjectileHits で削除されないよう貫通設定
+		WeaponComp->SpawnProjectile(P);
+	}
 }
 
 void USurvivorsFireWandWeapon::ComputeHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame)

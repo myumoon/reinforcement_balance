@@ -39,46 +39,113 @@ void USurvivorsWhipWeapon::Tick(float Dt)
 {
 	if (!Game || !WeaponComp) return;
 
+	if (FMath::Abs(Game->PlayerVel.X) > KINDA_SMALL_NUMBER)
+	{
+		LastFaceSign = (Game->PlayerVel.X >= 0.f) ? 1.f : -1.f;
+	}
+
 	CooldownTimer.Value = FMath::Max(0.f, CooldownTimer.Value - Dt);
 
-	if (!CooldownTimer.IsReady()) return;
+	if (PendingWhips > 0)
+	{
+		WhipBurstTimer -= Dt;
+		while (PendingWhips > 0 && WhipBurstTimer <= 0.f)
+		{
+			const float DirSign = (BurstIndex % 2 == 0) ? BurstFaceSign : -BurstFaceSign;
+			SpawnWhipSwing(DirSign);
+			++BurstIndex;
+			--PendingWhips;
+			if (PendingWhips > 0)
+			{
+				WhipBurstTimer += 0.30f;
+			}
+		}
+	}
 
+	if (!CooldownTimer.IsReady() || PendingWhips > 0) return;
+
+	StartBurst();
+}
+
+void USurvivorsWhipWeapon::StartBurst()
+{
 	const FPassiveEffects& PE = GetPassiveEffects();
 	const float EffCooldown = CachedCooldown * PE.CooldownMult;
 	CooldownTimer = FCooldownSeconds(EffCooldown);
 
-	const float EffDamage = CachedDamage * PE.DamageMult;
-	const float EffWidth  = CachedWidth  * PE.AreaMult;
-	const float EffHeight = CachedHeight * PE.AreaMult;
-	const float LifeTime  = 0.20f * PE.DurationMult;
-	const int32 EffAmount = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
-
-	float FaceSign = 1.f;
-	if (!Game->PlayerVel.IsNearlyZero())
+	BurstDamage = CachedDamage * PE.DamageMult;
+	BurstHalfWidth = CachedWidth * PE.AreaMult;
+	BurstHalfHeight = CachedHeight * PE.AreaMult;
+	BurstLifeTime = 0.20f * PE.DurationMult;
+	BurstFaceSign = LastFaceSign;
+	BurstIndex = 0;
+	PendingWhips = FMath::Max(2, CachedAmount + static_cast<int32>(PE.ExtraAmount));
+	WhipBurstTimer = 0.f;
+	if (PendingWhips > 0)
 	{
-		FaceSign = (Game->PlayerVel.X >= 0.f) ? 1.f : -1.f;
+		SpawnWhipSwing(BurstFaceSign);
+		++BurstIndex;
+		--PendingWhips;
+		WhipBurstTimer = (PendingWhips > 0) ? 0.30f : 0.f;
 	}
+}
 
-	for (int32 i = 0; i < EffAmount; ++i)
-	{
-		const float DirSign = (i % 2 == 0) ? FaceSign : -FaceSign;
-
-		FProjectileState P;
-		P.Pos               = Game->PlayerPos;
-		P.Vel               = FVector2D(DirSign * EffWidth * 2.f / LifeTime, 0.f);
-		P.Radius            = FSimRadius(EffHeight);
-		P.Damage            = FDamage(EffDamage);
-		P.WeaponType        = WeaponType;
-		P.WeaponSlotIdx     = SlotIdx;
-		P.LifeTime          = FProjectileLifeTime(LifeTime);
-		P.bPiercing         = true;   // AoE: 無限貫通
-		P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
-		WeaponComp->SpawnProjectile(P);
-	}
+void USurvivorsWhipWeapon::SpawnWhipSwing(float DirSign)
+{
+	FProjectileState P;
+	P.Pos               = Game->PlayerPos + FVector2D(DirSign * BurstHalfWidth, 0.f);
+	P.Vel               = FVector2D::ZeroVector;
+	P.Radius            = FSimRadius(BurstHalfHeight);
+	P.Damage            = FDamage(BurstDamage);
+	P.WeaponType        = WeaponType;
+	P.WeaponSlotIdx     = SlotIdx;
+	P.LifeTime          = FProjectileLifeTime(BurstLifeTime);
+	P.bPiercing         = true;   // AoE: 無限貫通
+	P.AngleRad          = FOrbitAngleRad(BurstHalfWidth);
+	P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
+	WeaponComp->SpawnProjectile(P);
 }
 
 void USurvivorsWhipWeapon::ComputeHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame)
 {
-	// プロジェクタイルの当たり判定は WeaponComponent::ComputeProjectileHits で一括処理されるため
-	// Whip では何もしない（基底クラス実装と同様）
+	if (!Game || !WeaponComp || !CollComp) return;
+
+	TArray<FProjectileState>& Projectiles = WeaponComp->GetProjectiles();
+	for (int32 PIdx = 0; PIdx < Projectiles.Num(); ++PIdx)
+	{
+		FProjectileState& P = Projectiles[PIdx];
+		if (P.WeaponSlotIdx != SlotIdx) continue;
+		if (P.WeaponType != EWeaponType::Whip && P.WeaponType != EWeaponType::BloodyTear) continue;
+
+		const float HalfWidth = FMath::Max(P.AngleRad.Value, 1.f);
+		const float HalfHeight = FMath::Max(P.Radius.Value, 1.f);
+		const float QueryRadius = FMath::Sqrt(FMath::Square(HalfWidth) + FMath::Square(HalfHeight));
+
+		TArray<const FSurvivorsTargetProxy*> Contacts;
+		CollComp->QueryEnemyContacts(P.Pos, QueryRadius, Contacts);
+
+		for (const FSurvivorsTargetProxy* Proxy : Contacts)
+		{
+			const FVector2D Rel = Proxy->Pos - P.Pos;
+			if (FMath::Abs(Rel.X) > HalfWidth + Proxy->Radius) continue;
+			if (FMath::Abs(Rel.Y) > HalfHeight + Proxy->Radius) continue;
+
+			const int32 EIdx = Proxy->Ref.IndexAtBuildTime;
+			if (!Game->Enemies.IsValidIndex(EIdx) || Game->Enemies[EIdx].UniqueId != Proxy->Ref.UniqueId) continue;
+			const FEnemyState& E = Game->Enemies[EIdx];
+			if (E.bPendingRemove) continue;
+			if (P.HitEnemyIds.Contains(E.UniqueId)) continue;
+
+			FSurvivorsHitEvent Ev;
+			Ev.Type = ESurvivorsHitType::ProjectileDamage;
+			Ev.Target = Proxy->Ref;
+			Ev.Damage = P.Damage.Value;
+			Ev.WeaponSlot = PIdx;
+			Ev.KnockbackDir = FVector2D((P.Pos.X >= Game->PlayerPos.X) ? 1.f : -1.f, 0.f);
+			Ev.KnockbackStrength = P.KnockbackStrength;
+			HitFrame.Events.Add(Ev);
+
+			P.HitEnemyIds.Add(E.UniqueId);
+		}
+	}
 }

@@ -43,17 +43,14 @@ void USurvivorsCrossWeapon::Tick(float Dt)
 	const FPassiveEffects& PE = GetPassiveEffects();
 
 	// --- 既存プロジェクタイルの折り返し処理 ---
-	// AngleRad.Value に発射時の初期 LifeTime を格納
+	// AngleRad.Value に折り返しまでの時間を格納
 	// bHasReversed で折り返し済みを管理（bPiercing は共通の ApplyWeaponHits 削除判定に使用するため流用しない）
 	WeaponComp->UpdateProjectilesBySlot(SlotIdx, Dt, [](FProjectileState& P, float InDt) -> bool
 	{
-		// AngleRad.Value = 初期 LifeTime（秒）
-		const float InitLifeTime = P.AngleRad.Value;
-		const float HalfTime     = InitLifeTime * 0.5f;
-		const float Elapsed      = InitLifeTime - P.LifeTime.Seconds;
+		const float ReverseTime = FMath::Max(P.AngleRad.Value, SurvivorsGameConstants::PhysicsDt);
 
-		// LifeTime の半分を過ぎたら折り返す（1度だけ）
-		if (!P.bHasReversed && Elapsed >= HalfTime)
+		// 発射後の固定時間で折り返し、その後は寿命まで画面端方向へ抜ける
+		if (!P.bHasReversed && P.Age >= ReverseTime)
 		{
 			P.Vel        = -P.Vel;
 			P.bHasReversed = true;  // 折り返し済みフラグ
@@ -69,7 +66,8 @@ void USurvivorsCrossWeapon::Tick(float Dt)
 
 	const float EffDamage  = CachedDamage * PE.DamageMult;
 	const float EffSpeed   = CachedSpeed  * PE.SpeedMult;
-	const float EffLifeTime = 2.0f * PE.DurationMult;
+	const float EffLifeTime = 6.0f * PE.DurationMult;
+	const float ReverseTime = 0.75f * PE.DurationMult;
 	const float EffRadius  = CachedRadius * PE.AreaMult;
 	const int32 EffAmount  = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 
@@ -104,9 +102,10 @@ void USurvivorsCrossWeapon::Tick(float Dt)
 		P.WeaponType        = WeaponType;
 		P.WeaponSlotIdx     = SlotIdx;
 		P.LifeTime          = FProjectileLifeTime(EffLifeTime);
+		P.Age               = 0.f;
 		P.bPiercing         = true;   // AoE: 無限貫通
 		P.bHasReversed      = false;
-		P.AngleRad          = FOrbitAngleRad(EffLifeTime);  // 流用: 初期 LifeTime を格納
+		P.AngleRad          = FOrbitAngleRad(ReverseTime);  // 流用: 折り返しまでの時間
 		P.KnockbackStrength = CachedKnockbackStrength;
 		WeaponComp->SpawnProjectile(P);
 	}

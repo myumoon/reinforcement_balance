@@ -17,7 +17,7 @@ public:
 private:
 	float CachedDamage   = 10.f;
 	float CachedCooldown = 1.20f;
-	float CachedSpeed    = 300.f;
+	float CachedSpeed    = 600.f;
 	int32 CachedAmount   = 1;
 	int32 CachedPierce   = 1;
 

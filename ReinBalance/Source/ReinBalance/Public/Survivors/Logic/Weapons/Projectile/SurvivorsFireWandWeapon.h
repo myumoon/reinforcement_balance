@@ -26,8 +26,9 @@ public:
 private:
 	float CachedDamage          = 40.f;
 	float CachedCooldown        = 1.40f;
-	float CachedSpeed           = 180.f;
+	float CachedSpeed           = 360.f;
 	float CachedExplosionRadius = 30.f;
+	int32 CachedAmount          = 4;
 
 	// 発射中プロジェクタイルの追跡（インデックスではなく発射時の位置を追跡）
 	// 簡略化: 爆発は発射時に最初に当たった敵の位置で単回処理

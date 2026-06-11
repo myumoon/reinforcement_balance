@@ -132,7 +132,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         )
 
     def _prompt_section_obs_index(self) -> str:
-        # 708次元 obs スキーマ（PR2 全武器対応版）に合わせた説明を生成する。
+        # 740次元 obs スキーマ（PR2 全武器対応版）に合わせた説明を生成する。
         # セグメント開始オフセットは _offsets dict（実 C++ schema から取得）を優先し、
         # 取得できない場合は PR2 schema の既定値にフォールバックする。
         o = self._offsets
@@ -162,15 +162,15 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         end_dm_i    = o.get("enemy_density_mid_16dir",  383)
         gem_da_i    = o.get("gem_density_all_16dir",   399)   # 48 dims
         gem_drg_i   = o.get("red_green_gem_density_16dir", 447)  # 48 dims
-        proj_i      = o.get("projectiles",             495)   # 160 dims: (dx,dy,r,vx,vy)×32
-        fp_i        = o.get("floor_pickups",           655)   # 24 dims
-        sp_i        = o.get("special_pickups",         679)   # 9 dims
-        dest_i      = o.get("destructibles",           688)   # 20 dims
+        proj_i      = o.get("projectiles",             495)   # 192 dims: (dx,dy,r,vx,vy,warning)×32
+        fp_i        = o.get("floor_pickups",           687)   # 24 dims
+        sp_i        = o.get("special_pickups",         711)   # 9 dims
+        dest_i      = o.get("destructibles",           720)   # 20 dims
 
         max_enemy   = (ev_i - er_i) // 2   # = 32
 
         return (
-            f"**obs 合計: 708 次元（PR2 全武器・パッシブ対応スキーマ）**\n"
+            f"**obs 合計: 740 次元（PR2 全武器・パッシブ対応スキーマ）**\n"
             f"\n"
             f"**プレイヤー状態**\n"
             f"  obs[0:2]    = player_pos (x,y) / FieldHalfSize → [-1, 1]\n"
@@ -222,8 +222,8 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"  obs[{gem_drg_i}:{gem_drg_i+48}]  = red_green_gem_density_16dir (Red+Green ×3)\n"
             f"\n"
             f"**プロジェクタイル（武器弾・GroundZone 混在、Level高い順→距離近い順）**\n"
-            f"  obs[{proj_i}:{proj_i+160}] = projectiles ×32: (dx,dy,radius_norm,vx_norm,vy_norm) 各5次元\n"
-            f"    未使用スロット = (0,0,0,0,0)\n"
+            f"  obs[{proj_i}:{proj_i+192}] = projectiles ×32: (dx,dy,radius_norm,vx_norm,vy_norm,warning) 各6次元\n"
+            f"    warning=1 は Santa Water / La Borra の着弾予兆、未使用スロット = (0,0,0,0,0,0)\n"
             f"\n"
             f"**フロアアイテム・特殊アイテム・破壊物**\n"
             f"  obs[{fp_i}:{fp_i+24}]   = floor_pickups ×8: (dx,dy,type_norm) 各3次元\n"

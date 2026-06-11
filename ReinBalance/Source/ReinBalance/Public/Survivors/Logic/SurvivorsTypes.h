@@ -174,10 +174,12 @@ struct FProjectileState
 	EWeaponType          WeaponType    = EWeaponType::None;
 	int32                WeaponSlotIdx = 0;
 	FProjectileLifeTime  LifeTime;                                         // 残寿命（秒）
+	float                Age            = 0.f;                             // 発射後経過時間（秒）
 	FBounceCount         BounceCount;                                      // Runetracer バウンス残回数
 	bool                 bPiercing     = false;
 	bool                 bHasReversed  = false;       // Cross ブーメランの折り返し済みフラグ
 	bool                 bPendingExplosion = false;  // FireWand 爆発待機フラグ（LifeTime 切れで爆発予約、次 Tick で処理）
+	bool                 bIsWarning    = false;       // obs 用: Santa Water などの予兆
 	FOrbitAngleRad       AngleRad;                                         // King Bible 等の軌道角度
 	FSurvivorsElapsedTime LastHitTime  = FSurvivorsElapsedTime(-1000.f);   // 範囲武器クールダウン
 	TArray<int32>        HitEnemyIds;  // ヒット済み UniqueId（同一弾で同一敵への多重ヒット防止）
@@ -194,9 +196,11 @@ struct FGroundZoneState
 	float              Radius       = 30.f;
 	float              Damage       = 10.f;
 	float              LifeTime     = 5.f;
+	float              WarningTime  = 0.f;
 	float              HitCooldown  = 0.5f;
 	int32              WeaponSlotIdx = 0;
 	EWeaponType        WeaponType   = EWeaponType::None;
+	bool               bIsWarning   = false;
 	TMap<int32, float> EnemyLastHitTime; // Key: FEnemyState::UniqueId, Value: 最終ヒット時刻
 };
 

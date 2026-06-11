@@ -109,7 +109,7 @@ void USurvivorsKingBibleWeapon::Tick(float Dt)
 	const int32 EffAmount   = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 
 	// 角度を更新してオーブ位置キャッシュを更新
-	MasterAngle += CachedRotSpeed * Dt;
+	MasterAngle += CachedRotSpeed * PE.SpeedMult * Dt;
 
 	OrbPositions.SetNum(EffAmount);
 	for (int32 i = 0; i < EffAmount; ++i)

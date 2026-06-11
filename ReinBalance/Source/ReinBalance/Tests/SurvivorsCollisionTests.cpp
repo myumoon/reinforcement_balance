@@ -287,12 +287,13 @@ bool FSurvivorsWeaponSpecProjectileAmounts::RunTest(const FString& Parameters)
 	};
 
 	const FCase Cases[] = {
-		{ EWeaponType::Whip,         1, 1, TEXT("Whip Lv1 Amount=1") },
-		{ EWeaponType::Whip,         2, 2, TEXT("Whip Lv2 Amount=2") },
+		{ EWeaponType::Whip,         1, 1, TEXT("Whip Lv1 first swing") },
+		{ EWeaponType::Whip,         2, 1, TEXT("Whip Lv2 first swing") },
 		{ EWeaponType::Axe,          8, 3, TEXT("Axe Lv8 Amount=3") },
 		{ EWeaponType::DeathSpiral,  1, 9, TEXT("Death Spiral Amount=9") },
 		{ EWeaponType::Cross,        7, 3, TEXT("Cross Lv7 Amount=3") },
 		{ EWeaponType::HeavenSword,  1, 1, TEXT("Heaven Sword Amount=1") },
+		{ EWeaponType::FireWand,     1, 4, TEXT("Fire Wand Lv1 fan=4") },
 		{ EWeaponType::Runetracer,   7, 3, TEXT("Runetracer Lv7 Amount=3") },
 		{ EWeaponType::NoFuture,     1, 1, TEXT("NO FUTURE Amount=1") },
 	};
@@ -312,6 +313,66 @@ bool FSurvivorsWeaponSpecProjectileAmounts::RunTest(const FString& Parameters)
 		S.Destroy();
 	}
 
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsWhipAlternatingBurst,
+	"ReinBalance.Survivors.Wiki.Whip_AlternatingBurst",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsWhipAlternatingBurst::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	EquipTestWeapon(S.Game, EWeaponType::Whip, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("First Whip swing exists", WC->GetProjectileCount(), 1);
+	TestTrue("First Whip swing faces +X", WC->GetProjectilePos(0).X > FSurvivorsGameTestAccess::PlayerPos(S.Game).X);
+
+	const int32 TicksToSecondSwing = FMath::CeilToInt(0.31f / SurvivorsGameConstants::PhysicsDt);
+	for (int32 i = 0; i < TicksToSecondSwing; ++i)
+	{
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	}
+
+	TestEqual("Second Whip swing exists after 0.3s", WC->GetProjectileCount(), 1);
+	TestTrue("Second Whip swing flips to -X", WC->GetProjectilePos(0).X < FSurvivorsGameTestAccess::PlayerPos(S.Game).X);
+
+	S.Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsKnifeBurstCadence,
+	"ReinBalance.Survivors.Wiki.Knife_BurstCadence",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsKnifeBurstCadence::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	EquipTestWeapon(S.Game, EWeaponType::Knife, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Knife fires first projectile immediately", WC->GetProjectileCount(), 1);
+
+	const int32 TicksToSecondShot = FMath::CeilToInt(0.11f / SurvivorsGameConstants::PhysicsDt);
+	for (int32 i = 0; i < TicksToSecondShot; ++i)
+	{
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	}
+	TestEqual("Knife fires second projectile after 0.1s", WC->GetProjectileCount(), 2);
+
+	const int32 TicksToThirdShot = FMath::CeilToInt(0.11f / SurvivorsGameConstants::PhysicsDt);
+	for (int32 i = 0; i < TicksToThirdShot; ++i)
+	{
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	}
+	TestEqual("Knife fires third projectile after another 0.1s", WC->GetProjectileCount(), 3);
+
+	S.Destroy();
 	return true;
 }
 
@@ -771,6 +832,41 @@ bool FSurvivorsGroundZoneHitCooldown::RunTest(const FString& Parameters)
 	S.RunWeaponHits();
 	TestTrue("Hit resumes after cooldown",
 		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, HPAfterFirst - 10.f, 0.01f));
+
+	S.Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsGroundZoneWarningNoDamage,
+	"ReinBalance.Survivors.HitFrame.GroundZone_WarningNoDamage",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FSurvivorsGroundZoneWarningNoDamage::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	S.AddEnemyAt(FVector2D(50.f, 0.f), 200.f);
+
+	FGroundZoneState Zone;
+	Zone.Pos          = FVector2D(50.f, 0.f);
+	Zone.Radius       = 30.f;
+	Zone.Damage       = 10.f;
+	Zone.LifeTime     = 2.f;
+	Zone.WarningTime  = 1.f;
+	Zone.HitCooldown  = 0.5f;
+	Zone.WeaponType   = EWeaponType::SantaWater;
+	Zone.WeaponSlotIdx= 2;
+	Zone.bIsWarning   = true;
+	FSurvivorsGameTestAccess::WeaponComp(S.Game)->SpawnGroundZone(Zone);
+
+	S.RunWeaponHits();
+	TestEqual("Warning GroundZone does not damage", FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, 200.f);
+
+	FSurvivorsGameTestAccess::WeaponComp(S.Game)->TickWeapons(1.01f);
+	S.RunWeaponHits();
+	TestTrue("GroundZone damages after warning expires",
+		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, 190.f, 0.01f));
 
 	S.Destroy();
 	return true;

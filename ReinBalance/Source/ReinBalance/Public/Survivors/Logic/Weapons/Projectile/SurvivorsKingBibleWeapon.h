@@ -39,7 +39,7 @@ private:
 	float CachedDuration    = 3.f;
 	float CachedOrbitRadius = 50.f;
 	int32 CachedAmount      = 1;
-	float CachedRotSpeed    = 2.0f;  // rad/sec
+	float CachedRotSpeed    = 4.0f;  // rad/sec
 	float CachedKnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;
 
 	// 基準軌道角度（Tick で更新）

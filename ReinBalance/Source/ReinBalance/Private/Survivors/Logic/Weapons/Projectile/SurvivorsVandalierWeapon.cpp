@@ -37,7 +37,8 @@ void USurvivorsVandalierWeapon::Tick(float Dt)
 {
 	if (!Game) return;
 
-	const float RotSpeed = 1.5f;  // rad/sec
+	const FPassiveEffects& PE = GetPassiveEffects();
+	const float RotSpeed = 3.0f * PE.SpeedMult;  // rad/sec
 	OrbitAngle[0] += RotSpeed * Dt;
 	OrbitAngle[1] -= RotSpeed * Dt;  // 逆回転
 

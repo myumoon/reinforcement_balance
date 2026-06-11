@@ -49,31 +49,36 @@ void USurvivorsSantaWaterWeapon::Tick(float Dt)
 	const float EffDuration = CachedDuration * PE.DurationMult;
 	const int32 EffAmount   = CachedAmount   + static_cast<int32>(PE.ExtraAmount);
 
+	TArray<int32> EnemyIdx;
+	EnemyIdx.Reserve(Game->Enemies.Num());
+	for (int32 EIdx = 0; EIdx < Game->Enemies.Num(); ++EIdx)
+	{
+		if (!Game->Enemies[EIdx].bPendingRemove) EnemyIdx.Add(EIdx);
+	}
+	EnemyIdx.Sort([&](int32 A, int32 B)
+	{
+		return FVector2D::DistSquared(Game->Enemies[A].Pos, Game->PlayerPos)
+			 < FVector2D::DistSquared(Game->Enemies[B].Pos, Game->PlayerPos);
+	});
+
 	for (int32 i = 0; i < EffAmount; ++i)
 	{
-		// 配置位置: ランダムにプレイヤー周辺（または最近傍敵の足元）
-		// 簡略: 最近傍敵の位置に生成、複数なら近い順
 		FVector2D DropPos = Game->PlayerPos;
-		int32 FoundCount = 0;
-		for (const FEnemyState& E : Game->Enemies)
+		if (EnemyIdx.IsValidIndex(i))
 		{
-			if (E.bPendingRemove) continue;
-			if (FoundCount == i)
-			{
-				DropPos = E.Pos;
-				break;
-			}
-			++FoundCount;
+			DropPos = Game->Enemies[EnemyIdx[i]].Pos;
 		}
 
 		FGroundZoneState Z;
 		Z.Pos          = DropPos;
 		Z.Radius       = EffRadius;
 		Z.Damage       = EffDamage;
-		Z.LifeTime     = EffDuration;
+		Z.LifeTime     = SurvivorsGameConstants::SantaWaterWarningTime + EffDuration;
+		Z.WarningTime  = SurvivorsGameConstants::SantaWaterWarningTime;
 		Z.HitCooldown  = 0.5f;
 		Z.WeaponSlotIdx = SlotIdx;
 		Z.WeaponType   = WeaponType;
+		Z.bIsWarning   = true;
 		WeaponComp->SpawnGroundZone(Z);
 	}
 }

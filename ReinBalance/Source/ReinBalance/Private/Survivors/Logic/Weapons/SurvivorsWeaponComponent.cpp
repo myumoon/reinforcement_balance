@@ -97,6 +97,7 @@ void USurvivorsWeaponComponent::TickProjectiles(float Dt)
 
 		// King Bible / Orbit 系は Pos を WeaponBase::Tick で更新するためここでは移動しない
 		P.Pos += P.Vel * Dt;
+		P.Age += Dt;
 		P.LifeTime.Tick(Dt);
 
 		if (P.LifeTime.IsExpired())
@@ -129,6 +130,15 @@ void USurvivorsWeaponComponent::TickGroundZones(float Dt)
 	{
 		FGroundZoneState& Z = GroundZones[i];
 		Z.LifeTime -= Dt;
+		if (Z.bIsWarning)
+		{
+			Z.WarningTime = FMath::Max(0.f, Z.WarningTime - Dt);
+			if (Z.WarningTime <= 0.f)
+			{
+				Z.bIsWarning = false;
+				Z.EnemyLastHitTime.Empty();
+			}
+		}
 		if (Z.LifeTime <= 0.f)
 		{
 			GroundZones.RemoveAt(i);
@@ -159,6 +169,7 @@ void USurvivorsWeaponComponent::ComputeGroundZoneHits(USurvivorsCollisionCompone
 	for (int32 ZIdx = 0; ZIdx < GroundZones.Num(); ++ZIdx)
 	{
 		const FGroundZoneState& Z = GroundZones[ZIdx];
+		if (Z.bIsWarning) continue;
 
 		TArray<const FSurvivorsTargetProxy*> Contacts;
 		CollComp->QueryEnemyContacts(Z.Pos, Z.Radius, Contacts);
@@ -197,8 +208,12 @@ void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionCompone
 	{
 		FProjectileState& P = Projectiles[PIdx];
 
-		// FireWand/Hellfire 弾は USurvivorsFireWandWeapon::ComputeHits() で完全に処理されるためスキップ
-		if (P.WeaponType == EWeaponType::FireWand || P.WeaponType == EWeaponType::Hellfire) continue;
+		// FireWand/Hellfire と Whip/BloodyTear は各武器の ComputeHits() で処理する。
+		if (P.WeaponType == EWeaponType::FireWand || P.WeaponType == EWeaponType::Hellfire
+			|| P.WeaponType == EWeaponType::Whip || P.WeaponType == EWeaponType::BloodyTear)
+		{
+			continue;
+		}
 
 		TArray<const FSurvivorsTargetProxy*> Contacts;
 		CollComp->QueryEnemyContacts(P.Pos, P.Radius.Value, Contacts);
@@ -372,6 +387,8 @@ TArray<FProjectileState> USurvivorsWeaponComponent::GetProjectileObsView() const
 		ZProj.Radius       = FSimRadius(Z.Radius);
 		ZProj.WeaponType   = Z.WeaponType;
 		ZProj.WeaponSlotIdx= Z.WeaponSlotIdx;
+		ZProj.bIsWarning   = Z.bIsWarning;
+		ZProj.LifeTime     = FProjectileLifeTime(Z.LifeTime);
 		View.Add(ZProj);
 	}
 
@@ -398,6 +415,11 @@ EWeaponType USurvivorsWeaponComponent::GetProjectileWeaponType(int32 i) const
 	return Projectiles.IsValidIndex(i) ? Projectiles[i].WeaponType : EWeaponType::None;
 }
 
+float USurvivorsWeaponComponent::GetProjectileBoxHalfWidth(int32 i) const
+{
+	return Projectiles.IsValidIndex(i) ? Projectiles[i].AngleRad.Value : 0.f;
+}
+
 int32 USurvivorsWeaponComponent::GetGroundZoneCount() const
 {
 	return GroundZones.Num();
@@ -416,6 +438,11 @@ float USurvivorsWeaponComponent::GetGroundZoneRadius(int32 i) const
 EWeaponType USurvivorsWeaponComponent::GetGroundZoneWeaponType(int32 i) const
 {
 	return GroundZones.IsValidIndex(i) ? GroundZones[i].WeaponType : EWeaponType::None;
+}
+
+bool USurvivorsWeaponComponent::IsGroundZoneWarning(int32 i) const
+{
+	return GroundZones.IsValidIndex(i) ? GroundZones[i].bIsWarning : false;
 }
 
 USurvivorsWeaponBase* USurvivorsWeaponComponent::GetWeaponInstance(int32 SlotIdx) const

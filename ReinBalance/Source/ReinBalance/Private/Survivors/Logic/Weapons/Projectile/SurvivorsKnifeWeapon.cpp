@@ -38,55 +38,66 @@ void USurvivorsKnifeWeapon::Tick(float Dt)
 {
 	if (!Game || !WeaponComp) return;
 
-	CooldownTimer.Value = FMath::Max(0.f, CooldownTimer.Value - Dt);
-	if (!CooldownTimer.IsReady()) return;
+	if (!Game->PlayerVel.IsNearlyZero())
+	{
+		LastFacingDir = Game->PlayerVel.GetSafeNormal();
+	}
 
+	CooldownTimer.Value = FMath::Max(0.f, CooldownTimer.Value - Dt);
+
+	if (PendingKnifeShots > 0)
+	{
+		KnifeBurstTimer -= Dt;
+		while (PendingKnifeShots > 0 && KnifeBurstTimer <= 0.f)
+		{
+			SpawnKnifeShot();
+			--PendingKnifeShots;
+			if (PendingKnifeShots > 0)
+			{
+				KnifeBurstTimer += 0.10f;
+			}
+		}
+	}
+
+	if (!CooldownTimer.IsReady() || PendingKnifeShots > 0) return;
+
+	StartBurst();
+}
+
+void USurvivorsKnifeWeapon::StartBurst()
+{
 	const FPassiveEffects& PE = GetPassiveEffects();
 	CooldownTimer = FCooldownSeconds(CachedCooldown * PE.CooldownMult);
 
-	const float EffDamage = CachedDamage * PE.DamageMult;
-	const float EffSpeed  = CachedSpeed  * PE.SpeedMult;
-	const int32 EffAmount = CachedAmount + static_cast<int32>(PE.ExtraAmount);
-	const float LifeTime  = 1.5f * PE.DurationMult;
-
-	// 最近傍敵の方向を前方として扇状に発射
-	FVector2D BaseDir = FVector2D(1.f, 0.f);
-	float MinDistSq = MAX_FLT;
-	for (const FEnemyState& E : Game->Enemies)
+	BurstDamage = CachedDamage * PE.DamageMult;
+	BurstSpeed = CachedSpeed * PE.SpeedMult;
+	BurstRadius = 6.f * PE.AreaMult;
+	BurstLifeTime = 1.5f * PE.DurationMult;
+	BurstPierce = CachedPierce;
+	PendingKnifeShots = FMath::Max(3, CachedAmount + 2 + static_cast<int32>(PE.ExtraAmount));
+	KnifeBurstTimer = 0.f;
+	if (PendingKnifeShots > 0)
 	{
-		if (E.bPendingRemove) continue;
-		const float Dsq = (E.Pos - Game->PlayerPos).SizeSquared();
-		if (Dsq < MinDistSq)
-		{
-			MinDistSq = Dsq;
-			BaseDir   = (E.Pos - Game->PlayerPos).GetSafeNormal();
-		}
+		SpawnKnifeShot();
+		--PendingKnifeShots;
+		KnifeBurstTimer = (PendingKnifeShots > 0) ? 0.10f : 0.f;
 	}
+}
 
-	for (int32 i = 0; i < EffAmount; ++i)
-	{
-		FVector2D Dir = BaseDir;
-		if (EffAmount > 1)
-		{
-			// 均等に扇状配置（例: 3本なら -15, 0, +15 度）
-			const float HalfSpread = 0.26f;  // ~15度
-			const float Angle = (static_cast<float>(i) / (EffAmount - 1) - 0.5f) * 2.f * HalfSpread;
-			const float C = FMath::Cos(Angle);
-			const float S = FMath::Sin(Angle);
-			Dir = FVector2D(BaseDir.X * C - BaseDir.Y * S, BaseDir.X * S + BaseDir.Y * C);
-		}
+void USurvivorsKnifeWeapon::SpawnKnifeShot()
+{
+	const FVector2D Dir = LastFacingDir.IsNearlyZero() ? FVector2D(1.f, 0.f) : LastFacingDir.GetSafeNormal();
 
-		FProjectileState P;
-		P.Pos               = Game->PlayerPos;
-		P.Vel               = Dir * EffSpeed;
-		P.Radius            = FSimRadius(6.f * PE.AreaMult);
-		P.Damage            = FDamage(EffDamage);
-		P.WeaponType        = WeaponType;
-		P.WeaponSlotIdx     = SlotIdx;
-		P.LifeTime          = FProjectileLifeTime(LifeTime);
-		P.bPiercing         = false;
-		P.MaxPierceCount    = CachedPierce;  // Pierce=1 から最大3まで増加
-		P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_Half;  // Knockback=0.5
-		WeaponComp->SpawnProjectile(P);
-	}
+	FProjectileState P;
+	P.Pos               = Game->PlayerPos;
+	P.Vel               = Dir * BurstSpeed;
+	P.Radius            = FSimRadius(BurstRadius);
+	P.Damage            = FDamage(BurstDamage);
+	P.WeaponType        = WeaponType;
+	P.WeaponSlotIdx     = SlotIdx;
+	P.LifeTime          = FProjectileLifeTime(BurstLifeTime);
+	P.bPiercing         = false;
+	P.MaxPierceCount    = BurstPierce;  // Pierce=1 から最大3まで増加
+	P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_Half;  // Knockback=0.5
+	WeaponComp->SpawnProjectile(P);
 }

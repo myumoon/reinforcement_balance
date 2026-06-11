@@ -40,7 +40,7 @@ void USurvivorsPeachoneWeapon::Tick(float Dt)
 	const float EffCooldown = CachedCooldown * PE.CooldownMult;
 
 	// 軌道角度を更新
-	const float RotSpeed = 1.5f;  // rad/sec
+	const float RotSpeed = 3.0f * PE.SpeedMult;  // rad/sec
 	OrbitAngle += RotDir * RotSpeed * Dt;
 	UpdateOrbitPos();
 
