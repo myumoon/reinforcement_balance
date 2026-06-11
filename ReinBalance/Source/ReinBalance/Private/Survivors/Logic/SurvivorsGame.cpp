@@ -143,6 +143,8 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	SpecialPickups.Empty();
 	Destructibles.Empty();
 
+	PhysicsAccumTime = 0.f;
+
 	PlayerComponent->Reset();
 	GemComponent->Reset();
 	EnemyComponent->Reset();
@@ -311,6 +313,22 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 	{
 		bTruncated = true;
 		LastSpawnDebug.bTruncated = true;
+	}
+}
+
+void ASurvivorsGame::StepWithDeltaTime(int32 ActionIdx, float DeltaTime)
+{
+	if (!bVariableFrameRate)
+	{
+		PhysicsStep(ActionIdx);
+		return;
+	}
+
+	PhysicsAccumTime += DeltaTime;
+	while (PhysicsAccumTime >= SurvivorsGameConstants::PhysicsDt)
+	{
+		PhysicsStep(ActionIdx);
+		PhysicsAccumTime -= SurvivorsGameConstants::PhysicsDt;
 	}
 }
 

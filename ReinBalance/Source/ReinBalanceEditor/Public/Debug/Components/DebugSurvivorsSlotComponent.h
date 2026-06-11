@@ -17,7 +17,10 @@ struct FDebugWeaponParam
 {
 	GENERATED_BODY()
 
+	UPROPERTY(EditAnywhere, Category = "Survivors|Debug")
 	EWeaponType WeaponType = EWeaponType::None;
+	
+	UPROPERTY(EditAnywhere, Category = "Survivors|Debug")
 	int32 Level = 1;
 };
 
@@ -26,7 +29,10 @@ struct FDebugPassiveParam
 {
 	GENERATED_BODY()
 	
+	UPROPERTY(EditAnywhere, Category = "Survivors|Debug")
 	EPassiveItemType PassiveType = EPassiveItemType::None;
+	
+	UPROPERTY(EditAnywhere, Category = "Survivors|Debug")
 	int32 Level = 1;
 };
 

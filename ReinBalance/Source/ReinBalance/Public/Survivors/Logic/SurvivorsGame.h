@@ -37,6 +37,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Survivors|Control")
 	void PhysicsStep(int32 ActionIdx);
 
+	/**
+	 * 可変フレームレート対応版。bVariableFrameRate が true の場合、
+	 * DeltaTime を蓄積して PhysicsDt 単位でステップを進める。
+	 * false の場合は PhysicsStep を 1 回呼ぶだけ（従来動作）。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Survivors|Control")
+	void StepWithDeltaTime(int32 ActionIdx, float DeltaTime);
+
 	/** 状態をリセット */
 	void ResetState(TOptional<int32> Seed);
 
@@ -165,6 +173,14 @@ public:
 	float MaxEpisodeTime = 300.f;
 
 	// ---- フィールド設定 ----
+
+	/**
+	 * true にすると StepWithDeltaTime() が DeltaTime を蓄積してステップ数を調整し、
+	 * FPS によらず一定の実ゲーム速度を保つ。
+	 * false（デフォルト）は従来の「毎フレーム 1 ステップ」動作を維持する。
+	 */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
+	bool bVariableFrameRate = false;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float FieldHalfSize = 1000.f;
@@ -434,4 +450,7 @@ private:
 	void  OnLevelUp(int32 NextLevel);
 
 	mutable int32 CachedObsDim = -1;
+
+	// StepWithDeltaTime() 用の時間蓄積バッファ
+	float PhysicsAccumTime = 0.f;
 };
