@@ -177,10 +177,10 @@ public:
 	/**
 	 * true にすると StepWithDeltaTime() が DeltaTime を蓄積してステップ数を調整し、
 	 * FPS によらず一定の実ゲーム速度を保つ。
-	 * false は従来の「毎フレーム 1 ステップ」動作を維持する。
+	 * false（デフォルト）は従来の「毎フレーム 1 ステップ」動作を維持する。
 	 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
-	bool bVariableFrameRate = true;
+	bool bVariableFrameRate = false;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float FieldHalfSize = 1000.f;
@@ -226,7 +226,7 @@ public:
 	// ---- プレイヤー設定 ----
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
-	float MaxPlayerHP = 70.f;
+	float MaxPlayerHP = 100.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
 	float MoveSpeed = 80.f;
@@ -341,7 +341,7 @@ private:
 	// ---- 状態 ----
 	FVector2D             PlayerPos;
 	FVector2D             PlayerVel;
-	float                 PlayerHP         = 70.f;
+	float                 PlayerHP         = 100.f;
 	float                 PlayerXP         = 0.f;
 	int32                 PlayerLevel      = 0;
 	FWeaponSlot           WeaponSlots[SurvivorsGameConstants::MaxWeaponSlots];

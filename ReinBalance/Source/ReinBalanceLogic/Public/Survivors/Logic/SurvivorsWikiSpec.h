@@ -11,7 +11,7 @@ namespace SurvivorsWikiSpec
 		Red,
 	};
 
-	static constexpr float StandardMaxPlayerHP = 70.f;
+	static constexpr float StandardMaxPlayerHP = 100.f;
 	static constexpr float StandardMoveSpeed = 80.f;
 	static constexpr float BaseGemPickupRadius = 30.f;
 
