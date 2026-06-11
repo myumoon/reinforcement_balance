@@ -197,7 +197,7 @@ bool FSurvivorsWikiPassiveGrowthAndAttractorb::RunTest(const FString& Parameters
 	TestTrue("Crown level 5 gives 1.4x Growth",
 		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::PassiveEffects(S.Game).GrowthMult, 1.4f, 0.001f));
 	TestTrue("Attractorb level 5 uses wiki multiplier",
-		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::GemPickupRadius(S.Game), 30.f * 3.980025f, 0.01f));
+		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::GemPickupRadius(S.Game), 50.f * 3.980025f, 0.01f));
 
 	FSurvivorsGameTestAccess::PlayerComp(S.Game)->ProcessXPGain(10.f);
 	TestTrue("Growth applies to gained XP",

@@ -36,7 +36,7 @@ void USurvivorsPlayerViewComponent::SetupPlayerMesh(USceneComponent* AttachParen
 	PlayerMesh->AttachToComponent(AttachParent, FAttachmentTransformRules::KeepRelativeTransform);
 	PlayerMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	if (ConeMeshAsset) PlayerMesh->SetStaticMesh(ConeMeshAsset);
-	PlayerMesh->SetRelativeScale3D(FVector(0.6f, 0.6f, 0.6f));
+	PlayerMesh->SetRelativeScale3D(FVector(1.2f, 1.2f, 1.2f));
 	PlayerMesh->SetRelativeRotation(FRotator(-90.f, 0.f, 0.f));
 
 	if (PlayerMaterial)

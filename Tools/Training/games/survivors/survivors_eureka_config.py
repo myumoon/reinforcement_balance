@@ -255,7 +255,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
     def _prompt_section_physics(self) -> str:
         max_player_hp = self._player_constant("MaxPlayerHP", 100.0)
         move_speed = self._player_constant("MoveSpeed", 80.0)
-        gem_pickup_radius = self._player_constant("GemPickupRadius", 30.0)
+        gem_pickup_radius = self._player_constant("GemPickupRadius", 50.0)
         contact_interval = self._observation_constant("ContactHitInterval", "Source of Truth")
         return (
             f"- プレイヤー最大 HP: {max_player_hp}\n"
