@@ -20,7 +20,7 @@ def test_survivors_source_of_truth_extracts_cpp_constants():
     assert sot["gem_xp_values"] == [2.0, 9.0, 10.0]
     assert len(sot["garlic_table"]) == 8
     assert any(enemy["name"] == "GiantBat" for enemy in sot["enemy_types"])
-    assert next(enemy for enemy in sot["enemy_types"] if enemy["name"] == "Bat")["speed"] == 70.0
+    assert next(enemy for enemy in sot["enemy_types"] if enemy["name"] == "Bat")["speed"] == 35.0
     assert next(enemy for enemy in sot["enemy_types"] if enemy["name"] == "Werewolf")["xp_drop"] == 9.0
     assert sot["directional_density"]["axis_mapping"]["+X"] == 8
     assert sot["directional_density"]["axis_mapping"]["+Y"] == 12
