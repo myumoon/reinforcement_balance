@@ -163,17 +163,18 @@ class SurvivorsEnv(BaseUE5Env):
             if d is not None and (nearest_gem is None or d < nearest_gem):
                 nearest_gem = d
 
-        weapon_slot_i = offset("weapon_slots", 23)
+        weapon_slot_i = offset("weapon_slots", -1)
         weapon_types: list[int] = []
-        for s in range(6):
-            idx = weapon_slot_i + s * 3
-            if idx + 2 >= len(obs):
-                break
-            tn = float(obs[idx])
-            if tn > 1e-4:
-                wtype_id = int(round(tn * 64.0))
-                if wtype_id > 0:
-                    weapon_types.append(wtype_id)
+        if weapon_slot_i >= 0:
+            for s in range(6):
+                idx = weapon_slot_i + s * 3
+                if idx + 2 >= len(obs):
+                    break
+                tn = float(obs[idx])
+                if tn > 1e-4:
+                    wtype_id = int(round(tn * 64.0))
+                    if wtype_id > 0:
+                        weapon_types.append(wtype_id)
 
         return {
             "player_hp": float(obs[offset("player_hp", 12)]),

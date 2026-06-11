@@ -237,7 +237,7 @@ def _aggregate_weapon_metrics(results: list[dict]) -> dict:
             # 例: acq_step=500, ep_len=3000(time_up) → (3000-500)/(3000-500) = 1.0
             # 例: acq_step=500, ep_len=1000(死亡)    → (1000-500)/(3000-500) = 0.20
             remaining = max(_MAX_EP_STEPS - acq_step, 1)
-            alive_norm = (ep_len - acq_step) / remaining  # 取得後の生存率
+            alive_norm = min((ep_len - acq_step) / remaining, 1.0)  # 取得後の生存率（1.0 にクランプ）
 
             entry = {
                 "active_score": r["active_score"],
@@ -252,6 +252,9 @@ def _aggregate_weapon_metrics(results: list[dict]) -> dict:
             if wid == first_wid:
                 first_weapon.setdefault(wid, []).append(entry)
 
+    def mean_or_minus1(lst, key):
+        return float(np.mean([e[key] for e in lst])) if lst else -1.0
+
     # 集計
     payload: dict = {}
     for wid in _ALL_WEAPON_IDS:
@@ -261,9 +264,6 @@ def _aggregate_weapon_metrics(results: list[dict]) -> dict:
 
         eps = per_weapon.get(wid)
         f_eps = first_weapon.get(wid)
-
-        def mean_or_minus1(lst, key):
-            return float(np.mean([e[key] for e in lst])) if lst else -1.0
 
         payload[f"{prefix}/active_score_mean"]      = mean_or_minus1(eps, "active_score")
         payload[f"{prefix}/kills_per_step_mean"]    = mean_or_minus1(eps, "kills_per_step")
