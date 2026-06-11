@@ -11,9 +11,9 @@ namespace SurvivorsWikiSpec
 		Red,
 	};
 
-	static constexpr float StandardMaxPlayerHP = 100.f;
-	static constexpr float StandardMoveSpeed = 100.f;
-	static constexpr float BaseGemPickupRadius = 60.f;
+	static constexpr float StandardMaxPlayerHP = 70.f;
+	static constexpr float StandardMoveSpeed = 80.f;
+	static constexpr float BaseGemPickupRadius = 30.f;
 
 	static constexpr float PummarolaRecoveryPerLevel = 0.2f;
 	static constexpr float SpellbinderDurationPerLevel = 0.10f;

@@ -14,7 +14,7 @@ def _source_of_truth():
             "KillReward": 2.0,
         },
         "player_constants": {
-            "MaxPlayerHP": 100.0,
+            "MaxPlayerHP": 70.0,
         },
         "directional_density": {
             "axis_mapping": {
@@ -28,7 +28,7 @@ def test_validator_rejects_stale_item_reward_and_hp_constants():
     code = """
 if base_reward >= 2.9:
     shaped += 0.1
-hp_abs = obs[12] * 70.0
+hp_abs = obs[12] * 100.0
 """
 
     findings = validate_survivors_reward_code(code, _source_of_truth())

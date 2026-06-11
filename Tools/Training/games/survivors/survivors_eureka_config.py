@@ -136,7 +136,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         # セグメント開始オフセットは _offsets dict（実 C++ schema から取得）を優先し、
         # 取得できない場合は PR2 schema の既定値にフォールバックする。
         o = self._offsets
-        max_player_hp = self._player_constant("MaxPlayerHP", 100.0)
+        max_player_hp = self._player_constant("MaxPlayerHP", 70.0)
         item_reward = self._reward_constant("ItemReward", 1.0)
         max_player_level = self._observation_constant("MaxPlayerLevel", 100)
 
@@ -253,8 +253,8 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         )
 
     def _prompt_section_physics(self) -> str:
-        max_player_hp = self._player_constant("MaxPlayerHP", 100.0)
-        move_speed = self._player_constant("MoveSpeed", 100.0)
+        max_player_hp = self._player_constant("MaxPlayerHP", 70.0)
+        move_speed = self._player_constant("MoveSpeed", 80.0)
         gem_pickup_radius = self._player_constant("GemPickupRadius", 30.0)
         contact_interval = self._observation_constant("ContactHitInterval", "Source of Truth")
         return (
@@ -328,7 +328,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         )
 
     def _prompt_section_scale_constraints(self) -> str:
-        max_hp_penalty = self._player_constant("MaxPlayerHP", 100.0)
+        max_hp_penalty = self._player_constant("MaxPlayerHP", 70.0)
         return (
             f"- **HP ペナルティは survivors_env が永続的に適用済み**（info['hp_penalty']）\n"
             f"  reward_fn でさらに HP 差分ペナルティを追加しないこと（二重計上になる）\n"
@@ -480,7 +480,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         alive_reward = self._reward_constant("AliveReward", 0.001)
         item_reward = self._reward_constant("ItemReward", 1.0)
         kill_reward = self._reward_constant("KillReward", 2.0)
-        max_player_hp = self._player_constant("MaxPlayerHP", 100.0)
+        max_player_hp = self._player_constant("MaxPlayerHP", 70.0)
         return (
             f"- base_reward_mean: C++固定報酬の1エピソード平均（AliveReward={alive_reward}/step + ItemReward={item_reward} + KillReward={kill_reward}）\n"
             f"- shaped_reward_mean: reward_fn 出力の1エピソード平均（hp_penalty は含まない）\n"

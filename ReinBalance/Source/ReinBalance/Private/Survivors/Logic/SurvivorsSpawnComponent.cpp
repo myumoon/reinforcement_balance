@@ -60,17 +60,17 @@ void USurvivorsSpawnComponent::InitDefaultEnemyTable()
 
 	struct FRow { const TCHAR* Name; float HP; float Spd; float Dmg; float XP; float R; float KB; bool Boss; };
 	static const FRow Rows[] = {
-		{ TEXT("Bat"),        1.f,    85.f,  2.f, 2.f, 10.f, 0.f, false },
-		{ TEXT("Zombie"),    10.f,    45.f,  5.f, 2.f, 12.f, 0.f, false },
-		{ TEXT("Skeleton"),  10.f,    55.f,  5.f, 2.f, 12.f, 0.f, false },
-		{ TEXT("Ghost"),      3.f,    95.f,  3.f, 2.f, 10.f, 0.f, false },
-		{ TEXT("Werewolf"),  30.f,    80.f, 10.f, 9.f, 14.f, 0.f, false },
-		{ TEXT("Mummy"),     40.f,    38.f, 10.f, 9.f, 14.f, 0.f, false },
-		{ TEXT("Plant"),     25.f,    35.f, 10.f, 9.f, 14.f, 0.f, false },
-		{ TEXT("BatSwarm"),   2.f,   120.f,  3.f, 2.f,  8.f, 0.f, false },
-		{ TEXT("FireBeast"), 60.f,    65.f, 15.f, 9.f, 16.f, 0.f, false },
-		{ TEXT("MedusaHead"),50.f,    95.f, 15.f, 9.f, 12.f, 0.f, false },
-		{ TEXT("GiantBat"), 3000.f,  55.f, 20.f, 2.f, 32.f, 1.f, true  },
+		{ TEXT("Bat"),        1.f,    70.f,  2.f, 2.f, 10.f, 0.f, false },
+		{ TEXT("Zombie"),     4.f,    40.f,  3.f, 2.f, 12.f, 0.f, false },
+		{ TEXT("Skeleton"),   6.f,    45.f,  4.f, 2.f, 12.f, 0.f, false },
+		{ TEXT("Ghost"),      3.f,    88.f,  3.f, 2.f, 10.f, 0.f, false },
+		{ TEXT("Werewolf"),  10.f,    80.f,  5.f, 9.f, 14.f, 0.f, false },
+		{ TEXT("Mummy"),     15.f,    36.f,  6.f, 9.f, 14.f, 0.f, false },
+		{ TEXT("Plant"),     20.f,    32.f,  7.f, 9.f, 14.f, 0.f, false },
+		{ TEXT("BatSwarm"),   2.f,   104.f,  3.f, 2.f,  8.f, 0.f, false },
+		{ TEXT("FireBeast"), 30.f,    64.f, 10.f, 9.f, 16.f, 0.f, false },
+		{ TEXT("MedusaHead"),25.f,    96.f, 10.f, 9.f, 12.f, 0.f, false },
+		{ TEXT("GiantBat"), 3000.f,  48.f, 12.f, 2.f, 32.f, 1.f, true  },
 	};
 
 	Game->EnemyTypeTable.Empty();

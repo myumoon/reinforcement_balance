@@ -15,11 +15,12 @@ def test_survivors_source_of_truth_extracts_cpp_constants():
     assert sot["reward_constants"]["AliveReward"] == 0.001
     assert sot["reward_constants"]["ItemReward"] == 1.0
     assert sot["reward_constants"]["KillReward"] == 2.0
-    assert sot["player_constants"]["MaxPlayerHP"] == 100.0
+    assert sot["player_constants"]["MaxPlayerHP"] == 70.0
     assert sot["observation_constants"]["EnemyDensityDirCount"] == 16
     assert sot["gem_xp_values"] == [2.0, 9.0, 10.0]
     assert len(sot["garlic_table"]) == 8
     assert any(enemy["name"] == "GiantBat" for enemy in sot["enemy_types"])
+    assert next(enemy for enemy in sot["enemy_types"] if enemy["name"] == "Bat")["speed"] == 70.0
     assert next(enemy for enemy in sot["enemy_types"] if enemy["name"] == "Werewolf")["xp_drop"] == 9.0
     assert sot["directional_density"]["axis_mapping"]["+X"] == 8
     assert sot["directional_density"]["axis_mapping"]["+Y"] == 12
@@ -31,7 +32,7 @@ def test_survivors_eureka_config_uses_source_of_truth_for_metric():
     config = SurvivorsEurekaConfig()
     config._source_of_truth = {
         "reward_constants": {"AliveReward": 0.5, "ItemReward": 1.0, "KillReward": 2.0},
-        "player_constants": {"MaxPlayerHP": 100.0},
+        "player_constants": {"MaxPlayerHP": 70.0},
     }
 
     assert config.compute_primary_metric([11.0], [2]) == 10.0
