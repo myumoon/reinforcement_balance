@@ -19,6 +19,42 @@ except ImportError:
 # active_score 計算で使う定数（C++ Source of Truth と合わせる）
 _KILL_REWARD = 2.0
 
+# 武器ID → カテゴリ名 マッピング
+# 注意: reward_fn.py では Runetracer(10) は AREA_IDS だが、
+#       メトリクス分類はユーザー合意で ranged に分類する。
+_WEAPON_CATEGORY: dict[int, str] = {
+    # melee
+    1: "melee", 2: "melee", 7: "melee", 16: "melee", 17: "melee", 22: "melee",
+    # ranged（Runetracer=10 は reward_fn では area だがここでは ranged）
+    3: "ranged", 4: "ranged", 5: "ranged", 6: "ranged", 8: "ranged",
+    10: "ranged", 13: "ranged", 14: "ranged", 18: "ranged", 19: "ranged",
+    20: "ranged", 21: "ranged", 23: "ranged", 25: "ranged", 28: "ranged",
+    # area
+    9: "area", 11: "area", 12: "area", 24: "area", 26: "area", 27: "area",
+    # defensive
+    15: "defensive",
+}
+
+# 最大エピソード長: 実測 eval/ep_length ≈ 3000 steps に合わせた定数
+# (C++ SurvivorsGameConstants の MaxGameTime と PhysicsDt から導出)
+_MAX_EP_STEPS = 3000
+
+# 武器ID → 武器名（W&B キー用、スネークケース）
+_WEAPON_NAME: dict[int, str] = {
+    1: "garlic", 2: "whip", 3: "magic_wand", 4: "knife", 5: "axe",
+    6: "cross", 7: "king_bible", 8: "fire_wand", 9: "santa_water",
+    10: "runetracer", 11: "lightning_ring", 12: "pentagram",
+    13: "peachone", 14: "ebony_wings", 15: "laurel",
+    16: "soul_eater", 17: "bloody_tear", 18: "holy_wand",
+    19: "thousand_edge", 20: "death_spiral", 21: "heaven_sword",
+    22: "unholy_vespers", 23: "hellfire", 24: "la_borra",
+    25: "no_future", 26: "thunder_loop", 27: "gorgeous_moon", 28: "vandalier",
+}
+
+# 全武器IDリスト（未使用武器の -1 記録に使用）
+_ALL_WEAPON_IDS = sorted(_WEAPON_CATEGORY.keys())
+_ALL_CATEGORIES = ["melee", "ranged", "area", "defensive"]
+
 
 def run_survivors_eval_episodes(
     *,
@@ -74,6 +110,8 @@ def run_survivors_eval_episodes(
             ep_stationary_steps = 0
             ep_steps = 0
             is_truncated = False
+            ep_weapon_acquired: dict[int, int] = {}
+            ep_first_weapon_id: int | None = None
 
             while not done[0]:
                 action, lstm_states = model.predict(
@@ -121,6 +159,13 @@ def run_survivors_eval_episodes(
                 if si.get("is_stationary"):
                     ep_stationary_steps += 1
 
+                weapon_types = si.get("weapon_types", [])
+                for wid in weapon_types:
+                    if wid not in ep_weapon_acquired:
+                        ep_weapon_acquired[wid] = ep_steps  # 取得step（1-indexed）
+                        if ep_first_weapon_id is None:
+                            ep_first_weapon_id = wid         # 最初のstepで出現した武器
+
                 if done[0]:
                     is_truncated = bool(si.get("TimeLimit.truncated", False))
 
@@ -144,6 +189,8 @@ def run_survivors_eval_episodes(
                 "move_speed":     ep_speed_sum / max(ep_steps, 1),
                 "stationary":     ep_stationary_steps / max(ep_steps, 1),
                 "terminated":     int(not is_truncated),
+                "weapon_acquired": ep_weapon_acquired,
+                "first_weapon_id": ep_first_weapon_id,
             })
 
     finally:
@@ -171,6 +218,84 @@ def _aggregate_eval_results(results: list[dict]) -> dict:
     agg["terminated_ratio"] = float(np.mean([r["terminated"] for r in results]))
     agg["n_episodes"] = len(results)
     return agg
+
+
+def _aggregate_weapon_metrics(results: list[dict]) -> dict:
+    """episode_results から武器別・カテゴリ別メトリクスを集計する。"""
+    # weapon_id ごとにエピソードを集約
+    per_weapon: dict[int, list[dict]] = {}    # wid → エピソードリスト
+    first_weapon: dict[int, list[dict]] = {}  # wid → first_weapon エピソードリスト
+
+    for r in results:
+        ep_len = r["ep_length"]
+        acquired = r.get("weapon_acquired", {})
+        first_wid = r.get("first_weapon_id")
+
+        for wid, acq_step in acquired.items():
+            # alive_steps_norm: 取得後に実際に生き残ったステップ / 取得時の最大残りステップ
+            # 分母 = max_ep_steps - acq_step（取得時点からゲームタイムアップまでの最大可能ステップ）
+            # 例: acq_step=500, ep_len=3000(time_up) → (3000-500)/(3000-500) = 1.0
+            # 例: acq_step=500, ep_len=1000(死亡)    → (1000-500)/(3000-500) = 0.20
+            remaining = max(_MAX_EP_STEPS - acq_step, 1)
+            alive_norm = min((ep_len - acq_step) / remaining, 1.0)  # 取得後の生存率（1.0 にクランプ）
+
+            entry = {
+                "active_score": r["active_score"],
+                "kills":        r["kills"],
+                "kills_per_step": r["kills"] / max(ep_len, 1),
+                "enemy_dist":   r["enemy_dist"],
+                "alive_norm":   alive_norm,
+                "survived":     1.0 - r["terminated"],  # time_up = survived
+                "gem_pickups":  r["gem_pickups"],
+            }
+            per_weapon.setdefault(wid, []).append(entry)
+            if wid == first_wid:
+                first_weapon.setdefault(wid, []).append(entry)
+
+    def mean_or_minus1(lst, key):
+        return float(np.mean([e[key] for e in lst])) if lst else -1.0
+
+    # 集計
+    payload: dict = {}
+    for wid in _ALL_WEAPON_IDS:
+        cat  = _WEAPON_CATEGORY.get(wid, "unknown")
+        name = _WEAPON_NAME.get(wid, f"weapon_{wid}")
+        prefix = f"weapon/{cat}.{name}"
+
+        eps = per_weapon.get(wid)
+        f_eps = first_weapon.get(wid)
+
+        payload[f"{prefix}/active_score_mean"]      = mean_or_minus1(eps, "active_score")
+        payload[f"{prefix}/kills_per_step_mean"]    = mean_or_minus1(eps, "kills_per_step")
+        payload[f"{prefix}/enemy_count_mean"]       = mean_or_minus1(eps, "kills")
+        payload[f"{prefix}/enemy_dist_mean"]        = mean_or_minus1(eps, "enemy_dist")
+        payload[f"{prefix}/alive_steps_mean_norm"]  = mean_or_minus1(eps, "alive_norm")
+        payload[f"{prefix}/survival_rate"]          = mean_or_minus1(eps, "survived")
+        payload[f"{prefix}/gem_pickups_mean"]       = mean_or_minus1(eps, "gem_pickups")
+        payload[f"{prefix}/first_weapon_active_score_mean"]     = mean_or_minus1(f_eps, "active_score")
+        payload[f"{prefix}/first_weapon_alive_steps_mean_norm"] = mean_or_minus1(f_eps, "alive_norm")
+
+    # カテゴリ集計（そのカテゴリの武器を持っていたエピソードで平均）
+    for cat in _ALL_CATEGORIES:
+        cat_eps = []
+        cat_f_eps = []
+        for wid, cat_name in _WEAPON_CATEGORY.items():
+            if cat_name == cat:
+                cat_eps.extend(per_weapon.get(wid, []))
+                cat_f_eps.extend(first_weapon.get(wid, []))
+
+        prefix = f"weapon/{cat}"
+        payload[f"{prefix}/active_score_mean"]      = mean_or_minus1(cat_eps, "active_score")
+        payload[f"{prefix}/kills_per_step_mean"]    = mean_or_minus1(cat_eps, "kills_per_step")
+        payload[f"{prefix}/enemy_count_mean"]       = mean_or_minus1(cat_eps, "kills")
+        payload[f"{prefix}/enemy_dist_mean"]        = mean_or_minus1(cat_eps, "enemy_dist")
+        payload[f"{prefix}/alive_steps_mean_norm"]  = mean_or_minus1(cat_eps, "alive_norm")
+        payload[f"{prefix}/survival_rate"]          = mean_or_minus1(cat_eps, "survived")
+        payload[f"{prefix}/gem_pickups_mean"]       = mean_or_minus1(cat_eps, "gem_pickups")
+        payload[f"{prefix}/first_weapon_active_score_mean"]     = mean_or_minus1(cat_f_eps, "active_score")
+        payload[f"{prefix}/first_weapon_alive_steps_mean_norm"] = mean_or_minus1(cat_f_eps, "alive_norm")
+
+    return payload
 
 
 class SurvivorsEvalCallback(BaseEvalCallback):
@@ -352,6 +477,12 @@ class SurvivorsEvalCallback(BaseEvalCallback):
         # eval_env 使用時は訓練環境（model._last_obs 等）には一切触れない
 
         self._log_results(metrics)
+
+        weapon_payload = _aggregate_weapon_metrics(episode_results)
+        if self._wandb_logger:
+            self._wandb_logger.log(weapon_payload, step=self.num_timesteps)
+        # 注: _log_results 内の wandb.log とは別呼び出しになるが、
+        #     step が同じなら W&B 上で同一ステップにマージされる
 
         if self.after_eval_callback is not None:
             self.after_eval_callback(episode_results, metrics)
