@@ -113,13 +113,14 @@ SurvivorsEvalCallback._run_eval_and_log()
 ### `weapon_types` の抽出（`survivors_env.py`）
 
 ```python
-weapon_slot_i = offset("weapon_slots", 23)
-for s in range(6):
-    idx = weapon_slot_i + s * 3
-    tn = float(obs[idx])
-    if tn > 1e-4:
-        wtype_id = int(round(tn * 64.0))
+weapon_slot_i = offset("weapon_slots", -1)  # スキーマ未登録時は -1
+if weapon_slot_i >= 0:
+    for s in range(6):
+        idx = weapon_slot_i + s * 3
+        tn = float(obs[idx])
+        if tn > 1e-4:
+            wtype_id = int(round(tn * 64.0))
 ```
 
-obs_schema に `weapon_slots` セグメントが存在する場合はオフセットを自動取得し、
-存在しない場合はデフォルト 23 を使用する。
+obs_schema に `weapon_slots` セグメントが存在する場合はオフセットを自動取得する。
+存在しない場合（`weapon_slot_i < 0`）は武器追跡をスキップして空リストを返す。
