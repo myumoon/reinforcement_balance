@@ -209,10 +209,10 @@ public:
 	// ---- スポーン設定 ----
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
-	float SpawnMinDistance = 400.f;
+	float SpawnMinDistance = 500.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
-	float SpawnMaxDistance = 600.f;
+	float SpawnMaxDistance = 700.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
 	float BossSpawnTime = 300.f;
