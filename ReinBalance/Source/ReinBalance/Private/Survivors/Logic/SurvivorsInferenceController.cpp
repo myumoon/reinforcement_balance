@@ -35,6 +35,6 @@ void ASurvivorsInferenceController::Tick(float DeltaTime)
 	if (RunInference(Obs, Action) && Action.Num() > 0)
 	{
 		const int32 ActionIdx = FMath::Clamp(FMath::RoundToInt(Action[0]), 0, 8);
-		SurvivorsGame->PhysicsStep(ActionIdx);
+		SurvivorsGame->StepWithDeltaTime(ActionIdx, DeltaTime);
 	}
 }
