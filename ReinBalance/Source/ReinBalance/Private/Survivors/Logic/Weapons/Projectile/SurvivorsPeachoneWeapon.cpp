@@ -96,8 +96,9 @@ void USurvivorsPeachoneWeapon::SpawnBombShot()
 
 	// target zone 内のランダム位置（uniform in circle: sqrt で面積均一サンプリング）
 	// OBSERVED: "bombard random points inside the current circular target zone" (weapon_peachone.md)
-	const float Angle = FMath::FRandRange(0.f, 2.f * UE_PI);
-	const float Dist  = FMath::Sqrt(FMath::FRand()) * BurstBombRadius;
+	// 再現性のため FMath::FRand 系ではなく Game->RandStream を使用する
+	const float Angle = Game->RandStream.FRand() * 2.f * UE_PI;
+	const float Dist  = FMath::Sqrt(Game->RandStream.FRand()) * BurstBombRadius;
 	const FVector2D ImpactPos = CurrentOrbitPos + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Dist;
 
 	FProjectileState P;

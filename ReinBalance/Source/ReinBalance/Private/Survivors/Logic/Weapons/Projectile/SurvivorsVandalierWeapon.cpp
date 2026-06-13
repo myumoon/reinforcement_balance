@@ -104,9 +104,9 @@ void USurvivorsVandalierWeapon::SpawnBombShot(int32 OrbIdx)
 
 	const FVector2D ZoneCenter = GetOrbitOrbPos(OrbIdx);
 
-	// target zone 内のランダム位置（uniform in circle）
-	const float Angle = FMath::FRandRange(0.f, 2.f * UE_PI);
-	const float Dist  = FMath::Sqrt(FMath::FRand()) * BurstBombRadius;
+	// target zone 内のランダム位置（uniform in circle）再現性のため RandStream を使用
+	const float Angle = Game->RandStream.FRand() * 2.f * UE_PI;
+	const float Dist  = FMath::Sqrt(Game->RandStream.FRand()) * BurstBombRadius;
 	const FVector2D ImpactPos = ZoneCenter + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Dist;
 
 	FProjectileState P;
