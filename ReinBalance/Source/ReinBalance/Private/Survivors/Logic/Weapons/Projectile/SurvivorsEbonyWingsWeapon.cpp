@@ -17,6 +17,7 @@ void USurvivorsEbonyWingsWeapon::CacheParams()
 	CachedCooldown    = P.Cooldown;
 	CachedOrbitRadius = P.OrbitRadius;
 	CachedBombRadius  = P.BombRadius;
+	CachedAmount      = P.Amount;
 
 	RotDir   = -1.f;        // 反時計回り
 	PhaseOff = UE_PI;       // π オフセット

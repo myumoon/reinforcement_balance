@@ -3,6 +3,7 @@
 #include "Survivors/Logic/SurvivorsCollisionComponent.h"
 #include "Survivors/Logic/SurvivorsGame.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 
 void USurvivorsPeachoneWeapon::OnLevelChanged(FWeaponLevel NewLevel)
 {
@@ -14,12 +15,12 @@ void USurvivorsPeachoneWeapon::CacheParams()
 	const int32 Lv  = FMath::Clamp(Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
 	const int32 Idx = Lv - 1;
 
-	// WeaponType は Peachone 固定（EbonyWings は派生クラスでオーバーライド）
 	const SurvivorsGameConstants::FPeachoneParams& P = SurvivorsGameConstants::PeachoneTable[Idx];
 	CachedDamage      = P.Damage;
 	CachedCooldown    = P.Cooldown;
 	CachedOrbitRadius = P.OrbitRadius;
 	CachedBombRadius  = P.BombRadius;
+	CachedAmount      = P.Amount;
 }
 
 void USurvivorsPeachoneWeapon::UpdateOrbitPos()
@@ -37,51 +38,78 @@ void USurvivorsPeachoneWeapon::Tick(float Dt)
 	if (!Game) return;
 
 	const FPassiveEffects& PE = GetPassiveEffects();
-	const float EffCooldown = CachedCooldown * PE.CooldownMult;
 
-	// 軌道角度を更新
-	const float RotSpeed = 3.0f * PE.SpeedMult;  // rad/sec
+	// 軌道角度を更新（Speed は target zone の周回速度に影響）
+	const float RotSpeed = 3.0f * PE.SpeedMult;
 	OrbitAngle += RotDir * RotSpeed * Dt;
 	UpdateOrbitPos();
 
+	// 砲撃バースト: 0.025s 間隔で target zone 内のランダム位置へ弾を発射（wiki: projectile interval）
+	if (PendingBombShots > 0 && WeaponComp)
+	{
+		BombShotTimer -= Dt;
+		while (PendingBombShots > 0 && BombShotTimer <= 0.f)
+		{
+			SpawnBombShot();
+			--PendingBombShots;
+			BombShotTimer += SurvivorsGameConstants::PeachoneProjectileInterval;
+		}
+	}
+
 	// クールダウン
 	CooldownTimer.Value = FMath::Max(0.f, CooldownTimer.Value - Dt);
-	if (CooldownTimer.IsReady() && !bPendingFire)
+	if (CooldownTimer.IsReady() && PendingBombShots == 0)
 	{
-		bPendingFire = true;
+		StartBombing();
 	}
 }
 
-void USurvivorsPeachoneWeapon::ComputeHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame)
+void USurvivorsPeachoneWeapon::StartBombing()
 {
-	if (!bPendingFire || !Game || !CollComp) return;
-	bPendingFire = false;
-
 	const FPassiveEffects& PE = GetPassiveEffects();
 	CooldownTimer = FCooldownSeconds(CachedCooldown * PE.CooldownMult);
 
-	const float EffDamage      = CachedDamage    * PE.DamageMult;
-	const float EffBombRadius  = CachedBombRadius * PE.AreaMult;
+	// ダメージはセット数で割って1 activation あたりの期待ダメージを wiki 値に近づける。
+	// 各弾がランダム散布されるため1敵への命中数は確率的に ~1/set となる。
+	BurstDamage       = CachedDamage * PE.DamageMult
+		/ static_cast<float>(SurvivorsGameConstants::PeachoneSetsPerActivation);
+	BurstImpactRadius = 10.f * PE.AreaMult;
+	BurstBombRadius   = CachedBombRadius * PE.AreaMult;
 
-	// 現在の軌道位置で爆発
-	TArray<const FSurvivorsTargetProxy*> Contacts;
-	CollComp->QueryEnemyContacts(CurrentOrbitPos, EffBombRadius, Contacts);
+	// wiki: Amount × SetsPerActivation 発を rapid fire
+	// Duration パッシブによるセット数スケールは TODO（現在は固定 4 sets）
+	const int32 EffAmount = CachedAmount + static_cast<int32>(PE.ExtraAmount);
+	PendingBombShots = EffAmount * SurvivorsGameConstants::PeachoneSetsPerActivation;
+	BombShotTimer    = 0.f;
 
-	for (const FSurvivorsTargetProxy* Proxy : Contacts)
+	if (PendingBombShots > 0)
 	{
-		if ((CurrentOrbitPos - Proxy->Pos).SizeSquared() > FMath::Square(EffBombRadius + Proxy->Radius)) continue;
-
-		const int32 EIdx = Proxy->Ref.IndexAtBuildTime;
-		if (!Game->Enemies.IsValidIndex(EIdx) || Game->Enemies[EIdx].UniqueId != Proxy->Ref.UniqueId) continue;
-		if (Game->Enemies[EIdx].bPendingRemove) continue;
-
-		FSurvivorsHitEvent Ev;
-		Ev.Type              = ESurvivorsHitType::WeaponAreaDamage;
-		Ev.Target            = Proxy->Ref;
-		Ev.Damage            = EffDamage;
-		Ev.WeaponSlot        = SlotIdx;
-		Ev.KnockbackDir      = (Proxy->Pos - Game->PlayerPos).GetSafeNormal();
-		Ev.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_2;  // Knockback=2
-		HitFrame.Events.Add(Ev);
+		SpawnBombShot();
+		--PendingBombShots;
+		BombShotTimer = SurvivorsGameConstants::PeachoneProjectileInterval;
 	}
+}
+
+void USurvivorsPeachoneWeapon::SpawnBombShot()
+{
+	if (!Game || !WeaponComp) return;
+
+	// target zone 内のランダム位置（uniform in circle: sqrt で面積均一サンプリング）
+	// OBSERVED: "bombard random points inside the current circular target zone" (weapon_peachone.md)
+	const float Angle = FMath::FRandRange(0.f, 2.f * UE_PI);
+	const float Dist  = FMath::Sqrt(FMath::FRand()) * BurstBombRadius;
+	const FVector2D ImpactPos = CurrentOrbitPos + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Dist;
+
+	FProjectileState P;
+	P.Pos               = ImpactPos;
+	P.Vel               = FVector2D::ZeroVector;
+	P.Radius            = FSimRadius(BurstImpactRadius);
+	P.Damage            = FDamage(BurstDamage);
+	P.WeaponType        = WeaponType;
+	P.WeaponSlotIdx     = SlotIdx;
+	P.LifeTime          = FProjectileLifeTime(0.1f);
+	P.bPiercing         = true;
+	P.MaxPierceCount    = 100;
+	P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_2;
+	WeaponComp->SpawnProjectile(P);
 }

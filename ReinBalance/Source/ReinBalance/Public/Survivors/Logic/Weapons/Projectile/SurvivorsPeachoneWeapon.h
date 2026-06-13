@@ -4,8 +4,9 @@
 #include "SurvivorsPeachoneWeapon.generated.h"
 
 /**
- * Peachone: 周回軌道から爆弾ドロップ（CD 毎に現在位置から爆発半径ダメージ）
- * 時計回り回転。
+ * Peachone: 周回する target zone 内のランダム位置へ高頻度で砲撃弾を発射。
+ * CD 毎に activation が開始し、Amount × PeachoneSetsPerActivation 発を
+ * PeachoneProjectileInterval(0.025s) 間隔で順次発射する（wiki・動画由来）。
  */
 UCLASS()
 class REINBALANCE_API USurvivorsPeachoneWeapon : public USurvivorsWeaponBase
@@ -14,7 +15,6 @@ class REINBALANCE_API USurvivorsPeachoneWeapon : public USurvivorsWeaponBase
 public:
 	virtual void Tick(float Dt) override;
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
-	virtual void ComputeHits(USurvivorsCollisionComponent* CollComp, FSurvivorsHitFrame& HitFrame) override;
 
 	// ---- 軌道オーブ View API ----
 	virtual int32     GetOrbitOrbCount()           const override { return 1; }
@@ -26,6 +26,7 @@ protected:
 	float CachedCooldown    = 3.0f;
 	float CachedOrbitRadius = 60.f;
 	float CachedBombRadius  = 30.f;
+	int32 CachedAmount      = 4;
 
 	// 1 = 時計回り / -1 = 反時計回り（EbonyWings で上書き）
 	float RotDir   = 1.f;
@@ -35,9 +36,16 @@ protected:
 	FVector2D CurrentOrbitPos;
 	float     OrbitAngle = 0.f;
 
-	bool bPendingFire = false;
+	// 砲撃バースト状態
+	int32 PendingBombShots  = 0;
+	float BombShotTimer     = 0.f;
+	float BurstDamage       = 0.f;
+	float BurstImpactRadius = 0.f;
+	float BurstBombRadius   = 0.f;
 
 	virtual void CacheParams();
+	void StartBombing();
+	void SpawnBombShot();
 
 private:
 	void UpdateOrbitPos();

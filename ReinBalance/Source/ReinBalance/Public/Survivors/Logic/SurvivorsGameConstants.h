@@ -510,25 +510,30 @@ namespace SurvivorsGameConstants
 		{ 999.f, 60.0f, 9999.f },  // Lv8 (未使用)
 	};
 
+	// Peachone 砲撃モデル定数（wiki由来）
+	static constexpr float PeachoneProjectileInterval = 0.025f;  // OBSERVED: 砲撃の発射間隔（weapon_peachone.md）
+	static constexpr int32 PeachoneSetsPerActivation   = 4;       // wiki: 1 activation あたり 4 set
+
 	struct FPeachoneParams
 	{
 		float Damage;
 		float Cooldown;
 		float OrbitRadius;
 		float BombRadius;
+		int32 Amount;  // projectiles per set (wiki: Lv1=4, +1/level)
 	};
 
 	// Peachone: OrbitRadius=60u 全レベル固定。BombRadius: Area100%=30u,140%=42u,180%=54u,220%=66u
-	// CD: Lv4,7 で -0.3s。Amount はコード側で管理
+	// CD: Lv4,7 で -0.3s。Amount: Lv1=4, +1/Lv まで Lv8=11（wiki由来）
 	inline constexpr FPeachoneParams PeachoneTable[MaxWeaponLevel] = {
-		{ 10.f, 1.0f, 60.f, 30.f },  // Lv1: D=10, CD=1.0, Area=100%
-		{ 10.f, 1.0f, 60.f, 42.f },  // Lv2: Area+40%
-		{ 20.f, 1.0f, 60.f, 42.f },  // Lv3: D+10
-		{ 20.f, 0.7f, 60.f, 42.f },  // Lv4: CD-0.3
-		{ 20.f, 0.7f, 60.f, 54.f },  // Lv5: Area+40%
-		{ 30.f, 0.7f, 60.f, 54.f },  // Lv6: D+10
-		{ 30.f, 0.4f, 60.f, 54.f },  // Lv7: CD-0.3
-		{ 30.f, 0.4f, 60.f, 66.f },  // Lv8: Area+40%
+		{ 10.f, 1.0f, 60.f, 30.f,  4 },  // Lv1: D=10, CD=1.0, Area=100%, Amount=4
+		{ 10.f, 1.0f, 60.f, 42.f,  5 },  // Lv2: Area+40%, Amount+1
+		{ 20.f, 1.0f, 60.f, 42.f,  6 },  // Lv3: D+10, Amount+1
+		{ 20.f, 0.7f, 60.f, 42.f,  7 },  // Lv4: CD-0.3, Amount+1
+		{ 20.f, 0.7f, 60.f, 54.f,  8 },  // Lv5: Area+40%, Amount+1
+		{ 30.f, 0.7f, 60.f, 54.f,  9 },  // Lv6: D+10, Amount+1
+		{ 30.f, 0.4f, 60.f, 54.f, 10 },  // Lv7: CD-0.3, Amount+1
+		{ 30.f, 0.4f, 60.f, 66.f, 11 },  // Lv8: Area+40%, Amount+1
 	};
 
 	// EbonyWings: Peachone と同じパラメータ・逆回転

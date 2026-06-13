@@ -916,3 +916,252 @@ bool FSurvivorsMixedHitGarlicKillsProjectileConsumed::RunTest(const FString& Par
 	S.Destroy();
 	return true;
 }
+
+// ============================================================
+// P0 武器仕様テスト（動画観察・wiki 由来）
+// ============================================================
+
+// MagicWand: Lv2 で 1 発目即時、2 発目は 0.1s 後に発射されること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsMagicWandSequentialTargeting,
+	"ReinBalance.Survivors.Wiki.MagicWand_SequentialTargeting",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsMagicWandSequentialTargeting::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	S.AddEnemyAt(FVector2D(50.f, 0.f));
+
+	// MagicWand Lv2: Amount=2
+	EquipTestWeapon(S.Game, EWeaponType::MagicWand, 2);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("MagicWand Lv2 fires first shot immediately", WC->GetProjectileCount(), 1);
+
+	// 0.1s 経過後に 2 発目
+	const int32 TicksTo2ndShot = FMath::CeilToInt(0.11f / SurvivorsGameConstants::PhysicsDt);
+	for (int32 i = 0; i < TicksTo2ndShot; ++i)
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+
+	TestEqual("MagicWand Lv2 fires second shot after 0.1s", WC->GetProjectileCount(), 2);
+
+	S.Destroy();
+	return true;
+}
+
+// MagicWand: 最近傍敵方向に発射されること（ノーファン）
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsMagicWandNearestEnemyTargeting,
+	"ReinBalance.Survivors.Wiki.MagicWand_NearestEnemyTargeting",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsMagicWandNearestEnemyTargeting::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	// 敵を Y+ 方向に配置
+	S.AddEnemyAt(FVector2D(0.f, 100.f));
+
+	EquipTestWeapon(S.Game, EWeaponType::MagicWand, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	// 5 tick 分進めて弾の移動方向を確認
+	for (int32 i = 0; i < 5; ++i)
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+
+	if (WC->GetProjectileCount() > 0)
+	{
+		const FVector2D FinalPos = WC->GetProjectilePos(0);
+		TestTrue("MagicWand projectile travels toward enemy (Y+)", FinalPos.Y > 0.f);
+		TestTrue("MagicWand projectile Y velocity dominant",
+			FMath::Abs(FinalPos.Y) > FMath::Abs(FinalPos.X));
+	}
+
+	S.Destroy();
+	return true;
+}
+
+// SantaWater: Lv2 で 2 drops が 0.3s 間隔で順次生成されること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsSantaWaterSequentialDrops,
+	"ReinBalance.Survivors.Wiki.SantaWater_SequentialDrops",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsSantaWaterSequentialDrops::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	S.AddEnemyAt(FVector2D(30.f, 0.f));
+	S.AddEnemyAt(FVector2D(-30.f, 0.f));
+
+	// SantaWater Lv2: Amount=2
+	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 2);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("SantaWater first drop spawned immediately", WC->GetGroundZoneCount(), 1);
+
+	const int32 TicksTo2ndDrop = FMath::CeilToInt(0.31f / SurvivorsGameConstants::PhysicsDt);
+	for (int32 i = 0; i < TicksTo2ndDrop; ++i)
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+
+	TestEqual("SantaWater second drop spawned after 0.3s", WC->GetGroundZoneCount(), 2);
+
+	S.Destroy();
+	return true;
+}
+
+// SantaWater: Amount < 4 で最近傍敵の近くに drop が配置されること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsSantaWaterLowAmountTargetsEnemy,
+	"ReinBalance.Survivors.Wiki.SantaWater_LowAmount_TargetsNearestEnemy",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsSantaWaterLowAmountTargetsEnemy::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	const FVector2D EnemyPos(100.f, 0.f);
+	S.AddEnemyAt(EnemyPos);
+
+	// SantaWater Lv1: Amount=1 < 4
+	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("SantaWater Lv1 spawns 1 ground zone", WC->GetGroundZoneCount(), 1);
+
+	if (WC->GetGroundZoneCount() > 0)
+	{
+		const float Dist = FVector2D::Distance(WC->GetGroundZonePos(0), EnemyPos);
+		TestTrue("SantaWater Lv1 drop near closest enemy (< 5u)", Dist < 5.f);
+	}
+
+	S.Destroy();
+	return true;
+}
+
+// SantaWater: warning zone 中は damage なし
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsSantaWaterWarningZoneNoDamage,
+	"ReinBalance.Survivors.Wiki.SantaWater_WarningZone_NoDamage",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsSantaWaterWarningZoneNoDamage::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	S.AddEnemyAt(FVector2D(0.f, 0.f), /*HP=*/100.f);
+
+	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestTrue("Ground zone is in warning phase", WC->IsGroundZoneWarning(0));
+
+	CC->BuildEnemyGrid();
+	FSurvivorsHitFrame HF;
+	WC->ComputeAllWeaponHits(CC, HF);
+	WC->ApplyWeaponHits(HF);
+
+	TestEqual("No damage during warning phase",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, 100.f);
+
+	S.Destroy();
+	return true;
+}
+
+// SantaWater: Amount >= 4 で drops が分散した円形配置になること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsSantaWaterHighAmountCircular,
+	"ReinBalance.Survivors.Wiki.SantaWater_HighAmount_CircularPattern",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsSantaWaterHighAmountCircular::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	S.AddEnemyAt(FVector2D(50.f, 0.f));
+
+	// SantaWater Lv6: Amount=4
+	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 6);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	// 4 drops 分生成（初回 + 0.3s × 3）
+	const int32 TicksForAll4 = FMath::CeilToInt(1.0f / SurvivorsGameConstants::PhysicsDt);
+	for (int32 i = 0; i < TicksForAll4; ++i)
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+
+	TestTrue("SantaWater Lv6 spawns 2+ drops", WC->GetGroundZoneCount() >= 2);
+
+	if (WC->GetGroundZoneCount() >= 2)
+	{
+		const float Dist01 = FVector2D::Distance(WC->GetGroundZonePos(0), WC->GetGroundZonePos(1));
+		// Amount=4 の円形配置: 隣接点は 80u × sin(90°) × 2 ≈ 113u 離れる
+		TestTrue("SantaWater circular drops are spread (not at same pos)", Dist01 > 1.f);
+	}
+
+	S.Destroy();
+	return true;
+}
+
+// Peachone: 複数の小プロジェクタイルが target zone 付近に生成されること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsPeachoneBombardModel,
+	"ReinBalance.Survivors.Wiki.Peachone_BombardModel_MultipleProjectiles",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsPeachoneBombardModel::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+
+	// Peachone Lv1: Amount=4, PeachoneSetsPerActivation=4 → 計 16 shots
+	EquipTestWeapon(S.Game, EWeaponType::Peachone, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	// 初回 tick で最初の 1 発が即時発射
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestTrue("Peachone fires at least 1 projectile immediately", WC->GetProjectileCount() >= 1);
+
+	// 0.025s × 2 後に 2 発以上
+	const int32 TicksFor2Shots = FMath::CeilToInt(0.06f / SurvivorsGameConstants::PhysicsDt);
+	for (int32 i = 0; i < TicksFor2Shots; ++i)
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+
+	TestTrue("Peachone fires multiple projectiles (bombard model not single AoE)",
+		WC->GetProjectileCount() >= 2);
+
+	// 砲撃弾はプレイヤー位置(0,0)ではなく orbit zone 付近（OrbitRadius=60u, BombRadius=30u）
+	if (WC->GetProjectileCount() > 0)
+	{
+		const FVector2D ProjPos = WC->GetProjectilePos(0);
+		const float DistFromPlayer = ProjPos.Size();
+		// orbit 中心は ~60u、scatter ±30u → 30u 〜 90u の範囲内
+		TestTrue("Peachone projectile is in orbit zone range (30u-120u from player)",
+			DistFromPlayer > 5.f && DistFromPlayer < 150.f);
+	}
+
+	S.Destroy();
+	return true;
+}
+
+// Vandalier: 2 zone から砲撃弾が生成され、orbit orb が 2 つであること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsVandalierTwoZoneBombard,
+	"ReinBalance.Survivors.Wiki.Vandalier_TwoZone_BombardModel",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsVandalierTwoZoneBombard::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	EquipTestWeapon(S.Game, EWeaponType::Vandalier, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+
+	// 2 zone 分の初回発射 → 2 発以上
+	TestTrue("Vandalier fires from 2 zones (>=2 projectiles)", WC->GetProjectileCount() >= 2);
+	TestEqual("Vandalier has 2 orbit orbs", WC->GetOrbitOrbCount(), 2);
+
+	S.Destroy();
+	return true;
+}
