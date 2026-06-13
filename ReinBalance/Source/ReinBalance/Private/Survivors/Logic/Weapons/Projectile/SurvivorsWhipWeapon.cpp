@@ -79,7 +79,7 @@ void USurvivorsWhipWeapon::StartBurst()
 	BurstLifeTime = 0.20f * PE.DurationMult;
 	BurstFaceSign = LastFaceSign;
 	BurstIndex = 0;
-	PendingWhips = FMath::Max(2, CachedAmount + static_cast<int32>(PE.ExtraAmount));
+	PendingWhips = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 	WhipBurstTimer = 0.f;
 	if (PendingWhips > 0)
 	{

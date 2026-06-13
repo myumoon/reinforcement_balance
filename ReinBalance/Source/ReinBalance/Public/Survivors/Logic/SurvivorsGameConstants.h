@@ -129,10 +129,11 @@ namespace SurvivorsGameConstants
 		int32 Amount;
 	};
 
-	// Whip: Area100%=50u。CD は全レベル固定 1.35s。Lv2 で Amount+1
+	// Whip: Area100%=50u。CD は全レベル固定 1.35s。
+	// Amount: Lv1 baseline=2（左→右交互スイング、0.3s間隔）。Lv2以降 Amount 変化なし。
 	inline constexpr FWhipParams WhipTable[MaxWeaponLevel] = {
-		{ 10.f, 1.35f, 50.f, 15.f, 1 },  // Lv1: D=10, Area=100%, Amount=1
-		{ 10.f, 1.35f, 50.f, 15.f, 2 },  // Lv2: Amount+1
+		{ 10.f, 1.35f, 50.f, 15.f, 2 },  // Lv1: D=10, Area=100%, Amount=2(baseline)
+		{ 10.f, 1.35f, 50.f, 15.f, 2 },  // Lv2: D same
 		{ 15.f, 1.35f, 50.f, 15.f, 2 },  // Lv3: D+5
 		{ 20.f, 1.35f, 55.f, 15.f, 2 },  // Lv4: D+5, Area+10%
 		{ 25.f, 1.35f, 55.f, 15.f, 2 },  // Lv5: D+5
@@ -174,15 +175,16 @@ namespace SurvivorsGameConstants
 	// MagicWand: Speed は全レベル固定。
 	// OBSERVED: magic_wand_bullet2.mp4 frame 289→300, 61.8px/11f × 0.4167u/px ≈ 140u/s
 	// acceptance range 120-165u/s。wiki の 100%=600u は Camera Z=2000 基準と合わないため動画値を採用。
+	// Amount: Lv1 baseline=2（1発目即時、2発目0.1s後）。Lv2=3, Lv4=4, Lv6=5。
 	inline constexpr FMagicWandParams MagicWandTable[MaxWeaponLevel] = {
-		{ 10.f, 1.20f, 140.f, 1, 1 },  // Lv1: D=10, CD=1.20, Speed=140u/s(OBSERVED), Amount=1
-		{ 10.f, 1.20f, 140.f, 2, 1 },  // Lv2: Amount+1
-		{ 10.f, 1.00f, 140.f, 2, 1 },  // Lv3: CD-0.20
-		{ 10.f, 1.00f, 140.f, 3, 1 },  // Lv4: Amount+1
-		{ 20.f, 1.00f, 140.f, 3, 1 },  // Lv5: D+10
-		{ 20.f, 1.00f, 140.f, 4, 1 },  // Lv6: Amount+1
-		{ 20.f, 1.00f, 140.f, 4, 2 },  // Lv7: Pierce+1
-		{ 30.f, 1.00f, 140.f, 4, 2 },  // Lv8: D+10
+		{ 10.f, 1.20f, 140.f, 2, 1 },  // Lv1: D=10, CD=1.20, Speed=140u/s, Amount=2(baseline)
+		{ 10.f, 1.20f, 140.f, 3, 1 },  // Lv2: Amount+1
+		{ 10.f, 1.00f, 140.f, 3, 1 },  // Lv3: CD-0.20
+		{ 10.f, 1.00f, 140.f, 4, 1 },  // Lv4: Amount+1
+		{ 20.f, 1.00f, 140.f, 4, 1 },  // Lv5: D+10
+		{ 20.f, 1.00f, 140.f, 5, 1 },  // Lv6: Amount+1
+		{ 20.f, 1.00f, 140.f, 5, 2 },  // Lv7: Pierce+1
+		{ 30.f, 1.00f, 140.f, 5, 2 },  // Lv8: D+10
 	};
 
 	// HolyWand (MagicWand 進化): Damage=30, CD=0.5s, Amount=4, Pierce=2
@@ -211,15 +213,16 @@ namespace SurvivorsGameConstants
 
 	// Knife: CD=1.0s 全レベル固定、Speed=800u(100%) 全レベル固定
 	// Pierce: Lv1=1体, Lv5=2体, Lv8=3体
+	// Amount: Lv1 baseline=2（1発目即時、2発目0.1s後）。Lv2=3, Lv3=4, Lv4=5, Lv6=6, Lv7=7。
 	inline constexpr FKnifeParams KnifeTable[MaxWeaponLevel] = {
-		{  6.5f, 1.00f, 800.f, 1, 1 },  // Lv1: D=6.5, Amount=1, Pierce=1
-		{  6.5f, 1.00f, 800.f, 2, 1 },  // Lv2: Amount+1
-		{ 11.5f, 1.00f, 800.f, 3, 1 },  // Lv3: D+5, Amount+1
-		{ 11.5f, 1.00f, 800.f, 4, 1 },  // Lv4: Amount+1
-		{ 11.5f, 1.00f, 800.f, 4, 2 },  // Lv5: Pierce+1
-		{ 11.5f, 1.00f, 800.f, 5, 2 },  // Lv6: Amount+1
-		{ 16.5f, 1.00f, 800.f, 6, 2 },  // Lv7: D+5, Amount+1
-		{ 16.5f, 1.00f, 800.f, 6, 3 },  // Lv8: Pierce+1
+		{  6.5f, 1.00f, 800.f, 2, 1 },  // Lv1: D=6.5, Amount=2(baseline), Pierce=1
+		{  6.5f, 1.00f, 800.f, 3, 1 },  // Lv2: Amount+1
+		{ 11.5f, 1.00f, 800.f, 4, 1 },  // Lv3: D+5, Amount+1
+		{ 11.5f, 1.00f, 800.f, 5, 1 },  // Lv4: Amount+1
+		{ 11.5f, 1.00f, 800.f, 5, 2 },  // Lv5: Pierce+1
+		{ 11.5f, 1.00f, 800.f, 6, 2 },  // Lv6: Amount+1
+		{ 16.5f, 1.00f, 800.f, 7, 2 },  // Lv7: D+5, Amount+1
+		{ 16.5f, 1.00f, 800.f, 7, 3 },  // Lv8: Pierce+1
 	};
 
 	// ThousandEdge (Knife 進化): Damage=16.5, CD=0.35s, Speed=1200u(150%), Amount=6, Pierce=3
@@ -246,19 +249,19 @@ namespace SurvivorsGameConstants
 	};
 
 	// Axe: CD=4.0s 全レベル固定、Speed=360u(100%) 全レベル固定
-	// Amount: Lv1=1,Lv2=2,Lv5=3。Pierce: Lv1=3体,Lv4=5体,Lv7=7体
+	// Amount: Lv1 baseline=2（1発目即時、2発目0.2s後）。Lv2=3, Lv5=4。Pierce: Lv1=3体,Lv4=5体,Lv7=7体。
 	// ArcHeight の意味: 重力式 g = InitVelY²/ArcHeight における中間パラメータ。
 	// 物理的な頂点高さ ≈ ArcHeight/2 (連続近似)。Lv1 ArcHeight=120 → apex ≈ 60u。
 	// OBSERVED: axe_bullet2.mp4 frame 80-100, 130-150px × 0.4167u/px ≈ 54-63u。acceptance 50-75u。
 	inline constexpr FAxeParams AxeTable[MaxWeaponLevel] = {
-		{  20.f, 4.00f, 360.f, 120.f, 1, 3 },  // Lv1: D=20, ArcHeight=120→apex≈60u(OBSERVED), Pierce=3
-		{  20.f, 4.00f, 360.f, 120.f, 2, 3 },  // Lv2: Amount+1
-		{  40.f, 4.00f, 360.f, 120.f, 2, 3 },  // Lv3: D+20
-		{  40.f, 4.00f, 360.f, 120.f, 2, 5 },  // Lv4: Pierce+2
-		{  40.f, 4.00f, 360.f, 120.f, 3, 5 },  // Lv5: Amount+1
-		{  60.f, 4.00f, 360.f, 120.f, 3, 5 },  // Lv6: D+20
-		{  60.f, 4.00f, 360.f, 120.f, 3, 7 },  // Lv7: Pierce+2
-		{  80.f, 4.00f, 360.f, 120.f, 3, 7 },  // Lv8: D+20
+		{  20.f, 4.00f, 360.f, 120.f, 2, 3 },  // Lv1: D=20, Amount=2(baseline), ArcHeight=120→apex≈60u
+		{  20.f, 4.00f, 360.f, 120.f, 3, 3 },  // Lv2: Amount+1
+		{  40.f, 4.00f, 360.f, 120.f, 3, 3 },  // Lv3: D+20
+		{  40.f, 4.00f, 360.f, 120.f, 3, 5 },  // Lv4: Pierce+2
+		{  40.f, 4.00f, 360.f, 120.f, 4, 5 },  // Lv5: Amount+1
+		{  60.f, 4.00f, 360.f, 120.f, 4, 5 },  // Lv6: D+20
+		{  60.f, 4.00f, 360.f, 120.f, 4, 7 },  // Lv7: Pierce+2
+		{  80.f, 4.00f, 360.f, 120.f, 4, 7 },  // Lv8: D+20
 	};
 
 	// DeathSpiral (Axe 進化): Damage=60, CD=4.0s, Speed=288u(80%), ArcHeight=144u, Pierce=1000(無限貫通)
@@ -286,15 +289,16 @@ namespace SurvivorsGameConstants
 
 	// Cross: CD=2.0s 全レベル固定。Speed は Lv3 で +25%、Lv6 で +25%。
 	// Speed: 100%=320u → 125%=400u → 150%=480u
+	// Amount: Lv1 baseline=2（1発目即時、2発目0.1s後）。Lv4=3, Lv7=4。
 	inline constexpr FCrossParams CrossTable[MaxWeaponLevel] = {
-		{  5.f, 2.00f, 320.f, 12.0f, 1, KnockbackSim_1 },  // Lv1: D=5,  Speed=100%
-		{ 15.f, 2.00f, 320.f, 12.0f, 1, KnockbackSim_1 },  // Lv2: D+10
-		{ 15.f, 2.00f, 400.f, 13.2f, 1, KnockbackSim_1 },  // Lv3: Speed+25%, Area+10%
-		{ 15.f, 2.00f, 400.f, 13.2f, 2, KnockbackSim_1 },  // Lv4: Amount+1
-		{ 25.f, 2.00f, 400.f, 13.2f, 2, KnockbackSim_1 },  // Lv5: D+10
-		{ 25.f, 2.00f, 480.f, 14.4f, 2, KnockbackSim_1 },  // Lv6: Speed+25%, Area+10%
-		{ 25.f, 2.00f, 480.f, 14.4f, 3, KnockbackSim_1 },  // Lv7: Amount+1
-		{ 35.f, 2.00f, 480.f, 14.4f, 3, KnockbackSim_1 },  // Lv8: D+10
+		{  5.f, 2.00f, 320.f, 12.0f, 2, KnockbackSim_1 },  // Lv1: D=5, Speed=100%, Amount=2(baseline)
+		{ 15.f, 2.00f, 320.f, 12.0f, 2, KnockbackSim_1 },  // Lv2: D+10
+		{ 15.f, 2.00f, 400.f, 13.2f, 2, KnockbackSim_1 },  // Lv3: Speed+25%, Area+10%
+		{ 15.f, 2.00f, 400.f, 13.2f, 3, KnockbackSim_1 },  // Lv4: Amount+1
+		{ 25.f, 2.00f, 400.f, 13.2f, 3, KnockbackSim_1 },  // Lv5: D+10
+		{ 25.f, 2.00f, 480.f, 14.4f, 3, KnockbackSim_1 },  // Lv6: Speed+25%, Area+10%
+		{ 25.f, 2.00f, 480.f, 14.4f, 4, KnockbackSim_1 },  // Lv7: Amount+1
+		{ 35.f, 2.00f, 480.f, 14.4f, 4, KnockbackSim_1 },  // Lv8: D+10
 	};
 
 	// HeavenSword (Cross 進化): Damage=77, CD=3.3s, Speed=640u(200%)
@@ -323,15 +327,16 @@ namespace SurvivorsGameConstants
 
 	// KingBible: CD=3.0s。OrbitRadius: 100%=50u,125%=62.5u,150%=75u
 	// RotSpeed: 100%=4.0rad/s,130%=5.2rad/s,160%=6.4rad/s
+	// Amount: Lv1 baseline=2（2冊が円周上に180°等間隔配置）。Lv2=3, Lv5=4, Lv8=5。
 	inline constexpr FKingBibleParams KingBibleTable[MaxWeaponLevel] = {
-		{ 10.f, 3.f, 3.0f, 50.0f, 1, 4.0f, KnockbackSim_1 },  // Lv1: D=10, OR=100%, RS=100%, Amount=1
-		{ 10.f, 3.f, 3.0f, 50.0f, 2, 4.0f, KnockbackSim_1 },  // Lv2: Amount+1
-		{ 10.f, 3.f, 3.0f, 62.5f, 2, 5.2f, KnockbackSim_1 },  // Lv3: Area+25%, Speed+30%
-		{ 20.f, 3.f, 3.5f, 62.5f, 2, 5.2f, KnockbackSim_1 },  // Lv4: D+10, Duration+0.5s
-		{ 20.f, 3.f, 3.5f, 62.5f, 3, 5.2f, KnockbackSim_1 },  // Lv5: Amount+1
-		{ 20.f, 3.f, 3.5f, 75.0f, 3, 6.4f, KnockbackSim_1 },  // Lv6: Area+25%, Speed+30%
-		{ 30.f, 3.f, 4.0f, 75.0f, 3, 6.4f, KnockbackSim_1 },  // Lv7: D+10, Duration+0.5s
-		{ 30.f, 3.f, 4.0f, 75.0f, 4, 6.4f, KnockbackSim_1 },  // Lv8: Amount+1
+		{ 10.f, 3.f, 3.0f, 50.0f, 2, 4.0f, KnockbackSim_1 },  // Lv1: D=10, OR=100%, RS=100%, Amount=2(baseline)
+		{ 10.f, 3.f, 3.0f, 50.0f, 3, 4.0f, KnockbackSim_1 },  // Lv2: Amount+1
+		{ 10.f, 3.f, 3.0f, 62.5f, 3, 5.2f, KnockbackSim_1 },  // Lv3: Area+25%, Speed+30%
+		{ 20.f, 3.f, 3.5f, 62.5f, 3, 5.2f, KnockbackSim_1 },  // Lv4: D+10, Duration+0.5s
+		{ 20.f, 3.f, 3.5f, 62.5f, 4, 5.2f, KnockbackSim_1 },  // Lv5: Amount+1
+		{ 20.f, 3.f, 3.5f, 75.0f, 4, 6.4f, KnockbackSim_1 },  // Lv6: Area+25%, Speed+30%
+		{ 30.f, 3.f, 4.0f, 75.0f, 4, 6.4f, KnockbackSim_1 },  // Lv7: D+10, Duration+0.5s
+		{ 30.f, 3.f, 4.0f, 75.0f, 5, 6.4f, KnockbackSim_1 },  // Lv8: Amount+1
 	};
 
 	// UnholyVespers (KingBible 進化): Damage=30, OrbitRadius=87.5u(175%), RotSpeed=6.0(150%), Amount=4
@@ -394,16 +399,18 @@ namespace SurvivorsGameConstants
 		int32 Amount;
 	};
 
-	// SantaWater: CD=4.5s 全レベル固定。Radius: 100%=30u。Duration は Lv3,5,7 で増加
+	// SantaWater: CD=4.5s 全レベル固定。Radius: 100%=30u。Duration は Lv3,5,7 で増加。
+	// Amount: Lv1 baseline=2（1個目即時、2個目0.3s後）。Amount<4: 敵付近 drop。Amount>=4: 円形配置。
+	// KingBible の orbit 等間隔仕様とは別物（SantaWater は敵ターゲット or 円形配置）。
 	inline constexpr FSantaWaterParams SantaWaterTable[MaxWeaponLevel] = {
-		{ 10.f, 4.50f, 30.f, 2.00f, 1 },  // Lv1: D=10, R=100%, Dur=2.0, Amount=1
-		{ 10.f, 4.50f, 36.f, 2.00f, 2 },  // Lv2: R+20%(120%), Amount+1
-		{ 20.f, 4.50f, 36.f, 2.50f, 2 },  // Lv3: D+10, Dur+0.50
-		{ 20.f, 4.50f, 42.f, 2.50f, 3 },  // Lv4: R+20%(140%), Amount+1
-		{ 30.f, 4.50f, 42.f, 2.75f, 3 },  // Lv5: D+10, Dur+0.25
-		{ 30.f, 4.50f, 48.f, 2.75f, 4 },  // Lv6: R+20%(160%), Amount+1
-		{ 35.f, 4.50f, 48.f, 3.00f, 4 },  // Lv7: D+5,  Dur+0.25
-		{ 40.f, 4.50f, 54.f, 3.00f, 4 },  // Lv8: D+5,  R+20%(180%)
+		{ 10.f, 4.50f, 30.f, 2.00f, 2 },  // Lv1: D=10, R=100%, Dur=2.0, Amount=2(baseline)
+		{ 10.f, 4.50f, 36.f, 2.00f, 3 },  // Lv2: R+20%(120%), Amount+1
+		{ 20.f, 4.50f, 36.f, 2.50f, 3 },  // Lv3: D+10, Dur+0.50
+		{ 20.f, 4.50f, 42.f, 2.50f, 4 },  // Lv4: R+20%(140%), Amount+1 → 円形配置開始
+		{ 30.f, 4.50f, 42.f, 2.75f, 4 },  // Lv5: D+10, Dur+0.25
+		{ 30.f, 4.50f, 48.f, 2.75f, 5 },  // Lv6: R+20%(160%), Amount+1
+		{ 35.f, 4.50f, 48.f, 3.00f, 5 },  // Lv7: D+5,  Dur+0.25
+		{ 40.f, 4.50f, 54.f, 3.00f, 5 },  // Lv8: D+5,  R+20%(180%)
 	};
 
 	// LaBorra (SantaWater 進化): Damage=40, CD=4.0s, Radius=60u(200%), Duration=4.0s, Amount=4
@@ -431,15 +438,16 @@ namespace SurvivorsGameConstants
 
 	// Runetracer: CD=3.0s 全レベル固定。Speed: 100%=440u,120%=528u,140%=616u
 	// Duration/Amount は仕様値を使用。MaxBounce は既存の壁反射寿命近似。
+	// Amount: Lv1 baseline=2（1発目即時、2発目0.2s後）。Lv4=3, Lv7=4。
 	inline constexpr FRunetracerParams RunetracerTable[MaxWeaponLevel] = {
-		{ 10.f, 3.00f, 440.f, 2.25f, 1, 3 },  // Lv1: D=10, Speed=100%
-		{ 15.f, 3.00f, 528.f, 2.25f, 1, 4 },  // Lv2: D+5, Speed+20%
-		{ 20.f, 3.00f, 528.f, 2.55f, 1, 4 },  // Lv3: D+5, Duration+0.3s
-		{ 20.f, 3.00f, 528.f, 2.55f, 2, 5 },  // Lv4: Amount+1
-		{ 25.f, 3.00f, 616.f, 2.55f, 2, 5 },  // Lv5: D+5, Speed+20%
-		{ 30.f, 3.00f, 616.f, 2.85f, 2, 6 },  // Lv6: D+5, Duration+0.3s
-		{ 30.f, 3.00f, 616.f, 2.85f, 3, 6 },  // Lv7: Amount+1
-		{ 30.f, 3.00f, 616.f, 3.25f, 3, 7 },  // Lv8: Duration+0.4s
+		{ 10.f, 3.00f, 440.f, 2.25f, 2, 3 },  // Lv1: D=10, Speed=100%, Amount=2(baseline)
+		{ 15.f, 3.00f, 528.f, 2.25f, 2, 4 },  // Lv2: D+5, Speed+20%
+		{ 20.f, 3.00f, 528.f, 2.55f, 2, 4 },  // Lv3: D+5, Duration+0.3s
+		{ 20.f, 3.00f, 528.f, 2.55f, 3, 5 },  // Lv4: Amount+1
+		{ 25.f, 3.00f, 616.f, 2.55f, 3, 5 },  // Lv5: D+5, Speed+20%
+		{ 30.f, 3.00f, 616.f, 2.85f, 3, 6 },  // Lv6: D+5, Duration+0.3s
+		{ 30.f, 3.00f, 616.f, 2.85f, 4, 6 },  // Lv7: Amount+1
+		{ 30.f, 3.00f, 616.f, 3.25f, 4, 7 },  // Lv8: Duration+0.4s
 	};
 
 	// NO FUTURE (Runetracer 進化): Damage=30, CD=1.0s, Speed=1232u(280%), MaxBounce=7

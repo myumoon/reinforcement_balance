@@ -74,8 +74,6 @@ void USurvivorsKnifeWeapon::StartBurst()
 	BurstRadius = 6.f * PE.AreaMult;
 	BurstLifeTime = 1.5f * PE.DurationMult;
 	BurstPierce = CachedPierce;
-	// wiki: Knife Lv1 Amount=1, Lv2=2, ... 直接使用。
-	// knife_bullet2 サンプルは Lv2 相当（Amount=2）で撮影された動画。
 	PendingKnifeShots = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 	KnifeBurstTimer = 0.f;
 	if (PendingKnifeShots > 0)
