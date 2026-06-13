@@ -162,6 +162,13 @@ static void TickTestWeaponsForSeconds(USurvivorsWeaponComponent* WC, float Secon
 	TickTestWeaponsForSteps(WC, SurvivorsStepsForSeconds(Seconds));
 }
 
+static float TickTestWeaponsForSecondsMeasured(USurvivorsWeaponComponent* WC, float Seconds)
+{
+	const int32 Steps = SurvivorsStepsForSeconds(Seconds);
+	TickTestWeaponsForSteps(WC, Steps);
+	return Steps * SurvivorsGameConstants::PhysicsDt;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsWikiLevelRequirements,
 	"ReinBalance.Survivors.Wiki.LevelRequirements",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -973,6 +980,45 @@ bool FSurvivorsMagicWandSequentialTargeting::RunTest(const FString& Parameters)
 	return true;
 }
 
+// MagicWand: magic_wand_bullet2.mp4 の frame 289→300 で、弾中心が
+// 約61.8px / 11f 移動。Camera Z=2000 基準(800u/1920px)で約140u/s。
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsMagicWandVideoProjectileSpeed,
+	"ReinBalance.Survivors.Video.MagicWand_ProjectileSpeed_140u",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsMagicWandVideoProjectileSpeed::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	S.AddEnemyAt(FVector2D(1000.f, 0.f), 10000.f);
+
+	EquipTestWeapon(S.Game, EWeaponType::MagicWand, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	if (!TestTrue("Magic Wand projectile exists", WC->GetProjectileCount() > 0))
+	{
+		S.Destroy();
+		return false;
+	}
+
+	const FVector2D StartPos = WC->GetProjectilePos(0);
+	const float Elapsed = TickTestWeaponsForSecondsMeasured(WC, 0.50f);
+	if (!TestTrue("Magic Wand projectile remains alive for speed sample", WC->GetProjectileCount() > 0))
+	{
+		S.Destroy();
+		return false;
+	}
+
+	const float Speed = FVector2D::Distance(WC->GetProjectilePos(0), StartPos) / Elapsed;
+	TestTrue(FString::Printf(TEXT("Magic Wand video speed %.1fu/s should stay near 140u/s"), Speed),
+		Speed >= 120.f && Speed <= 165.f);
+
+	S.Destroy();
+	return true;
+}
+
 // Cross: cross_bullet2.mp4 / weapon_cross.md の 2発サンプルは 0.1s 間隔の短い sequence。
 // 同じ +X 最近傍敵に向ける場合、追加弾も fan spread ではなく +X 方向へ飛ぶ。
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsCrossVideoBullet2Cadence,
@@ -1010,6 +1056,40 @@ bool FSurvivorsCrossVideoBullet2Cadence::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Cross: cross_bullet2.mp4 の見やすい区間では、右向きに出た Cross が
+// プレイヤー中心から約170-180px(=70-75u)の距離で折り返している。
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsCrossVideoReverseDistance,
+	"ReinBalance.Survivors.Video.Cross_ReverseDistance_75u",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsCrossVideoReverseDistance::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	S.AddEnemyAt(FVector2D(200.f, 0.f), 10000.f);
+
+	EquipTestWeapon(S.Game, EWeaponType::Cross, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Cross Lv1 first volley has one projectile", WC->GetProjectileCount(), 1);
+
+	float MaxForwardDistance = 0.f;
+	for (int32 Step = 0; Step < SurvivorsStepsForSeconds(1.0f); ++Step)
+	{
+		if (WC->GetProjectileCount() <= 0) break;
+		MaxForwardDistance = FMath::Max(MaxForwardDistance, WC->GetProjectilePos(0).X);
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	}
+
+	TestTrue(FString::Printf(TEXT("Cross reverse distance %.1fu should match video range 60-90u"), MaxForwardDistance),
+		MaxForwardDistance >= 60.f && MaxForwardDistance <= 90.f);
+
+	S.Destroy();
+	return true;
+}
+
 // Cross: weapon_cross.md says the projectile returns, then continues until it leaves the screen;
 // it must not be removed just because the next 2.0s cooldown volley starts.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsCrossPersistsIntoNextVolley,
@@ -1032,6 +1112,39 @@ bool FSurvivorsCrossPersistsIntoNextVolley::RunTest(const FString& Parameters)
 	TickTestWeaponsForSeconds(WC, 2.05f);
 	TestTrue("Cross previous projectile is still alive when the next cooldown volley starts",
 		WC->GetProjectileCount() >= 2);
+
+	S.Destroy();
+	return true;
+}
+
+// Axe: axe_bullet2.mp4 の frame 80-100 付近では、最初の Axe の上昇量が
+// プレイヤーHPバー中心から約130-150px(=54-63u)。動画基準の頂点は約60u。
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsAxeVideoApexHeight,
+	"ReinBalance.Survivors.Video.Axe_ApexHeight_60u",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsAxeVideoApexHeight::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	EquipTestWeapon(S.Game, EWeaponType::Axe, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+
+	float MaxHeight = 0.f;
+	for (int32 Step = 0; Step < SurvivorsStepsForSeconds(1.0f); ++Step)
+	{
+		if (WC->GetProjectileCount() > 0)
+		{
+			MaxHeight = FMath::Max(MaxHeight, WC->GetProjectilePos(0).Y);
+		}
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	}
+
+	TestTrue(FString::Printf(TEXT("Axe apex %.1fu should match video range 50-75u"), MaxHeight),
+		MaxHeight >= 50.f && MaxHeight <= 75.f);
 
 	S.Destroy();
 	return true;
@@ -1122,6 +1235,45 @@ bool FSurvivorsRunetracerDuration225Seconds::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Runetracer: wiki/spec の Hitbox Delay は0.5s。同じ rune は同じ敵に
+// 0.5s より短い間隔では再ヒットせず、0.5s 経過後は再ヒットできる。
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsRunetracerHitboxDelayAllowsRehit,
+	"ReinBalance.Survivors.Wiki.Runetracer_HitboxDelay_0_5s_Rehit",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+bool FSurvivorsRunetracerHitboxDelayAllowsRehit::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	S.AddEnemyAt(FVector2D::ZeroVector, 200.f);
+
+	FProjectileState Proj;
+	Proj.Pos = FVector2D::ZeroVector;
+	Proj.Radius = FSimRadius(10.f);
+	Proj.Damage = FDamage(10.f);
+	Proj.WeaponType = EWeaponType::Runetracer;
+	Proj.WeaponSlotIdx = 1;
+	Proj.LifeTime = FProjectileLifeTime(5.f);
+	Proj.bPiercing = true;
+	FSurvivorsGameTestAccess::WeaponComp(S.Game)->SpawnProjectile(Proj);
+
+	S.RunWeaponHits();
+	const float HPAfterFirst = FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP;
+	TestTrue("Runetracer first hit deals damage", FMath::IsNearlyEqual(HPAfterFirst, 190.f, 0.01f));
+
+	S.RunWeaponHits();
+	TestEqual("Runetracer does not re-hit before 0.5s",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, HPAfterFirst);
+
+	FSurvivorsGameTestAccess::ElapsedTime(S.Game) += 0.51f;
+	S.RunWeaponHits();
+	TestTrue("Runetracer re-hits after 0.5s hitbox delay",
+		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, HPAfterFirst - 10.f, 0.01f));
+
+	S.Destroy();
+	return true;
+}
+
 // Fire Wand: fire_wand_bullet4.mp4 shows a 4-fireball baseline fan, with 0.02s table interval.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsFireWandVideoBullet4Baseline,
 	"ReinBalance.Survivors.Wiki.FireWand_VideoBullet4_Baseline",
@@ -1147,6 +1299,95 @@ bool FSurvivorsFireWandVideoBullet4Baseline::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("Fire Wand projectile %d travels generally toward the selected +X enemy"), i),
 			WC->GetProjectilePos(i).X > 0.f);
 	}
+
+	S.Destroy();
+	return true;
+}
+
+// Fire Wand: fire_wand_bullet4.mp4 frame 290/300 の4発分離区間では、
+// 扇全体は約16度、1 projectile step は約5.3度。
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsFireWandVideoFanAngle,
+	"ReinBalance.Survivors.Video.FireWand_FanAngle_16deg",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsFireWandVideoFanAngle::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	S.AddEnemyAt(FVector2D(200.f, 0.f), 10000.f);
+
+	EquipTestWeapon(S.Game, EWeaponType::FireWand, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TickTestWeaponsForSeconds(WC, 0.08f);
+	TestEqual("Fire Wand Lv1 has four fireballs for angle sample", WC->GetProjectileCount(), 4);
+
+	TArray<float> AnglesDeg;
+	for (int32 i = 0; i < WC->GetProjectileCount(); ++i)
+	{
+		const FVector2D Delta = WC->GetProjectilePos(i) - FSurvivorsGameTestAccess::PlayerPos(S.Game);
+		AnglesDeg.Add(FMath::RadiansToDegrees(FMath::Atan2(Delta.Y, Delta.X)));
+	}
+	AnglesDeg.Sort();
+
+	if (TestTrue("Fire Wand angle sample has four angles", AnglesDeg.Num() == 4))
+	{
+		const float SpreadDeg = AnglesDeg.Last() - AnglesDeg[0];
+		TestTrue(FString::Printf(TEXT("Fire Wand fan spread %.1fdeg should match video range 14-18deg"), SpreadDeg),
+			SpreadDeg >= 14.f && SpreadDeg <= 18.f);
+	}
+
+	S.Destroy();
+	return true;
+}
+
+// Fire Wand: fire_wand_bullet4.mp4 frame 290→300 では、分離した4発が
+// 約38-39px / 10f 移動。Camera Z=2000 基準で約95-100u/s。
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsFireWandVideoProjectileSpeed,
+	"ReinBalance.Survivors.Video.FireWand_ProjectileSpeed_96u",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsFireWandVideoProjectileSpeed::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	S.AddEnemyAt(FVector2D(200.f, 0.f), 10000.f);
+
+	EquipTestWeapon(S.Game, EWeaponType::FireWand, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TickTestWeaponsForSeconds(WC, 0.08f);
+	if (!TestTrue("Fire Wand Lv1 has four fireballs for speed sample", WC->GetProjectileCount() == 4))
+	{
+		S.Destroy();
+		return false;
+	}
+
+	TArray<FVector2D> StartPositions;
+	for (int32 i = 0; i < WC->GetProjectileCount(); ++i)
+	{
+		StartPositions.Add(WC->GetProjectilePos(i));
+	}
+
+	const float Elapsed = TickTestWeaponsForSecondsMeasured(WC, 0.20f);
+	if (!TestTrue("Fire Wand projectiles remain alive for speed sample", WC->GetProjectileCount() == StartPositions.Num()))
+	{
+		S.Destroy();
+		return false;
+	}
+
+	float TotalSpeed = 0.f;
+	for (int32 i = 0; i < WC->GetProjectileCount(); ++i)
+	{
+		TotalSpeed += FVector2D::Distance(WC->GetProjectilePos(i), StartPositions[i]) / Elapsed;
+	}
+	const float AvgSpeed = TotalSpeed / static_cast<float>(WC->GetProjectileCount());
+	TestTrue(FString::Printf(TEXT("Fire Wand video speed %.1fu/s should stay near 96u/s"), AvgSpeed),
+		AvgSpeed >= 80.f && AvgSpeed <= 115.f);
 
 	S.Destroy();
 	return true;
