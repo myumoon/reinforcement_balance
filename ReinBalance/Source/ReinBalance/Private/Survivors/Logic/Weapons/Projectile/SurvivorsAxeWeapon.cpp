@@ -116,19 +116,9 @@ void USurvivorsAxeWeapon::StartBurst()
 	BurstArcHeight = CachedArcHeight * PE.SpeedMult;
 	BurstPierce    = CachedPierce;
 
-	// 横方向: 最近傍敵の X 方向（バースト開始時に一度決定）
-	BurstHorizDir = 1.f;
-	float MinDistSq = MAX_FLT;
-	for (const FEnemyState& E : Game->Enemies)
-	{
-		if (E.bPendingRemove) continue;
-		const float Dsq = (E.Pos - Game->PlayerPos).SizeSquared();
-		if (Dsq < MinDistSq)
-		{
-			MinDistSq    = Dsq;
-			BurstHorizDir = (E.Pos.X >= Game->PlayerPos.X) ? 1.f : -1.f;
-		}
-	}
+	// Axe は各弾が真上(+Y)を中心に ±45° のランダム方向に飛ぶ。
+	// 敵ロックオンは使わない（BurstHorizDir は SpawnAxeShot 内でランダム化するため0で初期化）。
+	BurstHorizDir = 0.f;  // SpawnAxeShot 内でランダム角度を生成するため未使用
 
 	PendingAxeShots      = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 	AxeBurstTimer        = 0.f;
@@ -149,14 +139,17 @@ void USurvivorsAxeWeapon::SpawnAxeShot()
 	const float HalfTime = (InitVelY > KINDA_SMALL_NUMBER) ? (BurstArcHeight / InitVelY) : 0.333f;
 	const float GravityY = -InitVelY / HalfTime;
 
-	// 1発目: 真上。追加弾: 横オフセット付き（OBSERVED: weapon_axe.md）
-	const float HorizScale = (BurstShotsFiredCount == 0)
-		? 0.f
-		: (0.25f + 0.15f * static_cast<float>(BurstShotsFiredCount - 1));
+	// 各弾は真上（+Y）から ±45° のランダム方向（Game->RandStream で再現性確保）。
+	// Vel.X = Speed * sin(random_offset), Vel.Y = Speed * cos(random_offset)
+	const float RandomOffset = Game->RandStream.FRandRange(
+		-SurvivorsGameConstants::AxeRandomConeHalfAngle,
+		 SurvivorsGameConstants::AxeRandomConeHalfAngle);
+	const float HorizScale = FMath::Sin(RandomOffset);  // 真上基準の横成分（sin(0)=0 → 真上）
 
 	FProjectileState P;
 	P.Pos               = Game->PlayerPos;
-	P.Vel               = FVector2D(BurstHorizDir * BurstSpeed * HorizScale, InitVelY);
+	// Vel.Y = Speed * cos(offset) ≥ 0（±45°なので常に上向き成分あり）
+	P.Vel               = FVector2D(BurstSpeed * HorizScale, BurstSpeed * FMath::Cos(RandomOffset));
 	P.Radius            = FSimRadius(BurstRadius);
 	P.Damage            = FDamage(BurstDamage);
 	P.WeaponType        = WeaponType;

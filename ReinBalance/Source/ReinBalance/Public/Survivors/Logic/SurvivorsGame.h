@@ -74,6 +74,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Survivors|Config")
 	FVector2D GetPlayerPos()   const { return PlayerPos; }
+	/** Camera Z=2000 基準のスクリーン内判定（±400u×±225u）
+	 *  ターゲット武器は画面内の敵のみを狙い、画面外敵は対象外にする。 */
+	bool IsOnScreen(FVector2D WorldPos) const;
 
 	FVector2D GetPlayerVel()   const { return PlayerVel; }
 	float     GetPlayerHP()    const { return PlayerHP; }

@@ -657,3 +657,10 @@ FString ASurvivorsGame::GetEnemyTypeDebugLabel(int32 TypeId) const
 	}
 	return FString::Printf(TEXT("ID:%d"), TypeId);
 }
+
+bool ASurvivorsGame::IsOnScreen(FVector2D WorldPos) const
+{
+	const FVector2D Rel = WorldPos - PlayerPos;
+	return FMath::Abs(Rel.X) <= SurvivorsGameConstants::ScreenHalfWidthU
+		&& FMath::Abs(Rel.Y) <= SurvivorsGameConstants::ScreenHalfHeightU;
+}

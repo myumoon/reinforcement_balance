@@ -77,22 +77,29 @@ void USurvivorsFireWandWeapon::Tick(float Dt)
 	CooldownTimer = FCooldownSeconds(CachedCooldown * PE.CooldownMult);
 
 	const float EffSpeed    = CachedSpeed * PE.SpeedMult;
-	const float LifeTime    = 1.2f * PE.DurationMult;
+	// 旧値1.2sでは画面内最大距離(400u)を96u/s=4.17sで到達できない。画面横断(800u÷96u/s≈8.3s)をカバー。
+	const float LifeTime    = 9.0f * PE.DurationMult;
 	const int32 EffAmount   = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 
-	// ランダムな敵方向へ、近接同時に扇状発射する。
-	FVector2D Dir = FVector2D(0.f, 1.f);
+	// 画面内の敵からランダムに選択して扇状発射。画面内に敵がいない場合はランダム方向。
+	FVector2D Dir = FVector2D::ZeroVector;
 	TArray<int32> Candidates;
 	for (int32 EIdx = 0; EIdx < Game->Enemies.Num(); ++EIdx)
 	{
 		const FEnemyState& E = Game->Enemies[EIdx];
 		if (E.bPendingRemove) continue;
+		if (!Game->IsOnScreen(E.Pos)) continue;  // 画面外の敵は対象外
 		Candidates.Add(EIdx);
 	}
 	if (Candidates.Num() > 0)
 	{
 		const int32 ChoiceIdx = Game->RandStream.RandRange(0, Candidates.Num() - 1);
 		Dir = (Game->Enemies[Candidates[ChoiceIdx]].Pos - Game->PlayerPos).GetSafeNormal();
+	}
+	if (Dir.IsNearlyZero())
+	{
+		const float RandomAngle = Game->RandStream.FRand() * TWO_PI;
+		Dir = FVector2D(FMath::Cos(RandomAngle), FMath::Sin(RandomAngle));
 	}
 
 	const float BaseAngle = FMath::Atan2(Dir.Y, Dir.X);

@@ -324,6 +324,12 @@ void USurvivorsWeaponComponent::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 			{
 				if (E.WeaponLastHitTime[Ev.WeaponSlot].Seconds < Game->ElapsedTime)
 					E.WeaponLastHitTime[Ev.WeaponSlot] = FSurvivorsElapsedTime(Game->ElapsedTime);
+				// King Bible per-orb cooldown: OrbIdx >= 0 の場合のみ OrbHitTimes を更新
+				if (Ev.OrbIdx >= 0)
+				{
+					const int32 OrbKey = Ev.WeaponSlot * 10 + Ev.OrbIdx;
+					E.OrbHitTimes.Add(OrbKey, Game->ElapsedTime);
+				}
 			}
 			else if (Ev.Type == ESurvivorsHitType::GroundZoneDamage)
 			{

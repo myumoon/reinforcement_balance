@@ -99,19 +99,25 @@ void USurvivorsCrossWeapon::StartBurst()
 
 void USurvivorsCrossWeapon::SpawnCrossShot()
 {
-	// 発射時点で最近傍敵を再評価（wiki: "each cross aims at the nearest enemy at firing time"）
-	// fan spread はなく、各弾が独立して最近傍敵を狙う
-	FVector2D Dir = FVector2D(1.f, 0.f);
+	// 発射時点で画面内最近傍敵を再評価（wiki: "each cross aims at the nearest enemy at firing time"）
+	// fan spread はなく、各弾が独立して最近傍敵を狙う。画面外の敵は対象外。
+	FVector2D Dir = FVector2D::ZeroVector;
 	float MinDistSq = MAX_FLT;
 	for (const FEnemyState& E : Game->Enemies)
 	{
 		if (E.bPendingRemove) continue;
+		if (!Game->IsOnScreen(E.Pos)) continue;
 		const float Dsq = (E.Pos - Game->PlayerPos).SizeSquared();
 		if (Dsq < MinDistSq)
 		{
 			MinDistSq = Dsq;
 			Dir       = (E.Pos - Game->PlayerPos).GetSafeNormal();
 		}
+	}
+	if (Dir.IsNearlyZero())
+	{
+		const float Angle = Game->RandStream.FRand() * TWO_PI;
+		Dir = FVector2D(FMath::Cos(Angle), FMath::Sin(Angle));
 	}
 
 	FProjectileState P;

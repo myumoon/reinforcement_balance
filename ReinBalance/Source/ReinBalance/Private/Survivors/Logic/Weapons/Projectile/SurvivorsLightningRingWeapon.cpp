@@ -3,6 +3,7 @@
 #include "Survivors/Logic/SurvivorsCollisionComponent.h"
 #include "Survivors/Logic/SurvivorsGame.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 
 void USurvivorsLightningRingWeapon::OnLevelChanged(FWeaponLevel NewLevel)
 {
@@ -88,6 +89,23 @@ void USurvivorsLightningRingWeapon::ComputeHits(USurvivorsCollisionComponent* Co
 	{
 		const int32 StrikeIdx = EnemyIndices[i];
 		const FEnemyState& StrikeTarget = Game->Enemies[StrikeIdx];
+
+		// strike marker: 落雷位置を短寿命 GroundZone として生成（view/obs 用）
+		// ダメージはヒットイベントで処理するため Damage=0、HitCooldown 大で追加ダメージなし
+		if (WeaponComp)
+		{
+			FGroundZoneState Marker;
+			Marker.Pos           = StrikeTarget.Pos;
+			Marker.Radius        = EffRadius;
+			Marker.Damage        = 0.f;
+			Marker.LifeTime      = SurvivorsGameConstants::LightningRingStrikeLifeTime;
+			Marker.WarningTime   = 0.f;
+			Marker.HitCooldown   = 9999.f;   // 追加ダメージを防ぐ
+			Marker.WeaponSlotIdx = SlotIdx;
+			Marker.WeaponType    = WeaponType;
+			Marker.bIsWarning    = false;
+			WeaponComp->SpawnGroundZone(Marker);
+		}
 
 		TArray<const FSurvivorsTargetProxy*> Contacts;
 		CollComp->QueryEnemyContacts(StrikeTarget.Pos, EffRadius, Contacts);

@@ -1658,3 +1658,217 @@ bool FSurvivorsVandalierTwoZoneBombard::RunTest(const FString& Parameters)
 	S.Destroy();
 	return true;
 }
+
+// ============================================================
+// King Bible per-orb hit cooldown テスト
+// ============================================================
+
+// King Bible Lv2 で orb 0 が敵に当たっても、orb 1 はすぐに同じ敵に当たれる（独立 cooldown）
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsKingBiblePerOrbIndependentCooldown,
+	"ReinBalance.Survivors.Wiki.KingBible_PerOrb_IndependentCooldown",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+bool FSurvivorsKingBiblePerOrbIndependentCooldown::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	// 敵を1体配置（HP 十分）
+	S.AddEnemyAt(FVector2D::ZeroVector, 2000.f);
+
+	EquipTestWeapon(S.Game, EWeaponType::KingBible, 2);  // Lv2: Amount=2
+
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
+	auto* KB = Cast<USurvivorsKingBibleWeapon>(WC->GetWeaponInstance(0));
+	if (!TestTrue("KingBible instance exists", KB != nullptr)) { S.Destroy(); return false; }
+
+	// 1tick 起動してオーブをアクティブにする
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	if (!TestEqual("KingBible Lv2 has 2 orbs", KB->GetOrbPositions().Num(), 2)) { S.Destroy(); return false; }
+
+	// 敵をオーブ 0 の位置に置く → orb 0 ヒット
+	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = KB->GetOrbPositions()[0];
+	CC->BuildEnemyGrid();
+	FSurvivorsHitFrame HF1;
+	WC->ComputeAllWeaponHits(CC, HF1);
+	WC->ApplyWeaponHits(HF1);
+	const float HPAfterOrb0 = FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP;
+	TestTrue("Orb 0 hit: HP decreased", HPAfterOrb0 < 2000.f);
+
+	// 敵をオーブ 1 の位置に置く → 同じ敵に orb 1 がすぐ当たれるか（per-orb 独立 cooldown）
+	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = KB->GetOrbPositions()[1];
+	CC->BuildEnemyGrid();
+	FSurvivorsHitFrame HF2;
+	WC->ComputeAllWeaponHits(CC, HF2);
+	WC->ApplyWeaponHits(HF2);
+	const float HPAfterOrb1 = FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP;
+	TestTrue("Orb 1 can immediately hit same enemy (per-orb independent cooldown)",
+		HPAfterOrb1 < HPAfterOrb0);
+
+	S.Destroy();
+	return true;
+}
+
+// King Bible Lv1 で同一 orb が同じ敵に 1.7s 以内に再ヒットしないこと
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsKingBibleOrbCooldownSameOrb,
+	"ReinBalance.Survivors.Wiki.KingBible_PerOrb_SameOrbCooldown",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+bool FSurvivorsKingBibleOrbCooldownSameOrb::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	S.AddEnemyAt(FVector2D::ZeroVector, 2000.f);
+
+	EquipTestWeapon(S.Game, EWeaponType::KingBible, 1);  // Lv1: Amount=1
+
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
+	auto* KB = Cast<USurvivorsKingBibleWeapon>(WC->GetWeaponInstance(0));
+	if (!TestTrue("KingBible instance exists", KB != nullptr)) { S.Destroy(); return false; }
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	if (!TestEqual("KingBible Lv1 has 1 orb", KB->GetOrbPositions().Num(), 1)) { S.Destroy(); return false; }
+
+	// 敵をオーブ 0 に重ねる → 1回目ヒット
+	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = KB->GetOrbPositions()[0];
+	CC->BuildEnemyGrid();
+	FSurvivorsHitFrame HF1;
+	WC->ComputeAllWeaponHits(CC, HF1);
+	WC->ApplyWeaponHits(HF1);
+	const float HPAfterFirst = FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP;
+	TestTrue("First orb hit deals damage", HPAfterFirst < 2000.f);
+
+	// 再度 → 0.5s 以内なので same orb cooldown でブロックされる
+	CC->BuildEnemyGrid();
+	FSurvivorsHitFrame HF2;
+	WC->ComputeAllWeaponHits(CC, HF2);
+	WC->ApplyWeaponHits(HF2);
+	TestEqual("Same orb does not re-hit immediately",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, HPAfterFirst);
+
+	// 1.7s 経過後 → 再ヒット可能
+	FSurvivorsGameTestAccess::ElapsedTime(S.Game) += 1.71f;
+	CC->BuildEnemyGrid();
+	FSurvivorsHitFrame HF3;
+	WC->ComputeAllWeaponHits(CC, HF3);
+	WC->ApplyWeaponHits(HF3);
+	TestTrue("Same orb re-hits after 1.7s cooldown",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP < HPAfterFirst);
+
+	S.Destroy();
+	return true;
+}
+
+// ============================================================
+// Lightning Ring strike marker テスト
+// ============================================================
+
+// Lightning Ring 発動時に strike marker（GroundZone）が敵付近に生成されること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsLightningRingStrikeMarker,
+	"ReinBalance.Survivors.Wiki.LightningRing_StrikeMarker_InObs",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+bool FSurvivorsLightningRingStrikeMarker::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	// Lv1: Amount=2、敵を2体配置
+	S.AddEnemyAt(FVector2D(-100.f, 0.f), 100.f);
+	S.AddEnemyAt(FVector2D( 100.f, 0.f), 100.f);
+
+	EquipTestWeapon(S.Game, EWeaponType::LightningRing, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	CC->BuildEnemyGrid();
+	FSurvivorsHitFrame HF;
+	WC->ComputeAllWeaponHits(CC, HF);
+	WC->ApplyWeaponHits(HF);
+
+	// 落雷位置 marker が GroundZone として生成されていること（Amount=2 なので 2 個）
+	TestTrue("Lightning Ring spawns strike markers (>=2 ground zones)",
+		WC->GetGroundZoneCount() >= 2);
+
+	// marker は敵の位置付近に配置されること
+	bool bFoundNearEnemy0 = false;
+	bool bFoundNearEnemy1 = false;
+	for (int32 i = 0; i < WC->GetGroundZoneCount(); ++i)
+	{
+		const FVector2D ZPos = WC->GetGroundZonePos(i);
+		if (FVector2D::Distance(ZPos, FVector2D(-100.f, 0.f)) < 50.f) bFoundNearEnemy0 = true;
+		if (FVector2D::Distance(ZPos, FVector2D( 100.f, 0.f)) < 50.f) bFoundNearEnemy1 = true;
+	}
+	TestTrue("Strike marker placed near enemy 0", bFoundNearEnemy0);
+	TestTrue("Strike marker placed near enemy 1", bFoundNearEnemy1);
+
+	// marker は短寿命（player center 常時 ring は出ない）
+	TestTrue("Strike markers are not warning zones", !WC->IsGroundZoneWarning(0));
+
+	S.Destroy();
+	return true;
+}
+
+// ============================================================
+// On-screen targeting テスト
+// ============================================================
+
+// MagicWand は画面外の敵を狙わず、画面内の敵がいない場合はランダム方向に発射する
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsMagicWandOnScreenOnly,
+	"ReinBalance.Survivors.Wiki.MagicWand_OnScreenTargeting",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsMagicWandOnScreenOnly::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	// 敵を画面外（500u）にのみ配置
+	S.AddEnemyAt(FVector2D(500.f, 0.f));
+
+	EquipTestWeapon(S.Game, EWeaponType::MagicWand, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	// 画面外敵しかいない場合、弾はランダム方向（≠ 敵方向）に飛ぶ
+	// ここでは単純に「弾が発射されること」だけをテストする（ランダム方向は検証しない）
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("MagicWand fires even when no on-screen enemy (random direction)",
+		WC->GetProjectileCount(), 1);
+
+	S.Destroy();
+	return true;
+}
+
+// Axe は上方向 ±45° のランダム角度で発射されること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsAxeRandomUpwardDirection,
+	"ReinBalance.Survivors.Wiki.Axe_RandomUpwardDirection",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsAxeRandomUpwardDirection::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	// 敵なし（ランダム方向）
+
+	EquipTestWeapon(S.Game, EWeaponType::Axe, 2);  // Amount=2
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	// 初回発射：1発目
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	if (!TestEqual("Axe fires first shot", WC->GetProjectileCount(), 1)) { S.Destroy(); return false; }
+
+	const FVector2D Pos0 = WC->GetProjectilePos(0);
+	// 上方向（Y > 0）であること
+	TestTrue("Axe shot 0 travels upward (Y > 0)", Pos0.Y > 0.f);
+	// ±45° 以内なので |X| < Y（sin45°=cos45°）
+	TestTrue("Axe shot 0 is within ±45° of up", FMath::Abs(Pos0.X) <= Pos0.Y + 0.01f);
+
+	// 0.2s 後：2発目
+	TickTestWeaponsForSeconds(WC, 0.21f);
+	if (!TestEqual("Axe fires second shot", WC->GetProjectileCount(), 2)) { S.Destroy(); return false; }
+
+	S.Destroy();
+	return true;
+}

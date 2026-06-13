@@ -545,6 +545,20 @@ namespace SurvivorsGameConstants
 	// Axe の Area スケール係数（wiki: "Axe scales with Area × 1.3"）
 	static constexpr float AxeAreaScaleFactor = 1.3f;
 
+	// Axe 上方向発射コーン: 真上（+Y）から左右 45° 以内のランダム方向
+	static constexpr float AxeRandomConeHalfAngle = UE_PI / 4.f;  // 45° in radians
+
+	// 画面半幅・半高（Camera Z=2000 基準、横幅 1920px=800u）
+	// on-screen 判定に使用: |enemy.x - player.x| <= ScreenHalfWidthU かつ |y| <= ScreenHalfHeightU
+	static constexpr float ScreenHalfWidthU  = 400.f;  // 800u/2
+	static constexpr float ScreenHalfHeightU = 225.f;  // 450u/2 (16:9)
+
+	// King Bible per-orb hit cooldown（wiki: "same bible hits same enemy no more than every 1.7s"）
+	static constexpr float KingBibleOrbHitInterval = 1.7f;
+
+	// Lightning Ring strike marker の寿命（visual/obs 用短寿命 GroundZone）
+	static constexpr float LightningRingStrikeLifeTime = 0.15f;
+
 	struct FPeachoneParams
 	{
 		float Damage;

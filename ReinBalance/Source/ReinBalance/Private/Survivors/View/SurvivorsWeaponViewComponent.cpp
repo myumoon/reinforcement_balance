@@ -253,32 +253,9 @@ void USurvivorsWeaponViewComponent::DrawOrbitOrbs()
 
 void USurvivorsWeaponViewComponent::DrawLightningRings()
 {
-	if (!Game || !GetWorld()) return;
-
-	for (int32 s = 0; s < SurvivorsGameConstants::MaxWeaponSlots; ++s)
-	{
-		const FWeaponSlot& Slot = Game->GetWeaponSlot(s);
-		float SimRadius = 0.f;
-
-		if (Slot.Type == EWeaponType::LightningRing)
-		{
-			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
-			SimRadius = SurvivorsGameConstants::LightningRingTable[Lv - 1].Radius * Game->GetCachedPassiveEffects().AreaMult;
-		}
-		else if (Slot.Type == EWeaponType::ThunderLoop)
-		{
-			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
-			SimRadius = SurvivorsGameConstants::ThunderLoopTable[Lv - 1].Radius * Game->GetCachedPassiveEffects().AreaMult;
-		}
-
-		if (SimRadius > 0.f)
-		{
-			const float  WorldRadius = SimRadius * Game->SimToUE;
-			const FVector Center = Converter.ToWorld(Game->GetPlayerPos(), FWorldLayerZ::Aura());
-			DrawDebugCircle(GetWorld(), Center, WorldRadius, 48, WeaponViewColors::Yellow,
-				false, 0.f, 1, 2.f, FVector(1, 0, 0), FVector(0, 1, 0));
-		}
-	}
+	// プレイヤー中心の常時円表示を廃止。
+	// 落雷位置は ComputeHits で生成した短寿命 GroundZone (strike marker) として
+	// DrawGroundZones() 経由で表示される。ここでは何も描画しない。
 }
 
 void USurvivorsWeaponViewComponent::DrawPentagramFields()

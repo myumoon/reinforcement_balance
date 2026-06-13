@@ -32,6 +32,8 @@ struct FSurvivorsHitEvent
 	FVector2D            KnockbackDir       = FVector2D::ZeroVector;
 	float                KnockbackStrength  = 0.f;
 	float                KnockbackResistance= 0.f;
+	// King Bible per-orb cooldown 用。-1 = orb 以外の武器（無視される）
+	int32                OrbIdx             = -1;
 };
 
 struct FSurvivorsHitFrame
@@ -269,6 +271,8 @@ struct FEnemyState
 		FSurvivorsElapsedTime(-1000.f), FSurvivorsElapsedTime(-1000.f),
 		FSurvivorsElapsedTime(-1000.f), FSurvivorsElapsedTime(-1000.f),
 	};
+	// King Bible per-orb hit cooldown。Key = SlotIdx * 10 + OrbIdx
+	TMap<int32, float> OrbHitTimes;
 };
 
 struct FGemState

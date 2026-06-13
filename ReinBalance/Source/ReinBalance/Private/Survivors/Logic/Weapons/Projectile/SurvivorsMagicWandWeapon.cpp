@@ -66,7 +66,9 @@ void USurvivorsMagicWandWeapon::StartBurst()
 	BurstDamage   = CachedDamage * PE.DamageMult;
 	BurstSpeed    = CachedSpeed  * PE.SpeedMult;
 	BurstRadius   = 8.f * PE.AreaMult;
-	BurstLifeTime = 1.5f * PE.DurationMult;
+	// 1.5s(旧値)では画面内最大距離(400u)を140u/sで到達できない(2.86s必要)。
+	// on-screen targeting 前提で画面横断(800u÷140u/s≈5.7s)をカバーする寿命に延長。
+	BurstLifeTime = 6.0f * PE.DurationMult;
 	BurstPierce   = CachedPierce;
 
 	PendingWandShots = CachedAmount + static_cast<int32>(PE.ExtraAmount);
@@ -82,18 +84,26 @@ void USurvivorsMagicWandWeapon::StartBurst()
 
 void USurvivorsMagicWandWeapon::SpawnWandShot()
 {
-	// 発射時点で最近傍敵を個別に探索（wiki: "Each missile aims at the closest enemy at the moment it is spawned"）
-	FVector2D Dir = FVector2D(0.f, 1.f);
+	// 発射時点で画面内最近傍敵を探索（画面外の敵は対象外）。
+	// 画面内に敵がいない場合はランダム方向に発射する。
+	FVector2D Dir = FVector2D::ZeroVector;  // ZeroVector = 敵未発見を示す
 	float MinDistSq = MAX_FLT;
 	for (const FEnemyState& E : Game->Enemies)
 	{
 		if (E.bPendingRemove) continue;
+		if (!Game->IsOnScreen(E.Pos)) continue;  // 画面外の敵は無視
 		const float Dsq = (E.Pos - Game->PlayerPos).SizeSquared();
 		if (Dsq < MinDistSq)
 		{
 			MinDistSq = Dsq;
 			Dir       = (E.Pos - Game->PlayerPos).GetSafeNormal();
 		}
+	}
+	// 画面内に敵がいない場合はランダム方向
+	if (Dir.IsNearlyZero())
+	{
+		const float Angle = Game->RandStream.FRand() * TWO_PI;
+		Dir = FVector2D(FMath::Cos(Angle), FMath::Sin(Angle));
 	}
 
 	FProjectileState P;
