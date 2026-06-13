@@ -40,38 +40,65 @@ void USurvivorsCrossWeapon::Tick(float Dt)
 {
 	if (!Game || !WeaponComp) return;
 
-	const FPassiveEffects& PE = GetPassiveEffects();
-
 	// --- 既存プロジェクタイルの折り返し処理 ---
 	// AngleRad.Value に折り返しまでの時間を格納
-	// bHasReversed で折り返し済みを管理（bPiercing は共通の ApplyWeaponHits 削除判定に使用するため流用しない）
 	WeaponComp->UpdateProjectilesBySlot(SlotIdx, Dt, [](FProjectileState& P, float InDt) -> bool
 	{
 		const float ReverseTime = FMath::Max(P.AngleRad.Value, SurvivorsGameConstants::PhysicsDt);
-
-		// 発射後の固定時間で折り返し、その後は寿命まで画面端方向へ抜ける
 		if (!P.bHasReversed && P.Age >= ReverseTime)
 		{
 			P.Vel        = -P.Vel;
-			P.bHasReversed = true;  // 折り返し済みフラグ
+			P.bHasReversed = true;
 		}
 		return true;
 	});
 
+	// --- 順次発射バースト（wiki: 0.1s projectile interval）---
+	if (PendingCrossShots > 0)
+	{
+		CrossBurstTimer -= Dt;
+		while (PendingCrossShots > 0 && CrossBurstTimer <= 0.f)
+		{
+			SpawnCrossShot();
+			--PendingCrossShots;
+			CrossBurstTimer += SurvivorsGameConstants::CrossProjectileInterval;
+		}
+	}
+
 	// --- クールダウン ---
 	CooldownTimer.Value = FMath::Max(0.f, CooldownTimer.Value - Dt);
-	if (!CooldownTimer.IsReady()) return;
+	if (!CooldownTimer.IsReady() || PendingCrossShots > 0) return;
 
+	StartBurst();
+}
+
+void USurvivorsCrossWeapon::StartBurst()
+{
+	const FPassiveEffects& PE = GetPassiveEffects();
 	CooldownTimer = FCooldownSeconds(CachedCooldown * PE.CooldownMult);
 
-	const float EffDamage  = CachedDamage * PE.DamageMult;
-	const float EffSpeed   = CachedSpeed  * PE.SpeedMult;
-	const float EffLifeTime = 6.0f * PE.DurationMult;
-	const float ReverseTime = 0.75f * PE.DurationMult;
-	const float EffRadius  = CachedRadius * PE.AreaMult;
-	const int32 EffAmount  = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
+	BurstDamage      = CachedDamage * PE.DamageMult;
+	BurstSpeed       = CachedSpeed  * PE.SpeedMult;
+	BurstRadius      = CachedRadius * PE.AreaMult;
+	BurstLifeTime    = 6.0f * PE.DurationMult;
+	BurstReverseTime = 0.75f;  // wiki: "after a short while, travels in the opposite direction"
+	BurstKnockback   = CachedKnockbackStrength;
 
-	// 最近傍敵の方向へ発射
+	PendingCrossShots = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
+	CrossBurstTimer   = 0.f;
+
+	if (PendingCrossShots > 0)
+	{
+		SpawnCrossShot();
+		--PendingCrossShots;
+		CrossBurstTimer = (PendingCrossShots > 0) ? SurvivorsGameConstants::CrossProjectileInterval : 0.f;
+	}
+}
+
+void USurvivorsCrossWeapon::SpawnCrossShot()
+{
+	// 発射時点で最近傍敵を再評価（wiki: "each cross aims at the nearest enemy at firing time"）
+	// fan spread はなく、各弾が独立して最近傍敵を狙う
 	FVector2D Dir = FVector2D(1.f, 0.f);
 	float MinDistSq = MAX_FLT;
 	for (const FEnemyState& E : Game->Enemies)
@@ -81,32 +108,22 @@ void USurvivorsCrossWeapon::Tick(float Dt)
 		if (Dsq < MinDistSq)
 		{
 			MinDistSq = Dsq;
-			Dir = (E.Pos - Game->PlayerPos).GetSafeNormal();
+			Dir       = (E.Pos - Game->PlayerPos).GetSafeNormal();
 		}
 	}
 
-	const float BaseAngle = FMath::Atan2(Dir.Y, Dir.X);
-	for (int32 i = 0; i < EffAmount; ++i)
-	{
-		const float Spread = (EffAmount <= 1)
-			? 0.f
-			: FMath::DegreesToRadians(12.f) * (static_cast<float>(i) - 0.5f * static_cast<float>(EffAmount - 1));
-		const float Angle = BaseAngle + Spread;
-		const FVector2D ShotDir(FMath::Cos(Angle), FMath::Sin(Angle));
-
-		FProjectileState P;
-		P.Pos               = Game->PlayerPos;
-		P.Vel               = ShotDir * EffSpeed;
-		P.Radius            = FSimRadius(EffRadius);
-		P.Damage            = FDamage(EffDamage);
-		P.WeaponType        = WeaponType;
-		P.WeaponSlotIdx     = SlotIdx;
-		P.LifeTime          = FProjectileLifeTime(EffLifeTime);
-		P.Age               = 0.f;
-		P.bPiercing         = true;   // AoE: 無限貫通
-		P.bHasReversed      = false;
-		P.AngleRad          = FOrbitAngleRad(ReverseTime);  // 流用: 折り返しまでの時間
-		P.KnockbackStrength = CachedKnockbackStrength;
-		WeaponComp->SpawnProjectile(P);
-	}
+	FProjectileState P;
+	P.Pos               = Game->PlayerPos;
+	P.Vel               = Dir * BurstSpeed;
+	P.Radius            = FSimRadius(BurstRadius);
+	P.Damage            = FDamage(BurstDamage);
+	P.WeaponType        = WeaponType;
+	P.WeaponSlotIdx     = SlotIdx;
+	P.LifeTime          = FProjectileLifeTime(BurstLifeTime);
+	P.Age               = 0.f;
+	P.bPiercing         = true;    // AoE: 無限貫通
+	P.bHasReversed      = false;
+	P.AngleRad          = FOrbitAngleRad(BurstReverseTime);  // 流用: 折り返しまでの時間
+	P.KnockbackStrength = BurstKnockback;
+	WeaponComp->SpawnProjectile(P);
 }

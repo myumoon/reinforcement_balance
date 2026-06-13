@@ -514,6 +514,18 @@ namespace SurvivorsGameConstants
 	static constexpr float PeachoneProjectileInterval = 0.025f;  // OBSERVED: 砲撃の発射間隔（weapon_peachone.md）
 	static constexpr int32 PeachoneSetsPerActivation   = 4;       // wiki: 1 activation あたり 4 set
 
+	// 順次発射間隔（wiki・動画観察由来）
+	static constexpr float CrossProjectileInterval      = 0.10f;  // wiki: 0.1s projectile interval (weapon_cross.md)
+	static constexpr float AxeProjectileInterval        = 0.20f;  // OBSERVED: ~0.2s short volley (weapon_axe.md)
+	static constexpr float RunetracerProjectileInterval = 0.20f;  // OBSERVED: ~0.2s sequence (weapon_runetracer.md)
+
+	// Fire Wand ファン角度（動画観察：narrow fan。12° → 8° に修正）
+	// OBSERVED: weapon_fire_wand.md「narrow fan」。仕様レビューで 12° は広すぎると判定
+	static constexpr float FireWandAngleStepDeg = 8.f;
+
+	// Axe の Area スケール係数（wiki: "Axe scales with Area × 1.3"）
+	static constexpr float AxeAreaScaleFactor = 1.3f;
+
 	struct FPeachoneParams
 	{
 		float Damage;

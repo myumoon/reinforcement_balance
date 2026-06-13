@@ -23,6 +23,7 @@ struct FSurvivorsGameTestAccess
 	static float& PlayerHP(ASurvivorsGame* G)              { return G->PlayerHP; }
 	static float& PlayerXP(ASurvivorsGame* G)              { return G->PlayerXP; }
 	static FVector2D& PlayerPos(ASurvivorsGame* G)         { return G->PlayerPos; }
+	static FVector2D& PlayerVel(ASurvivorsGame* G)         { return G->PlayerVel; }
 	static bool& bShieldActive(ASurvivorsGame* G)          { return G->bShieldActive; }
 	static float& LastReward(ASurvivorsGame* G)            { return G->LastReward; }
 	static float& ElapsedTime(ASurvivorsGame* G)           { return G->ElapsedTime; }
@@ -141,6 +142,24 @@ static void EquipTestWeapon(ASurvivorsGame* Game, EWeaponType Type, int32 Level)
 	Weapons[0].Type = Type;
 	Weapons[0].Level = FWeaponLevel(Level);
 	FSurvivorsGameTestAccess::WeaponComp(Game)->EquipWeapon(0, Type, Level);
+}
+
+static int32 SurvivorsStepsForSeconds(float Seconds)
+{
+	return FMath::CeilToInt(Seconds / SurvivorsGameConstants::PhysicsDt);
+}
+
+static void TickTestWeaponsForSteps(USurvivorsWeaponComponent* WC, int32 Steps)
+{
+	for (int32 i = 0; i < Steps; ++i)
+	{
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	}
+}
+
+static void TickTestWeaponsForSeconds(USurvivorsWeaponComponent* WC, float Seconds)
+{
+	TickTestWeaponsForSteps(WC, SurvivorsStepsForSeconds(Seconds));
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsWikiLevelRequirements,
@@ -283,19 +302,20 @@ bool FSurvivorsWeaponSpecProjectileAmounts::RunTest(const FString& Parameters)
 		EWeaponType Type;
 		int32 Level;
 		int32 ExpectedProjectiles;
+		float SecondsAfterFirstTick;
 		const TCHAR* Label;
 	};
 
 	const FCase Cases[] = {
-		{ EWeaponType::Whip,         1, 1, TEXT("Whip Lv1 first swing") },
-		{ EWeaponType::Whip,         2, 1, TEXT("Whip Lv2 first swing") },
-		{ EWeaponType::Axe,          8, 3, TEXT("Axe Lv8 Amount=3") },
-		{ EWeaponType::DeathSpiral,  1, 9, TEXT("Death Spiral Amount=9") },
-		{ EWeaponType::Cross,        7, 3, TEXT("Cross Lv7 Amount=3") },
-		{ EWeaponType::HeavenSword,  1, 1, TEXT("Heaven Sword Amount=1") },
-		{ EWeaponType::FireWand,     1, 4, TEXT("Fire Wand Lv1 fan=4") },
-		{ EWeaponType::Runetracer,   7, 3, TEXT("Runetracer Lv7 Amount=3") },
-		{ EWeaponType::NoFuture,     1, 1, TEXT("NO FUTURE Amount=1") },
+		{ EWeaponType::Whip,         1, 1, 0.00f, TEXT("Whip Lv1 first swing") },
+		{ EWeaponType::Whip,         2, 1, 0.00f, TEXT("Whip Lv2 first swing") },
+		{ EWeaponType::Axe,          8, 3, 0.45f, TEXT("Axe Lv8 Amount=3 after 0.2s intervals") },
+		{ EWeaponType::DeathSpiral,  1, 9, 0.00f, TEXT("Death Spiral Amount=9") },
+		{ EWeaponType::Cross,        7, 3, 0.25f, TEXT("Cross Lv7 Amount=3 after 0.1s intervals") },
+		{ EWeaponType::HeavenSword,  1, 1, 0.00f, TEXT("Heaven Sword Amount=1") },
+		{ EWeaponType::FireWand,     1, 4, 0.08f, TEXT("Fire Wand Lv1 fan=4 within 0.02s interval window") },
+		{ EWeaponType::Runetracer,   7, 3, 0.45f, TEXT("Runetracer Lv7 Amount=3 after 0.2s intervals") },
+		{ EWeaponType::NoFuture,     1, 1, 0.00f, TEXT("NO FUTURE Amount=1") },
 	};
 
 	for (const FCase& Case : Cases)
@@ -305,6 +325,10 @@ bool FSurvivorsWeaponSpecProjectileAmounts::RunTest(const FString& Parameters)
 
 		EquipTestWeapon(S.Game, Case.Type, Case.Level);
 		FSurvivorsGameTestAccess::WeaponComp(S.Game)->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		if (Case.SecondsAfterFirstTick > 0.f)
+		{
+			TickTestWeaponsForSeconds(FSurvivorsGameTestAccess::WeaponComp(S.Game), Case.SecondsAfterFirstTick);
+		}
 
 		TestEqual(FString::Printf(TEXT("%s projectile count"), Case.Label),
 			FSurvivorsGameTestAccess::WeaponComp(S.Game)->GetProjectileCount(),
@@ -352,25 +376,23 @@ bool FSurvivorsKnifeBurstCadence::RunTest(const FString& Parameters)
 	FSurvivorsTestWorld S;
 	if (!TestTrue("World created", S.Create())) return false;
 
-	EquipTestWeapon(S.Game, EWeaponType::Knife, 1);
+	// weapon_knife.md + knife_bullet2.mp4:
+	// Lv2 is the raw-table 2-projectile preset, emitted at the 0.1s projectile interval.
+	FSurvivorsGameTestAccess::PlayerVel(S.Game) = FVector2D(1.f, 0.f);
+	EquipTestWeapon(S.Game, EWeaponType::Knife, 2);
 	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
 	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
 	TestEqual("Knife fires first projectile immediately", WC->GetProjectileCount(), 1);
 
-	const int32 TicksToSecondShot = FMath::CeilToInt(0.11f / SurvivorsGameConstants::PhysicsDt);
-	for (int32 i = 0; i < TicksToSecondShot; ++i)
-	{
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	}
+	TickTestWeaponsForSeconds(WC, 0.05f);
+	TestEqual("Knife does not fire the second projectile before 0.1s", WC->GetProjectileCount(), 1);
+
+	TickTestWeaponsForSeconds(WC, 0.06f);
 	TestEqual("Knife fires second projectile after 0.1s", WC->GetProjectileCount(), 2);
 
-	const int32 TicksToThirdShot = FMath::CeilToInt(0.11f / SurvivorsGameConstants::PhysicsDt);
-	for (int32 i = 0; i < TicksToThirdShot; ++i)
-	{
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	}
-	TestEqual("Knife fires third projectile after another 0.1s", WC->GetProjectileCount(), 3);
+	TickTestWeaponsForSeconds(WC, 0.15f);
+	TestEqual("Knife Lv2 bullet2 preset stops at two projectiles", WC->GetProjectileCount(), 2);
 
 	S.Destroy();
 	return true;
@@ -939,12 +961,242 @@ bool FSurvivorsMagicWandSequentialTargeting::RunTest(const FString& Parameters)
 	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
 	TestEqual("MagicWand Lv2 fires first shot immediately", WC->GetProjectileCount(), 1);
 
+	TickTestWeaponsForSeconds(WC, 0.05f);
+	TestEqual("MagicWand Lv2 does not fire the second shot before 0.1s", WC->GetProjectileCount(), 1);
+
 	// 0.1s 経過後に 2 発目
-	const int32 TicksTo2ndShot = FMath::CeilToInt(0.11f / SurvivorsGameConstants::PhysicsDt);
-	for (int32 i = 0; i < TicksTo2ndShot; ++i)
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TickTestWeaponsForSeconds(WC, 0.06f);
 
 	TestEqual("MagicWand Lv2 fires second shot after 0.1s", WC->GetProjectileCount(), 2);
+
+	S.Destroy();
+	return true;
+}
+
+// Cross: cross_bullet2.mp4 / weapon_cross.md の 2発サンプルは 0.1s 間隔の短い sequence。
+// 同じ +X 最近傍敵に向ける場合、追加弾も fan spread ではなく +X 方向へ飛ぶ。
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsCrossVideoBullet2Cadence,
+	"ReinBalance.Survivors.Wiki.Cross_VideoBullet2_CadenceAndDirection",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsCrossVideoBullet2Cadence::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	S.AddEnemyAt(FVector2D(200.f, 0.f));
+
+	// Cross Lv4: raw table Amount=2, matching the captured bullet2 preset without adding passive assumptions.
+	EquipTestWeapon(S.Game, EWeaponType::Cross, 4);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Cross bullet2 preset fires first projectile immediately", WC->GetProjectileCount(), 1);
+
+	TickTestWeaponsForSeconds(WC, 0.05f);
+	TestEqual("Cross does not fire the second projectile before 0.1s", WC->GetProjectileCount(), 1);
+
+	TickTestWeaponsForSeconds(WC, 0.06f);
+	TestEqual("Cross fires the second projectile after 0.1s", WC->GetProjectileCount(), 2);
+
+	for (int32 i = 0; i < WC->GetProjectileCount(); ++i)
+	{
+		const FVector2D Pos = WC->GetProjectilePos(i);
+		TestTrue(FString::Printf(TEXT("Cross projectile %d moves toward +X without fan spread"), i),
+			Pos.X > 0.f && FMath::Abs(Pos.Y) < 1.f);
+	}
+
+	S.Destroy();
+	return true;
+}
+
+// Cross: weapon_cross.md says the projectile returns, then continues until it leaves the screen;
+// it must not be removed just because the next 2.0s cooldown volley starts.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsCrossPersistsIntoNextVolley,
+	"ReinBalance.Survivors.Wiki.Cross_PersistsIntoNextVolley",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsCrossPersistsIntoNextVolley::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	S.AddEnemyAt(FVector2D(200.f, 0.f));
+
+	EquipTestWeapon(S.Game, EWeaponType::Cross, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Cross Lv1 first volley has one projectile", WC->GetProjectileCount(), 1);
+
+	TickTestWeaponsForSeconds(WC, 2.05f);
+	TestTrue("Cross previous projectile is still alive when the next cooldown volley starts",
+		WC->GetProjectileCount() >= 2);
+
+	S.Destroy();
+	return true;
+}
+
+// Axe: weapon_axe.md / axe_bullet2.mp4 specify a 0.2s short volley.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsAxeVideoBullet2Cadence,
+	"ReinBalance.Survivors.Wiki.Axe_VideoBullet2_Cadence",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsAxeVideoBullet2Cadence::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	S.AddEnemyAt(FVector2D(200.f, 0.f));
+
+	// Axe Lv2: raw table Amount=2, matching the captured bullet2 sample without passive assumptions.
+	EquipTestWeapon(S.Game, EWeaponType::Axe, 2);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Axe bullet2 preset fires first axe immediately", WC->GetProjectileCount(), 1);
+	if (WC->GetProjectileCount() > 0)
+	{
+		const FVector2D FirstPos = WC->GetProjectilePos(0);
+		TestTrue("First axe is thrown upward from the player", FMath::Abs(FirstPos.X) < 1.f && FirstPos.Y > 0.f);
+	}
+
+	TickTestWeaponsForSeconds(WC, 0.10f);
+	TestEqual("Axe does not fire the second axe before 0.2s", WC->GetProjectileCount(), 1);
+
+	TickTestWeaponsForSeconds(WC, 0.11f);
+	TestEqual("Axe fires the second axe after about 0.2s", WC->GetProjectileCount(), 2);
+
+	S.Destroy();
+	return true;
+}
+
+// Runetracer: runetracer_bullet2.mp4 / weapon_runetracer.md specify sequence firing at 0.2s interval.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsRunetracerVideoBullet2Cadence,
+	"ReinBalance.Survivors.Wiki.Runetracer_VideoBullet2_Cadence",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsRunetracerVideoBullet2Cadence::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	// Runetracer Lv4: raw table Amount=2, matching the captured bullet2 sample without passive assumptions.
+	EquipTestWeapon(S.Game, EWeaponType::Runetracer, 4);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Runetracer bullet2 preset fires first rune immediately", WC->GetProjectileCount(), 1);
+
+	TickTestWeaponsForSeconds(WC, 0.10f);
+	TestEqual("Runetracer does not fire the second rune before 0.2s", WC->GetProjectileCount(), 1);
+
+	TickTestWeaponsForSeconds(WC, 0.11f);
+	TestEqual("Runetracer fires the second rune after about 0.2s", WC->GetProjectileCount(), 2);
+
+	S.Destroy();
+	return true;
+}
+
+// Runetracer: weapon_runetracer.md gives Lv1 Duration=2.25s.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsRunetracerDuration225Seconds,
+	"ReinBalance.Survivors.Wiki.Runetracer_Duration_2_25s",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsRunetracerDuration225Seconds::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	EquipTestWeapon(S.Game, EWeaponType::Runetracer, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Runetracer Lv1 projectile exists immediately", WC->GetProjectileCount(), 1);
+
+	TickTestWeaponsForSeconds(WC, 2.00f);
+	TestEqual("Runetracer Lv1 projectile remains before its 2.25s duration", WC->GetProjectileCount(), 1);
+
+	TickTestWeaponsForSeconds(WC, 0.30f);
+	TestEqual("Runetracer Lv1 projectile expires after its 2.25s duration", WC->GetProjectileCount(), 0);
+
+	S.Destroy();
+	return true;
+}
+
+// Fire Wand: fire_wand_bullet4.mp4 shows a 4-fireball baseline fan, with 0.02s table interval.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsFireWandVideoBullet4Baseline,
+	"ReinBalance.Survivors.Wiki.FireWand_VideoBullet4_Baseline",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsFireWandVideoBullet4Baseline::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	S.AddEnemyAt(FVector2D(200.f, 0.f));
+
+	EquipTestWeapon(S.Game, EWeaponType::FireWand, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TickTestWeaponsForSeconds(WC, 0.08f);
+	TestEqual("Fire Wand Lv1 baseline emits four fireballs within the 0.02s interval window",
+		WC->GetProjectileCount(), 4);
+
+	for (int32 i = 0; i < WC->GetProjectileCount(); ++i)
+	{
+		TestTrue(FString::Printf(TEXT("Fire Wand projectile %d travels generally toward the selected +X enemy"), i),
+			WC->GetProjectilePos(i).X > 0.f);
+	}
+
+	S.Destroy();
+	return true;
+}
+
+// Lightning Ring: lightning_ring_bullet2.mp4 / weapon_lightning_ring.md specify two baseline strikes.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsLightningRingVideoBullet2Baseline,
+	"ReinBalance.Survivors.Wiki.LightningRing_VideoBullet2_Baseline",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsLightningRingVideoBullet2Baseline::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	S.AddEnemyAt(FVector2D(-100.f, 0.f), 100.f);
+	S.AddEnemyAt(FVector2D(100.f, 0.f), 100.f);
+
+	EquipTestWeapon(S.Game, EWeaponType::LightningRing, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	CC->BuildEnemyGrid();
+	FSurvivorsHitFrame HF;
+	WC->ComputeAllWeaponHits(CC, HF);
+	WC->ApplyWeaponHits(HF);
+
+	TestTrue("Lightning Ring baseline strikes first enemy",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP < 100.f);
+	TestTrue("Lightning Ring baseline strikes second enemy",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[1].HP < 100.f);
+
+	S.Destroy();
+	return true;
+}
+
+// King Bible: king_bible_bullet2.mp4 shows two orbiting bibles; Lv2 is the raw-table 2-orb preset.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsKingBibleVideoBullet2OrbitCount,
+	"ReinBalance.Survivors.Wiki.KingBible_VideoBullet2_OrbitCount",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsKingBibleVideoBullet2OrbitCount::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	EquipTestWeapon(S.Game, EWeaponType::KingBible, 2);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	TestEqual("King Bible Lv2 video bullet2 preset has two orbit orbs", WC->GetOrbitOrbCount(), 2);
 
 	S.Destroy();
 	return true;

@@ -39,15 +39,15 @@ void USurvivorsSantaWaterWeapon::Tick(float Dt)
 	if (!Game || !WeaponComp) return;
 
 	// 順次落下: 0.3s 間隔でキューから drop を処理（wiki: projectile interval = 0.3s）
+	// while + += で overshoot を保持（大 Dt 時のキャッチアップ対応）
 	if (PendingDropPositions.Num() > 0)
 	{
 		DropTimer -= Dt;
-		if (DropTimer <= 0.f)
+		while (DropTimer <= 0.f && PendingDropPositions.Num() > 0)
 		{
 			SpawnDrop(PendingDropPositions[0]);
 			PendingDropPositions.RemoveAt(0);
-			if (PendingDropPositions.Num() > 0)
-				DropTimer = 0.30f;
+			DropTimer += 0.30f;
 		}
 	}
 

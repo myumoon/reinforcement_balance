@@ -96,7 +96,8 @@ void USurvivorsFireWandWeapon::Tick(float Dt)
 	}
 
 	const float BaseAngle = FMath::Atan2(Dir.Y, Dir.X);
-	const float AngleStep = FMath::DegreesToRadians(12.f);
+	// OBSERVED: weapon_fire_wand.md「narrow fan」。仕様レビューで 12° は広すぎると判定 → 8° に修正
+	const float AngleStep = FMath::DegreesToRadians(SurvivorsGameConstants::FireWandAngleStepDeg);
 	for (int32 i = 0; i < EffAmount; ++i)
 	{
 		const float Offset = (static_cast<float>(i) - 0.5f * static_cast<float>(EffAmount - 1)) * AngleStep;
