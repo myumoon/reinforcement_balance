@@ -32,6 +32,16 @@ void USurvivorsLightningRingWeapon::CacheParams()
 	}
 }
 
+// TODO(lightning ring marker): 現状は落雷後にランダム敵位置で直接ダメージを与えるのみ。
+// weapon_lightning_ring.md: 「the lightning bolt visual and the ground hitbox separately」
+// 改善計画:
+//   1. 各 strike の impact 位置を短寿命 FGroundZoneState (bIsWarning=false, HitCooldown 大) で生成
+//      → OBS に strike 位置が見えるようになる。
+//   2. View 側: player center の ring 表示を strike marker に差し替える。
+//   3. Obs 側: 既存 GroundZone obs stream に乗せるか、Projectile obs に bIsWarning=false の
+//      marker として追加する。
+// 現状の実装は OBS/view での認識には不十分であるため、次フェーズで対応する。
+
 void USurvivorsLightningRingWeapon::Tick(float Dt)
 {
 	if (!Game) return;

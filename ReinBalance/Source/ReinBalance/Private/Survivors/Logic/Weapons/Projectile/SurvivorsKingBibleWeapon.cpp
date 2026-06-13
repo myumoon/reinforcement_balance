@@ -147,7 +147,11 @@ void USurvivorsKingBibleWeapon::ComputeHits(USurvivorsCollisionComponent* CollCo
 			const FEnemyState& E = Game->Enemies[EIdx];
 			if (E.bPendingRemove) continue;
 
-			// ヒット間隔チェック（SlotIdx ベースで管理）
+			// TODO(per-orb hit cooldown): 現状は SlotIdx 単位のクールダウンで全 bible 共有。
+			// wiki 仕様では "same bible" ごとに 1.7s cooldown。OrbIdx ごとに管理するには
+			// FEnemyState::WeaponLastHitTime を拡張するか、bible ごとの hit time map が必要。
+			// WeaponLastHitTime[SlotIdx] は slots=6 固定のため orb 数 × slot 数での拡張には
+			// 別構造が必要。今後の改善タスクとして残す（現状は slot 単位で近似動作）。
 			if (Game->ElapsedTime - E.WeaponLastHitTime[SlotIdx].Seconds < OrbHitInterval) continue;
 
 			FSurvivorsHitEvent Ev;

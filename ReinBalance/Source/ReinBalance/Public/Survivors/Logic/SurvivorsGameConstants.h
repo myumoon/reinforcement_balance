@@ -171,29 +171,33 @@ namespace SurvivorsGameConstants
 		int32 Pierce;  // 貫通数: 1=単体命中, N=N体貫通
 	};
 
-	// MagicWand: Speed は全レベル固定 600u(100%)。Lv3 で CD-0.2、各 Lv で Amount/Pierce 増加
+	// MagicWand: Speed は全レベル固定。
+	// OBSERVED: magic_wand_bullet2.mp4 frame 289→300, 61.8px/11f × 0.4167u/px ≈ 140u/s
+	// acceptance range 120-165u/s。wiki の 100%=600u は Camera Z=2000 基準と合わないため動画値を採用。
 	inline constexpr FMagicWandParams MagicWandTable[MaxWeaponLevel] = {
-		{ 10.f, 1.20f, 600.f, 1, 1 },  // Lv1: D=10, CD=1.20, Amount=1, Pierce=1
-		{ 10.f, 1.20f, 600.f, 2, 1 },  // Lv2: Amount+1
-		{ 10.f, 1.00f, 600.f, 2, 1 },  // Lv3: CD-0.20
-		{ 10.f, 1.00f, 600.f, 3, 1 },  // Lv4: Amount+1
-		{ 20.f, 1.00f, 600.f, 3, 1 },  // Lv5: D+10
-		{ 20.f, 1.00f, 600.f, 4, 1 },  // Lv6: Amount+1
-		{ 20.f, 1.00f, 600.f, 4, 2 },  // Lv7: Pierce+1
-		{ 30.f, 1.00f, 600.f, 4, 2 },  // Lv8: D+10
+		{ 10.f, 1.20f, 140.f, 1, 1 },  // Lv1: D=10, CD=1.20, Speed=140u/s(OBSERVED), Amount=1
+		{ 10.f, 1.20f, 140.f, 2, 1 },  // Lv2: Amount+1
+		{ 10.f, 1.00f, 140.f, 2, 1 },  // Lv3: CD-0.20
+		{ 10.f, 1.00f, 140.f, 3, 1 },  // Lv4: Amount+1
+		{ 20.f, 1.00f, 140.f, 3, 1 },  // Lv5: D+10
+		{ 20.f, 1.00f, 140.f, 4, 1 },  // Lv6: Amount+1
+		{ 20.f, 1.00f, 140.f, 4, 2 },  // Lv7: Pierce+1
+		{ 30.f, 1.00f, 140.f, 4, 2 },  // Lv8: D+10
 	};
 
-	// HolyWand (MagicWand 進化): Damage=30, CD=0.5s, Speed=1200u(200%), Amount=4, Pierce=2
+	// HolyWand (MagicWand 進化): Damage=30, CD=0.5s, Amount=4, Pierce=2
+	// Speed: wiki では MagicWand の 200%。動画由来 MagicWand 140u/s × 2.0 = 280u/s。
+	// HolyWand の動画測定値は未取得のため、MagicWand との相対倍率 2.0x を維持する。
 	// 進化武器は MaxLevel=1 のため Lv1 のみ参照される
 	inline constexpr FMagicWandParams HolyWandTable[MaxWeaponLevel] = {
-		{ 30.f, 0.50f, 1200.f, 4, 2 },  // Lv1
-		{ 30.f, 0.50f, 1200.f, 4, 2 },  // Lv2 (未使用)
-		{ 30.f, 0.50f, 1200.f, 4, 2 },  // Lv3 (未使用)
-		{ 30.f, 0.50f, 1200.f, 4, 2 },  // Lv4 (未使用)
-		{ 30.f, 0.50f, 1200.f, 4, 2 },  // Lv5 (未使用)
-		{ 30.f, 0.50f, 1200.f, 4, 2 },  // Lv6 (未使用)
-		{ 30.f, 0.50f, 1200.f, 4, 2 },  // Lv7 (未使用)
-		{ 30.f, 0.50f, 1200.f, 4, 2 },  // Lv8 (未使用)
+		{ 30.f, 0.50f, 280.f, 4, 2 },  // Lv1: Speed=280u/s(MagicWand 140×2.0)
+		{ 30.f, 0.50f, 280.f, 4, 2 },  // Lv2 (未使用)
+		{ 30.f, 0.50f, 280.f, 4, 2 },  // Lv3 (未使用)
+		{ 30.f, 0.50f, 280.f, 4, 2 },  // Lv4 (未使用)
+		{ 30.f, 0.50f, 280.f, 4, 2 },  // Lv5 (未使用)
+		{ 30.f, 0.50f, 280.f, 4, 2 },  // Lv6 (未使用)
+		{ 30.f, 0.50f, 280.f, 4, 2 },  // Lv7 (未使用)
+		{ 30.f, 0.50f, 280.f, 4, 2 },  // Lv8 (未使用)
 	};
 
 	struct FKnifeParams
@@ -243,8 +247,11 @@ namespace SurvivorsGameConstants
 
 	// Axe: CD=4.0s 全レベル固定、Speed=360u(100%) 全レベル固定
 	// Amount: Lv1=1,Lv2=2,Lv5=3。Pierce: Lv1=3体,Lv4=5体,Lv7=7体
+	// ArcHeight の意味: 重力式 g = InitVelY²/ArcHeight における中間パラメータ。
+	// 物理的な頂点高さ ≈ ArcHeight/2 (連続近似)。Lv1 ArcHeight=120 → apex ≈ 60u。
+	// OBSERVED: axe_bullet2.mp4 frame 80-100, 130-150px × 0.4167u/px ≈ 54-63u。acceptance 50-75u。
 	inline constexpr FAxeParams AxeTable[MaxWeaponLevel] = {
-		{  20.f, 4.00f, 360.f, 120.f, 1, 3 },  // Lv1: D=20, Pierce=3
+		{  20.f, 4.00f, 360.f, 120.f, 1, 3 },  // Lv1: D=20, ArcHeight=120→apex≈60u(OBSERVED), Pierce=3
 		{  20.f, 4.00f, 360.f, 120.f, 2, 3 },  // Lv2: Amount+1
 		{  40.f, 4.00f, 360.f, 120.f, 2, 3 },  // Lv3: D+20
 		{  40.f, 4.00f, 360.f, 120.f, 2, 5 },  // Lv4: Pierce+2
@@ -349,30 +356,33 @@ namespace SurvivorsGameConstants
 		int32 Amount;
 	};
 
-	// FireWand: CD=3.0s 全レベル固定。Speed: 75%=360u(基準100%=480u)。Lv1 から4発の扇状発射。
-	// Speed: Lv1=75%,Lv3=95%,Lv5=115%,Lv7=135%。ExplosionRadius は全レベル固定
+	// FireWand: CD=3.0s 全レベル固定。Lv1 から4発の扇状発射。
+	// OBSERVED: fire_wand_bullet4.mp4 frame 290→300, 38-39px/10f × 0.4167u/px ≈ 96u/s (Lv1 75%)
+	// acceptance range 80-115u/s。wiki の 75%=360u は Camera Z=2000 基準と合わないため動画値を採用。
+	// 基準 100% = 96/0.75 = 128u/s。各 Lv は wiki の相対 % で比例換算。
 	inline constexpr FFireWandParams FireWandTable[MaxWeaponLevel] = {
-		{ 20.f, 3.00f, 360.f, 30.f, 4 },  // Lv1: D=20, Speed=75%
-		{ 30.f, 3.00f, 360.f, 30.f, 4 },  // Lv2: D+10
-		{ 40.f, 3.00f, 456.f, 30.f, 4 },  // Lv3: D+10, Speed+20%(95%)
-		{ 50.f, 3.00f, 456.f, 30.f, 4 },  // Lv4: D+10
-		{ 60.f, 3.00f, 552.f, 30.f, 4 },  // Lv5: D+10, Speed+20%(115%)
-		{ 70.f, 3.00f, 552.f, 30.f, 4 },  // Lv6: D+10
-		{ 80.f, 3.00f, 648.f, 30.f, 4 },  // Lv7: D+10, Speed+20%(135%)
-		{ 90.f, 3.00f, 648.f, 30.f, 4 },  // Lv8: D+10
+		{ 20.f, 3.00f,  96.f, 30.f, 4 },  // Lv1: D=20, Speed=75%=96u/s(OBSERVED)
+		{ 30.f, 3.00f,  96.f, 30.f, 4 },  // Lv2: D+10
+		{ 40.f, 3.00f, 122.f, 30.f, 4 },  // Lv3: D+10, Speed+20%(95%=122u/s)
+		{ 50.f, 3.00f, 122.f, 30.f, 4 },  // Lv4: D+10
+		{ 60.f, 3.00f, 147.f, 30.f, 4 },  // Lv5: D+10, Speed+20%(115%=147u/s)
+		{ 70.f, 3.00f, 147.f, 30.f, 4 },  // Lv6: D+10
+		{ 80.f, 3.00f, 173.f, 30.f, 4 },  // Lv7: D+10, Speed+20%(135%=173u/s)
+		{ 90.f, 3.00f, 173.f, 30.f, 4 },  // Lv8: D+10
 	};
 
-	// Hellfire (FireWand 進化): Damage=100, CD=3.0s, Speed=480u(100%), ExpRad=30u
+	// Hellfire (FireWand 進化): Damage=100, CD=3.0s, Speed=100%=128u/s, ExpRad=30u
+	// wiki の 100% を FireWand 動画由来基準 128u/s に換算。Hellfire 動画測定値は未取得のため比例維持。
 	// 進化武器は MaxLevel=1 のため Lv1 のみ参照される
 	inline constexpr FFireWandParams HellfireTable[MaxWeaponLevel] = {
-		{ 100.f, 3.00f, 480.f, 30.f, 4 },  // Lv1
-		{ 100.f, 3.00f, 480.f, 30.f, 4 },  // Lv2 (未使用)
-		{ 100.f, 3.00f, 480.f, 30.f, 4 },  // Lv3 (未使用)
-		{ 100.f, 3.00f, 480.f, 30.f, 4 },  // Lv4 (未使用)
-		{ 100.f, 3.00f, 480.f, 30.f, 4 },  // Lv5 (未使用)
-		{ 100.f, 3.00f, 480.f, 30.f, 4 },  // Lv6 (未使用)
-		{ 100.f, 3.00f, 480.f, 30.f, 4 },  // Lv7 (未使用)
-		{ 100.f, 3.00f, 480.f, 30.f, 4 },  // Lv8 (未使用)
+		{ 100.f, 3.00f, 128.f, 30.f, 4 },  // Lv1: Speed=100%=128u/s
+		{ 100.f, 3.00f, 128.f, 30.f, 4 },  // Lv2 (未使用)
+		{ 100.f, 3.00f, 128.f, 30.f, 4 },  // Lv3 (未使用)
+		{ 100.f, 3.00f, 128.f, 30.f, 4 },  // Lv4 (未使用)
+		{ 100.f, 3.00f, 128.f, 30.f, 4 },  // Lv5 (未使用)
+		{ 100.f, 3.00f, 128.f, 30.f, 4 },  // Lv6 (未使用)
+		{ 100.f, 3.00f, 128.f, 30.f, 4 },  // Lv7 (未使用)
+		{ 100.f, 3.00f, 128.f, 30.f, 4 },  // Lv8 (未使用)
 	};
 
 	struct FSantaWaterParams
@@ -519,9 +529,18 @@ namespace SurvivorsGameConstants
 	static constexpr float AxeProjectileInterval        = 0.20f;  // OBSERVED: ~0.2s short volley (weapon_axe.md)
 	static constexpr float RunetracerProjectileInterval = 0.20f;  // OBSERVED: ~0.2s sequence (weapon_runetracer.md)
 
-	// Fire Wand ファン角度（動画観察：narrow fan。12° → 8° に修正）
-	// OBSERVED: weapon_fire_wand.md「narrow fan」。仕様レビューで 12° は広すぎると判定
-	static constexpr float FireWandAngleStepDeg = 8.f;
+	// Fire Wand ファン角度（動画測定値）
+	// OBSERVED: fire_wand_bullet4.mp4 frame 290/300, 4発全体で約16°, 1 step ≈ 5.3°
+	// acceptance range total 14-18°。
+	static constexpr float FireWandAngleStepDeg = 5.3f;
+
+	// Cross 折り返し往路距離（動画測定値）
+	// OBSERVED: cross_bullet2.mp4 frame 80-110, 170-180px × 0.4167u/px ≈ 75u
+	// acceptance range 60-90u。speed によらず距離を固定する。
+	static constexpr float CrossReverseDistance = 75.f;
+
+	// Runetracer Hitbox Delay（wiki: "same enemy cannot be hit more often than every 0.5s by the same rune"）
+	static constexpr float RunetracerHitboxDelay = 0.5f;
 
 	// Axe の Area スケール係数（wiki: "Axe scales with Area × 1.3"）
 	static constexpr float AxeAreaScaleFactor = 1.3f;

@@ -183,6 +183,9 @@ struct FProjectileState
 	FOrbitAngleRad       AngleRad;                                         // King Bible 等の軌道角度
 	FSurvivorsElapsedTime LastHitTime  = FSurvivorsElapsedTime(-1000.f);   // 範囲武器クールダウン
 	TArray<int32>        HitEnemyIds;  // ヒット済み UniqueId（同一弾で同一敵への多重ヒット防止）
+	// Runetracer/NoFuture 専用: 敵 UniqueId → 最終ヒット ElapsedTime。
+	// 0.5s Hitbox Delay を projectile 単位で管理する（HitEnemyIds の永続ブロックを使わない）。
+	TMap<int32, float>   EnemyHitDelays;
 	// 貫通設定: 0=無限貫通(bPiercing=true と同義), N>0=N体まで命中後に消滅
 	// bPiercing=false かつ MaxPierceCount=0 の場合は bPiercing の挙動（1体で消滅）を使用
 	int32                MaxPierceCount = 0;

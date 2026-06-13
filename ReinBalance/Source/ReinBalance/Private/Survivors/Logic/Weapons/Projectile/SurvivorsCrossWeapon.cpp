@@ -81,7 +81,9 @@ void USurvivorsCrossWeapon::StartBurst()
 	BurstSpeed       = CachedSpeed  * PE.SpeedMult;
 	BurstRadius      = CachedRadius * PE.AreaMult;
 	BurstLifeTime    = 6.0f * PE.DurationMult;
-	BurstReverseTime = 0.75f;  // wiki: "after a short while, travels in the opposite direction"
+	// 折り返しまでの時間 = 距離 / 速度（距離固定で speed が変わっても往路距離が伸びない設計）。
+	// OBSERVED: cross_bullet2.mp4 frame 80-110, 約75u。CrossReverseDistance = 75u。
+	BurstReverseTime = SurvivorsGameConstants::CrossReverseDistance / FMath::Max(BurstSpeed, 1.f);
 	BurstKnockback   = CachedKnockbackStrength;
 
 	PendingCrossShots = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));

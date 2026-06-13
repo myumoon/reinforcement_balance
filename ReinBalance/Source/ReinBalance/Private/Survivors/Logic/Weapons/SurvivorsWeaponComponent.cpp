@@ -229,8 +229,21 @@ void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionCompone
 			const FEnemyState& E = Game->Enemies[EIdx];
 			if (E.bPendingRemove) continue;
 
-			// piercing/非piercing 問わずヒット済みならスキップ（毎 tick 多重ダメージ防止）
-			if (P.HitEnemyIds.Contains(E.UniqueId)) continue;
+			// Runetracer/NoFuture: wiki Hitbox Delay 0.5s で同一敵への再ヒットを制御。
+			// 永続 HitEnemyIds ではなく projectile ごとの EnemyHitDelays で管理する。
+			const bool bIsRunetracer = (P.WeaponType == EWeaponType::Runetracer
+				|| P.WeaponType == EWeaponType::NoFuture);
+			if (bIsRunetracer)
+			{
+				const float* LastHit = P.EnemyHitDelays.Find(E.UniqueId);
+				if (LastHit && (Game->ElapsedTime - *LastHit) < SurvivorsGameConstants::RunetracerHitboxDelay)
+					continue;
+			}
+			else
+			{
+				// 通常 projectile: ヒット済みなら永続スキップ
+				if (P.HitEnemyIds.Contains(E.UniqueId)) continue;
+			}
 
 			FSurvivorsHitEvent Ev;
 			Ev.Type = ESurvivorsHitType::ProjectileDamage;
@@ -245,8 +258,16 @@ void USurvivorsWeaponComponent::ComputeProjectileHits(USurvivorsCollisionCompone
 			}
 			HitFrame.Events.Add(Ev);
 
-			// HitEnemyIds に記録（同一弾では1回のみダメージ）
-			P.HitEnemyIds.Add(E.UniqueId);
+			if (bIsRunetracer)
+			{
+				// 時刻を記録して 0.5s 後に再ヒット可能にする
+				P.EnemyHitDelays.Add(E.UniqueId, Game->ElapsedTime);
+			}
+			else
+			{
+				// HitEnemyIds に記録（同一弾では1回のみダメージ）
+				P.HitEnemyIds.Add(E.UniqueId);
+			}
 
 			// 貫通数チェック: MaxPierceCount > 0 の場合、N 体命中で終了
 			if (P.MaxPierceCount > 0 && P.HitEnemyIds.Num() >= P.MaxPierceCount)
