@@ -96,7 +96,7 @@ void USurvivorsFireWandWeapon::Tick(float Dt)
 	}
 
 	const float BaseAngle = FMath::Atan2(Dir.Y, Dir.X);
-	// OBSERVED: weapon_fire_wand.md「narrow fan」。仕様レビューで 12° は広すぎると判定 → 8° に修正
+	// OBSERVED: fire_wand_bullet4.mp4 frame 290/300, 4発全体≈16°, step≈5.3° (FireWandAngleStepDeg)
 	const float AngleStep = FMath::DegreesToRadians(SurvivorsGameConstants::FireWandAngleStepDeg);
 	for (int32 i = 0; i < EffAmount; ++i)
 	{
