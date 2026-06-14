@@ -2182,11 +2182,11 @@ bool FSurvivorsRunetracerScreenEdgeBounce::RunTest(const FString& Parameters)
 	EquipTestWeapon(S.Game, EWeaponType::Runetracer, 1);
 	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	// スクリーン右端の 1u 内側からスタートし、1 tick（1/60s）で端を超える速度で +X 発射
-	// 速度が大きすぎると左壁まで跳ね返って X が増加してしまうため、適度な速度を使う
+	// Lv1 実速度（193u/s）で右端の 1u 内側から発射する
+	// 実ゲームの速度でバウンス機構が正しく動くことを検証する
 	// SlotIdx=0（Runetracer のスロット）に対してバウンス処理が走る
 	const float ScreenEdgeX = SurvivorsGameConstants::ScreenHalfWidthU;  // 400u
-	const float HighSpeed   = 600.f;  // 1tick(1/60s)で 10u 進む → 端(399u→409u)を超える; 2tick目は逆行
+	const float HighSpeed   = SurvivorsGameConstants::RunetracerTable[0].Speed;  // 193u/s (Lv1)
 	FProjectileState Proj;
 	Proj.Pos            = FVector2D(ScreenEdgeX - 1.f, 0.f);
 	Proj.Vel            = FVector2D(HighSpeed, 0.f);
