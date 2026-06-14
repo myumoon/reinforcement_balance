@@ -1394,16 +1394,19 @@ bool FSurvivorsRunetracerHitboxDelayAllowsRehit::RunTest(const FString& Paramete
 	FSurvivorsTestWorld S;
 	if (!TestTrue("World created", S.Create())) return false;
 
-	S.AddEnemyAt(FVector2D::ZeroVector, 200.f);
+	// 敵をグリッド境界から離れた (50,0) に配置し、弾も同位置に置く（接触 = 0u）
+	const FVector2D EnemyPos(50.f, 0.f);
+	S.AddEnemyAt(EnemyPos, 200.f);
 
 	FProjectileState Proj;
-	Proj.Pos = FVector2D::ZeroVector;
-	Proj.Radius = FSimRadius(10.f);
-	Proj.Damage = FDamage(10.f);
-	Proj.WeaponType = EWeaponType::Runetracer;
-	Proj.WeaponSlotIdx = 1;
-	Proj.LifeTime = FProjectileLifeTime(5.f);
-	Proj.bPiercing = true;
+	Proj.Pos            = EnemyPos;
+	Proj.Radius         = FSimRadius(10.f);
+	Proj.Damage         = FDamage(10.f);
+	Proj.WeaponType     = EWeaponType::Runetracer;
+	Proj.WeaponSlotIdx  = 0;
+	Proj.LifeTime       = FProjectileLifeTime(5.f);
+	Proj.bPiercing      = true;
+	Proj.KnockbackStrength = 0.f;  // ノックバックなし（敵位置を維持する）
 	FSurvivorsGameTestAccess::WeaponComp(S.Game)->SpawnProjectile(Proj);
 
 	S.RunWeaponHits();
@@ -2011,8 +2014,11 @@ bool FSurvivorsKingBibleOrbCooldownSameOrb::RunTest(const FString& Parameters)
 	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
 	if (!TestEqual("KingBible Lv1 has 2 orbs", KB->GetOrbPositions().Num(), 2)) { S.Destroy(); return false; }
 
+	const FVector2D Orb0Pos = KB->GetOrbPositions()[0];
+
 	// 敵をオーブ 0 に重ねる → 1回目ヒット
-	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = KB->GetOrbPositions()[0];
+	// ノックバック(KnockbackSim_1=20u)で敵が離れるため、各 ComputeHits 前に位置をリセットする
+	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = Orb0Pos;
 	CC->BuildEnemyGrid();
 	FSurvivorsHitFrame HF1;
 	WC->ComputeAllWeaponHits(CC, HF1);
@@ -2020,7 +2026,8 @@ bool FSurvivorsKingBibleOrbCooldownSameOrb::RunTest(const FString& Parameters)
 	const float HPAfterFirst = FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP;
 	TestTrue("First orb hit deals damage", HPAfterFirst < 2000.f);
 
-	// 再度 → 0.5s 以内なので same orb cooldown でブロックされる
+	// 再度 → same orb cooldown でブロックされるはず（位置をリセットして接触範囲内に戻す）
+	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = Orb0Pos;
 	CC->BuildEnemyGrid();
 	FSurvivorsHitFrame HF2;
 	WC->ComputeAllWeaponHits(CC, HF2);
@@ -2028,8 +2035,9 @@ bool FSurvivorsKingBibleOrbCooldownSameOrb::RunTest(const FString& Parameters)
 	TestEqual("Same orb does not re-hit immediately",
 		FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, HPAfterFirst);
 
-	// 1.7s 経過後 → 再ヒット可能
+	// 1.7s 経過後 → 再ヒット可能（位置をリセット）
 	FSurvivorsGameTestAccess::ElapsedTime(S.Game) += 1.71f;
+	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = Orb0Pos;
 	CC->BuildEnemyGrid();
 	FSurvivorsHitFrame HF3;
 	WC->ComputeAllWeaponHits(CC, HF3);
@@ -2175,9 +2183,10 @@ bool FSurvivorsRunetracerScreenEdgeBounce::RunTest(const FString& Parameters)
 	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
 	// スクリーン右端の 1u 内側からスタートし、1 tick（1/60s）で端を超える速度で +X 発射
+	// 速度が大きすぎると左壁まで跳ね返って X が増加してしまうため、適度な速度を使う
 	// SlotIdx=0（Runetracer のスロット）に対してバウンス処理が走る
 	const float ScreenEdgeX = SurvivorsGameConstants::ScreenHalfWidthU;  // 400u
-	const float HighSpeed   = ScreenEdgeX * 60.f;  // 1 tick(1/60s) で ScreenHalfWidthU 分進む速度
+	const float HighSpeed   = 600.f;  // 1tick(1/60s)で 10u 進む → 端(399u→409u)を超える; 2tick目は逆行
 	FProjectileState Proj;
 	Proj.Pos            = FVector2D(ScreenEdgeX - 1.f, 0.f);
 	Proj.Vel            = FVector2D(HighSpeed, 0.f);
@@ -2266,11 +2275,16 @@ bool FSurvivorsSantaWaterHighAmountBlueAreaDistanceFromImage::RunTest(const FStr
 
 	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
 
-	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 4);
+	// Lv1: ZoneRadius=30u (SantaWater Radius=100%=30u) → 画像由来 [20,38u] の範囲内
+	// 敵を SantaWaterCircleRadius(140u) の位置に置くことで
+	// 1発目が敵付近(140u)に落ちる → DistFromPlayer ≈ 140u, BlueAreaEdge ≈ 170u
+	S.AddEnemyAt(FVector2D(SurvivorsGameConstants::SantaWaterCircleRadius, 0.f));
+
+	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 1);
 	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
 	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	if (!TestTrue("SantaWater Lv4 first drop spawned", WC->GetGroundZoneCount() >= 1))
+	if (!TestTrue("SantaWater Lv1 first drop spawned", WC->GetGroundZoneCount() >= 1))
 	{
 		S.Destroy();
 		return false;
@@ -2280,7 +2294,7 @@ bool FSurvivorsSantaWaterHighAmountBlueAreaDistanceFromImage::RunTest(const FStr
 	const float DistFromPlayer = WC->GetGroundZonePos(0).Size();
 	const float BlueAreaEdge   = DistFromPlayer + ZoneRadius;
 
-	TestTrue(FString::Printf(TEXT("Zone radius %.1fu should be 20-38u"), ZoneRadius),
+	TestTrue(FString::Printf(TEXT("Zone radius %.1fu should be 20-38u (image-derived Lv1=30u)"), ZoneRadius),
 		ZoneRadius >= 20.f && ZoneRadius <= 38.f);
 	TestTrue(FString::Printf(TEXT("Blue area outer edge %.1fu should be 155-178u"), BlueAreaEdge),
 		BlueAreaEdge >= 155.f && BlueAreaEdge <= 178.f);
