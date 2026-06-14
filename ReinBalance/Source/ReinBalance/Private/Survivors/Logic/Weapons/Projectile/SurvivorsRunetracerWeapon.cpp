@@ -118,7 +118,7 @@ void USurvivorsRunetracerWeapon::StartBurst()
 	BurstDamage    = CachedDamage   * PE.DamageMult;
 	BurstSpeed     = CachedSpeed    * PE.SpeedMult;
 	BurstDuration  = CachedDuration * PE.DurationMult;
-	BurstRadius    = 10.f           * PE.AreaMult;
+	BurstRadius    = 6.7f           * PE.AreaMult;  // 10u × 2/3 ≈ 6.7u
 	BurstMaxBounce = CachedMaxBounce;
 
 	PendingRuneShots = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
