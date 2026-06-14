@@ -1314,7 +1314,9 @@ bool FSurvivorsRunetracerVideoBullet2Cadence::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Runetracer: weapon_runetracer.md gives Lv1 Duration=2.25s.
+// Runetracer: OBSERVED: 真下に打った弾が70f(60fps)で画面下(225u)に到達し、70f後にプレイヤー位置に戻った。
+// Duration = 140f/60fps = 2.33s。Speed = 225u×60/70 ≈ 193u/s。
+// (旧テスト名は FSurvivorsRunetracerDuration225Seconds のまま後方互換で維持)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsRunetracerDuration225Seconds,
 	"ReinBalance.Survivors.Wiki.Runetracer_Duration_2_25s",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1333,10 +1335,50 @@ bool FSurvivorsRunetracerDuration225Seconds::RunTest(const FString& Parameters)
 	TestEqual("Runetracer Lv1 second projectile appears after about 0.2s", WC->GetProjectileCount(), 2);
 
 	TickTestWeaponsForSeconds(WC, 1.80f);
-	TestEqual("Runetracer Lv1 projectiles remain before their 2.25s duration", WC->GetProjectileCount(), 2);
+	TestEqual("Runetracer Lv1 projectiles remain before their 2.33s duration", WC->GetProjectileCount(), 2);
 
 	TickTestWeaponsForSeconds(WC, 0.60f);
-	TestEqual("Runetracer Lv1 projectiles expire after their 2.25s duration", WC->GetProjectileCount(), 0);
+	TestEqual("Runetracer Lv1 projectiles expire after their 2.33s duration", WC->GetProjectileCount(), 0);
+
+	S.Destroy();
+	return true;
+}
+
+// Runetracer: OBSERVED: 弾速 225u / (70f/60fps) ≈ 193u/s (Acceptance: 160-225u/s)
+// 現行 440u/s では失敗する想定。193u/s 修正後に通す。
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsRunetracerVideoProjectileSpeed,
+	"ReinBalance.Survivors.Video.Runetracer_ProjectileSpeed_193u",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsRunetracerVideoProjectileSpeed::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+
+	EquipTestWeapon(S.Game, EWeaponType::Runetracer, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	if (!TestTrue("Runetracer Lv1 fires first projectile", WC->GetProjectileCount() > 0))
+	{
+		S.Destroy();
+		return false;
+	}
+
+	// 0.25s 以内なら 193u/s で 48u — スクリーン端(225u)に届かず bounce しない
+	const FVector2D StartPos = WC->GetProjectilePos(0);
+	const float Elapsed      = TickTestWeaponsForSecondsMeasured(WC, 0.25f);
+	if (!TestTrue("Runetracer projectile remains alive for speed sample", WC->GetProjectileCount() > 0))
+	{
+		S.Destroy();
+		return false;
+	}
+
+	// 距離は方向によらず Speed × Elapsed （bounce しない距離なので正確）
+	const float Speed = FVector2D::Distance(WC->GetProjectilePos(0), StartPos) / Elapsed;
+	TestTrue(FString::Printf(TEXT("Runetracer video speed %.1fu/s should be near 193u/s"), Speed),
+		Speed >= 160.f && Speed <= 225.f);
 
 	S.Destroy();
 	return true;

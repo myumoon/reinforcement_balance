@@ -446,31 +446,32 @@ namespace SurvivorsGameConstants
 		int32 MaxBounce;
 	};
 
-	// Runetracer: CD=3.0s 全レベル固定。Speed: 100%=440u,120%=528u,140%=616u
-	// Duration/Amount は仕様値を使用。MaxBounce は既存の壁反射寿命近似。
-	// Amount: Lv1 baseline=2（1発目即時、2発目0.2s後）。Lv4=3, Lv7=4。
+	// Runetracer: CD=3.0s 全レベル固定。
+	// Speed: OBSERVED: 弾が画面下(225u)まで70f(60fps)で到達 → 225×60/70 ≈ 193u/s (Lv1=100%)
+	// Duration: OBSERVED: 往復140f(60fps) = 140/60 ≈ 2.33s (Lv1 baseline)
+	// MaxBounce は既存の壁反射寿命近似。Amount: Lv1=2, Lv4=3, Lv7=4。
 	inline constexpr FRunetracerParams RunetracerTable[MaxWeaponLevel] = {
-		{ 10.f, 3.00f, 440.f, 2.25f, 2, 3 },  // Lv1: D=10, Speed=100%, Amount=2(baseline)
-		{ 15.f, 3.00f, 528.f, 2.25f, 2, 4 },  // Lv2: D+5, Speed+20%
-		{ 20.f, 3.00f, 528.f, 2.55f, 2, 4 },  // Lv3: D+5, Duration+0.3s
-		{ 20.f, 3.00f, 528.f, 2.55f, 3, 5 },  // Lv4: Amount+1
-		{ 25.f, 3.00f, 616.f, 2.55f, 3, 5 },  // Lv5: D+5, Speed+20%
-		{ 30.f, 3.00f, 616.f, 2.85f, 3, 6 },  // Lv6: D+5, Duration+0.3s
-		{ 30.f, 3.00f, 616.f, 2.85f, 4, 6 },  // Lv7: Amount+1
-		{ 30.f, 3.00f, 616.f, 3.25f, 4, 7 },  // Lv8: Duration+0.4s
+		{ 10.f, 3.00f, 193.f, 2.33f, 2, 3 },  // Lv1: D=10, Speed=100%=193u/s(OBSERVED), Duration=2.33s(OBSERVED)
+		{ 15.f, 3.00f, 232.f, 2.33f, 2, 4 },  // Lv2: D+5, Speed+20%=232u/s
+		{ 20.f, 3.00f, 232.f, 2.63f, 2, 4 },  // Lv3: D+5, Duration+0.3s
+		{ 20.f, 3.00f, 232.f, 2.63f, 3, 5 },  // Lv4: Amount+1
+		{ 25.f, 3.00f, 270.f, 2.63f, 3, 5 },  // Lv5: D+5, Speed+20%=270u/s (193×1.4)
+		{ 30.f, 3.00f, 270.f, 2.93f, 3, 6 },  // Lv6: D+5, Duration+0.3s
+		{ 30.f, 3.00f, 270.f, 2.93f, 4, 6 },  // Lv7: Amount+1
+		{ 30.f, 3.00f, 270.f, 3.33f, 4, 7 },  // Lv8: Duration+0.4s
 	};
 
-	// NO FUTURE (Runetracer 進化): Damage=30, CD=1.0s, Speed=1232u(280%), MaxBounce=7
+	// NO FUTURE (Runetracer 進化): Damage=30, CD=1.0s, Speed=193×280%=540u/s, MaxBounce=7
 	// 進化武器は MaxLevel=1 のため Lv1 のみ参照される
 	inline constexpr FRunetracerParams NoFutureTable[MaxWeaponLevel] = {
-		{ 30.f, 1.00f, 1232.f, 3.00f, 1, 7 },  // Lv1
-		{ 30.f, 1.00f, 1232.f, 3.00f, 1, 7 },  // Lv2 (未使用)
-		{ 30.f, 1.00f, 1232.f, 3.00f, 1, 7 },  // Lv3 (未使用)
-		{ 30.f, 1.00f, 1232.f, 3.00f, 1, 7 },  // Lv4 (未使用)
-		{ 30.f, 1.00f, 1232.f, 3.00f, 1, 7 },  // Lv5 (未使用)
-		{ 30.f, 1.00f, 1232.f, 3.00f, 1, 7 },  // Lv6 (未使用)
-		{ 30.f, 1.00f, 1232.f, 3.00f, 1, 7 },  // Lv7 (未使用)
-		{ 30.f, 1.00f, 1232.f, 3.00f, 1, 7 },  // Lv8 (未使用)
+		{ 30.f, 1.00f, 540.f, 3.00f, 1, 7 },  // Lv1: Speed=193×2.8=540u/s
+		{ 30.f, 1.00f, 540.f, 3.00f, 1, 7 },  // Lv2 (未使用)
+		{ 30.f, 1.00f, 540.f, 3.00f, 1, 7 },  // Lv3 (未使用)
+		{ 30.f, 1.00f, 540.f, 3.00f, 1, 7 },  // Lv4 (未使用)
+		{ 30.f, 1.00f, 540.f, 3.00f, 1, 7 },  // Lv5 (未使用)
+		{ 30.f, 1.00f, 540.f, 3.00f, 1, 7 },  // Lv6 (未使用)
+		{ 30.f, 1.00f, 540.f, 3.00f, 1, 7 },  // Lv7 (未使用)
+		{ 30.f, 1.00f, 540.f, 3.00f, 1, 7 },  // Lv8 (未使用)
 	};
 
 	struct FLightningRingParams
