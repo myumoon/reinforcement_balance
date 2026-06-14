@@ -16,21 +16,22 @@ void USurvivorsPeachoneWeapon::CacheParams()
 	const int32 Idx = Lv - 1;
 
 	const SurvivorsGameConstants::FPeachoneParams& P = SurvivorsGameConstants::PeachoneTable[Idx];
-	CachedDamage      = P.Damage;
-	CachedCooldown    = P.Cooldown;
-	CachedOrbitRadius = P.OrbitRadius;
-	CachedBombRadius  = P.BombRadius;
-	CachedAmount      = P.Amount;
+	CachedDamage           = P.Damage;
+	CachedCooldown         = P.Cooldown;
+	CachedOrbitRadius      = P.OrbitRadius;
+	CachedOrbitRotSpeed    = P.OrbitRotSpeed;
+	CachedTargetZoneRadius = P.TargetZoneRadius;
+	CachedImpactRadius     = P.ImpactRadius;
+	CachedAmount           = P.Amount;
 }
 
 void USurvivorsPeachoneWeapon::UpdateOrbitPos()
 {
 	if (!Game) return;
-	const FPassiveEffects& PE = GetPassiveEffects();
-	const float EffRadius = CachedOrbitRadius * PE.AreaMult;
+	// OrbitRadius は固定（Area不使用）
 	CurrentOrbitPos = Game->PlayerPos + FVector2D(
-		FMath::Cos(OrbitAngle + PhaseOff) * EffRadius,
-		FMath::Sin(OrbitAngle + PhaseOff) * EffRadius);
+		FMath::Cos(OrbitAngle + PhaseOff) * CachedOrbitRadius,
+		FMath::Sin(OrbitAngle + PhaseOff) * CachedOrbitRadius);
 }
 
 void USurvivorsPeachoneWeapon::Tick(float Dt)
@@ -39,8 +40,8 @@ void USurvivorsPeachoneWeapon::Tick(float Dt)
 
 	const FPassiveEffects& PE = GetPassiveEffects();
 
-	// 軌道角度を更新（Speed は target zone の周回速度に影響）
-	const float RotSpeed = 3.0f * PE.SpeedMult;
+	// 軌道角度を更新（SpeedMult を軌道速度に適用）
+	const float RotSpeed = CachedOrbitRotSpeed * PE.SpeedMult;
 	OrbitAngle += RotDir * RotSpeed * Dt;
 	UpdateOrbitPos();
 
@@ -71,10 +72,12 @@ void USurvivorsPeachoneWeapon::StartBombing()
 
 	// ダメージはセット数で割って1 activation あたりの期待ダメージを wiki 値に近づける。
 	// 各弾がランダム散布されるため1敵への命中数は確率的に ~1/set となる。
-	BurstDamage       = CachedDamage * PE.DamageMult
+	BurstDamage           = CachedDamage * PE.DamageMult
 		/ static_cast<float>(SurvivorsGameConstants::PeachoneSetsPerActivation);
-	BurstImpactRadius = 10.f * PE.AreaMult;
-	BurstBombRadius   = CachedBombRadius * PE.AreaMult;
+	// ImpactRadius: passive AreaMult のみ適用（level-tier は CachedImpactRadius に織り込み済み）
+	BurstImpactRadius     = CachedImpactRadius * PE.AreaMult;
+	// TargetZoneRadius: 固定（Area 不使用）
+	BurstTargetZoneRadius = CachedTargetZoneRadius;
 
 	// wiki: Amount × SetsPerActivation 発を rapid fire
 	// Duration パッシブによるセット数スケールは TODO（現在は固定 4 sets）
@@ -98,7 +101,7 @@ void USurvivorsPeachoneWeapon::SpawnBombShot()
 	// OBSERVED: "bombard random points inside the current circular target zone" (weapon_peachone.md)
 	// 再現性のため FMath::FRand 系ではなく Game->RandStream を使用する
 	const float Angle = Game->RandStream.FRand() * 2.f * UE_PI;
-	const float Dist  = FMath::Sqrt(Game->RandStream.FRand()) * BurstBombRadius;
+	const float Dist  = FMath::Sqrt(Game->RandStream.FRand()) * BurstTargetZoneRadius;
 	const FVector2D ImpactPos = CurrentOrbitPos + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Dist;
 
 	FProjectileState P;

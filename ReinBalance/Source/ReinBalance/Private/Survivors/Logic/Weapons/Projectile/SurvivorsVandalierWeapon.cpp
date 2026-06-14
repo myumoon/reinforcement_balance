@@ -17,21 +17,21 @@ void USurvivorsVandalierWeapon::CacheParams()
 
 	// Vandalier は Peachone + EbonyWings 統合のため約 1.5 倍強化
 	const SurvivorsGameConstants::FPeachoneParams& P = SurvivorsGameConstants::PeachoneTable[Idx];
-	CachedDamage      = P.Damage * 1.5f;
-	CachedCooldown    = P.Cooldown * 0.8f;
-	CachedOrbitRadius = P.OrbitRadius + 10.f;
-	CachedBombRadius  = P.BombRadius + 10.f;
-	CachedAmount      = P.Amount;
+	CachedDamage           = P.Damage * 1.5f;
+	CachedCooldown         = P.Cooldown * 0.8f;
+	CachedOrbitRadius      = P.OrbitRadius + 10.f;
+	CachedOrbitRotSpeed    = P.OrbitRotSpeed;
+	CachedTargetZoneRadius = P.TargetZoneRadius + 10.f;
+	CachedImpactRadius     = P.ImpactRadius;
+	CachedAmount           = P.Amount;
 }
 
 FVector2D USurvivorsVandalierWeapon::GetOrbitOrbPos(int32 OrbIdx) const
 {
 	if (!Game || OrbIdx < 0 || OrbIdx >= 2) return FVector2D::ZeroVector;
-	const FPassiveEffects& PE = GetPassiveEffects();
-	const float EffOrbitRadius = CachedOrbitRadius * PE.AreaMult;
 	return Game->PlayerPos + FVector2D(
-		FMath::Cos(OrbitAngle[OrbIdx]) * EffOrbitRadius,
-		FMath::Sin(OrbitAngle[OrbIdx]) * EffOrbitRadius);
+		FMath::Cos(OrbitAngle[OrbIdx]) * CachedOrbitRadius,
+		FMath::Sin(OrbitAngle[OrbIdx]) * CachedOrbitRadius);
 }
 
 void USurvivorsVandalierWeapon::Tick(float Dt)
@@ -39,7 +39,7 @@ void USurvivorsVandalierWeapon::Tick(float Dt)
 	if (!Game) return;
 
 	const FPassiveEffects& PE = GetPassiveEffects();
-	const float RotSpeed = 3.0f * PE.SpeedMult;
+	const float RotSpeed = CachedOrbitRotSpeed * PE.SpeedMult;
 	OrbitAngle[0] += RotSpeed * Dt;
 	OrbitAngle[1] -= RotSpeed * Dt;  // 逆回転
 
@@ -76,10 +76,10 @@ void USurvivorsVandalierWeapon::StartBombing()
 	CooldownTimer = FCooldownSeconds(CachedCooldown * PE.CooldownMult);
 
 	// Peachone 同様、セット数で割って期待 DPS を維持する（2 zone 分で × 2 倍になるため zone 数でも割る）
-	BurstDamage       = CachedDamage * PE.DamageMult
+	BurstDamage           = CachedDamage * PE.DamageMult
 		/ static_cast<float>(SurvivorsGameConstants::PeachoneSetsPerActivation) / 2.f;
-	BurstImpactRadius = 10.f * PE.AreaMult;
-	BurstBombRadius   = CachedBombRadius * PE.AreaMult;
+	BurstImpactRadius     = CachedImpactRadius * PE.AreaMult;
+	BurstTargetZoneRadius = CachedTargetZoneRadius;
 
 	const int32 EffAmount = CachedAmount + static_cast<int32>(PE.ExtraAmount);
 	const int32 TotalShots = EffAmount * SurvivorsGameConstants::PeachoneSetsPerActivation;
@@ -106,7 +106,7 @@ void USurvivorsVandalierWeapon::SpawnBombShot(int32 OrbIdx)
 
 	// target zone 内のランダム位置（uniform in circle）再現性のため RandStream を使用
 	const float Angle = Game->RandStream.FRand() * 2.f * UE_PI;
-	const float Dist  = FMath::Sqrt(Game->RandStream.FRand()) * BurstBombRadius;
+	const float Dist  = FMath::Sqrt(Game->RandStream.FRand()) * BurstTargetZoneRadius;
 	const FVector2D ImpactPos = ZoneCenter + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Dist;
 
 	FProjectileState P;

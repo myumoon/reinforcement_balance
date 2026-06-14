@@ -62,6 +62,10 @@ namespace SurvivorsGameConstants
 	// 1発目は最近傍敵、残りはこの半径内のランダム位置に落下
 	static constexpr float SantaWaterRandomDropRadius   = 150.f;
 
+	// SantaWater high-amount（Amount>=4）の円形配置半径
+	// OBSERVED: santa_water.jpg 337.5px × (800u/1920px) ≈ 140.6u → 採用値 140u
+	static constexpr float SantaWaterCircleRadius       = 140.f;
+
 	// Obs の Shield 正規化最大値（秒）
 	static constexpr float MaxShieldDuration            = 8.f;
 
@@ -577,25 +581,29 @@ namespace SurvivorsGameConstants
 	{
 		float Damage;
 		float Cooldown;
-		float OrbitRadius;
-		float BombRadius;
-		int32 Amount;  // projectiles per set (wiki: Lv1=4, +1/level)
+		float OrbitRadius;       // 軌道半径（固定、Area不使用）
+		float OrbitRotSpeed;     // 軌道回転速度 rad/s（固定）
+		float TargetZoneRadius;  // target zone 半径（固定、Area不使用）
+		float ImpactRadius;      // 弾当たり半径（Area×Lv でスケール）
+		int32 Amount;            // projectiles per set (wiki: Lv1=4, +1/level)
 	};
 
-	// Peachone: OrbitRadius=60u 全レベル固定。BombRadius: Area100%=30u,140%=42u,180%=54u,220%=66u
-	// CD: Lv4,7 で -0.3s。Amount: Lv1=4, +1/Lv まで Lv8=11（wiki由来）
+	// Peachone: OBSERVED: peachone_bullet25.mp4
+	//   OrbitRadius≈168u, OrbitRotSpeed≈0.8rad/s, TargetZoneRadius≈49u, ImpactRadius≈4.5u
+	// CD: Lv4,7 で -0.3s。Amount: Lv1=4, +1/Lv。BaseArea(Lv2): ImpactRadius のみ +40%。
+	// TargetZoneRadius と OrbitRadius は Area/Passive 不使用（fixed）。
 	inline constexpr FPeachoneParams PeachoneTable[MaxWeaponLevel] = {
-		{ 10.f, 1.0f, 60.f, 30.f,  4 },  // Lv1: D=10, CD=1.0, Area=100%, Amount=4
-		{ 10.f, 1.0f, 60.f, 42.f,  5 },  // Lv2: Area+40%, Amount+1
-		{ 20.f, 1.0f, 60.f, 42.f,  6 },  // Lv3: D+10, Amount+1
-		{ 20.f, 0.7f, 60.f, 42.f,  7 },  // Lv4: CD-0.3, Amount+1
-		{ 20.f, 0.7f, 60.f, 54.f,  8 },  // Lv5: Area+40%, Amount+1
-		{ 30.f, 0.7f, 60.f, 54.f,  9 },  // Lv6: D+10, Amount+1
-		{ 30.f, 0.4f, 60.f, 54.f, 10 },  // Lv7: CD-0.3, Amount+1
-		{ 30.f, 0.4f, 60.f, 66.f, 11 },  // Lv8: Area+40%, Amount+1
+		{ 10.f, 1.0f, 168.f, 0.8f, 49.f, 4.5f,  4 },  // Lv1: OBSERVED values, Amount=4
+		{ 10.f, 1.0f, 168.f, 0.8f, 49.f, 6.3f,  5 },  // Lv2: ImpactRadius×1.4(BaseArea+40%), Amount+1
+		{ 20.f, 1.0f, 168.f, 0.8f, 49.f, 6.3f,  6 },  // Lv3: D+10, Amount+1
+		{ 20.f, 0.7f, 168.f, 0.8f, 49.f, 6.3f,  7 },  // Lv4: CD-0.3, Amount+1
+		{ 20.f, 0.7f, 168.f, 0.8f, 49.f, 8.8f,  8 },  // Lv5: ImpactRadius×1.4(BaseArea+40%), Amount+1
+		{ 30.f, 0.7f, 168.f, 0.8f, 49.f, 8.8f,  9 },  // Lv6: D+10, Amount+1
+		{ 30.f, 0.4f, 168.f, 0.8f, 49.f, 8.8f, 10 },  // Lv7: CD-0.3, Amount+1
+		{ 30.f, 0.4f, 168.f, 0.8f, 49.f,12.3f, 11 },  // Lv8: ImpactRadius×1.4(BaseArea+40%), Amount+1
 	};
 
-	// EbonyWings: Peachone と同じパラメータ・逆回転
+	// EbonyWings: Peachone と同じパラメータ・逆回転・π初期位相
 	// Vandalier: Peachone+EbonyWings 統合（同パラメータ使用）
 
 	struct FLaurelParams

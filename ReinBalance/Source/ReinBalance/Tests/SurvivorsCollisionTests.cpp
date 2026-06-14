@@ -24,6 +24,7 @@ struct FSurvivorsGameTestAccess
 	static float& PlayerXP(ASurvivorsGame* G)              { return G->PlayerXP; }
 	static FVector2D& PlayerPos(ASurvivorsGame* G)         { return G->PlayerPos; }
 	static FVector2D& PlayerVel(ASurvivorsGame* G)         { return G->PlayerVel; }
+	static float& PlayerRadius(ASurvivorsGame* G)          { return G->PlayerRadius; }
 	static bool& bShieldActive(ASurvivorsGame* G)          { return G->bShieldActive; }
 	static float& LastReward(ASurvivorsGame* G)            { return G->LastReward; }
 	static float& ElapsedTime(ASurvivorsGame* G)           { return G->ElapsedTime; }
@@ -444,6 +445,65 @@ bool FSurvivorsKnifeVideoProjectileSpeed::RunTest(const FString& Parameters)
 	const float Speed = FVector2D::Distance(WC->GetProjectilePos(0), StartPos) / Elapsed;
 	TestTrue(FString::Printf(TEXT("Knife video speed %.1fu/s should stay near 326u/s"), Speed),
 		Speed >= 295.f && Speed <= 365.f);
+
+	S.Destroy();
+	return true;
+}
+
+// Knife: knife_bullet3_1.mp4 shows per-shot spawn jitter perpendicular to the firing direction.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsKnifeVideoSpawnJitter,
+	"ReinBalance.Survivors.Video.Knife_SpawnJitter_PlayerRadius",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsKnifeVideoSpawnJitter::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	const FVector2D PlayerPos = FVector2D::ZeroVector;
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = PlayerPos;
+	FSurvivorsGameTestAccess::PlayerVel(S.Game) = FVector2D(1.f, 0.f);
+
+	EquipTestWeapon(S.Game, EWeaponType::Knife, 2);  // baseline 3-shot volley
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	TArray<float> SpawnOffsetsY;
+	int32 CapturedProjectiles = 0;
+	auto CaptureNewProjectileOffsets = [&]()
+	{
+		const int32 Count = WC->GetProjectileCount();
+		for (int32 i = CapturedProjectiles; i < Count; ++i)
+		{
+			SpawnOffsetsY.Add(WC->GetProjectilePos(i).Y - PlayerPos.Y);
+		}
+		CapturedProjectiles = Count;
+	};
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	CaptureNewProjectileOffsets();
+	TickTestWeaponsForSeconds(WC, 0.11f);
+	CaptureNewProjectileOffsets();
+	TickTestWeaponsForSeconds(WC, 0.11f);
+	CaptureNewProjectileOffsets();
+
+	if (!TestEqual("Knife Lv2 captures three spawn offsets", SpawnOffsetsY.Num(), 3))
+	{
+		S.Destroy();
+		return false;
+	}
+
+	const float PlayerRadius = FSurvivorsGameTestAccess::PlayerRadius(S.Game);
+	float MinOffset = TNumericLimits<float>::Max();
+	float MaxOffset = TNumericLimits<float>::Lowest();
+	for (const float Offset : SpawnOffsetsY)
+	{
+		MinOffset = FMath::Min(MinOffset, Offset);
+		MaxOffset = FMath::Max(MaxOffset, Offset);
+		TestTrue(FString::Printf(TEXT("Knife spawn offset %.2fu stays within player radius %.2fu"), Offset, PlayerRadius),
+			FMath::Abs(Offset) <= PlayerRadius + 0.1f);
+	}
+
+	TestTrue(FString::Printf(TEXT("Knife spawn offsets should visibly vary, span %.2fu"), MaxOffset - MinOffset),
+		(MaxOffset - MinOffset) >= PlayerRadius * 0.5f);
 
 	S.Destroy();
 	return true;
@@ -1655,6 +1715,125 @@ bool FSurvivorsSantaWaterHighAmountCircular::RunTest(const FString& Parameters)
 }
 
 // Peachone: 複数の小プロジェクタイルが target zone 付近に生成されること
+// Peachone/Ebony Wings: peachone_bullet25.mp4 shows a wide orbiting target zone.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsPeachoneVideoOrbitMetrics,
+	"ReinBalance.Survivors.Video.Peachone_OrbitMetrics",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsPeachoneVideoOrbitMetrics::RunTest(const FString& Parameters)
+{
+	struct FCase
+	{
+		EWeaponType Type;
+		const TCHAR* Label;
+	};
+
+	const FCase Cases[] = {
+		{ EWeaponType::Peachone,   TEXT("Peachone") },
+		{ EWeaponType::EbonyWings, TEXT("Ebony Wings") },
+	};
+
+	for (const FCase& Case : Cases)
+	{
+		FSurvivorsTestWorld S;
+		if (!TestTrue(FString::Printf(TEXT("%s world created"), Case.Label), S.Create())) return false;
+
+		FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+		EquipTestWeapon(S.Game, Case.Type, 1);
+		auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		const FVector2D StartPos = WC->GetOrbitOrbPos(0);
+		const float OrbitRadius = StartPos.Size();
+		TestTrue(FString::Printf(TEXT("%s video orbit radius %.1fu should be near 168u"), Case.Label, OrbitRadius),
+			OrbitRadius >= 150.f && OrbitRadius <= 185.f);
+
+		const float ZoneRadius = WC->GetOrbitOrbVisualRadius(0);
+		TestTrue(FString::Printf(TEXT("%s video target-zone radius %.1fu should be near 49u"), Case.Label, ZoneRadius),
+			ZoneRadius >= 45.f && ZoneRadius <= 55.f);
+
+		const float StartAngle = FMath::Atan2(StartPos.Y, StartPos.X);
+		const float Elapsed = TickTestWeaponsForSecondsMeasured(WC, 1.0f);
+		const FVector2D EndPos = WC->GetOrbitOrbPos(0);
+		const float EndAngle = FMath::Atan2(EndPos.Y, EndPos.X);
+		const float RotSpeed = FMath::Abs(FMath::FindDeltaAngleRadians(StartAngle, EndAngle)) / Elapsed;
+		TestTrue(FString::Printf(TEXT("%s video orbit speed %.2frad/s should be near 0.8rad/s"), Case.Label, RotSpeed),
+			RotSpeed >= 0.70f && RotSpeed <= 1.05f);
+
+		S.Destroy();
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsPeachoneAreaScalesImpactOnly,
+	"ReinBalance.Survivors.Video.Peachone_AreaScalesImpactOnly",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsPeachoneAreaScalesImpactOnly::RunTest(const FString& Parameters)
+{
+	struct FSnapshot
+	{
+		float OrbitRadius = 0.f;
+		float ZoneRadius = 0.f;
+		float ImpactRadius = 0.f;
+	};
+
+	auto Capture = [this](EWeaponType Type, int32 Level, FSnapshot& Out, const TCHAR* Label) -> bool
+	{
+		FSurvivorsTestWorld S;
+		if (!TestTrue(FString::Printf(TEXT("%s world created"), Label), S.Create())) return false;
+
+		FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+		EquipTestWeapon(S.Game, Type, Level);
+		auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		if (!TestTrue(FString::Printf(TEXT("%s spawned bombard projectile"), Label), WC->GetProjectileCount() > 0))
+		{
+			S.Destroy();
+			return false;
+		}
+
+		Out.OrbitRadius = WC->GetOrbitOrbPos(0).Size();
+		Out.ZoneRadius = WC->GetOrbitOrbVisualRadius(0);
+		Out.ImpactRadius = WC->GetProjectileRadius(0).Value;
+
+		S.Destroy();
+		return true;
+	};
+
+	struct FCase
+	{
+		EWeaponType Type;
+		const TCHAR* Label;
+	};
+
+	const FCase Cases[] = {
+		{ EWeaponType::Peachone,   TEXT("Peachone") },
+		{ EWeaponType::EbonyWings, TEXT("Ebony Wings") },
+	};
+
+	for (const FCase& Case : Cases)
+	{
+		FSnapshot Lv1;
+		FSnapshot Lv2;
+		if (!Capture(Case.Type, 1, Lv1, *FString::Printf(TEXT("%s Lv1"), Case.Label))) return false;
+		if (!Capture(Case.Type, 2, Lv2, *FString::Printf(TEXT("%s Lv2"), Case.Label))) return false;
+
+		TestTrue(FString::Printf(TEXT("%s Lv1 impact radius %.1fu should match video small impact"), Case.Label, Lv1.ImpactRadius),
+			Lv1.ImpactRadius >= 3.f && Lv1.ImpactRadius <= 6.f);
+		TestTrue(FString::Printf(TEXT("%s BaseArea must not change orbit radius"), Case.Label),
+			FMath::Abs(Lv2.OrbitRadius - Lv1.OrbitRadius) <= 1.f);
+		TestTrue(FString::Printf(TEXT("%s BaseArea must not change target-zone radius"), Case.Label),
+			FMath::Abs(Lv2.ZoneRadius - Lv1.ZoneRadius) <= 1.f);
+
+		const float Ratio = (Lv1.ImpactRadius > 0.f) ? (Lv2.ImpactRadius / Lv1.ImpactRadius) : 0.f;
+		TestTrue(FString::Printf(TEXT("%s Lv2 BaseArea should scale impact radius only, ratio %.2f"), Case.Label, Ratio),
+			Ratio >= 1.35f && Ratio <= 1.45f);
+	}
+
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsPeachoneBombardModel,
 	"ReinBalance.Survivors.Wiki.Peachone_BombardModel_MultipleProjectiles",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1686,9 +1865,9 @@ bool FSurvivorsPeachoneBombardModel::RunTest(const FString& Parameters)
 	{
 		const FVector2D ProjPos = WC->GetProjectilePos(0);
 		const float DistFromPlayer = ProjPos.Size();
-		// orbit 中心は ~60u、scatter ±30u → 30u 〜 90u の範囲内
-		TestTrue("Peachone projectile is in orbit zone range (30u-120u from player)",
-			DistFromPlayer > 5.f && DistFromPlayer < 150.f);
+		// Video target zone: orbit center about 168u from player, target-zone radius about 49u.
+		TestTrue("Peachone projectile is in video target-zone range (about 115u-215u from player)",
+			DistFromPlayer > 90.f && DistFromPlayer < 235.f);
 	}
 
 	S.Destroy();
@@ -1926,6 +2105,145 @@ bool FSurvivorsAxeRandomUpwardDirection::RunTest(const FString& Parameters)
 	// 0.2s 後：2発目
 	TickTestWeaponsForSeconds(WC, 0.21f);
 	if (!TestEqual("Axe fires second shot", WC->GetProjectileCount(), 2)) { S.Destroy(); return false; }
+
+	S.Destroy();
+	return true;
+}
+
+// ============================================================
+// Runetracer スクリーンエッジバウンステスト
+// ============================================================
+
+// AWallActor が存在しない環境でも Runetracer がスクリーン端で跳ね返ること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsRunetracerScreenEdgeBounce,
+	"ReinBalance.Survivors.Wiki.Runetracer_ScreenEdgeBounce",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+bool FSurvivorsRunetracerScreenEdgeBounce::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	const FVector2D PlayerPos = FVector2D::ZeroVector;
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = PlayerPos;
+
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	// +X 方向へ高速で弾を手動スポーン（BounceCount=3）
+	FProjectileState Proj;
+	Proj.Pos            = FVector2D(SurvivorsGameConstants::ScreenHalfWidthU - 2.f, 0.f);  // 右端すぐ内側
+	Proj.Vel            = FVector2D(SurvivorsGameConstants::ScreenHalfWidthU * 10.f, 0.f); // 高速 +X
+	Proj.Radius         = FSimRadius(2.f);
+	Proj.Damage         = FDamage(1.f);
+	Proj.WeaponType     = EWeaponType::Runetracer;
+	Proj.WeaponSlotIdx  = 1;
+	Proj.LifeTime       = FProjectileLifeTime(10.f);
+	Proj.bPiercing      = true;
+	Proj.BounceCount    = FBounceCount(3);
+	WC->SpawnProjectile(Proj);
+
+	const int32 StartCount = WC->GetProjectileCount();
+	if (!TestTrue("Projectile spawned", StartCount > 0)) { S.Destroy(); return false; }
+	const int32 PIdx = StartCount - 1;
+	const float PosX0 = WC->GetProjectilePos(PIdx).X;
+
+	// 1 tick で右端に到達・クランプされる
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+
+	TestTrue("Runetracer projectile survives screen edge",
+		WC->GetProjectileCount() >= StartCount);
+
+	// クランプ: X <= ScreenHalfWidthU であること
+	if (WC->GetProjectileCount() >= StartCount)
+	{
+		const float PosX1 = WC->GetProjectilePos(PIdx).X;
+		TestTrue(FString::Printf(TEXT("Runetracer clamped to screen edge (%.1fu <= %.1fu)"),
+			PosX1, SurvivorsGameConstants::ScreenHalfWidthU),
+			PosX1 <= SurvivorsGameConstants::ScreenHalfWidthU + 0.5f);
+
+		// もう 1 tick 進めると X が小さくなる（左向きに反射）
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		if (WC->GetProjectileCount() >= StartCount)
+		{
+			const float PosX2 = WC->GetProjectilePos(PIdx).X;
+			TestTrue("Runetracer moves leftward after screen-edge bounce (X decreases)",
+				PosX2 < PosX1 || PosX1 < PosX0);  // X が戻っているか、既に戻り始めている
+		}
+	}
+
+	S.Destroy();
+	return true;
+}
+
+// ============================================================
+// SantaWater 高Amount配置半径テスト（画像由来）
+// ============================================================
+
+// SantaWater Lv4+: drop center は player から 130-150u の円上に配置されること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsSantaWaterHighAmountPlacementRadiusFromImage,
+	"ReinBalance.Survivors.Wiki.SantaWater_HighAmount_PlacementRadius_Image",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+bool FSurvivorsSantaWaterHighAmountPlacementRadiusFromImage::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+
+	// SantaWater Lv4: Amount=4（高Amount円形配置）
+	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 4);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	// 4 drops 全生成（0.3s×3+初回）
+	const int32 TicksForAll = FMath::CeilToInt(1.1f / SurvivorsGameConstants::PhysicsDt);
+	for (int32 i = 0; i < TicksForAll; ++i)
+		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+
+	TestTrue("SantaWater Lv4 spawns at least 4 drops", WC->GetGroundZoneCount() >= 4);
+
+	for (int32 i = 0; i < WC->GetGroundZoneCount(); ++i)
+	{
+		const float Dist = WC->GetGroundZonePos(i).Size();
+		TestTrue(FString::Printf(TEXT("Drop %d center distance %.1fu should be 130-150u from player"), i, Dist),
+			Dist >= 130.f && Dist <= 150.f);
+	}
+
+	S.Destroy();
+	return true;
+}
+
+// SantaWater: zone radius と配置半径の合計（blue area 外縁）が 155-178u であること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsSantaWaterHighAmountBlueAreaDistanceFromImage,
+	"ReinBalance.Survivors.Wiki.SantaWater_HighAmount_BlueArea_Image",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+bool FSurvivorsSantaWaterHighAmountBlueAreaDistanceFromImage::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+
+	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 4);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	if (!TestTrue("SantaWater Lv4 first drop spawned", WC->GetGroundZoneCount() >= 1))
+	{
+		S.Destroy();
+		return false;
+	}
+
+	const float ZoneRadius     = WC->GetGroundZoneRadius(0);
+	const float DistFromPlayer = WC->GetGroundZonePos(0).Size();
+	const float BlueAreaEdge   = DistFromPlayer + ZoneRadius;
+
+	TestTrue(FString::Printf(TEXT("Zone radius %.1fu should be 20-38u"), ZoneRadius),
+		ZoneRadius >= 20.f && ZoneRadius <= 38.f);
+	TestTrue(FString::Printf(TEXT("Blue area outer edge %.1fu should be 155-178u"), BlueAreaEdge),
+		BlueAreaEdge >= 155.f && BlueAreaEdge <= 178.f);
+
+	const float Margin = BlueAreaEdge - SurvivorsGameConstants::SantaWaterCircleRadius;
+	TestTrue(FString::Printf(TEXT("Blue area margin outside red circle %.1fu should be 20-38u"), Margin),
+		Margin >= 20.f && Margin <= 38.f);
 
 	S.Destroy();
 	return true;

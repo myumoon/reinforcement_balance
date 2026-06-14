@@ -86,10 +86,13 @@ void USurvivorsKnifeWeapon::StartBurst()
 
 void USurvivorsKnifeWeapon::SpawnKnifeShot()
 {
-	const FVector2D Dir = LastFacingDir.IsNearlyZero() ? FVector2D(1.f, 0.f) : LastFacingDir.GetSafeNormal();
+	const FVector2D Dir  = LastFacingDir.IsNearlyZero() ? FVector2D(1.f, 0.f) : LastFacingDir.GetSafeNormal();
+	// 発射方向に垂直な方向へ PlayerRadius 以内でランダムにスポーン位置をずらす（動画観測: 左右ブレ）
+	const FVector2D Perp   = FVector2D(-Dir.Y, Dir.X);
+	const float     Offset = Game->RandStream.FRandRange(-Game->PlayerRadius, Game->PlayerRadius);
 
 	FProjectileState P;
-	P.Pos               = Game->PlayerPos;
+	P.Pos               = Game->PlayerPos + Perp * Offset;
 	P.Vel               = Dir * BurstSpeed;
 	P.Radius            = FSimRadius(BurstRadius);
 	P.Damage            = FDamage(BurstDamage);

@@ -41,26 +41,47 @@ void USurvivorsRunetracerWeapon::Tick(float Dt)
 {
 	if (!Game || !WeaponComp) return;
 
-	// --- 既存プロジェクタイルの壁反射処理 ---
+	// --- 壁反射 + スクリーンエッジバウンス ---
+	// ReflectOffWall は AWallActor のみ対象。それに加えて可視スクリーン端でも反射する。
 	USurvivorsCollisionComponent* CollComp = Game->CollisionComponent;
-	if (CollComp)
+	const FVector2D PlayerPos = Game->PlayerPos;
+	const float ScrW = SurvivorsGameConstants::ScreenHalfWidthU;
+	const float ScrH = SurvivorsGameConstants::ScreenHalfHeightU;
+	WeaponComp->UpdateProjectilesBySlot(SlotIdx, Dt, [CollComp, PlayerPos, ScrW, ScrH](FProjectileState& P, float InDt) -> bool
 	{
-		WeaponComp->UpdateProjectilesBySlot(SlotIdx, Dt, [CollComp](FProjectileState& P, float InDt) -> bool
+		if (!P.BounceCount.HasBounces()) return true;
+
+		bool bBounced = false;
+
+		// AWallActor 反射
+		if (CollComp)
 		{
-			if (P.BounceCount.HasBounces())
+			FVector2D NewPos = P.Pos;
+			FVector2D NewVel = P.Vel;
+			if (CollComp->ReflectOffWall(NewPos, NewVel, P.Radius.Value))
 			{
-				FVector2D NewPos = P.Pos;
-				FVector2D NewVel = P.Vel;
-				if (CollComp->ReflectOffWall(NewPos, NewVel, P.Radius.Value))
-				{
-					P.Pos = NewPos;
-					P.Vel = NewVel;
-					P.BounceCount.Consume();
-				}
+				P.Pos    = NewPos;
+				P.Vel    = NewVel;
+				bBounced = true;
 			}
-			return true;
-		});
-	}
+		}
+
+		// スクリーンエッジ反射（PlayerPos 相対で可視領域端）
+		if (!bBounced)
+		{
+			const float MinX = PlayerPos.X - ScrW;
+			const float MaxX = PlayerPos.X + ScrW;
+			const float MinY = PlayerPos.Y - ScrH;
+			const float MaxY = PlayerPos.Y + ScrH;
+			if (P.Pos.X > MaxX) { P.Pos.X = MaxX; P.Vel.X = -FMath::Abs(P.Vel.X); bBounced = true; }
+			else if (P.Pos.X < MinX) { P.Pos.X = MinX; P.Vel.X =  FMath::Abs(P.Vel.X); bBounced = true; }
+			if (P.Pos.Y > MaxY) { P.Pos.Y = MaxY; P.Vel.Y = -FMath::Abs(P.Vel.Y); bBounced = true; }
+			else if (P.Pos.Y < MinY) { P.Pos.Y = MinY; P.Vel.Y =  FMath::Abs(P.Vel.Y); bBounced = true; }
+		}
+
+		if (bBounced) P.BounceCount.Consume();
+		return true;
+	});
 
 	// --- 順次発射バースト（wiki/OBSERVED: ~0.2s projectile interval）---
 	if (PendingRuneShots > 0)
