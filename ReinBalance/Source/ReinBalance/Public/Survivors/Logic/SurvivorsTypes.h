@@ -32,6 +32,8 @@ struct FSurvivorsHitEvent
 	FVector2D            KnockbackDir       = FVector2D::ZeroVector;
 	float                KnockbackStrength  = 0.f;
 	float                KnockbackResistance= 0.f;
+	// King Bible per-orb cooldown 用。-1 = orb 以外の武器（無視される）
+	int32                OrbIdx             = -1;
 };
 
 struct FSurvivorsHitFrame
@@ -174,13 +176,18 @@ struct FProjectileState
 	EWeaponType          WeaponType    = EWeaponType::None;
 	int32                WeaponSlotIdx = 0;
 	FProjectileLifeTime  LifeTime;                                         // 残寿命（秒）
+	float                Age            = 0.f;                             // 発射後経過時間（秒）
 	FBounceCount         BounceCount;                                      // Runetracer バウンス残回数
 	bool                 bPiercing     = false;
 	bool                 bHasReversed  = false;       // Cross ブーメランの折り返し済みフラグ
 	bool                 bPendingExplosion = false;  // FireWand 爆発待機フラグ（LifeTime 切れで爆発予約、次 Tick で処理）
+	bool                 bIsWarning    = false;       // obs 用: Santa Water などの予兆
 	FOrbitAngleRad       AngleRad;                                         // King Bible 等の軌道角度
 	FSurvivorsElapsedTime LastHitTime  = FSurvivorsElapsedTime(-1000.f);   // 範囲武器クールダウン
 	TArray<int32>        HitEnemyIds;  // ヒット済み UniqueId（同一弾で同一敵への多重ヒット防止）
+	// Runetracer/NoFuture 専用: 敵 UniqueId → 最終ヒット ElapsedTime。
+	// 0.5s Hitbox Delay を projectile 単位で管理する（HitEnemyIds の永続ブロックを使わない）。
+	TMap<int32, float>   EnemyHitDelays;
 	// 貫通設定: 0=無限貫通(bPiercing=true と同義), N>0=N体まで命中後に消滅
 	// bPiercing=false かつ MaxPierceCount=0 の場合は bPiercing の挙動（1体で消滅）を使用
 	int32                MaxPierceCount = 0;
@@ -194,9 +201,11 @@ struct FGroundZoneState
 	float              Radius       = 30.f;
 	float              Damage       = 10.f;
 	float              LifeTime     = 5.f;
+	float              WarningTime  = 0.f;
 	float              HitCooldown  = 0.5f;
 	int32              WeaponSlotIdx = 0;
 	EWeaponType        WeaponType   = EWeaponType::None;
+	bool               bIsWarning   = false;
 	TMap<int32, float> EnemyLastHitTime; // Key: FEnemyState::UniqueId, Value: 最終ヒット時刻
 };
 
@@ -262,6 +271,8 @@ struct FEnemyState
 		FSurvivorsElapsedTime(-1000.f), FSurvivorsElapsedTime(-1000.f),
 		FSurvivorsElapsedTime(-1000.f), FSurvivorsElapsedTime(-1000.f),
 	};
+	// King Bible per-orb hit cooldown。Key = SlotIdx * 10 + OrbIdx
+	TMap<int32, float> OrbHitTimes;
 };
 
 struct FGemState

@@ -10,11 +10,11 @@ bool NearlyEqual(float Actual, float Expected, float Tolerance = 0.001f)
 }
 }
 
-TEST_CASE("Survivors wiki base player stats use standard character-neutral values", "[unit][survivors][logic][wiki-spec]")
+TEST_CASE("Survivors wiki base player stats use standard character values", "[unit][survivors][logic][wiki-spec]")
 {
 	CHECK(SurvivorsWikiSpec::StandardMaxPlayerHP == 100.f);
-	CHECK(SurvivorsWikiSpec::StandardMoveSpeed == 100.f);
-	CHECK(SurvivorsWikiSpec::BaseGemPickupRadius == 30.f);
+	CHECK(SurvivorsWikiSpec::StandardMoveSpeed == 80.f);
+	CHECK(SurvivorsWikiSpec::BaseGemPickupRadius == 50.f);
 }
 
 TEST_CASE("Survivors wiki XP requirement starts at zero before level two", "[unit][survivors][logic][wiki-spec][level]")

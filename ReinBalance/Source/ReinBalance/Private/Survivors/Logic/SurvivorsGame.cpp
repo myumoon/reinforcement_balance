@@ -450,6 +450,11 @@ EWeaponType ASurvivorsGame::GetProjectileWeaponType(int32 i) const
 	return WeaponComponent ? WeaponComponent->GetProjectileWeaponType(i) : EWeaponType::None;
 }
 
+float ASurvivorsGame::GetProjectileBoxHalfWidth(int32 i) const
+{
+	return WeaponComponent ? WeaponComponent->GetProjectileBoxHalfWidth(i) : 0.f;
+}
+
 int32 ASurvivorsGame::GetGroundZoneCount() const
 {
 	return WeaponComponent ? WeaponComponent->GetGroundZoneCount() : 0;
@@ -468,6 +473,11 @@ float ASurvivorsGame::GetGroundZoneRadius(int32 i) const
 EWeaponType ASurvivorsGame::GetGroundZoneWeaponType(int32 i) const
 {
 	return WeaponComponent ? WeaponComponent->GetGroundZoneWeaponType(i) : EWeaponType::None;
+}
+
+bool ASurvivorsGame::IsGroundZoneWarning(int32 i) const
+{
+	return WeaponComponent ? WeaponComponent->IsGroundZoneWarning(i) : false;
 }
 
 int32 ASurvivorsGame::GetOrbitOrbCount() const
@@ -646,4 +656,11 @@ FString ASurvivorsGame::GetEnemyTypeDebugLabel(int32 TypeId) const
 		return FString::Printf(TEXT("%s(ID:%d)"), *EnemyTypeTable[TypeId].Name, TypeId);
 	}
 	return FString::Printf(TEXT("ID:%d"), TypeId);
+}
+
+bool ASurvivorsGame::IsOnScreen(FVector2D WorldPos) const
+{
+	const FVector2D Rel = WorldPos - PlayerPos;
+	return FMath::Abs(Rel.X) <= SurvivorsGameConstants::ScreenHalfWidthU
+		&& FMath::Abs(Rel.Y) <= SurvivorsGameConstants::ScreenHalfHeightU;
 }

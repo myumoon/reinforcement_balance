@@ -163,10 +163,11 @@ void USurvivorsWeaponViewComponent::DrawWhipInstances()
 
 		const FSimRadius SimR   = Game->GetProjectileRadius(i);
 		const float      WorldR = FMath::Max(Converter.Radius(SimR), 6.f);
+		const float      WorldHalfWidth = FMath::Max(Game->GetProjectileBoxHalfWidth(i) * Game->SimToUE, WorldR * 3.f);
 		const FVector    Pos3D  = Converter.ToWorld(Game->GetProjectilePos(i), FWorldLayerZ::Projectile());
 
-		// 横線スイープを矩形で表現: X 幅=高さの 3 倍、Y 高さ、Z は薄く
-		const FVector HalfExtents(WorldR * 3.f, WorldR, WorldR * 0.4f);
+		// Whip はロジック側の矩形当たり判定と同じ半径で描画する
+		const FVector HalfExtents(WorldHalfWidth, WorldR, WorldR * 0.4f);
 		DrawDebugBox(GetWorld(), Pos3D, HalfExtents, WeaponViewColors::Brown, false, 0.f, 1, 2.f);
 	}
 }
@@ -210,12 +211,14 @@ void USurvivorsWeaponViewComponent::DrawGroundZones()
 	for (int32 i = 0; i < Game->GetGroundZoneCount(); ++i)
 	{
 		const EWeaponType WType = Game->GetGroundZoneWeaponType(i);
-		// SantaWater / LaBorra ともに Cyan（LaBorra は少し濃い）
-		const FColor Color = (WType == EWeaponType::LaBorra)
-			? FColor(60, 190, 240) : WeaponViewColors::Cyan;
+		const bool bWarning = Game->IsGroundZoneWarning(i);
+		const FColor Color = bWarning
+			? WeaponViewColors::Orange
+			: ((WType == EWeaponType::LaBorra) ? FColor(60, 190, 240) : WeaponViewColors::Cyan);
+		const float Thickness = bWarning ? 3.f : 2.f;
 		const float  Radius = Game->GetGroundZoneRadius(i) * Game->SimToUE;
 		const FVector Center = Converter.ToWorld(Game->GetGroundZonePos(i), FWorldLayerZ::GroundZone());
-		DrawDebugCircle(GetWorld(), Center, Radius, 32, Color, false, 0.f, 1, 2.f,
+		DrawDebugCircle(GetWorld(), Center, Radius, 32, Color, false, 0.f, 1, Thickness,
 			FVector(1, 0, 0), FVector(0, 1, 0));
 	}
 }
@@ -250,32 +253,9 @@ void USurvivorsWeaponViewComponent::DrawOrbitOrbs()
 
 void USurvivorsWeaponViewComponent::DrawLightningRings()
 {
-	if (!Game || !GetWorld()) return;
-
-	for (int32 s = 0; s < SurvivorsGameConstants::MaxWeaponSlots; ++s)
-	{
-		const FWeaponSlot& Slot = Game->GetWeaponSlot(s);
-		float SimRadius = 0.f;
-
-		if (Slot.Type == EWeaponType::LightningRing)
-		{
-			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
-			SimRadius = SurvivorsGameConstants::LightningRingTable[Lv - 1].Radius * Game->GetCachedPassiveEffects().AreaMult;
-		}
-		else if (Slot.Type == EWeaponType::ThunderLoop)
-		{
-			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, SurvivorsGameConstants::MaxWeaponLevel);
-			SimRadius = SurvivorsGameConstants::ThunderLoopTable[Lv - 1].Radius * Game->GetCachedPassiveEffects().AreaMult;
-		}
-
-		if (SimRadius > 0.f)
-		{
-			const float  WorldRadius = SimRadius * Game->SimToUE;
-			const FVector Center = Converter.ToWorld(Game->GetPlayerPos(), FWorldLayerZ::Aura());
-			DrawDebugCircle(GetWorld(), Center, WorldRadius, 48, WeaponViewColors::Yellow,
-				false, 0.f, 1, 2.f, FVector(1, 0, 0), FVector(0, 1, 0));
-		}
-	}
+	// プレイヤー中心の常時円表示を廃止。
+	// 落雷位置は ComputeHits で生成した短寿命 GroundZone (strike marker) として
+	// DrawGroundZones() 経由で表示される。ここでは何も描画しない。
 }
 
 void USurvivorsWeaponViewComponent::DrawPentagramFields()

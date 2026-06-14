@@ -53,7 +53,7 @@ TArray<FSurvivorsObsSegment> USurvivorsObservationComponent::GetObsSchema() cons
 		{ TEXT("enemy_density_mid_16dir"),    EnemyDensityDirCount },
 		{ TEXT("gem_density_all_16dir"),      GemDensityDirCount * 3 },
 		{ TEXT("red_green_gem_density_16dir"),GemDensityDirCount * 3 },
-		{ TEXT("projectiles"),                MaxProjectileObs * 5 },  // (dx,dy,radius,vx,vy) × 32
+		{ TEXT("projectiles"),                MaxProjectileObs * ProjectileObsStride },  // (dx,dy,radius,vx,vy,warning) × 32
 		{ TEXT("floor_pickups"),              MaxFloorPickupObs * 3 }, // (dx,dy,type_norm) × 8
 		{ TEXT("special_pickups"),            MaxSpecialPickupObs * 3 }, // (dx,dy,type_norm) × 3
 		{ TEXT("destructibles"),              MaxDestructibleObs * 2 }, // (dx,dy) × 10
@@ -64,15 +64,15 @@ FString USurvivorsObservationComponent::GetObsSchemaHash() const
 {
 	using namespace SurvivorsGameConstants;
 	FString Schema = FString::Printf(
-		TEXT("SurvivorsGame_v708"
+		TEXT("SurvivorsGame_v740"
 		     ",MaxEnemyObs=%d,MaxWeaponSlots=%d,MaxPassiveSlots=%d"
-		     ",MaxProjectileObs=%d,MaxRedGemObs=%d,MaxGreenGemObs=%d,MaxBlueGemObs=%d"
+		     ",MaxProjectileObs=%d,ProjectileObsStride=%d,MaxRedGemObs=%d,MaxGreenGemObs=%d,MaxBlueGemObs=%d"
 		     ",MaxFloorPickupObs=%d,MaxSpecialPickupObs=%d,MaxDestructibleObs=%d"
 		     ",MaxWeaponTypeCountReserved=%d,MaxPassiveTypeCountReserved=%d"
 		     ",EnemyDensityDirCount=%d,GemDensityDirCount=%d"
 		     ",EnemyNearestDistanceMax=%.0f,GemNearestDistanceMax=%.0f"),
 		MaxEnemyObs, MaxWeaponSlots, MaxPassiveSlots,
-		MaxProjectileObs, MaxRedGemObs, MaxGreenGemObs, MaxBlueGemObs,
+		MaxProjectileObs, ProjectileObsStride, MaxRedGemObs, MaxGreenGemObs, MaxBlueGemObs,
 		MaxFloorPickupObs, MaxSpecialPickupObs, MaxDestructibleObs,
 		MaxWeaponTypeCountReserved, MaxPassiveTypeCountReserved,
 		EnemyDensityDirCount, GemDensityDirCount,
@@ -418,7 +418,7 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 			GemDensityNearNormalizeFactor, GemDensityMidNormalizeFactor, Obs);
 	}
 
-	// ---- projectiles (MaxProjectileObs * 5 = 160) ----
+	// ---- projectiles (MaxProjectileObs * ProjectileObsStride = 192) ----
 	if (Game->WeaponComponent)
 	{
 		TArray<FProjectileState> ProjView = Game->WeaponComponent->GetProjectileObsView();
@@ -449,14 +449,15 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 				Obs.Add(FMath::Clamp(P.Radius.Value / MaxProjectileRadius, 0.f, 1.f));
 				Obs.Add(P.Vel.X / VNorm);
 				Obs.Add(P.Vel.Y / VNorm);
+				Obs.Add(P.bIsWarning ? 1.f : 0.f);
 			}
-			else { Obs.Add(0.f); Obs.Add(0.f); Obs.Add(0.f); Obs.Add(0.f); Obs.Add(0.f); }
+			else { for (int32 k = 0; k < ProjectileObsStride; ++k) Obs.Add(0.f); }
 		}
 	}
 	else
 	{
 		// WeaponComponent なし時は 0 パディング
-		for (int32 p = 0; p < MaxProjectileObs * 5; ++p) Obs.Add(0.f);
+		for (int32 p = 0; p < MaxProjectileObs * ProjectileObsStride; ++p) Obs.Add(0.f);
 	}
 
 	// ---- floor_pickups (MaxFloorPickupObs * 3 = 24) ----

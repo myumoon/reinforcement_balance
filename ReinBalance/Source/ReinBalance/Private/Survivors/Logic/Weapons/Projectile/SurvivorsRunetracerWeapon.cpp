@@ -41,58 +41,113 @@ void USurvivorsRunetracerWeapon::Tick(float Dt)
 {
 	if (!Game || !WeaponComp) return;
 
-	// --- 既存プロジェクタイルの壁反射処理 ---
+	// --- 壁反射 + スクリーンエッジバウンス ---
+	// ReflectOffWall は AWallActor のみ対象。それに加えて可視スクリーン端でも反射する。
 	USurvivorsCollisionComponent* CollComp = Game->CollisionComponent;
-	if (CollComp)
+	const FVector2D PlayerPos = Game->PlayerPos;
+	const float ScrW = SurvivorsGameConstants::ScreenHalfWidthU;
+	const float ScrH = SurvivorsGameConstants::ScreenHalfHeightU;
+	WeaponComp->UpdateProjectilesBySlot(SlotIdx, Dt, [CollComp, PlayerPos, ScrW, ScrH](FProjectileState& P, float InDt) -> bool
 	{
-		WeaponComp->UpdateProjectilesBySlot(SlotIdx, Dt, [CollComp](FProjectileState& P, float InDt) -> bool
+		if (!P.BounceCount.HasBounces()) return true;
+
+		bool bBounced = false;
+
+		// AWallActor 反射
+		if (CollComp)
 		{
-			if (P.BounceCount.HasBounces())
+			FVector2D NewPos = P.Pos;
+			FVector2D NewVel = P.Vel;
+			if (CollComp->ReflectOffWall(NewPos, NewVel, P.Radius.Value))
 			{
-				FVector2D NewPos = P.Pos;
-				FVector2D NewVel = P.Vel;
-				if (CollComp->ReflectOffWall(NewPos, NewVel, P.Radius.Value))
-				{
-					P.Pos = NewPos;
-					P.Vel = NewVel;
-					P.BounceCount.Consume();
-				}
+				P.Pos    = NewPos;
+				P.Vel    = NewVel;
+				bBounced = true;
 			}
-			return true;
-		});
+		}
+
+		// スクリーンエッジ反射（PlayerPos 相対で可視領域端）
+		// TickProjectiles が Pos += Vel * Dt を実行するのは Tick() より後なので、
+		// 次フレーム位置 = Pos + Vel * InDt で判定して Vel のみ修正する。
+		if (!bBounced)
+		{
+			const float MinX = PlayerPos.X - ScrW;
+			const float MaxX = PlayerPos.X + ScrW;
+			const float MinY = PlayerPos.Y - ScrH;
+			const float MaxY = PlayerPos.Y + ScrH;
+			const FVector2D NextPos = P.Pos + P.Vel * InDt;
+			const float     R       = P.Radius.Value;
+			if      (NextPos.X + R > MaxX) { P.Vel.X = -FMath::Abs(P.Vel.X); bBounced = true; }
+			else if (NextPos.X - R < MinX) { P.Vel.X =  FMath::Abs(P.Vel.X); bBounced = true; }
+			if      (NextPos.Y + R > MaxY) { P.Vel.Y = -FMath::Abs(P.Vel.Y); bBounced = true; }
+			else if (NextPos.Y - R < MinY) { P.Vel.Y =  FMath::Abs(P.Vel.Y); bBounced = true; }
+		}
+
+		if (bBounced) P.BounceCount.Consume();
+		return true;
+	});
+
+	// --- 順次発射バースト（wiki/OBSERVED: ~0.2s projectile interval）---
+	if (PendingRuneShots > 0)
+	{
+		RuneBurstTimer -= Dt;
+		while (PendingRuneShots > 0 && RuneBurstTimer <= 0.f)
+		{
+			SpawnRuneShot();
+			--PendingRuneShots;
+			RuneBurstTimer += SurvivorsGameConstants::RunetracerProjectileInterval;
+		}
 	}
 
 	// --- クールダウン ---
 	CooldownTimer.Value = FMath::Max(0.f, CooldownTimer.Value - Dt);
-	if (!CooldownTimer.IsReady()) return;
+	if (!CooldownTimer.IsReady() || PendingRuneShots > 0) return;
 
+	StartBurst();
+}
+
+void USurvivorsRunetracerWeapon::StartBurst()
+{
 	const FPassiveEffects& PE = GetPassiveEffects();
+
 	const float CooldownInterval = (WeaponType == EWeaponType::NoFuture)
 		? CachedCooldown * PE.CooldownMult + CachedDuration
 		: CachedCooldown * PE.CooldownMult;
 	CooldownTimer = FCooldownSeconds(CooldownInterval);
 
-	const float EffDamage = CachedDamage * PE.DamageMult;
-	const float EffSpeed  = CachedSpeed  * PE.SpeedMult;
-	const float LifeTime  = CachedDuration * PE.DurationMult;
-	const int32 EffAmount = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
+	BurstDamage    = CachedDamage   * PE.DamageMult;
+	BurstSpeed     = CachedSpeed    * PE.SpeedMult;
+	BurstDuration  = CachedDuration * PE.DurationMult;
+	BurstRadius    = 6.7f           * PE.AreaMult;  // 10u × 2/3 ≈ 6.7u
+	BurstMaxBounce = CachedMaxBounce;
 
-	for (int32 i = 0; i < EffAmount; ++i)
+	PendingRuneShots = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
+	RuneBurstTimer   = 0.f;
+
+	if (PendingRuneShots > 0)
 	{
-		const float Angle = Game->RandStream.FRand() * TWO_PI;
-		const FVector2D Dir = FVector2D(FMath::Cos(Angle), FMath::Sin(Angle));
-
-		FProjectileState P;
-		P.Pos               = Game->PlayerPos;
-		P.Vel               = Dir * EffSpeed;
-		P.Radius            = FSimRadius(10.f * PE.AreaMult);
-		P.Damage            = FDamage(EffDamage);
-		P.WeaponType        = WeaponType;
-		P.WeaponSlotIdx     = SlotIdx;
-		P.LifeTime          = FProjectileLifeTime(LifeTime);
-		P.bPiercing         = true;  // AoE: 無限貫通
-		P.BounceCount       = FBounceCount(CachedMaxBounce);
-		P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;  // Knockback=1
-		WeaponComp->SpawnProjectile(P);
+		SpawnRuneShot();
+		--PendingRuneShots;
+		RuneBurstTimer = (PendingRuneShots > 0) ? SurvivorsGameConstants::RunetracerProjectileInterval : 0.f;
 	}
+}
+
+void USurvivorsRunetracerWeapon::SpawnRuneShot()
+{
+	// 各弾のランダム方向は発射時点で決定（OBSERVED: weapon_runetracer.md）
+	const float Angle = Game->RandStream.FRand() * TWO_PI;
+	const FVector2D Dir = FVector2D(FMath::Cos(Angle), FMath::Sin(Angle));
+
+	FProjectileState P;
+	P.Pos               = Game->PlayerPos;
+	P.Vel               = Dir * BurstSpeed;
+	P.Radius            = FSimRadius(BurstRadius);
+	P.Damage            = FDamage(BurstDamage);
+	P.WeaponType        = WeaponType;
+	P.WeaponSlotIdx     = SlotIdx;
+	P.LifeTime          = FProjectileLifeTime(BurstDuration);
+	P.bPiercing         = true;   // AoE: 無限貫通
+	P.BounceCount       = FBounceCount(BurstMaxBounce);
+	P.KnockbackStrength = SurvivorsGameConstants::KnockbackSim_1;
+	WeaponComp->SpawnProjectile(P);
 }

@@ -109,7 +109,7 @@ void USurvivorsKingBibleWeapon::Tick(float Dt)
 	const int32 EffAmount   = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 
 	// 角度を更新してオーブ位置キャッシュを更新
-	MasterAngle += CachedRotSpeed * Dt;
+	MasterAngle += CachedRotSpeed * PE.SpeedMult * Dt;
 
 	OrbPositions.SetNum(EffAmount);
 	for (int32 i = 0; i < EffAmount; ++i)
@@ -147,18 +147,24 @@ void USurvivorsKingBibleWeapon::ComputeHits(USurvivorsCollisionComponent* CollCo
 			const FEnemyState& E = Game->Enemies[EIdx];
 			if (E.bPendingRemove) continue;
 
-			// ヒット間隔チェック（SlotIdx ベースで管理）
-			if (Game->ElapsedTime - E.WeaponLastHitTime[SlotIdx].Seconds < OrbHitInterval) continue;
+			// per-orb hit cooldown: Key = SlotIdx*10 + OrbIdx（同一 orb の同一敵への 1.7s 制限）
+			// wiki: "same bible hits same enemy no more than every 1.7s"
+			// 異なる orb は独立したクールダウンを持つため、Lv2 の2冊が同時に同じ敵を攻撃できる。
+			const int32 OrbKey = SlotIdx * 10 + OrbIdx;
+			const float* LastOrbHit = E.OrbHitTimes.Find(OrbKey);
+			if (LastOrbHit && (Game->ElapsedTime - *LastOrbHit) < SurvivorsGameConstants::KingBibleOrbHitInterval)
+				continue;
 
 			FSurvivorsHitEvent Ev;
 			Ev.Type              = ESurvivorsHitType::WeaponAreaDamage;
 			Ev.Target            = Proxy->Ref;
 			Ev.Damage            = EffDamage;
 			Ev.WeaponSlot        = SlotIdx;
+			Ev.OrbIdx            = OrbIdx;
 			Ev.KnockbackDir      = (Proxy->Pos - Game->PlayerPos).GetSafeNormal();
 			Ev.KnockbackStrength = CachedKnockbackStrength;
 			HitFrame.Events.Add(Ev);
-			break;  // 1 オーブにつき 1 ヒット/フレーム（複数オーブが同一敵に重なるケースを制限）
+			break;  // 1 オーブにつき 1 ヒット/フレーム
 		}
 	}
 }

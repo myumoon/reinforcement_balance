@@ -38,42 +38,92 @@ void USurvivorsSantaWaterWeapon::Tick(float Dt)
 {
 	if (!Game || !WeaponComp) return;
 
-	CooldownTimer.Value = FMath::Max(0.f, CooldownTimer.Value - Dt);
-	if (!CooldownTimer.IsReady()) return;
+	// 順次落下: 0.3s 間隔でキューから drop を処理（wiki: projectile interval = 0.3s）
+	// while + += で overshoot を保持（大 Dt 時のキャッチアップ対応）
+	if (PendingDropPositions.Num() > 0)
+	{
+		DropTimer -= Dt;
+		while (DropTimer <= 0.f && PendingDropPositions.Num() > 0)
+		{
+			SpawnDrop(PendingDropPositions[0]);
+			PendingDropPositions.RemoveAt(0);
+			DropTimer += 0.30f;
+		}
+	}
 
+	CooldownTimer.Value = FMath::Max(0.f, CooldownTimer.Value - Dt);
+	if (!CooldownTimer.IsReady() || PendingDropPositions.Num() > 0) return;
+
+	StartDropSequence();
+}
+
+void USurvivorsSantaWaterWeapon::StartDropSequence()
+{
 	const FPassiveEffects& PE = GetPassiveEffects();
 	CooldownTimer = FCooldownSeconds(CachedCooldown * PE.CooldownMult);
 
-	const float EffDamage   = CachedDamage   * PE.DamageMult;
-	const float EffRadius   = CachedRadius   * PE.AreaMult;
-	const float EffDuration = CachedDuration * PE.DurationMult;
-	const int32 EffAmount   = CachedAmount   + static_cast<int32>(PE.ExtraAmount);
+	BurstDamage   = CachedDamage   * PE.DamageMult;
+	BurstRadius   = CachedRadius   * PE.AreaMult;
+	BurstDuration = CachedDuration * PE.DurationMult;
 
-	for (int32 i = 0; i < EffAmount; ++i)
+	const int32 EffAmount = CachedAmount + static_cast<int32>(PE.ExtraAmount);
+
+	PendingDropPositions.Empty();
+
+	if (EffAmount < 4)
 	{
-		// 配置位置: ランダムにプレイヤー周辺（または最近傍敵の足元）
-		// 簡略: 最近傍敵の位置に生成、複数なら近い順
-		FVector2D DropPos = Game->PlayerPos;
-		int32 FoundCount = 0;
+		// Amount < 4: 1発目は最近傍敵、残りはプレイヤー周囲のランダム位置
+		FVector2D NearestEnemyPos = Game->PlayerPos;
+		float MinDistSq = MAX_FLT;
 		for (const FEnemyState& E : Game->Enemies)
 		{
 			if (E.bPendingRemove) continue;
-			if (FoundCount == i)
-			{
-				DropPos = E.Pos;
-				break;
-			}
-			++FoundCount;
+			const float Dsq = FVector2D::DistSquared(E.Pos, Game->PlayerPos);
+			if (Dsq < MinDistSq) { MinDistSq = Dsq; NearestEnemyPos = E.Pos; }
 		}
+		PendingDropPositions.Add(NearestEnemyPos);
 
-		FGroundZoneState Z;
-		Z.Pos          = DropPos;
-		Z.Radius       = EffRadius;
-		Z.Damage       = EffDamage;
-		Z.LifeTime     = EffDuration;
-		Z.HitCooldown  = 0.5f;
-		Z.WeaponSlotIdx = SlotIdx;
-		Z.WeaponType   = WeaponType;
-		WeaponComp->SpawnGroundZone(Z);
+		for (int32 i = 1; i < EffAmount; ++i)
+		{
+			const float Angle = Game->RandStream.FRand() * TWO_PI;
+			const float Dist  = Game->RandStream.FRandRange(0.f, SurvivorsGameConstants::SantaWaterRandomDropRadius);
+			PendingDropPositions.Add(
+				Game->PlayerPos + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Dist);
+		}
 	}
+	else
+	{
+		// Amount >= 4: プレイヤー周囲を 30°固定間隔で時計回りに配置（ランダム開始角度）
+		// OBSERVED: santa_water.jpg 赤い円半径 ≈ 140u。各 drop は SantaWaterCircleDropStep(30°) ごとにずれる。
+		const float StartAngle = Game->RandStream.FRand() * TWO_PI;
+		for (int32 i = 0; i < EffAmount; ++i)
+		{
+			const float Angle = StartAngle + SurvivorsGameConstants::SantaWaterCircleDropStep * i;
+			PendingDropPositions.Add(
+				Game->PlayerPos + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * SurvivorsGameConstants::SantaWaterCircleRadius);
+		}
+	}
+
+	// 最初の drop を即時処理
+	if (PendingDropPositions.Num() > 0)
+	{
+		SpawnDrop(PendingDropPositions[0]);
+		PendingDropPositions.RemoveAt(0);
+		DropTimer = (PendingDropPositions.Num() > 0) ? 0.30f : 0.f;
+	}
+}
+
+void USurvivorsSantaWaterWeapon::SpawnDrop(FVector2D DropPos)
+{
+	FGroundZoneState Z;
+	Z.Pos           = DropPos;
+	Z.Radius        = BurstRadius;
+	Z.Damage        = BurstDamage;
+	Z.LifeTime      = SurvivorsGameConstants::SantaWaterWarningTime + BurstDuration;
+	Z.WarningTime   = SurvivorsGameConstants::SantaWaterWarningTime;
+	Z.HitCooldown   = 0.5f;
+	Z.WeaponSlotIdx = SlotIdx;
+	Z.WeaponType    = WeaponType;
+	Z.bIsWarning    = true;
+	WeaponComp->SpawnGroundZone(Z);
 }

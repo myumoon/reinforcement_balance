@@ -42,11 +42,13 @@ public:
 	FVector2D GetProjectilePos(int32 i)         const;
 	FSimRadius GetProjectileRadius(int32 i)     const;
 	EWeaponType GetProjectileWeaponType(int32 i)const;
+	float     GetProjectileBoxHalfWidth(int32 i) const;
 
 	int32     GetGroundZoneCount()              const;
 	FVector2D GetGroundZonePos(int32 i)         const;
 	float     GetGroundZoneRadius(int32 i)      const;
 	EWeaponType GetGroundZoneWeaponType(int32 i)const;
+	bool      IsGroundZoneWarning(int32 i)      const;
 
 	/** 全スロットの軌道オーブ総数（KingBible / Peachone / EbonyWings / Vandalier） */
 	int32       GetOrbitOrbCount()               const;

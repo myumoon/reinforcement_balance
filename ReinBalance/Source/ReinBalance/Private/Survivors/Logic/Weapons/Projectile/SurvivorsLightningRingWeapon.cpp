@@ -3,6 +3,7 @@
 #include "Survivors/Logic/SurvivorsCollisionComponent.h"
 #include "Survivors/Logic/SurvivorsGame.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 
 void USurvivorsLightningRingWeapon::OnLevelChanged(FWeaponLevel NewLevel)
 {
@@ -31,6 +32,16 @@ void USurvivorsLightningRingWeapon::CacheParams()
 		CachedAmount   = P.Amount;
 	}
 }
+
+// TODO(lightning ring marker): 現状は落雷後にランダム敵位置で直接ダメージを与えるのみ。
+// weapon_lightning_ring.md: 「the lightning bolt visual and the ground hitbox separately」
+// 改善計画:
+//   1. 各 strike の impact 位置を短寿命 FGroundZoneState (bIsWarning=false, HitCooldown 大) で生成
+//      → OBS に strike 位置が見えるようになる。
+//   2. View 側: player center の ring 表示を strike marker に差し替える。
+//   3. Obs 側: 既存 GroundZone obs stream に乗せるか、Projectile obs に bIsWarning=false の
+//      marker として追加する。
+// 現状の実装は OBS/view での認識には不十分であるため、次フェーズで対応する。
 
 void USurvivorsLightningRingWeapon::Tick(float Dt)
 {
@@ -78,6 +89,23 @@ void USurvivorsLightningRingWeapon::ComputeHits(USurvivorsCollisionComponent* Co
 	{
 		const int32 StrikeIdx = EnemyIndices[i];
 		const FEnemyState& StrikeTarget = Game->Enemies[StrikeIdx];
+
+		// strike marker: 落雷位置を短寿命 GroundZone として生成（view/obs 用）
+		// ダメージはヒットイベントで処理するため Damage=0、HitCooldown 大で追加ダメージなし
+		if (WeaponComp)
+		{
+			FGroundZoneState Marker;
+			Marker.Pos           = StrikeTarget.Pos;
+			Marker.Radius        = EffRadius;
+			Marker.Damage        = 0.f;
+			Marker.LifeTime      = SurvivorsGameConstants::LightningRingStrikeLifeTime;
+			Marker.WarningTime   = 0.f;
+			Marker.HitCooldown   = 9999.f;   // 追加ダメージを防ぐ
+			Marker.WeaponSlotIdx = SlotIdx;
+			Marker.WeaponType    = WeaponType;
+			Marker.bIsWarning    = false;
+			WeaponComp->SpawnGroundZone(Marker);
+		}
 
 		TArray<const FSurvivorsTargetProxy*> Contacts;
 		CollComp->QueryEnemyContacts(StrikeTarget.Pos, EffRadius, Contacts);

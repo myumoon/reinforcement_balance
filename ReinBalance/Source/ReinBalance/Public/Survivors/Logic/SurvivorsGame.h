@@ -23,7 +23,7 @@ class USurvivorsWeaponComponent;
  * ビジュアル表示は別クラスが担う。
  *
  * 行動: 離散9方向 (0=+Y, 1=北東, 2=+X, 3=南東, 4=-Y, 5=南西, 6=-X, 7=北西, 8=静止)
- * 観測: 708次元（GetObsSchema() のセグメント合計）
+ * 観測: 740次元（GetObsSchema() のセグメント合計）
  */
 UCLASS()
 class REINBALANCE_API ASurvivorsGame : public AActor
@@ -74,6 +74,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Survivors|Config")
 	FVector2D GetPlayerPos()   const { return PlayerPos; }
+	/** Camera Z=2000 基準のスクリーン内判定（±400u×±225u）
+	 *  ターゲット武器は画面内の敵のみを狙い、画面外敵は対象外にする。 */
+	bool IsOnScreen(FVector2D WorldPos) const;
 
 	FVector2D GetPlayerVel()   const { return PlayerVel; }
 	float     GetPlayerHP()    const { return PlayerHP; }
@@ -102,12 +105,14 @@ public:
 	FVector2D GetProjectilePos(int32 i)         const;
 	FSimRadius GetProjectileRadius(int32 i)     const;
 	EWeaponType GetProjectileWeaponType(int32 i)const;
+	float     GetProjectileBoxHalfWidth(int32 i) const;
 
 	// グラウンドゾーンアクセサ（WeaponComponent 経由）
 	int32     GetGroundZoneCount()              const;
 	FVector2D GetGroundZonePos(int32 i)         const;
 	float     GetGroundZoneRadius(int32 i)      const;
 	EWeaponType GetGroundZoneWeaponType(int32 i)const;
+	bool      IsGroundZoneWarning(int32 i)      const;
 
 	// 軌道オーブアクセサ（KingBible / Peachone / EbonyWings / Vandalier）
 	int32       GetOrbitOrbCount()                    const;
@@ -209,10 +214,10 @@ public:
 	// ---- スポーン設定 ----
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
-	float SpawnMinDistance = 400.f;
+	float SpawnMinDistance = 500.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
-	float SpawnMaxDistance = 600.f;
+	float SpawnMaxDistance = 700.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
 	float BossSpawnTime = 300.f;
@@ -229,7 +234,7 @@ public:
 	float MaxPlayerHP = 100.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
-	float MoveSpeed = 100.f;
+	float MoveSpeed = 80.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Player")
 	float PlayerRadius = 10.f;
