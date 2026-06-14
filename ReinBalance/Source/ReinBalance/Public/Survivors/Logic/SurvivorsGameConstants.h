@@ -66,6 +66,9 @@ namespace SurvivorsGameConstants
 	// OBSERVED: santa_water.jpg 337.5px × (800u/1920px) ≈ 140.6u → 採用値 140u
 	static constexpr float SantaWaterCircleRadius       = 140.f;
 
+	// SantaWater high-amount: 各 drop の角度ステップ（30°固定）
+	static constexpr float SantaWaterCircleDropStep     = UE_PI / 6.f;  // 30° in radians
+
 	// Obs の Shield 正規化最大値（秒）
 	static constexpr float MaxShieldDuration            = 8.f;
 

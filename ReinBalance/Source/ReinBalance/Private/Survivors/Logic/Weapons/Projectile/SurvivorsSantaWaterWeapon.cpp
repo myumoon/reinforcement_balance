@@ -93,12 +93,12 @@ void USurvivorsSantaWaterWeapon::StartDropSequence()
 	}
 	else
 	{
-		// Amount >= 4: プレイヤー周囲の時計回り円形配置（ランダム開始角度）
-		// OBSERVED: santa_water.jpg 赤い円半径 ≈ 337.5px × (800u/1920px) ≈ 140u
+		// Amount >= 4: プレイヤー周囲を 30°固定間隔で時計回りに配置（ランダム開始角度）
+		// OBSERVED: santa_water.jpg 赤い円半径 ≈ 140u。各 drop は SantaWaterCircleDropStep(30°) ごとにずれる。
 		const float StartAngle = Game->RandStream.FRand() * TWO_PI;
 		for (int32 i = 0; i < EffAmount; ++i)
 		{
-			const float Angle = StartAngle + 2.0f * UE_PI * i / EffAmount;
+			const float Angle = StartAngle + SurvivorsGameConstants::SantaWaterCircleDropStep * i;
 			PendingDropPositions.Add(
 				Game->PlayerPos + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * SurvivorsGameConstants::SantaWaterCircleRadius);
 		}

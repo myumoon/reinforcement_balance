@@ -1723,7 +1723,8 @@ bool FSurvivorsSantaWaterWarningZoneNoDamage::RunTest(const FString& Parameters)
 	return true;
 }
 
-// SantaWater: Amount >= 4 で drops が分散した円形配置になること
+// SantaWater: Amount >= 4 で drops が 30°固定間隔の円形配置になること
+// 隣接 drop 間距離 = 2 × 140u × sin(15°) ≈ 72.5u
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsSantaWaterHighAmountCircular,
 	"ReinBalance.Survivors.Wiki.SantaWater_HighAmount_CircularPattern",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1734,7 +1735,7 @@ bool FSurvivorsSantaWaterHighAmountCircular::RunTest(const FString& Parameters)
 
 	S.AddEnemyAt(FVector2D(50.f, 0.f));
 
-	// SantaWater Lv6: Amount=4
+	// SantaWater Lv6: Amount=5
 	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 6);
 	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
@@ -1748,8 +1749,9 @@ bool FSurvivorsSantaWaterHighAmountCircular::RunTest(const FString& Parameters)
 	if (WC->GetGroundZoneCount() >= 2)
 	{
 		const float Dist01 = FVector2D::Distance(WC->GetGroundZonePos(0), WC->GetGroundZonePos(1));
-		// Amount=4 の円形配置: 隣接点は 80u × sin(90°) × 2 ≈ 113u 離れる
-		TestTrue("SantaWater circular drops are spread (not at same pos)", Dist01 > 1.f);
+		// 30°固定間隔: chord = 2 × 140 × sin(15°) ≈ 72.5u、許容 [60, 85]u
+		TestTrue(FString::Printf(TEXT("SantaWater drops 30-degree spacing, dist01 %.1fu in [60,85]u"), Dist01),
+			Dist01 >= 60.f && Dist01 <= 85.f);
 	}
 
 	S.Destroy();
