@@ -55,7 +55,12 @@ namespace SurvivorsGameConstants
 	static constexpr float MaxProjectileRadius          = 80.f;
 
 	// Santa Water / La Borra の着弾予兆時間（秒）
-	static constexpr float SantaWaterWarningTime        = 1.00f;
+	// 本家VSは予告円なし。UE5では0.1sの短い予告のみ（落下位置が見える程度）。
+	static constexpr float SantaWaterWarningTime        = 0.10f;
+
+	// SantaWater low-amount（Amount<4）のランダムドロップ範囲半径
+	// 1発目は最近傍敵、残りはこの半径内のランダム位置に落下
+	static constexpr float SantaWaterRandomDropRadius   = 150.f;
 
 	// Obs の Shield 正規化最大値（秒）
 	static constexpr float MaxShieldDuration            = 8.f;
@@ -211,31 +216,32 @@ namespace SurvivorsGameConstants
 		int32 Pierce;  // 貫通数: 1=単体命中, 2=2体貫通, 3=3体貫通
 	};
 
-	// Knife: CD=1.0s 全レベル固定、Speed=800u(100%) 全レベル固定
+	// Knife: CD=1.0s 全レベル固定
+	// Speed: OBSERVED: knife_bullet3.mp4 Track1=326.2u/s, Track2=325.8u/s → 採用値326u/s
 	// Pierce: Lv1=1体, Lv5=2体, Lv8=3体
 	// Amount: Lv1 baseline=2（1発目即時、2発目0.1s後）。Lv2=3, Lv3=4, Lv4=5, Lv6=6, Lv7=7。
 	inline constexpr FKnifeParams KnifeTable[MaxWeaponLevel] = {
-		{  6.5f, 1.00f, 800.f, 2, 1 },  // Lv1: D=6.5, Amount=2(baseline), Pierce=1
-		{  6.5f, 1.00f, 800.f, 3, 1 },  // Lv2: Amount+1
-		{ 11.5f, 1.00f, 800.f, 4, 1 },  // Lv3: D+5, Amount+1
-		{ 11.5f, 1.00f, 800.f, 5, 1 },  // Lv4: Amount+1
-		{ 11.5f, 1.00f, 800.f, 5, 2 },  // Lv5: Pierce+1
-		{ 11.5f, 1.00f, 800.f, 6, 2 },  // Lv6: Amount+1
-		{ 16.5f, 1.00f, 800.f, 7, 2 },  // Lv7: D+5, Amount+1
-		{ 16.5f, 1.00f, 800.f, 7, 3 },  // Lv8: Pierce+1
+		{  6.5f, 1.00f, 326.f, 2, 1 },  // Lv1: D=6.5, Speed=326u/s(OBSERVED), Amount=2(baseline), Pierce=1
+		{  6.5f, 1.00f, 326.f, 3, 1 },  // Lv2: Amount+1
+		{ 11.5f, 1.00f, 326.f, 4, 1 },  // Lv3: D+5, Amount+1
+		{ 11.5f, 1.00f, 326.f, 5, 1 },  // Lv4: Amount+1
+		{ 11.5f, 1.00f, 326.f, 5, 2 },  // Lv5: Pierce+1
+		{ 11.5f, 1.00f, 326.f, 6, 2 },  // Lv6: Amount+1
+		{ 16.5f, 1.00f, 326.f, 7, 2 },  // Lv7: D+5, Amount+1
+		{ 16.5f, 1.00f, 326.f, 7, 3 },  // Lv8: Pierce+1
 	};
 
-	// ThousandEdge (Knife 進化): Damage=16.5, CD=0.35s, Speed=1200u(150%), Amount=6, Pierce=3
+	// ThousandEdge (Knife 進化): Damage=16.5, CD=0.35s, Speed=Knife×150%=489u/s, Amount=6, Pierce=3
 	// 進化武器は MaxLevel=1 のため Lv1 のみ参照される
 	inline constexpr FKnifeParams ThousandEdgeTable[MaxWeaponLevel] = {
-		{ 16.5f, 0.35f, 1200.f, 6, 3 },  // Lv1
-		{ 16.5f, 0.35f, 1200.f, 6, 3 },  // Lv2 (未使用)
-		{ 16.5f, 0.35f, 1200.f, 6, 3 },  // Lv3 (未使用)
-		{ 16.5f, 0.35f, 1200.f, 6, 3 },  // Lv4 (未使用)
-		{ 16.5f, 0.35f, 1200.f, 6, 3 },  // Lv5 (未使用)
-		{ 16.5f, 0.35f, 1200.f, 6, 3 },  // Lv6 (未使用)
-		{ 16.5f, 0.35f, 1200.f, 6, 3 },  // Lv7 (未使用)
-		{ 16.5f, 0.35f, 1200.f, 6, 3 },  // Lv8 (未使用)
+		{ 16.5f, 0.35f, 489.f, 6, 3 },  // Lv1: Speed=326×1.5=489u/s
+		{ 16.5f, 0.35f, 489.f, 6, 3 },  // Lv2 (未使用)
+		{ 16.5f, 0.35f, 489.f, 6, 3 },  // Lv3 (未使用)
+		{ 16.5f, 0.35f, 489.f, 6, 3 },  // Lv4 (未使用)
+		{ 16.5f, 0.35f, 489.f, 6, 3 },  // Lv5 (未使用)
+		{ 16.5f, 0.35f, 489.f, 6, 3 },  // Lv6 (未使用)
+		{ 16.5f, 0.35f, 489.f, 6, 3 },  // Lv7 (未使用)
+		{ 16.5f, 0.35f, 489.f, 6, 3 },  // Lv8 (未使用)
 	};
 
 	struct FAxeParams
@@ -553,8 +559,8 @@ namespace SurvivorsGameConstants
 	// Axe の Area スケール係数（wiki: "Axe scales with Area × 1.3"）
 	static constexpr float AxeAreaScaleFactor = 1.3f;
 
-	// Axe 上方向発射コーン: 真上（+Y）から左右 45° 以内のランダム方向
-	static constexpr float AxeRandomConeHalfAngle = UE_PI / 4.f;  // 45° in radians
+	// Axe 上方向発射コーン: 真上（+Y）から左右 30° 以内のランダム方向（45°の2/3）
+	static constexpr float AxeRandomConeHalfAngle = UE_PI / 6.f;  // 30° in radians
 
 	// 画面半幅・半高（Camera Z=2000 基準、横幅 1920px=800u）
 	// on-screen 判定に使用: |enemy.x - player.x| <= ScreenHalfWidthU かつ |y| <= ScreenHalfHeightU

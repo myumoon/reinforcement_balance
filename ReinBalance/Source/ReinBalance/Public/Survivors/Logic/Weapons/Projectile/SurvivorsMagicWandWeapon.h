@@ -5,7 +5,7 @@
 
 /**
  * MagicWand / HolyWand: 最近傍敵へ Amount 本の弾を 0.1s 間隔で順次発射。
- * 各弾はスポーン時点で最近傍の敵を個別に狙う（wiki: projectile interval = 0.1s）。
+ * 画面内に敵がいない場合、バースト開始時に1度だけランダム方向を決定し全弾が同一方向へ飛ぶ。
  */
 UCLASS()
 class REINBALANCE_API USurvivorsMagicWandWeapon : public USurvivorsWeaponBase
@@ -23,8 +23,9 @@ private:
 	int32 CachedPierce   = 1;
 
 	// sequential shot state
-	int32 PendingWandShots = 0;
-	float WandBurstTimer   = 0.f;
+	int32     PendingWandShots  = 0;
+	float     WandBurstTimer    = 0.f;
+	FVector2D BurstNoTargetDir  = FVector2D(1.f, 0.f);  // 画面内に敵がいない場合のバースト共通方向
 	// burst snapshot (captured when burst starts)
 	float BurstDamage   = 0.f;
 	float BurstSpeed    = 0.f;

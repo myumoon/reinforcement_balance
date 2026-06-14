@@ -66,10 +66,21 @@ void USurvivorsMagicWandWeapon::StartBurst()
 	BurstDamage   = CachedDamage * PE.DamageMult;
 	BurstSpeed    = CachedSpeed  * PE.SpeedMult;
 	BurstRadius   = 8.f * PE.AreaMult;
-	// 1.5s(旧値)では画面内最大距離(400u)を140u/sで到達できない(2.86s必要)。
 	// on-screen targeting 前提で画面横断(800u÷140u/s≈5.7s)をカバーする寿命に延長。
 	BurstLifeTime = 6.0f * PE.DurationMult;
 	BurstPierce   = CachedPierce;
+
+	// 画面内に敵がいない場合のバースト共通ランダム方向を事前決定（全弾が同一方向に飛ぶ）
+	bool bHasOnScreenEnemy = false;
+	for (const FEnemyState& E : Game->Enemies)
+	{
+		if (!E.bPendingRemove && Game->IsOnScreen(E.Pos)) { bHasOnScreenEnemy = true; break; }
+	}
+	if (!bHasOnScreenEnemy)
+	{
+		const float Angle = Game->RandStream.FRand() * TWO_PI;
+		BurstNoTargetDir = FVector2D(FMath::Cos(Angle), FMath::Sin(Angle));
+	}
 
 	PendingWandShots = CachedAmount + static_cast<int32>(PE.ExtraAmount);
 	WandBurstTimer   = 0.f;
@@ -85,13 +96,13 @@ void USurvivorsMagicWandWeapon::StartBurst()
 void USurvivorsMagicWandWeapon::SpawnWandShot()
 {
 	// 発射時点で画面内最近傍敵を探索（画面外の敵は対象外）。
-	// 画面内に敵がいない場合はランダム方向に発射する。
-	FVector2D Dir = FVector2D::ZeroVector;  // ZeroVector = 敵未発見を示す
+	// 画面内に敵がいない場合は StartBurst() で決定した BurstNoTargetDir を使う（全弾同一方向）。
+	FVector2D Dir = FVector2D::ZeroVector;
 	float MinDistSq = MAX_FLT;
 	for (const FEnemyState& E : Game->Enemies)
 	{
 		if (E.bPendingRemove) continue;
-		if (!Game->IsOnScreen(E.Pos)) continue;  // 画面外の敵は無視
+		if (!Game->IsOnScreen(E.Pos)) continue;
 		const float Dsq = (E.Pos - Game->PlayerPos).SizeSquared();
 		if (Dsq < MinDistSq)
 		{
@@ -99,12 +110,8 @@ void USurvivorsMagicWandWeapon::SpawnWandShot()
 			Dir       = (E.Pos - Game->PlayerPos).GetSafeNormal();
 		}
 	}
-	// 画面内に敵がいない場合はランダム方向
 	if (Dir.IsNearlyZero())
-	{
-		const float Angle = Game->RandStream.FRand() * TWO_PI;
-		Dir = FVector2D(FMath::Cos(Angle), FMath::Sin(Angle));
-	}
+		Dir = BurstNoTargetDir;
 
 	FProjectileState P;
 	P.Pos               = Game->PlayerPos;

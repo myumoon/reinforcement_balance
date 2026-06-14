@@ -411,6 +411,44 @@ bool FSurvivorsKnifeBurstCadence::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Knife: knife_bullet3.mp4 (Lv1 + Amount bonus +1) shows straight knives moving about 326u/s.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsKnifeVideoProjectileSpeed,
+	"ReinBalance.Survivors.Video.Knife_ProjectileSpeed_326u",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsKnifeVideoProjectileSpeed::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
+	FSurvivorsGameTestAccess::PlayerVel(S.Game) = FVector2D(1.f, 0.f);
+
+	EquipTestWeapon(S.Game, EWeaponType::Knife, 1);
+	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	if (!TestTrue("Knife projectile exists", WC->GetProjectileCount() > 0))
+	{
+		S.Destroy();
+		return false;
+	}
+
+	const FVector2D StartPos = WC->GetProjectilePos(0);
+	const float Elapsed = TickTestWeaponsForSecondsMeasured(WC, 0.25f);
+	if (!TestTrue("Knife projectile remains alive for speed sample", WC->GetProjectileCount() > 0))
+	{
+		S.Destroy();
+		return false;
+	}
+
+	const float Speed = FVector2D::Distance(WC->GetProjectilePos(0), StartPos) / Elapsed;
+	TestTrue(FString::Printf(TEXT("Knife video speed %.1fu/s should stay near 326u/s"), Speed),
+		Speed >= 295.f && Speed <= 365.f);
+
+	S.Destroy();
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsKingBibleDurationCooldown,
 	"ReinBalance.Survivors.Wiki.KingBible_DurationCooldown",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1860,7 +1898,7 @@ bool FSurvivorsMagicWandOnScreenOnly::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Axe は上方向 ±45° のランダム角度で発射されること
+// Axe は上方向 ±30° のランダム角度で発射されること（1発目は真上固定）
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsAxeRandomUpwardDirection,
 	"ReinBalance.Survivors.Wiki.Axe_RandomUpwardDirection",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1875,15 +1913,15 @@ bool FSurvivorsAxeRandomUpwardDirection::RunTest(const FString& Parameters)
 	EquipTestWeapon(S.Game, EWeaponType::Axe, 2);  // Amount=2
 	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	// 初回発射：1発目
+	// 初回発射：1発目（真上固定）
 	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
 	if (!TestEqual("Axe fires first shot", WC->GetProjectileCount(), 1)) { S.Destroy(); return false; }
 
 	const FVector2D Pos0 = WC->GetProjectilePos(0);
 	// 上方向（Y > 0）であること
 	TestTrue("Axe shot 0 travels upward (Y > 0)", Pos0.Y > 0.f);
-	// ±45° 以内なので |X| < Y（sin45°=cos45°）
-	TestTrue("Axe shot 0 is within ±45° of up", FMath::Abs(Pos0.X) <= Pos0.Y + 0.01f);
+	// 1発目は真上固定（BurstShotsFiredCount==0 → RandomOffset=0）なので X≈0
+	TestTrue("Axe shot 0 is within ±30° of up", FMath::Abs(Pos0.X) <= Pos0.Y + 0.01f);
 
 	// 0.2s 後：2発目
 	TickTestWeaponsForSeconds(WC, 0.21f);

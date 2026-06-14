@@ -139,12 +139,15 @@ void USurvivorsAxeWeapon::SpawnAxeShot()
 	const float HalfTime = (InitVelY > KINDA_SMALL_NUMBER) ? (BurstArcHeight / InitVelY) : 0.333f;
 	const float GravityY = -InitVelY / HalfTime;
 
-	// 各弾は真上（+Y）から ±45° のランダム方向（Game->RandStream で再現性確保）。
-	// Vel.X = Speed * sin(random_offset), Vel.Y = Speed * cos(random_offset)
-	const float RandomOffset = Game->RandStream.FRandRange(
-		-SurvivorsGameConstants::AxeRandomConeHalfAngle,
-		 SurvivorsGameConstants::AxeRandomConeHalfAngle);
-	const float HorizScale = FMath::Sin(RandomOffset);  // 真上基準の横成分（sin(0)=0 → 真上）
+	// 1発目は直上（X=0）。追加弾は真上（+Y）から ±45° のランダム方向。
+	// wiki: "The first axe is thrown directly above the character"
+	// ユーザー仕様: 上方向左右45度ランダム（追加弾）。Game->RandStream で再現性確保。
+	const float RandomOffset = (BurstShotsFiredCount == 0)
+		? 0.f  // 1発目: 真上固定
+		: Game->RandStream.FRandRange(
+			-SurvivorsGameConstants::AxeRandomConeHalfAngle,
+			 SurvivorsGameConstants::AxeRandomConeHalfAngle);
+	const float HorizScale = FMath::Sin(RandomOffset);  // 横成分: 1発目=0, 追加弾=ランダム
 
 	FProjectileState P;
 	P.Pos               = Game->PlayerPos;

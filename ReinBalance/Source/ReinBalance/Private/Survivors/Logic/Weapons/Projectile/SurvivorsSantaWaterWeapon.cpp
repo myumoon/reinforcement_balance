@@ -72,32 +72,32 @@ void USurvivorsSantaWaterWeapon::StartDropSequence()
 
 	if (EffAmount < 4)
 	{
-		// Amount < 4: 近い敵順に drop（wiki: "first bottle aims at the closest enemy"）
-		TArray<int32> EnemyIdx;
-		EnemyIdx.Reserve(Game->Enemies.Num());
-		for (int32 EIdx = 0; EIdx < Game->Enemies.Num(); ++EIdx)
+		// Amount < 4: 1発目は最近傍敵、残りはプレイヤー周囲のランダム位置
+		FVector2D NearestEnemyPos = Game->PlayerPos;
+		float MinDistSq = MAX_FLT;
+		for (const FEnemyState& E : Game->Enemies)
 		{
-			if (!Game->Enemies[EIdx].bPendingRemove) EnemyIdx.Add(EIdx);
+			if (E.bPendingRemove) continue;
+			const float Dsq = FVector2D::DistSquared(E.Pos, Game->PlayerPos);
+			if (Dsq < MinDistSq) { MinDistSq = Dsq; NearestEnemyPos = E.Pos; }
 		}
-		EnemyIdx.Sort([&](int32 A, int32 B) {
-			return FVector2D::DistSquared(Game->Enemies[A].Pos, Game->PlayerPos)
-				 < FVector2D::DistSquared(Game->Enemies[B].Pos, Game->PlayerPos);
-		});
+		PendingDropPositions.Add(NearestEnemyPos);
 
-		for (int32 i = 0; i < EffAmount; ++i)
+		for (int32 i = 1; i < EffAmount; ++i)
 		{
-			if (EnemyIdx.IsValidIndex(i))
-				PendingDropPositions.Add(Game->Enemies[EnemyIdx[i]].Pos);
-			else
-				PendingDropPositions.Add(Game->PlayerPos);
+			const float Angle = Game->RandStream.FRand() * TWO_PI;
+			const float Dist  = Game->RandStream.FRandRange(0.f, SurvivorsGameConstants::SantaWaterRandomDropRadius);
+			PendingDropPositions.Add(
+				Game->PlayerPos + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Dist);
 		}
 	}
 	else
 	{
-		// Amount >= 4: プレイヤー周囲の時計回り円形配置（wiki: "clockwise, roughly circular pattern"）
+		// Amount >= 4: プレイヤー周囲の時計回り円形配置（ランダム開始角度）
+		const float StartAngle = Game->RandStream.FRand() * TWO_PI;
 		for (int32 i = 0; i < EffAmount; ++i)
 		{
-			const float Angle = 2.0f * UE_PI * i / EffAmount;
+			const float Angle = StartAngle + 2.0f * UE_PI * i / EffAmount;
 			PendingDropPositions.Add(
 				Game->PlayerPos + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * 80.f);
 		}
