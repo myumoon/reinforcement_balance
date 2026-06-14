@@ -76,10 +76,11 @@ void USurvivorsRunetracerWeapon::Tick(float Dt)
 			const float MinY = PlayerPos.Y - ScrH;
 			const float MaxY = PlayerPos.Y + ScrH;
 			const FVector2D NextPos = P.Pos + P.Vel * InDt;
-			if      (NextPos.X > MaxX) { P.Vel.X = -FMath::Abs(P.Vel.X); bBounced = true; }
-			else if (NextPos.X < MinX) { P.Vel.X =  FMath::Abs(P.Vel.X); bBounced = true; }
-			if      (NextPos.Y > MaxY) { P.Vel.Y = -FMath::Abs(P.Vel.Y); bBounced = true; }
-			else if (NextPos.Y < MinY) { P.Vel.Y =  FMath::Abs(P.Vel.Y); bBounced = true; }
+			const float     R       = P.Radius.Value;
+			if      (NextPos.X + R > MaxX) { P.Vel.X = -FMath::Abs(P.Vel.X); bBounced = true; }
+			else if (NextPos.X - R < MinX) { P.Vel.X =  FMath::Abs(P.Vel.X); bBounced = true; }
+			if      (NextPos.Y + R > MaxY) { P.Vel.Y = -FMath::Abs(P.Vel.Y); bBounced = true; }
+			else if (NextPos.Y - R < MinY) { P.Vel.Y =  FMath::Abs(P.Vel.Y); bBounced = true; }
 		}
 
 		if (bBounced) P.BounceCount.Consume();
