@@ -67,16 +67,19 @@ void USurvivorsRunetracerWeapon::Tick(float Dt)
 		}
 
 		// スクリーンエッジ反射（PlayerPos 相対で可視領域端）
+		// TickProjectiles が Pos += Vel * Dt を実行するのは Tick() より後なので、
+		// 次フレーム位置 = Pos + Vel * InDt で判定して Vel のみ修正する。
 		if (!bBounced)
 		{
 			const float MinX = PlayerPos.X - ScrW;
 			const float MaxX = PlayerPos.X + ScrW;
 			const float MinY = PlayerPos.Y - ScrH;
 			const float MaxY = PlayerPos.Y + ScrH;
-			if (P.Pos.X > MaxX) { P.Pos.X = MaxX; P.Vel.X = -FMath::Abs(P.Vel.X); bBounced = true; }
-			else if (P.Pos.X < MinX) { P.Pos.X = MinX; P.Vel.X =  FMath::Abs(P.Vel.X); bBounced = true; }
-			if (P.Pos.Y > MaxY) { P.Pos.Y = MaxY; P.Vel.Y = -FMath::Abs(P.Vel.Y); bBounced = true; }
-			else if (P.Pos.Y < MinY) { P.Pos.Y = MinY; P.Vel.Y =  FMath::Abs(P.Vel.Y); bBounced = true; }
+			const FVector2D NextPos = P.Pos + P.Vel * InDt;
+			if      (NextPos.X > MaxX) { P.Vel.X = -FMath::Abs(P.Vel.X); bBounced = true; }
+			else if (NextPos.X < MinX) { P.Vel.X =  FMath::Abs(P.Vel.X); bBounced = true; }
+			if      (NextPos.Y > MaxY) { P.Vel.Y = -FMath::Abs(P.Vel.Y); bBounced = true; }
+			else if (NextPos.Y < MinY) { P.Vel.Y =  FMath::Abs(P.Vel.Y); bBounced = true; }
 		}
 
 		if (bBounced) P.BounceCount.Consume();

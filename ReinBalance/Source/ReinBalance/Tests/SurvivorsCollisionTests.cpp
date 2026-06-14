@@ -2115,6 +2115,7 @@ bool FSurvivorsAxeRandomUpwardDirection::RunTest(const FString& Parameters)
 // ============================================================
 
 // AWallActor が存在しない環境でも Runetracer がスクリーン端で跳ね返ること
+// Runetracer を装備して実装経路（USurvivorsRunetracerWeapon::Tick → UpdateProjectilesBySlot）を通す
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsRunetracerScreenEdgeBounce,
 	"ReinBalance.Survivors.Wiki.Runetracer_ScreenEdgeBounce",
 	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
@@ -2123,51 +2124,50 @@ bool FSurvivorsRunetracerScreenEdgeBounce::RunTest(const FString& Parameters)
 	FSurvivorsTestWorld S;
 	if (!TestTrue("World created", S.Create())) return false;
 
-	const FVector2D PlayerPos = FVector2D::ZeroVector;
-	FSurvivorsGameTestAccess::PlayerPos(S.Game) = PlayerPos;
+	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
 
+	// Runetracer を装備して SlotIdx=0 のバウンス処理経路を有効化
+	EquipTestWeapon(S.Game, EWeaponType::Runetracer, 1);
 	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	// +X 方向へ高速で弾を手動スポーン（BounceCount=3）
+	// スクリーン右端の 1u 内側からスタートし、1 tick（1/60s）で端を超える速度で +X 発射
+	// SlotIdx=0（Runetracer のスロット）に対してバウンス処理が走る
+	const float ScreenEdgeX = SurvivorsGameConstants::ScreenHalfWidthU;  // 400u
+	const float HighSpeed   = ScreenEdgeX * 60.f;  // 1 tick(1/60s) で ScreenHalfWidthU 分進む速度
 	FProjectileState Proj;
-	Proj.Pos            = FVector2D(SurvivorsGameConstants::ScreenHalfWidthU - 2.f, 0.f);  // 右端すぐ内側
-	Proj.Vel            = FVector2D(SurvivorsGameConstants::ScreenHalfWidthU * 10.f, 0.f); // 高速 +X
-	Proj.Radius         = FSimRadius(2.f);
-	Proj.Damage         = FDamage(1.f);
+	Proj.Pos            = FVector2D(ScreenEdgeX - 1.f, 0.f);
+	Proj.Vel            = FVector2D(HighSpeed, 0.f);
+	Proj.Radius         = FSimRadius(1.f);
+	Proj.Damage         = FDamage(0.f);
 	Proj.WeaponType     = EWeaponType::Runetracer;
-	Proj.WeaponSlotIdx  = 1;
+	Proj.WeaponSlotIdx  = 0;  // Runetracer のスロット
 	Proj.LifeTime       = FProjectileLifeTime(10.f);
 	Proj.bPiercing      = true;
 	Proj.BounceCount    = FBounceCount(3);
 	WC->SpawnProjectile(Proj);
+	const int32 PIdx = WC->GetProjectileCount() - 1;
 
-	const int32 StartCount = WC->GetProjectileCount();
-	if (!TestTrue("Projectile spawned", StartCount > 0)) { S.Destroy(); return false; }
-	const int32 PIdx = StartCount - 1;
-	const float PosX0 = WC->GetProjectilePos(PIdx).X;
-
-	// 1 tick で右端に到達・クランプされる
+	// Tick: Runetracer::Tick → UpdateProjectilesBySlot（速度反転）→ TickProjectiles（Pos += Vel * Dt）
 	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
 
-	TestTrue("Runetracer projectile survives screen edge",
-		WC->GetProjectileCount() >= StartCount);
-
-	// クランプ: X <= ScreenHalfWidthU であること
-	if (WC->GetProjectileCount() >= StartCount)
+	if (!TestTrue("Runetracer projectile survives after screen edge tick", WC->GetProjectileCount() > PIdx))
 	{
-		const float PosX1 = WC->GetProjectilePos(PIdx).X;
-		TestTrue(FString::Printf(TEXT("Runetracer clamped to screen edge (%.1fu <= %.1fu)"),
-			PosX1, SurvivorsGameConstants::ScreenHalfWidthU),
-			PosX1 <= SurvivorsGameConstants::ScreenHalfWidthU + 0.5f);
+		S.Destroy();
+		return false;
+	}
 
-		// もう 1 tick 進めると X が小さくなる（左向きに反射）
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-		if (WC->GetProjectileCount() >= StartCount)
-		{
-			const float PosX2 = WC->GetProjectilePos(PIdx).X;
-			TestTrue("Runetracer moves leftward after screen-edge bounce (X decreases)",
-				PosX2 < PosX1 || PosX1 < PosX0);  // X が戻っているか、既に戻り始めている
-		}
+	// 速度が反転した後に移動しているので、最終位置はスクリーン端内（端を超えない）
+	const float PosX1 = WC->GetProjectilePos(PIdx).X;
+	TestTrue(FString::Printf(TEXT("Runetracer pos after bounce %.1fu <= screen edge %.1fu"),
+		PosX1, ScreenEdgeX),
+		PosX1 <= ScreenEdgeX + 1.f);
+
+	// もう 1 tick: 反射済みなので -X 方向に動く（X が減少）
+	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	if (WC->GetProjectileCount() > PIdx)
+	{
+		const float PosX2 = WC->GetProjectilePos(PIdx).X;
+		TestTrue("Runetracer moves leftward after screen-edge bounce", PosX2 < PosX1);
 	}
 
 	S.Destroy();
