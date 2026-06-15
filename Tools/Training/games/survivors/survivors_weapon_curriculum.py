@@ -79,26 +79,11 @@ WEAPON_PHASES: dict[str, dict] = {
     "W1": {
         "weapon_pool_mode": "fixed_subset",
         "allowed_weapon_types": [
-            WeaponType.GARLIC, WeaponType.KING_BIBLE, WeaponType.SANTA_WATER,
+            WeaponType.GARLIC, WeaponType.KING_BIBLE, WeaponType.FIRE_WAND,
         ],
         "enable_passives": True,
         "enable_evolutions": False,
         "replay_old_phase_fraction": 0.0,  # v08: W0廃止により古いフェーズが存在しないため0.0に変更
-        "log_combination_rewards": True,
-    },
-    "W1_to_W2": {
-        "weapon_pool_mode": "weighted",
-        "allowed_weapon_types": [
-            WeaponType.GARLIC, WeaponType.WHIP, WeaponType.MAGIC_WAND,
-            WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS,
-            WeaponType.KING_BIBLE, WeaponType.SANTA_WATER,
-        ],
-        "enable_passives": True,
-        "enable_evolutions": False,
-        "replay_old_phase_fraction": 0.25,
-        "transition_steps": 2_000_000,
-        "from_phase": "W1",
-        "to_phase": "W2",
         "log_combination_rewards": True,
     },
     "W2": {
@@ -148,23 +133,6 @@ TRANSITION_WEAPON_WEIGHTS: dict[str, dict] = {
             WeaponType.SANTA_WATER: 0.25,
         },
     },
-    "W1_to_W2": {
-        "start": {
-            WeaponType.GARLIC: 0.5,
-            WeaponType.KING_BIBLE: 0.25,
-            WeaponType.SANTA_WATER: 0.25,
-        },
-        "end": {
-            WeaponType.GARLIC: 0.2,
-            WeaponType.WHIP: 0.1,
-            WeaponType.MAGIC_WAND: 0.1,
-            WeaponType.KNIFE: 0.1,
-            WeaponType.AXE: 0.1,
-            WeaponType.CROSS: 0.1,
-            WeaponType.KING_BIBLE: 0.15,
-            WeaponType.SANTA_WATER: 0.15,
-        },
-    },
 }
 
 
@@ -200,7 +168,7 @@ def get_weapon_weights(phase_key: str, phase_progress: float) -> dict[int, float
 def get_params_for_phase(phase_key: str, global_step: int = 0) -> dict:
     """指定フェーズの武器カリキュラムパラメータを返す。
 
-    weighted フェーズ（W0_to_W1 / W1_to_W2）では global_step に応じて
+    weighted フェーズ（W0_to_W1 等）では global_step に応じて
     weapon_weights を線形補間する。fixed フェーズでは weapon_weights は返さない。
 
     Args:
