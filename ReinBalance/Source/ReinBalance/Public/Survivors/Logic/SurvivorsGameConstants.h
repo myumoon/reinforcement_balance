@@ -706,10 +706,12 @@ namespace SurvivorsGameConstants
 
 	// 有効射程の正規化値（0.0〜1.0）。obs の weapon_attack_range_norm に使用する。
 	// 値はゲームフィールド半径を基準とした相対値（0=接触系, 1=画面外まで届く）。
+	// 進化後武器は基礎武器と同じ range 値を使用（進化で射程特性は大きく変わらない）。
 	inline constexpr float GetWeaponEffectiveRange(EWeaponType T)
 	{
 		switch (T)
 		{
+			// ---- 基礎武器 ----
 			case EWeaponType::Garlic:        return 0.0f;
 			case EWeaponType::KingBible:     return 0.1f;
 			case EWeaponType::Whip:          return 0.15f;
@@ -721,6 +723,24 @@ namespace SurvivorsGameConstants
 			case EWeaponType::Axe:           return 0.6f;
 			case EWeaponType::SantaWater:    return 0.3f;
 			case EWeaponType::Runetracer:    return 0.6f;
+			case EWeaponType::Pentagram:     return 1.0f;   // 全画面消去
+			case EWeaponType::Peachone:
+			case EWeaponType::EbonyWings:    return 0.5f;   // 軌道+砲撃、中距離
+			case EWeaponType::Laurel:        return 0.0f;   // 防御系（射程なし）
+			// ---- 進化後武器（基礎武器と同じ range） ----
+			case EWeaponType::SoulEater:     return 0.0f;   // Garlic 進化
+			case EWeaponType::BloodyTear:    return 0.15f;  // Whip 進化
+			case EWeaponType::HolyWand:      return 0.6f;   // MagicWand 進化（Speed 2倍でやや広い）
+			case EWeaponType::ThousandEdge:  return 0.9f;   // Knife 進化（Speed 1.5倍、高速）
+			case EWeaponType::DeathSpiral:   return 0.6f;   // Axe 進化
+			case EWeaponType::HeavenSword:   return 0.8f;   // Cross 進化（Speed 2倍）
+			case EWeaponType::UnholyVespers: return 0.1f;   // KingBible 進化
+			case EWeaponType::Hellfire:      return 0.5f;   // FireWand 進化
+			case EWeaponType::LaBorra:       return 0.3f;   // SantaWater 進化
+			case EWeaponType::NoFuture:      return 0.7f;   // Runetracer 進化（Speed 2.8倍）
+			case EWeaponType::ThunderLoop:   return 0.4f;   // LightningRing 進化
+			case EWeaponType::GorgeousMoon:  return 1.0f;   // Pentagram 進化
+			case EWeaponType::Vandalier:     return 0.5f;   // Peachone+EbonyWings Union
 			default:                         return 0.5f;
 		}
 	}
@@ -728,32 +748,47 @@ namespace SurvivorsGameConstants
 	// 武器カテゴリ（整数）。obs の weapon_category_onehot に使用する。
 	// 0=garlic_auto, 1=orbital, 2=melee_line, 3=ranged_targeted,
 	// 4=ranged_directional, 5=area_drop, 6=defensive
+	// 進化後武器は基礎武器と同じカテゴリに分類する。
 	inline constexpr int32 GetWeaponCategory(EWeaponType T)
 	{
 		switch (T)
 		{
+			// ---- 0: garlic_auto（自動全方位攻撃） ----
 			case EWeaponType::Garlic:
-			case EWeaponType::SoulEater:      return 0; // garlic_auto
+			case EWeaponType::SoulEater:      return 0;  // SoulEater = Garlic 進化
+			// ---- 1: orbital（プレイヤー周回） ----
 			case EWeaponType::KingBible:
-			case EWeaponType::UnholyVespers:  return 1; // orbital
+			case EWeaponType::UnholyVespers:  return 1;  // UnholyVespers = KingBible 進化
+			// ---- 2: melee_line（近接ライン） ----
 			case EWeaponType::Whip:
-			case EWeaponType::BloodyTear:     return 2; // melee_line
+			case EWeaponType::BloodyTear:     return 2;  // BloodyTear = Whip 進化
+			// ---- 3: ranged_targeted（誘導・ターゲット指向） ----
 			case EWeaponType::MagicWand:
+			case EWeaponType::HolyWand:       // MagicWand 進化
 			case EWeaponType::FireWand:
 			case EWeaponType::LightningRing:
-			case EWeaponType::HolyWand:
-			case EWeaponType::ThunderLoop:    return 3; // ranged_targeted
+			case EWeaponType::ThunderLoop:    return 3;  // ThunderLoop = LightningRing 進化
+			// ---- 4: ranged_directional（方向性飛道） ----
 			case EWeaponType::Knife:
+			case EWeaponType::ThousandEdge:   // Knife 進化
 			case EWeaponType::Axe:
+			case EWeaponType::DeathSpiral:    // Axe 進化
 			case EWeaponType::Cross:
+			case EWeaponType::HeavenSword:    // Cross 進化
 			case EWeaponType::Peachone:
-			case EWeaponType::EbonyWings:     return 4; // ranged_directional
+			case EWeaponType::EbonyWings:
+			case EWeaponType::Vandalier:      return 4;  // Vandalier = Peachone+EbonyWings Union
+			// ---- 5: area_drop（エリア設置・バウンス・全体攻撃） ----
 			case EWeaponType::SantaWater:
+			case EWeaponType::LaBorra:        // SantaWater 進化
 			case EWeaponType::Runetracer:
-			case EWeaponType::Hellfire:
-			case EWeaponType::LaBorra:
-			case EWeaponType::GorgeousMoon:   return 5; // area_drop
-			default:                          return 6; // defensive
+			case EWeaponType::NoFuture:       // Runetracer 進化
+			case EWeaponType::Hellfire:       // FireWand 進化
+			case EWeaponType::Pentagram:
+			case EWeaponType::GorgeousMoon:   return 5;  // GorgeousMoon = Pentagram 進化
+			// ---- 6: defensive（防御系） ----
+			case EWeaponType::Laurel:
+			default:                          return 6;
 		}
 	}
 

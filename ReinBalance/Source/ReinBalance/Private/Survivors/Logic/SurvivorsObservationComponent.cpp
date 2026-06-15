@@ -539,12 +539,21 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 	}
 
 	// ---- weapon_is_directional (MaxWeaponSlots = 6) ----
+	// 方向性武器: プレイヤーの移動方向に依存して発射方向が変わる武器。
+	// 進化後武器も基礎武器と同じ方向性を持つ。
 	for (int32 s = 0; s < MaxWeaponSlots; ++s)
 	{
 		const EWeaponType T = Game->WeaponSlots[s].Type;
-		const bool bDir = (T == EWeaponType::Knife || T == EWeaponType::Axe ||
-		                   T == EWeaponType::Cross || T == EWeaponType::Peachone ||
-		                   T == EWeaponType::EbonyWings);
+		// GetWeaponCategory(T) == 4 (ranged_directional) と等価だが明示的に列挙する
+		const bool bDir = (T == EWeaponType::Knife         ||
+		                   T == EWeaponType::ThousandEdge  ||  // Knife 進化
+		                   T == EWeaponType::Axe           ||
+		                   T == EWeaponType::DeathSpiral   ||  // Axe 進化
+		                   T == EWeaponType::Cross         ||
+		                   T == EWeaponType::HeavenSword   ||  // Cross 進化
+		                   T == EWeaponType::Peachone      ||
+		                   T == EWeaponType::EbonyWings    ||
+		                   T == EWeaponType::Vandalier);        // Peachone+EbonyWings Union
 		Obs.Add(T != EWeaponType::None ? (bDir ? 1.f : 0.f) : 0.f);
 	}
 
