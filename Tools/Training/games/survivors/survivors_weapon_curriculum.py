@@ -37,19 +37,29 @@ class WeaponType:
     GORGEOUS_MOON = 27
     VANDALIER     = 28
 
+# カリキュラム除外武器 (攻撃判定なし or 経験値ドロップなし)
+# - LAUREL (15)     : ComputeHits 実装なし。シールドを張るだけで攻撃判定がない。
+# - PENTAGRAM (12)  : 攻撃はするが Vampire Survivors 仕様で経験値を落とさない。レベルアップ不可。
+# - GORGEOUS_MOON (27): PENTAGRAM の進化形。同じ理由で経験値なし。
+CURRICULUM_EXCLUDED_WEAPONS = [
+    WeaponType.PENTAGRAM,
+    WeaponType.LAUREL,
+    WeaponType.GORGEOUS_MOON,
+]
+
 ALL_BASE_WEAPONS = [
     WeaponType.GARLIC, WeaponType.WHIP, WeaponType.MAGIC_WAND,
     WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS,
     WeaponType.KING_BIBLE, WeaponType.FIRE_WAND, WeaponType.SANTA_WATER,
-    WeaponType.RUNETRACER, WeaponType.LIGHTNING_RING, WeaponType.PENTAGRAM,
-    WeaponType.PEACHONE, WeaponType.EBONY_WINGS, WeaponType.LAUREL,
+    WeaponType.RUNETRACER, WeaponType.LIGHTNING_RING,
+    WeaponType.PEACHONE, WeaponType.EBONY_WINGS,
 ]
 
 ALL_EVOLVED_WEAPONS = [
     WeaponType.SOUL_EATER, WeaponType.BLOODY_TEAR, WeaponType.HOLY_WAND,
     WeaponType.THOUSAND_EDGE, WeaponType.DEATH_SPIRAL, WeaponType.HEAVEN_SWORD,
     WeaponType.UNHOLY_VESPERS, WeaponType.HELLFIRE, WeaponType.LA_BORRA,
-    WeaponType.NO_FUTURE, WeaponType.THUNDER_LOOP, WeaponType.GORGEOUS_MOON,
+    WeaponType.NO_FUTURE, WeaponType.THUNDER_LOOP,
     WeaponType.VANDALIER,
 ]
 
