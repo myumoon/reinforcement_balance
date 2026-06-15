@@ -193,9 +193,29 @@ class CurriculumCallback(BaseCallback):
         敵難易度パラメータを新しいフェーズに合わせて適用する。
         HybridCurriculumSpalfCallback.rollback_one_phase() と同じインターフェースを持ち、
         WeaponPhaseAutoStateModule の rollback_fn として使用できる。
+
+        Note:
+            v09 ではこの関数は WeaponPhaseAutoStateModule からは呼ばれない。
+            代わりに on_weapon_phase_advance() がスコアウィンドウのみリセットする。
+            backward compatibility のため残している。
         """
         self._curriculum.rollback_one_phase(reason)
         self._param_applier.apply(_phase_to_params(self._curriculum.current_phase))
+
+    def on_weapon_phase_advance(self) -> None:
+        """武器フェーズ昇格時: カリキュラムフェーズを維持してスコアウィンドウのみリセット。
+
+        v09 での forced_rollback 廃止に対応。武器フェーズが上がっても
+        カリキュラムの難易度設定はそのままとし、スコア判定ウィンドウのみクリアする。
+        これにより、次フェーズへの昇格条件が新しい武器セットで再評価される。
+        """
+        self._curriculum._scores.clear()
+        self._curriculum._episode_lengths.clear()
+        self._curriculum._episode_scores.clear()
+        print(
+            f"[Curriculum] 武器フェーズ昇格によるスコアウィンドウリセット "
+            f"(phase={self._curriculum.current_phase} を維持)"
+        )
 
     def _save_status(self, *a):
         self._curriculum.save_status()

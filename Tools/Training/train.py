@@ -1504,8 +1504,7 @@ def main() -> None:
 
     # WeaponPhaseAutoCallback: --weapon-phase auto 時に登録
     # --curriculum または --curriculum-spalf が必要。
-    # WeaponPhaseAutoStateModule に CurriculumStateModule を渡し、rollback_fn は
-    # 各コールバックの rollback_one_phase を使用することで HybridCallback への直接依存を排除する。
+    # v09: ゲートベース昇格に変更。on_weapon_phase_advance_fn でスコアウィンドウのみリセット。
     # resume 状態は train_status_{step}_steps.json の "weapon_phase_auto" キーから復元する。
     _weapon_auto_module = None
     if args.game == "survivors" and not args.dry_run and _weapon_phase_key == "auto":
@@ -1517,8 +1516,11 @@ def main() -> None:
         from games.survivors.weapon_phase_auto_callback import WeaponPhaseAutoCallback
         _weapon_auto_module = WeaponPhaseAutoStateModule(
             curriculum=curriculum_cb._curriculum,
-            stagnation_steps=args.weapon_phase_auto_stagnation_steps,
-            rollback_fn=curriculum_cb.rollback_one_phase,
+            stagnation_steps=getattr(args, "weapon_phase_auto_stagnation_steps", 500_000),
+            # v09: rollback_fn は使用しない（on_weapon_phase_advance_fn に移行）
+            rollback_fn=None,
+            # v09: 武器フェーズ昇格時はスコアウィンドウのみリセット（フェーズ維持）
+            on_weapon_phase_advance_fn=curriculum_cb.on_weapon_phase_advance,
         )
         # train_status_{step}_steps.json の "weapon_phase_auto" から状態を復元
         _weapon_auto_raw = resume_status.get("weapon_phase_auto") if resume_status else None
@@ -1537,8 +1539,7 @@ def main() -> None:
         )
         callbacks.append(_weapon_auto_cb)
         print(
-            f"[INFO] WeaponPhaseAutoCallback 有効 "
-            f"(stagnation_steps={args.weapon_phase_auto_stagnation_steps:,}, "
+            f"[INFO] WeaponPhaseAutoCallback 有効 (ゲートベース昇格, "
             f"weapon_update_freq={args.checkpoint_freq:,})"
         )
 

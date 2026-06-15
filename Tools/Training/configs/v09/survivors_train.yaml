@@ -1,0 +1,23 @@
+# v09 Survivors 訓練設定
+# 使い方: python train.py --config configs/v09/survivors_train.yaml
+# CLI 引数で個別上書き可能: python train.py --config configs/v09/survivors_train.yaml --total-steps 10000000
+#
+# v09 主な変更:
+#   - weapon_phase: auto (W0 から W5 へゲートベース自動昇格)
+#   - weapon_phase_auto_stagnation_steps は廃止 (ゲートベース昇格のため不要)
+#   - 武器フェーズ昇格時の forced_rollback 廃止
+#     (カリキュラムフェーズを維持しスコアウィンドウのみリセット)
+
+game: survivors
+total_steps: 10_000_000
+curriculum: true
+curriculum_window: 20
+frame_skip: 2
+wandb: true
+wandb_project: rl-survivors
+
+# 武器カリキュラム: ゲートベース自動昇格
+# W0 (Garlic のみ) → curriculum Phase 4 到達 → W1 → ... → W5 (全武器)
+weapon_phase: auto
+# weapon_phase_auto_stagnation_steps は v09 では不要 (廃止)
+# v08 では 500_000 を指定していたが、ゲートベース昇格に移行したため削除

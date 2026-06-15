@@ -387,9 +387,29 @@ class HybridCurriculumSpalfCallback(BaseCallback):
 
         CurriculumStateModule.rollback_one_phase() でフェーズ状態を更新した後、
         SPALF の探索範囲と敵難易度パラメータを新しいフェーズに合わせて更新する。
+
+        Note:
+            v09 ではこの関数は WeaponPhaseAutoStateModule からは呼ばれない。
+            代わりに on_weapon_phase_advance() がスコアウィンドウのみリセットする。
+            backward compatibility のため残している。
         """
         self._curriculum.rollback_one_phase(reason)
         self._on_phase_changed("forced_rollback")
+
+    def on_weapon_phase_advance(self) -> None:
+        """武器フェーズ昇格時: カリキュラムフェーズを維持してスコアウィンドウのみリセット。
+
+        v09 での forced_rollback 廃止に対応。武器フェーズが上がっても
+        カリキュラムの難易度設定はそのままとし、スコア判定ウィンドウのみクリアする。
+        これにより、次フェーズへの昇格条件が新しい武器セットで再評価される。
+        """
+        self._curriculum._scores.clear()
+        self._curriculum._episode_lengths.clear()
+        self._curriculum._episode_scores.clear()
+        print(
+            f"[HybridCurriculum] 武器フェーズ昇格によるスコアウィンドウリセット "
+            f"(phase={self._curriculum.current_phase} を維持)"
+        )
 
     def _save_status(self) -> None:
         """全モジュールのステータスを保存する。"""
