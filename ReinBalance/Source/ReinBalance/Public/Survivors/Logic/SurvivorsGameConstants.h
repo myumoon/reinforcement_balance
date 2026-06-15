@@ -702,6 +702,61 @@ namespace SurvivorsGameConstants
 		EGemType::Red,
 	};
 
+	// ---- 武器有効射程・カテゴリ関数 -----------------------------------------
+
+	// 有効射程の正規化値（0.0〜1.0）。obs の weapon_attack_range_norm に使用する。
+	// 値はゲームフィールド半径を基準とした相対値（0=接触系, 1=画面外まで届く）。
+	inline constexpr float GetWeaponEffectiveRange(EWeaponType T)
+	{
+		switch (T)
+		{
+			case EWeaponType::Garlic:        return 0.0f;
+			case EWeaponType::KingBible:     return 0.1f;
+			case EWeaponType::Whip:          return 0.15f;
+			case EWeaponType::MagicWand:     return 0.5f;
+			case EWeaponType::FireWand:      return 0.5f;
+			case EWeaponType::LightningRing: return 0.4f;
+			case EWeaponType::Knife:         return 0.8f;
+			case EWeaponType::Cross:         return 0.7f;
+			case EWeaponType::Axe:           return 0.6f;
+			case EWeaponType::SantaWater:    return 0.3f;
+			case EWeaponType::Runetracer:    return 0.6f;
+			default:                         return 0.5f;
+		}
+	}
+
+	// 武器カテゴリ（整数）。obs の weapon_category_onehot に使用する。
+	// 0=garlic_auto, 1=orbital, 2=melee_line, 3=ranged_targeted,
+	// 4=ranged_directional, 5=area_drop, 6=defensive
+	inline constexpr int32 GetWeaponCategory(EWeaponType T)
+	{
+		switch (T)
+		{
+			case EWeaponType::Garlic:
+			case EWeaponType::SoulEater:      return 0; // garlic_auto
+			case EWeaponType::KingBible:
+			case EWeaponType::UnholyVespers:  return 1; // orbital
+			case EWeaponType::Whip:
+			case EWeaponType::BloodyTear:     return 2; // melee_line
+			case EWeaponType::MagicWand:
+			case EWeaponType::FireWand:
+			case EWeaponType::LightningRing:
+			case EWeaponType::HolyWand:
+			case EWeaponType::ThunderLoop:    return 3; // ranged_targeted
+			case EWeaponType::Knife:
+			case EWeaponType::Axe:
+			case EWeaponType::Cross:
+			case EWeaponType::Peachone:
+			case EWeaponType::EbonyWings:     return 4; // ranged_directional
+			case EWeaponType::SantaWater:
+			case EWeaponType::Runetracer:
+			case EWeaponType::Hellfire:
+			case EWeaponType::LaBorra:
+			case EWeaponType::GorgeousMoon:   return 5; // area_drop
+			default:                          return 6; // defensive
+		}
+	}
+
 	// ---- 進化条件テーブル ---------------------------------------------------
 
 	struct FEvolutionRule
