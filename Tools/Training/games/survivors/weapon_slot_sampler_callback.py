@@ -28,15 +28,22 @@ class WeaponSlotSamplerCallback(BaseCallback):
         self._rng = random.Random(seed)
 
     def _on_training_start(self) -> None:
-        self._apply_all_envs()
+        self._apply_all_envs()  # 初期送信（ep1 の reset 前にセット）
 
     def _on_rollout_start(self) -> None:
         # ロールアウト開始時に全 env へ RSI パラメータを再送する。
-        # done 後の set_params は SB3 VecEnv の reset() タイミングに間に合わない
-        # ため、ロールアウト先頭で一括送信する方式を採用している。
+        # _on_step() での done 検出サンプルが次エピソードのリセット前に
+        # 届かない場合のフォールバックとして機能する。
         self._apply_all_envs()
 
     def _on_step(self) -> bool:
+        dones = self.locals.get("dones", [])
+        for i, done in enumerate(dones):
+            if done:
+                # done=True 検出時は SB3 がすでに次エピソードの reset() を完了しているため、
+                # ここで送信したサンプルは「次の次の」エピソード開始時に適用される。
+                # 1 エピソードのズレは _on_training_start / _on_rollout_start でカバーする。
+                self._apply_single_env(i)
         return True
 
     def _apply_all_envs(self) -> None:
@@ -56,4 +63,5 @@ class WeaponSlotSamplerCallback(BaseCallback):
             "set_params", indices=[env_idx],
             initial_elapsed_time=elapsed_time,
             initial_weapon_slots=slots,
+            MaxEpisodeTime=elapsed_time + 300.0,  # RSI 後に 300 秒のエピソードを保証
         )

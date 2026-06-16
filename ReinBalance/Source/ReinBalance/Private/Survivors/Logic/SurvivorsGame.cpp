@@ -256,6 +256,11 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 			WeaponSlots[i].Type  = static_cast<EWeaponType>(WId);
 			WeaponSlots[i].Level = FWeaponLevel(WLv);
 		}
+
+		// RSI: 一度適用したらクリア（次のリセットでは通常動作に戻す）
+		bHasInitialOverride = false;
+		InitialWeaponSlots.Empty();
+		InitialElapsedTime  = 0.f;
 	}
 }
 
