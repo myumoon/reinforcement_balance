@@ -3,32 +3,55 @@
 import numpy as np
 import gymnasium as gym
 
-_OBS_DIM = 279  # 183 + 96 (方向別密度/最近傍距離 16方向×6セグメント)
-_NUM_ACTIONS = 9
-
-# UE5 GetObsSchema() と一致するオフセット・スキーマ（dry-run 時の extractor 用）
+# obs schema v794 に対応（SurvivorsObservationComponent.cpp GetObsSchema() と一致させる）
+# MaxWeaponSlots=6, MaxPassiveSlots=6, MaxEnemyObs=32, MaxRedGemObs=10,
+# MaxGreenGemObs=12, MaxBlueGemObs=12, MaxProjectileObs=32, ProjectileObsStride=6,
+# MaxFloorPickupObs=8, MaxSpecialPickupObs=3, MaxDestructibleObs=10,
+# EnemyDensityDirCount=16, GemDensityDirCount=16
 _OBS_SCHEMA = [
-    {"name": "player_pos",               "dim": 2},
-    {"name": "player_vel",               "dim": 2},
-    {"name": "wall_rays",                "dim": 8},
-    {"name": "player_hp",                "dim": 1},
-    {"name": "weapon_slots",             "dim": 6},
-    {"name": "enemy_count",              "dim": 1},
-    {"name": "elapsed_time",             "dim": 1},
-    {"name": "xp_progress",              "dim": 1},
-    {"name": "player_level",             "dim": 1},
-    {"name": "gem_rel_pos",              "dim": 40},
-    {"name": "enemy_rel_pos",            "dim": 40},
-    {"name": "enemy_vel",                "dim": 40},
-    {"name": "enemy_type",               "dim": 20},
-    {"name": "enemy_hp",                 "dim": 20},
-    {"name": "enemy_nearest_dist_16dir", "dim": 16},
-    {"name": "enemy_density_near_16dir", "dim": 16},
-    {"name": "enemy_density_mid_16dir",  "dim": 16},
-    {"name": "gem_nearest_dist_16dir",   "dim": 16},
-    {"name": "gem_density_near_16dir",   "dim": 16},
-    {"name": "gem_density_mid_16dir",    "dim": 16},
+    {"name": "player_pos",                  "dim": 2},
+    {"name": "player_vel",                  "dim": 2},
+    {"name": "wall_rays",                   "dim": 8},
+    {"name": "player_hp",                   "dim": 1},
+    {"name": "shield_active",               "dim": 1},
+    {"name": "shield_timer_norm",           "dim": 1},
+    {"name": "revival_remaining_norm",      "dim": 1},
+    {"name": "armor_flat_norm",             "dim": 1},
+    {"name": "regen_per_sec_norm",          "dim": 1},
+    {"name": "passive_effect_summary",      "dim": 5},
+    {"name": "weapon_slots",                "dim": 18},   # (type_norm, level_norm, cooldown_norm) × 6
+    {"name": "passive_slots",               "dim": 12},   # (type_norm, level_norm) × 6
+    {"name": "enemy_count",                 "dim": 1},
+    {"name": "elapsed_time",                "dim": 1},
+    {"name": "xp_progress",                 "dim": 1},
+    {"name": "player_level",                "dim": 1},
+    {"name": "stage_id_norm",               "dim": 1},
+    {"name": "red_gem_rel_pos",             "dim": 20},   # MaxRedGemObs(10) × 2
+    {"name": "green_gem_rel_pos",           "dim": 24},   # MaxGreenGemObs(12) × 2
+    {"name": "blue_gem_rel_pos",            "dim": 24},   # MaxBlueGemObs(12) × 2
+    {"name": "gem_pickup_radius",           "dim": 1},
+    {"name": "enemy_rel_pos",               "dim": 64},   # MaxEnemyObs(32) × 2
+    {"name": "enemy_vel",                   "dim": 64},   # MaxEnemyObs(32) × 2
+    {"name": "enemy_type",                  "dim": 32},   # MaxEnemyObs(32)
+    {"name": "enemy_hp",                    "dim": 32},   # MaxEnemyObs(32)
+    {"name": "enemy_frozen",                "dim": 32},   # MaxEnemyObs(32)
+    {"name": "enemy_nearest_dist_16dir",    "dim": 16},   # EnemyDensityDirCount(16)
+    {"name": "enemy_density_near_16dir",    "dim": 16},   # EnemyDensityDirCount(16)
+    {"name": "enemy_density_mid_16dir",     "dim": 16},   # EnemyDensityDirCount(16)
+    {"name": "gem_density_all_16dir",       "dim": 48},   # GemDensityDirCount(16) × 3
+    {"name": "red_green_gem_density_16dir", "dim": 48},   # GemDensityDirCount(16) × 3
+    {"name": "projectiles",                 "dim": 192},  # MaxProjectileObs(32) × ProjectileObsStride(6)
+    {"name": "floor_pickups",               "dim": 24},   # MaxFloorPickupObs(8) × 3
+    {"name": "special_pickups",             "dim": 9},    # MaxSpecialPickupObs(3) × 3
+    {"name": "destructibles",               "dim": 20},   # MaxDestructibleObs(10) × 2
+    {"name": "weapon_attack_range_norm",    "dim": 6},    # MaxWeaponSlots(6)
+    {"name": "weapon_is_directional",       "dim": 6},    # MaxWeaponSlots(6)
+    {"name": "weapon_category_onehot",      "dim": 42},   # MaxWeaponSlots(6) × 7カテゴリ
 ]
+
+_OBS_DIM = sum(seg["dim"] for seg in _OBS_SCHEMA)  # = 794
+
+_NUM_ACTIONS = 9
 
 _OBS_OFFSETS: dict[str, int] = {}
 _offset = 0

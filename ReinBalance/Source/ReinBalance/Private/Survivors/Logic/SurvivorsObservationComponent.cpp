@@ -57,6 +57,9 @@ TArray<FSurvivorsObsSegment> USurvivorsObservationComponent::GetObsSchema() cons
 		{ TEXT("floor_pickups"),              MaxFloorPickupObs * 3 }, // (dx,dy,type_norm) × 8
 		{ TEXT("special_pickups"),            MaxSpecialPickupObs * 3 }, // (dx,dy,type_norm) × 3
 		{ TEXT("destructibles"),              MaxDestructibleObs * 2 }, // (dx,dy) × 10
+		{ TEXT("weapon_attack_range_norm"),   MaxWeaponSlots },         // 有効射程 × 6
+		{ TEXT("weapon_is_directional"),      MaxWeaponSlots },         // 方向性フラグ × 6
+		{ TEXT("weapon_category_onehot"),     MaxWeaponSlots * 7 },     // カテゴリ one-hot (7カテゴリ) × 6
 	};
 }
 
@@ -64,7 +67,7 @@ FString USurvivorsObservationComponent::GetObsSchemaHash() const
 {
 	using namespace SurvivorsGameConstants;
 	FString Schema = FString::Printf(
-		TEXT("SurvivorsGame_v740"
+		TEXT("SurvivorsGame_v794"
 		     ",MaxEnemyObs=%d,MaxWeaponSlots=%d,MaxPassiveSlots=%d"
 		     ",MaxProjectileObs=%d,ProjectileObsStride=%d,MaxRedGemObs=%d,MaxGreenGemObs=%d,MaxBlueGemObs=%d"
 		     ",MaxFloorPickupObs=%d,MaxSpecialPickupObs=%d,MaxDestructibleObs=%d"
@@ -526,6 +529,41 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 			}
 			else { Obs.Add(0.f); Obs.Add(0.f); }
 		}
+	}
+
+	// ---- weapon_attack_range_norm (MaxWeaponSlots = 6) ----
+	for (int32 s = 0; s < MaxWeaponSlots; ++s)
+	{
+		const EWeaponType T = Game->WeaponSlots[s].Type;
+		Obs.Add(T != EWeaponType::None ? GetWeaponEffectiveRange(T) : 0.f);
+	}
+
+	// ---- weapon_is_directional (MaxWeaponSlots = 6) ----
+	// 方向性武器: プレイヤーの移動方向に依存して発射方向が変わる武器。
+	// 進化後武器も基礎武器と同じ方向性を持つ。
+	for (int32 s = 0; s < MaxWeaponSlots; ++s)
+	{
+		const EWeaponType T = Game->WeaponSlots[s].Type;
+		// GetWeaponCategory(T) == 4 (ranged_directional) と等価だが明示的に列挙する
+		const bool bDir = (T == EWeaponType::Knife         ||
+		                   T == EWeaponType::ThousandEdge  ||  // Knife 進化
+		                   T == EWeaponType::Axe           ||
+		                   T == EWeaponType::DeathSpiral   ||  // Axe 進化
+		                   T == EWeaponType::Cross         ||
+		                   T == EWeaponType::HeavenSword   ||  // Cross 進化
+		                   T == EWeaponType::Peachone      ||
+		                   T == EWeaponType::EbonyWings    ||
+		                   T == EWeaponType::Vandalier);        // Peachone+EbonyWings Union
+		Obs.Add(T != EWeaponType::None ? (bDir ? 1.f : 0.f) : 0.f);
+	}
+
+	// ---- weapon_category_onehot (MaxWeaponSlots × 7 = 42) ----
+	for (int32 s = 0; s < MaxWeaponSlots; ++s)
+	{
+		const EWeaponType T = Game->WeaponSlots[s].Type;
+		const int32 Cat = GetWeaponCategory(T);
+		for (int32 c = 0; c < 7; ++c)
+			Obs.Add(T != EWeaponType::None && Cat == c ? 1.f : 0.f);
 	}
 
 	return Obs;
