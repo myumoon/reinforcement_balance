@@ -43,6 +43,12 @@ class WeaponType:
     GORGEOUS_MOON = 27
     VANDALIER     = 28
 
+# 基本武器リスト（Garlic〜Laurel）。
+# Laurel (15) は攻撃判定がない防衛武器（ComputeHits 未実装）。
+# UE5 の "all_base" モードでは初期武器から Laurel を除外するハードコードが C++ 側にある
+# （SurvivorsGame.cpp の AllBaseWeapons には Laurel が含まれない）。
+# レベルアップ選択肢には Laurel が出現するが、初期武器としては選ばれないため
+# "all_base" 使用時のエピソード初期化に問題は生じない。
 ALL_BASE_WEAPONS = [
     WeaponType.GARLIC, WeaponType.WHIP, WeaponType.MAGIC_WAND,
     WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS,
@@ -51,6 +57,10 @@ ALL_BASE_WEAPONS = [
     WeaponType.PEACHONE, WeaponType.EBONY_WINGS, WeaponType.LAUREL,
 ]
 
+# 進化武器リスト。enable_evolutions=False のフェーズでは出現しない。
+# SoulEater は Garlic の進化形（Garlic + Pummarola パッシブで進化）。
+# allowed_weapon_types に含めると fixed_subset モードで初期武器・レベルアップ選択肢に
+# 出現してしまうため、enable_evolutions=False のフェーズには含めてはならない。
 ALL_EVOLVED_WEAPONS = [
     WeaponType.SOUL_EATER, WeaponType.BLOODY_TEAR, WeaponType.HOLY_WAND,
     WeaponType.THOUSAND_EDGE, WeaponType.DEATH_SPIRAL, WeaponType.HEAVEN_SWORD,
@@ -70,9 +80,10 @@ WEAPON_PHASES: dict[str, dict] = {
     },
     "W1": {
         # 近距離範囲群: Garlic と戦略的類似性が最も高いグループ
+        # SoulEater は Garlic の進化形（enable_evolutions=False なので含めない）
         "weapon_pool_mode": "fixed_subset",
         "allowed_weapon_types": [
-            WeaponType.GARLIC, WeaponType.KING_BIBLE, WeaponType.SOUL_EATER,
+            WeaponType.GARLIC, WeaponType.KING_BIBLE,
         ],
         "enable_passives": True,
         "enable_evolutions": False,
@@ -80,9 +91,10 @@ WEAPON_PHASES: dict[str, dict] = {
     },
     "W2": {
         # ターゲット追尾遠距離群: 「敵を向く」という戦略の延長
+        # SoulEater は Garlic の進化形（enable_evolutions=False なので含めない）
         "weapon_pool_mode": "fixed_subset",
         "allowed_weapon_types": [
-            WeaponType.GARLIC, WeaponType.KING_BIBLE, WeaponType.SOUL_EATER,
+            WeaponType.GARLIC, WeaponType.KING_BIBLE,
             WeaponType.MAGIC_WAND, WeaponType.FIRE_WAND, WeaponType.LIGHTNING_RING,
         ],
         "enable_passives": True,
@@ -91,9 +103,10 @@ WEAPON_PHASES: dict[str, dict] = {
     },
     "W3": {
         # ライン/エリア制圧群: 敵集団の制御が必要
+        # SoulEater は Garlic の進化形（enable_evolutions=False なので含めない）
         "weapon_pool_mode": "fixed_subset",
         "allowed_weapon_types": [
-            WeaponType.GARLIC, WeaponType.KING_BIBLE, WeaponType.SOUL_EATER,
+            WeaponType.GARLIC, WeaponType.KING_BIBLE,
             WeaponType.MAGIC_WAND, WeaponType.FIRE_WAND, WeaponType.LIGHTNING_RING,
             WeaponType.WHIP, WeaponType.SANTA_WATER,
         ],
@@ -103,9 +116,10 @@ WEAPON_PHASES: dict[str, dict] = {
     },
     "W4": {
         # 方向型投射物群: エイム・位置取りが必要な最難グループ
+        # SoulEater は Garlic の進化形（enable_evolutions=False なので含めない）
         "weapon_pool_mode": "fixed_subset",
         "allowed_weapon_types": [
-            WeaponType.GARLIC, WeaponType.KING_BIBLE, WeaponType.SOUL_EATER,
+            WeaponType.GARLIC, WeaponType.KING_BIBLE,
             WeaponType.MAGIC_WAND, WeaponType.FIRE_WAND, WeaponType.LIGHTNING_RING,
             WeaponType.WHIP, WeaponType.SANTA_WATER,
             WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS, WeaponType.RUNETRACER,
@@ -116,6 +130,11 @@ WEAPON_PHASES: dict[str, dict] = {
     },
     "W5": {
         # 全基本武器 + passive + evolution
+        # weapon_pool_mode="all_base" では UE5 C++ 側のハードコードプールを使うため、
+        # allowed_weapon_types は初期武器選択には影響しない。
+        # Laurel は C++ 側の AllBaseWeapons から除外済みなので初期武器にはならない。
+        # レベルアップ選択肢にはLaurelが出現するが、攻撃補助として機能する設計。
+        # enable_evolutions=True なので進化武器（SoulEater 等）は進化システム経由で出現する。
         "weapon_pool_mode": "all_base",
         "allowed_weapon_types": ALL_BASE_WEAPONS,
         "enable_passives": True,
