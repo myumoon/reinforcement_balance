@@ -43,7 +43,7 @@ class WeaponType:
     GORGEOUS_MOON = 27
     VANDALIER     = 28
 
-# 全基本武器（Garlic〜Laurel）。レベルアップ選択肢候補として使用。
+# 全基本武器（Garlic〜Laurel）。参照・進化判定用。
 # Laurel (15) は攻撃判定がない防衛武器（ComputeHits 未実装）。
 ALL_BASE_WEAPONS = [
     WeaponType.GARLIC, WeaponType.WHIP, WeaponType.MAGIC_WAND,
@@ -53,9 +53,12 @@ ALL_BASE_WEAPONS = [
     WeaponType.PEACHONE, WeaponType.EBONY_WINGS, WeaponType.LAUREL,
 ]
 
-# 初期武器プール用: Laurel は攻撃不能なので開始武器から除外する。
-# UE5 の "all_base" モードは C++ のハードコードプール（AllBaseWeapons）を使うため
-# Python 側で除外できない。W5/BC では "fixed_subset" + このリストを使う。
+# Laurel を除外した攻撃可能基本武器リスト。
+# UE5 の fixed_subset モードでは allowed_weapon_types が初期武器とレベルアップ候補の
+# 両方に使われる（SurvivorsPlayerComponent.cpp BuildLevelUpChoices 参照）。
+# 現在の C++ API に開始武器とレベルアップ候補を別管理する仕組みがないため、
+# W5/BC では Laurel をレベルアップ候補からも除外するトレードオフを採用する。
+# Laurel の進化形 NoFuture は enable_evolutions=True の W5 で進化システム経由で出現する。
 ALL_BASE_ATTACK_WEAPONS = [w for w in ALL_BASE_WEAPONS if w != WeaponType.LAUREL]
 
 # 進化武器リスト。enable_evolutions=False のフェーズでは出現しない。
@@ -131,9 +134,9 @@ WEAPON_PHASES: dict[str, dict] = {
     },
     "W5": {
         # 全基本武器 + passive + evolution
-        # "fixed_subset" + ALL_BASE_ATTACK_WEAPONS を使って初期武器プールから Laurel を除外。
-        # Laurel は攻撃不能なので初期武器にすると XP 獲得不能エピソードが発生する。
-        # レベルアップ選択肢には Laurel も出現するため攻撃補助として機能する設計は維持。
+        # ALL_BASE_ATTACK_WEAPONS (Laurel除外) を使用。
+        # Laurel は攻撃不能なため初期武器・レベルアップ候補の両方から除外する。
+        # Laurel の進化形 NoFuture は enable_evolutions=True の進化システム経由で出現する。
         "weapon_pool_mode": "fixed_subset",
         "allowed_weapon_types": ALL_BASE_ATTACK_WEAPONS,
         "enable_passives": True,
@@ -146,7 +149,7 @@ TRANSITION_WEAPON_WEIGHTS: dict[str, dict] = {}
 
 
 # BC 専用固定 preset（W5 相当: 全基本武器+パッシブ+進化）
-# ALL_BASE_ATTACK_WEAPONS を使って初期武器プールから Laurel を除外する。
+# ALL_BASE_ATTACK_WEAPONS (Laurel除外) を使用。W5 と同様の設計方針。
 BC_WEAPON_PRESET: dict = {
     "weapon_pool_mode": "fixed_subset",
     "allowed_weapon_types": ALL_BASE_ATTACK_WEAPONS,
