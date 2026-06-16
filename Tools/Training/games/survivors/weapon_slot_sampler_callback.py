@@ -30,11 +30,13 @@ class WeaponSlotSamplerCallback(BaseCallback):
     def _on_training_start(self) -> None:
         self._apply_all_envs()
 
+    def _on_rollout_start(self) -> None:
+        # ロールアウト開始時に全 env へ RSI パラメータを再送する。
+        # done 後の set_params は SB3 VecEnv の reset() タイミングに間に合わない
+        # ため、ロールアウト先頭で一括送信する方式を採用している。
+        self._apply_all_envs()
+
     def _on_step(self) -> bool:
-        dones = self.locals.get("dones", [])
-        for i, done in enumerate(dones):
-            if done:
-                self._apply_single_env(i)
         return True
 
     def _apply_all_envs(self) -> None:

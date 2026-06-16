@@ -287,13 +287,6 @@ private:
 				Game->bHasInitialOverride = true;
 		}
 
-		// RSI: initial_player_level
-		double InitPlayerLv = 0.0;
-		if (JsonObj->TryGetNumberField(TEXT("initial_player_level"), InitPlayerLv))
-		{
-			Game->InitialPlayerLevel = FMath::Clamp(static_cast<int32>(InitPlayerLv), 1, 30);
-		}
-
 		// RSI: clear_initial_override — true を送ると次のリセットでオーバーライドを適用しない
 		bool bClearOverride = false;
 		if (JsonObj->TryGetBoolField(TEXT("clear_initial_override"), bClearOverride) && bClearOverride)
