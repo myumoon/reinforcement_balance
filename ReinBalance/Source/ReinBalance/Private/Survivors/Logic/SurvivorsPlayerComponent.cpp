@@ -540,15 +540,13 @@ TArray<FLevelUpChoice> USurvivorsPlayerComponent::BuildLevelUpChoices()
 			}
 			else  // "all_base" / "all_with_evolutions" / デフォルト（garlic_only フォールバック後）
 			{
-				// カリキュラム除外武器（攻撃判定なし or 経験値ドロップなし）:
-				//   Pentagram (12) : 経験値を落とさないため除外
-				//   Laurel    (15) : ComputeHits 未実装（シールドのみ）のため除外
+				// Pentagram・Laurel は初期武器から除外されるが、レベルアップ選択肢には出現する
 				AllowedPool = {
 					EWeaponType::Garlic,  EWeaponType::Whip,   EWeaponType::MagicWand,
 					EWeaponType::Knife,   EWeaponType::Axe,    EWeaponType::Cross,
 					EWeaponType::KingBible, EWeaponType::FireWand, EWeaponType::SantaWater,
-					EWeaponType::Runetracer, EWeaponType::LightningRing,
-					EWeaponType::Peachone, EWeaponType::EbonyWings,
+					EWeaponType::Runetracer, EWeaponType::LightningRing, EWeaponType::Pentagram,
+					EWeaponType::Peachone, EWeaponType::EbonyWings, EWeaponType::Laurel,
 				};
 			}
 
