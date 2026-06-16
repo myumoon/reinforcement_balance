@@ -540,6 +540,7 @@ TArray<FLevelUpChoice> USurvivorsPlayerComponent::BuildLevelUpChoices()
 			}
 			else  // "all_base" / "all_with_evolutions" / デフォルト（garlic_only フォールバック後）
 			{
+				// Pentagram・Laurel は初期武器から除外されるが、レベルアップ選択肢には出現する
 				AllowedPool = {
 					EWeaponType::Garlic,  EWeaponType::Whip,   EWeaponType::MagicWand,
 					EWeaponType::Knife,   EWeaponType::Axe,    EWeaponType::Cross,

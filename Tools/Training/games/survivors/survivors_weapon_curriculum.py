@@ -37,6 +37,17 @@ class WeaponType:
     GORGEOUS_MOON = 27
     VANDALIER     = 28
 
+# 初期武器として選択不可にする武器（攻撃判定なし or 経験値ドロップなし）。
+# レベルアップ選択肢には出現する。
+# - LAUREL (15)        : ComputeHits 実装なし。シールドのみで攻撃判定がない。
+# - PENTAGRAM (12)     : Vampire Survivors 仕様で経験値を落とさない。初期武器だとレベルアップ不可。
+# - GORGEOUS_MOON (27) : PENTAGRAM の進化形。同じ理由で経験値なし。
+EXCLUDED_AS_STARTING_WEAPON = [
+    WeaponType.PENTAGRAM,
+    WeaponType.LAUREL,
+    WeaponType.GORGEOUS_MOON,
+]
+
 ALL_BASE_WEAPONS = [
     WeaponType.GARLIC, WeaponType.WHIP, WeaponType.MAGIC_WAND,
     WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS,

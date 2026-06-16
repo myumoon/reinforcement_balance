@@ -159,12 +159,14 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	//   "all_with_evolutions" → all_base と同じ（進化後武器は進化システムで処理）
 	//   "weighted"            → fixed_subset 扱い（weights=0 の武器は Python 側で除外済み）
 	{
+		// 初期武器選択プール: Pentagram・Laurel は経験値ドロップなし/攻撃判定なしのため除外。
+		// （レベルアップ選択肢には出現する。PlayerComponent 側の AllowedPool には含まれる）
 		static const TArray<EWeaponType> AllBaseWeapons = {
 			EWeaponType::Garlic,  EWeaponType::Whip,   EWeaponType::MagicWand,
 			EWeaponType::Knife,   EWeaponType::Axe,    EWeaponType::Cross,
 			EWeaponType::KingBible, EWeaponType::FireWand, EWeaponType::SantaWater,
-			EWeaponType::Runetracer, EWeaponType::LightningRing, EWeaponType::Pentagram,
-			EWeaponType::Peachone, EWeaponType::EbonyWings, EWeaponType::Laurel,
+			EWeaponType::Runetracer, EWeaponType::LightningRing,
+			EWeaponType::Peachone, EWeaponType::EbonyWings,
 		};
 
 		EWeaponType StartWeapon = EWeaponType::Garlic;
