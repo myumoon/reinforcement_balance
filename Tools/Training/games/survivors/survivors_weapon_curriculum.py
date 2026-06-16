@@ -43,12 +43,8 @@ class WeaponType:
     GORGEOUS_MOON = 27
     VANDALIER     = 28
 
-# 基本武器リスト（Garlic〜Laurel）。
+# 全基本武器（Garlic〜Laurel）。レベルアップ選択肢候補として使用。
 # Laurel (15) は攻撃判定がない防衛武器（ComputeHits 未実装）。
-# UE5 の "all_base" モードでは初期武器から Laurel を除外するハードコードが C++ 側にある
-# （SurvivorsGame.cpp の AllBaseWeapons には Laurel が含まれない）。
-# レベルアップ選択肢には Laurel が出現するが、初期武器としては選ばれないため
-# "all_base" 使用時のエピソード初期化に問題は生じない。
 ALL_BASE_WEAPONS = [
     WeaponType.GARLIC, WeaponType.WHIP, WeaponType.MAGIC_WAND,
     WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS,
@@ -56,6 +52,11 @@ ALL_BASE_WEAPONS = [
     WeaponType.RUNETRACER, WeaponType.LIGHTNING_RING, WeaponType.PENTAGRAM,
     WeaponType.PEACHONE, WeaponType.EBONY_WINGS, WeaponType.LAUREL,
 ]
+
+# 初期武器プール用: Laurel は攻撃不能なので開始武器から除外する。
+# UE5 の "all_base" モードは C++ のハードコードプール（AllBaseWeapons）を使うため
+# Python 側で除外できない。W5/BC では "fixed_subset" + このリストを使う。
+ALL_BASE_ATTACK_WEAPONS = [w for w in ALL_BASE_WEAPONS if w != WeaponType.LAUREL]
 
 # 進化武器リスト。enable_evolutions=False のフェーズでは出現しない。
 # SoulEater は Garlic の進化形（Garlic + Pummarola パッシブで進化）。
@@ -130,13 +131,11 @@ WEAPON_PHASES: dict[str, dict] = {
     },
     "W5": {
         # 全基本武器 + passive + evolution
-        # weapon_pool_mode="all_base" では UE5 C++ 側のハードコードプールを使うため、
-        # allowed_weapon_types は初期武器選択には影響しない。
-        # Laurel は C++ 側の AllBaseWeapons から除外済みなので初期武器にはならない。
-        # レベルアップ選択肢にはLaurelが出現するが、攻撃補助として機能する設計。
-        # enable_evolutions=True なので進化武器（SoulEater 等）は進化システム経由で出現する。
-        "weapon_pool_mode": "all_base",
-        "allowed_weapon_types": ALL_BASE_WEAPONS,
+        # "fixed_subset" + ALL_BASE_ATTACK_WEAPONS を使って初期武器プールから Laurel を除外。
+        # Laurel は攻撃不能なので初期武器にすると XP 獲得不能エピソードが発生する。
+        # レベルアップ選択肢には Laurel も出現するため攻撃補助として機能する設計は維持。
+        "weapon_pool_mode": "fixed_subset",
+        "allowed_weapon_types": ALL_BASE_ATTACK_WEAPONS,
         "enable_passives": True,
         "enable_evolutions": True,
         "replay_old_phase_fraction": 0.3,
@@ -147,9 +146,10 @@ TRANSITION_WEAPON_WEIGHTS: dict[str, dict] = {}
 
 
 # BC 専用固定 preset（W5 相当: 全基本武器+パッシブ+進化）
+# ALL_BASE_ATTACK_WEAPONS を使って初期武器プールから Laurel を除外する。
 BC_WEAPON_PRESET: dict = {
-    "weapon_pool_mode": "all_base",
-    "allowed_weapon_types": ALL_BASE_WEAPONS,
+    "weapon_pool_mode": "fixed_subset",
+    "allowed_weapon_types": ALL_BASE_ATTACK_WEAPONS,
     "enable_passives": True,
     "enable_evolutions": True,
     "replay_old_phase_fraction": 0.0,
