@@ -600,6 +600,20 @@ class CurriculumStateModule(BaseStateModule):
         })
         print(f"[Curriculum] 強制降格: {prev_name} -> {next_phase.name} ({reason})")
 
+    def reset_evaluation_window(self) -> None:
+        """武器フェーズ昇格時: phase_idx を変えずに評価状態のみリセットする。
+
+        スコアウィンドウ・rollback 判定カウンタ・フェーズ内ステップ数・
+        probe window をすべてクリアし、新しい武器セットで再評価を開始できる状態にする。
+        """
+        self._scores.clear()
+        self._episode_lengths.clear()
+        self._episode_scores.clear()
+        self._rollback_bad_windows = 0
+        self._steps_in_phase = 0
+        self._episodes_in_phase = 0
+        self.clear_promotion_probe_window()
+
     def get_wandb_metrics(self) -> dict:
         from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
         phase = self._PHASES[self._phase_idx]

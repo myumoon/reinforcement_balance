@@ -7,6 +7,7 @@
 #   - weapon_phase_auto_stagnation_steps は廃止 (ゲートベース昇格のため不要)
 #   - 武器フェーズ昇格時の forced_rollback 廃止
 #     (カリキュラムフェーズを維持しスコアウィンドウのみリセット)
+#   - reward_fn: configs/v09/reward_fn.py (v09 専用報酬シェーピング)
 
 game: survivors
 total_steps: 10_000_000
@@ -15,6 +16,11 @@ curriculum_window: 20
 frame_skip: 2
 wandb: true
 wandb_project: rl-survivors
+
+# v09 専用報酬シェーピング関数 (python train.py --config configs/v09/survivors_train.yaml で自動ロード)
+# CLI から上書き可能: python train.py --config configs/v09/survivors_train.yaml --reward-fn path/to/other.py
+# パスは Tools/Training/ を起点とした相対パスまたは絶対パスで指定すること
+reward_fn: configs/v09/reward_fn.py
 
 # 武器カリキュラム: ゲートベース自動昇格
 # W0 (Garlic のみ) → curriculum Phase 4 到達 → W1 → ... → W5 (全武器)
