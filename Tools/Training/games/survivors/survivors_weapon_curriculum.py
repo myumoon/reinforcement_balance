@@ -43,8 +43,18 @@ class WeaponType:
     GORGEOUS_MOON = 27
     VANDALIER     = 28
 
+# 初期武器として選択不可にする武器（攻撃判定なし or 経験値ドロップなし）。
+# レベルアップ選択肢には出現する。
+# - LAUREL (15)        : ComputeHits 実装なし。シールドのみで攻撃判定がない。
+# - PENTAGRAM (12)     : Vampire Survivors 仕様で経験値を落とさない。初期武器だとレベルアップ不可。
+# - GORGEOUS_MOON (27) : PENTAGRAM の進化形。同じ理由で経験値なし。
+EXCLUDED_AS_STARTING_WEAPON = [
+    WeaponType.PENTAGRAM,
+    WeaponType.LAUREL,
+    WeaponType.GORGEOUS_MOON,
+]
+
 # 全基本武器（Garlic〜Laurel）。参照・進化判定用。
-# Laurel (15) は攻撃判定がない防衛武器（ComputeHits 未実装）。
 ALL_BASE_WEAPONS = [
     WeaponType.GARLIC, WeaponType.WHIP, WeaponType.MAGIC_WAND,
     WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS,
@@ -53,13 +63,12 @@ ALL_BASE_WEAPONS = [
     WeaponType.PEACHONE, WeaponType.EBONY_WINGS, WeaponType.LAUREL,
 ]
 
-# Laurel を除外した攻撃可能基本武器リスト。
+# 初期武器プール用: EXCLUDED_AS_STARTING_WEAPON を除いた攻撃可能武器リスト。
 # UE5 の fixed_subset モードでは allowed_weapon_types が初期武器とレベルアップ候補の
 # 両方に使われる（SurvivorsPlayerComponent.cpp BuildLevelUpChoices 参照）。
 # 現在の C++ API に開始武器とレベルアップ候補を別管理する仕組みがないため、
-# W5/BC では Laurel をレベルアップ候補からも除外するトレードオフを採用する。
-# Laurel の進化形 NoFuture は enable_evolutions=True の W5 で進化システム経由で出現する。
-ALL_BASE_ATTACK_WEAPONS = [w for w in ALL_BASE_WEAPONS if w != WeaponType.LAUREL]
+# W5/BC では EXCLUDED_AS_STARTING_WEAPON をレベルアップ候補からも除外するトレードオフを採用する。
+ALL_BASE_ATTACK_WEAPONS = [w for w in ALL_BASE_WEAPONS if w not in EXCLUDED_AS_STARTING_WEAPON]
 
 # 進化武器リスト。enable_evolutions=False のフェーズでは出現しない。
 # SoulEater は Garlic の進化形（Garlic + Pummarola パッシブで進化）。
