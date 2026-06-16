@@ -260,6 +260,49 @@ private:
 		if (JsonObj->TryGetStringField(TEXT("starting_weapon_mode"), StartingWeaponMode))
 			Game->StartingWeaponMode = StartingWeaponMode;
 
+		// RSI: initial_elapsed_time
+		double InitialElapsedTime = 0.0;
+		if (JsonObj->TryGetNumberField(TEXT("initial_elapsed_time"), InitialElapsedTime))
+		{
+			Game->InitialElapsedTime = FMath::Clamp(static_cast<float>(InitialElapsedTime), 0.f, 1800.f);
+			Game->bHasInitialOverride = true;
+		}
+
+		// RSI: initial_weapon_slots [{weapon_id: int, level: int}, ...]
+		const TArray<TSharedPtr<FJsonValue>>* WSlots;
+		if (JsonObj->TryGetArrayField(TEXT("initial_weapon_slots"), WSlots))
+		{
+			Game->InitialWeaponSlots.Empty();
+			for (const TSharedPtr<FJsonValue>& Val : *WSlots)
+			{
+				const TSharedPtr<FJsonObject>* SlotObj;
+				if (!Val->TryGetObject(SlotObj)) continue;
+				int32 WId = 0, WLv = 1;
+				double TmpId = 0, TmpLv = 0;
+				if ((*SlotObj)->TryGetNumberField(TEXT("weapon_id"), TmpId)) WId = static_cast<int32>(TmpId);
+				if ((*SlotObj)->TryGetNumberField(TEXT("level"),     TmpLv)) WLv = static_cast<int32>(TmpLv);
+				Game->InitialWeaponSlots.Add({WId, FMath::Clamp(WLv, 1, 8)});
+			}
+			if (!Game->InitialWeaponSlots.IsEmpty())
+				Game->bHasInitialOverride = true;
+		}
+
+		// RSI: initial_player_level
+		double InitPlayerLv = 0.0;
+		if (JsonObj->TryGetNumberField(TEXT("initial_player_level"), InitPlayerLv))
+		{
+			Game->InitialPlayerLevel = FMath::Clamp(static_cast<int32>(InitPlayerLv), 1, 30);
+		}
+
+		// RSI: clear_initial_override — true を送ると次のリセットでオーバーライドを適用しない
+		bool bClearOverride = false;
+		if (JsonObj->TryGetBoolField(TEXT("clear_initial_override"), bClearOverride) && bClearOverride)
+		{
+			Game->bHasInitialOverride = false;
+			Game->InitialWeaponSlots.Empty();
+			Game->InitialElapsedTime = 0.f;
+		}
+
 		OnComplete(MakeJsonResponse(TEXT("{\"status\":\"ok\"}")));
 		return true;
 	}

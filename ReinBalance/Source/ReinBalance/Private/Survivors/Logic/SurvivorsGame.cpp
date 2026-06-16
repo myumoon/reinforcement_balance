@@ -242,6 +242,25 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	LastReward  = 0.f;
 	bDone       = false;
 	bTruncated  = false;
+
+	// RSI: 初期状態オーバーライドの適用
+	if (bHasInitialOverride)
+	{
+		ElapsedTime = FMath::Clamp(InitialElapsedTime, 0.f, 1800.f);
+
+		// NOTE: USurvivorsPlayerComponent::SetLevel() が存在しないため
+		// InitialPlayerLevel の適用は省略する。
+		// 将来 SetLevel() が実装された際に以下を追加:
+		//   if (InitialPlayerLevel > 1) PlayerComponent->SetLevel(InitialPlayerLevel);
+
+		for (int32 i = 0; i < InitialWeaponSlots.Num() && i < MaxWeaponSlots; ++i)
+		{
+			const int32 WId = InitialWeaponSlots[i].WeaponId;
+			const int32 WLv = FMath::Clamp(InitialWeaponSlots[i].Level, 1, 8);
+			WeaponComponent->EquipWeapon(i, static_cast<EWeaponType>(WId), WLv);
+			WeaponSlots[i].Level = FWeaponLevel(WLv);
+		}
+	}
 }
 
 void ASurvivorsGame::PhysicsStep(int32 ActionIdx)

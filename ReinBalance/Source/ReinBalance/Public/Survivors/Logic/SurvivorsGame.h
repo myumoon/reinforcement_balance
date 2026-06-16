@@ -287,6 +287,19 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
 	FString StartingWeaponMode = TEXT("garlic");
 
+	// RSI: 武器スロット初期化用の構造体
+	struct FWeaponSlotOverride
+	{
+		int32 WeaponId = 0;
+		int32 Level    = 1;
+	};
+
+	// RSI: リセット時に適用する初期状態オーバーライド（SurvivorsHttpEnvService から設定）
+	float                       InitialElapsedTime  = 0.f;
+	TArray<FWeaponSlotOverride> InitialWeaponSlots;
+	int32                       InitialPlayerLevel  = 1;
+	bool                        bHasInitialOverride = false;
+
 	UPROPERTY(EditAnywhere, Category = "Survivors|TimeScaling")
 	float HPScaleRatePerMin = 0.10f;
 
