@@ -82,7 +82,11 @@ class WeaponPhaseAutoCallback(BaseCallback):
         )
 
     def _on_step(self) -> bool:
-        new_phase_key = self._module.on_step(self.num_timesteps)
+        # v09: current_curriculum_phase を curriculum から取得して on_step() に渡す
+        current_curriculum_phase = self._module._curriculum.current_phase
+        new_phase_key = self._module.on_step(
+            self.num_timesteps, current_curriculum_phase=current_curriculum_phase
+        )
         if new_phase_key is not None:
             # 武器フェーズ昇格 → 新フェーズの初期パラメータを送信
             self._apply_weapon_phase(elapsed=0)
@@ -91,7 +95,8 @@ class WeaponPhaseAutoCallback(BaseCallback):
             self._log_wandb_metrics()
         elif (self._module.is_transition
               and self.num_timesteps - self._last_weapon_update >= self._weapon_update_freq):
-            # 遷移フェーズ中: weapon_weights を定期更新
+            # v09 では遷移フェーズは廃止されているため通常ここには到達しない
+            # backward compatibility のため残す
             elapsed = self._module.get_transition_elapsed(self.num_timesteps)
             self._apply_weapon_phase(elapsed)
             self._last_weapon_update = self.num_timesteps

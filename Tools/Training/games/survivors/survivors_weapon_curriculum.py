@@ -1,6 +1,12 @@
 """
-Vampire Survivors 武器カリキュラム定義 W0〜W6。
+Vampire Survivors 武器カリキュラム定義 W0〜W5。
 HybridCurriculumSpalf（敵難易度）と独立した別軸で制御する。
+
+v09 変更:
+  - W0 Garlic 単独フェーズを復活（v06 で Phase 11 突破実績あり）
+  - W0_to_W1 / W1_to_W2 の遷移フェーズを廃止（停滞ベース → ゲートベース昇格）
+  - W1-W4 をタスク類似性に基づく武器グループで再設計
+  - W5 は全基本武器 + passive + evolution
 """
 
 from __future__ import annotations
@@ -48,6 +54,7 @@ EXCLUDED_AS_STARTING_WEAPON = [
     WeaponType.GORGEOUS_MOON,
 ]
 
+# 全基本武器（Garlic〜Laurel）。参照・進化判定用。
 ALL_BASE_WEAPONS = [
     WeaponType.GARLIC, WeaponType.WHIP, WeaponType.MAGIC_WAND,
     WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS,
@@ -56,6 +63,17 @@ ALL_BASE_WEAPONS = [
     WeaponType.PEACHONE, WeaponType.EBONY_WINGS, WeaponType.LAUREL,
 ]
 
+# 初期武器プール用: EXCLUDED_AS_STARTING_WEAPON を除いた攻撃可能武器リスト。
+# UE5 の fixed_subset モードでは allowed_weapon_types が初期武器とレベルアップ候補の
+# 両方に使われる（SurvivorsPlayerComponent.cpp BuildLevelUpChoices 参照）。
+# 現在の C++ API に開始武器とレベルアップ候補を別管理する仕組みがないため、
+# W5/BC では EXCLUDED_AS_STARTING_WEAPON をレベルアップ候補からも除外するトレードオフを採用する。
+ALL_BASE_ATTACK_WEAPONS = [w for w in ALL_BASE_WEAPONS if w not in EXCLUDED_AS_STARTING_WEAPON]
+
+# 進化武器リスト。enable_evolutions=False のフェーズでは出現しない。
+# SoulEater は Garlic の進化形（Garlic + Pummarola パッシブで進化）。
+# allowed_weapon_types に含めると fixed_subset モードで初期武器・レベルアップ選択肢に
+# 出現してしまうため、enable_evolutions=False のフェーズには含めてはならない。
 ALL_EVOLVED_WEAPONS = [
     WeaponType.SOUL_EATER, WeaponType.BLOODY_TEAR, WeaponType.HOLY_WAND,
     WeaponType.THOUSAND_EDGE, WeaponType.DEATH_SPIRAL, WeaponType.HEAVEN_SWORD,
@@ -66,123 +84,84 @@ ALL_EVOLVED_WEAPONS = [
 
 WEAPON_PHASES: dict[str, dict] = {
     "W0": {
+        # Garlic 単独フェーズ: 移動基礎スキル習得（v06 で Phase 11 突破実績）
         "weapon_pool_mode": "garlic_only",
         "allowed_weapon_types": [WeaponType.GARLIC],
         "enable_passives": False,
         "enable_evolutions": False,
         "replay_old_phase_fraction": 0.0,
-        "net_arch": [512, 256],
-        "log_combination_rewards": True,
-    },
-    "W0_to_W1": {
-        "weapon_pool_mode": "weighted",
-        "allowed_weapon_types": [
-            WeaponType.GARLIC, WeaponType.KING_BIBLE, WeaponType.SANTA_WATER,
-        ],
-        "enable_passives": False,
-        "enable_evolutions": False,
-        "replay_old_phase_fraction": 0.3,
-        "transition_steps": 2_000_000,
-        "from_phase": "W0",
-        "to_phase": "W1",
-        "log_combination_rewards": True,
     },
     "W1": {
+        # 近距離範囲群: Garlic と戦略的類似性が最も高いグループ
+        # SoulEater は Garlic の進化形（enable_evolutions=False なので含めない）
         "weapon_pool_mode": "fixed_subset",
         "allowed_weapon_types": [
-            WeaponType.GARLIC, WeaponType.KING_BIBLE, WeaponType.SANTA_WATER,
-        ],
-        "enable_passives": True,
-        "enable_evolutions": False,
-        "replay_old_phase_fraction": 0.0,  # v08: W0廃止により古いフェーズが存在しないため0.0に変更
-        "log_combination_rewards": True,
-    },
-    "W1_to_W2": {
-        "weapon_pool_mode": "weighted",
-        "allowed_weapon_types": [
-            WeaponType.GARLIC, WeaponType.WHIP, WeaponType.MAGIC_WAND,
-            WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS,
-            WeaponType.KING_BIBLE, WeaponType.SANTA_WATER,
-        ],
-        "enable_passives": True,
-        "enable_evolutions": False,
-        "replay_old_phase_fraction": 0.25,
-        "transition_steps": 2_000_000,
-        "from_phase": "W1",
-        "to_phase": "W2",
-        "log_combination_rewards": True,
-    },
-    "W2": {
-        "weapon_pool_mode": "fixed_subset",
-        "allowed_weapon_types": [
-            WeaponType.GARLIC, WeaponType.WHIP, WeaponType.MAGIC_WAND,
-            WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS,
-            WeaponType.KING_BIBLE, WeaponType.SANTA_WATER,
+            WeaponType.GARLIC, WeaponType.KING_BIBLE,
         ],
         "enable_passives": True,
         "enable_evolutions": False,
         "replay_old_phase_fraction": 0.2,
-        "log_combination_rewards": True,
+    },
+    "W2": {
+        # ターゲット追尾遠距離群: 「敵を向く」という戦略の延長
+        # SoulEater は Garlic の進化形（enable_evolutions=False なので含めない）
+        "weapon_pool_mode": "fixed_subset",
+        "allowed_weapon_types": [
+            WeaponType.GARLIC, WeaponType.KING_BIBLE,
+            WeaponType.MAGIC_WAND, WeaponType.FIRE_WAND, WeaponType.LIGHTNING_RING,
+        ],
+        "enable_passives": True,
+        "enable_evolutions": False,
+        "replay_old_phase_fraction": 0.2,
     },
     "W3": {
-        "weapon_pool_mode": "all_base",
-        "allowed_weapon_types": ALL_BASE_WEAPONS,
+        # ライン/エリア制圧群: 敵集団の制御が必要
+        # SoulEater は Garlic の進化形（enable_evolutions=False なので含めない）
+        "weapon_pool_mode": "fixed_subset",
+        "allowed_weapon_types": [
+            WeaponType.GARLIC, WeaponType.KING_BIBLE,
+            WeaponType.MAGIC_WAND, WeaponType.FIRE_WAND, WeaponType.LIGHTNING_RING,
+            WeaponType.WHIP, WeaponType.SANTA_WATER,
+        ],
         "enable_passives": True,
-        "enable_evolutions": True,
-        "replay_old_phase_fraction": 0.25,
-        "log_combination_rewards": True,
+        "enable_evolutions": False,
+        "replay_old_phase_fraction": 0.2,
     },
     "W4": {
-        "weapon_pool_mode": "all_base",
-        "allowed_weapon_types": ALL_BASE_WEAPONS,
+        # 方向型投射物群: エイム・位置取りが必要な最難グループ
+        # SoulEater は Garlic の進化形（enable_evolutions=False なので含めない）
+        "weapon_pool_mode": "fixed_subset",
+        "allowed_weapon_types": [
+            WeaponType.GARLIC, WeaponType.KING_BIBLE,
+            WeaponType.MAGIC_WAND, WeaponType.FIRE_WAND, WeaponType.LIGHTNING_RING,
+            WeaponType.WHIP, WeaponType.SANTA_WATER,
+            WeaponType.KNIFE, WeaponType.AXE, WeaponType.CROSS, WeaponType.RUNETRACER,
+        ],
         "enable_passives": True,
-        "enable_evolutions": True,
-        "replay_old_phase_fraction": 0.3,
-        "log_combination_rewards": True,
+        "enable_evolutions": False,
+        "replay_old_phase_fraction": 0.25,
     },
     "W5": {
-        "weapon_pool_mode": "all_with_evolutions",
-        "allowed_weapon_types": ALL_BASE_WEAPONS + ALL_EVOLVED_WEAPONS,
+        # 全基本武器 + passive + evolution
+        # ALL_BASE_ATTACK_WEAPONS (Laurel除外) を使用。
+        # Laurel は攻撃不能なため初期武器・レベルアップ候補の両方から除外する。
+        # Laurel の進化形 NoFuture は enable_evolutions=True の進化システム経由で出現する。
+        "weapon_pool_mode": "fixed_subset",
+        "allowed_weapon_types": ALL_BASE_ATTACK_WEAPONS,
         "enable_passives": True,
         "enable_evolutions": True,
         "replay_old_phase_fraction": 0.3,
-        "log_combination_rewards": True,
     },
 }
 
-TRANSITION_WEAPON_WEIGHTS: dict[str, dict] = {
-    "W0_to_W1": {
-        "start": {WeaponType.GARLIC: 1.0},
-        "end": {
-            WeaponType.GARLIC: 0.5,
-            WeaponType.KING_BIBLE: 0.25,
-            WeaponType.SANTA_WATER: 0.25,
-        },
-    },
-    "W1_to_W2": {
-        "start": {
-            WeaponType.GARLIC: 0.5,
-            WeaponType.KING_BIBLE: 0.25,
-            WeaponType.SANTA_WATER: 0.25,
-        },
-        "end": {
-            WeaponType.GARLIC: 0.2,
-            WeaponType.WHIP: 0.1,
-            WeaponType.MAGIC_WAND: 0.1,
-            WeaponType.KNIFE: 0.1,
-            WeaponType.AXE: 0.1,
-            WeaponType.CROSS: 0.1,
-            WeaponType.KING_BIBLE: 0.15,
-            WeaponType.SANTA_WATER: 0.15,
-        },
-    },
-}
+TRANSITION_WEAPON_WEIGHTS: dict[str, dict] = {}
 
 
-# BC 専用固定 preset（W5 相当: 全基本武器+パッシブ+進化、weighted transition なし）
+# BC 専用固定 preset（W5 相当: 全基本武器+パッシブ+進化）
+# ALL_BASE_ATTACK_WEAPONS (Laurel除外) を使用。W5 と同様の設計方針。
 BC_WEAPON_PRESET: dict = {
-    "weapon_pool_mode": "all_base",
-    "allowed_weapon_types": ALL_BASE_WEAPONS,
+    "weapon_pool_mode": "fixed_subset",
+    "allowed_weapon_types": ALL_BASE_ATTACK_WEAPONS,
     "enable_passives": True,
     "enable_evolutions": True,
     "replay_old_phase_fraction": 0.0,
@@ -191,6 +170,7 @@ BC_WEAPON_PRESET: dict = {
 
 
 def get_weapon_weights(phase_key: str, phase_progress: float) -> dict[int, float]:
+    """v09 では遷移フェーズ（weighted mode）を廃止したため、常に空 dict を返す。"""
     if phase_key not in TRANSITION_WEAPON_WEIGHTS:
         return {}
     table = TRANSITION_WEAPON_WEIGHTS[phase_key]
@@ -211,21 +191,20 @@ def get_weapon_weights(phase_key: str, phase_progress: float) -> dict[int, float
 def get_params_for_phase(phase_key: str, global_step: int = 0) -> dict:
     """指定フェーズの武器カリキュラムパラメータを返す。
 
-    weighted フェーズ（W0_to_W1 / W1_to_W2）では global_step に応じて
-    weapon_weights を線形補間する。fixed フェーズでは weapon_weights は返さない。
+    v09 では全フェーズが fixed_subset / garlic_only / all_base のいずれかであり、
+    weighted（遷移）フェーズは廃止されている。global_step は互換性のため残すが使用しない。
 
     Args:
-        phase_key: WEAPON_PHASES のキー（例: "W0", "W0_to_W1"）。
-        global_step: 現在のフェーズ内経過ステップ数。weighted フェーズでの補間に使用。
-            ※ 累積 num_timesteps ではなく、フェーズ開始からの相対ステップを渡すこと。
+        phase_key: WEAPON_PHASES のキー（例: "W0", "W1"）。
+        global_step: 使用しない（backward compatibility のために残す）。
 
     Returns:
         UE5 の /params エンドポイントに送信するパラメータ辞書。
 
     Note:
-        UE5 側の /params が以下のキーをサポートしている必要があります（Task A PR で実装）:
+        UE5 側の /params が以下のキーをサポートしている必要があります:
         - weapon_pool_mode, allowed_weapon_types, enable_passives, enable_evolutions,
-          replay_old_phase_fraction, starting_weapon_mode, weapon_weights
+          replay_old_phase_fraction, starting_weapon_mode
         UE5 側が未対応の場合、ゲームは Garlic-only で動作します。
     """
     if phase_key not in WEAPON_PHASES:
@@ -239,13 +218,12 @@ def get_params_for_phase(phase_key: str, global_step: int = 0) -> dict:
         "replay_old_phase_fraction": phase.get("replay_old_phase_fraction", 0.0),
         "starting_weapon_mode": "pool_random",
     }
+    # v09: weighted フェーズは廃止。weapon_pool_mode=="weighted" は通常発生しない。
     if phase.get("weapon_pool_mode") == "weighted":
         transition_steps = phase.get("transition_steps", 2_000_000)
         progress = min(global_step / max(transition_steps, 1), 1.0)
         weights = get_weapon_weights(phase_key, progress)
         params["weapon_weights"] = weights
-        # 重み > 0 の武器 ID のみ allowed_weapon_types に含める
-        # （重み=0 の武器がプール入りすると遷移設計が崩れるため除外する）
         params["allowed_weapon_types"] = [
             wid for wid, w in weights.items() if w > 1e-6
         ]
