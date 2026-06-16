@@ -4,8 +4,8 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     """
     Survivors reward shaping v9.
     v08 からの主な変更:
-      - 武器分類を 5 グループ（garlic_auto / orbital / melee_line /
-        ranged_targeted / ranged_directional / area_drop）に細分化
+      - 武器分類を 6 グループ（garlic_auto / orbital / melee_line /
+        ranged_targeted / ranged_directional / area_drop）+ defensive に細分化
       - Garlic/Orbital/MeleeLine: 敵接近ボーナスを追加
         (PR#202 で敵速度が半減 → プレイヤーが積極的に敵に向かわないと DPS が出ない)
       - RangedDirectional: 前方敵密度ボーナスを追加
@@ -85,7 +85,8 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     gem_density_mid_16 = gem_density_all[2]
 
     # ============================================================
-    # 1. 武器分類 (v09: 5グループに細分化)
+    # 1. 武器分類 (v09: 6グループ + defensive に細分化)
+    #    UE5 SurvivorsGameConstants::GetWeaponCategory() の定義と一致させること
     # ============================================================
     # 自律範囲 (敵に近いほど有効)
     GARLIC_AUTO_IDS = {1, 16}          # Garlic, SoulEater
@@ -96,11 +97,11 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     # ターゲット追尾遠距離 (中距離で自動照準)
     RANGED_TARGETED_IDS = {3, 8, 11, 18, 26}   # MagicWand, FireWand, LightningRing, HolyWand, ThunderLoop
     # 方向固定遠距離 (移動方向前方に敵が並ぶと有効)
-    RANGED_DIRECTIONAL_IDS = {4, 5, 6, 13, 14, 19, 20, 21, 25, 28}  # Knife, Axe, Cross, Peachone, ...
+    RANGED_DIRECTIONAL_IDS = {4, 5, 6, 13, 14, 19, 20, 21, 28}  # Knife, Axe, Cross, Peachone, EbonyWings, ThousandEdge, DeathSpiral, HeavenSword, Vandalier
     # エリアドロップ (敵密度の高い場所に落とす)
-    AREA_DROP_IDS = {9, 10, 23, 24, 27}         # SantaWater, Runetracer, HellFire, LaBorra, GorgeousMoon
+    AREA_DROP_IDS = {9, 10, 12, 23, 24, 25, 27}  # SantaWater, Runetracer, Pentagram, Hellfire, LaBorra, NoFuture, GorgeousMoon
     # 防御/特殊
-    DEFENSIVE_IDS = {12, 15}           # Pentagram, Laurel
+    DEFENSIVE_IDS = {15}               # Laurel
 
     garlic_auto_count = 0
     orbital_count = 0
