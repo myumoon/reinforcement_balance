@@ -257,9 +257,20 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 			WeaponSlots[i].Level = FWeaponLevel(WLv);
 		}
 
+		for (int32 i = 0; i < InitialPassiveSlots.Num() && i < MaxPassiveSlots; ++i)
+		{
+			const int32 PId  = InitialPassiveSlots[i].PassiveId;
+			const int32 PLv  = FMath::Clamp(InitialPassiveSlots[i].Level, 1, 9);
+			PassiveSlots[i].Type  = static_cast<EPassiveItemType>(PId);
+			PassiveSlots[i].Level = PLv;
+		}
+		if (!InitialPassiveSlots.IsEmpty())
+			PlayerComponent->RecalcPassiveEffects();
+
 		// RSI: 一度適用したらクリア（次のリセットでは通常動作に戻す）
 		bHasInitialOverride = false;
 		InitialWeaponSlots.Empty();
+		InitialPassiveSlots.Empty();
 		InitialElapsedTime  = 0.f;
 	}
 }

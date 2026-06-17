@@ -62,6 +62,8 @@ class _Phase:
     promotion_score_percentile: float = 10.0
     # threshold=None の最終フェーズ用: ロールバック score floor の基準となる参照閾値
     rollback_reference_threshold: Optional[float] = None
+    # RSI: このフェーズの初期経過時間（0.0 = RSI なし）
+    initial_elapsed_time: float = 0.0
 
 
 # promotion_blocker カテゴリ定数（W&B グラフで停滞原因を数値で識別する）
@@ -98,21 +100,27 @@ PHASES: list[_Phase] = [
            promotion_score_stat="percentile", promotion_score_percentile=10.0),
     _Phase("群れ対応A",        16,  50, 1.0, 2.7,  7, 1.25, 1.25, False, 2400, 1700.0,
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
-           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+           promotion_score_stat="percentile", promotion_score_percentile=10.0,
+           initial_elapsed_time=300.0),
     _Phase("群れ対応B",        18,  65, 1.05, 2.8,  8, 1.35, 1.35, True,  2400, 1850.0,
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
-           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+           promotion_score_stat="percentile", promotion_score_percentile=10.0,
+           initial_elapsed_time=420.0),
     _Phase("群れ対応C",        20,  80, 1.1,  3.0,  9, 1.50, 1.50, True,  2400, 2000.0,
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
-           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+           promotion_score_stat="percentile", promotion_score_percentile=10.0,
+           initial_elapsed_time=600.0),
     _Phase("Mad Forest 入門",  27, 100, 1.13, 3.3, 10, 1.67, 1.67, True,  2400, 2100.0,
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
-           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+           promotion_score_stat="percentile", promotion_score_percentile=10.0,
+           initial_elapsed_time=600.0),
     _Phase("Mad Forest 中級",  33, 125, 1.17, 3.7, 10, 1.83, 1.83, True,  2400, 2250.0,
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
-           promotion_score_stat="percentile", promotion_score_percentile=10.0),
+           promotion_score_stat="percentile", promotion_score_percentile=10.0,
+           initial_elapsed_time=900.0),
     _Phase("Mad Forest",       40, 150, 1.2,  4.0, 10, 2.00, 2.00, True,  2400,   None,
-           rollback_reference_threshold=2250.0),
+           rollback_reference_threshold=2250.0,
+           initial_elapsed_time=900.0),
 ]
 
 

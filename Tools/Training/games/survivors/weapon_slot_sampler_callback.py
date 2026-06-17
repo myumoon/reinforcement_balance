@@ -11,10 +11,7 @@ from typing import Callable, Optional
 
 from stable_baselines3.common.callbacks import BaseCallback
 
-from games.survivors.weapon_slot_sampler import (
-    get_initial_elapsed_time,
-    sample_weapon_slots,
-)
+from games.survivors.weapon_slot_sampler import sample_weapon_slots
 
 
 class WeaponSlotSamplerCallback(BaseCallback):
@@ -51,17 +48,13 @@ class WeaponSlotSamplerCallback(BaseCallback):
             self._apply_single_env(i)
 
     def _apply_single_env(self, env_idx: int) -> None:
-        phase_name   = self._get_phase_name()
-        elapsed_time = get_initial_elapsed_time(phase_name)
-        slots        = sample_weapon_slots(elapsed_time, rng=self._rng)
-        if slots is None:
+        phase_name = self._get_phase_name()
+        result     = sample_weapon_slots(phase_name, rng=self._rng)
+        if result is None:
             self.training_env.env_method(
                 "set_params", indices=[env_idx], clear_initial_override=True,
             )
             return
         self.training_env.env_method(
-            "set_params", indices=[env_idx],
-            initial_elapsed_time=elapsed_time,
-            initial_weapon_slots=slots,
-            MaxEpisodeTime=elapsed_time + 300.0,  # RSI 後に 300 秒のエピソードを保証
+            "set_params", indices=[env_idx], **result,
         )

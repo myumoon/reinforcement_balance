@@ -287,12 +287,32 @@ private:
 				Game->bHasInitialOverride = true;
 		}
 
+		// RSI: initial_passive_slots [{passive_id: int, level: int}, ...]
+		const TArray<TSharedPtr<FJsonValue>>* PSlots;
+		if (JsonObj->TryGetArrayField(TEXT("initial_passive_slots"), PSlots))
+		{
+			Game->InitialPassiveSlots.Empty();
+			for (const TSharedPtr<FJsonValue>& Val : *PSlots)
+			{
+				const TSharedPtr<FJsonObject>* SlotObj;
+				if (!Val->TryGetObject(SlotObj)) continue;
+				int32 PId = 0, PLv = 1;
+				double TmpId = 0, TmpLv = 0;
+				if ((*SlotObj)->TryGetNumberField(TEXT("passive_id"), TmpId)) PId = static_cast<int32>(TmpId);
+				if ((*SlotObj)->TryGetNumberField(TEXT("level"),      TmpLv)) PLv = static_cast<int32>(TmpLv);
+				Game->InitialPassiveSlots.Add({PId, FMath::Clamp(PLv, 1, 9)});
+			}
+			if (!Game->InitialPassiveSlots.IsEmpty())
+				Game->bHasInitialOverride = true;
+		}
+
 		// RSI: clear_initial_override — true を送ると次のリセットでオーバーライドを適用しない
 		bool bClearOverride = false;
 		if (JsonObj->TryGetBoolField(TEXT("clear_initial_override"), bClearOverride) && bClearOverride)
 		{
 			Game->bHasInitialOverride = false;
 			Game->InitialWeaponSlots.Empty();
+			Game->InitialPassiveSlots.Empty();
 			Game->InitialElapsedTime = 0.f;
 		}
 
