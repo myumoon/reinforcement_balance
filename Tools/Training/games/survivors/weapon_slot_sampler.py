@@ -43,13 +43,13 @@ _PHASE_RSI: dict[str, dict] = {
     },
     "Mad Forest 中級": {
         "elapsed_time": 900.0,
-        "weapon_num": (5, 6), "weapon_lv": (6, 8),
+        "weapon_num": (5, 6), "weapon_lv": (30, 48),  # 各武器Lv6〜8相当（5〜6本 × Lv6〜8）
         "passive_num": (4, 6), "passive_lv": (3, 5),
         "allow_evolved": True,
     },
     "Mad Forest": {
         "elapsed_time": 900.0,
-        "weapon_num": (5, 6), "weapon_lv": (6, 8),
+        "weapon_num": (5, 6), "weapon_lv": (30, 48),  # 各武器Lv6〜8相当（5〜6本 × Lv6〜8）
         "passive_num": (4, 6), "passive_lv": (3, 5),
         "allow_evolved": True,
     },

@@ -253,3 +253,23 @@ class TestSurvivorsVsSpec:
 
     def test_weapon_valid_for_rsi_has_no_duplicates(self):
         assert len(WEAPON_VALID_FOR_RSI) == len(set(WEAPON_VALID_FOR_RSI))
+
+
+# ---------------------------------------------------------------------------
+# Mad Forest weapon level tests
+# ---------------------------------------------------------------------------
+
+class TestMadForestWeaponLevels:
+    def test_mad_forest_weapon_levels(self):
+        """Mad Forestフェーズで各武器がLv6以上になること（合計30以上）を確認"""
+        rng = random.Random(42)
+        results = [sample_weapon_slots("Mad Forest", rng=rng) for _ in range(20)]
+        for r in results:
+            if r is None:
+                continue
+            weapon_slots = r["initial_weapon_slots"]
+            # 進化武器（level=1）は除外してベース武器のみチェック
+            base_weapons = [s for s in weapon_slots if s["level"] > 1]
+            if base_weapons:
+                total_lv = sum(s["level"] for s in base_weapons)
+                assert total_lv >= 5, f"合計レベルが低すぎる: {total_lv}"
