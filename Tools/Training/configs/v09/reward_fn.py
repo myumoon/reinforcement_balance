@@ -4,8 +4,8 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     """
     Survivors reward shaping v9.
     v08 からの主な変更:
-      - 武器分類を 5 グループ（garlic_auto / orbital / melee_line /
-        ranged_targeted / ranged_directional / area_drop）に細分化
+      - 武器分類を 6 グループ（garlic_auto / orbital / melee_line /
+        ranged_targeted / ranged_directional / area_drop）+ defensive に細分化
       - Garlic/Orbital/MeleeLine: 敵接近ボーナスを追加
         (PR#202 で敵速度が半減 → プレイヤーが積極的に敵に向かわないと DPS が出ない)
       - RangedDirectional: 前方敵密度ボーナスを追加
@@ -85,7 +85,8 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     gem_density_mid_16 = gem_density_all[2]
 
     # ============================================================
-    # 1. 武器分類 (v09: 5グループに細分化)
+    # 1. 武器分類 (v09: 6グループ + defensive に細分化)
+    #    UE5 SurvivorsGameConstants::GetWeaponCategory() の定義と一致させること
     # ============================================================
     # 自律範囲 (敵に近いほど有効)
     GARLIC_AUTO_IDS = {1, 16}          # Garlic, SoulEater
@@ -96,11 +97,11 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     # ターゲット追尾遠距離 (中距離で自動照準)
     RANGED_TARGETED_IDS = {3, 8, 11, 18, 26}   # MagicWand, FireWand, LightningRing, HolyWand, ThunderLoop
     # 方向固定遠距離 (移動方向前方に敵が並ぶと有効)
-    RANGED_DIRECTIONAL_IDS = {4, 5, 6, 13, 14, 19, 20, 21, 25, 28}  # Knife, Axe, Cross, Peachone, ...
+    RANGED_DIRECTIONAL_IDS = {4, 5, 6, 13, 14, 19, 20, 21, 28}  # Knife, Axe, Cross, Peachone, EbonyWings, ThousandEdge, DeathSpiral, HeavenSword, Vandalier
     # エリアドロップ (敵密度の高い場所に落とす)
-    AREA_DROP_IDS = {9, 10, 23, 24, 27}         # SantaWater, Runetracer, HellFire, LaBorra, GorgeousMoon
+    AREA_DROP_IDS = {9, 10, 12, 23, 24, 25, 27}  # SantaWater, Runetracer, Pentagram, Hellfire, LaBorra, NoFuture, GorgeousMoon
     # 防御/特殊
-    DEFENSIVE_IDS = {12, 15}           # Pentagram, Laurel
+    DEFENSIVE_IDS = {15}               # Laurel
 
     garlic_auto_count = 0
     orbital_count = 0
@@ -110,6 +111,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     area_drop_count = 0
     defensive_count = 0
     equipped_count = 0
+    orbital_cooldown_max = 0.0
 
     for slot_i in range(6):
         tn = weapon_slots_raw[slot_i, 0]
@@ -121,6 +123,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
             garlic_auto_count += 1
         elif wtype_id in ORBITAL_IDS:
             orbital_count += 1
+            orbital_cooldown_max = max(orbital_cooldown_max, weapon_slots_raw[slot_i, 2])
         elif wtype_id in MELEE_LINE_IDS:
             melee_line_count += 1
         elif wtype_id in RANGED_TARGETED_IDS:
@@ -187,14 +190,6 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
         nearest_enemy_dir = enemy_rel[nearest_idx] / d
 
     # ============================================================
-    # 4. 停止ペナルティ
-    # ============================================================
-    if not is_moving:
-        min_enemy_nearest = float(np.min(enemy_nearest_16)) if enemy_nearest_16.size > 0 else 1.0
-        stationary_pen = -0.01 - 0.02 * max(0.0, 1.0 - min_enemy_nearest * 5.0)
-        shaped += stationary_pen
-
-    # ============================================================
     # 5. 方向品質ボーナス (安全 + Gem リッチな方向)
     # ============================================================
     if is_moving and move_dir >= 0:
@@ -228,6 +223,13 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
         gem_dir_bonus  = 0.02 * min(gem_richness, 3.0) * safety_factor * hp_gate
         gem_close_bonus = 0.01 * max(0.0, 1.0 - gem_nearest_d) * safety_factor * hp_gate
         shaped += gem_dir_bonus + gem_close_bonus
+
+        # 5c. [v09 修正] Orbital クールダウン中の敵密度方向ペナルティ
+        #    KingBible 等は充填中に攻撃判定ゼロ（聖書が消えている）→ 高密度方向への接近を抑制
+        #    Orbital に限定: FireWand/Axe 等はクールダウン中も敵方向移動が合理的なため対象外
+        if orbital_ratio > 0.1 and orbital_cooldown_max > 0.3:
+            cooldown_density_pen = -0.01 * orbital_ratio * orbital_cooldown_max * min(enemy_near_dens_d, 4.0)
+            shaped += cooldown_density_pen
 
     # ============================================================
     # 6. [v09 新規] Garlic/Orbital/MeleeLine: 敵接近ボーナス
