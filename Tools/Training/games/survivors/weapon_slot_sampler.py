@@ -17,40 +17,42 @@ from games.survivors.survivors_vs_spec import (
 )
 
 _PHASE_RSI: dict[str, dict] = {
+    # weapon_lv: weapon_num本の武器全体への合計レベルのmin/max（_distributeで分配）
+    # passive_lv: passive_num個のパッシブ全体への合計レベルのmin/max（_distribute_variable_maxで分配）
     "群れ対応A": {
         "elapsed_time": 300.0,
         "weapon_num": (2, 3), "weapon_lv": (4, 8),
-        "passive_num": (0, 2), "passive_lv": (1, 3),
+        "passive_num": (0, 2), "passive_lv": (1, 6),
         "allow_evolved": False,
     },
     "群れ対応B": {
         "elapsed_time": 420.0,
         "weapon_num": (3, 4), "weapon_lv": (7, 12),
-        "passive_num": (1, 3), "passive_lv": (1, 4),
+        "passive_num": (1, 3), "passive_lv": (2, 10),
         "allow_evolved": False,
     },
     "群れ対応C": {
         "elapsed_time": 600.0,
-        "weapon_num": (4, 5), "weapon_lv": (11, 16),
-        "passive_num": (2, 4), "passive_lv": (2, 5),
+        "weapon_num": (4, 5), "weapon_lv": (10, 20),
+        "passive_num": (2, 4), "passive_lv": (5, 18),
         "allow_evolved": False,
     },
     "Mad Forest 入門": {
         "elapsed_time": 600.0,
-        "weapon_num": (4, 5), "weapon_lv": (9, 14),
-        "passive_num": (3, 5), "passive_lv": (2, 5),
+        "weapon_num": (4, 5), "weapon_lv": (14, 32),
+        "passive_num": (3, 5), "passive_lv": (7, 22),
         "allow_evolved": False,
     },
     "Mad Forest 中級": {
         "elapsed_time": 900.0,
         "weapon_num": (5, 6), "weapon_lv": (30, 48),  # 各武器Lv6〜8相当（5〜6本 × Lv6〜8）
-        "passive_num": (4, 6), "passive_lv": (3, 5),
+        "passive_num": (4, 6), "passive_lv": (12, 28),
         "allow_evolved": True,
     },
     "Mad Forest": {
         "elapsed_time": 900.0,
         "weapon_num": (5, 6), "weapon_lv": (30, 48),  # 各武器Lv6〜8相当（5〜6本 × Lv6〜8）
-        "passive_num": (4, 6), "passive_lv": (3, 5),
+        "passive_num": (4, 6), "passive_lv": (12, 28),
         "allow_evolved": True,
     },
 }
@@ -67,6 +69,7 @@ def _get_phase_rsi(phase_name: str) -> Optional[dict]:
 
 
 def _distribute(total: int, n: int, max_per: int, rng: random.Random) -> list[int]:
+    """total を n 個に分配（各最低1、最大 max_per）。武器スロット用。"""
     total = max(total, n)
     levels = [1] * n
     remaining = total - n
@@ -74,6 +77,26 @@ def _distribute(total: int, n: int, max_per: int, rng: random.Random) -> list[in
     rng.shuffle(indices)
     for i in indices:
         add = min(remaining, max_per - 1)
+        levels[i] += add
+        remaining -= add
+        if remaining <= 0:
+            break
+    return levels
+
+
+def _distribute_variable_max(total: int, max_levels: list[int], rng: random.Random) -> list[int]:
+    """total を len(max_levels) 個に分配（各最低1、各最大は max_levels[i]）。パッシブスロット用。"""
+    n = len(max_levels)
+    if n == 0:
+        return []
+    total = max(total, n)
+    total = min(total, sum(max_levels))
+    levels = [1] * n
+    remaining = total - n
+    indices = list(range(n))
+    rng.shuffle(indices)
+    for i in indices:
+        add = min(remaining, max_levels[i] - 1)
         levels[i] += add
         remaining -= add
         if remaining <= 0:
@@ -149,17 +172,19 @@ def sample_weapon_slots(
         weapon_slots.extend({"weapon_id": w, "level": lv} for w, lv in zip(chosen, levels))
 
     num_p_min, num_p_max = constraints["passive_num"]
-    p_lv_min, p_lv_max  = constraints["passive_lv"]
+    total_p_lv = _rng.randint(*constraints["passive_lv"])
     num_p = _rng.randint(num_p_min, num_p_max)
 
     available_passives = [p for p in PASSIVE_VALID_FOR_RSI if p not in used_passives]
     num_p = min(num_p - len(passive_slots), len(available_passives))
     if num_p > 0:
         chosen_p = _rng.sample(available_passives, num_p)
-        for pid in chosen_p:
-            max_lv = PASSIVE_MAX_LEVEL[pid]
-            lv = _rng.randint(min(p_lv_min, max_lv), min(p_lv_max, max_lv))
-            passive_slots.append({"passive_id": pid, "level": lv})
+        max_lvs  = [PASSIVE_MAX_LEVEL[pid] for pid in chosen_p]
+        p_levels = _distribute_variable_max(total_p_lv, max_lvs, _rng)
+        passive_slots.extend(
+            {"passive_id": pid, "level": lv}
+            for pid, lv in zip(chosen_p, p_levels)
+        )
 
     return {
         "initial_elapsed_time":   elapsed_time,
