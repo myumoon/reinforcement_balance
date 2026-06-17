@@ -470,6 +470,18 @@ def _load_reward_fn(path: Path) -> Callable:
     return mod.reward_shaping
 
 
+def _call_reward_fn(fn, obs, prev_obs, base_reward):
+    """reward_fn を呼び出し、float または dict のどちらでも処理する。
+    Returns: (total_shaped: float, components: dict[str, float] | None)
+    """
+    result = fn(obs, prev_obs, base_reward)
+    if isinstance(result, dict):
+        total = float(result.get("total", sum(v for v in result.values())))
+        components = {k: float(v) for k, v in result.items() if k != "total"}
+        return total, components
+    return float(result), None
+
+
 # ---------------------------------------------------------------------------
 # メトリクスコールバック
 # ---------------------------------------------------------------------------
@@ -498,6 +510,7 @@ class _EurekaMetricsCallback(BaseCallback):
         self.episode_shaped_rewards: list[float] = []
         self.episode_hp_rewards: list[float] = []
         self.episode_lengths: list[int] = []
+        self.episode_shaped_components: dict[str, list[float]] = {}
 
         self._check_history: list[float] = []
         self._no_improve_count = 0
@@ -506,6 +519,9 @@ class _EurekaMetricsCallback(BaseCallback):
         self._zero_enemy_steps = 0
         self._terminated_count = 0
         self._truncated_count = 0
+        self._total_steps = 0
+        self._nonzero_shaped_steps = 0
+        self._ep_shaped_components: dict[str, float] = {}
 
     def _on_step(self) -> bool:
         info = self.locals["infos"][0]
@@ -514,6 +530,14 @@ class _EurekaMetricsCallback(BaseCallback):
         self._ep_shaped += info.get("shaped_reward", 0.0)
         self._ep_hp += info.get("hp_penalty", 0.0)
         self._ep_len += 1
+        self._total_steps += 1
+        if info.get("shaped_reward", 0.0) != 0.0:
+            self._nonzero_shaped_steps += 1
+        # コンポーネント追跡（UE5 が shaped_components を返す場合に自動対応）
+        components = info.get("shaped_components")
+        if isinstance(components, dict):
+            for k, v in components.items():
+                self._ep_shaped_components[k] = self._ep_shaped_components.get(k, 0.0) + float(v)
 
         if self.locals["dones"][0]:
             if info.get("TimeLimit.truncated", False) or spawn_debug.get("truncated", False):
@@ -524,6 +548,11 @@ class _EurekaMetricsCallback(BaseCallback):
             self.episode_shaped_rewards.append(self._ep_shaped)
             self.episode_hp_rewards.append(self._ep_hp)
             self.episode_lengths.append(self._ep_len)
+            for k, v in self._ep_shaped_components.items():
+                if k not in self.episode_shaped_components:
+                    self.episode_shaped_components[k] = []
+                self.episode_shaped_components[k].append(v)
+            self._ep_shaped_components = {}
             self._ep_base = 0.0
             self._ep_shaped = 0.0
             self._ep_hp = 0.0
@@ -598,6 +627,34 @@ class _EurekaMetricsCallback(BaseCallback):
             self.episode_base_rewards, self.episode_lengths)
         extra = game_config.compute_extra_metrics(
             self.episode_base_rewards, self.episode_lengths)
+
+        # shaped_base 相関（エピソード数 >= 2 の場合のみ）
+        shaped_base_corr_entry: dict = {}
+        if n >= 2:
+            corr_matrix = np.corrcoef(self.episode_base_rewards, self.episode_shaped_rewards)
+            corr = corr_matrix[0, 1]
+            if not np.isnan(corr):
+                shaped_base_corr_entry = {"shaped_base_corr": round(float(corr), 3)}
+
+        # sparsity: shaped_reward が 0 だったステップの割合
+        shaped_sparsity_entry: dict = {}
+        if self._total_steps > 0:
+            shaped_sparsity_entry = {
+                "shaped_sparsity": round(
+                    1.0 - self._nonzero_shaped_steps / self._total_steps, 4
+                )
+            }
+
+        # コンポーネント別平均
+        shaped_components_entry: dict = {}
+        if self.episode_shaped_components:
+            shaped_components_entry = {
+                "shaped_components": {
+                    k: round(sum(v) / len(v), 4)
+                    for k, v in self.episode_shaped_components.items()
+                }
+            }
+
         return {
             "episodes": n,
             "terminated_episodes": self._terminated_count,
@@ -609,6 +666,9 @@ class _EurekaMetricsCallback(BaseCallback):
             "episode_length_mean": round(mean_len, 1),
             game_config.primary_metric_name: round(primary, 3),
             **extra,
+            **shaped_base_corr_entry,
+            **shaped_sparsity_entry,
+            **shaped_components_entry,
         }
 
 
