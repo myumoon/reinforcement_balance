@@ -300,7 +300,19 @@ private:
 				double TmpId = 0, TmpLv = 0;
 				if ((*SlotObj)->TryGetNumberField(TEXT("passive_id"), TmpId)) PId = static_cast<int32>(TmpId);
 				if ((*SlotObj)->TryGetNumberField(TEXT("level"),      TmpLv)) PLv = static_cast<int32>(TmpLv);
-				Game->InitialPassiveSlots.Add({PId, FMath::Clamp(PLv, 1, 9)});
+
+				// None(0) および予約範囲外は除外
+				if (PId <= 0 || PId >= SurvivorsGameConstants::MaxPassiveTypeCountReserved)
+					continue;
+
+				const EPassiveItemType PType  = static_cast<EPassiveItemType>(PId);
+				const int32            MaxLv  = Game->GetPassiveItemMaxLevel(PType);
+
+				// MaxLevel=0（StoneMask など未実装パッシブ）はスキップ
+				if (MaxLv <= 0)
+					continue;
+
+				Game->InitialPassiveSlots.Add({PId, FMath::Clamp(PLv, 1, MaxLv)});
 			}
 			if (!Game->InitialPassiveSlots.IsEmpty())
 				Game->bHasInitialOverride = true;
