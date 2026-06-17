@@ -7,7 +7,6 @@ from __future__ import annotations
 import random
 from typing import Optional
 
-from games.survivors.survivors_curriculum import PHASES as _CURRICULUM_PHASES
 from games.survivors.survivors_vs_spec import (
     PassiveItemType,
     PASSIVE_MAX_LEVEL,
@@ -17,37 +16,39 @@ from games.survivors.survivors_vs_spec import (
     EVOLUTION_TABLE,
 )
 
-_PHASE_NAME_TO_ELAPSED: dict[str, float] = {
-    p.name: p.initial_elapsed_time for p in _CURRICULUM_PHASES
-}
-
 _PHASE_RSI: dict[str, dict] = {
     "群れ対応A": {
+        "elapsed_time": 300.0,
         "weapon_num": (2, 3), "weapon_lv": (4, 8),
         "passive_num": (0, 2), "passive_lv": (1, 3),
         "allow_evolved": False,
     },
     "群れ対応B": {
+        "elapsed_time": 420.0,
         "weapon_num": (3, 4), "weapon_lv": (7, 12),
         "passive_num": (1, 3), "passive_lv": (1, 4),
         "allow_evolved": False,
     },
     "群れ対応C": {
+        "elapsed_time": 600.0,
         "weapon_num": (4, 5), "weapon_lv": (11, 16),
         "passive_num": (2, 4), "passive_lv": (2, 5),
         "allow_evolved": False,
     },
     "Mad Forest 入門": {
+        "elapsed_time": 600.0,
         "weapon_num": (4, 5), "weapon_lv": (9, 14),
         "passive_num": (3, 5), "passive_lv": (2, 5),
         "allow_evolved": False,
     },
     "Mad Forest 中級": {
+        "elapsed_time": 900.0,
         "weapon_num": (5, 6), "weapon_lv": (6, 8),
         "passive_num": (4, 6), "passive_lv": (3, 5),
         "allow_evolved": True,
     },
     "Mad Forest": {
+        "elapsed_time": 900.0,
         "weapon_num": (5, 6), "weapon_lv": (6, 8),
         "passive_num": (4, 6), "passive_lv": (3, 5),
         "allow_evolved": True,
@@ -56,7 +57,9 @@ _PHASE_RSI: dict[str, dict] = {
 
 
 def get_initial_elapsed_time(phase_name: str) -> float:
-    return _PHASE_NAME_TO_ELAPSED.get(phase_name, 0.0)
+    """フェーズ名から initial_elapsed_time を返す。RSI非対象フェーズは 0.0。"""
+    entry = _PHASE_RSI.get(phase_name)
+    return entry["elapsed_time"] if entry else 0.0
 
 
 def _get_phase_rsi(phase_name: str) -> Optional[dict]:
@@ -78,14 +81,21 @@ def _distribute(total: int, n: int, max_per: int, rng: random.Random) -> list[in
     return levels
 
 
-def _sample_evolved_set(rng: random.Random) -> Optional[tuple[dict, dict]]:
+def _sample_evolved_set(rng: random.Random) -> Optional[tuple[dict, dict, list[int]]]:
+    """進化テーブルからランダムに1セットを返す。
+    Returns: (evolved_weapon_slot, passive_slot, excluded_weapon_ids) または None
+    """
     candidates = [e for e in EVOLUTION_TABLE if e["passive"] != PassiveItemType.NONE]
     if not candidates:
         return None
     entry = rng.choice(candidates)
     weapon_slot = {"weapon_id": entry["evolved"], "level": 1}
     passive_slot = {"passive_id": entry["passive"], "level": PASSIVE_MAX_LEVEL[entry["passive"]]}
-    return weapon_slot, passive_slot
+    # 元武器IDを除外リストとして返す（進化後スロットと重複しないよう基本武器・合成武器を除外）
+    excluded = [entry["base"]]
+    if "union_weapon" in entry:
+        excluded.append(entry["union_weapon"])
+    return weapon_slot, passive_slot, excluded
 
 
 def sample_weapon_slots(
@@ -102,9 +112,11 @@ def sample_weapon_slots(
           "initial_passive_slots": list[{"passive_id": int, "level": int}]
           "MaxEpisodeTime": float
     """
-    elapsed_time = get_initial_elapsed_time(phase_name)
-    constraints  = _get_phase_rsi(phase_name)
-    if constraints is None or elapsed_time <= 0.0:
+    constraints = _get_phase_rsi(phase_name)
+    if constraints is None:
+        return None
+    elapsed_time = constraints["elapsed_time"]
+    if elapsed_time <= 0.0:
         return None
 
     _rng = rng or random.Random()
@@ -115,17 +127,20 @@ def sample_weapon_slots(
     weapon_slots: list[dict] = []
     passive_slots: list[dict] = []
     used_passives: set[int] = set()
+    excluded_bases: list[int] = []
 
     if constraints.get("allow_evolved") and _rng.random() < 0.5:
         result = _sample_evolved_set(_rng)
         if result:
-            ew_slot, ep_slot = result
+            ew_slot, ep_slot, excluded_bases = result
             weapon_slots.append(ew_slot)
             passive_slots.append(ep_slot)
             used_passives.add(ep_slot["passive_id"])
             num_w = max(num_w - 1, 0)
 
-    remaining_weapons = [w for w in WEAPON_VALID_FOR_RSI if w not in {s["weapon_id"] for s in weapon_slots}]
+    # 残りの基本武器（進化後武器スロット使用済み＋進化元武器も除外）
+    already_used_weapons = {s["weapon_id"] for s in weapon_slots} | set(excluded_bases)
+    remaining_weapons = [w for w in WEAPON_VALID_FOR_RSI if w not in already_used_weapons]
     num_w = min(num_w, len(remaining_weapons))
     if num_w > 0:
         chosen = _rng.sample(remaining_weapons, num_w)
