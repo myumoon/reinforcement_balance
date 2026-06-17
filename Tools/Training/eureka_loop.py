@@ -470,16 +470,25 @@ def _load_reward_fn(path: Path) -> Callable:
     return mod.reward_shaping
 
 
-def _call_reward_fn(fn, obs, prev_obs, base_reward):
-    """reward_fn を呼び出し、float または dict のどちらでも処理する。
-    Returns: (total_shaped: float, components: dict[str, float] | None)
-    """
-    result = fn(obs, prev_obs, base_reward)
-    if isinstance(result, dict):
-        total = float(result.get("total", sum(v for v in result.values())))
-        components = {k: float(v) for k, v in result.items() if k != "total"}
-        return total, components
-    return float(result), None
+class _SharedComponents:
+    """reward_fn ラッパーと callback の間でコンポーネント情報を共有するコンテナ。"""
+    __slots__ = ("components",)
+
+    def __init__(self):
+        self.components: dict[str, float] | None = None
+
+
+def _make_reward_fn_wrapper(fn: Callable, shared: "_SharedComponents") -> Callable:
+    """reward_fn を float を返すラッパーで包み、dict 返しの場合はコンポーネントを shared に保存する。"""
+    def wrapper(obs, prev_obs, base_reward):
+        result = fn(obs, prev_obs, base_reward)
+        if isinstance(result, dict):
+            total = float(result.get("total", sum(result.values())))
+            shared.components = {k: float(v) for k, v in result.items() if k != "total"}
+            return total
+        shared.components = None
+        return float(result)
+    return wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +502,7 @@ class _EurekaMetricsCallback(BaseCallback):
 
     def __init__(self, compute_metric: Callable, eval_freq: int = 10_000,
                  min_steps: int = 30_000, patience: int = 3, delta: float = 0.05,
-                 env_log_freq: int = 1_000):
+                 env_log_freq: int = 1_000, shared_components: "_SharedComponents | None" = None):
         super().__init__(verbose=0)
         self._compute_metric = compute_metric
         self.eval_freq = eval_freq
@@ -501,6 +510,7 @@ class _EurekaMetricsCallback(BaseCallback):
         self.patience = patience
         self.delta = delta
         self.env_log_freq = env_log_freq
+        self._shared_components = shared_components
 
         self._ep_base = 0.0
         self._ep_shaped = 0.0
@@ -533,9 +543,15 @@ class _EurekaMetricsCallback(BaseCallback):
         self._total_steps += 1
         if info.get("shaped_reward", 0.0) != 0.0:
             self._nonzero_shaped_steps += 1
-        # コンポーネント追跡（UE5 が shaped_components を返す場合に自動対応）
-        components = info.get("shaped_components")
-        if isinstance(components, dict):
+        # コンポーネント追跡（_SharedComponents 優先、フォールバックで info["shaped_components"]）
+        if self._shared_components is not None and self._shared_components.components is not None:
+            components = self._shared_components.components
+        elif isinstance(info.get("shaped_components"), dict):
+            components = info["shaped_components"]
+        else:
+            components = None
+
+        if components is not None:
             for k, v in components.items():
                 self._ep_shaped_components[k] = self._ep_shaped_components.get(k, 0.0) + float(v)
 
@@ -938,11 +954,14 @@ def main() -> None:
             # 動的ロード & セット（VecNormalize ラッパーを通じて生の環境にセット）
             try:
                 fn = _load_reward_fn(reward_fn_path)
-                _get_raw_env(env)._reward_fn = fn
+                shared_comps = _SharedComponents()
+                wrapped_fn = _make_reward_fn_wrapper(fn, shared_comps)
+                _get_raw_env(env)._reward_fn = wrapped_fn
                 print("[INFO] reward_fn をロードしました。")
             except Exception as e:
                 print(f"[ERROR] reward_fn のロードに失敗: {e}")
                 _get_raw_env(env)._reward_fn = None
+                shared_comps = _SharedComponents()
 
             # --- PPO 訓練 ---
             _weapon_phase_key = getattr(args, "weapon_phase", "W0")
@@ -1008,6 +1027,7 @@ def main() -> None:
                 patience=args.patience,
                 delta=args.delta,
                 env_log_freq=args.env_log_freq,
+                shared_components=shared_comps,
             )
 
             print(f"[INFO] 訓練開始: {training_steps:,} steps (上限: {args.max_steps:,})")
