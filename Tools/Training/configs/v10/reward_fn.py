@@ -13,10 +13,9 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     v10 obs_schema v794 対応変更:
       - Section 6b: Orbital クールダウン近接ペナルティを -0.03 → -0.02 に軽減
         （5c との二重がけによる過剰抑制を解消）
-      - Section 12b 追加: 低HP時の逃走方向ボーナス
-        （早期 terminated エピソードの削減を狙う）
       - Section 13 刷新: 全武器カテゴリ対応の適正距離維持ボーナス
         （obs[740:746] weapon_attack_range_norm を使用、固定 [0.15,0.40] を廃止）
+        低HP時 (HP<0.3) はボーナスを最大 2x に強化し、逃走ではなく間合い維持を促す
 
     obs レイアウト (794 dims, obs_schema v794):
       [0:2]    player_pos (x/HN, y/HN)
@@ -354,17 +353,6 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
             shaped += low_hp_danger
 
     # ============================================================
-    # 12b. [v10 新規] 低HP時の逃走方向ボーナス
-    #    低HPで最近傍敵から遠ざかる方向への移動を評価する
-    #    Section 12 のペナルティと対になる正報酬: 逃げると報われる
-    # ============================================================
-    if player_hp_norm < 0.3 and is_moving and nearest_enemy_dir is not None:
-        escape_dot = float(np.dot(vel_norm, -nearest_enemy_dir))
-        if escape_dot > 0.0:
-            escape_bonus = 0.015 * escape_dot * (1.0 - player_hp_norm / 0.3)
-            shaped += escape_bonus
-
-    # ============================================================
     # 13. [v10 刷新] 全武器適正距離維持ボーナス
     #    obs[740:746] = weapon_attack_range_norm (GetWeaponEffectiveRange() の値)
     #    enemy_nearest_16 の正規化基準: EnemyNearestDistanceMax = 2400u
@@ -383,11 +371,16 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     #      Axe  / DeathSpiral:  ArcHeight=120u,apex≈60u  → [0.000, 0.045]
     #    折り返し後のヒットは副産物扱いのため報酬なし。
     #
-    #    ボーナス上限: スロット毎 0.010、全スロット平均で最大 0.010
+    #    低HP時 (HP < 0.3) は適正距離維持ボーナスを最大 2x に強化。
+    #    「逃げる」のではなく「間合いを保ちながら戦う」行動を促す。
+    #    ボーナス上限: スロット毎 0.010 × 最大 2.0 = 0.020、全スロット平均
     # ============================================================
     # 折り返し系武器 ID (RANGED_DIRECTIONAL_IDS のサブセット)
     CROSS_BOOMERANG_IDS = {6, 21}   # Cross=6, HeavenSword=21
     AXE_ARC_IDS = {5, 20}           # Axe=5, DeathSpiral=20
+
+    # 低HP時ほど適正距離維持の重要性が増す (1.0〜2.0)
+    low_hp_range_mult = 1.0 + max(0.0, (0.3 - player_hp_norm) / 0.3)
 
     min_enemy_dist_val = float(np.min(enemy_nearest_16))
     range_bonus_sum = 0.0
@@ -450,7 +443,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
                 overshoot = (min_enemy_dist_val - hi) / hi
                 dist_score = max(0.0, 1.0 - overshoot * 2.0)
 
-        range_bonus_sum += 0.010 * dist_score
+        range_bonus_sum += 0.010 * dist_score * low_hp_range_mult
         range_slot_count += 1
 
     if range_slot_count > 0:
