@@ -10,8 +10,14 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
       - reward_analysis_logger.py と組み合わせて使用
         (shaped_reward 分布・obs 相関・エピソード時系列が自動ログされる)
 
+    v10 obs_schema v794 対応変更:
+      - Section 6b: Orbital クールダウン近接ペナルティを -0.03 → -0.02 に軽減
+        （5c との二重がけによる過剰抑制を解消）
+      - Section 13 刷新: 全武器カテゴリ対応の適正距離維持ボーナス
+        （obs[740:746] weapon_attack_range_norm を使用、固定 [0.15,0.40] を廃止）
+        低HP時 (HP<0.3) はボーナスを最大 2x に強化し、逃走ではなく間合い維持を促す
 
-    obs レイアウト (740 dims, obs_schema v740):
+    obs レイアウト (794 dims, obs_schema v794):
       [0:2]    player_pos (x/HN, y/HN)
       [2:4]    player_vel (vx/MoveSpeed, vy/MoveSpeed)
       [4:12]   wall_rays (8 dirs, 0=wall close, 1=far)
@@ -38,7 +44,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
       [255:287] enemy_type     (32)
       [287:319] enemy_hp       (32)
       [319:351] enemy_frozen   (32)
-      [351:367] enemy_nearest_dist_16dir
+      [351:367] enemy_nearest_dist_16dir   (正規化基準: EnemyNearestDistanceMax=2400u)
       [367:383] enemy_density_near_16dir
       [383:399] enemy_density_mid_16dir
       [399:447] gem_density_all_16dir  (3 × 16)
@@ -47,10 +53,9 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
       [687:711] floor_pickups (8 × 3)
       [711:720] special_pickups (3 × 3)
       [720:740] destructibles (10 × 2)
-
-    Phase 1 の obs 追加後 (weapon_attack_range_norm + weapon_is_directional +
-    weapon_category_onehot) は obs_schema が変わるため、
-    オフセットを全て更新すること (+ 54 dims → total 794 dims)。
+      [740:746] weapon_attack_range_norm  (GetWeaponEffectiveRange() × 6スロット)
+      [746:752] weapon_is_directional     (6スロット)
+      [752:794] weapon_category_onehot    (6スロット × 7カテゴリ)
     """
     shaped = 0.0
 
@@ -83,6 +88,9 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     gem_density_near_16 = gem_density_all[1]
     gem_density_mid_16 = gem_density_all[2]
 
+    # v794 追加次元
+    weapon_range_norms = obs[740:746]  # GetWeaponEffectiveRange() 正規化値
+
     # ============================================================
     # 1. 武器分類 (v09: 6グループ + defensive に細分化)
     #    UE5 SurvivorsGameConstants::GetWeaponCategory() の定義と一致させること
@@ -97,6 +105,8 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     RANGED_TARGETED_IDS = {3, 8, 11, 18, 26}   # MagicWand, FireWand, LightningRing, HolyWand, ThunderLoop
     # 方向固定遠距離 (移動方向前方に敵が並ぶと有効)
     RANGED_DIRECTIONAL_IDS = {4, 5, 6, 13, 14, 19, 20, 21, 28}  # Knife, Axe, Cross, Peachone, EbonyWings, ThousandEdge, DeathSpiral, HeavenSword, Vandalier
+    # 折り返し系 (往路の折り返し距離が間合い。RANGED_DIRECTIONAL のサブセット)
+    FOLDING_IDS = {5, 6, 20, 21}       # Axe=5, Cross=6, DeathSpiral=20, HeavenSword=21
     # エリアドロップ (敵密度の高い場所に落とす)
     AREA_DROP_IDS = {9, 10, 12, 23, 24, 25, 27}  # SantaWater, Runetracer, Pentagram, Hellfire, LaBorra, NoFuture, GorgeousMoon
     # 防御/特殊
@@ -107,6 +117,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     melee_line_count = 0
     ranged_t_count = 0
     directional_count = 0
+    folding_count = 0
     area_drop_count = 0
     defensive_count = 0
     equipped_count = 0
@@ -129,6 +140,8 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
             ranged_t_count += 1
         elif wtype_id in RANGED_DIRECTIONAL_IDS:
             directional_count += 1
+            if wtype_id in FOLDING_IDS:
+                folding_count += 1
         elif wtype_id in AREA_DROP_IDS:
             area_drop_count += 1
         elif wtype_id in DEFENSIVE_IDS:
@@ -142,6 +155,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     melee_line_ratio   = melee_line_count / equipped_count
     ranged_t_ratio     = ranged_t_count / equipped_count
     directional_ratio  = directional_count / equipped_count
+    folding_ratio      = folding_count / equipped_count
     area_drop_ratio    = area_drop_count / equipped_count
     defensive_ratio    = defensive_count / equipped_count
 
@@ -150,14 +164,17 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
 
     # density_pen_mult: 武器グループ別に調整
     # Garlic/Orbital は「敵の近く」が最適なので密度ペナルティを大幅軽減
+    # 折り返し系 (Cross/Axe): 往路の折り返し距離 (~75-100u) が間合いのため軽減
+    #   Knife 等の純粋直線系とは分けて 0.4 を適用する
     density_pen_mult = (
-        garlic_auto_ratio  * 0.2 +
-        orbital_ratio      * 0.3 +
-        melee_line_ratio   * 0.5 +
-        ranged_t_ratio     * 0.9 +
-        directional_ratio  * 1.0 +
-        area_drop_ratio    * 0.6 +
-        defensive_ratio    * 0.8
+        garlic_auto_ratio            * 0.2 +
+        orbital_ratio                * 0.3 +
+        melee_line_ratio             * 0.5 +
+        folding_ratio                * 0.4 +
+        (directional_ratio - folding_ratio) * 1.0 +
+        ranged_t_ratio               * 0.9 +
+        area_drop_ratio              * 0.6 +
+        defensive_ratio              * 0.8
     )
     if density_pen_mult < 1e-6:
         density_pen_mult = 1.0
@@ -243,15 +260,16 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
         shaped += approach_bonus
 
     # ============================================================
-    # 6b. [v09 修正] Orbital クールダウン中の敵近接ペナルティ
+    # 6b. [v09 修正 / v10 軽減] Orbital クールダウン中の敵近接ペナルティ
     #    KingBible 充填中（聖書なし）に敵が近い状態そのものを抑制
     #    5c が「移動方向」への抑制であるのに対し、6b は「現在位置」への抑制
+    #    v10: 5c との二重がけによる過剰抑制を解消するため -0.03 → -0.02 に軽減
     # ============================================================
     if orbital_ratio > 0.1 and orbital_cooldown_max > 0.5:
         min_enemy_dist_orbital = float(np.min(enemy_nearest_16))
         if min_enemy_dist_orbital < 0.25:
             cooldown_proximity_pen = (
-                -0.03 * orbital_ratio * orbital_cooldown_max
+                -0.02 * orbital_ratio * orbital_cooldown_max
                 * (1.0 - min_enemy_dist_orbital / 0.25)
             )
             shaped += cooldown_proximity_pen
@@ -335,14 +353,101 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
             shaped += low_hp_danger
 
     # ============================================================
-    # 13. RangedTargeted: 適切な戦闘距離維持ボーナス (v08 から継承)
+    # 13. [v10 刷新] 全武器適正距離維持ボーナス
+    #    obs[740:746] = weapon_attack_range_norm (GetWeaponEffectiveRange() の値)
+    #    enemy_nearest_16 の正規化基準: EnemyNearestDistanceMax = 2400u
+    #
+    #    weapon_attack_range_norm → 適正距離帯のマッピング:
+    #      ≤ 0.05  Garlic/SoulEater:    密着 (0〜60u)    → [0.000, 0.025]
+    #      ≤ 0.15  KingBible/Whip:      近接 (0〜90u)    → [0.000, 0.040]
+    #      ≤ 0.35  SantaWater/LRing:    中近  (150〜480u) → [0.063, 0.200]
+    #      ≤ 0.55  MagicWand/FireWand:  中距離(200〜650u) → [0.083, 0.280]
+    #      ≤ 0.79  Runetracer 等:       中遠  (250〜900u) → [0.104, 0.375]
+    #      ≥ 0.80  Knife/Pentagram: 超遠距離 → Section 7 が主担当のためスキップ
+    #
+    #    折り返し系武器 (Cross/HeavenSword/Axe/DeathSpiral) は weapon_attack_range_norm
+    #    の値に関わらず、往路の折り返し距離を間合いとして扱う:
+    #      Cross / HeavenSword: CrossReverseDistance=75u  → [0.000, 0.035]
+    #      Axe  / DeathSpiral:  ArcHeight=120u,apex≈60u  → [0.000, 0.045]
+    #    折り返し後のヒットは副産物扱いのため報酬なし。
+    #
+    #    低HP時 (HP < 0.3) は適正距離維持ボーナスを最大 2x に強化。
+    #    「逃げる」のではなく「間合いを保ちながら戦う」行動を促す。
+    #    ボーナス上限: スロット毎 0.010 × 最大 2.0 = 0.020、全スロット平均
     # ============================================================
-    if ranged_t_ratio > 0.3:
-        min_enemy_dist_val = float(np.min(enemy_nearest_16))
-        if 0.15 <= min_enemy_dist_val <= 0.40:
-            dist_deviation = abs(min_enemy_dist_val - 0.275) / 0.125
-            combat_range_bonus = 0.01 * ranged_t_ratio * (1.0 - dist_deviation)
-            shaped += combat_range_bonus
+    # 折り返し系武器 ID (RANGED_DIRECTIONAL_IDS のサブセット)
+    CROSS_BOOMERANG_IDS = {6, 21}   # Cross=6, HeavenSword=21
+    AXE_ARC_IDS = {5, 20}           # Axe=5, DeathSpiral=20
+
+    # 低HP時ほど適正距離維持の重要性が増す (1.0〜2.0)
+    low_hp_range_mult = 1.0 + max(0.0, (0.3 - player_hp_norm) / 0.3)
+
+    min_enemy_dist_val = float(np.min(enemy_nearest_16))
+    range_bonus_sum = 0.0
+    range_slot_count = 0
+
+    for slot_i in range(6):
+        tn = weapon_slots_raw[slot_i, 0]
+        if tn < 1e-4:
+            continue
+        wtype_id_s13 = int(round(tn * 64.0))
+        r = float(weapon_range_norms[slot_i])
+
+        # 適正距離帯 (lo, hi) と近接系フラグを決定
+        is_near_type = False
+        if wtype_id_s13 in CROSS_BOOMERANG_IDS:
+            # Cross/HeavenSword: 往路の折り返し距離 75u が実質の間合い
+            lo, hi = 0.000, 0.035   # 75u / 2400u ≈ 0.031 に余裕を持たせた 0.035
+            is_near_type = True
+        elif wtype_id_s13 in AXE_ARC_IDS:
+            # Axe/DeathSpiral: 弧の頂点まで ~60u、着地まで ~100u が実質の間合い
+            lo, hi = 0.000, 0.045   # 100u / 2400u ≈ 0.042 に余裕を持たせた 0.045
+            is_near_type = True
+        elif r >= 0.80:
+            # Knife/Pentagram 等の超遠距離はスキップ (Section 7 が担当)
+            continue
+        elif r <= 0.05:        # Garlic / SoulEater: 密着
+            lo, hi = 0.000, 0.025
+            is_near_type = True
+        elif r <= 0.15:        # KingBible / Whip: 近接
+            lo, hi = 0.000, 0.040
+            is_near_type = True
+        elif r <= 0.35:        # SantaWater / LightningRing: 中近距離
+            lo, hi = 0.063, 0.200
+        elif r <= 0.55:        # MagicWand / FireWand / Peachone: 中距離
+            lo, hi = 0.083, 0.280
+        else:                  # Runetracer 等 (0.56〜0.79): 中遠距離
+            lo, hi = 0.104, 0.375
+
+        # 距離スコア (0〜1) を計算
+        if is_near_type:
+            # 近接/折り返し系: バンド内は満点、超えると急減 (遠くなるほど不利)
+            if min_enemy_dist_val <= hi:
+                dist_score = 1.0
+            else:
+                overshoot = (min_enemy_dist_val - hi) / hi
+                dist_score = max(0.0, 1.0 - overshoot * 3.0)
+        else:
+            # 中距離系: バンド中央付近が満点、外れると逓減
+            if min_enemy_dist_val < lo:
+                # バンドより近すぎ (敵に密着しすぎ)
+                overshoot = (lo - min_enemy_dist_val) / lo if lo > 0.0 else 0.0
+                dist_score = max(0.0, 1.0 - overshoot * 2.0)
+            elif min_enemy_dist_val <= hi:
+                # バンド内: 中央からの逸脱量でスコア計算
+                mid = (lo + hi) / 2.0
+                half_width = (hi - lo) / 2.0
+                dist_score = max(0.0, 1.0 - abs(min_enemy_dist_val - mid) / half_width)
+            else:
+                # バンドより遠すぎ
+                overshoot = (min_enemy_dist_val - hi) / hi
+                dist_score = max(0.0, 1.0 - overshoot * 2.0)
+
+        range_bonus_sum += 0.010 * dist_score * low_hp_range_mult
+        range_slot_count += 1
+
+    if range_slot_count > 0:
+        shaped += range_bonus_sum / range_slot_count
 
     # ============================================================
     # 14. 防御武器の特殊処理 (v08 から継承)
