@@ -259,3 +259,47 @@ class RewardAnalysisCallback(BaseCallback):
             if done:
                 self._rl.on_episode_end(env_idx=env_idx)
         return True
+
+
+class RewardAnalysisCheckpointCallback(BaseCallback):
+    """チェックポイントごとに累積報酬統計を running_reward_analysis_{step}.md/json に保存する。
+
+    データはリセットせず、訓練開始からの全累積統計を出力する。
+    最終ログとは別に中間ログを出力するため、訓練途中でも報酬分布を確認できる。
+    """
+
+    def __init__(
+        self,
+        logger: RewardAnalysisLogger,
+        log_dir: Path,
+        save_freq: int,
+        run_name: str = "",
+    ):
+        super().__init__(verbose=0)
+        self._rl = logger
+        self._log_dir = Path(log_dir)
+        self.save_freq = max(save_freq, 1)
+        self._run_name = run_name
+        self._last_save = 0
+
+    def _on_training_start(self) -> None:
+        self._last_save = self.num_timesteps
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self._last_save < self.save_freq:
+            return True
+        self._last_save = self.num_timesteps
+        step = self.num_timesteps
+        metadata: dict = {"checkpoint_step": f"{step:,}"}
+        if self._run_name:
+            metadata["run"] = self._run_name
+        try:
+            self._rl.save(
+                log_dir=self._log_dir,
+                prefix=f"running_reward_analysis_{step}",
+                metadata=metadata,
+            )
+            print(f"[INFO] 中間報酬解析ログ保存: {self._log_dir / f'running_reward_analysis_{step}.md'}")
+        except Exception as e:
+            print(f"[WARN] 中間報酬解析ログの保存に失敗しました (step={step}): {e}")
+        return True

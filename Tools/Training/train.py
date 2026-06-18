@@ -41,7 +41,7 @@ import torch
 from base.base_ue5_env import UE5ConnectionError
 from common.utils import _linear_schedule
 from common.wandb_logger import WandbLogger
-from common.reward_analysis_logger import RewardAnalysisLogger, RewardAnalysisCallback, SURVIVORS_OBS_SCHEMA
+from common.reward_analysis_logger import RewardAnalysisLogger, RewardAnalysisCallback, RewardAnalysisCheckpointCallback, SURVIVORS_OBS_SCHEMA
 from curriculum_callback import CurriculumCallback
 from games.survivors.weapon_curriculum_callback import WeaponCurriculumCallback as _WeaponCurriculumCallback
 
@@ -1680,6 +1680,13 @@ def main() -> None:
     )
     _reward_logger_cb = RewardAnalysisCallback(_reward_logger)
     callbacks.append(_reward_logger_cb)
+    _reward_ckpt_cb = RewardAnalysisCheckpointCallback(
+        logger=_reward_logger,
+        log_dir=log_dir,
+        save_freq=args.checkpoint_freq,
+        run_name=str(run_dir.name),
+    )
+    callbacks.append(_reward_ckpt_cb)
 
     exit_reason = "completed"
     exit_error = None
