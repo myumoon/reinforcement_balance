@@ -50,3 +50,22 @@ def test_save_creates_files():
         path = lg.save(Path(tmpdir))
         assert path.exists()
         assert (Path(tmpdir) / "reward_analysis.json").exists()
+
+
+def test_multi_env_episode_isolation():
+    """複数 env のエピソードが混線しないことを確認する。"""
+    lg = _make_logger()
+    # env 0: 5ステップのエピソード (shaped=1.0)
+    for _ in range(5):
+        lg.on_step(1.0, 2.0, env_idx=0)
+    # env 1: 3ステップ途中（done まだ来ない）
+    for _ in range(3):
+        lg.on_step(0.5, 1.0, env_idx=1)
+    # env 0 のみエピソード終了
+    lg.on_episode_end(env_idx=0)
+    # エピソード完了は env 0 の 1 件のみ
+    assert len(lg.ep_shaped_totals) == 1
+    assert abs(lg.ep_shaped_totals[0] - 5.0) < 1e-6  # env 0 の合計
+    # env 1 のデータは残っている（まだ done していない）
+    assert 1 in lg._ep_shaped_per_env
+    assert len(lg._ep_shaped_per_env[1]) == 3

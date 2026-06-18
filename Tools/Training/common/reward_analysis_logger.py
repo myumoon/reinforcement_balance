@@ -40,8 +40,8 @@ class RewardAnalysisLogger:
         self._obs_buf: list[np.ndarray] = []
         self._obs_shaped_buf: list[float] = []
 
-        self._ep_shaped: list[float] = []
-        self._ep_base: list[float] = []
+        self._ep_shaped_per_env: dict[int, list[float]] = {}
+        self._ep_base_per_env: dict[int, list[float]] = {}
         self.ep_shaped_totals: list[float] = []
         self.ep_base_totals: list[float] = []
         self.ep_lengths: list[int] = []
@@ -50,12 +50,16 @@ class RewardAnalysisLogger:
         self._step_count = 0
         self._saved = False
 
-    def on_step(self, shaped: float, base: float, obs: np.ndarray | None = None) -> None:
+    def on_step(self, shaped: float, base: float, obs: np.ndarray | None = None, env_idx: int = 0) -> None:
         if len(self._shaped_buf) < self._MAX_STEPS:
             self._shaped_buf.append(shaped)
             self._base_buf.append(base)
-        self._ep_shaped.append(shaped)
-        self._ep_base.append(base)
+        # per-env episode accumulation
+        if env_idx not in self._ep_shaped_per_env:
+            self._ep_shaped_per_env[env_idx] = []
+            self._ep_base_per_env[env_idx] = []
+        self._ep_shaped_per_env[env_idx].append(shaped)
+        self._ep_base_per_env[env_idx].append(base)
         self._step_count += 1
         if (obs is not None
                 and self._step_count % self._OBS_SAMPLE_INTERVAL == 0
@@ -63,14 +67,16 @@ class RewardAnalysisLogger:
             self._obs_buf.append(obs.copy())
             self._obs_shaped_buf.append(shaped)
 
-    def on_episode_end(self) -> None:
-        self.ep_shaped_totals.append(sum(self._ep_shaped))
-        self.ep_base_totals.append(sum(self._ep_base))
-        self.ep_lengths.append(len(self._ep_shaped))
+    def on_episode_end(self, env_idx: int = 0) -> None:
+        ep_shaped = self._ep_shaped_per_env.pop(env_idx, [])
+        ep_base = self._ep_base_per_env.pop(env_idx, [])
+        if not ep_shaped:
+            return
+        self.ep_shaped_totals.append(sum(ep_shaped))
+        self.ep_base_totals.append(sum(ep_base))
+        self.ep_lengths.append(len(ep_shaped))
         if len(self._sampled_ep_seqs) < 50:
-            self._sampled_ep_seqs.append(self._ep_shaped[:])
-        self._ep_shaped = []
-        self._ep_base = []
+            self._sampled_ep_seqs.append(ep_shaped[:])
 
     def to_markdown(self, metadata: dict | None = None) -> str:
         shaped = np.array(self._shaped_buf) if self._shaped_buf else np.array([])
@@ -251,7 +257,7 @@ class RewardAnalysisCallback(BaseCallback):
             shaped = float(info.get("shaped_reward", 0.0))
             base = float(info.get("base_reward", 0.0))
             obs_vec = new_obs[env_idx] if new_obs is not None else None
-            self._rl.on_step(shaped, base, obs_vec)
+            self._rl.on_step(shaped, base, obs_vec, env_idx=env_idx)
             if done:
-                self._rl.on_episode_end()
+                self._rl.on_episode_end(env_idx=env_idx)
         return True
