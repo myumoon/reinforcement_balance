@@ -3,21 +3,13 @@ import numpy as np
 def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) -> float:
     """
     Survivors reward shaping v10.
-    reward_analysis_logger.py と組み合わせて使用することで、
-    shaped_reward の分布・時系列・obs 相関をログとして収集・分析できる。
-
     v09 からの変更:
-      - コード本体は v09 と同一
-      - reward_analysis_logger.py との統合を想定したバージョン
+      - バージョン番号の更新
+      - PR#216: Orbital クールダウン中の敵接近抑制を Section 6 に統合
+        （Section 5c の移動方向ペナルティに加え、接近ボーナス自体を cooldown_gate で抑制）
+      - reward_analysis_logger.py と組み合わせて使用
+        (shaped_reward 分布・obs 相関・エピソード時系列が自動ログされる)
 
-    v08 からの主な変更（v09 より継承）:
-      - 武器分類を 6 グループ（garlic_auto / orbital / melee_line /
-        ranged_targeted / ranged_directional / area_drop）+ defensive に細分化
-      - Garlic/Orbital/MeleeLine: 敵接近ボーナスを追加
-        (PR#202 で敵速度が半減 → プレイヤーが積極的に敵に向かわないと DPS が出ない)
-      - RangedDirectional: 前方敵密度ボーナスを追加
-      - AreaDrop: 最高密度方向一致ボーナスを追加
-      - density_pen_mult を武器グループ別に調整 (Garlic 0.5 → 0.2)
 
     obs レイアウト (740 dims, obs_schema v740):
       [0:2]    player_pos (x/HN, y/HN)
@@ -244,10 +236,25 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     # ============================================================
     if near_melee_ratio > 0.2 and is_moving and nearest_enemy_dir is not None:
         approach_dot = float(np.dot(vel_norm, nearest_enemy_dir))
-        # HP が低い時は安全優先のため接近ボーナスを抑制
         hp_gate_approach = min(player_hp_norm / 0.5, 1.0)
-        approach_bonus = 0.025 * near_melee_ratio * max(0.0, approach_dot) * hp_gate_approach
+        # Orbital クールダウン中は接近ボーナスを抑制（聖書が消えている間に近づくと無防備）
+        orbital_cooldown_gate = 1.0 - 0.8 * orbital_ratio * orbital_cooldown_max
+        approach_bonus = 0.025 * near_melee_ratio * max(0.0, approach_dot) * hp_gate_approach * orbital_cooldown_gate
         shaped += approach_bonus
+
+    # ============================================================
+    # 6b. [v09 修正] Orbital クールダウン中の敵近接ペナルティ
+    #    KingBible 充填中（聖書なし）に敵が近い状態そのものを抑制
+    #    5c が「移動方向」への抑制であるのに対し、6b は「現在位置」への抑制
+    # ============================================================
+    if orbital_ratio > 0.1 and orbital_cooldown_max > 0.5:
+        min_enemy_dist_orbital = float(np.min(enemy_nearest_16))
+        if min_enemy_dist_orbital < 0.25:
+            cooldown_proximity_pen = (
+                -0.03 * orbital_ratio * orbital_cooldown_max
+                * (1.0 - min_enemy_dist_orbital / 0.25)
+            )
+            shaped += cooldown_proximity_pen
 
     # ============================================================
     # 7. [v09 新規] RangedDirectional: 前方敵密度ボーナス
