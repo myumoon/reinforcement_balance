@@ -28,6 +28,7 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
+from common.reward_analysis_logger import RewardAnalysisLogger, RewardAnalysisCallback, SURVIVORS_OBS_SCHEMA
 from games.survivors.survivors_weapon_curriculum import WEAPON_PHASES
 from games.survivors.weapon_curriculum_callback import WeaponCurriculumCallback
 
@@ -137,6 +138,13 @@ def _parse_args() -> argparse.Namespace:
                    help="1回目イテレーションでLLMに伝える訓練課題テキスト（直接指定）")
     p.add_argument("--initial-observation-file", type=Path, default=None,
                    help="1回目イテレーションでLLMに伝える訓練課題テキストのファイルパス")
+    p.add_argument(
+        "--initial-log-file",
+        type=Path,
+        default=None,
+        metavar="MD_FILE",
+        help="初回イテレーションの reward_analysis に渡す既存ログファイル（train.py 生成の .md）",
+    )
     p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
     p.add_argument("--wandb-project", default="eureka-loop", help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None, help="W&B ラン名")
@@ -325,12 +333,13 @@ def _save_validation_findings(findings: list[dict], out_dir: Path,
 
 
 def _call_build_prompt_parts(game_config, prev_metrics, iteration, prev_review_findings,
-                             obs_for_iter, source_of_truth):
+                             obs_for_iter, source_of_truth, prev_reward_analysis=None):
     try:
         return game_config.build_prompt_parts(
             prev_metrics, iteration, prev_review_findings,
             initial_observation=obs_for_iter,
             source_of_truth=source_of_truth,
+            prev_reward_analysis=prev_reward_analysis,
         )
     except TypeError:
         return game_config.build_prompt_parts(
@@ -340,12 +349,13 @@ def _call_build_prompt_parts(game_config, prev_metrics, iteration, prev_review_f
 
 
 def _call_build_prompt(game_config, prev_metrics, iteration, prev_review_findings,
-                       obs_for_iter, source_of_truth):
+                       obs_for_iter, source_of_truth, prev_reward_analysis=None):
     try:
         return game_config.build_prompt(
             prev_metrics, iteration, prev_review_findings,
             initial_observation=obs_for_iter,
             source_of_truth=source_of_truth,
+            prev_reward_analysis=prev_reward_analysis,
         )
     except TypeError:
         return game_config.build_prompt(
@@ -750,6 +760,13 @@ def main() -> None:
         env.close()
         return
 
+    initial_reward_log: str | None = None
+    _initial_log_file = getattr(args, "initial_log_file", None)
+    if _initial_log_file is not None and Path(_initial_log_file).exists():
+        initial_reward_log = Path(_initial_log_file).read_text(encoding="utf-8")
+        print(f"[INFO] 初回報酬ログをロード: {_initial_log_file}")
+    prev_reward_analysis: str | None = initial_reward_log
+
     try:
         for i in range(start_iter, args.iterations + 1):
             iter_dir = run_dir / f"iter_{i:03d}"
@@ -765,13 +782,13 @@ def main() -> None:
             if args.llm == "anthropic":
                 static_prefix, dynamic_suffix = _call_build_prompt_parts(
                     game_config, prev_metrics, i, prev_review_findings,
-                    obs_for_iter, source_of_truth)
+                    obs_for_iter, source_of_truth, prev_reward_analysis=prev_reward_analysis)
                 gen_content = (_make_cached_content(static_prefix, dynamic_suffix)
                                if static_prefix else dynamic_suffix)
             else:
                 gen_content = _call_build_prompt(
                     game_config, prev_metrics, i, prev_review_findings,
-                    obs_for_iter, source_of_truth)
+                    obs_for_iter, source_of_truth, prev_reward_analysis=prev_reward_analysis)
             try:
                 llm_response = _call_llm(client, model_name, gen_content, args.llm,
                                          max_tokens=8192)
@@ -952,6 +969,13 @@ def main() -> None:
 
             print(f"[INFO] 訓練開始: {training_steps:,} steps (上限: {args.max_steps:,})")
             loop_callbacks = [metrics_cb]
+            _reward_logger = RewardAnalysisLogger(
+                obs_schema=SURVIVORS_OBS_SCHEMA if args.game == "survivors" else {},
+                game=args.game,
+                version=args.version_name,
+            )
+            _reward_logger_cb = RewardAnalysisCallback(_reward_logger)
+            loop_callbacks.append(_reward_logger_cb)
             curriculum_cb = None
             if args.curriculum:
                 curriculum_status_path = iter_dir / "curriculum_status.json"
@@ -1000,6 +1024,10 @@ def main() -> None:
 
             # --- メトリクス収集・保存 ---
             metrics = metrics_cb.get_metrics(game_config)
+            _iter_log_dir = iter_dir / "log"
+            _reward_logger.save(_iter_log_dir, metadata={"iteration": i, "training_steps": training_steps})
+            print(f"[INFO] 報酬解析ログ: {_iter_log_dir / 'reward_analysis.md'}")
+            prev_reward_analysis = (_iter_log_dir / "reward_analysis.md").read_text(encoding="utf-8")
             if curriculum_cb is not None:
                 curriculum_metrics = game_config.collect_curriculum_metrics(curriculum_cb)
                 if curriculum_metrics:
@@ -1054,6 +1082,11 @@ def main() -> None:
 
     except KeyboardInterrupt:
         print("\n[INFO] ループを中断しました。")
+        try:
+            _reward_logger.save(iter_dir / "log", metadata={"iteration": i, "interrupted": True})
+            print("[INFO] 中断時の報酬解析ログを保存しました")
+        except Exception:
+            pass
 
     finally:
         env.close()
