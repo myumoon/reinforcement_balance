@@ -1717,9 +1717,15 @@ def main() -> None:
                     print(f"[INFO] SPALF state を保存: {spalf_status_path}")
         finally:
             if env is not None:
-                env.close()
+                try:
+                    env.close()
+                except (BrokenPipeError, OSError):
+                    pass
             if eval_env is not None:
-                eval_env.close()
+                try:
+                    eval_env.close()
+                except (BrokenPipeError, OSError):
+                    pass
         if args.curriculum and curriculum_cb is not None and args.total_steps >= 20_000:
             current_episode_count = len(curriculum_cb.export_state().get("episode_scores", []))
             if current_episode_count <= resume_episode_count:
