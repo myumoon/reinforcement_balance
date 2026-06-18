@@ -132,15 +132,15 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         )
 
     def _prompt_section_obs_index(self) -> str:
-        # 740次元 obs スキーマ（PR2 全武器対応版）に合わせた説明を生成する。
+        # 794次元 obs スキーマ（v794 全武器・パッシブ対応スキーマ）に合わせた説明を生成する。
         # セグメント開始オフセットは _offsets dict（実 C++ schema から取得）を優先し、
-        # 取得できない場合は PR2 schema の既定値にフォールバックする。
+        # 取得できない場合は v794 schema の既定値にフォールバックする。
         o = self._offsets
         max_player_hp = self._player_constant("MaxPlayerHP", 100.0)
         item_reward = self._reward_constant("ItemReward", 1.0)
         max_player_level = self._observation_constant("MaxPlayerLevel", 100)
 
-        # --- PR2 schema オフセット（デフォルト値は schema 計算値） ---
+        # --- v794 schema オフセット（デフォルト値は schema 計算値） ---
         hp_i        = o.get("player_hp",               12)
         wpn_i       = o.get("weapon_slots",             23)   # 18 dims: (type,level,cd)×6
         psvslot_i   = o.get("passive_slots",            41)   # 12 dims: (type,level)×6
@@ -166,11 +166,14 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         fp_i        = o.get("floor_pickups",           687)   # 24 dims
         sp_i        = o.get("special_pickups",         711)   # 9 dims
         dest_i      = o.get("destructibles",           720)   # 20 dims
+        war_i       = o.get("weapon_attack_range_norm", 740)  # 6 dims: 有効射程×6スロット
+        wdir_i      = o.get("weapon_is_directional",   746)   # 6 dims: 方向性フラグ×6スロット
+        wcat_i      = o.get("weapon_category_onehot",  752)   # 42 dims: one-hot(7カテゴリ)×6スロット
 
         max_enemy   = (ev_i - er_i) // 2   # = 32
 
         return (
-            f"**obs 合計: 740 次元（PR2 全武器・パッシブ対応スキーマ）**\n"
+            f"**obs 合計: 794 次元（v794 全武器・パッシブ対応スキーマ）**\n"
             f"\n"
             f"**プレイヤー状態**\n"
             f"  obs[0:2]    = player_pos (x,y) / FieldHalfSize → [-1, 1]\n"
@@ -230,6 +233,16 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"  obs[{sp_i}:{sp_i+9}]    = special_pickups ×3: (dx,dy,type_norm)\n"
             f"  obs[{dest_i}:{dest_i+20}]  = destructibles ×10: (dx,dy)\n"
             f"\n"
+            f"**武器スロット補助情報（v794 新規追加）**\n"
+            f"  obs[{war_i}:{war_i+6}]   = weapon_attack_range_norm: スロット×6 の有効射程 (0~1)\n"
+            f"    0=空スロット、値が大きいほど射程が長い（近距離aura=小, 遠距離projectile=大）\n"
+            f"  obs[{wdir_i}:{wdir_i+6}]   = weapon_is_directional: スロット×6 の方向性フラグ (0/1)\n"
+            f"    1=プレイヤーの移動方向依存（Knife, Axe, Cross, Peachone系等）、0=非方向性\n"
+            f"  obs[{wcat_i}:{wcat_i+42}]  = weapon_category_onehot: スロット×6 の7カテゴリ one-hot\n"
+            f"    各スロット7要素: [0]=None, [1]=melee_aura, [2]=melee_contact, [3]=ranged_homing,\n"
+            f"    [4]=ranged_directional, [5]=area_zone, [6]=defensive\n"
+            f"    例: Garlic(aura) → [0,1,0,0,0,0,0]、Knife(directional) → [0,0,0,0,1,0,0]\n"
+            f"\n"
             f"**Gem 取得検知**\n"
             f"  obs[{xp_i}] > prev_obs[{xp_i}] または base_reward >= {item_reward}\n"
             f"  （レベルアップ直後は obs[{xp_i}] が 0 に戻るため base_reward 判定を推奨）\n"
@@ -268,7 +281,10 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         )
 
     def _prompt_section_weapon_profiles(self) -> str:
-        wpn_i = self._offsets.get("weapon_slots", 23)
+        wpn_i  = self._offsets.get("weapon_slots",            23)
+        war_i  = self._offsets.get("weapon_attack_range_norm", 740)
+        wdir_i = self._offsets.get("weapon_is_directional",   746)
+        wcat_i = self._offsets.get("weapon_category_onehot",  752)
         W = WeaponType
         melee   = [W.GARLIC, W.WHIP, W.KING_BIBLE, W.SOUL_EATER, W.BLOODY_TEAR, W.UNHOLY_VESPERS]
         ranged  = [W.MAGIC_WAND, W.KNIFE, W.AXE, W.CROSS, W.FIRE_WAND,
@@ -285,9 +301,18 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             return ", ".join(f"{i/64:.3f}" for i in ids)
 
         return (
-            f"reward_fn は obs[{wpn_i}:{wpn_i+18}] (weapon_slots, 6スロット×3要素) を読み取り、\n"
-            f"装備中の武器タイプから立ち回り傾向を推定して、敵密度・距離シェーピングの重みを変えること。\n"
+            f"reward_fn は obs[{wpn_i}:{wpn_i+18}] (weapon_slots) および v794 新規の\n"
+            f"obs[{wcat_i}:{wcat_i+42}] (weapon_category_onehot) を活用して武器カテゴリを判定し、\n"
+            f"敵密度・距離シェーピングの重みを変えること。\n"
+            f"obs[{war_i}:{war_i+6}] (weapon_attack_range_norm) で射程を、\n"
+            f"obs[{wdir_i}:{wdir_i+6}] (weapon_is_directional) で方向性フラグを参照できる。\n"
             f"各スロットの type_norm = EWeaponType_id / 64。type_norm=0 は空スロット。\n"
+            f"\n"
+            f"**推奨: weapon_category_onehot を使ったカテゴリ判定（v794以降）**\n"
+            f"  各スロット s のカテゴリは obs[{wcat_i}+s*7 : {wcat_i}+s*7+7].argmax() で取得可。\n"
+            f"  0=None, 1=melee_aura, 2=melee_contact, 3=ranged_homing, 4=ranged_directional,\n"
+            f"  5=area_zone, 6=defensive\n"
+            f"  type_norm による手書きのID範囲テーブル照合は不要になった。\n"
             f"\n"
             f"武器カテゴリと EWeaponType_id / type_norm:\n"
             f"\n"
@@ -312,13 +337,18 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"           shield_timer_norm (obs[14]) が低い時は安全回避を優先すること。\n"
             f"\n"
             f"実装指針:\n"
-            f"- 各スロットの type_norm (0は空スロット) を上記カテゴリ範囲テーブルに照合し、\n"
-            f"  カテゴリ別の占有スロット数を集計すること。最多占有カテゴリを主力として採用する。\n"
+            f"- weapon_category_onehot (obs[{wcat_i}:{wcat_i+42}]) を使ってカテゴリ集計を行うこと。\n"
+            f"  各スロット s: cat = np.argmax(obs[{wcat_i}+s*7 : {wcat_i}+s*7+7])\n"
+            f"  カテゴリ別の占有スロット数を集計し、最多占有カテゴリを主力として採用する。\n"
             f"  例: melee_count=3, ranged_count=1, area_count=2 → 主力=melee\n"
             f"- カテゴリが混在する場合は、各カテゴリの占有スロット数を総スロット数で割った比率で\n"
             f"  敵密度ペナルティ重みを按分すること。\n"
             f"  例: melee=3/6=0.5, ranged=2/6=0.33, area=1/6=0.17 の場合、\n"
             f"  penalty_weight = melee_w * 0.5 + ranged_w * 0.33 + area_w * 0.17\n"
+            f"- weapon_attack_range_norm (obs[{war_i}:{war_i+6}]) で射程を参照し、\n"
+            f"  射程が長い武器ほど遠距離維持を評価する重みを増やしてよい。\n"
+            f"- weapon_is_directional (obs[{wdir_i}:{wdir_i+6}]) が 1 のスロットがある場合は、\n"
+            f"  カイト行動（移動方向への敵整列）を小さく補助してよい。\n"
             f"- 全武器に同一の敵距離・密度ペナルティ係数を適用しないこと。\n"
             f"- 武器カテゴリごとの大きな固定報酬オフセットは加えず、\n"
             f"  Gem接近・敵密度回避・間合い維持の重み係数だけを小さく変えること。\n"

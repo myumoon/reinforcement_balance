@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from base.entity_attention_extractor import EntityAttentionExtractor
 
-# 740次元 obs スキーマ（新）の方向別密度特徴セグメント
+# v794 obs スキーマの方向別密度特徴セグメント
 # 旧スキーマ（gem_nearest_dist_16dir 等）と新スキーマ（gem_density_all_16dir）の両方に対応
 _GLOBAL_KEYS_NEW = [
     "enemy_nearest_dist_16dir",
@@ -28,16 +28,20 @@ _ITEM_KEY_LEGACY = "gem_rel_pos"
 
 
 class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
-    """Survivors用エンティティアテンション抽出器（740次元 obs スキーマ対応）。
+    """Survivors用エンティティアテンション抽出器（v794 obs スキーマ対応）。
 
     基底クラスに加えて、方向別密度/最近傍距離のセグメントを
     global_feats として combined に結合する。
 
-    新スキーマ（740次元）と旧スキーマの両方に自動対応:
+    新スキーマ（v794: 794次元）と旧スキーマの両方に自動対応:
     - obs_schema に red_gem_rel_pos が存在する場合: 新スキーマとして処理
       新スキーマでは red/green/blue の3セグメントを結合して item として扱い、
       gem_pickup_radius（1次元スカラー）は結合対象から除外する。
     - 存在しない場合: 旧スキーマ（gem_rel_pos）として処理
+
+    注: v794 追加セグメント (weapon_attack_range_norm / weapon_is_directional /
+    weapon_category_onehot) は self_info (obs[:coin_i]) の範囲外のため、
+    現在のモデルには渡らない。将来の拡張として global_slices への追加を検討する。
     """
 
     def __init__(self, observation_space, features_dim=128, offsets=None, obs_schema=None):
