@@ -21,7 +21,6 @@ SURVIVORS_OBS_SCHEMA: dict[int, str] = {
 
 
 class RewardAnalysisLogger:
-    _MAX_STEPS = 500_000
     _OBS_SAMPLE_INTERVAL = 10
     _MAX_OBS_SAMPLES = 50_000  # obs サンプルの上限（メモリ節約）
 
@@ -51,9 +50,8 @@ class RewardAnalysisLogger:
         self._saved = False
 
     def on_step(self, shaped: float, base: float, obs: np.ndarray | None = None, env_idx: int = 0) -> None:
-        if len(self._shaped_buf) < self._MAX_STEPS:
-            self._shaped_buf.append(shaped)
-            self._base_buf.append(base)
+        self._shaped_buf.append(shaped)
+        self._base_buf.append(base)
         # per-env episode accumulation
         if env_idx not in self._ep_shaped_per_env:
             self._ep_shaped_per_env[env_idx] = []
