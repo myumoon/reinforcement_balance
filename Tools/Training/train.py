@@ -1682,7 +1682,7 @@ def main() -> None:
     callbacks.append(_reward_logger_cb)
     _reward_ckpt_cb = RewardAnalysisCheckpointCallback(
         logger=_reward_logger,
-        log_dir=log_dir,
+        log_dir=log_dir / "running_reward_analysis",
         save_freq=args.checkpoint_freq,
         run_name=str(run_dir.name),
     )
