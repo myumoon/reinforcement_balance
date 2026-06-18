@@ -129,22 +129,23 @@ class TestRulePolicyGem(unittest.TestCase):
 
     def test_gem_east_safe_east_chooses_east(self):
         """Gem が東に多く、安全も東なら East(2) を選ぶ。"""
-        gem_near = np.zeros(16, dtype=np.float32)
-        gem_near[7] = 1.0   # dir16=7 → East
-        gem_near[8] = 1.0   # dir16=8 → East
-        obs = _make_obs(gem_density_near_16dir=gem_near)
+        # v794: gem_density_all_16dir は near[0:16]+mid[16:32]+dist[32:48] の48次元
+        gem_all = np.zeros(48, dtype=np.float32)
+        gem_all[7] = 1.0   # near: dir16=7 → East
+        gem_all[8] = 1.0   # near: dir16=8 → East
+        obs = _make_obs(gem_density_all_16dir=gem_all)
         action = rule_policy(obs, _OBS_OFFSETS)
         self.assertEqual(action, 2, f"Expected East(2), got {action}")
 
     def test_gem_east_blocked_by_nearby_enemy(self):
         """東に Gem があっても東に敵が接触距離なら East(2) を選ばない。"""
-        gem_near = np.zeros(16, dtype=np.float32)
-        gem_near[7] = 1.0
-        gem_near[8] = 1.0
+        gem_all = np.zeros(48, dtype=np.float32)
+        gem_all[7] = 1.0   # near: dir16=7 → East
+        gem_all[8] = 1.0   # near: dir16=8 → East
         enemy_nd = np.ones(16, dtype=np.float32)
         enemy_nd[7] = 0.05   # dir16=7 (East) に敵が接触距離
         enemy_nd[8] = 0.05
-        obs = _make_obs(gem_density_near_16dir=gem_near, enemy_nearest_dist_16dir=enemy_nd)
+        obs = _make_obs(gem_density_all_16dir=gem_all, enemy_nearest_dist_16dir=enemy_nd)
         action = rule_policy(obs, _OBS_OFFSETS)
         self.assertNotEqual(action, 2, f"East(2) should be avoided due to contact enemy")
 
@@ -171,8 +172,9 @@ class TestRulePolicyTieBreaking(unittest.TestCase):
 
     def test_uniform_gem_not_fixed_to_west(self):
         """全方向 gem が同じ場合、dir16=0 対応の West(6) に固定されない。"""
-        gem_near = np.ones(16, dtype=np.float32) * 0.5
-        obs = _make_obs(gem_density_near_16dir=gem_near)
+        # v794: gem_density_all_16dir は 48次元（near+mid+dist 各16）
+        gem_all = np.ones(48, dtype=np.float32) * 0.5
+        obs = _make_obs(gem_density_all_16dir=gem_all)
         results = set(_run_n(obs, n=200, seed=1))
         self.assertGreater(len(results), 1, f"Expected diverse results, got {results}")
         if 6 in results:

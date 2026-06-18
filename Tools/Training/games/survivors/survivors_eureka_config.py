@@ -248,7 +248,7 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"  （レベルアップ直後は obs[{xp_i}] が 0 に戻るため base_reward 判定を推奨）\n"
             f"\n"
             f"**⚠ 注意事項**\n"
-            f"  weapon_slots の type_norm は武器フェーズにより変化する（W0: Garlic のみ、W6: 全武器）\n"
+            f"  weapon_slots の type_norm は武器フェーズにより変化する（W0: Garlic のみ、W5: 全武器）\n"
             f"  reward_fn は特定武器の固定値を仮定しないこと（obs スキーマは永続固定だが武器構成は可変）\n"
             f"  Garlic等の武器パラメータは Source of Truth のC++ snippetを参照すること"
         )
