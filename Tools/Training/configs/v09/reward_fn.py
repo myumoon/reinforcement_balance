@@ -237,10 +237,25 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     # ============================================================
     if near_melee_ratio > 0.2 and is_moving and nearest_enemy_dir is not None:
         approach_dot = float(np.dot(vel_norm, nearest_enemy_dir))
-        # HP が低い時は安全優先のため接近ボーナスを抑制
         hp_gate_approach = min(player_hp_norm / 0.5, 1.0)
-        approach_bonus = 0.025 * near_melee_ratio * max(0.0, approach_dot) * hp_gate_approach
+        # Orbital クールダウン中は接近ボーナスを抑制（聖書が消えている間に近づくと無防備）
+        orbital_cooldown_gate = 1.0 - 0.8 * orbital_ratio * orbital_cooldown_max
+        approach_bonus = 0.025 * near_melee_ratio * max(0.0, approach_dot) * hp_gate_approach * orbital_cooldown_gate
         shaped += approach_bonus
+
+    # ============================================================
+    # 6b. [v09 修正] Orbital クールダウン中の敵近接ペナルティ
+    #    KingBible 充填中（聖書なし）に敵が近い状態そのものを抑制
+    #    5c が「移動方向」への抑制であるのに対し、6b は「現在位置」への抑制
+    # ============================================================
+    if orbital_ratio > 0.1 and orbital_cooldown_max > 0.5:
+        min_enemy_dist_orbital = float(np.min(enemy_nearest_16))
+        if min_enemy_dist_orbital < 0.25:
+            cooldown_proximity_pen = (
+                -0.03 * orbital_ratio * orbital_cooldown_max
+                * (1.0 - min_enemy_dist_orbital / 0.25)
+            )
+            shaped += cooldown_proximity_pen
 
     # ============================================================
     # 7. [v09 新規] RangedDirectional: 前方敵密度ボーナス
