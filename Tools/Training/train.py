@@ -41,6 +41,7 @@ import torch
 from base.base_ue5_env import UE5ConnectionError
 from common.utils import _linear_schedule
 from common.wandb_logger import WandbLogger
+from common.reward_analysis_logger import RewardAnalysisLogger, RewardAnalysisCallback, SURVIVORS_OBS_SCHEMA
 from curriculum_callback import CurriculumCallback
 from games.survivors.weapon_curriculum_callback import WeaponCurriculumCallback as _WeaponCurriculumCallback
 
@@ -1672,6 +1673,14 @@ def main() -> None:
     )
     callbacks.append(checkpoint_cb)
 
+    _reward_logger = RewardAnalysisLogger(
+        obs_schema=SURVIVORS_OBS_SCHEMA if args.game == "survivors" else {},
+        game=args.game,
+        version=getattr(args, "version_name", ""),
+    )
+    _reward_logger_cb = RewardAnalysisCallback(_reward_logger)
+    callbacks.append(_reward_logger_cb)
+
     exit_reason = "completed"
     exit_error = None
 
@@ -1691,6 +1700,11 @@ def main() -> None:
         print("\n[WARN] UE5 HTTP 接続が復旧できませんでした。モデルを保存して終了します。")
         print(f"[WARN] {exit_error}")
     finally:
+        try:
+            _reward_logger.save(log_dir, metadata={"run": str(run_dir.name)})
+            print(f"[INFO] 報酬解析ログ保存: {log_dir / 'reward_analysis.md'}")
+        except Exception as _e:
+            print(f"[WARN] 報酬解析ログの保存に失敗しました: {_e}")
         try:
             if model is not None:
                 model.save(str(model_base_path))

@@ -27,20 +27,23 @@ class EurekaGameConfig(ABC):
     def build_prompt(self, prev_metrics: dict | None, iteration: int,
                      prev_review: str | None = None,
                      initial_observation: str | None = None,
-                     source_of_truth: dict | None = None) -> str:
+                     source_of_truth: dict | None = None,
+                     prev_reward_analysis: str | None = None) -> str:
         """LLM へのプロンプト文字列を生成して返す。"""
         ...
 
     def build_prompt_parts(self, prev_metrics: dict | None, iteration: int,
                            prev_review: str | None = None,
                            initial_observation: str | None = None,
-                           source_of_truth: dict | None = None) -> tuple[str, str]:
+                           source_of_truth: dict | None = None,
+                           prev_reward_analysis: str | None = None) -> tuple[str, str]:
         """Anthropic プロンプトキャッシュ用の (静的プレフィックス, 動的サフィックス) を返す。
 
         デフォルト実装: 静的部分なし（キャッシュ無効）。
         ゲーム固有の静的プレフィックスがある場合は override する。
         """
-        return "", self.build_prompt(prev_metrics, iteration, prev_review, initial_observation)
+        return "", self.build_prompt(prev_metrics, iteration, prev_review, initial_observation,
+                                     prev_reward_analysis=prev_reward_analysis)
 
     def build_constraints_hint(self, source_of_truth: dict | None = None) -> str:
         """改訂プロンプト用の制約ヒント文字列を返す（任意 override）。
