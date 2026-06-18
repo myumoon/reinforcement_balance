@@ -23,6 +23,7 @@ SURVIVORS_OBS_SCHEMA: dict[int, str] = {
 class RewardAnalysisLogger:
     _MAX_STEPS = 500_000
     _OBS_SAMPLE_INTERVAL = 10
+    _MAX_OBS_SAMPLES = 50_000  # obs サンプルの上限（メモリ節約）
 
     def __init__(
         self,
@@ -56,7 +57,9 @@ class RewardAnalysisLogger:
         self._ep_shaped.append(shaped)
         self._ep_base.append(base)
         self._step_count += 1
-        if obs is not None and self._step_count % self._OBS_SAMPLE_INTERVAL == 0:
+        if (obs is not None
+                and self._step_count % self._OBS_SAMPLE_INTERVAL == 0
+                and len(self._obs_buf) < self._MAX_OBS_SAMPLES):
             self._obs_buf.append(obs.copy())
             self._obs_shaped_buf.append(shaped)
 
@@ -241,12 +244,14 @@ class RewardAnalysisCallback(BaseCallback):
         self._rl = logger
 
     def _on_step(self) -> bool:
-        info = self.locals["infos"][0]
-        shaped = float(info.get("shaped_reward", 0.0))
-        base = float(info.get("base_reward", 0.0))
-        new_obs = self.locals.get("new_obs")
-        obs_vec = new_obs[0] if new_obs is not None else None
-        self._rl.on_step(shaped, base, obs_vec)
-        if self.locals["dones"][0]:
-            self._rl.on_episode_end()
+        infos = self.locals["infos"]
+        dones = self.locals["dones"]
+        new_obs = self.locals.get("new_obs")  # shape: (n_envs, obs_dim)
+        for env_idx, (info, done) in enumerate(zip(infos, dones)):
+            shaped = float(info.get("shaped_reward", 0.0))
+            base = float(info.get("base_reward", 0.0))
+            obs_vec = new_obs[env_idx] if new_obs is not None else None
+            self._rl.on_step(shaped, base, obs_vec)
+            if done:
+                self._rl.on_episode_end()
         return True
