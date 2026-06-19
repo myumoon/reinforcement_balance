@@ -17,6 +17,17 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
         （obs[740:746] weapon_attack_range_norm を使用、固定 [0.15,0.40] を廃止）
         低HP時 (HP<0.3) はボーナスを最大 2x に強化し、逃走ではなく間合い維持を促す
 
+    v10 03_fix_orbital_kiting 変更:
+      - Fix 1: near_melee_ratio から orbital_ratio を除外
+        KingBible/UnholyVespers は orbit が自動攻撃するため approach_bonus の対象外。
+        接近ボーナスで敵に突進して 0距離死亡する問題を解消。
+      - Fix 2: Section 13 に Orbital 専用 donut 距離帯を追加
+        KingBible の orbit 半径(~60-90u)外縁を包む [60u, 240u] が最適距離。
+        is_near_type=False にすることで近すぎにもペナルティを付与。
+      - Fix 3: Section 12a 新設 — 全武器共通の緊急接近ペナルティ
+        60u(0.025) 以内に敵が入ると最大 -0.10 のペナルティ。
+        approach_bonus 最大値(~0.025)の 4倍以上の強さで「近づかない」を最優先学習。
+
     obs レイアウト (794 dims, obs_schema v794):
       [0:2]    player_pos (x/HN, y/HN)
       [2:4]    player_vel (vx/MoveSpeed, vy/MoveSpeed)
@@ -159,8 +170,10 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     area_drop_ratio    = area_drop_count / equipped_count
     defensive_ratio    = defensive_count / equipped_count
 
-    # 近接系の合計 (接近ボーナスの適用判断に使用)
-    near_melee_ratio = garlic_auto_ratio + orbital_ratio + melee_line_ratio
+    # [Fix 1] Orbital 系は orbit が自動攻撃するため approach_bonus の対象から除外。
+    # KingBible はプレイヤーが近づかなくても orbit が敵を迎撃する。
+    # orbital_ratio を含めると「敵に突進 → 0距離死亡」を誘発する。
+    near_melee_ratio = garlic_auto_ratio + melee_line_ratio
 
     # density_pen_mult: 武器グループ別に調整
     # Garlic/Orbital は「敵の近く」が最適なので密度ペナルティを大幅軽減
@@ -248,8 +261,9 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
             shaped += cooldown_density_pen
 
     # ============================================================
-    # 6. [v09 新規] Garlic/Orbital/MeleeLine: 敵接近ボーナス
+    # 6. [v09 新規] Garlic/MeleeLine: 敵接近ボーナス
     #    PR#202 で全敵が Player より遅くなったため、自ら接近しないと DPS が出ない
+    #    [Fix 1] Orbital は near_melee_ratio から除外済み（orbit 自動攻撃のため不要）
     # ============================================================
     if near_melee_ratio > 0.2 and is_moving and nearest_enemy_dir is not None:
         approach_dot = float(np.dot(vel_norm, nearest_enemy_dir))
@@ -353,13 +367,26 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
             shaped += low_hp_danger
 
     # ============================================================
+    # 12a. [Fix 3] 全武器共通: 敵との緊急接近ペナルティ
+    #    KingBible 等 orbit 系でも敵が orbit 内（< 60u）に入ると直接ダメージを受ける。
+    #    approach_bonus 最大値(~0.025)の 4倍以上の強さで「近づかない」を最優先で学習させる。
+    #    HP や武器種に依存せず常時発動し、0距離死亡を根本から抑制する。
+    # ============================================================
+    _emergency_enemy_dist = float(np.min(enemy_nearest_16))
+    _EMERGENCY_DIST = 0.025  # ≈ 60u（KingBible orbit 半径の目安）
+    if _emergency_enemy_dist < _EMERGENCY_DIST:
+        shaped += -0.10 * (1.0 - _emergency_enemy_dist / _EMERGENCY_DIST)
+
+    # ============================================================
     # 13. [v10 刷新] 全武器適正距離維持ボーナス
     #    obs[740:746] = weapon_attack_range_norm (GetWeaponEffectiveRange() の値)
     #    enemy_nearest_16 の正規化基準: EnemyNearestDistanceMax = 2400u
     #
     #    weapon_attack_range_norm → 適正距離帯のマッピング:
+    #      Orbital (KingBible 等): [Fix 2] donut 距離帯 [60u, 240u] → [0.025, 0.100]
+    #        orbit 半径内に入ると直接ダメージ → 近すぎも遠すぎも逓減
     #      ≤ 0.05  Garlic/SoulEater:    密着 (0〜60u)    → [0.000, 0.025]
-    #      ≤ 0.15  KingBible/Whip:      近接 (0〜90u)    → [0.000, 0.040]
+    #      ≤ 0.15  Whip 等:             近接 (0〜90u)    → [0.000, 0.040]
     #      ≤ 0.35  SantaWater/LRing:    中近  (150〜480u) → [0.063, 0.200]
     #      ≤ 0.55  MagicWand/FireWand:  中距離(200〜650u) → [0.083, 0.280]
     #      ≤ 0.79  Runetracer 等:       中遠  (250〜900u) → [0.104, 0.375]
@@ -395,7 +422,12 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
 
         # 適正距離帯 (lo, hi) と近接系フラグを決定
         is_near_type = False
-        if wtype_id_s13 in CROSS_BOOMERANG_IDS:
+        if wtype_id_s13 in ORBITAL_IDS:
+            # [Fix 2] KingBible/UnholyVespers: orbit 半径(~60-90u)の外縁を包む donut 距離帯
+            # 近すぎ(< 60u)は orbit 内侵入で直接ダメージ、遠すぎは orbit が届かない
+            lo, hi = 0.025, 0.100   # 60u〜240u
+            is_near_type = False    # donut: 近すぎも遠すぎも逓減
+        elif wtype_id_s13 in CROSS_BOOMERANG_IDS:
             # Cross/HeavenSword: 往路の折り返し距離 75u が実質の間合い
             lo, hi = 0.000, 0.035   # 75u / 2400u ≈ 0.031 に余裕を持たせた 0.035
             is_near_type = True
@@ -409,7 +441,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
         elif r <= 0.05:        # Garlic / SoulEater: 密着
             lo, hi = 0.000, 0.025
             is_near_type = True
-        elif r <= 0.15:        # KingBible / Whip: 近接
+        elif r <= 0.15:        # Whip 等の近接（KingBible は ORBITAL_IDS で先に処理済み）
             lo, hi = 0.000, 0.040
             is_near_type = True
         elif r <= 0.35:        # SantaWater / LightningRing: 中近距離
@@ -428,7 +460,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
                 overshoot = (min_enemy_dist_val - hi) / hi
                 dist_score = max(0.0, 1.0 - overshoot * 3.0)
         else:
-            # 中距離系: バンド中央付近が満点、外れると逓減
+            # 中距離系 / Orbital donut: バンド中央付近が満点、外れると逓減
             if min_enemy_dist_val < lo:
                 # バンドより近すぎ (敵に密着しすぎ)
                 overshoot = (lo - min_enemy_dist_val) / lo if lo > 0.0 else 0.0
