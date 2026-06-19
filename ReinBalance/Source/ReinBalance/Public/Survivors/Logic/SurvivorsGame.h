@@ -187,6 +187,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	bool bVariableFrameRate = false;
 
+	/** WallActorがある場合はBeginPlay時に自動計算される（sim units）。WallActorがない場合のフォールバック値。 */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Config")
 	float FieldHalfSize = 1000.f;
 
