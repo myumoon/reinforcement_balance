@@ -31,6 +31,23 @@ void USurvivorsCollisionComponent::CollectWallActors()
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[SurvivorsGame] WallActors found: %d"), Game->WallActors.Num());
+
+	if (Game->WallActors.Num() > 0)
+	{
+		// 各WallActorの内側面（原点に最も近い面）の絶対値を求め、全Wall間の最大値をFieldHalfSizeとする
+		float Computed = 0.f;
+		for (const TObjectPtr<AWallActor>& Wall : Game->WallActors)
+		{
+			if (!Wall) continue;
+			const FBox2D Box = Wall->GetSimBounds(Game->SimToUE);
+			const float Inner = FMath::Min(
+				FMath::Min(FMath::Abs(Box.Min.X), FMath::Abs(Box.Max.X)),
+				FMath::Min(FMath::Abs(Box.Min.Y), FMath::Abs(Box.Max.Y)));
+			Computed = FMath::Max(Computed, Inner);
+		}
+		Game->FieldHalfSize = Computed;
+		UE_LOG(LogTemp, Log, TEXT("[SurvivorsGame] FieldHalfSize auto-computed from WallActors: %.1f"), Game->FieldHalfSize);
+	}
 }
 
 void USurvivorsCollisionComponent::ResolveWallCollisions()
