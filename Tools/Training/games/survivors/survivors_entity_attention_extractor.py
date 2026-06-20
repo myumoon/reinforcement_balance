@@ -26,22 +26,37 @@ _GLOBAL_KEYS_LEGACY = [
 _GEM_REL_POS_KEYS_NEW = ["red_gem_rel_pos", "green_gem_rel_pos", "blue_gem_rel_pos"]
 _ITEM_KEY_LEGACY = "gem_rel_pos"
 
+# v794 追加セグメント: 武器情報・フィールドアイテム（グローバル特徴量として追加）
+# self_info(obs[0:coin_i]) の範囲外のため global_slices に個別追加する。
+# スキーマに存在しないキーはスキップして後方互換を維持する。
+_EXTRA_GLOBAL_KEYS = [
+    "weapon_attack_range_norm",   # 6  dims: GetWeaponEffectiveRange() × 6スロット
+    "weapon_is_directional",      # 6  dims: 6スロット
+    "weapon_category_onehot",     # 42 dims: 6スロット × 7カテゴリ
+    "floor_pickups",              # 24 dims: 8アイテム × (dx,dy,type_norm)
+    "special_pickups",            # 9  dims: 3アイテム × (dx,dy,type_norm)
+    "destructibles",              # 20 dims: 10アイテム × (dx,dy)
+]
+
 
 class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
     """Survivors用エンティティアテンション抽出器（v794 obs スキーマ対応）。
 
-    基底クラスに加えて、方向別密度/最近傍距離のセグメントを
-    global_feats として combined に結合する。
+    基底クラスに加えて以下を追加:
+    - 方向別密度/最近傍距離セグメントを global_feats として結合（既存）
+    - weapon_attack_range_norm / weapon_is_directional / weapon_category_onehot を
+      global_feats に追加（v794 追加セグメント）
+    - floor_pickups / special_pickups / destructibles を global_feats に追加
+    - enemy_frozen を敵スカラー特徴として enemy_encoder に追加
+    - projectiles (プレイヤー武器の飛翔体) を専用 attention head で集約
 
     新スキーマ（v794: 794次元）と旧スキーマの両方に自動対応:
     - obs_schema に red_gem_rel_pos が存在する場合: 新スキーマとして処理
-      新スキーマでは red/green/blue の3セグメントを結合して item として扱い、
-      gem_pickup_radius（1次元スカラー）は結合対象から除外する。
     - 存在しない場合: 旧スキーマ（gem_rel_pos）として処理
+    - _EXTRA_GLOBAL_KEYS / projectiles / enemy_frozen は存在する場合のみ追加
 
-    注: v794 追加セグメント (weapon_attack_range_norm / weapon_is_directional /
-    weapon_category_onehot) は self_info (obs[:coin_i]) の範囲外のため、
-    現在のモデルには渡らない。将来の拡張として global_slices への追加を検討する。
+    combined ベクトル構成（新スキーマ・全セグメント存在時）:
+        self_info (58) + global_feats (251) + gem_agg (32) + enemy_agg (32) + proj_agg (32) = 405
     """
 
     def __init__(self, observation_space, features_dim=128, offsets=None, obs_schema=None):
@@ -52,12 +67,12 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
         self._is_new_schema = "red_gem_rel_pos" in offsets
         global_keys = _GLOBAL_KEYS_NEW if self._is_new_schema else _GLOBAL_KEYS_LEGACY
 
-        if self._is_new_schema:
-            # 新スキーマ: item_key は red_gem_rel_pos を基準とし、
-            # _split_obs でオーバーライドして3セグメントを結合する
-            item_key = "red_gem_rel_pos"
-        else:
-            item_key = _ITEM_KEY_LEGACY
+        item_key = "red_gem_rel_pos" if self._is_new_schema else _ITEM_KEY_LEGACY
+
+        # enemy_frozen はスキーマに存在する場合のみ追加（後方互換）
+        enemy_scalar_keys = ["enemy_type", "enemy_hp"]
+        if "enemy_frozen" in offsets:
+            enemy_scalar_keys.append("enemy_frozen")
 
         super().__init__(
             observation_space,
@@ -65,12 +80,10 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
             offsets=offsets,
             item_key=item_key,
             use_polar=True,
-            enemy_scalar_keys=["enemy_type", "enemy_hp"],
+            enemy_scalar_keys=enemy_scalar_keys,
         )
 
         if self._is_new_schema:
-            # 新スキーマ: red/green/blue gem の各セグメントスライスを保存し、
-            # _split_obs でこれらを結合して item を構成する
             self._gem_slices: list[tuple[int, int]] = []
             total_gem_dim = 0
             for key in _GEM_REL_POS_KEYS_NEW:
@@ -80,9 +93,9 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
                         start = offsets[key]
                         self._gem_slices.append((start, start + dim))
                         total_gem_dim += dim
-            self._num_items = total_gem_dim // 2  # 2次元（dx,dy）ずつ
+            self._num_items = total_gem_dim // 2
 
-        # global セグメントの (start, end) リストを構築（自動判別済みの global_keys を使用）
+        # global セグメント構築（既存キー）
         self._global_slices: list[tuple[int, int]] = []
         global_dim = 0
         for key in global_keys:
@@ -101,29 +114,44 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
             self._global_slices.append((start, start + dim))
             global_dim += dim
 
-        # global_dim を考慮した final 層で差し替え
+        # 追加グローバルセグメント（v794）: スキーマにある分だけ個別追加
+        for key in _EXTRA_GLOBAL_KEYS:
+            if key in offsets:
+                dim = schema_map.get(key, 0)
+                if dim > 0:
+                    start = offsets[key]
+                    self._global_slices.append((start, start + dim))
+                    global_dim += dim
+
+        # プロジェクタイル attention head（存在する場合のみ構築）
         e = self._EMBED_DIM
+        self._proj_slice: tuple[int, int] | None = None
+        proj_agg_dim = 0
+        if "projectiles" in offsets:
+            proj_total_dim = schema_map.get("projectiles", 0)
+            if proj_total_dim > 0:
+                proj_start = offsets["projectiles"]
+                self._proj_slice = (proj_start, proj_start + proj_total_dim)
+                self._num_projectiles = proj_total_dim // 6  # 各プロジェクタイル: (dx,dy,r,vx,vy,warning)
+                self.proj_encoder = nn.Sequential(
+                    nn.Linear(6, e), nn.ReLU(),
+                    nn.Linear(e, e), nn.ReLU(),
+                )
+                self.proj_query = nn.Parameter(torch.randn(e))
+                proj_agg_dim = e
+
+        # final 層を全追加分を含む次元で再構築
         self.final = nn.Sequential(
-            nn.Linear(self._self_dim + global_dim + e + e, features_dim),
+            nn.Linear(self._self_dim + global_dim + e + e + proj_agg_dim, features_dim),
             nn.ReLU(),
         )
 
     def _split_obs(self, obs: torch.Tensor, B: int):
-        """obs をセグメントに分割して返す。
-
-        新スキーマでは red/green/blue gem セグメントを結合して item を構成する。
-        gem_pickup_radius（1次元スカラー）は item に含めない。
-        旧スキーマは基底クラスの _split_obs に委譲する。
-        """
         if not self._is_new_schema:
             return super()._split_obs(obs, B)
 
-        # 新スキーマ: red/green/blue gem セグメントを結合
         gem_parts = [obs[:, s:e] for s, e in self._gem_slices]
-        if gem_parts:
-            gem_concat = torch.cat(gem_parts, dim=-1)  # [B, total_gem_dim]
-        else:
-            gem_concat = torch.zeros(B, 0, device=obs.device)
+        gem_concat = torch.cat(gem_parts, dim=-1) if gem_parts else torch.zeros(B, 0, device=obs.device)
         items = gem_concat.reshape(B, self._num_items, 2)
 
         e_pos = obs[:, self._enemy_r_i:self._enemy_v_i].reshape(B, self._num_enemies, 2)
@@ -160,5 +188,16 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
         item_agg  = self._attend(item_enc,  self.coin_query,  self.dist_alpha * item_dist)
         enemy_agg = self._attend(enemy_enc, self.enemy_query, self.dist_alpha * enemy_dist)
 
-        combined = torch.cat([self_info, global_feats, item_agg, enemy_agg], dim=-1)
+        parts = [self_info, global_feats, item_agg, enemy_agg]
+
+        if self._proj_slice is not None:
+            s, e_idx = self._proj_slice
+            proj_raw = obs[:, s:e_idx].reshape(B, self._num_projectiles, 6)
+            # dx,dy ([:, :, :2]) からプレイヤーとの距離を計算して attention バイアスに使用
+            proj_dist = torch.norm(proj_raw[:, :, :2], dim=-1)
+            proj_enc  = self.proj_encoder(proj_raw)
+            proj_agg  = self._attend(proj_enc, self.proj_query, self.dist_alpha * proj_dist)
+            parts.append(proj_agg)
+
+        combined = torch.cat(parts, dim=-1)
         return self.final(combined)
