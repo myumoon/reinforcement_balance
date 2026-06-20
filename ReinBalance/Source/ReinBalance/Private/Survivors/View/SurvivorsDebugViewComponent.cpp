@@ -199,10 +199,25 @@ void USurvivorsDebugViewComponent::DrawSection_Train(int32& Key, TArray<FDebugLi
 	Key = DebugKeyBase + 110;
 	AddLine(pendingLines, Key++, TEXT("--- Train ---"), FLinearColor::White);
 
-	const float Reward = Game->GetLastReward();
+	const float StepReward   = Game->GetLastReward();
+	const float EpBase       = Game->GetEpisodeBaseReward();
+	const float ActiveScore  = Game->GetEpisodeActiveScore();
+
 	AddLine(pendingLines, Key++,
-		FString::Printf(TEXT("%-10s %.4f"), TEXT("Reward"), Reward),
+		FString::Printf(TEXT("%-10s %.4f"), TEXT("Reward"), StepReward),
 		FLinearColor::White);
+	AddLine(pendingLines, Key++,
+		FString::Printf(TEXT("%-10s %.4f"), TEXT("TotalRew"), EpBase),
+		FLinearColor::White);
+	AddLine(pendingLines, Key++,
+		FString::Printf(TEXT("%-10s %.4f"), TEXT("BaseRew"), EpBase),
+		FLinearColor::White);
+	AddLine(pendingLines, Key++,
+		FString::Printf(TEXT("%-10s %.4f"), TEXT("ShapedRew"), 0.f),
+		FLinearColor(0.5f, 0.5f, 0.5f));
+	AddLine(pendingLines, Key++,
+		FString::Printf(TEXT("%-10s %.4f"), TEXT("ActiveScore"), ActiveScore),
+		FLinearColor::Yellow);
 }
 
 void USurvivorsDebugViewComponent::AddLine(TArray<FDebugLine>& lines, int32 Key, const FString& Text, FLinearColor Color)
