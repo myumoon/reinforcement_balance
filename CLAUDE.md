@@ -79,3 +79,4 @@ python train.py --game survivors --total-steps 500000
 | [`docs/train/overview.md`](docs/train/overview.md) | 訓練スクリプト概要・モジュール構成 |
 | [`docs/train/ue5_env.md`](docs/train/ue5_env.md) | UE5 HTTP API 仕様・`/params` の挙動 |
 | [`docs/train/impl_notes.md`](docs/train/impl_notes.md) | 実装上の注意点・既知の問題（コールバック・多並列・Resume・SPALF） |
+| [`docs/train/reward_fn_policy.md`](docs/train/reward_fn_policy.md) | Survivors reward_fn 設計ポリシー 12 項目（reward_fn を実装・修正する際の必須チェックリスト） |
