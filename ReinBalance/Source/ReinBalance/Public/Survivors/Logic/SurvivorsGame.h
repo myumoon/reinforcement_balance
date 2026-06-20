@@ -142,6 +142,10 @@ public:
 	float              GetPlayerShieldTimer()      const { return PlayerShieldTimer; }
 	float              GetElapsedTime()            const { return ElapsedTime; }
 	float              GetLastReward()             const { return LastReward; }
+	float              GetEpisodeBaseReward()      const { return EpisodeBaseReward; }
+	int32              GetEpisodeStepCount()       const { return EpisodeStepCount; }
+	/** AliveReward 分を除いた撃破・収集による実質スコア（active_score に相当） */
+	float              GetEpisodeActiveScore()     const { return EpisodeBaseReward - AliveReward * static_cast<float>(EpisodeStepCount); }
 	/** Idx は 0..MaxPassiveSlots-1。範囲チェックは呼び出し側で行う */
 	const FPassiveSlot& GetPassiveSlot(int32 Idx) const { return PassiveSlots[Idx]; }
 
@@ -382,6 +386,8 @@ private:
 	float                 SpawnAccumulator = 0.f;
 	bool                  bBossSpawned     = false;
 	float                 LastReward       = 0.f;
+	float                 EpisodeBaseReward = 0.f;
+	int32                 EpisodeStepCount  = 0;
 	bool                  bDone            = false;
 	bool                  bTruncated       = false;
 	FRandomStream         RandStream;

@@ -239,7 +239,9 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 
 	ElapsedTime           = 0.f;
 	GlobalFreezeUntilTime = -1.f;
-	LastReward  = 0.f;
+	LastReward        = 0.f;
+	EpisodeBaseReward = 0.f;
+	EpisodeStepCount  = 0;
 	bDone       = false;
 	bTruncated  = false;
 }
@@ -306,10 +308,14 @@ void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 	if (PlayerHP <= 0.f)
 	{
 		bDone = true;
+		EpisodeBaseReward += LastReward;
+		EpisodeStepCount++;
 		return;
 	}
 
 	LastReward += AliveReward;
+	EpisodeBaseReward += LastReward;
+	EpisodeStepCount++;
 
 	if (MaxEpisodeTime > 0.f && ElapsedTime >= MaxEpisodeTime)
 	{
