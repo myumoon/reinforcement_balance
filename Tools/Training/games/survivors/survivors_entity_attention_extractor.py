@@ -30,6 +30,7 @@ _ITEM_KEY_LEGACY = "gem_rel_pos"
 # self_info(obs[0:coin_i]) の範囲外のため global_slices に個別追加する。
 # スキーマに存在しないキーはスキップして後方互換を維持する。
 _EXTRA_GLOBAL_KEYS = [
+    "gem_pickup_radius",          # 1  dim : Attractorb 等で変動する収集半径（正規化済み）
     "weapon_attack_range_norm",   # 6  dims: GetWeaponEffectiveRange() × 6スロット
     "weapon_is_directional",      # 6  dims: 6スロット
     "weapon_category_onehot",     # 42 dims: 6スロット × 7カテゴリ
@@ -56,7 +57,7 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
     - _EXTRA_GLOBAL_KEYS / projectiles / enemy_frozen は存在する場合のみ追加
 
     combined ベクトル構成（新スキーマ・全セグメント存在時）:
-        self_info (58) + global_feats (251) + gem_agg (32) + enemy_agg (32) + proj_agg (32) = 405
+        self_info (58) + global_feats (252) + gem_agg (32) + enemy_agg (32) + proj_agg (32) = 406
     """
 
     def __init__(self, observation_space, features_dim=128, offsets=None, obs_schema=None):
