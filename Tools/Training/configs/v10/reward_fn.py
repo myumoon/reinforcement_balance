@@ -3,30 +3,26 @@ import numpy as np
 def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) -> float:
     """
     Survivors reward shaping v10.
-    v09 からの変更:
-      - バージョン番号の更新
-      - PR#216: Orbital クールダウン中の敵接近抑制を Section 6 に統合
-        （Section 5c の移動方向ペナルティに加え、接近ボーナス自体を cooldown_gate で抑制）
-      - reward_analysis_logger.py と組み合わせて使用
-        (shaped_reward 分布・obs 相関・エピソード時系列が自動ログされる)
+    reward_fn_policy.md の 12 項目チェックリストに対応した改訂版。
 
-    v10 obs_schema v794 対応変更:
-      - Section 6b: Orbital クールダウン近接ペナルティを -0.03 → -0.02 に軽減
-        （5c との二重がけによる過剰抑制を解消）
-      - Section 13 刷新: 全武器カテゴリ対応の適正距離維持ボーナス
-        （obs[740:746] weapon_attack_range_norm を使用、固定 [0.15,0.40] を廃止）
-        低HP時 (HP<0.3) はボーナスを最大 2x に強化し、逃走ではなく間合い維持を促す
-
-    v10 03_fix_orbital_kiting 変更:
-      - Fix 1: near_melee_ratio から orbital_ratio を除外
-        KingBible/UnholyVespers は orbit が自動攻撃するため approach_bonus の対象外。
-        接近ボーナスで敵に突進して 0距離死亡する問題を解消。
-      - Fix 2: Section 13 に Orbital 専用 donut 距離帯を追加
-        KingBible の orbit 半径(~60-90u)外縁を包む [60u, 240u] が最適距離。
-        is_near_type=False にすることで近すぎにもペナルティを付与。
-      - Fix 3: Section 12a 新設 — 全武器共通の緊急接近ペナルティ
-        60u(0.025) 以内に敵が入ると最大 -0.10 のペナルティ。
-        approach_bonus 最大値(~0.025)の 4倍以上の強さで「近づかない」を最優先学習。
+    変更履歴（Fix 識別子は reward_fn_policy.md / 実装プランに準拠）:
+      Fix A: Section 12a — Garlic 主体時は緊急接近ペナルティを除外（Item 1）
+             garlic_auto_ratio >= 0.5 の場合は 12a を発動しない。
+             混在ロードアウト（Garlic+KingBible 等）では引き続き発動し KingBible を保護。
+      Fix B: Section 13 — 射程バンド超過時の明示的ペナルティ追加（Item 3）
+             is_near_type 問わず、バンドの 2 倍以上逃げると追加マイナスを付与。
+      Fix C: Section 1b 新設 — 全武器共通 cooldown 集計（Item 4）
+             all_cooldown_max / active_slot_exists / best_active_level を事前計算。
+             Section 5a の density_pen_mult に cooldown_density_mult を乗算。
+      Fix D: Section 6a 新設 — アクティブ強武器による高密度方向移動ボーナス（Item 9）
+             cooldown < 0.2 かつ level_norm >= 0.3 の武器があれば前方密度ボーナスを付与。
+      Fix E: Section 13 — 複数武器同時射程帯重複ボーナス + DPS 優先重み（Item 6）
+             同一ステップで射程帯が重複するスロット数に応じてボーナス加算。
+             優先武器（高 Lv・低 cooldown）と同距離帯に入ると重みを強化。
+      Fix F: Section 9 改修 — Gem 接近デルタに密度重みを乗算（Item 8）
+             移動方向の gem_density_near が高いほど接近ボーナスを増幅。
+      Fix G: Section 15a 新設 — レベルアップ直前の Gem 加速（Item 12）
+             xp_progress > 0.7 で Gem 収集シグナルを最大 1.5 倍に強化。
 
     obs レイアウト (794 dims, obs_schema v794):
       [0:2]    player_pos (x/HN, y/HN)
@@ -77,7 +73,6 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     wall_rays = obs[4:12]
     player_hp_norm = obs[12]
     shield_active = obs[13]
-    shield_timer = obs[14]
 
     weapon_slots_raw = obs[23:41].reshape(6, 3)
 
@@ -87,7 +82,6 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     green_gem_rel = obs[78:102].reshape(12, 2)
     blue_gem_rel = obs[102:126].reshape(12, 2)
 
-    # 最近傍敵の相対位置 (dx/DN, dy/DN) — 方向計算に使用
     enemy_rel = obs[127:191].reshape(32, 2)
 
     enemy_nearest_16 = obs[351:367]
@@ -99,29 +93,19 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     gem_density_near_16 = gem_density_all[1]
     gem_density_mid_16 = gem_density_all[2]
 
-    # v794 追加次元
-    weapon_range_norms = obs[740:746]  # GetWeaponEffectiveRange() 正規化値
+    weapon_range_norms = obs[740:746]
 
     # ============================================================
-    # 1. 武器分類 (v09: 6グループ + defensive に細分化)
-    #    UE5 SurvivorsGameConstants::GetWeaponCategory() の定義と一致させること
+    # 1. 武器分類 (v09: 6グループ + defensive)
     # ============================================================
-    # 自律範囲 (敵に近いほど有効)
-    GARLIC_AUTO_IDS = {1, 16}          # Garlic, SoulEater
-    # 軌道型 (近距離を維持しながら自動攻撃)
-    ORBITAL_IDS = {7, 22}              # KingBible, UnholyVespers
-    # ライン/扇形メレー (敵方向への移動が重要)
-    MELEE_LINE_IDS = {2, 17}           # Whip, BloodyTear
-    # ターゲット追尾遠距離 (中距離で自動照準)
-    RANGED_TARGETED_IDS = {3, 8, 11, 18, 26}   # MagicWand, FireWand, LightningRing, HolyWand, ThunderLoop
-    # 方向固定遠距離 (移動方向前方に敵が並ぶと有効)
-    RANGED_DIRECTIONAL_IDS = {4, 5, 6, 13, 14, 19, 20, 21, 28}  # Knife, Axe, Cross, Peachone, EbonyWings, ThousandEdge, DeathSpiral, HeavenSword, Vandalier
-    # 折り返し系 (往路の折り返し距離が間合い。RANGED_DIRECTIONAL のサブセット)
-    FOLDING_IDS = {5, 6, 20, 21}       # Axe=5, Cross=6, DeathSpiral=20, HeavenSword=21
-    # エリアドロップ (敵密度の高い場所に落とす)
-    AREA_DROP_IDS = {9, 10, 12, 23, 24, 25, 27}  # SantaWater, Runetracer, Pentagram, Hellfire, LaBorra, NoFuture, GorgeousMoon
-    # 防御/特殊
-    DEFENSIVE_IDS = {15}               # Laurel
+    GARLIC_AUTO_IDS = {1, 16}
+    ORBITAL_IDS = {7, 22}
+    MELEE_LINE_IDS = {2, 17}
+    RANGED_TARGETED_IDS = {3, 8, 11, 18, 26}
+    RANGED_DIRECTIONAL_IDS = {4, 5, 6, 13, 14, 19, 20, 21, 28}
+    FOLDING_IDS = {5, 6, 20, 21}
+    AREA_DROP_IDS = {9, 10, 12, 23, 24, 25, 27}
+    DEFENSIVE_IDS = {15}
 
     garlic_auto_count = 0
     orbital_count = 0
@@ -170,15 +154,9 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     area_drop_ratio    = area_drop_count / equipped_count
     defensive_ratio    = defensive_count / equipped_count
 
-    # [Fix 1] Orbital 系は orbit が自動攻撃するため approach_bonus の対象から除外。
-    # KingBible はプレイヤーが近づかなくても orbit が敵を迎撃する。
-    # orbital_ratio を含めると「敵に突進 → 0距離死亡」を誘発する。
+    # Orbital は orbit 自動攻撃のため approach_bonus 対象外
     near_melee_ratio = garlic_auto_ratio + melee_line_ratio
 
-    # density_pen_mult: 武器グループ別に調整
-    # Garlic/Orbital は「敵の近く」が最適なので密度ペナルティを大幅軽減
-    # 折り返し系 (Cross/Axe): 往路の折り返し距離 (~75-100u) が間合いのため軽減
-    #   Knife 等の純粋直線系とは分けて 0.4 を適用する
     density_pen_mult = (
         garlic_auto_ratio            * 0.2 +
         orbital_ratio                * 0.3 +
@@ -191,6 +169,30 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     )
     if density_pen_mult < 1e-6:
         density_pen_mult = 1.0
+
+    # ============================================================
+    # 1b. [Fix C] 全武器共通: cooldown 集計・アクティブ武器情報
+    #    all_cooldown_max   : 全スロット中の最大 cooldown_norm
+    #    active_slot_exists : cooldown_norm < 0.2 の装備スロットが存在するか
+    #    best_active_level  : アクティブスロット中の最大 level_norm
+    # ============================================================
+    all_cooldown_max = 0.0
+    active_slot_exists = False
+    best_active_level = 0.0
+
+    for slot_i in range(6):
+        tn = weapon_slots_raw[slot_i, 0]
+        if tn < 1e-4:
+            continue
+        cd = float(weapon_slots_raw[slot_i, 2])
+        lv = float(weapon_slots_raw[slot_i, 1])
+        all_cooldown_max = max(all_cooldown_max, cd)
+        if cd < 0.2:
+            active_slot_exists = True
+            best_active_level = max(best_active_level, lv)
+
+    # クールダウン中ほど密度ペナルティを強化（最大 1.5 倍）
+    cooldown_density_mult = 1.0 + 0.5 * all_cooldown_max
 
     # ============================================================
     # 2. 移動方向の計算
@@ -221,6 +223,11 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     # ============================================================
     # 5. 方向品質ボーナス (安全 + Gem リッチな方向)
     # ============================================================
+    gem_near_dens_d = 0.0
+    gem_mid_dens_d = 0.0
+    gem_richness = 0.0
+    safety_factor = 1.0
+
     if is_moving and move_dir >= 0:
         d = move_dir
 
@@ -233,8 +240,9 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
         gem_mid_dens_d = float(gem_density_mid_16[d])
 
         # 5a. 敵密度ペナルティ
-        near_density_pen = -0.015 * density_pen_mult * min(enemy_near_dens_d, 4.0)
-        mid_density_pen  = -0.005 * density_pen_mult * min(enemy_mid_dens_d, 6.0)
+        # [Fix C] cooldown_density_mult: クールダウン中ほど密度突入を強く抑制
+        near_density_pen = -0.015 * density_pen_mult * cooldown_density_mult * min(enemy_near_dens_d, 4.0)
+        mid_density_pen  = -0.005 * density_pen_mult * cooldown_density_mult * min(enemy_mid_dens_d, 6.0)
         danger_close_pen = 0.0
         if enemy_nearest_d < 0.15:
             danger_close_pen = -0.02 * density_pen_mult * (1.0 - enemy_nearest_d / 0.15)
@@ -253,31 +261,40 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
         gem_close_bonus = 0.01 * max(0.0, 1.0 - gem_nearest_d) * safety_factor * hp_gate
         shaped += gem_dir_bonus + gem_close_bonus
 
-        # 5c. [v09 修正] Orbital クールダウン中の敵密度方向ペナルティ
-        #    KingBible 等は充填中に攻撃判定ゼロ（聖書が消えている）→ 高密度方向への接近を抑制
-        #    Orbital に限定: FireWand/Axe 等はクールダウン中も敵方向移動が合理的なため対象外
+        # 5c. Orbital クールダウン中の敵密度方向ペナルティ（Orbital 特化の精度維持）
         if orbital_ratio > 0.1 and orbital_cooldown_max > 0.3:
             cooldown_density_pen = -0.01 * orbital_ratio * orbital_cooldown_max * min(enemy_near_dens_d, 4.0)
             shaped += cooldown_density_pen
 
     # ============================================================
-    # 6. [v09 新規] Garlic/MeleeLine: 敵接近ボーナス
-    #    PR#202 で全敵が Player より遅くなったため、自ら接近しないと DPS が出ない
-    #    [Fix 1] Orbital は near_melee_ratio から除外済み（orbit 自動攻撃のため不要）
+    # 6. Garlic/MeleeLine: 敵接近ボーナス
     # ============================================================
     if near_melee_ratio > 0.2 and is_moving and nearest_enemy_dir is not None:
         approach_dot = float(np.dot(vel_norm, nearest_enemy_dir))
         hp_gate_approach = min(player_hp_norm / 0.5, 1.0)
-        # Orbital クールダウン中は接近ボーナスを抑制（聖書が消えている間に近づくと無防備）
         orbital_cooldown_gate = 1.0 - 0.8 * orbital_ratio * orbital_cooldown_max
         approach_bonus = 0.025 * near_melee_ratio * max(0.0, approach_dot) * hp_gate_approach * orbital_cooldown_gate
         shaped += approach_bonus
 
     # ============================================================
-    # 6b. [v09 修正 / v10 軽減] Orbital クールダウン中の敵近接ペナルティ
-    #    KingBible 充填中（聖書なし）に敵が近い状態そのものを抑制
-    #    5c が「移動方向」への抑制であるのに対し、6b は「現在位置」への抑制
-    #    v10: 5c との二重がけによる過剰抑制を解消するため -0.03 → -0.02 に軽減
+    # 6a. [Fix D] アクティブ武器が強い → 敵高密度方向移動ボーナス（Item 9）
+    #    「倒せる武器があれば Gem ドロップ最大化のため高密度へ」
+    #    条件: cooldown < 0.2 のスロットが存在 かつ level_norm >= 0.3（Lv 3 相当）
+    #    HP による制限なし（HP 節約より積極撃破が生存に有利なため）
+    #    Garlic/Orbital は近接・orbit 自動攻撃のため near_melee_ratio で対応済み → 半減
+    # ============================================================
+    if active_slot_exists and is_moving and move_dir >= 0 and best_active_level >= 0.3:
+        front_enemy_density = float(enemy_density_near_16[move_dir])
+        lv_gate = min(best_active_level / 0.5, 1.0)   # Lv 5(level_norm=0.5) で最大
+        attack_bonus = (
+            0.012 * lv_gate
+            * min(front_enemy_density, 4.0)
+            * (1.0 - near_melee_ratio * 0.5)  # Garlic/Melee は担当セクションが別途あるため半減
+        )
+        shaped += attack_bonus
+
+    # ============================================================
+    # 6b. Orbital クールダウン中の敵近接ペナルティ（位置ベース）
     # ============================================================
     if orbital_ratio > 0.1 and orbital_cooldown_max > 0.5:
         min_enemy_dist_orbital = float(np.min(enemy_nearest_16))
@@ -289,8 +306,7 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
             shaped += cooldown_proximity_pen
 
     # ============================================================
-    # 7. [v09 新規] RangedDirectional: 前方敵密度ボーナス
-    #    Knife/Axe/Cross は移動方向前方に敵が並ぶほど命中しやすい
+    # 7. RangedDirectional: 前方敵密度ボーナス
     # ============================================================
     if directional_ratio > 0.2 and is_moving and move_dir >= 0:
         front_density = float(enemy_density_near_16[move_dir])
@@ -298,13 +314,11 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
         shaped += front_bonus
 
     # ============================================================
-    # 8. [v09 新規] AreaDrop: 最高敵密度方向への移動ボーナス
-    #    SantaWater/Runetracer は最も敵が密集している方向で最大効果
+    # 8. AreaDrop: 最高敵密度方向への移動ボーナス
     # ============================================================
     if area_drop_ratio > 0.2 and is_moving and move_dir >= 0:
         best_density_dir = int(np.argmax(enemy_density_near_16))
         best_density_val = float(enemy_density_near_16[best_density_dir])
-        # 移動方向が最高密度方向と ±1 以内で一致
         dir_diff = abs(move_dir - best_density_dir)
         dir_match = (dir_diff <= 1 or dir_diff >= 15)
         if dir_match and best_density_val > 0.1:
@@ -312,7 +326,8 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
             shaped += area_bonus
 
     # ============================================================
-    # 9. 最近傍 Gem への接近ボーナス (ステップ単位の前進)
+    # 9. 最近傍 Gem への接近ボーナス
+    # [Fix F] 移動方向の gem_density_near で重み付け → 密集 Gem 方向の接近を優遇
     # ============================================================
     def closest_gem_dist(gem_arr: np.ndarray) -> float:
         dists = np.sqrt(gem_arr[:, 0]**2 + gem_arr[:, 1]**2)
@@ -332,7 +347,10 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
 
     if curr_min_gem < float('inf') and prev_min_gem < float('inf'):
         gem_approach_delta = prev_min_gem - curr_min_gem
-        gem_approach_reward = float(np.clip(gem_approach_delta * 0.02, -0.02, 0.02))
+        # [Fix F] 移動方向の Gem 密度が高いほど接近ボーナスを増幅（最大 1.9 倍）
+        gem_dir_density = float(gem_density_near_16[move_dir]) if is_moving and move_dir >= 0 else 0.0
+        density_weight = 1.0 + min(gem_dir_density, 3.0) * 0.3
+        gem_approach_reward = float(np.clip(gem_approach_delta * 0.02 * density_weight, -0.02, 0.025))
         min_enemy_nearest_val = float(np.min(enemy_nearest_16))
         if player_hp_norm < 0.3 and min_enemy_nearest_val < 0.1:
             gem_approach_reward *= 0.3
@@ -367,51 +385,49 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
             shaped += low_hp_danger
 
     # ============================================================
-    # 12a. [Fix 3] 全武器共通: 敵との緊急接近ペナルティ
-    #    KingBible 等 orbit 系でも敵が orbit 内（< 60u）に入ると直接ダメージを受ける。
-    #    approach_bonus 最大値(~0.025)の 4倍以上の強さで「近づかない」を最優先で学習させる。
-    #    HP や武器種に依存せず常時発動し、0距離死亡を根本から抑制する。
+    # 12a. 全武器共通: 敵との緊急接近ペナルティ
+    # [Fix A] Garlic 主体（garlic_auto_ratio >= 0.5）の場合は除外。
+    #    Garlic は敵を引き寄せて AoE で倒す武器のため 0 距離は許容される。
+    #    混在ロードアウト（Garlic + KingBible 等）では発動し KingBible の 0 距離を抑制。
     # ============================================================
     _emergency_enemy_dist = float(np.min(enemy_nearest_16))
     _EMERGENCY_DIST = 0.025  # ≈ 60u（KingBible orbit 半径の目安）
-    if _emergency_enemy_dist < _EMERGENCY_DIST:
+    if garlic_auto_ratio < 0.5 and _emergency_enemy_dist < _EMERGENCY_DIST:
         shaped += -0.10 * (1.0 - _emergency_enemy_dist / _EMERGENCY_DIST)
 
     # ============================================================
-    # 13. [v10 刷新] 全武器適正距離維持ボーナス
-    #    obs[740:746] = weapon_attack_range_norm (GetWeaponEffectiveRange() の値)
-    #    enemy_nearest_16 の正規化基準: EnemyNearestDistanceMax = 2400u
-    #
-    #    weapon_attack_range_norm → 適正距離帯のマッピング:
-    #      Orbital (KingBible 等): [Fix 2] donut 距離帯 [60u, 240u] → [0.025, 0.100]
-    #        orbit 半径内に入ると直接ダメージ → 近すぎも遠すぎも逓減
-    #      ≤ 0.05  Garlic/SoulEater:    密着 (0〜60u)    → [0.000, 0.025]
-    #      ≤ 0.15  Whip 等:             近接 (0〜90u)    → [0.000, 0.040]
-    #      ≤ 0.35  SantaWater/LRing:    中近  (150〜480u) → [0.063, 0.200]
-    #      ≤ 0.55  MagicWand/FireWand:  中距離(200〜650u) → [0.083, 0.280]
-    #      ≤ 0.79  Runetracer 等:       中遠  (250〜900u) → [0.104, 0.375]
-    #      ≥ 0.80  Knife/Pentagram: 超遠距離 → Section 7 が主担当のためスキップ
-    #
-    #    折り返し系武器 (Cross/HeavenSword/Axe/DeathSpiral) は weapon_attack_range_norm
-    #    の値に関わらず、往路の折り返し距離を間合いとして扱う:
-    #      Cross / HeavenSword: CrossReverseDistance=75u  → [0.000, 0.035]
-    #      Axe  / DeathSpiral:  ArcHeight=120u,apex≈60u  → [0.000, 0.045]
-    #    折り返し後のヒットは副産物扱いのため報酬なし。
-    #
-    #    低HP時 (HP < 0.3) は適正距離維持ボーナスを最大 2x に強化。
-    #    「逃げる」のではなく「間合いを保ちながら戦う」行動を促す。
-    #    ボーナス上限: スロット毎 0.010 × 最大 2.0 = 0.020、全スロット平均
+    # 13. 全武器適正距離維持ボーナス
+    # [Fix B] 射程バンドの 2 倍以上逃げた場合に追加ペナルティ（Item 3）
+    # [Fix E] 複数スロットが同一ステップで射程帯に入ると重複ボーナス（Item 6）
+    #         DPS 優先: cooldown 低 × level 高 のスロットに重み付け
     # ============================================================
-    # 折り返し系武器 ID (RANGED_DIRECTIONAL_IDS のサブセット)
-    CROSS_BOOMERANG_IDS = {6, 21}   # Cross=6, HeavenSword=21
-    AXE_ARC_IDS = {5, 20}           # Axe=5, DeathSpiral=20
+    CROSS_BOOMERANG_IDS = {6, 21}
+    AXE_ARC_IDS = {5, 20}
 
-    # 低HP時ほど適正距離維持の重要性が増す (1.0〜2.0)
     low_hp_range_mult = 1.0 + max(0.0, (0.3 - player_hp_norm) / 0.3)
 
     min_enemy_dist_val = float(np.min(enemy_nearest_16))
     range_bonus_sum = 0.0
+    range_penalty_sum = 0.0
     range_slot_count = 0
+    overlap_count = 0  # [Fix E] 適正射程帯に入っているスロット数
+
+    # [Fix E] DPS 優先: 最も殲滅能力が高いスロットを特定（cooldown 低 × level 高）
+    priority_dps_score = 0.0
+    priority_lo = -1.0
+    priority_hi = -1.0
+    for slot_i in range(6):
+        tn = weapon_slots_raw[slot_i, 0]
+        if tn < 1e-4:
+            continue
+        lv = float(weapon_slots_raw[slot_i, 1])
+        cd = float(weapon_slots_raw[slot_i, 2])
+        dps_score = lv * (1.0 - cd * 0.5)
+        if dps_score > priority_dps_score:
+            priority_dps_score = dps_score
+            # 優先武器の距離帯は後のループで再計算するため仮置き
+            priority_lo = -1.0
+            priority_hi = -1.0
 
     for slot_i in range(6):
         tn = weapon_slots_raw[slot_i, 0]
@@ -419,70 +435,88 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
             continue
         wtype_id_s13 = int(round(tn * 64.0))
         r = float(weapon_range_norms[slot_i])
+        lv = float(weapon_slots_raw[slot_i, 1])
+        cd = float(weapon_slots_raw[slot_i, 2])
 
-        # 適正距離帯 (lo, hi) と近接系フラグを決定
         is_near_type = False
         if wtype_id_s13 in ORBITAL_IDS:
-            # [Fix 2] KingBible/UnholyVespers: orbit 半径(~60-90u)の外縁を包む donut 距離帯
-            # 近すぎ(< 60u)は orbit 内侵入で直接ダメージ、遠すぎは orbit が届かない
-            lo, hi = 0.025, 0.100   # 60u〜240u
-            is_near_type = False    # donut: 近すぎも遠すぎも逓減
+            lo, hi = 0.025, 0.100
+            is_near_type = False
         elif wtype_id_s13 in CROSS_BOOMERANG_IDS:
-            # Cross/HeavenSword: 往路の折り返し距離 75u が実質の間合い
-            lo, hi = 0.000, 0.035   # 75u / 2400u ≈ 0.031 に余裕を持たせた 0.035
+            lo, hi = 0.000, 0.035
             is_near_type = True
         elif wtype_id_s13 in AXE_ARC_IDS:
-            # Axe/DeathSpiral: 弧の頂点まで ~60u、着地まで ~100u が実質の間合い
-            lo, hi = 0.000, 0.045   # 100u / 2400u ≈ 0.042 に余裕を持たせた 0.045
+            lo, hi = 0.000, 0.045
             is_near_type = True
         elif r >= 0.80:
-            # Knife/Pentagram 等の超遠距離はスキップ (Section 7 が担当)
             continue
-        elif r <= 0.05:        # Garlic / SoulEater: 密着
+        elif r <= 0.05:
             lo, hi = 0.000, 0.025
             is_near_type = True
-        elif r <= 0.15:        # Whip 等の近接（KingBible は ORBITAL_IDS で先に処理済み）
+        elif r <= 0.15:
             lo, hi = 0.000, 0.040
             is_near_type = True
-        elif r <= 0.35:        # SantaWater / LightningRing: 中近距離
+        elif r <= 0.35:
             lo, hi = 0.063, 0.200
-        elif r <= 0.55:        # MagicWand / FireWand / Peachone: 中距離
+        elif r <= 0.55:
             lo, hi = 0.083, 0.280
-        else:                  # Runetracer 等 (0.56〜0.79): 中遠距離
+        else:
             lo, hi = 0.104, 0.375
 
-        # 距離スコア (0〜1) を計算
+        # [Fix E] 優先武器の距離帯を記録（最初に見つかったもの）
+        if priority_lo < 0.0 and lv * (1.0 - cd * 0.5) >= priority_dps_score * 0.95:
+            priority_lo = lo
+            priority_hi = hi
+
+        # 距離スコアを計算
+        range_pen = 0.0
         if is_near_type:
-            # 近接/折り返し系: バンド内は満点、超えると急減 (遠くなるほど不利)
             if min_enemy_dist_val <= hi:
                 dist_score = 1.0
             else:
-                overshoot = (min_enemy_dist_val - hi) / hi
+                overshoot = (min_enemy_dist_val - hi) / max(hi, 1e-6)
                 dist_score = max(0.0, 1.0 - overshoot * 3.0)
+                # [Fix B] 射程の 2 倍以上逃げたら追加ペナルティ
+                if overshoot > 1.0:
+                    range_pen = -0.005 * min(overshoot - 1.0, 2.0)
         else:
-            # 中距離系 / Orbital donut: バンド中央付近が満点、外れると逓減
             if min_enemy_dist_val < lo:
-                # バンドより近すぎ (敵に密着しすぎ)
                 overshoot = (lo - min_enemy_dist_val) / lo if lo > 0.0 else 0.0
                 dist_score = max(0.0, 1.0 - overshoot * 2.0)
             elif min_enemy_dist_val <= hi:
-                # バンド内: 中央からの逸脱量でスコア計算
                 mid = (lo + hi) / 2.0
                 half_width = (hi - lo) / 2.0
                 dist_score = max(0.0, 1.0 - abs(min_enemy_dist_val - mid) / half_width)
             else:
-                # バンドより遠すぎ
-                overshoot = (min_enemy_dist_val - hi) / hi
+                overshoot = (min_enemy_dist_val - hi) / max(hi, 1e-6)
                 dist_score = max(0.0, 1.0 - overshoot * 2.0)
+                # [Fix B] 射程の 2 倍以上逃げたら追加ペナルティ
+                if overshoot > 1.0:
+                    range_pen = -0.005 * min(overshoot - 1.0, 2.0)
 
-        range_bonus_sum += 0.010 * dist_score * low_hp_range_mult
+        # [Fix E] DPS 優先重み: 優先武器と同距離帯(lo/hi が一致)なら 1.5 倍
+        dps_weight = 1.0
+        if priority_lo >= 0.0 and abs(lo - priority_lo) < 1e-4 and abs(hi - priority_hi) < 1e-4:
+            dps_weight = 1.5
+
+        slot_bonus = 0.010 * dist_score * low_hp_range_mult * dps_weight
+        range_bonus_sum += slot_bonus
+        range_penalty_sum += range_pen
         range_slot_count += 1
+
+        if dist_score > 0.5:
+            overlap_count += 1
 
     if range_slot_count > 0:
         shaped += range_bonus_sum / range_slot_count
+        shaped += range_penalty_sum / range_slot_count
+
+    # [Fix E] 複数スロットが同時に射程帯内 → 重複ボーナス
+    if overlap_count >= 2:
+        shaped += 0.005 * min(overlap_count - 1, 3)
 
     # ============================================================
-    # 14. 防御武器の特殊処理 (v08 から継承)
+    # 14. 防御武器の特殊処理
     # ============================================================
     if defensive_ratio > 0.1:
         if shield_active > 0.5:
@@ -498,6 +532,16 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     curr_xp = float(obs[55])
     if prev_xp > 0.8 and curr_xp < 0.2:
         shaped += 0.02
+
+    # ============================================================
+    # 15a. [Fix G] レベルアップ直前 Gem 加速（Item 12）
+    #    xp_progress > 0.7 で Gem 収集シグナルを最大 1.5 倍に強化。
+    #    早期レベルアップ → 武器・Passive 強化選択肢を早く得る。
+    # ============================================================
+    if xp_progress > 0.7 and is_moving and move_dir >= 0:
+        xp_gate = 1.0 + 0.5 * min((xp_progress - 0.7) / 0.3, 1.0)
+        gem_xp_bonus = 0.008 * (xp_gate - 1.0) * min(gem_near_dens_d + gem_richness, 3.0) * safety_factor
+        shaped += gem_xp_bonus
 
     # ============================================================
     # Final clamp
