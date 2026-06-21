@@ -4,11 +4,12 @@ from base.entity_attention_extractor import EntityAttentionExtractor
 
 # v794 obs スキーマの方向別密度特徴セグメント
 # 旧スキーマ（gem_nearest_dist_16dir 等）と新スキーマ（gem_density_all_16dir）の両方に対応
-# gem_density 系は Gem Attention head と重複するため新スキーマでは除外する
 _GLOBAL_KEYS_NEW = [
     "enemy_nearest_dist_16dir",
     "enemy_density_near_16dir",
     "enemy_density_mid_16dir",
+    "gem_density_all_16dir",        # 全Gemの方向密度（フィールド全体、Gem Attentionの34個と非重複）
+    "red_green_gem_density_16dir",  # Red+Green Gemの方向密度（フィールド全体）
 ]
 
 # 後方互換: 旧スキーマ名（gem_nearest_dist_16dir 等が存在する場合に使用）
@@ -57,7 +58,7 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
 
     combined ベクトル構成（新スキーマ・全セグメント存在時）:
         self_info (58) + global_proj (64) + gem_agg (32) + enemy_agg (32) + proj_agg (32) = 218
-        ※ global_feats (156) は global_proj: Linear(156→64) で圧縮してから結合
+        ※ global_feats (252) は global_proj: Linear(252→64) で圧縮してから結合
     """
 
     _GLOBAL_PROJ_DIM = 64
