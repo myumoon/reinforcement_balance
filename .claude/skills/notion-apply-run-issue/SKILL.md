@@ -44,6 +44,8 @@ notion-fetch(
 
 ### 2-3. 最新の課題ページを SQL で検索する
 
+**run 名が指定されている場合** は LIKE 検索で絞り込む:
+
 ```
 notion-query-data-sources(
   data={
@@ -52,6 +54,28 @@ notion-query-data-sources(
     "params": ["%<run名>%"]
   }
 )
+```
+
+**run 名が指定されていない場合**（「最新の課題」など）は更新日時降順で上位5件を取得する:
+
+```
+notion-query-data-sources(
+  data={
+    "data_source_urls": ["collection://<data_source_id>"],
+    "query": "SELECT * FROM \"collection://<data_source_id>\" ORDER BY last_edited_time DESC LIMIT 5",
+    "params": []
+  }
+)
+```
+
+取得した上位5件をユーザーに提示して確認を取る。ただし直近1件の更新日時が他と明らかに離れている場合はそのまま使用してよい:
+
+```
+以下のページが新しい順に見つかりました。どのページに反映しますか？
+1. [タイトル] (更新日: yyyy-mm-dd) ← 最新
+2. [タイトル] (更新日: yyyy-mm-dd)
+...
+明らかに最新のページでよい場合は「1番」と答えてください。
 ```
 
 `<タイトル列名>` は Step 2-2 で取得した schema のタイトルプロパティ名（多くの場合 `要約` や `名前`）を使う。
@@ -127,7 +151,15 @@ notion-fetch(
 - [ ] TODO: run 完了後に結果を追記する
 ```
 
-**注意**: `content` 内にページタイトルを重複して書かないこと。
+**注意**:
+- `content` 内にページタイトルを重複して書かないこと。
+- content は **Notion-flavored Markdown** 形式で記述する。サポートされている主な記法:
+  - 見出し: `#`（H1）、`##`（H2）、`###`（H3）
+  - 箇条書き: `- ` で始まる行
+  - チェックボックス: `- [ ]`（未完了）、`- [x]`（完了）
+  - 太字: `**テキスト**`、斜体: `*テキスト*`
+  - インラインコード: `` `コード` ``
+- **HTML タグ・独自記法は使わないこと**。Notion MCP は HTML を解釈せず、そのままテキストとして挿入されてしまう。
 
 ---
 
