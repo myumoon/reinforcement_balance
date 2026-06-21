@@ -104,13 +104,16 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
 
     @staticmethod
     def _attend(enc: torch.Tensor, query: torch.Tensor,
-                dist_bias: torch.Tensor | None = None) -> torch.Tensor:
+                dist_bias: torch.Tensor | None = None,
+                padding_mask: torch.Tensor | None = None) -> torch.Tensor:
         """スケール済みドット積アテンションで entity を集約する。
 
         Args:
-            enc:       [B, N, embed_dim]
-            query:     [embed_dim]
-            dist_bias: [B, N] 距離 * alpha（近いほどスコアを上げるため減算する）
+            enc:          [B, N, embed_dim]
+            query:        [embed_dim]
+            dist_bias:    [B, N] 距離 * alpha（近いほどスコアを上げるため減算する）
+            padding_mask: [B, N] True のスロットをパディングとして softmax から除外する。
+                          全スロットがマスクの行は均等重みにフォールバック。
         Returns:
             [B, embed_dim]
         """
@@ -118,14 +121,20 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         scores = (enc * query).sum(-1) / scale
         if dist_bias is not None:
             scores = scores - dist_bias
+        if padding_mask is not None:
+            all_masked = padding_mask.all(dim=1, keepdim=True)
+            scores = scores.masked_fill(padding_mask & ~all_masked, float('-inf'))
         weights = torch.softmax(scores, dim=1).unsqueeze(-1)
         return (enc * weights).sum(dim=1)
 
     @staticmethod
     def _attend_weights(enc: torch.Tensor, query: torch.Tensor,
-                        dist_bias: torch.Tensor | None = None) -> torch.Tensor:
+                        dist_bias: torch.Tensor | None = None,
+                        padding_mask: torch.Tensor | None = None) -> torch.Tensor:
         """アテンション重みのみを返す（可視化・デバッグ用）。
 
+        Args:
+            padding_mask: [B, N] True のスロットを softmax から除外する。
         Returns:
             [B, N]  ∈ (0, 1),  sum over N == 1
         """
@@ -133,6 +142,9 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         scores = (enc * query).sum(-1) / scale
         if dist_bias is not None:
             scores = scores - dist_bias
+        if padding_mask is not None:
+            all_masked = padding_mask.all(dim=1, keepdim=True)
+            scores = scores.masked_fill(padding_mask & ~all_masked, float('-inf'))
         return torch.softmax(scores, dim=1)
 
     # ---- デバッグ用 ----
@@ -152,6 +164,10 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         item_dist  = torch.norm(items, dim=-1)
         enemy_dist = torch.norm(e_pos,  dim=-1)
 
+        # VecNormalize後のノルムが極小のスロット＝常にゼロ埋めのパディングスロット
+        item_pad_mask  = (item_dist  < 1e-3)
+        enemy_pad_mask = (enemy_dist < 1e-3)
+
         if self.use_polar:
             items = self._to_polar(items)
             e_pos = self._to_polar(e_pos)
@@ -164,9 +180,9 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
 
         return (
             self._attend_weights(item_enc,  self.coin_query,
-                                 self.dist_alpha * item_dist),
+                                 self.dist_alpha * item_dist,  item_pad_mask),
             self._attend_weights(enemy_enc, self.enemy_query,
-                                 self.dist_alpha * enemy_dist),
+                                 self.dist_alpha * enemy_dist, enemy_pad_mask),
         )
 
     # ---- 内部ユーティリティ ----
@@ -204,6 +220,9 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         item_dist  = torch.norm(items, dim=-1)
         enemy_dist = torch.norm(e_pos,  dim=-1)
 
+        item_pad_mask  = (item_dist  < 1e-3)
+        enemy_pad_mask = (enemy_dist < 1e-3)
+
         if self.use_polar:
             items = self._to_polar(items)
             e_pos = self._to_polar(e_pos)
@@ -215,9 +234,9 @@ class EntityAttentionExtractor(BaseFeaturesExtractor):
         enemy_enc = self.enemy_encoder(enemies)
 
         item_agg  = self._attend(item_enc,  self.coin_query,
-                                 self.dist_alpha * item_dist)
+                                 self.dist_alpha * item_dist,  item_pad_mask)
         enemy_agg = self._attend(enemy_enc, self.enemy_query,
-                                 self.dist_alpha * enemy_dist)
+                                 self.dist_alpha * enemy_dist, enemy_pad_mask)
 
         combined = torch.cat([self_info, item_agg, enemy_agg], dim=-1)
         return self.final(combined)
