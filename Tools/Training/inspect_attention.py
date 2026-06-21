@@ -89,10 +89,12 @@ def main():
     item_weights_list  = []
     enemy_weights_list = []
 
+    device = next(extractor.parameters()).device
+
     obs = env.reset()
     print(f"[INFO] {args.steps} ステップ収集中...")
     for step in range(args.steps):
-        obs_t = torch.FloatTensor(obs)
+        obs_t = torch.FloatTensor(obs).to(device)
         with torch.no_grad():
             iw, ew = extractor.get_attention_weights(obs_t)
         item_weights_list.append(iw.squeeze(0).cpu().numpy())
