@@ -49,13 +49,15 @@ notion-fetch(
 notion-query-data-sources(
   data={
     "data_source_urls": ["collection://<data_source_id>"],
-    "query": "SELECT * FROM \"collection://<data_source_id>\" WHERE <タイトル列名> LIKE ? LIMIT 10",
+    "query": "SELECT * FROM \"collection://<data_source_id>\" WHERE \"<タイトル列名>\" LIKE ? LIMIT 10",
     "params": ["%<run名>%"]
   }
 )
 ```
 
 `<タイトル列名>` は Step 2-2 で取得した schema のタイトルプロパティ名（多くの場合 `要約` や `名前`）を使う。
+列名は必ず二重引用符 (`"`) で囲むこと（SQLite の識別子クォート）。
+列名自体に `"` が含まれる場合は `""` にエスケープする（例: `"my\"\"col"` → `"my""col"`）。
 
 ### 2-4. 候補の評価
 
