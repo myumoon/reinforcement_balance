@@ -19,13 +19,35 @@
 """
 
 import argparse
+import os
 import sys
 
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use("Agg")  # GUI なし環境対応
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+
+_JP_FONT_CANDIDATES = [
+    "/mnt/c/Windows/Fonts/NotoSansJP-Regular.otf",
+    "/mnt/c/Windows/Fonts/meiryo.ttc",
+    "/mnt/c/Windows/Fonts/YuGothR.ttc",
+    "/mnt/c/Windows/Fonts/msgothic.ttc",
+]
+
+def _setup_japanese_font():
+    """日本語フォントを matplotlib に登録する。"""
+    for path in _JP_FONT_CANDIDATES:
+        if os.path.exists(path):
+            fm.fontManager.addfont(path)
+            prop = fm.FontProperties(fname=path)
+            matplotlib.rcParams["font.family"] = prop.get_name()
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            return
+    print("[WARN] 日本語フォントが見つかりませんでした。文字化けの可能性があります。")
+
+_setup_japanese_font()
 
 
 _GAME_DEFAULTS = {
