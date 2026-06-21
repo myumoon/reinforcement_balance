@@ -4,12 +4,11 @@ from base.entity_attention_extractor import EntityAttentionExtractor
 
 # v794 obs スキーマの方向別密度特徴セグメント
 # 旧スキーマ（gem_nearest_dist_16dir 等）と新スキーマ（gem_density_all_16dir）の両方に対応
+# gem_density 系は Gem Attention head と重複するため新スキーマでは除外する
 _GLOBAL_KEYS_NEW = [
     "enemy_nearest_dist_16dir",
     "enemy_density_near_16dir",
     "enemy_density_mid_16dir",
-    "gem_density_all_16dir",        # 新: 全ジェム 16方向×3
-    "red_green_gem_density_16dir",  # 新: Red+Green ジェム 16方向×3
 ]
 
 # 後方互換: 旧スキーマ名（gem_nearest_dist_16dir 等が存在する場合に使用）
@@ -57,8 +56,11 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
     - _EXTRA_GLOBAL_KEYS / projectiles / enemy_frozen は存在する場合のみ追加
 
     combined ベクトル構成（新スキーマ・全セグメント存在時）:
-        self_info (58) + global_feats (252) + gem_agg (32) + enemy_agg (32) + proj_agg (32) = 406
+        self_info (58) + global_proj (64) + gem_agg (32) + enemy_agg (32) + proj_agg (32) = 218
+        ※ global_feats (156) は global_proj: Linear(156→64) で圧縮してから結合
     """
+
+    _GLOBAL_PROJ_DIM = 64
 
     def __init__(self, observation_space, features_dim=128, offsets=None, obs_schema=None):
         offsets = offsets or {}
@@ -141,9 +143,19 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
                 self.proj_query = nn.Parameter(torch.randn(e))
                 proj_agg_dim = e
 
+        # global_proj: global_feats を _GLOBAL_PROJ_DIM に圧縮してから combined に結合
+        if global_dim > 0:
+            self.global_proj = nn.Sequential(
+                nn.Linear(global_dim, self._GLOBAL_PROJ_DIM), nn.ReLU()
+            )
+            global_proj_dim = self._GLOBAL_PROJ_DIM
+        else:
+            self.global_proj = None
+            global_proj_dim = 0
+
         # final 層を全追加分を含む次元で再構築
         self.final = nn.Sequential(
-            nn.Linear(self._self_dim + global_dim + e + e + proj_agg_dim, features_dim),
+            nn.Linear(self._self_dim + global_proj_dim + e + e + proj_agg_dim, features_dim),
             nn.ReLU(),
         )
 
@@ -176,6 +188,9 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
         item_dist  = torch.norm(items, dim=-1)
         enemy_dist = torch.norm(e_pos,  dim=-1)
 
+        item_pad_mask  = (item_dist  < 1e-3)
+        enemy_pad_mask = (enemy_dist < 1e-3)
+
         if self.use_polar:
             items = self._to_polar(items)
             e_pos = self._to_polar(e_pos)
@@ -186,18 +201,21 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
         item_enc  = self.coin_encoder(items)
         enemy_enc = self.enemy_encoder(enemies)
 
-        item_agg  = self._attend(item_enc,  self.coin_query,  self.dist_alpha * item_dist)
-        enemy_agg = self._attend(enemy_enc, self.enemy_query, self.dist_alpha * enemy_dist)
+        item_agg  = self._attend(item_enc,  self.coin_query,  self.dist_alpha * item_dist,  item_pad_mask)
+        enemy_agg = self._attend(enemy_enc, self.enemy_query, self.dist_alpha * enemy_dist, enemy_pad_mask)
+
+        if self.global_proj is not None:
+            global_feats = self.global_proj(global_feats)
 
         parts = [self_info, global_feats, item_agg, enemy_agg]
 
         if self._proj_slice is not None:
             s, e_idx = self._proj_slice
             proj_raw = obs[:, s:e_idx].reshape(B, self._num_projectiles, 6)
-            # dx,dy ([:, :, :2]) からプレイヤーとの距離を計算して attention バイアスに使用
             proj_dist = torch.norm(proj_raw[:, :, :2], dim=-1)
+            proj_pad_mask = (proj_dist < 1e-3)
             proj_enc  = self.proj_encoder(proj_raw)
-            proj_agg  = self._attend(proj_enc, self.proj_query, self.dist_alpha * proj_dist)
+            proj_agg  = self._attend(proj_enc, self.proj_query, self.dist_alpha * proj_dist, proj_pad_mask)
             parts.append(proj_agg)
 
         combined = torch.cat(parts, dim=-1)
