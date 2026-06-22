@@ -801,6 +801,9 @@ def parse_args() -> argparse.Namespace:
                    help="アニーリングチェックを開始する最小ステップ数 (default: 50000)")
     p.add_argument("--anneal-min-weight", type=float, default=0.0,
                    help="shaping_weight の下限値 (default: 0.0=完全除去, 例: 0.05 で5%%維持)")
+    p.add_argument("--anneal-use-global-reference", action="store_true",
+                   help="シェーピングアニーリングの基準を curriculum 最終フェーズではなく"
+                        "global ステップ数（--anneal-min-steps）に変更する")
     p.add_argument("--noveld", action="store_true",
                    help="NovelD 内発的動機を有効化（Survivors のみ）")
     p.add_argument("--noveld-beta", type=float, default=0.3,
@@ -875,6 +878,11 @@ def parse_args() -> argparse.Namespace:
                    help="武器カリキュラムのフェーズキー（W0〜W6 または W0_to_W1 等, 'auto' で自動昇格, default: W0）")
     p.add_argument("--weapon-phase-auto-stagnation-steps", type=int, default=500_000,
                    help="--weapon-phase auto 時: カリキュラム停滞とみなすステップ数 (default: 500000)")
+    p.add_argument(
+        "--weapon-phase-auto-min-wait-steps", type=int, default=100_000,
+        help="--weapon-phase auto 時: ゲート条件成立後に武器フェーズを昇格するまでの"
+             "最小待機ステップ数 (default: 100000)"
+    )
     p.add_argument(
         "--rsi-mode",
         default="none",
@@ -1542,6 +1550,7 @@ def main() -> None:
             rollback_fn=None,
             # v09: 武器フェーズ昇格時はスコアウィンドウのみリセット（フェーズ維持）
             on_weapon_phase_advance_fn=curriculum_cb.on_weapon_phase_advance,
+            min_wait_steps=getattr(args, "weapon_phase_auto_min_wait_steps", 100_000),
         )
         # train_status_{step}_steps.json の "weapon_phase_auto" から状態を復元
         _weapon_auto_raw = resume_status.get("weapon_phase_auto") if resume_status else None
@@ -1624,20 +1633,26 @@ def main() -> None:
         print("[WARN] --noveld は --dry-run 時は無視されます。")
 
     if reward_fn is not None and args.game in ("coin", "survivors"):
+        anneal_curriculum_cb = (
+            None  # global 基準
+            if (getattr(args, "anneal_use_global_reference", False)
+                or not (args.curriculum or args.curriculum_spalf))
+            else curriculum_cb
+        )
         anneal_cb = _AnnealingShapingCallback(
             anneal_threshold=args.anneal_threshold,
             anneal_steps=args.anneal_steps,
             check_freq=args.anneal_check_freq,
             min_steps=args.anneal_min_steps,
             min_weight=args.anneal_min_weight,
-            curriculum_cb=curriculum_cb if (args.curriculum or args.curriculum_spalf) else None,
+            curriculum_cb=anneal_curriculum_cb,
         )
         anneal_state = resume_status.get("shaping_anneal") if resume_status else None
         if anneal_state:
             anneal_cb.import_state(anneal_state)
             print("[INFO] shaping anneal state を復元")
         callbacks.append(anneal_cb)
-        reference = "last_phase" if curriculum_cb is not None else "global"
+        reference = "global" if anneal_curriculum_cb is None else "last_phase"
         print(f"[INFO] シェーピングアニーリング有効 "
               f"(threshold={args.anneal_threshold}, anneal_steps={args.anneal_steps:,}, "
               f"min_steps={args.anneal_min_steps:,}, min_weight={args.anneal_min_weight}, "

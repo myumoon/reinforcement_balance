@@ -983,6 +983,7 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         stagnation_steps: int = 500_000,
         rollback_fn: "Callable[[str], None] | None" = None,
         on_weapon_phase_advance_fn: "Callable[[], None] | None" = None,
+        min_wait_steps: int = 100_000,
     ) -> None:
         """
         Args:
@@ -992,12 +993,15 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
             on_weapon_phase_advance_fn: 武器フェーズ昇格時に呼ぶ関数。
                 スコアウィンドウのリセットを担う（カリキュラムフェーズは変更しない）。
                 None の場合はスコアウィンドウリセットをスキップ。
+            min_wait_steps: ゲート条件成立後に武器フェーズを昇格するまでの
+                最小待機ステップ数（default: 100_000）。
         """
         self._curriculum = curriculum
         self._stagnation_steps = max(stagnation_steps, 1)  # 後方互換のため残す
         # rollback_fn は v09 では呼ばない（後方互換のため引数は受け付ける）
         self._rollback_fn: Callable[[str], None] | None = rollback_fn
         self._on_weapon_phase_advance_fn: Callable[[], None] | None = on_weapon_phase_advance_fn
+        self._weapon_phase_min_wait_steps: int = max(0, int(min_wait_steps))
 
         self._weapon_phase_seq_idx: int = 0
         self._last_curriculum_phase: int = -1  # 後方互換用（未使用）
@@ -1005,6 +1009,7 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         self._stagnation_start_step: int = 0   # 後方互換用（未使用）
         self._phase_start_step: int = 0        # 現在の武器フェーズ開始時の num_timesteps
         self._state_restored: bool = False     # import_state() で復元済みか否か
+        self._gate_first_met_step: int | None = None  # ゲート条件が最初に成立したステップ
 
     # ------------------------------------------------------------------ #
     # Properties                                                           #
@@ -1065,7 +1070,30 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         if gate is None:
             return None  # 最終フェーズ（通常 is_final_weapon_phase で捕捉されるが念のため）
         if current_curriculum_phase >= gate:
-            return self._advance(num_timesteps, reason=f"curriculum_gate_{gate}")
+            # 初回成立を記録
+            if self._gate_first_met_step is None:
+                self._gate_first_met_step = num_timesteps
+                print(
+                    f"[WeaponPhaseAuto] ゲート条件成立 ({self.current_phase_key} -> 次フェーズ), "
+                    f"待機開始: {num_timesteps:,} step "
+                    f"(あと {self._weapon_phase_min_wait_steps:,} step 後に昇格)"
+                )
+
+            steps_waited = num_timesteps - self._gate_first_met_step
+            if steps_waited >= self._weapon_phase_min_wait_steps:
+                self._gate_first_met_step = None  # 次ゲート用にリセット
+                return self._advance(
+                    num_timesteps,
+                    reason=f"curriculum_gate_{gate}+wait_{steps_waited}"
+                )
+        else:
+            # ゲート未満に戻った場合（curriculum rollback）→ 待機タイマーをリセット
+            if self._gate_first_met_step is not None:
+                print(
+                    f"[WeaponPhaseAuto] curriculum rollback によりゲート条件が不成立に。"
+                    f"待機タイマーをリセット (phase={self.current_phase_key})"
+                )
+                self._gate_first_met_step = None
         return None
 
     def _advance(self, num_timesteps: int, reason: str = "") -> str:
@@ -1130,6 +1158,7 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
             "phase_start_step": self._phase_start_step,
             "max_curriculum_phase": self._max_curriculum_phase,
             "stagnation_start_step": self._stagnation_start_step,
+            "gate_first_met_step": self._gate_first_met_step,
         }
 
     def import_state(self, state: dict) -> None:
@@ -1139,6 +1168,7 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
             state.get("max_curriculum_phase", self._curriculum.current_phase)
         )
         self._stagnation_start_step = int(state.get("stagnation_start_step", 0))
+        self._gate_first_met_step = state.get("gate_first_met_step")
         self._state_restored = True  # 復元済みフラグを立てる
 
     def save_status(self, path=None) -> None:
