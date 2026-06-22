@@ -7,6 +7,7 @@
 #include "Survivors/Logic/SurvivorsPlayerComponent.h"
 #include "Survivors/Logic/SurvivorsSpawnComponent.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
+#include "Survivors/View/WallActor.h"
 
 // ---- 加重サンプリングヘルパー -----------------------------------------------
 
@@ -74,6 +75,29 @@ void ASurvivorsGame::BeginPlay()
 	Super::BeginPlay();
 
 	CollisionComponent->CollectWallActors();
+
+	// Logic を初期化: WallActors を FBox2D に変換して Config に渡す
+	{
+		FSurvivorsGameLogicConfig Cfg;
+		Cfg.FieldHalfSize  = FieldHalfSize;
+		Cfg.SimToUE        = SimToUE;
+		Cfg.SpawnWaves     = SpawnWaves;
+		Cfg.EnemyTypeTable = EnemyTypeTable;
+
+		// WallActors → FBox2D 変換
+		for (const TObjectPtr<AWallActor>& Wall : WallActors)
+		{
+			if (Wall)
+				Cfg.WallBounds.Add(Wall->GetSimBounds(SimToUE));
+		}
+
+		Logic.Initialize(Cfg);
+	}
+
+	// Phase 2 暫定: GameFacade を設定して ExecStep/ExecReset が正しく動作するようにする
+	// TODO(issue): Phase 3 で Logic 自身がロジックを持つようになったら除去する
+	Logic.SetGameFacade(this);
+
 	ResetState(TOptional<int32>());
 }
 
@@ -702,4 +726,72 @@ bool ASurvivorsGame::IsOnScreen(FVector2D WorldPos) const
 	const FVector2D Rel = WorldPos - PlayerPos;
 	return FMath::Abs(Rel.X) <= SurvivorsGameConstants::ScreenHalfWidthU
 		&& FMath::Abs(Rel.Y) <= SurvivorsGameConstants::ScreenHalfHeightU;
+}
+
+// ---- FSurvivorsGameLogic ファサード -----------------------------------------
+
+void ASurvivorsGame::SyncConfigToLogic()
+{
+	FSurvivorsGameLogicConfig Cfg;
+
+	// ---- フィールド設定 ----
+	Cfg.FieldHalfSize       = FieldHalfSize;
+	Cfg.SimToUE             = SimToUE;
+	Cfg.bVariableFrameRate  = bVariableFrameRate;
+
+	// ---- 敵設定 ----
+	Cfg.MinActiveEnemies    = MinActiveEnemies;
+	Cfg.MaxActiveEnemies    = MaxActiveEnemies;
+	Cfg.SpawnRateMult       = SpawnRateMult;
+	Cfg.MaxEnemyTypeId      = MaxEnemyTypeId;
+	Cfg.EnemyHPScale        = EnemyHPScale;
+	Cfg.EnemyDamageScale    = EnemyDamageScale;
+	Cfg.EnemySpeedMult      = EnemySpeedMult;
+	Cfg.SpawnMinDistance    = SpawnMinDistance;
+	Cfg.SpawnMaxDistance    = SpawnMaxDistance;
+	Cfg.BossSpawnTime       = BossSpawnTime;
+
+	// ---- プレイヤー設定 ----
+	Cfg.MaxPlayerHP         = MaxPlayerHP;
+	Cfg.MoveSpeed           = MoveSpeed;
+	Cfg.PlayerRadius        = PlayerRadius;
+	Cfg.GemPickupRadius     = GemPickupRadius;
+	Cfg.FloorPickupRadius   = FloorPickupRadius;
+
+	// ---- 報酬設定 ----
+	Cfg.AliveReward         = AliveReward;
+	Cfg.ItemReward          = ItemReward;
+	Cfg.KillReward          = KillReward;
+	Cfg.MaxEpisodeTime      = MaxEpisodeTime;
+
+	// ---- 時間スケーリング ----
+	Cfg.bTimeScalingEnabled  = bTimeScalingEnabled;
+	Cfg.HPScaleRatePerMin    = HPScaleRatePerMin;
+	Cfg.DamageScaleRatePerMin = DamageScaleRatePerMin;
+
+	// ---- 訓練用パラメータ拡張 ----
+	Cfg.WeaponPoolMode       = WeaponPoolMode;
+	Cfg.AllowedWeaponTypes   = AllowedWeaponTypes;
+	Cfg.WeaponWeights        = WeaponWeights;
+	Cfg.bEnablePassives      = bEnablePassives;
+	Cfg.bEnableEvolutions    = bEnableEvolutions;
+	Cfg.ReplayOldPhaseFraction = ReplayOldPhaseFraction;
+	Cfg.StartingWeaponMode   = StartingWeaponMode;
+
+	// ---- RSI オーバーライド ----
+	Cfg.InitialElapsedTime   = InitialElapsedTime;
+	Cfg.bHasInitialOverride  = bHasInitialOverride;
+	for (const FWeaponSlotOverride& W : InitialWeaponSlots)
+		Cfg.InitialWeaponSlots.Add({ W.WeaponId, W.Level });
+	for (const FPassiveSlotOverride& P : InitialPassiveSlots)
+		Cfg.InitialPassiveSlots.Add({ P.PassiveId, P.Level });
+
+	// ---- 静的テーブル（BeginPlay で設定済みのもの） ----
+	Cfg.SpawnWaves     = SpawnWaves;
+	Cfg.EnemyTypeTable = EnemyTypeTable;
+
+	// WallBounds は BeginPlay 時に一度だけ設定する（ここでは更新しない）
+	// WallActors → FBox2D 変換は BeginPlay 時に Logic.Initialize() で行う
+
+	Logic.ApplyConfig(Cfg);
 }

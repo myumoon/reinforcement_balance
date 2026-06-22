@@ -2,6 +2,7 @@
 // AutomationTest.h は各 .cpp で include する（マクロ展開が TU ごとに必要）
 #include "Engine/World.h"
 #include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/Logic/SurvivorsGameLogic.h"
 #include "Survivors/Logic/SurvivorsTypes.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/SurvivorsCollisionComponent.h"
@@ -14,9 +15,15 @@
 // ============================================================
 // テストヘルパー: ASurvivorsGame の private 状態へのアクセサ
 // (SurvivorsGame.h の WITH_AUTOMATION_TESTS friend 宣言が必要)
+//
+// Phase 2: 状態フィールドは ASurvivorsGame に残っているため
+//          既存アクセサはそのまま維持する。
+//          Phase 3 で FSurvivorsGameLogic に状態が移った後、
+//          G->GetLogic()->XXX 経由に切り替える。
 // ============================================================
 struct FSurvivorsGameTestAccess
 {
+	// Phase 2: ASurvivorsGame の private フィールドに直接アクセス（friend 宣言経由）
 	static TArray<FEnemyState>& Enemies(ASurvivorsGame* G) { return G->Enemies; }
 	static TArray<FGemState>&   Gems(ASurvivorsGame* G)    { return G->Gems; }
 	static TArray<FSpecialPickupState>& SpecialPickups(ASurvivorsGame* G) { return G->SpecialPickups; }
@@ -35,6 +42,7 @@ struct FSurvivorsGameTestAccess
 	static FPassiveSlot* PassiveSlots(ASurvivorsGame* G)   { return G->PassiveSlots; }
 	static FPassiveEffects& PassiveEffects(ASurvivorsGame* G) { return G->CachedPassiveEffects; }
 
+	// コンポーネントアクセサ（既存テストが使用するため維持）
 	static USurvivorsCollisionComponent* CollComp(ASurvivorsGame* G) { return G->CollisionComponent; }
 	static USurvivorsEnemyComponent*     EnemyComp(ASurvivorsGame* G){ return G->EnemyComponent; }
 	static USurvivorsGemComponent*       GemComp(ASurvivorsGame* G)  { return G->GemComponent; }
@@ -46,6 +54,9 @@ struct FSurvivorsGameTestAccess
 
 	static void FinalizePendingEnemies(ASurvivorsGame* G)  { G->FinalizePendingEnemies(); }
 	static void FinalizePickupRemovals(ASurvivorsGame* G)  { G->FinalizePickupRemovals(); }
+
+	// Phase 2 追加: FSurvivorsGameLogic へのアクセサ（テスト用）
+	static FSurvivorsGameLogic* GetLogic(ASurvivorsGame* G) { return G->GetLogic(); }
 };
 
 // ============================================================

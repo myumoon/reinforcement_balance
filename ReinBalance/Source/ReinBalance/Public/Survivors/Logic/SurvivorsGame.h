@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/Logic/SurvivorsGameLogic.h"
 #include "Survivors/Logic/SurvivorsTypes.h"
 #include "SurvivorsGame.generated.h"
 
@@ -485,4 +486,20 @@ private:
 
 	// StepWithDeltaTime() 用の時間蓄積バッファ
 	float PhysicsAccumTime = 0.f;
+
+public:
+	// ---- FSurvivorsGameLogic ファサード API ----
+
+	/** ゲームロジックへのポインタ（ParallelFor / テストから参照用） */
+	FSurvivorsGameLogic* GetLogic() { return &Logic; }
+	const FSurvivorsGameLogic* GetLogic() const { return &Logic; }
+
+	/**
+	 * 全 UPROPERTY フィールドを FSurvivorsGameLogicConfig に変換して Logic に同期する。
+	 * /params 適用後・ResetState() 前に呼ぶ（ゲームスレッド専用）。
+	 */
+	void SyncConfigToLogic();
+
+private:
+	FSurvivorsGameLogic Logic;
 };

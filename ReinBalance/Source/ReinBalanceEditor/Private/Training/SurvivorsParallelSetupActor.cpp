@@ -1,12 +1,18 @@
+// Phase 2: FSurvivorsGameLogic が完全移植されたら定義して ParallelFor を有効化する
+// #define SURVIVORS_PARALLEL_LOGIC_READY
+
 #include "Training/SurvivorsParallelSetupActor.h"
 #include "Training/SurvivorsHttpEnvService.h"
 #include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/Logic/SurvivorsGameLogic.h"
 #include "Survivors/View/SurvivorsGameView.h"
 #include "Kismet/GameplayStatics.h"
+#include "Async/ParallelFor.h"
 
 ASurvivorsParallelSetupActor::ASurvivorsParallelSetupActor()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	// Phase 2: 並列 Tick マネージャーとして機能するため true に変更
+	PrimaryActorTick.bCanEverTick = true;
 }
 
 void ASurvivorsParallelSetupActor::BeginPlay()
@@ -20,6 +26,9 @@ void ASurvivorsParallelSetupActor::BeginPlay()
 		return;
 	}
 
+	// Phase 2: AllServices をリセット
+	AllServices.Reset();
+
 	// 訓練 env をスポーン
 	TrainGames.Reset();
 	for (int32 i = 0; i < NumTrainEnvs; ++i)
@@ -28,7 +37,14 @@ void ASurvivorsParallelSetupActor::BeginPlay()
 		if (!Game) continue;
 
 		TrainGames.Add(Game);
-		SpawnService(Game, BasePort + i);
+
+		ASurvivorsHttpEnvService* Svc = SpawnService(Game, BasePort + i);
+		if (Svc)
+		{
+			// Phase 2: ParallelSetupActor が制御するため自律 Tick をスキップさせる
+			Svc->bManagedExternally = true;
+			AllServices.Add(Svc);
+		}
 	}
 
 	// 評価 env をスポーン（EvalPort > 0 の場合のみ）
@@ -38,7 +54,12 @@ void ASurvivorsParallelSetupActor::BeginPlay()
 		EvalGame = SpawnGame();
 		if (EvalGame)
 		{
-			SpawnService(EvalGame, EvalPort);
+			ASurvivorsHttpEnvService* EvalSvc = SpawnService(EvalGame, EvalPort);
+			if (EvalSvc)
+			{
+				EvalSvc->bManagedExternally = true;
+				AllServices.Add(EvalSvc);
+			}
 		}
 	}
 
@@ -83,6 +104,151 @@ void ASurvivorsParallelSetupActor::BeginPlay()
 		             : (TrainGames.Num() > 0 ? TrainGames.Last().Get() : nullptr);
 	}
 	BindCameraToGame(CameraTarget);
+}
+
+// ============================================================
+// Phase 2: 並列 Tick マネージャー
+// ============================================================
+
+namespace
+{
+	/** FSurvivorsStepResult → FEnvStepResult 変換 */
+	static FEnvStepResult ConvertStepResult(const FSurvivorsStepResult& Src)
+	{
+		FEnvStepResult Dst;
+		Dst.Obs       = Src.Obs;
+		Dst.Reward    = Src.Reward;
+		Dst.bDone     = Src.bDone;
+		Dst.bTruncated = Src.bTruncated;
+		Dst.InfoJson  = FString::Printf(TEXT("{\"spawn_debug\":%s}"),
+			Src.SpawnDebugJson.IsEmpty() ? TEXT("{}") : *Src.SpawnDebugJson);
+		return Dst;
+	}
+
+	/** FSurvivorsResetResult → FEnvResetResult 変換 */
+	static FEnvResetResult ConvertResetResult(const FSurvivorsResetResult& Src)
+	{
+		FEnvResetResult Dst;
+		Dst.Obs           = Src.Obs;
+		Dst.ObsSchemaHash = Src.ObsSchemaHash;
+		return Dst;
+	}
+} // namespace
+
+void ASurvivorsParallelSetupActor::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	if (AllServices.IsEmpty()) return;
+
+	// ---- 1. Params をゲームスレッドで先に適用（ParallelFor より前）----
+	for (ASurvivorsHttpEnvService* Svc : AllServices)
+	{
+		if (!Svc) continue;
+		FString Json;
+		FHttpResultCallback Cb;
+		while (Svc->TakeParamsRequest(Json, Cb))
+		{
+			FString ResponseJson = Svc->ApplyParams(Json);
+			Cb(FHttpEnvServerBase::MakeJsonResponse(ResponseJson));
+		}
+	}
+
+	// ---- 2. Step/Reset リクエストを収集 ----
+
+	struct FPendingWork
+	{
+		ASurvivorsHttpEnvService* Service  = nullptr;
+		FSurvivorsGameLogic*      Logic    = nullptr;
+		bool                      bIsStep  = true;
+		TArray<float>             Action;
+		int32                     Steps    = 1;
+		FHttpResultCallback       StepCallback;
+		TOptional<int32>          Seed;
+		FHttpResultCallback       ResetCallback;
+	};
+
+	TArray<FPendingWork> Works;
+	Works.Reserve(AllServices.Num());
+
+	for (ASurvivorsHttpEnvService* Svc : AllServices)
+	{
+		if (!Svc) continue;
+		FPendingWork W;
+		W.Service = Svc;
+		W.Logic   = Svc->GetGameLogic();
+
+		// Reset を Step より優先（既存 FHttpEnvServerBase::Tick と同じ順序）
+		if (Svc->TakeResetRequest(W.Seed, W.ResetCallback))
+		{
+			W.bIsStep = false;
+			Works.Add(MoveTemp(W));
+		}
+		else if (Svc->TakeStepRequest(W.Action, W.Steps, W.StepCallback))
+		{
+			W.bIsStep = true;
+			Works.Add(MoveTemp(W));
+		}
+	}
+
+	if (Works.IsEmpty()) return;
+
+	// ---- 3. Step/Reset を実行 ----
+	//
+	// Phase 3 完了前: ForceSingleThread で直列（UObject 経由の Reset/Step が必要）
+	// Phase 3 完了後: SURVIVORS_PARALLEL_LOGIC_READY を定義してフラグを外す
+	//
+	// NOTE: 現在 FSurvivorsGameLogic::ExecStep/ExecReset は骨格実装のみで
+	//       実際の処理は ASurvivorsGame 側にある。
+	//       Phase 3 で移植が完了するまで、ASurvivorsHttpEnvService::ProcessStep/Reset
+	//       を通常の方法で呼び出す（EnvServer->Tick() 代わりに直接呼び出す）。
+	// TODO(issue): Phase 3 完了後に W.Logic->ExecStep(W.Action, W.Steps) を使うよう変更する
+
+	TArray<FSurvivorsStepResult>  LogicStepResults;
+	TArray<FSurvivorsResetResult> LogicResetResults;
+	LogicStepResults.SetNum(Works.Num());
+	LogicResetResults.SetNum(Works.Num());
+
+#ifdef SURVIVORS_PARALLEL_LOGIC_READY
+	// Phase 3 完了後: 純 C++ Logic を直接並列実行
+	ParallelFor(Works.Num(), [&](int32 i)
+	{
+		FPendingWork& W = Works[i];
+		if (!W.Logic) return;
+		if (W.bIsStep)
+			LogicStepResults[i]  = W.Logic->ExecStep(W.Action, W.Steps);
+		else
+			LogicResetResults[i] = W.Logic->ExecReset(W.Seed);
+	});
+#else
+	// Phase 3 完了前: ASurvivorsGame 経由で直列実行（暫定）
+	// TODO(issue): Phase 3 で Logic に移植後、ParallelFor に切り替える
+	for (int32 i = 0; i < Works.Num(); ++i)
+	{
+		FPendingWork& W = Works[i];
+		if (!W.Logic) continue;
+		if (W.bIsStep)
+			LogicStepResults[i]  = W.Logic->ExecStep(W.Action, W.Steps);
+		else
+			LogicResetResults[i] = W.Logic->ExecReset(W.Seed);
+	}
+#endif
+
+	// ---- 4. レスポンス送信（ゲームスレッドで実行）----
+	for (int32 i = 0; i < Works.Num(); ++i)
+	{
+		FPendingWork& W = Works[i];
+		if (W.bIsStep)
+		{
+			FEnvStepResult EnvResult = ConvertStepResult(LogicStepResults[i]);
+			W.Service->CompleteStep(MoveTemp(EnvResult), MoveTemp(W.StepCallback));
+		}
+		else
+		{
+			FEnvResetResult EnvResult = ConvertResetResult(LogicResetResults[i]);
+			W.Service->CompleteReset(MoveTemp(EnvResult), MoveTemp(W.ResetCallback));
+		}
+	}
 }
 
 ASurvivorsGame* ASurvivorsParallelSetupActor::FindGameByPort(int32 Port) const

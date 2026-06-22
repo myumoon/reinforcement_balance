@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "IHttpRouter.h"  // FHttpResultCallback
 
 /**
  * Step/Reset の結果を格納する構造体。
@@ -57,4 +58,42 @@ public:
 
 	/** リセット時にゲーム固有の初期化を行い初期観測値を返す。GameThread で実行される。 */
 	virtual FEnvResetResult ProcessReset(TOptional<int32> Seed) = 0;
+
+	// ---- Phase 2: 並列外部制御 API（デフォルト実装で後方互換を維持） ----
+
+	/**
+	 * ActionQueue から Step リクエストを 1 件取り出す。
+	 * キューが空なら false を返す。
+	 * @param OutAction   取り出したアクション配列
+	 * @param OutSteps    取り出したフレームスキップ数
+	 * @param OutCallback 応答コールバック（非同期 HTTP 応答用）
+	 */
+	virtual bool TakeStepRequest(
+		TArray<float>& OutAction, int32& OutSteps, FHttpResultCallback& OutCallback)
+	{
+		return false;
+	}
+
+	/**
+	 * ResetQueue から Reset リクエストを 1 件取り出す。
+	 * キューが空なら false を返す。
+	 * @param OutSeed     取り出したシード（設定なしの場合は TOptional が空）
+	 * @param OutCallback 応答コールバック
+	 */
+	virtual bool TakeResetRequest(
+		TOptional<int32>& OutSeed, FHttpResultCallback& OutCallback)
+	{
+		return false;
+	}
+
+	/**
+	 * Step 結果を HTTP レスポンスとして返す。
+	 * CompleteStep は Tick() 外部（ParallelSetupActor の Tick）から呼ぶ場合に使う。
+	 */
+	virtual void CompleteStep(FEnvStepResult Result, FHttpResultCallback Callback) {}
+
+	/**
+	 * Reset 結果を HTTP レスポンスとして返す。
+	 */
+	virtual void CompleteReset(FEnvResetResult Result, FHttpResultCallback Callback) {}
 };
