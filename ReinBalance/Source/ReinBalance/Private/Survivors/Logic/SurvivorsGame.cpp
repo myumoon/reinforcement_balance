@@ -244,6 +244,37 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	EpisodeStepCount  = 0;
 	bDone       = false;
 	bTruncated  = false;
+
+	// RSI: 初期状態オーバーライドの適用
+	if (bHasInitialOverride)
+	{
+		ElapsedTime = FMath::Clamp(InitialElapsedTime, 0.f, 1800.f);
+
+		for (int32 i = 0; i < InitialWeaponSlots.Num() && i < MaxWeaponSlots; ++i)
+		{
+			const int32 WId = InitialWeaponSlots[i].WeaponId;
+			const int32 WLv = FMath::Clamp(InitialWeaponSlots[i].Level, 1, 8);
+			WeaponComponent->EquipWeapon(i, static_cast<EWeaponType>(WId), WLv);
+			WeaponSlots[i].Type  = static_cast<EWeaponType>(WId);
+			WeaponSlots[i].Level = FWeaponLevel(WLv);
+		}
+
+		for (int32 i = 0; i < InitialPassiveSlots.Num() && i < MaxPassiveSlots; ++i)
+		{
+			const int32 PId  = InitialPassiveSlots[i].PassiveId;
+			const int32 PLv  = FMath::Clamp(InitialPassiveSlots[i].Level, 1, 9);
+			PassiveSlots[i].Type  = static_cast<EPassiveItemType>(PId);
+			PassiveSlots[i].Level = PLv;
+		}
+		if (!InitialPassiveSlots.IsEmpty())
+			PlayerComponent->RecalcPassiveEffects();
+
+		// RSI: 一度適用したらクリア（次のリセットでは通常動作に戻す）
+		bHasInitialOverride = false;
+		InitialWeaponSlots.Empty();
+		InitialPassiveSlots.Empty();
+		InitialElapsedTime  = 0.f;
+	}
 }
 
 void ASurvivorsGame::PhysicsStep(int32 ActionIdx)

@@ -875,6 +875,12 @@ def parse_args() -> argparse.Namespace:
                    help="武器カリキュラムのフェーズキー（W0〜W6 または W0_to_W1 等, 'auto' で自動昇格, default: W0）")
     p.add_argument("--weapon-phase-auto-stagnation-steps", type=int, default=500_000,
                    help="--weapon-phase auto 時: カリキュラム停滞とみなすステップ数 (default: 500000)")
+    p.add_argument(
+        "--rsi-mode",
+        default="none",
+        choices=["none", "auto"],
+        help="RSI（制約付きランダム武器生成）モード。auto でカリキュラムフェーズに応じて有効化（default: none）",
+    )
     p.add_argument("--wandb", action="store_true", help="W&B ログを有効にする")
     p.add_argument("--wandb-project", default="rl-balance", help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None, help="W&B ラン名（未指定時は自動生成）")
@@ -1502,6 +1508,20 @@ def main() -> None:
         )
     elif args.curriculum_spalf:
         print("[WARN] --curriculum-spalf は survivors ゲームかつ非 dry-run 時のみ有効です。無視します。")
+
+    # WeaponSlotSamplerCallback: --rsi-mode auto 時に登録
+    # HybridCurriculumSpalfCallback.get_current_phase_name() でフェーズ名を取得する。
+    if args.game == "survivors" and not args.dry_run and getattr(args, "rsi_mode", "none") == "auto":
+        _rsi_cb_source = locals().get("hybrid_cb")
+        if _rsi_cb_source is not None and hasattr(_rsi_cb_source, "get_current_phase_name"):
+            from games.survivors.weapon_slot_sampler_callback import WeaponSlotSamplerCallback
+            rsi_cb = WeaponSlotSamplerCallback(
+                get_phase_name_fn=_rsi_cb_source.get_current_phase_name,
+            )
+            callbacks.append(rsi_cb)
+            print(f"[INFO] WeaponSlotSamplerCallback 有効 (rsi-mode=auto)")
+        else:
+            print("[WARN] --rsi-mode auto: --curriculum-spalf と組み合わせて使用してください。WeaponSlotSamplerCallback をスキップします。")
 
     # WeaponPhaseAutoCallback: --weapon-phase auto 時に登録
     # --curriculum または --curriculum-spalf が必要。

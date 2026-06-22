@@ -260,6 +260,74 @@ private:
 		if (JsonObj->TryGetStringField(TEXT("starting_weapon_mode"), StartingWeaponMode))
 			Game->StartingWeaponMode = StartingWeaponMode;
 
+		// RSI: initial_elapsed_time
+		double InitialElapsedTime = 0.0;
+		if (JsonObj->TryGetNumberField(TEXT("initial_elapsed_time"), InitialElapsedTime))
+		{
+			Game->InitialElapsedTime = FMath::Clamp(static_cast<float>(InitialElapsedTime), 0.f, 1800.f);
+			Game->bHasInitialOverride = true;
+		}
+
+		// RSI: initial_weapon_slots [{weapon_id: int, level: int}, ...]
+		const TArray<TSharedPtr<FJsonValue>>* WSlots;
+		if (JsonObj->TryGetArrayField(TEXT("initial_weapon_slots"), WSlots))
+		{
+			Game->InitialWeaponSlots.Empty();
+			for (const TSharedPtr<FJsonValue>& Val : *WSlots)
+			{
+				const TSharedPtr<FJsonObject>* SlotObj;
+				if (!Val->TryGetObject(SlotObj)) continue;
+				int32 WId = 0, WLv = 1;
+				double TmpId = 0, TmpLv = 0;
+				if ((*SlotObj)->TryGetNumberField(TEXT("weapon_id"), TmpId)) WId = static_cast<int32>(TmpId);
+				if ((*SlotObj)->TryGetNumberField(TEXT("level"),     TmpLv)) WLv = static_cast<int32>(TmpLv);
+				Game->InitialWeaponSlots.Add({WId, FMath::Clamp(WLv, 1, 8)});
+			}
+			if (!Game->InitialWeaponSlots.IsEmpty())
+				Game->bHasInitialOverride = true;
+		}
+
+		// RSI: initial_passive_slots [{passive_id: int, level: int}, ...]
+		const TArray<TSharedPtr<FJsonValue>>* PSlots;
+		if (JsonObj->TryGetArrayField(TEXT("initial_passive_slots"), PSlots))
+		{
+			Game->InitialPassiveSlots.Empty();
+			for (const TSharedPtr<FJsonValue>& Val : *PSlots)
+			{
+				const TSharedPtr<FJsonObject>* SlotObj;
+				if (!Val->TryGetObject(SlotObj)) continue;
+				int32 PId = 0, PLv = 1;
+				double TmpId = 0, TmpLv = 0;
+				if ((*SlotObj)->TryGetNumberField(TEXT("passive_id"), TmpId)) PId = static_cast<int32>(TmpId);
+				if ((*SlotObj)->TryGetNumberField(TEXT("level"),      TmpLv)) PLv = static_cast<int32>(TmpLv);
+
+				// None(0) および予約範囲外は除外
+				if (PId <= 0 || PId >= SurvivorsGameConstants::MaxPassiveTypeCountReserved)
+					continue;
+
+				const EPassiveItemType PType  = static_cast<EPassiveItemType>(PId);
+				const int32            MaxLv  = Game->GetPassiveItemMaxLevel(PType);
+
+				// MaxLevel=0（StoneMask など未実装パッシブ）はスキップ
+				if (MaxLv <= 0)
+					continue;
+
+				Game->InitialPassiveSlots.Add({PId, FMath::Clamp(PLv, 1, MaxLv)});
+			}
+			if (!Game->InitialPassiveSlots.IsEmpty())
+				Game->bHasInitialOverride = true;
+		}
+
+		// RSI: clear_initial_override — true を送ると次のリセットでオーバーライドを適用しない
+		bool bClearOverride = false;
+		if (JsonObj->TryGetBoolField(TEXT("clear_initial_override"), bClearOverride) && bClearOverride)
+		{
+			Game->bHasInitialOverride = false;
+			Game->InitialWeaponSlots.Empty();
+			Game->InitialPassiveSlots.Empty();
+			Game->InitialElapsedTime = 0.f;
+		}
+
 		OnComplete(MakeJsonResponse(TEXT("{\"status\":\"ok\"}")));
 		return true;
 	}

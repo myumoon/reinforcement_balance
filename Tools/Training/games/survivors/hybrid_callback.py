@@ -418,6 +418,10 @@ class HybridCurriculumSpalfCallback(BaseCallback):
 
     # ---- Probe 昇格 API ----
 
+    def get_current_phase_name(self) -> str:
+        """現在のカリキュラムフェーズ名を返す（RSI 用）。"""
+        return _CURRICULUM_PHASES[self._curriculum.current_phase].name
+
     def get_current_phase_params(self) -> dict:
         """probe eval で eval_env に適用する params dict を返す。
 
