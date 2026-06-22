@@ -455,7 +455,7 @@ class HybridCurriculumSpalfCallback(BaseCallback):
             self._on_phase_changed("advance")
         return event
 
-    def on_promotion_probe_eval_results(self, episode_results: list[dict], metrics: dict) -> None:
+    def on_promotion_probe_eval_results(self, episode_results: list[dict], metrics: dict, step: int | None = None) -> None:
         """SurvivorsEvalCallback の after_eval_callback として呼ばれるエントリポイント。
 
         SurvivorsEvalCallback は ep_length キーを使う。
@@ -464,6 +464,8 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         Args:
             episode_results: SurvivorsEvalCallback が返す episode_results（ep_length キー）
             metrics:         SurvivorsEvalCallback が返す aggregate_metrics
+            step:            eval 完了時の timestep（async eval 時は join 後の timestep）。
+                             None の場合は self.num_timesteps を使用する。
         """
         # ep_length → ep_len 変換
         normalized = [
@@ -475,9 +477,9 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         # ログは昇格を発生させた phase の値で記録しなければならない。
         pre_diag = self._curriculum.get_promotion_probe_diagnostics()
         event = self.on_promotion_probe_results(normalized)
-        self._log_promotion_probe_metrics(metrics, pre_diag=pre_diag, event=event)
+        self._log_promotion_probe_metrics(metrics, pre_diag=pre_diag, event=event, step=step)
 
-    def _log_promotion_probe_metrics(self, metrics: dict, *, pre_diag: dict, event: str | None) -> None:
+    def _log_promotion_probe_metrics(self, metrics: dict, *, pre_diag: dict, event: str | None, step: int | None = None) -> None:
         """probe eval の昇格判定関連メトリクスを curriculum/* として W&B に記録する。
 
         active_score_mean / ep_length_mean / n_episodes / phase_idx は eval/* および
@@ -488,13 +490,15 @@ class HybridCurriculumSpalfCallback(BaseCallback):
             metrics:  SurvivorsEvalCallback が返す aggregate_metrics
             pre_diag: on_promotion_probe_results() 呼び出し前に取得した probe diagnostics
             event:    "advance" / None（on_promotion_probe_results() の戻り値）
+            step:     ログに使用する timestep。None の場合は self.num_timesteps を使用する。
         """
         if not self._wandb_logger or not self._wandb_logger.enabled:
             return
 
+        log_step = step if step is not None else self.num_timesteps
         wandb_metrics = {
             "curriculum/probe_threshold":        pre_diag.get("threshold"),
             "curriculum/probe_promotion_ready":  int(bool(pre_diag.get("promotion_ready"))),
             "curriculum/probe_event":            int(event == "advance"),
         }
-        self._wandb_logger.log(wandb_metrics, step=self.num_timesteps)
+        self._wandb_logger.log(wandb_metrics, step=log_step)

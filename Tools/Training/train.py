@@ -1502,6 +1502,10 @@ def main() -> None:
                 wandb_logger=wandb_logger,
                 params_provider=hybrid_cb.get_current_phase_params,
                 after_eval_callback=hybrid_cb.on_promotion_probe_eval_results,
+                stale_check_fn=lambda: (
+                    hybrid_cb.current_phase,
+                    _weapon_auto_module.current_phase_key if _weapon_auto_module is not None else None,
+                ),
             ))
             _survivors_eval_registered = True
             print(
@@ -1778,6 +1782,24 @@ def main() -> None:
                 except (BrokenPipeError, OSError):
                     pass
             if eval_env is not None:
+                # eval thread cleanup（必須。SB3 が on_training_end を呼ばない場合でも確実に実行）
+                for cb in callbacks:
+                    if hasattr(cb, '_eval_thread') and cb._eval_thread is not None:
+                        if cb._eval_thread.is_alive():
+                            cb._eval_thread.join()  # 完了まで待つ（eval_env はまだ open）
+                        # 結果処理はしない（env close 直前のため set_params 等の副作用を避ける）
+                        # eval/running=0 または eval/aborted=1 はログする（W&B に 1 が残らないよう）
+                        try:
+                            if (hasattr(cb, '_wandb_logger') and cb._wandb_logger
+                                    and cb._wandb_logger.enabled):
+                                cb._wandb_logger.log(
+                                    {"eval/running": 0, "eval/aborted": 1},
+                                    step=cb.num_timesteps,
+                                )
+                        except Exception:
+                            pass
+                        cb._eval_thread = None
+                        cb._eval_result_queue = None
                 try:
                     eval_env.close()
                 except (BrokenPipeError, OSError):
