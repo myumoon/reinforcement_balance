@@ -23,6 +23,11 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
              移動方向の gem_density_near が高いほど接近ボーナスを増幅。
       Fix G: Section 15a 新設 — レベルアップ直前の Gem 加速（Item 12）
              xp_progress > 0.7 で Gem 収集シグナルを最大 1.5 倍に強化。
+      Fix H: Section 12a — 緊急接近ペナルティを -0.10 → -0.04 に緩和し Gem 近接ガードを追加。
+             Gem が収集圏内（curr_min_gem < 0.08）の場合はペナルティをさらに半減。
+             Section 9 の Gem 接近ボーナス（最大 +0.025）と同規模に揃え Gem 収集阻害を解消。
+      Fix I: Section 10 — Gem ピックアップボーナスを 0.02 → 0.05 に強化（最大 +0.25）。
+             Section 9 の連続接近シグナルと両方から Gem 収集行動を促す。
 
     obs レイアウト (794 dims, obs_schema v794):
       [0:2]    player_pos (x/HN, y/HN)
@@ -358,10 +363,11 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
 
     # ============================================================
     # 10. Gem ピックアップ時の小ボーナス
+    # [Fix I] 0.02 → 0.05（最大 +0.25）: 離散イベントへの報酬を強化
     # ============================================================
     if base_reward >= 1.0:
         gem_count_est = min(base_reward, 5.0)
-        shaped += 0.02 * gem_count_est
+        shaped += 0.05 * gem_count_est
 
     # ============================================================
     # 11. 壁際ペナルティ
@@ -389,11 +395,16 @@ def reward_shaping(obs: np.ndarray, prev_obs: np.ndarray, base_reward: float) ->
     # [Fix A] Garlic 主体（garlic_auto_ratio >= 0.5）の場合は除外。
     #    Garlic は敵を引き寄せて AoE で倒す武器のため 0 距離は許容される。
     #    混在ロードアウト（Garlic + KingBible 等）では発動し KingBible の 0 距離を抑制。
+    # [Fix H] -0.10 → -0.04: Section 9 Gem 接近ボーナス（最大 +0.025）と同規模に揃える。
+    #    Gem は敵密集地にドロップするため過大なペナルティが Gem 収集を阻害していた。
+    #    curr_min_gem < 0.08（Gem が収集圏内）の場合はさらに半減して Gem 収集を優先。
     # ============================================================
     _emergency_enemy_dist = float(np.min(enemy_nearest_16))
     _EMERGENCY_DIST = 0.025  # ≈ 60u（KingBible orbit 半径の目安）
     if garlic_auto_ratio < 0.5 and _emergency_enemy_dist < _EMERGENCY_DIST:
-        shaped += -0.10 * (1.0 - _emergency_enemy_dist / _EMERGENCY_DIST)
+        base_pen = -0.04 * (1.0 - _emergency_enemy_dist / _EMERGENCY_DIST)
+        gem_proximity_gate = 0.5 if curr_min_gem < 0.08 else 1.0
+        shaped += base_pen * gem_proximity_gate
 
     # ============================================================
     # 13. 全武器適正距離維持ボーナス

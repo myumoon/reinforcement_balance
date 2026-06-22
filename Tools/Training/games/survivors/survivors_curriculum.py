@@ -85,7 +85,7 @@ PHASES: list[_Phase] = [
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25),
     _Phase("通常序盤",          8,  20, 1.0, 2.0,  4, 1.00, 1.00, False, 2400,  800.0,
            promotion_score_stat="percentile", promotion_score_percentile=10.0,
-           promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25),
+           promotion_min_score_ratio=0.90, promotion_max_score_cv=0.25),
     _Phase("包囲入門A",         9,  18, 1.0, 2.0,  4, 1.00, 0.80, False, 2400,  950.0,
            promotion_min_score_ratio=0.70, promotion_max_score_cv=0.25,
            promotion_score_stat="percentile", promotion_score_percentile=10.0),
