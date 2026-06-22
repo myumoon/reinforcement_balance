@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 from typing import Callable
 
@@ -332,6 +333,7 @@ class SurvivorsEvalCallback(BaseEvalCallback):
         wandb_logger=None,
         params_provider: Callable[[], dict] | None = None,
         after_eval_callback: Callable[[list[dict], dict], None] | None = None,
+        stale_check_fn: Callable[[], object] | None = None,
         verbose: int = 1,
     ):
         super().__init__(
@@ -345,6 +347,23 @@ class SurvivorsEvalCallback(BaseEvalCallback):
         self.alive_reward = alive_reward
         self.params_provider = params_provider
         self.after_eval_callback = after_eval_callback
+        self.stale_check_fn = stale_check_fn
+
+        # after_eval_callback が step 引数を受け付けるか初期化時に一度だけ判定
+        # 'step' の明示パラメータ、または **kwargs（VAR_KEYWORD）があれば対応とみなす
+        self._after_eval_callback_supports_step = False
+        if after_eval_callback is not None:
+            try:
+                sig = inspect.signature(after_eval_callback)
+                self._after_eval_callback_supports_step = (
+                    'step' in sig.parameters
+                    or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in sig.parameters.values()
+                    )
+                )
+            except (ValueError, TypeError):
+                pass
 
     def _sync_vecnormalize(self) -> None:
         """訓練側 VecNormalize の obs_rms/ret_rms を eval_env へコピーする。"""
@@ -454,6 +473,73 @@ class SurvivorsEvalCallback(BaseEvalCallback):
             else:
                 self._sync_env_params()
 
+    def _start_eval_async(self) -> None:
+        """background thread で eval を起動する（BaseEvalCallback の実装）。"""
+        import queue
+        import threading
+
+        policy_snapshot = copy.deepcopy(self.model.policy)
+        stale_snapshot = self.stale_check_fn() if self.stale_check_fn else None
+        result_queue: queue.Queue = queue.Queue()
+        self._eval_result_queue = result_queue  # _try_process_pending_eval_result で参照
+
+        frame_skip = self.frame_skip
+        alive_reward = self.alive_reward
+        n_eval_episodes = self.n_eval_episodes
+        eval_env = self.eval_env
+
+        def _worker():
+            try:
+                episode_results, metrics, _ = run_survivors_eval_episodes(
+                    model=policy_snapshot,
+                    env=eval_env,
+                    n_eval_episodes=n_eval_episodes,
+                    frame_skip=frame_skip,
+                    alive_reward=alive_reward,
+                    deterministic=True,
+                )
+                result_queue.put((episode_results, metrics, stale_snapshot, None))
+            except Exception as exc:
+                result_queue.put((None, None, stale_snapshot, exc))
+
+        self._eval_thread = threading.Thread(target=_worker, daemon=True)
+        self._eval_thread.start()
+
+    def _process_eval_result(self, result: tuple) -> None:
+        """background eval の結果をメインスレッドで処理する（BaseEvalCallback の実装）。"""
+        episode_results, metrics, stale_snapshot, exc = result
+        log_step = self.num_timesteps  # join 完了時の現在 step
+
+        # worker 内例外をメインスレッドでログ（verbose のみ、訓練は継続）
+        if exc is not None:
+            import traceback
+            print(f"[Eval] async eval worker で例外が発生しました（スキップ）: {exc}")
+            if self.verbose >= 2:
+                traceback.print_exception(type(exc), exc, exc.__traceback__)
+            return
+
+        # stale 判定: eval 実行中に curriculum/weapon phase が変わった場合は after_eval_callback をスキップ
+        is_stale = False
+        if stale_snapshot is not None and self.stale_check_fn is not None:
+            if self.stale_check_fn() != stale_snapshot:
+                is_stale = True
+                if self._wandb_logger and self._wandb_logger.enabled:
+                    self._wandb_logger.log({"curriculum/probe_skipped_stale": 1}, step=log_step)
+                print("[Eval] stale probe result を破棄 (phase が変化)")
+
+        # eval/weapon metrics は stale でも記録する（診断用）
+        self._log_results(metrics)
+        weapon_payload = _aggregate_weapon_metrics(episode_results)
+        if self._wandb_logger and self._wandb_logger.enabled:
+            self._wandb_logger.log(weapon_payload, step=log_step)
+
+        # after_eval_callback（昇格判定）は stale の場合はスキップ
+        if not is_stale and self.after_eval_callback is not None:
+            if self._after_eval_callback_supports_step:
+                self.after_eval_callback(episode_results, metrics, step=log_step)
+            else:
+                self.after_eval_callback(episode_results, metrics)
+
     def _run_eval_and_log(self) -> None:
         # eval_env が None の場合は training_env を使う（n_envs=1 旧互換）
         use_training_env = self.eval_env is None
@@ -485,7 +571,10 @@ class SurvivorsEvalCallback(BaseEvalCallback):
         #     step が同じなら W&B 上で同一ステップにマージされる
 
         if self.after_eval_callback is not None:
-            self.after_eval_callback(episode_results, metrics)
+            if self._after_eval_callback_supports_step:
+                self.after_eval_callback(episode_results, metrics, step=self.num_timesteps)
+            else:
+                self.after_eval_callback(episode_results, metrics)
 
     def _aggregate(self, results: list[dict]) -> dict:
         return _aggregate_eval_results(results)
