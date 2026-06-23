@@ -56,6 +56,16 @@ struct FSurvivorsGameTestAccess
 
 	// Phase 2 追加: FSurvivorsGameLogic へのアクセサ（テスト用）
 	static FSurvivorsGameLogic* GetLogic(ASurvivorsGame* G) { return G->GetLogic(); }
+
+	// Logic プライベートメソッドのラッパー（FSurvivorsTestWorld から呼ぶ用）
+	static void BuildEnemyGrid(ASurvivorsGame* G)                               { G->GetLogic()->BuildEnemyGrid(); }
+	static void BuildPickupGrid(ASurvivorsGame* G)                              { G->GetLogic()->BuildPickupGrid(); }
+	static void ComputeAllWeaponHits(ASurvivorsGame* G, FSurvivorsHitFrame& HF) { G->GetLogic()->ComputeAllWeaponHits(HF); }
+	static void ApplyWeaponHits(ASurvivorsGame* G, FSurvivorsHitFrame& HF)      { G->GetLogic()->ApplyWeaponHits(HF); }
+	static void ComputeContactHits(ASurvivorsGame* G, FSurvivorsHitFrame& HF)   { G->GetLogic()->ComputeContactHits(HF); }
+	static void ApplyContactHits(ASurvivorsGame* G, FSurvivorsHitFrame& HF)     { G->GetLogic()->ApplyContactHits(HF); }
+	static void ComputePickupHits(ASurvivorsGame* G, FSurvivorsHitFrame& HF)    { G->GetLogic()->ComputePickupHits(HF); }
+	static void ApplyPickupHits(ASurvivorsGame* G, FSurvivorsHitFrame& HF)      { G->GetLogic()->ApplyPickupHits(HF); }
 };
 
 // ============================================================
@@ -118,32 +128,26 @@ struct FSurvivorsTestWorld
 	// Weapon/Enemy/Gem の一連の当たり判定ステップを実行するヘルパー
 	void RunWeaponHits()
 	{
-		auto* CC = FSurvivorsGameTestAccess::CollComp(Game);
-		auto* WC = FSurvivorsGameTestAccess::WeaponComp(Game);
-		CC->BuildEnemyGrid();
 		FSurvivorsHitFrame HF;
-		WC->ComputeAllWeaponHits(CC, HF);
-		WC->ApplyWeaponHits(HF);
+		FSurvivorsGameTestAccess::BuildEnemyGrid(Game);
+		FSurvivorsGameTestAccess::ComputeAllWeaponHits(Game, HF);
+		FSurvivorsGameTestAccess::ApplyWeaponHits(Game, HF);
 	}
 
 	void RunContactHits()
 	{
-		auto* CC = FSurvivorsGameTestAccess::CollComp(Game);
-		auto* EC = FSurvivorsGameTestAccess::EnemyComp(Game);
-		CC->BuildEnemyGrid();
 		FSurvivorsHitFrame HF;
-		EC->ComputeContactHits(CC, HF);
-		EC->ApplyContactHits(HF);
+		FSurvivorsGameTestAccess::BuildEnemyGrid(Game);
+		FSurvivorsGameTestAccess::ComputeContactHits(Game, HF);
+		FSurvivorsGameTestAccess::ApplyContactHits(Game, HF);
 	}
 
 	void RunPickupHits()
 	{
-		auto* CC = FSurvivorsGameTestAccess::CollComp(Game);
-		auto* GC = FSurvivorsGameTestAccess::GemComp(Game);
-		CC->BuildPickupGrid();
 		FSurvivorsHitFrame HF;
-		GC->ComputePickupHits(CC, HF);
-		GC->ApplyPickupHits(HF);
+		FSurvivorsGameTestAccess::BuildPickupGrid(Game);
+		FSurvivorsGameTestAccess::ComputePickupHits(Game, HF);
+		FSurvivorsGameTestAccess::ApplyPickupHits(Game, HF);
 	}
 };
 

@@ -74,32 +74,32 @@ public:
 	// ---- ビュー / デバッグ向けアクセサー ----
 
 	UFUNCTION(BlueprintPure, Category = "Survivors|Config")
-	FVector2D GetPlayerPos()   const { return PlayerPos; }
+	FVector2D GetPlayerPos()   const { return Logic.GetPlayerPos(); }
 	/** Camera Z=2000 基準のスクリーン内判定（±400u×±225u）
 	 *  ターゲット武器は画面内の敵のみを狙い、画面外敵は対象外にする。 */
 	bool IsOnScreen(FVector2D WorldPos) const;
 
-	FVector2D GetPlayerVel()   const { return PlayerVel; }
-	float     GetPlayerHP()    const { return PlayerHP; }
-	float     GetMaxPlayerHP() const { return MaxPlayerHP; }
+	FVector2D GetPlayerVel()   const { return Logic.GetPlayerVel(); }
+	float     GetPlayerHP()    const { return Logic.GetPlayerHP(); }
+	float     GetMaxPlayerHP() const { return Logic.GetMaxPlayerHP(); }
 
 	/** 後方互換: Garlic オーラ半径（WeaponSlots から取得）。View の DrawAura 用 */
 	float     GetAuraSize()    const;
 
-	const FWeaponSlot& GetWeaponSlot(int32 Idx) const { return WeaponSlots[Idx]; }
-	bool               IsShieldActive()          const { return bShieldActive; }
+	const FWeaponSlot& GetWeaponSlot(int32 Idx) const { return Logic.GetWeaponSlot(Idx); }
+	bool               IsShieldActive()          const { return Logic.IsShieldActive(); }
 
 	// ジェムアクセサ
-	int32     GetItemCount()       const { return Gems.Num(); }
+	int32     GetItemCount()       const { return Logic.GetItemCount(); }
 	FVector2D GetItemPos(int32 i)  const;
 	EGemType  GetItemGemType(int32 i) const;
 
 	// 敵アクセサ
-	int32     GetEnemyCount()         const { return Enemies.Num(); }
-	FVector2D GetEnemyPos(int32 i)    const { return Enemies.IsValidIndex(i) ? Enemies[i].Pos   : FVector2D::ZeroVector; }
-	int32     GetEnemyType(int32 i)   const { return Enemies.IsValidIndex(i) ? Enemies[i].TypeId : 0; }
-	float     GetEnemyHP(int32 i)     const { return Enemies.IsValidIndex(i) ? Enemies[i].HP    : 0.f; }
-	float     GetEnemyMaxHP(int32 i)  const { return Enemies.IsValidIndex(i) ? Enemies[i].MaxHP : 1.f; }
+	int32     GetEnemyCount()         const { return Logic.GetEnemyCount(); }
+	FVector2D GetEnemyPos(int32 i)    const { return Logic.GetEnemyPos(i); }
+	int32     GetEnemyType(int32 i)   const { return Logic.GetEnemyType(i); }
+	float     GetEnemyHP(int32 i)     const { return Logic.GetEnemyHP(i); }
+	float     GetEnemyMaxHP(int32 i)  const { return Logic.GetEnemyMaxHP(i); }
 
 	// プロジェクタイルアクセサ（WeaponComponent 経由）
 	int32     GetProjectileCount()              const;
@@ -122,36 +122,36 @@ public:
 	float       GetOrbitOrbVisualRadius(int32 i)      const;
 
 	// フロアアイテムアクセサ
-	int32            GetFloorPickupCount()           const { return FloorPickups.Num(); }
-	FVector2D        GetFloorPickupPos(int32 i)      const { return FloorPickups.IsValidIndex(i) ? FloorPickups[i].Pos : FVector2D::ZeroVector; }
-	EFloorPickupType GetFloorPickupType(int32 i)     const { return FloorPickups.IsValidIndex(i) ? FloorPickups[i].Type : EFloorPickupType::FloorChicken; }
+	int32            GetFloorPickupCount()           const { return Logic.GetFloorPickupCount(); }
+	FVector2D        GetFloorPickupPos(int32 i)      const { return Logic.GetFloorPickupPos(i); }
+	EFloorPickupType GetFloorPickupType(int32 i)     const { return Logic.GetFloorPickupType(i); }
 
 	// 特殊アイテムアクセサ
-	int32              GetSpecialPickupCount()           const { return SpecialPickups.Num(); }
-	FVector2D          GetSpecialPickupPos(int32 i)      const { return SpecialPickups.IsValidIndex(i) ? SpecialPickups[i].Pos : FVector2D::ZeroVector; }
-	ESpecialPickupType GetSpecialPickupType(int32 i)     const { return SpecialPickups.IsValidIndex(i) ? SpecialPickups[i].Type : ESpecialPickupType::Rosary; }
+	int32              GetSpecialPickupCount()           const { return Logic.GetSpecialPickupCount(); }
+	FVector2D          GetSpecialPickupPos(int32 i)      const { return Logic.GetSpecialPickupPos(i); }
+	ESpecialPickupType GetSpecialPickupType(int32 i)     const { return Logic.GetSpecialPickupType(i); }
 
 	// 破壊可能オブジェクトアクセサ
-	int32     GetDestructibleCount()          const { return Destructibles.Num(); }
-	FVector2D GetDestructiblePos(int32 i)     const { return Destructibles.IsValidIndex(i) ? Destructibles[i].Pos : FVector2D::ZeroVector; }
-	bool      IsDestructibleActive(int32 i)   const { return Destructibles.IsValidIndex(i) ? Destructibles[i].bActive : false; }
+	int32     GetDestructibleCount()          const { return Logic.GetDestructibleCount(); }
+	FVector2D GetDestructiblePos(int32 i)     const { return Logic.GetDestructiblePos(i); }
+	bool      IsDestructibleActive(int32 i)   const { return Logic.IsDestructibleActive(i); }
 
 	// ---- ビュー / デバッグ向けアクセサー ----
 
-	float              GetPlayerXP()              const { return PlayerXP; }
-	int32              GetPlayerLevel()            const { return PlayerLevel; }
-	float              GetPlayerShieldTimer()      const { return PlayerShieldTimer; }
-	float              GetElapsedTime()            const { return ElapsedTime; }
-	float              GetLastReward()             const { return LastReward; }
-	float              GetEpisodeBaseReward()      const { return EpisodeBaseReward; }
-	int32              GetEpisodeStepCount()       const { return EpisodeStepCount; }
+	float              GetPlayerXP()              const { return Logic.GetPlayerXP(); }
+	int32              GetPlayerLevel()            const { return Logic.GetPlayerLevel(); }
+	float              GetPlayerShieldTimer()      const { return Logic.GetPlayerShieldTimer(); }
+	float              GetElapsedTime()            const { return Logic.GetElapsedTime(); }
+	float              GetLastReward()             const { return Logic.GetLastReward(); }
+	float              GetEpisodeBaseReward()      const { return Logic.GetEpisodeBaseReward(); }
+	int32              GetEpisodeStepCount()       const { return Logic.GetEpisodeStepCount(); }
 	/** AliveReward 分を除いた撃破・収集による実質スコア（active_score に相当） */
-	float              GetEpisodeActiveScore()     const { return EpisodeBaseReward - AliveReward * static_cast<float>(EpisodeStepCount); }
+	float              GetEpisodeActiveScore()     const { return Logic.GetEpisodeActiveScore(); }
 	/** Idx は 0..MaxPassiveSlots-1。範囲チェックは呼び出し側で行う */
-	const FPassiveSlot& GetPassiveSlot(int32 Idx) const { return PassiveSlots[Idx]; }
+	const FPassiveSlot& GetPassiveSlot(int32 Idx) const { return Logic.GetPassiveSlot(Idx); }
 
 	/** パッシブ効果キャッシュ（View からの参照用） */
-	const FPassiveEffects& GetCachedPassiveEffects() const { return CachedPassiveEffects; }
+	const FPassiveEffects& GetCachedPassiveEffects() const { return Logic.GetCachedPassiveEffects(); }
 
 	/** TypeId → 生存数のマップ。デバッグ表示用（毎フレームの呼び出しを想定） */
 	TMap<int32, int32> GetEnemyCountByType() const;
