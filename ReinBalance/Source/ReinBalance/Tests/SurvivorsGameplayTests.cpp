@@ -57,7 +57,7 @@ bool FSurvivorsWikiPassiveGrowthAndAttractorb::RunTest(const FString& Parameters
 	TestTrue("Attractorb level 5 uses wiki multiplier",
 		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::GemPickupRadius(S.Game), 50.f * 3.980025f, 0.01f));
 
-	FSurvivorsGameTestAccess::GetLogic(S.Game)->ProcessXPGain(10.f);
+	FSurvivorsGameTestAccess::ProcessXPGain(S.Game, 10.f);
 	TestTrue("Growth applies to gained XP",
 		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::PlayerXP(S.Game), 14.f, 0.001f));
 
