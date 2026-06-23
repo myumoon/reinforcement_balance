@@ -289,6 +289,10 @@ public:
 	// Phase 3: GameFacade は除去済み（Logic が直接ロジックを持つ）
 
 private:
+#if WITH_AUTOMATION_TESTS
+	friend struct FSurvivorsGameTestAccess;
+#endif
+
 	// ---- 定数 ----
 	static constexpr int32 MaxWeaponSlots  = SurvivorsGameConstants::MaxWeaponSlots;
 	static constexpr int32 MaxPassiveSlots = SurvivorsGameConstants::MaxPassiveSlots;
