@@ -67,7 +67,7 @@ python train.py --game survivors --total-steps 500000
 
 - プランを実装する際、明示的に「分割して」と指示がない限り **1つのworktreeブランチ・1つのPR** にまとめること
 - 実装途中でPRを作成・マージしないこと（全フェーズ完了後に `gh pr create` を1回だけ実行する）
-- 大規模実装には `/worktree-dev-review` スキルを使用すること
+- 実装には常に `/worktree-dev-review` スキルを使用すること
 
 ### その他ルール
 
