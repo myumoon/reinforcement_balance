@@ -7,9 +7,7 @@
 #include "Survivors/Logic/SurvivorsTypes.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/SurvivorsCollisionTypes.h"  // FSurvivorsTargetGrid (ReinBalanceLogic module)
-
-// 前方宣言
-class FSurvivorsWeaponBase;
+#include "Survivors/Logic/Weapons/SurvivorsWeaponBaseF.h"  // FSurvivorsWeaponBase 完全定義（TUniquePtr が destructor を要求する）
 
 // ============================================================
 // PythonTrainingComm に依存しないロジック層の結果型
@@ -103,6 +101,12 @@ class REINBALANCE_API FSurvivorsGameLogic
 public:
 	FSurvivorsGameLogic();
 	~FSurvivorsGameLogic();
+
+	// TUniquePtr は move-only のためコピー禁止
+	FSurvivorsGameLogic(const FSurvivorsGameLogic&)            = delete;
+	FSurvivorsGameLogic& operator=(const FSurvivorsGameLogic&) = delete;
+	FSurvivorsGameLogic(FSurvivorsGameLogic&&)                 = default;
+	FSurvivorsGameLogic& operator=(FSurvivorsGameLogic&&)      = default;
 
 	// ---- 初期化 ----
 
@@ -237,6 +241,8 @@ public:
 	TArray<FProjectileState>& GetProjectiles() { return Projectiles; }
 	void  UpdateProjectilesBySlot(int32 InSlotIdx, float Dt, TFunctionRef<bool(FProjectileState&, float)> Callback);
 	TArray<FProjectileState> GetProjectileObsView() const;
+	void  QueryEnemyContacts(FVector2D Pos, float Radius, TArray<const struct FSurvivorsTargetProxy*>& Out) const;
+	bool  ReflectOffWall(FVector2D& InOutPos, FVector2D& InOutVel, float Radius) const;
 
 	// ---- 状態データ（コンポーネント・テストヘルパーからのアクセス用） ----
 	// NOTE: Phase 3 移行後、テストヘルパーはこれらを直接参照する
@@ -329,7 +335,6 @@ private:
 	void      RegisterPickupTargets();
 	void      ResolveWallCollisions();
 	float     CastRayToObstacles(FVector2D Origin, FVector2D Dir) const;
-	bool      ReflectOffWall(FVector2D& InOutPos, FVector2D& InOutVel, float Radius) const;
 	void      FinalizePendingEnemies();
 	void      FinalizePickupRemovals();
 	void      InitDefaultEnemyTable();
@@ -358,6 +363,10 @@ private:
 	void  ApplyWeaponHits(FSurvivorsHitFrame& HitFrame);
 	void  BuildEnemyGrid();
 	void  BuildPickupGrid();
-	void  QueryEnemyContacts(FVector2D Pos, float Radius, TArray<const struct FSurvivorsTargetProxy*>& Out) const;
 	void  QueryPickupContacts(FVector2D Pos, float Radius, TArray<const struct FSurvivorsTargetProxy*>& Out) const;
+	TUniquePtr<FSurvivorsWeaponBase> CreateFWeaponInstance(EWeaponType Type);
+
+#if WITH_AUTOMATION_TESTS
+	friend struct FSurvivorsGameTestAccess;
+#endif
 };

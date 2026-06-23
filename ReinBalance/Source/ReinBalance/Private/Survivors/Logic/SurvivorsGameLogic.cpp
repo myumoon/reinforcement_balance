@@ -2,6 +2,22 @@
 #include "Survivors/Logic/SurvivorsWikiSpec.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponBaseF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsGarlicWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWhipWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsMagicWandWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsKnifeWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsAxeWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsCrossWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsKingBibleWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsFireWandWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsSantaWaterWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsRunetracerWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsLightningRingWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsPentagramWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsPeachoneWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsEbonyWingsWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsVandalierWeaponF.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsLaurelWeaponF.h"
 #include "Misc/SecureHash.h"
 #include <algorithm>
 
@@ -1216,10 +1232,55 @@ void FSurvivorsGameLogic::QueryPickupContacts(FVector2D Pos, float Radius, TArra
 
 TUniquePtr<FSurvivorsWeaponBase> FSurvivorsGameLogic::CreateFWeaponInstance(EWeaponType Type)
 {
-	// TODO(issue): Phase3武器F変換後にここに各FSurvivors*Weaponを追加する
-	// 現時点ではFクラスが未実装のためnullptrを返す
-	(void)Type;
-	return nullptr;
+	switch (Type)
+	{
+	case EWeaponType::Garlic:
+	case EWeaponType::SoulEater:
+		return MakeUnique<FSurvivorsGarlicWeapon>();
+	case EWeaponType::Whip:
+	case EWeaponType::BloodyTear:
+		return MakeUnique<FSurvivorsWhipWeapon>();
+	case EWeaponType::MagicWand:
+	case EWeaponType::HolyWand:
+		return MakeUnique<FSurvivorsMagicWandWeapon>();
+	case EWeaponType::Knife:
+	case EWeaponType::ThousandEdge:
+		return MakeUnique<FSurvivorsKnifeWeapon>();
+	case EWeaponType::Axe:
+	case EWeaponType::DeathSpiral:
+		return MakeUnique<FSurvivorsAxeWeapon>();
+	case EWeaponType::Cross:
+	case EWeaponType::HeavenSword:
+		return MakeUnique<FSurvivorsCrossWeapon>();
+	case EWeaponType::KingBible:
+	case EWeaponType::UnholyVespers:
+		return MakeUnique<FSurvivorsKingBibleWeapon>();
+	case EWeaponType::FireWand:
+	case EWeaponType::Hellfire:
+		return MakeUnique<FSurvivorsFireWandWeapon>();
+	case EWeaponType::SantaWater:
+	case EWeaponType::LaBorra:
+		return MakeUnique<FSurvivorsSantaWaterWeapon>();
+	case EWeaponType::Runetracer:
+	case EWeaponType::NoFuture:
+		return MakeUnique<FSurvivorsRunetracerWeapon>();
+	case EWeaponType::LightningRing:
+	case EWeaponType::ThunderLoop:
+		return MakeUnique<FSurvivorsLightningRingWeapon>();
+	case EWeaponType::Pentagram:
+	case EWeaponType::GorgeousMoon:
+		return MakeUnique<FSurvivorsPentagramWeapon>();
+	case EWeaponType::Peachone:
+		return MakeUnique<FSurvivorsPeachoneWeapon>();
+	case EWeaponType::EbonyWings:
+		return MakeUnique<FSurvivorsEbonyWingsWeapon>();
+	case EWeaponType::Vandalier:
+		return MakeUnique<FSurvivorsVandalierWeapon>();
+	case EWeaponType::Laurel:
+		return MakeUnique<FSurvivorsLaurelWeapon>();
+	default:
+		return nullptr;
+	}
 }
 
 void FSurvivorsGameLogic::EquipWeapon(int32 SlotIdx, EWeaponType Type, int32 Level)
@@ -1288,9 +1349,9 @@ void FSurvivorsGameLogic::ComputeGroundZoneHits(FSurvivorsHitFrame& HitFrame)
 
 void FSurvivorsGameLogic::ComputeProjectileHits(FSurvivorsHitFrame& HitFrame)
 {
-	for (int32 PI=0;PI<Projectiles.Num();++PI)
+	for (int32 ProjIdx=0;ProjIdx<Projectiles.Num();++ProjIdx)
 	{
-		FProjectileState& P = Projectiles[PI];
+		FProjectileState& P = Projectiles[ProjIdx];
 		if(P.WeaponType==EWeaponType::FireWand||P.WeaponType==EWeaponType::Hellfire||P.WeaponType==EWeaponType::Whip||P.WeaponType==EWeaponType::BloodyTear) continue;
 		TArray<const FSurvivorsTargetProxy*> Contacts; QueryEnemyContacts(P.Pos, P.Radius.Value, Contacts);
 		for (const FSurvivorsTargetProxy* Proxy : Contacts)
@@ -1302,7 +1363,7 @@ void FSurvivorsGameLogic::ComputeProjectileHits(FSurvivorsHitFrame& HitFrame)
 			const bool bRT=(P.WeaponType==EWeaponType::Runetracer||P.WeaponType==EWeaponType::NoFuture);
 			if(bRT){const float* LH=P.EnemyHitDelays.Find(E.UniqueId);if(LH&&(ElapsedTime-*LH)<SurvivorsGameConstants::RunetracerHitboxDelay) continue;}
 			else if(P.HitEnemyIds.Contains(E.UniqueId)) continue;
-			FSurvivorsHitEvent Ev; Ev.Type=ESurvivorsHitType::ProjectileDamage; Ev.Target=Proxy->Ref; Ev.Damage=P.Damage.Value; Ev.WeaponSlot=PI;
+			FSurvivorsHitEvent Ev; Ev.Type=ESurvivorsHitType::ProjectileDamage; Ev.Target=Proxy->Ref; Ev.Damage=P.Damage.Value; Ev.WeaponSlot=ProjIdx;
 			if(P.KnockbackStrength>0.f){Ev.KnockbackDir=P.Vel.GetSafeNormal();Ev.KnockbackStrength=P.KnockbackStrength;}
 			HitFrame.Events.Add(Ev);
 			if(bRT) P.EnemyHitDelays.Add(E.UniqueId,ElapsedTime);
