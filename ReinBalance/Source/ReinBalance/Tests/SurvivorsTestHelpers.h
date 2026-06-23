@@ -23,24 +23,24 @@
 // ============================================================
 struct FSurvivorsGameTestAccess
 {
-	// Phase 2: ASurvivorsGame の private フィールドに直接アクセス（friend 宣言経由）
-	static TArray<FEnemyState>& Enemies(ASurvivorsGame* G) { return G->Enemies; }
-	static TArray<FGemState>&   Gems(ASurvivorsGame* G)    { return G->Gems; }
-	static TArray<FSpecialPickupState>& SpecialPickups(ASurvivorsGame* G) { return G->SpecialPickups; }
-	static float& PlayerHP(ASurvivorsGame* G)              { return G->PlayerHP; }
-	static float& PlayerXP(ASurvivorsGame* G)              { return G->PlayerXP; }
-	static FVector2D& PlayerPos(ASurvivorsGame* G)         { return G->PlayerPos; }
-	static FVector2D& PlayerVel(ASurvivorsGame* G)         { return G->PlayerVel; }
-	static float& PlayerRadius(ASurvivorsGame* G)          { return G->PlayerRadius; }
-	static bool& bShieldActive(ASurvivorsGame* G)          { return G->bShieldActive; }
-	static float& LastReward(ASurvivorsGame* G)            { return G->LastReward; }
-	static float& ElapsedTime(ASurvivorsGame* G)           { return G->ElapsedTime; }
-	static float& GemPickupRadius(ASurvivorsGame* G)       { return G->GemPickupRadius; }
-	static int32& NextEnemyId(ASurvivorsGame* G)           { return G->NextEnemyId; }
-	static int32& NextGemId(ASurvivorsGame* G)             { return G->NextGemId; }
-	static FWeaponSlot* WeaponSlots(ASurvivorsGame* G)     { return G->WeaponSlots; }
-	static FPassiveSlot* PassiveSlots(ASurvivorsGame* G)   { return G->PassiveSlots; }
-	static FPassiveEffects& PassiveEffects(ASurvivorsGame* G) { return G->CachedPassiveEffects; }
+	// Phase 3: 状態フィールドは FSurvivorsGameLogic を経由してアクセス
+	static TArray<FEnemyState>& Enemies(ASurvivorsGame* G) { return G->GetLogic()->Enemies; }
+	static TArray<FGemState>&   Gems(ASurvivorsGame* G)    { return G->GetLogic()->Gems; }
+	static TArray<FSpecialPickupState>& SpecialPickups(ASurvivorsGame* G) { return G->GetLogic()->SpecialPickups; }
+	static float& PlayerHP(ASurvivorsGame* G)              { return G->GetLogic()->PlayerHP; }
+	static float& PlayerXP(ASurvivorsGame* G)              { return G->GetLogic()->PlayerXP; }
+	static FVector2D& PlayerPos(ASurvivorsGame* G)         { return G->GetLogic()->PlayerPos; }
+	static FVector2D& PlayerVel(ASurvivorsGame* G)         { return G->GetLogic()->PlayerVel; }
+	static float& PlayerRadius(ASurvivorsGame* G)          { return G->GetLogic()->CurrentConfig.PlayerRadius; }
+	static bool& bShieldActive(ASurvivorsGame* G)          { return G->GetLogic()->bShieldActive; }
+	static float& LastReward(ASurvivorsGame* G)            { return G->GetLogic()->LastReward; }
+	static float& ElapsedTime(ASurvivorsGame* G)           { return G->GetLogic()->ElapsedTime; }
+	static float& GemPickupRadius(ASurvivorsGame* G)       { return G->GetLogic()->CurrentConfig.GemPickupRadius; }
+	static int32& NextEnemyId(ASurvivorsGame* G)           { return G->GetLogic()->NextEnemyId; }
+	static int32& NextGemId(ASurvivorsGame* G)             { return G->GetLogic()->NextGemId; }
+	static FWeaponSlot* WeaponSlots(ASurvivorsGame* G)     { return G->GetLogic()->WeaponSlots; }
+	static FPassiveSlot* PassiveSlots(ASurvivorsGame* G)   { return G->GetLogic()->PassiveSlots; }
+	static FPassiveEffects& PassiveEffects(ASurvivorsGame* G) { return G->GetLogic()->CachedPassiveEffects; }
 
 	// コンポーネントアクセサ（既存テストが使用するため維持）
 	static USurvivorsCollisionComponent* CollComp(ASurvivorsGame* G) { return G->CollisionComponent; }
@@ -50,10 +50,9 @@ struct FSurvivorsGameTestAccess
 	static USurvivorsPlayerComponent*    PlayerComp(ASurvivorsGame* G){ return G->PlayerComponent; }
 	static USurvivorsWeaponComponent*    WeaponComp(ASurvivorsGame* G){ return G->WeaponComponent; }
 
-	static float XPRequiredForLevel(ASurvivorsGame* G, int32 Level) { return G->XPRequiredForLevel(Level); }
-
-	static void FinalizePendingEnemies(ASurvivorsGame* G)  { G->FinalizePendingEnemies(); }
-	static void FinalizePickupRemovals(ASurvivorsGame* G)  { G->FinalizePickupRemovals(); }
+	static float XPRequiredForLevel(ASurvivorsGame* G, int32 Level) { return G->GetLogic()->XPRequiredForLevel(Level); }
+	static void FinalizePendingEnemies(ASurvivorsGame* G)  { G->GetLogic()->FinalizePendingEnemies(); }
+	static void FinalizePickupRemovals(ASurvivorsGame* G)  { G->GetLogic()->FinalizePickupRemovals(); }
 
 	// Phase 2 追加: FSurvivorsGameLogic へのアクセサ（テスト用）
 	static FSurvivorsGameLogic* GetLogic(ASurvivorsGame* G) { return G->GetLogic(); }

@@ -6,6 +6,7 @@
 #include "CoreMinimal.h"
 #include "Survivors/Logic/SurvivorsTypes.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/Logic/SurvivorsCollisionTypes.h"  // FSurvivorsTargetGrid (ReinBalanceLogic module)
 
 // 前方宣言
 class FSurvivorsWeaponBase;
@@ -228,6 +229,15 @@ public:
 
 	FSurvivorsSpawnDebug GetSpawnDebug() const { return LastSpawnDebug; }
 
+	// ---- 武器クラスが使用する API (FSurvivorsWeaponBase サブクラスからアクセス) ----
+	void  EquipWeapon(int32 SlotIdx, EWeaponType Type, int32 Level);
+	void  UnequipWeapon(int32 SlotIdx);
+	void  SpawnProjectile(const FProjectileState& P) { Projectiles.Add(P); }
+	void  SpawnGroundZone(const FGroundZoneState& Z) { GroundZones.Add(Z); }
+	TArray<FProjectileState>& GetProjectiles() { return Projectiles; }
+	void  UpdateProjectilesBySlot(int32 InSlotIdx, float Dt, TFunctionRef<bool(FProjectileState&, float)> Callback);
+	TArray<FProjectileState> GetProjectileObsView() const;
+
 	// ---- 状態データ（コンポーネント・テストヘルパーからのアクセス用） ----
 	// NOTE: Phase 3 移行後、テストヘルパーはこれらを直接参照する
 
@@ -262,22 +272,21 @@ public:
 	FRandomStream         RandStream;
 	FSurvivorsSpawnDebug  LastSpawnDebug;
 
-	// プロジェクタイル・グラウンドゾーン（Phase 3 武器移植後に有効化）
+	// プロジェクタイル・グラウンドゾーン
 	TArray<FProjectileState> Projectiles;
 	TArray<FGroundZoneState> GroundZones;
 
-	// 純 C++ 武器配列（Phase 3 移植後に有効化）
-	// TODO(issue): Phase 3 武器移植が完了したら TUniquePtr<FSurvivorsWeaponBase> を使う
-	// TArray<TUniquePtr<FSurvivorsWeaponBase>> Weapons;
+	// コリジョングリッド（BuildEnemyGrid/BuildPickupGrid で毎ステップ再構築）
+	FSurvivorsTargetGrid EnemyGrid;
+	FSurvivorsTargetGrid PickupGrid;
+
+	// 純 C++ 武器配列
+	TArray<TUniquePtr<FSurvivorsWeaponBase>> Weapons;
 
 	// 現在の設定
 	FSurvivorsGameLogicConfig CurrentConfig;
 
-	// Phase 2 暫定実装: ASurvivorsGame へのデリゲートポインタ
-	// TODO(issue): Phase 3 で Logic に完全移植したら削除する
-	// NOTE: SurvivorsGameLogic.h は UObject 系ヘッダーをインクルードしないため前方宣言のみ
-	// ASurvivorsGame は UObject 派生だが、ここでは生のポインタとして前方宣言する
-	void SetGameFacade(void* InGame) { GameFacade = InGame; }
+	// Phase 3: GameFacade は除去済み（Logic が直接ロジックを持つ）
 
 private:
 	// ---- 定数 ----
@@ -294,9 +303,7 @@ private:
 	mutable int32 CachedObsDim = -1;
 	float PhysicsAccumTime = 0.f;
 
-	// Phase 2 暫定: ASurvivorsGame へのデリゲートポインタ（void* で UObject 依存を回避）
-	// TODO(issue): Phase 3 で Logic に完全移植したら削除する
-	void* GameFacade = nullptr;
+
 
 	// ---- 内部メソッド（Phase 3 で各コンポーネントから移植する） ----
 	// TODO(issue): 以下は Phase 3 で実装する
@@ -309,6 +316,17 @@ private:
 	void      DropGem(int32 TypeId, FVector2D Pos);
 	void      CheckGemCollections();
 	void      ApplyEnemyContactDamage();
+	void      ComputeContactHits(FSurvivorsHitFrame& HitFrame);
+	void      ApplyContactHits(FSurvivorsHitFrame& HitFrame);
+	void      ComputePickupHits(FSurvivorsHitFrame& HitFrame);
+	void      ApplyPickupHits(FSurvivorsHitFrame& HitFrame);
+	void      CheckSpecialPickups();
+	void      ComputeGroundZoneHits(FSurvivorsHitFrame& HitFrame);
+	void      ComputeProjectileHits(FSurvivorsHitFrame& HitFrame);
+	void      TickProjectiles(float Dt);
+	void      TickGroundZones(float Dt);
+	void      RegisterEnemyTargets();
+	void      RegisterPickupTargets();
 	void      ResolveWallCollisions();
 	float     CastRayToObstacles(FVector2D Origin, FVector2D Dir) const;
 	bool      ReflectOffWall(FVector2D& InOutPos, FVector2D& InOutVel, float Radius) const;
@@ -327,10 +345,17 @@ private:
 	void  ProcessXPGain(float Amount);
 	void  OnLevelUp(int32 NextLevel);
 	void  RecalcPassiveEffects();
+	FPassiveEffects ComputePassiveEffects() const;
+	TArray<FLevelUpChoice> BuildLevelUpChoices();
+	void  ApplyLevelUpChoice(const FLevelUpChoice& Choice);
+	void  EvolveWeapon(int32 SlotIdx, EWeaponType EvolvedType);
+	TArray<int32> GetEvolvableWeapons() const;
 	void  ApplyAction(int32 ActionIdx, float Dt);
 	void  StepSpawn(float Dt);
 	void  CheckFloorPickups();
 	void  TickWeapons(float Dt);
+	void  ComputeAllWeaponHits(FSurvivorsHitFrame& HitFrame);
+	void  ApplyWeaponHits(FSurvivorsHitFrame& HitFrame);
 	void  BuildEnemyGrid();
 	void  BuildPickupGrid();
 	void  QueryEnemyContacts(FVector2D Pos, float Radius, TArray<const struct FSurvivorsTargetProxy*>& Out) const;

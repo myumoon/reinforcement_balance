@@ -94,10 +94,6 @@ void ASurvivorsGame::BeginPlay()
 		Logic.Initialize(Cfg);
 	}
 
-	// Phase 2 暫定: GameFacade を設定して ExecStep/ExecReset が正しく動作するようにする
-	// TODO(issue): Phase 3 で Logic 自身がロジックを持つようになったら除去する
-	Logic.SetGameFacade(this);
-
 	ResetState(TOptional<int32>());
 }
 
@@ -105,26 +101,29 @@ void ASurvivorsGame::BeginPlay()
 
 TArray<FSurvivorsObsSegment> ASurvivorsGame::GetObsSchema() const
 {
-	return ObservationComponent->GetObsSchema();
+	return Logic.GetObsSchema();
 }
 
 FString ASurvivorsGame::GetObsSchemaHash() const
 {
-	return ObservationComponent->GetObsSchemaHash();
+	return Logic.GetObsSchemaHash();
 }
 
 int32 ASurvivorsGame::GetObsDim() const
 {
 	if (CachedObsDim >= 0) return CachedObsDim;
-	if (!ObservationComponent) return 0;
-	int32 Total = 0;
-	for (const FSurvivorsObsSegment& Seg : ObservationComponent->GetObsSchema())
-		Total += Seg.Dim;
-	CachedObsDim = Total;
+	CachedObsDim = Logic.GetObsDim();
 	return CachedObsDim;
 }
 
 void ASurvivorsGame::ResetState(TOptional<int32> Seed)
+{
+	// Phase 3: Logic に完全委譲
+	SyncConfigToLogic();
+	Logic.Reset(Seed);
+}
+
+void ASurvivorsGame::ResetState_Legacy(TOptional<int32> Seed)
 {
 	if (Seed.IsSet())
 		RandStream.Initialize(Seed.GetValue());
@@ -303,6 +302,12 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 
 void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 {
+	// Phase 3: Logic に完全委譲
+	Logic.PhysicsStep(ActionIdx);
+}
+
+void ASurvivorsGame::PhysicsStep_Legacy(int32 ActionIdx)
+{
 	if (bDone || bTruncated) return;
 	LastReward = 0.f;
 
@@ -428,14 +433,10 @@ void ASurvivorsGame::FinalizePickupRemovals()
 	}
 }
 
-TArray<float> ASurvivorsGame::GetObservation() const
-{
-	return ObservationComponent->GetObservation();
-}
-
-float ASurvivorsGame::GetReward()     const { return LastReward; }
-bool  ASurvivorsGame::IsDone()        const { return bDone; }
-bool  ASurvivorsGame::IsTruncated()   const { return bTruncated; }
+TArray<float> ASurvivorsGame::GetObservation() const { return Logic.GetObservation(); }
+float ASurvivorsGame::GetReward()     const { return Logic.GetReward(); }
+bool  ASurvivorsGame::IsDone()        const { return Logic.IsDone(); }
+bool  ASurvivorsGame::IsTruncated()   const { return Logic.IsTruncated(); }
 
 FString ASurvivorsGame::GetSpawnDebugJson() const
 {
@@ -463,15 +464,8 @@ FString ASurvivorsGame::GetSpawnDebugJson() const
 		LastSpawnDebug.bTruncated ? TEXT("true") : TEXT("false"));
 }
 
-FVector2D ASurvivorsGame::GetItemPos(int32 i) const
-{
-	return Gems.IsValidIndex(i) ? Gems[i].Pos : FVector2D::ZeroVector;
-}
-
-EGemType ASurvivorsGame::GetItemGemType(int32 i) const
-{
-	return Gems.IsValidIndex(i) ? Gems[i].Type : EGemType::Blue;
-}
+FVector2D ASurvivorsGame::GetItemPos(int32 i) const { return Logic.GetItemPos(i); }
+EGemType  ASurvivorsGame::GetItemGemType(int32 i) const { return Logic.GetItemGemType(i); }
 
 float ASurvivorsGame::GetAuraSize() const
 {

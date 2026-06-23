@@ -1,5 +1,7 @@
-// Phase 2: FSurvivorsGameLogic が完全移植されたら定義して ParallelFor を有効化する
-// #define SURVIVORS_PARALLEL_LOGIC_READY
+// Phase 3 完了: FSurvivorsGameLogic にロジックを移植済み。ParallelFor を有効化する。
+// NOTE: 武器 F クラスは未完（CreateFWeaponInstance が nullptr を返す）のため、
+// 武器系ロジックはノーオップになる。武器F変換後に挙動が完全になる。TODO(issue)
+#define SURVIVORS_PARALLEL_LOGIC_READY
 
 #include "Training/SurvivorsParallelSetupActor.h"
 #include "Training/SurvivorsHttpEnvService.h"
