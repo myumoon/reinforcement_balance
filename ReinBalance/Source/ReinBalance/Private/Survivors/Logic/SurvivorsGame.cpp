@@ -118,7 +118,7 @@ int32 ASurvivorsGame::GetObsDim() const
 
 void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 {
-	// Phase 3: Logic に完全委譲
+
 	SyncConfigToLogic();
 	Logic.Reset(Seed);
 	PhysicsAccumTime = 0.f;  // variable frame rate 用アキュムレータはASurvivorsGame側でリセット
@@ -132,7 +132,7 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 
 void ASurvivorsGame::PhysicsStep(int32 ActionIdx)
 {
-	// Phase 3: Logic に完全委譲
+
 	Logic.PhysicsStep(ActionIdx);
 }
 

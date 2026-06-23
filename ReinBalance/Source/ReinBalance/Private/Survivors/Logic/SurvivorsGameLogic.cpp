@@ -543,7 +543,21 @@ FString FSurvivorsGameLogic::GetEnemyTypeDebugLabel(int32 TypeId) const
 { if(CurrentConfig.EnemyTypeTable.IsValidIndex(TypeId)&&!CurrentConfig.EnemyTypeTable[TypeId].Name.IsEmpty()) return FString::Printf(TEXT("%s(ID:%d)"),*CurrentConfig.EnemyTypeTable[TypeId].Name,TypeId); return FString::Printf(TEXT("ID:%d"),TypeId); }
 int32 FSurvivorsGameLogic::GetPassiveItemMaxLevel(EPassiveItemType Type) const
 { const int32 TI=(int32)(uint8)Type; return (TI>=0&&TI<18)?SurvivorsGameConstants::PassiveMaxLevel[TI]:0; }
-float FSurvivorsGameLogic::GetAuraSize() const { return 0.f; /* TODO: from weapon slot */ }
+float FSurvivorsGameLogic::GetAuraSize() const
+{
+	for (int32 s = 0; s < MaxWeaponSlots; ++s)
+	{
+		const FWeaponSlot& Slot = WeaponSlots[s];
+		if (Slot.Type == EWeaponType::Garlic || Slot.Type == EWeaponType::SoulEater)
+		{
+			const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, MaxWeaponLevel);
+			return Slot.Type == EWeaponType::SoulEater
+				? SurvivorsGameConstants::SoulEaterTable[Lv - 1].AreaRadius.Value
+				: SurvivorsGameConstants::GarlicTable[Lv - 1].AreaRadius.Value;
+		}
+	}
+	return 0.f;
+}
 
 // Projectile/GroundZone アクセサ
 int32     FSurvivorsGameLogic::GetProjectileCount()               const { return Projectiles.Num(); }

@@ -2,19 +2,12 @@
 #include "SurvivorsTestHelpers.h"
 #include "Survivors/Logic/SurvivorsGameLogic.h"
 
-// ============================================================
-// Phase 3: FSurvivorsGameLogic のロジックテスト
-// ============================================================
-
 /** FSurvivorsGameLogic::ExecReset が非空の obs を返す */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsParallelLogicResetReturnsObs,
 	"ReinBalance.Survivors.Parallel.LogicResetReturnsObs",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FSurvivorsParallelLogicResetReturnsObs::RunTest(const FString& Parameters)
 {
-	// TODO(issue): FSurvivorsGameLogic が実装されたら有効化する。
-	// 現時点では FSurvivorsGameLogic の骨格のみ存在するため、
-	// ExecReset は空の Obs を返す（実装完了後にこのテストが通る）。
 	FSurvivorsTestWorld S;
 	if (!S.Create()) return false;
 
@@ -83,10 +76,6 @@ bool FSurvivorsParallelLogicStepReturnsValidData::RunTest(const FString& Paramet
 	return true;
 }
 
-// ============================================================
-// Phase 2: bManagedExternally フラグのテスト
-// ============================================================
-
 /** bManagedExternally=true 時に Tick() がキュー処理をスキップする
  *  NOTE: このテストは TakeStepRequest/TakeResetRequest の戻り値で間接的に確認する。
  *        EnvServer への直接アクセスが必要なため、現時点では ASurvivorsHttpEnvService の
@@ -97,15 +86,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsParallelManagedExternallySkipsTick,
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FSurvivorsParallelManagedExternallySkipsTick::RunTest(const FString& Parameters)
 {
-	// TODO(issue): ASurvivorsHttpEnvService を直接インスタンス化してテストするには
-	// HTTP サーバーのポートが必要。統合テストは PIE 環境でのみ実行可能なため、
-	// 現時点ではフラグの存在のみを確認する。
-	// 実際の挙動確認は PIE + Python クライアントを使った手動テストで行う。
-
-	// ASurvivorsHttpEnvService に bManagedExternally フィールドが存在することを型チェックで確認
-	// （コンパイルが通れば OK）
-	// TODO(issue): ASurvivorsHttpEnvService の include が必要だが、
-	// ReinBalanceEditor モジュールへの依存を避けるため現時点ではスキップ。
+	// bManagedExternally フラグの存在は SurvivorsParallelSetupActor.cpp のコンパイルで確認する。
+	// HTTP ポートが必要な統合テストは PIE + Python クライアントで手動検証する。
 	AddInfo(TEXT("bManagedExternally フラグの存在は SurvivorsParallelSetupActor.cpp でコンパイル確認する。"));
 	return true;
 }
@@ -119,8 +101,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsParallelQueueTakeRequest,
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 bool FSurvivorsParallelQueueTakeRequest::RunTest(const FString& Parameters)
 {
-	// TODO(issue): Phase3 完成後に FSurvivorsGameLogic::ExecStep/ExecReset を直接テストする。
-	// 現状は ASurvivorsGame 経由でステップが正常動作することを確認する。
 	FSurvivorsTestWorld S;
 	if (!S.Create()) return false;
 

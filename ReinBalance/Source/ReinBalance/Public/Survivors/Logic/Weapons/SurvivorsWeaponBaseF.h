@@ -11,9 +11,7 @@ class FSurvivorsGameLogic;
 /**
  * FSurvivorsWeaponBase — 純粋 C++ 武器基底クラス。
  *
- * USurvivorsWeaponBase (UObject 派生) の UObject 非依存版。
- * Phase 3 で各武器を FSurvivors*Weapon に変換した後、
- * FSurvivorsGameLogic が TUniquePtr<FSurvivorsWeaponBase> で管理する。
+ * UObject 非依存。FSurvivorsGameLogic が TUniquePtr<FSurvivorsWeaponBase> で管理する。
  */
 class REINBALANCE_API FSurvivorsWeaponBase
 {

@@ -79,8 +79,7 @@ void USurvivorsPeachoneWeapon::StartBombing()
 	// TargetZoneRadius: 固定（Area 不使用）
 	BurstTargetZoneRadius = CachedTargetZoneRadius;
 
-	// wiki: Amount × SetsPerActivation 発を rapid fire
-	// Duration パッシブによるセット数スケールは TODO（現在は固定 4 sets）
+	// wiki: Amount × SetsPerActivation 発を rapid fire（SetsPerActivation は固定値）
 	const int32 EffAmount = CachedAmount + static_cast<int32>(PE.ExtraAmount);
 	PendingBombShots = EffAmount * SurvivorsGameConstants::PeachoneSetsPerActivation;
 	BombShotTimer    = 0.f;

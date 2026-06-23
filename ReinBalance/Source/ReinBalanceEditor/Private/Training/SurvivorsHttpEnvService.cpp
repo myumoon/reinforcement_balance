@@ -128,15 +128,13 @@ private:
 
 	bool HandleObsSchema(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 	{
-		// Phase 2: キャッシュを返すだけ（HTTP ワーカースレッドから Game に触れない）
 		OnComplete(MakeJsonResponse(CachedObsSchemaJson));
 		return true;
 	}
 
 	bool HandleParams(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 	{
-		// Phase 2: ワーカースレッドでは Game フィールドを直接変更せずキューに積む。
-		// ゲームスレッドの Tick または ParallelSetupActor の Tick で ApplyParams を呼ぶ。
+		// ワーカースレッドから Game を直接変更できないため、キューに積んでゲームスレッドで適用する。
 		FString BodyStr = ParseBodyString(Request);
 		if (BodyStr.IsEmpty())
 		{
@@ -393,7 +391,6 @@ void ASurvivorsHttpEnvService::BeginPlay()
 
 	auto* Server = new FSurvivorsEnvServer(SurvivorsGame.Get());
 
-	// Phase 2: obs_schema キャッシュを StartServer 前に構築する
 	Server->BuildObsSchemaCache();
 
 	EnvServer = TUniquePtr<FHttpEnvServerBase>(Server);
@@ -414,12 +411,10 @@ void ASurvivorsHttpEnvService::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// Phase 2: bManagedExternally=true の場合は ParallelSetupActor が制御するためスキップ
 	if (bManagedExternally) return;
 
 	if (!EnvServer) return;
 
-	// Phase 2: Params を先にゲームスレッドで適用してから Step/Reset を処理する
 	{
 		FString Json;
 		FHttpResultCallback Cb;
@@ -433,7 +428,7 @@ void ASurvivorsHttpEnvService::Tick(float DeltaTime)
 	EnvServer->Tick();
 }
 
-// ---- Phase 2: 外部制御 API 実装 ----
+
 
 bool ASurvivorsHttpEnvService::TakeStepRequest(
 	TArray<float>& OutAction, int32& OutSteps, FHttpResultCallback& OutCallback)

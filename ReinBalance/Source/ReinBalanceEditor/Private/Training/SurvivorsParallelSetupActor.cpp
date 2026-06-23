@@ -1,8 +1,3 @@
-// Phase 3 完了: FSurvivorsGameLogic にロジックを移植済み。ParallelFor を有効化する。
-// NOTE: 武器 F クラスは未完（CreateFWeaponInstance が nullptr を返す）のため、
-// 武器系ロジックはノーオップになる。武器F変換後に挙動が完全になる。TODO(issue)
-#define SURVIVORS_PARALLEL_LOGIC_READY
-
 #include "Training/SurvivorsParallelSetupActor.h"
 #include "Training/SurvivorsHttpEnvService.h"
 #include "Survivors/Logic/SurvivorsGame.h"
@@ -13,7 +8,6 @@
 
 ASurvivorsParallelSetupActor::ASurvivorsParallelSetupActor()
 {
-	// Phase 2: 並列 Tick マネージャーとして機能するため true に変更
 	PrimaryActorTick.bCanEverTick = true;
 }
 
@@ -28,7 +22,6 @@ void ASurvivorsParallelSetupActor::BeginPlay()
 		return;
 	}
 
-	// Phase 2: AllServices をリセット
 	AllServices.Reset();
 
 	// 訓練 env をスポーン
@@ -43,7 +36,6 @@ void ASurvivorsParallelSetupActor::BeginPlay()
 		ASurvivorsHttpEnvService* Svc = SpawnService(Game, BasePort + i);
 		if (Svc)
 		{
-			// Phase 2: ParallelSetupActor が制御するため自律 Tick をスキップさせる
 			Svc->bManagedExternally = true;
 			AllServices.Add(Svc);
 		}
@@ -107,10 +99,6 @@ void ASurvivorsParallelSetupActor::BeginPlay()
 	}
 	BindCameraToGame(CameraTarget);
 }
-
-// ============================================================
-// Phase 2: 並列 Tick マネージャー
-// ============================================================
 
 namespace
 {
@@ -195,24 +183,13 @@ void ASurvivorsParallelSetupActor::Tick(float DeltaTime)
 
 	if (Works.IsEmpty()) return;
 
-	// ---- 3. Step/Reset を実行 ----
-	//
-	// Phase 3 完了前: ForceSingleThread で直列（UObject 経由の Reset/Step が必要）
-	// Phase 3 完了後: SURVIVORS_PARALLEL_LOGIC_READY を定義してフラグを外す
-	//
-	// NOTE: 現在 FSurvivorsGameLogic::ExecStep/ExecReset は骨格実装のみで
-	//       実際の処理は ASurvivorsGame 側にある。
-	//       Phase 3 で移植が完了するまで、ASurvivorsHttpEnvService::ProcessStep/Reset
-	//       を通常の方法で呼び出す（EnvServer->Tick() 代わりに直接呼び出す）。
-	// TODO(issue): Phase 3 完了後に W.Logic->ExecStep(W.Action, W.Steps) を使うよう変更する
+	// ---- 3. Step/Reset を並列実行 ----
 
 	TArray<FSurvivorsStepResult>  LogicStepResults;
 	TArray<FSurvivorsResetResult> LogicResetResults;
 	LogicStepResults.SetNum(Works.Num());
 	LogicResetResults.SetNum(Works.Num());
 
-#ifdef SURVIVORS_PARALLEL_LOGIC_READY
-	// Phase 3 完了後: 純 C++ Logic を直接並列実行
 	ParallelFor(Works.Num(), [&](int32 i)
 	{
 		FPendingWork& W = Works[i];
@@ -222,19 +199,6 @@ void ASurvivorsParallelSetupActor::Tick(float DeltaTime)
 		else
 			LogicResetResults[i] = W.Logic->ExecReset(W.Seed);
 	});
-#else
-	// Phase 3 完了前: ASurvivorsGame 経由で直列実行（暫定）
-	// TODO(issue): Phase 3 で Logic に移植後、ParallelFor に切り替える
-	for (int32 i = 0; i < Works.Num(); ++i)
-	{
-		FPendingWork& W = Works[i];
-		if (!W.Logic) continue;
-		if (W.bIsStep)
-			LogicStepResults[i]  = W.Logic->ExecStep(W.Action, W.Steps);
-		else
-			LogicResetResults[i] = W.Logic->ExecReset(W.Seed);
-	}
-#endif
 
 	// ---- 4. レスポンス送信（ゲームスレッドで実行）----
 	for (int32 i = 0; i < Works.Num(); ++i)

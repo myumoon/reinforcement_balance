@@ -59,8 +59,6 @@ public:
 	/** リセット時にゲーム固有の初期化を行い初期観測値を返す。GameThread で実行される。 */
 	virtual FEnvResetResult ProcessReset(TOptional<int32> Seed) = 0;
 
-	// ---- Phase 2: 並列外部制御 API（デフォルト実装で後方互換を維持） ----
-
 	/**
 	 * ActionQueue から Step リクエストを 1 件取り出す。
 	 * キューが空なら false を返す。

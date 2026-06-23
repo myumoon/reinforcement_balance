@@ -16,9 +16,8 @@
  *   POST /params      — カリキュラム用難易度パラメータを受け取る
  *     {"MaxActiveEnemies": 5, "EnemySpeedMult": 1.2, "SpawnInterval": 6.0}
  *
- * Phase 2 追加:
  *   bManagedExternally=true にすると Tick() がキュー処理をスキップする。
- *   ParallelSetupActor が一元管理する場合に使用する。
+ *   ASurvivorsParallelSetupActor が一元管理する場合に使用する。
  */
 UCLASS()
 class REINBALANCEEDITOR_API ASurvivorsHttpEnvService : public AActor
@@ -35,15 +34,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Training")
 	TObjectPtr<ASurvivorsGame> SurvivorsGame;
 
-	// ---- Phase 2: 並列外部制御フラグ ----
-
 	/**
 	 * true にすると Tick() がキュー処理をスキップする。
 	 * ASurvivorsParallelSetupActor が Step/Reset を一元管理する場合に設定する。
 	 */
 	bool bManagedExternally = false;
-
-	// ---- Phase 2: 外部制御 API ----
 
 	/** ActionQueue から Step リクエストを 1 件取り出す（GameThread 専用） */
 	bool TakeStepRequest(TArray<float>& OutAction, int32& OutSteps, FHttpResultCallback& OutCallback);
@@ -67,7 +62,7 @@ public:
 	 */
 	FString ApplyParams(const FString& Json);
 
-	/** ゲームロジックへのポインタを返す（Phase 2 で ParallelSetupActor が使用） */
+	/** ASurvivorsParallelSetupActor が並列 Tick 時に使用するゲームロジックポインタ */
 	FSurvivorsGameLogic* GetGameLogic();
 
 protected:

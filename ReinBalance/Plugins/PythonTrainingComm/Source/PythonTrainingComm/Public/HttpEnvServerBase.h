@@ -37,11 +37,9 @@ public:
 	 */
 	static TUniquePtr<FHttpServerResponse> MakeJsonResponse(const FString& Json);
 
-	// ---- Phase 2: 並列外部制御 API（IHttpEnvServer オーバーライド） ----
-
 	/**
 	 * ActionQueue から Step リクエストを 1 件取り出す。
-	 * ParallelSetupActor の Tick から呼ぶ（GameThread 専用）。
+	 * ASurvivorsParallelSetupActor の Tick から呼ぶ（GameThread 専用）。
 	 */
 	virtual bool TakeStepRequest(
 		TArray<float>& OutAction, int32& OutSteps, FHttpResultCallback& OutCallback) override;

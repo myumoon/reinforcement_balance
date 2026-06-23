@@ -194,8 +194,6 @@ public:
 	FVector2D GetDestructiblePos(int32 i)   const { return Destructibles.IsValidIndex(i) ? Destructibles[i].Pos : FVector2D::ZeroVector; }
 	bool      IsDestructibleActive(int32 i) const { return Destructibles.IsValidIndex(i) ? Destructibles[i].bActive : false; }
 
-	// TODO(issue): プロジェクタイル/グラウンドゾーン/軌道オーブのアクセサは
-	// Phase 3 武器移植完了後に追加する。現時点では ASurvivorsGame 経由で取得する。
 	int32     GetProjectileCount()             const;
 	FVector2D GetProjectilePos(int32 i)        const;
 	FSimRadius GetProjectileRadius(int32 i)    const;
@@ -247,8 +245,7 @@ public:
 	void  QueryEnemyContacts(FVector2D Pos, float Radius, TArray<const struct FSurvivorsTargetProxy*>& Out) const;
 	bool  ReflectOffWall(FVector2D& InOutPos, FVector2D& InOutVel, float Radius) const;
 
-	// ---- 状態データ（コンポーネント・テストヘルパーからのアクセス用） ----
-	// NOTE: Phase 3 移行後、テストヘルパーはこれらを直接参照する
+	// ---- 状態データ（テストヘルパーからのアクセス用） ----
 
 	FVector2D             PlayerPos;
 	FVector2D             PlayerVel;
@@ -295,8 +292,6 @@ public:
 	// 現在の設定
 	FSurvivorsGameLogicConfig CurrentConfig;
 
-	// Phase 3: GameFacade は除去済み（Logic が直接ロジックを持つ）
-
 private:
 	friend class ASurvivorsGame;
 #if WITH_AUTOMATION_TESTS
@@ -319,8 +314,7 @@ private:
 
 
 
-	// ---- 内部メソッド（Phase 3 で各コンポーネントから移植する） ----
-	// TODO(issue): 以下は Phase 3 で実装する
+	// ---- 内部メソッド ----
 	FVector2D RandomInsideField();
 	FVector2D RandomOnEdge();
 	FVector2D RandomSpawnPos();

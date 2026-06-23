@@ -13,17 +13,11 @@
 #include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
 
 // ============================================================
-// テストヘルパー: ASurvivorsGame の private 状態へのアクセサ
-// (SurvivorsGame.h の WITH_AUTOMATION_TESTS friend 宣言が必要)
-//
-// Phase 2: 状態フィールドは ASurvivorsGame に残っているため
-//          既存アクセサはそのまま維持する。
-//          Phase 3 で FSurvivorsGameLogic に状態が移った後、
-//          G->GetLogic()->XXX 経由に切り替える。
+// テストヘルパー: FSurvivorsGameLogic の private 状態・メソッドへのアクセサ
+// (SurvivorsGameLogic.h の WITH_AUTOMATION_TESTS friend 宣言が必要)
 // ============================================================
 struct FSurvivorsGameTestAccess
 {
-	// Phase 3: 状態フィールドは FSurvivorsGameLogic を経由してアクセス
 	static TArray<FEnemyState>& Enemies(ASurvivorsGame* G) { return G->GetLogic()->Enemies; }
 	static TArray<FGemState>&   Gems(ASurvivorsGame* G)    { return G->GetLogic()->Gems; }
 	static TArray<FSpecialPickupState>& SpecialPickups(ASurvivorsGame* G) { return G->GetLogic()->SpecialPickups; }
@@ -54,7 +48,6 @@ struct FSurvivorsGameTestAccess
 	static void FinalizePendingEnemies(ASurvivorsGame* G)  { G->GetLogic()->FinalizePendingEnemies(); }
 	static void FinalizePickupRemovals(ASurvivorsGame* G)  { G->GetLogic()->FinalizePickupRemovals(); }
 
-	// Phase 2 追加: FSurvivorsGameLogic へのアクセサ（テスト用）
 	static FSurvivorsGameLogic* GetLogic(ASurvivorsGame* G) { return G->GetLogic(); }
 
 	// Logic プライベートメソッドのラッパー（FSurvivorsTestWorld から呼ぶ用）
