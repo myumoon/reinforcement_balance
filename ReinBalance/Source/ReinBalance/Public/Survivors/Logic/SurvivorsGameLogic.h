@@ -9,6 +9,9 @@
 #include "Survivors/Logic/SurvivorsCollisionTypes.h"  // FSurvivorsTargetGrid (ReinBalanceLogic module)
 #include "Survivors/Logic/Weapons/SurvivorsWeaponBaseF.h"  // FSurvivorsWeaponBase 完全定義（TUniquePtr が destructor を要求する）
 
+// ASurvivorsGame: UObject ヘッダーは include しない。friend 宣言のみで使用。
+class ASurvivorsGame;
+
 // ============================================================
 // PythonTrainingComm に依存しないロジック層の結果型
 // ============================================================
@@ -295,6 +298,7 @@ public:
 	// Phase 3: GameFacade は除去済み（Logic が直接ロジックを持つ）
 
 private:
+	friend class ASurvivorsGame;
 #if WITH_AUTOMATION_TESTS
 	friend struct FSurvivorsGameTestAccess;
 #endif
