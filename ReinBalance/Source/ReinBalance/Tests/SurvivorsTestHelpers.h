@@ -60,6 +60,7 @@ struct FSurvivorsGameTestAccess
 	// Logic プライベートメソッドのラッパー（FSurvivorsTestWorld から呼ぶ用）
 	static void BuildEnemyGrid(ASurvivorsGame* G)                               { G->GetLogic()->BuildEnemyGrid(); }
 	static void BuildPickupGrid(ASurvivorsGame* G)                              { G->GetLogic()->BuildPickupGrid(); }
+	static void TickWeapons(ASurvivorsGame* G, float Dt)                        { G->GetLogic()->TickWeapons(Dt); }
 	static void ComputeAllWeaponHits(ASurvivorsGame* G, FSurvivorsHitFrame& HF) { G->GetLogic()->ComputeAllWeaponHits(HF); }
 	static void ApplyWeaponHits(ASurvivorsGame* G, FSurvivorsHitFrame& HF)      { G->GetLogic()->ApplyWeaponHits(HF); }
 	static void ComputeContactHits(ASurvivorsGame* G, FSurvivorsHitFrame& HF)   { G->GetLogic()->ComputeContactHits(HF); }
@@ -153,10 +154,10 @@ struct FSurvivorsTestWorld
 
 static void EquipTestWeapon(ASurvivorsGame* Game, EWeaponType Type, int32 Level)
 {
-	FWeaponSlot* Weapons = FSurvivorsGameTestAccess::WeaponSlots(Game);
-	Weapons[0].Type = Type;
-	Weapons[0].Level = FWeaponLevel(Level);
-	FSurvivorsGameTestAccess::WeaponComp(Game)->EquipWeapon(0, Type, Level);
+	FWeaponSlot& Slot = FSurvivorsGameTestAccess::WeaponSlots(Game)[0];
+	Slot.Type  = Type;
+	Slot.Level = FWeaponLevel(Level);
+	Game->GetLogic()->EquipWeapon(0, Type, Level);
 }
 
 static int32 SurvivorsStepsForSeconds(float Seconds)
@@ -164,22 +165,22 @@ static int32 SurvivorsStepsForSeconds(float Seconds)
 	return FMath::CeilToInt(Seconds / SurvivorsGameConstants::PhysicsDt);
 }
 
-static void TickTestWeaponsForSteps(USurvivorsWeaponComponent* WC, int32 Steps)
+static void TickTestWeaponsForSteps(ASurvivorsGame* Game, int32 Steps)
 {
 	for (int32 i = 0; i < Steps; ++i)
 	{
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(Game, SurvivorsGameConstants::PhysicsDt);
 	}
 }
 
-static void TickTestWeaponsForSeconds(USurvivorsWeaponComponent* WC, float Seconds)
+static void TickTestWeaponsForSeconds(ASurvivorsGame* Game, float Seconds)
 {
-	TickTestWeaponsForSteps(WC, SurvivorsStepsForSeconds(Seconds));
+	TickTestWeaponsForSteps(Game, SurvivorsStepsForSeconds(Seconds));
 }
 
-static float TickTestWeaponsForSecondsMeasured(USurvivorsWeaponComponent* WC, float Seconds)
+static float TickTestWeaponsForSecondsMeasured(ASurvivorsGame* Game, float Seconds)
 {
 	const int32 Steps = SurvivorsStepsForSeconds(Seconds);
-	TickTestWeaponsForSteps(WC, Steps);
+	TickTestWeaponsForSteps(Game, Steps);
 	return Steps * SurvivorsGameConstants::PhysicsDt;
 }

@@ -224,77 +224,24 @@ float ASurvivorsGame::GetAuraSize() const
 	return Logic.GetAuraSize();
 }
 
-// ---- プロジェクタイル / GroundZone アクセサ --------------------------------
+// ---- プロジェクタイル / GroundZone / OrbitOrb アクセサ --------------------------------
 
-int32 ASurvivorsGame::GetProjectileCount() const
-{
-	return WeaponComponent ? WeaponComponent->GetProjectileCount() : 0;
-}
+int32      ASurvivorsGame::GetProjectileCount()               const { return Logic.GetProjectileCount(); }
+FVector2D  ASurvivorsGame::GetProjectilePos(int32 i)          const { return Logic.GetProjectilePos(i); }
+FSimRadius ASurvivorsGame::GetProjectileRadius(int32 i)       const { return Logic.GetProjectileRadius(i); }
+EWeaponType ASurvivorsGame::GetProjectileWeaponType(int32 i)  const { return Logic.GetProjectileWeaponType(i); }
+float      ASurvivorsGame::GetProjectileBoxHalfWidth(int32 i) const { return Logic.GetProjectileBoxHalfWidth(i); }
 
-FVector2D ASurvivorsGame::GetProjectilePos(int32 i) const
-{
-	return WeaponComponent ? WeaponComponent->GetProjectilePos(i) : FVector2D::ZeroVector;
-}
+int32      ASurvivorsGame::GetGroundZoneCount()               const { return Logic.GetGroundZoneCount(); }
+FVector2D  ASurvivorsGame::GetGroundZonePos(int32 i)          const { return Logic.GetGroundZonePos(i); }
+float      ASurvivorsGame::GetGroundZoneRadius(int32 i)       const { return Logic.GetGroundZoneRadius(i); }
+EWeaponType ASurvivorsGame::GetGroundZoneWeaponType(int32 i)  const { return Logic.GetGroundZoneWeaponType(i); }
+bool       ASurvivorsGame::IsGroundZoneWarning(int32 i)       const { return Logic.IsGroundZoneWarning(i); }
 
-FSimRadius ASurvivorsGame::GetProjectileRadius(int32 i) const
-{
-	return WeaponComponent ? WeaponComponent->GetProjectileRadius(i) : FSimRadius(0.f);
-}
-
-EWeaponType ASurvivorsGame::GetProjectileWeaponType(int32 i) const
-{
-	return WeaponComponent ? WeaponComponent->GetProjectileWeaponType(i) : EWeaponType::None;
-}
-
-float ASurvivorsGame::GetProjectileBoxHalfWidth(int32 i) const
-{
-	return WeaponComponent ? WeaponComponent->GetProjectileBoxHalfWidth(i) : 0.f;
-}
-
-int32 ASurvivorsGame::GetGroundZoneCount() const
-{
-	return WeaponComponent ? WeaponComponent->GetGroundZoneCount() : 0;
-}
-
-FVector2D ASurvivorsGame::GetGroundZonePos(int32 i) const
-{
-	return WeaponComponent ? WeaponComponent->GetGroundZonePos(i) : FVector2D::ZeroVector;
-}
-
-float ASurvivorsGame::GetGroundZoneRadius(int32 i) const
-{
-	return WeaponComponent ? WeaponComponent->GetGroundZoneRadius(i) : 0.f;
-}
-
-EWeaponType ASurvivorsGame::GetGroundZoneWeaponType(int32 i) const
-{
-	return WeaponComponent ? WeaponComponent->GetGroundZoneWeaponType(i) : EWeaponType::None;
-}
-
-bool ASurvivorsGame::IsGroundZoneWarning(int32 i) const
-{
-	return WeaponComponent ? WeaponComponent->IsGroundZoneWarning(i) : false;
-}
-
-int32 ASurvivorsGame::GetOrbitOrbCount() const
-{
-	return WeaponComponent ? WeaponComponent->GetOrbitOrbCount() : 0;
-}
-
-FVector2D ASurvivorsGame::GetOrbitOrbPos(int32 i) const
-{
-	return WeaponComponent ? WeaponComponent->GetOrbitOrbPos(i) : FVector2D::ZeroVector;
-}
-
-EWeaponType ASurvivorsGame::GetOrbitOrbWeaponType(int32 i) const
-{
-	return WeaponComponent ? WeaponComponent->GetOrbitOrbWeaponType(i) : EWeaponType::None;
-}
-
-float ASurvivorsGame::GetOrbitOrbVisualRadius(int32 i) const
-{
-	return WeaponComponent ? WeaponComponent->GetOrbitOrbVisualRadius(i) : 0.f;
-}
+int32      ASurvivorsGame::GetOrbitOrbCount()                 const { return Logic.GetOrbitOrbCount(); }
+FVector2D  ASurvivorsGame::GetOrbitOrbPos(int32 i)            const { return Logic.GetOrbitOrbPos(i); }
+EWeaponType ASurvivorsGame::GetOrbitOrbWeaponType(int32 i)    const { return Logic.GetOrbitOrbWeaponType(i); }
+float      ASurvivorsGame::GetOrbitOrbVisualRadius(int32 i)   const { return Logic.GetOrbitOrbVisualRadius(i); }
 
 // ---- 内部ユーティリティ -------------------------------------------------------
 
