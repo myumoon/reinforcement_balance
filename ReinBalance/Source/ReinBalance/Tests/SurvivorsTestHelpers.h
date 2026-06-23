@@ -58,6 +58,8 @@ struct FSurvivorsGameTestAccess
 	static FSurvivorsGameLogic* GetLogic(ASurvivorsGame* G) { return G->GetLogic(); }
 
 	// Logic プライベートメソッドのラッパー（FSurvivorsTestWorld から呼ぶ用）
+	static void RecalcPassiveEffects(ASurvivorsGame* G)                         { G->GetLogic()->RecalcPassiveEffects(); }
+	static void CheckSpecialPickups(ASurvivorsGame* G)                          { G->GetLogic()->CheckSpecialPickups(); }
 	static void BuildEnemyGrid(ASurvivorsGame* G)                               { G->GetLogic()->BuildEnemyGrid(); }
 	static void BuildPickupGrid(ASurvivorsGame* G)                              { G->GetLogic()->BuildPickupGrid(); }
 	static void TickWeapons(ASurvivorsGame* G, float Dt)                        { G->GetLogic()->TickWeapons(Dt); }

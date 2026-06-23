@@ -50,14 +50,14 @@ bool FSurvivorsWikiPassiveGrowthAndAttractorb::RunTest(const FString& Parameters
 	Passives[0].Level = 5;
 	Passives[1].Type = EPassiveItemType::Attractorb;
 	Passives[1].Level = 5;
-	FSurvivorsGameTestAccess::PlayerComp(S.Game)->RecalcPassiveEffects();
+	FSurvivorsGameTestAccess::RecalcPassiveEffects(S.Game);
 
 	TestTrue("Crown level 5 gives 1.4x Growth",
 		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::PassiveEffects(S.Game).GrowthMult, 1.4f, 0.001f));
 	TestTrue("Attractorb level 5 uses wiki multiplier",
 		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::GemPickupRadius(S.Game), 50.f * 3.980025f, 0.01f));
 
-	FSurvivorsGameTestAccess::PlayerComp(S.Game)->ProcessXPGain(10.f);
+	FSurvivorsGameTestAccess::GetLogic(S.Game)->ProcessXPGain(10.f);
 	TestTrue("Growth applies to gained XP",
 		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::PlayerXP(S.Game), 14.f, 0.001f));
 
@@ -107,7 +107,7 @@ bool FSurvivorsWikiChestEvolvesWeapon::RunTest(const FString& Parameters)
 	FWeaponSlot* Weapons = FSurvivorsGameTestAccess::WeaponSlots(S.Game);
 	Weapons[0].Type = EWeaponType::Whip;
 	Weapons[0].Level = FWeaponLevel(8);
-	FSurvivorsGameTestAccess::WeaponComp(S.Game)->EquipWeapon(0, EWeaponType::Whip, 8);
+	S.Game->GetLogic()->EquipWeapon(0, EWeaponType::Whip, 8);
 
 	FPassiveSlot* Passives = FSurvivorsGameTestAccess::PassiveSlots(S.Game);
 	Passives[0].Type = EPassiveItemType::HollowHeart;
@@ -120,7 +120,7 @@ bool FSurvivorsWikiChestEvolvesWeapon::RunTest(const FString& Parameters)
 	FSurvivorsGameTestAccess::SpecialPickups(S.Game).Add(Chest);
 	FSurvivorsGameTestAccess::GemPickupRadius(S.Game) = 50.f;
 
-	FSurvivorsGameTestAccess::PickupComp(S.Game)->CheckSpecialPickups();
+	FSurvivorsGameTestAccess::CheckSpecialPickups(S.Game);
 
 	TestEqual("Whip evolved into Bloody Tear",
 		static_cast<int32>(Weapons[0].Type),

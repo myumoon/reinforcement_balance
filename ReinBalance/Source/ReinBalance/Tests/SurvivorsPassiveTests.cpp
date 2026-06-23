@@ -1,6 +1,5 @@
 #include "Misc/AutomationTest.h"
 #include "SurvivorsTestHelpers.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsKingBibleWeapon.h"
 
 // ============================================================
 // 速度上昇パッシブ（Bracer Lv1-5）武器速度スケーリングテスト
@@ -15,7 +14,7 @@ static void SetupBracerPassive(ASurvivorsGame* Game, int32 BracerLevel)
 	FPassiveSlot* Passives = FSurvivorsGameTestAccess::PassiveSlots(Game);
 	Passives[0].Type  = EPassiveItemType::Bracer;
 	Passives[0].Level = BracerLevel;
-	FSurvivorsGameTestAccess::PlayerComp(Game)->RecalcPassiveEffects();
+	FSurvivorsGameTestAccess::RecalcPassiveEffects(Game);
 }
 
 // プロジェクタイル直線速度: MagicWand, Knife, Cross, FireWand, Runetracer

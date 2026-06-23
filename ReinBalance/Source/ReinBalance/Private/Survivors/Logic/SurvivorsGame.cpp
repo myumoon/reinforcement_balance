@@ -267,12 +267,12 @@ float ASurvivorsGame::CumulativeXPForLevel(int32 Level) const
 
 void ASurvivorsGame::ProcessXPGain(float Amount)
 {
-	PlayerComponent->ProcessXPGain(Amount);
+	Logic.ProcessXPGain(Amount);
 }
 
 void ASurvivorsGame::OnLevelUp(int32 NextLevel)
 {
-	PlayerComponent->OnLevelUp(NextLevel);
+	Logic.OnLevelUp(NextLevel);
 }
 
 FVector2D ASurvivorsGame::RandomInsideField()
