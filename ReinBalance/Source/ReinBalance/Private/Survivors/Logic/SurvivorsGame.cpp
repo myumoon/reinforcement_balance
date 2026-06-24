@@ -192,28 +192,7 @@ bool  ASurvivorsGame::IsTruncated()   const { return Logic.IsTruncated(); }
 
 FString ASurvivorsGame::GetSpawnDebugJson() const
 {
-	return FString::Printf(
-		TEXT("{\"elapsed_time\":%.3f,\"max_episode_time\":%.3f,\"enemy_count\":%d,\"current_wave_index\":%d,"
-			 "\"min_active_enemies\":%d,\"max_active_enemies\":%d,"
-			 "\"effective_min_enemies\":%d,\"effective_max_enemies\":%d,"
-			 "\"max_enemy_type_id\":%d,\"allowed_spawn_type_count\":%d,"
-			 "\"spawn_accumulator\":%.3f,\"has_current_wave\":%s,"
-			 "\"used_curriculum_enemy_pool\":%s,\"spawn_blocked\":%s,\"truncated\":%s}"),
-		LastSpawnDebug.ElapsedTime,
-		LastSpawnDebug.MaxEpisodeTime,
-		LastSpawnDebug.EnemyCount,
-		LastSpawnDebug.CurrentWaveIndex,
-		LastSpawnDebug.MinActiveEnemies,
-		LastSpawnDebug.MaxActiveEnemies,
-		LastSpawnDebug.EffectiveMinEnemies,
-		LastSpawnDebug.EffectiveMaxEnemies,
-		LastSpawnDebug.MaxEnemyTypeId,
-		LastSpawnDebug.AllowedSpawnTypeCount,
-		LastSpawnDebug.SpawnAccumulator,
-		LastSpawnDebug.bHasCurrentWave ? TEXT("true") : TEXT("false"),
-		LastSpawnDebug.bUsedCurriculumEnemyPool ? TEXT("true") : TEXT("false"),
-		LastSpawnDebug.bSpawnBlocked ? TEXT("true") : TEXT("false"),
-		LastSpawnDebug.bTruncated ? TEXT("true") : TEXT("false"));
+	return Logic.GetSpawnDebugJson();
 }
 
 FVector2D ASurvivorsGame::GetItemPos(int32 i) const { return Logic.GetItemPos(i); }

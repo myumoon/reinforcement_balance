@@ -68,7 +68,7 @@ public:
 	bool IsDone() const;
 	bool IsTruncated() const;
 
-	FSurvivorsSpawnDebug GetSpawnDebug() const { return LastSpawnDebug; }
+	FSurvivorsSpawnDebug GetSpawnDebug() const { return Logic.GetSpawnDebug(); }
 	FString GetSpawnDebugJson() const;
 
 	// ---- ビュー / デバッグ向けアクセサー ----
