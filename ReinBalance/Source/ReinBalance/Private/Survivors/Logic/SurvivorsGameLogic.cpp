@@ -1,23 +1,23 @@
 #include "Survivors/Logic/SurvivorsGameLogic.h"
 #include "Survivors/Logic/SurvivorsWikiSpec.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
-#include "Survivors/Logic/Weapons/SurvivorsWeaponBaseF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsGarlicWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsWhipWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsMagicWandWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsKnifeWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsAxeWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsCrossWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsKingBibleWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsFireWandWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsSantaWaterWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsRunetracerWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsLightningRingWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsPentagramWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsPeachoneWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsEbonyWingsWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsVandalierWeaponF.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsLaurelWeaponF.h"
+#include "Survivors/Logic/Weapons/SurvivorsWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsGarlicWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWhipWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsMagicWandWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsKnifeWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsAxeWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsCrossWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsKingBibleWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsFireWandWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsSantaWaterWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsRunetracerWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsLightningRingWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsPentagramWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsPeachoneWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsEbonyWingsWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsVandalierWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsLaurelWeaponLogic.h"
 #include "Misc/SecureHash.h"
 #include <algorithm>
 
@@ -396,7 +396,7 @@ TArray<float> FSurvivorsGameLogic::GetObservation() const
 		Obs.Add((float)(uint8)Slot.Type / (float)MaxWeaponTypeCountReserved);
 		const int32 WML = SurvivorsGameConstants::GetWeaponMaxLevel(Slot.Type);
 		Obs.Add(WML > 0 ? (float)Slot.Level.Value / (float)WML : 0.f);
-		const FSurvivorsWeaponBase* WI = Weapons.IsValidIndex(s) ? Weapons[s].Get() : nullptr;
+		const FSurvivorsWeaponLogic* WI = Weapons.IsValidIndex(s) ? Weapons[s].Get() : nullptr;
 		Obs.Add(WI && Slot.Type != EWeaponType::None ? FMath::Clamp(WI->GetCooldownRemaining().Value / 2.f, 0.f, 1.f) : 0.f);
 	}
 
@@ -1244,54 +1244,54 @@ void FSurvivorsGameLogic::QueryPickupContacts(FVector2D Pos, float Radius, TArra
 // Weapon ロジック
 // ============================================================================
 
-TUniquePtr<FSurvivorsWeaponBase> FSurvivorsGameLogic::CreateFWeaponInstance(EWeaponType Type)
+TUniquePtr<FSurvivorsWeaponLogic> FSurvivorsGameLogic::CreateWeaponLogic(EWeaponType Type)
 {
 	switch (Type)
 	{
 	case EWeaponType::Garlic:
 	case EWeaponType::SoulEater:
-		return MakeUnique<FSurvivorsGarlicWeapon>();
+		return MakeUnique<FSurvivorsGarlicWeaponLogic>();
 	case EWeaponType::Whip:
 	case EWeaponType::BloodyTear:
-		return MakeUnique<FSurvivorsWhipWeapon>();
+		return MakeUnique<FSurvivorsWhipWeaponLogic>();
 	case EWeaponType::MagicWand:
 	case EWeaponType::HolyWand:
-		return MakeUnique<FSurvivorsMagicWandWeapon>();
+		return MakeUnique<FSurvivorsMagicWandWeaponLogic>();
 	case EWeaponType::Knife:
 	case EWeaponType::ThousandEdge:
-		return MakeUnique<FSurvivorsKnifeWeapon>();
+		return MakeUnique<FSurvivorsKnifeWeaponLogic>();
 	case EWeaponType::Axe:
 	case EWeaponType::DeathSpiral:
-		return MakeUnique<FSurvivorsAxeWeapon>();
+		return MakeUnique<FSurvivorsAxeWeaponLogic>();
 	case EWeaponType::Cross:
 	case EWeaponType::HeavenSword:
-		return MakeUnique<FSurvivorsCrossWeapon>();
+		return MakeUnique<FSurvivorsCrossWeaponLogic>();
 	case EWeaponType::KingBible:
 	case EWeaponType::UnholyVespers:
-		return MakeUnique<FSurvivorsKingBibleWeapon>();
+		return MakeUnique<FSurvivorsKingBibleWeaponLogic>();
 	case EWeaponType::FireWand:
 	case EWeaponType::Hellfire:
-		return MakeUnique<FSurvivorsFireWandWeapon>();
+		return MakeUnique<FSurvivorsFireWandWeaponLogic>();
 	case EWeaponType::SantaWater:
 	case EWeaponType::LaBorra:
-		return MakeUnique<FSurvivorsSantaWaterWeapon>();
+		return MakeUnique<FSurvivorsSantaWaterWeaponLogic>();
 	case EWeaponType::Runetracer:
 	case EWeaponType::NoFuture:
-		return MakeUnique<FSurvivorsRunetracerWeapon>();
+		return MakeUnique<FSurvivorsRunetracerWeaponLogic>();
 	case EWeaponType::LightningRing:
 	case EWeaponType::ThunderLoop:
-		return MakeUnique<FSurvivorsLightningRingWeapon>();
+		return MakeUnique<FSurvivorsLightningRingWeaponLogic>();
 	case EWeaponType::Pentagram:
 	case EWeaponType::GorgeousMoon:
-		return MakeUnique<FSurvivorsPentagramWeapon>();
+		return MakeUnique<FSurvivorsPentagramWeaponLogic>();
 	case EWeaponType::Peachone:
-		return MakeUnique<FSurvivorsPeachoneWeapon>();
+		return MakeUnique<FSurvivorsPeachoneWeaponLogic>();
 	case EWeaponType::EbonyWings:
-		return MakeUnique<FSurvivorsEbonyWingsWeapon>();
+		return MakeUnique<FSurvivorsEbonyWingsWeaponLogic>();
 	case EWeaponType::Vandalier:
-		return MakeUnique<FSurvivorsVandalierWeapon>();
+		return MakeUnique<FSurvivorsVandalierWeaponLogic>();
 	case EWeaponType::Laurel:
-		return MakeUnique<FSurvivorsLaurelWeapon>();
+		return MakeUnique<FSurvivorsLaurelWeaponLogic>();
 	default:
 		return nullptr;
 	}
@@ -1301,7 +1301,7 @@ void FSurvivorsGameLogic::EquipWeapon(int32 SlotIdx, EWeaponType Type, int32 Lev
 {
 	if (SlotIdx < 0 || SlotIdx >= MaxWeaponSlots) return;
 	if (!Weapons.IsValidIndex(SlotIdx)) Weapons.SetNum(SlotIdx+1);
-	Weapons[SlotIdx] = CreateFWeaponInstance(Type);
+	Weapons[SlotIdx] = CreateWeaponLogic(Type);
 	if (Weapons[SlotIdx])
 	{ Weapons[SlotIdx]->Initialize(this, SlotIdx); Weapons[SlotIdx]->SetWeaponType(Type); Weapons[SlotIdx]->SetLevel(FWeaponLevel(Level)); }
 }

@@ -1,0 +1,13 @@
+#pragma once
+// このファイルは UObject 系ヘッダーをインクルードしてはならない。
+#include "CoreMinimal.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsPeachoneWeaponLogic.h"
+
+class REINBALANCE_API FSurvivorsEbonyWingsWeaponLogic : public FSurvivorsPeachoneWeaponLogic
+{
+public:
+	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
+
+protected:
+	virtual void CacheParams() override;
+};
