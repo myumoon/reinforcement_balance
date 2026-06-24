@@ -1640,6 +1640,10 @@ def main() -> None:
             wandb_logger=wandb_logger,
         )
         callbacks.append(_survivors_eval_cb)
+        # --weapon-phase auto 時: SPALF 経路と同様に context_provider を後付け設定
+        _phase_ctx_fn = locals().get("_build_phase_context")
+        if _phase_ctx_fn is not None:
+            _survivors_eval_cb.context_provider = _phase_ctx_fn
         if eval_env is not None:
             print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
                   f"n_eval_episodes={args.eval_episodes}, eval_port={args.eval_port}, "

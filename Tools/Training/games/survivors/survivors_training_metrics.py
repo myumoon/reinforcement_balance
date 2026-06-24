@@ -264,6 +264,7 @@ class SurvivorsMetricsCallback(BaseCallback):
             "active_score":         round(active_score, 4),
             "base_reward":          round(ep_base, 4),
             "terminated":           int(not is_truncated),
+            "truncated":            int(is_truncated),
             "first_weapon_id":      first_wid,
             "first_weapon_name":    first_name,
             "first_weapon_category": first_cat,
