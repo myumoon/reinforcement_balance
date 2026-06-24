@@ -52,6 +52,7 @@ struct FSurvivorsGameLogicConfig
 	float  EnemySpeedMult     = 1.0f;
 	float  SpawnMinDistance   = 500.f;
 	float  SpawnMaxDistance   = 700.f;
+	float  EnemyRecycleDistance = 1000.f;
 	float  BossSpawnTime      = 300.f;
 
 	// ---- プレイヤー設定 ----
@@ -321,6 +322,7 @@ private:
 	void      SpawnEnemy(const FSpawnWave& Wave);
 	void      SpawnBoss();
 	void      UpdateEnemies();
+	void      RecycleDistantEnemies();
 	void      DropGem(int32 TypeId, FVector2D Pos);
 	void      CheckGemCollections();
 	void      ApplyEnemyContactDamage();
