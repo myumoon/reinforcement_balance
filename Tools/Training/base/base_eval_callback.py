@@ -37,7 +37,16 @@ class BaseEvalCallback(BaseCallback):
         self._eval_thread: threading.Thread | None = None
         self._eval_result_queue: queue.Queue | None = None
 
+    def _on_training_start(self) -> None:
+        """訓練開始時に eval/running=0 を初期ログし、W&B チャートの左端を 0 に固定する。"""
+        if self._wandb_logger and self._wandb_logger.enabled:
+            self._wandb_logger.log({"eval/running": 0}, step=self.num_timesteps)
+
     def _on_step(self) -> bool:
+        # eval thread が存在する間だけ 64 step ごとにポーリングし、
+        # eval 終了から eval/running=0 ログまでの遅れを最大 64 step に抑える。
+        if self._eval_thread is not None and self.n_calls % 64 == 0:
+            self._try_process_pending_eval_result()
         return True
 
     def _sync_vecnormalize(self) -> None:
