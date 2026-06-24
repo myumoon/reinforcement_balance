@@ -884,6 +884,22 @@ def parse_args() -> argparse.Namespace:
              "最小待機ステップ数 (default: 100000)"
     )
     p.add_argument(
+        "--weapon-exposure-guard-steps", type=int, default=200_000,
+        help="武器露出ガード期間（武器フェーズ昇格後に敵Phase昇格を禁止するステップ数, default: 200000）"
+    )
+    p.add_argument(
+        "--weapon-exposure-guard-min-new-weapon-episodes", type=int, default=20,
+        help="武器露出ガード終了条件: 新規武器がfirst weaponのエピソード数 (default: 20)"
+    )
+    p.add_argument(
+        "--weapon-exposure-guard-max-normal-rollbacks", type=int, default=1,
+        help="武器露出ガード中に許可する通常rollbackの最大段数 (default: 1)"
+    )
+    p.add_argument(
+        "--weapon-exposure-guard-emergency-ep-len-ratio", type=float, default=0.25,
+        help="緊急rollback条件: episode_length_mean < min_episode_steps * ratio (default: 0.25)"
+    )
+    p.add_argument(
         "--rsi-mode",
         default="none",
         choices=["none", "auto"],
@@ -1386,7 +1402,13 @@ def main() -> None:
         )
         survivors_metrics_callback = SurvivorsMetricsCallback
         survivors_curriculum_metrics_callback = SurvivorsCurriculumProgressMetricsCallback
-        callbacks.append(survivors_metrics_callback(log_freq=5_000, frame_skip=args.frame_skip))
+        _survivors_metrics_cb = survivors_metrics_callback(
+            log_freq=5_000,
+            frame_skip=args.frame_skip,
+            alive_reward=getattr(args, "curriculum_alive_reward", 0.001),
+            log_dir=log_dir,
+        )
+        callbacks.append(_survivors_metrics_cb)
         callbacks.append(ActionDistributionCallback(n_actions=9, log_freq=5_000))
         # eval_callback は後で curriculum_spalf 用 hook と接続するため、ここでは登録を保留する。
         # curriculum_spalf 時: curriculum_spalf ブロックで hook 付きで登録する。
@@ -1547,13 +1569,23 @@ def main() -> None:
             )
         from games.survivors.state_modules import WeaponPhaseAutoStateModule
         from games.survivors.weapon_phase_auto_callback import WeaponPhaseAutoCallback
+        _curriculum_module = curriculum_cb._curriculum
+        _curriculum_module.configure_weapon_exposure_guard(
+            guard_steps=getattr(args, "weapon_exposure_guard_steps", 200_000),
+            min_new_weapon_episodes=getattr(args, "weapon_exposure_guard_min_new_weapon_episodes", 20),
+            max_normal_rollbacks=getattr(args, "weapon_exposure_guard_max_normal_rollbacks", 1),
+            emergency_ep_len_ratio=getattr(args, "weapon_exposure_guard_emergency_ep_len_ratio", 0.25),
+        )
         _weapon_auto_module = WeaponPhaseAutoStateModule(
-            curriculum=curriculum_cb._curriculum,
+            curriculum=_curriculum_module,
             stagnation_steps=getattr(args, "weapon_phase_auto_stagnation_steps", 500_000),
             # v09: rollback_fn は使用しない（on_weapon_phase_advance_fn に移行）
             rollback_fn=None,
             # v09: 武器フェーズ昇格時はスコアウィンドウのみリセット（フェーズ維持）
             on_weapon_phase_advance_fn=curriculum_cb.on_weapon_phase_advance,
+            on_weapon_phase_guard_start_fn=lambda new_ids, ts: _curriculum_module.start_weapon_exposure_guard(
+                new_ids, num_timesteps=ts
+            ),
             min_wait_steps=getattr(args, "weapon_phase_auto_min_wait_steps", 100_000),
         )
         # train_status_{step}_steps.json の "weapon_phase_auto" から状態を復元
@@ -1576,6 +1608,16 @@ def main() -> None:
             f"[INFO] WeaponPhaseAutoCallback 有効 (ゲートベース昇格, "
             f"weapon_update_freq={args.checkpoint_freq:,})"
         )
+
+        # SurvivorsMetricsCallback に武器露出ガード通知と context_provider を設定
+        if "_survivors_metrics_cb" in dir():
+            _survivors_metrics_cb._on_episode_end_fn = _curriculum_module.on_weapon_exposure_episode_end
+            _weapon_auto_module_ref = _weapon_auto_module
+            _curriculum_module_ref = _curriculum_module
+            _survivors_metrics_cb._context_provider = lambda: {
+                "curriculum_phase_idx": _curriculum_module_ref.current_phase,
+                "weapon_phase_key": _weapon_auto_module_ref.current_phase_key,
+            }
 
     # 通常時（非 curriculum_spalf）の eval 登録
     # curriculum_spalf 時は上のブロックで既に登録済みのため、_survivors_eval_registered をチェックする。

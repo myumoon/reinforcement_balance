@@ -263,7 +263,11 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         # フェーズ遷移判定（エピソード終了があったステップのみ）
         # allow_promotion=False: train episode での昇格は発生させない（probe path に委譲）
         if episode_results:
-            event = self._curriculum.check_phase_transition(allow_promotion=False, promotion_source="train")
+            event = self._curriculum.check_phase_transition(
+                allow_promotion=False,
+                promotion_source="train",
+                num_timesteps=self.num_timesteps,
+            )
             if event in ("rollback",):
                 self._on_phase_changed(event)
 
