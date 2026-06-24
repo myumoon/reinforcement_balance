@@ -7,7 +7,7 @@
 #include "Survivors/Logic/SurvivorsTypes.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/SurvivorsCollisionTypes.h"  // FSurvivorsTargetGrid (ReinBalanceLogic module)
-#include "Survivors/Logic/Weapons/SurvivorsWeaponBaseF.h"  // FSurvivorsWeaponBase 完全定義（TUniquePtr が destructor を要求する）
+#include "Survivors/Logic/Weapons/SurvivorsWeaponLogic.h"  // FSurvivorsWeaponLogic 完全定義（TUniquePtr が destructor を要求する）
 
 // ASurvivorsGame: UObject ヘッダーは include しない。friend 宣言のみで使用。
 class ASurvivorsGame;
@@ -234,7 +234,7 @@ public:
 
 	FSurvivorsSpawnDebug GetSpawnDebug() const { return LastSpawnDebug; }
 
-	// ---- 武器クラスが使用する API (FSurvivorsWeaponBase サブクラスからアクセス) ----
+	// ---- 武器クラスが使用する API (FSurvivorsWeaponLogic サブクラスからアクセス) ----
 	void  EquipWeapon(int32 SlotIdx, EWeaponType Type, int32 Level);
 	void  UnequipWeapon(int32 SlotIdx);
 	void  SpawnProjectile(const FProjectileState& P) { Projectiles.Add(P); }
@@ -287,7 +287,7 @@ public:
 	FSurvivorsTargetGrid PickupGrid;
 
 	// 純 C++ 武器配列
-	TArray<TUniquePtr<FSurvivorsWeaponBase>> Weapons;
+	TArray<TUniquePtr<FSurvivorsWeaponLogic>> Weapons;
 
 	// 現在の設定
 	FSurvivorsGameLogicConfig CurrentConfig;
@@ -366,7 +366,7 @@ private:
 	void  BuildEnemyGrid();
 	void  BuildPickupGrid();
 	void  QueryPickupContacts(FVector2D Pos, float Radius, TArray<const struct FSurvivorsTargetProxy*>& Out) const;
-	TUniquePtr<FSurvivorsWeaponBase> CreateFWeaponInstance(EWeaponType Type);
+	TUniquePtr<FSurvivorsWeaponLogic> CreateWeaponLogic(EWeaponType Type);
 
 #if WITH_AUTOMATION_TESTS
 	friend struct FSurvivorsGameTestAccess;

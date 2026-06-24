@@ -5,22 +5,22 @@
 #include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/SurvivorsGemComponent.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponBase.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsGarlicWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsWhipWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsMagicWandWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsKnifeWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsAxeWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsCrossWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsKingBibleWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsFireWandWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsSantaWaterWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsRunetracerWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsLightningRingWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsPentagramWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsPeachoneWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsEbonyWingsWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsVandalierWeapon.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsLaurelWeapon.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponGarlic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponWhip.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponMagicWand.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponKnife.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponAxe.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponCross.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponKingBible.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponFireWand.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponSantaWater.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponRunetracer.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponLightningRing.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponPentagram.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponPeachone.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponEbonyWings.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponVandalier.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponLaurel.h"
 
 USurvivorsWeaponComponent::USurvivorsWeaponComponent()
 {
@@ -532,33 +532,33 @@ USurvivorsWeaponBase* USurvivorsWeaponComponent::CreateWeaponInstance(EWeaponTyp
 	switch (Type)
 	{
 		case EWeaponType::Garlic:
-		case EWeaponType::SoulEater:      return NewObject<USurvivorsGarlicWeapon>(this);
+		case EWeaponType::SoulEater:      return NewObject<USurvivorsWeaponGarlic>(this);
 		case EWeaponType::Whip:
-		case EWeaponType::BloodyTear:     return NewObject<USurvivorsWhipWeapon>(this);
+		case EWeaponType::BloodyTear:     return NewObject<USurvivorsWeaponWhip>(this);
 		case EWeaponType::MagicWand:
-		case EWeaponType::HolyWand:       return NewObject<USurvivorsMagicWandWeapon>(this);
+		case EWeaponType::HolyWand:       return NewObject<USurvivorsWeaponMagicWand>(this);
 		case EWeaponType::Knife:
-		case EWeaponType::ThousandEdge:   return NewObject<USurvivorsKnifeWeapon>(this);
+		case EWeaponType::ThousandEdge:   return NewObject<USurvivorsWeaponKnife>(this);
 		case EWeaponType::Axe:
-		case EWeaponType::DeathSpiral:    return NewObject<USurvivorsAxeWeapon>(this);
+		case EWeaponType::DeathSpiral:    return NewObject<USurvivorsWeaponAxe>(this);
 		case EWeaponType::Cross:
-		case EWeaponType::HeavenSword:    return NewObject<USurvivorsCrossWeapon>(this);
+		case EWeaponType::HeavenSword:    return NewObject<USurvivorsWeaponCross>(this);
 		case EWeaponType::KingBible:
-		case EWeaponType::UnholyVespers:  return NewObject<USurvivorsKingBibleWeapon>(this);
+		case EWeaponType::UnholyVespers:  return NewObject<USurvivorsWeaponKingBible>(this);
 		case EWeaponType::FireWand:
-		case EWeaponType::Hellfire:       return NewObject<USurvivorsFireWandWeapon>(this);
+		case EWeaponType::Hellfire:       return NewObject<USurvivorsWeaponFireWand>(this);
 		case EWeaponType::SantaWater:
-		case EWeaponType::LaBorra:        return NewObject<USurvivorsSantaWaterWeapon>(this);
+		case EWeaponType::LaBorra:        return NewObject<USurvivorsWeaponSantaWater>(this);
 		case EWeaponType::Runetracer:
-		case EWeaponType::NoFuture:       return NewObject<USurvivorsRunetracerWeapon>(this);
+		case EWeaponType::NoFuture:       return NewObject<USurvivorsWeaponRunetracer>(this);
 		case EWeaponType::LightningRing:
-		case EWeaponType::ThunderLoop:    return NewObject<USurvivorsLightningRingWeapon>(this);
+		case EWeaponType::ThunderLoop:    return NewObject<USurvivorsWeaponLightningRing>(this);
 		case EWeaponType::Pentagram:
-		case EWeaponType::GorgeousMoon:   return NewObject<USurvivorsPentagramWeapon>(this);
-		case EWeaponType::Peachone:       return NewObject<USurvivorsPeachoneWeapon>(this);
-		case EWeaponType::EbonyWings:     return NewObject<USurvivorsEbonyWingsWeapon>(this);
-		case EWeaponType::Vandalier:      return NewObject<USurvivorsVandalierWeapon>(this);
-		case EWeaponType::Laurel:         return NewObject<USurvivorsLaurelWeapon>(this);
+		case EWeaponType::GorgeousMoon:   return NewObject<USurvivorsWeaponPentagram>(this);
+		case EWeaponType::Peachone:       return NewObject<USurvivorsWeaponPeachone>(this);
+		case EWeaponType::EbonyWings:     return NewObject<USurvivorsWeaponEbonyWings>(this);
+		case EWeaponType::Vandalier:      return NewObject<USurvivorsWeaponVandalier>(this);
+		case EWeaponType::Laurel:         return NewObject<USurvivorsWeaponLaurel>(this);
 		default:
 			checkNoEntry();
 			return nullptr;
