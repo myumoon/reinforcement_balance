@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-#include "Survivors/Game/SurvivorsTypes.h"
+#include "Survivors/Logic/SurvivorsTypes.h"
 #include "SurvivorsCollisionComponent.generated.h"
 
 class ASurvivorsGame;

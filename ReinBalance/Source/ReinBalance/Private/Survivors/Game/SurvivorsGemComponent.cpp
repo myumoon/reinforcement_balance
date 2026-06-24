@@ -2,7 +2,7 @@
 
 #include "Survivors/Game/SurvivorsCollisionComponent.h"
 #include "Survivors/Game/SurvivorsGame.h"
-#include "Survivors/Game/SurvivorsGameConstants.h"
+#include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Game/SurvivorsPlayerComponent.h"
 #include "Survivors/Logic/SurvivorsWikiSpec.h"
 

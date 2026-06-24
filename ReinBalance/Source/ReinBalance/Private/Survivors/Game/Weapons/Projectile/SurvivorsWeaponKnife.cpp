@@ -1,7 +1,7 @@
 #include "Survivors/Game/Weapons/Projectile/SurvivorsWeaponKnife.h"
 
 #include "Survivors/Game/SurvivorsGame.h"
-#include "Survivors/Game/SurvivorsGameConstants.h"
+#include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Game/Weapons/SurvivorsWeaponComponent.h"
 
 void USurvivorsWeaponKnife::OnLevelChanged(FWeaponLevel NewLevel)

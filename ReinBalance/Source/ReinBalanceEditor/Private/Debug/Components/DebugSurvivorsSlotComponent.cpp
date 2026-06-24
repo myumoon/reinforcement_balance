@@ -3,7 +3,7 @@
 
 #include "Debug/Components/DebugSurvivorsSlotComponent.h"
 #include "Survivors/Game/SurvivorsGame.h"
-#include "Survivors/Game/SurvivorsDebugRegistry.h"
+#include "Survivors/Logic/SurvivorsDebugRegistry.h"
 #include "Survivors/Game/Weapons/SurvivorsWeaponComponent.h"
 
 // Sets default values for this component's properties

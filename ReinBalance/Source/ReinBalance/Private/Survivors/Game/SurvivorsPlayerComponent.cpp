@@ -5,7 +5,7 @@
 #include "Survivors/Game/Weapons/SurvivorsWeaponComponent.h"
 #include "Survivors/Game/Weapons/SurvivorsWeaponBase.h"
 #if WITH_EDITOR
-#include "Survivors/Game/SurvivorsDebugRegistry.h"
+#include "Survivors/Logic/SurvivorsDebugRegistry.h"
 #endif
 
 namespace

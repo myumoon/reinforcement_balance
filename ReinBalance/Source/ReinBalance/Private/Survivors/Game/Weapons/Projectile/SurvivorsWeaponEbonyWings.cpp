@@ -1,5 +1,5 @@
 #include "Survivors/Game/Weapons/Projectile/SurvivorsWeaponEbonyWings.h"
-#include "Survivors/Game/SurvivorsGameConstants.h"
+#include "Survivors/Logic/SurvivorsGameConstants.h"
 
 void USurvivorsWeaponEbonyWings::OnLevelChanged(FWeaponLevel NewLevel)
 {

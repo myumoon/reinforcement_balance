@@ -1,7 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Survivors/Game/SurvivorsTypes.h"
+#include "Survivors/Logic/SurvivorsTypes.h"
 
 /**
  * UE ワールド空間の Z レイヤー高さ（オブジェクトの重なりを管理）。

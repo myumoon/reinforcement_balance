@@ -2,9 +2,9 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "Survivors/Game/SurvivorsGameConstants.h"
-#include "Survivors/Game/SurvivorsGameLogic.h"
-#include "Survivors/Game/SurvivorsTypes.h"
+#include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/Logic/SurvivorsGameLogic.h"
+#include "Survivors/Logic/SurvivorsTypes.h"
 #include "SurvivorsGame.generated.h"
 
 class AWallActor;

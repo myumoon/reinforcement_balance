@@ -1,7 +1,7 @@
 #include "Survivors/Game/Weapons/Projectile/SurvivorsWeaponLaurel.h"
 
 #include "Survivors/Game/SurvivorsGame.h"
-#include "Survivors/Game/SurvivorsGameConstants.h"
+#include "Survivors/Logic/SurvivorsGameConstants.h"
 
 void USurvivorsWeaponLaurel::OnLevelChanged(FWeaponLevel NewLevel)
 {

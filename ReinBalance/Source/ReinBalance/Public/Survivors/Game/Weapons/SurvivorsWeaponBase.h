@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "UObject/NoExportTypes.h"
-#include "Survivors/Game/SurvivorsTypes.h"
+#include "Survivors/Logic/SurvivorsTypes.h"
 #include "SurvivorsWeaponBase.generated.h"
 
 class ASurvivorsGame;
