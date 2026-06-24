@@ -71,6 +71,8 @@ void FSurvivorsWeaponKnifeLogic::StartBurst()
 	BurstPierce   = CachedPierce;
 
 	PendingKnifeShots = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
+	BurstShotCount    = PendingKnifeShots;
+	BurstShotIndex    = 0;
 	KnifeBurstTimer   = 0.f;
 
 	if (PendingKnifeShots > 0)
@@ -85,7 +87,15 @@ void FSurvivorsWeaponKnifeLogic::SpawnKnifeShot()
 {
 	const FVector2D Dir    = LastFacingDir.IsNearlyZero() ? FVector2D(1.f, 0.f) : LastFacingDir.GetSafeNormal();
 	const FVector2D Perp   = FVector2D(-Dir.Y, Dir.X);
-	const float     Offset = Logic->RandStream.FRandRange(-Logic->CurrentConfig.PlayerRadius, Logic->CurrentConfig.PlayerRadius);
+	const float     Radius = Logic->CurrentConfig.PlayerRadius;
+	float           Offset = Logic->RandStream.FRandRange(-Radius, Radius);
+	if (BurstShotCount > 1)
+	{
+		const float T = static_cast<float>(BurstShotIndex) / static_cast<float>(BurstShotCount - 1);
+		const float SpreadOffset = FMath::Lerp(-Radius * 0.5f, Radius * 0.5f, T);
+		Offset = FMath::Clamp(SpreadOffset + Offset * 0.25f, -Radius, Radius);
+	}
+	++BurstShotIndex;
 
 	FProjectileState P;
 	P.Pos               = Logic->PlayerPos + Perp * Offset;

@@ -83,9 +83,11 @@ void FSurvivorsGameLogic::ApplyConfig(const FSurvivorsGameLogicConfig& Config)
 	TArray<FSpawnWave>       Waves = MoveTemp(CurrentConfig.SpawnWaves);
 	TArray<FEnemyTypeParams> Table = MoveTemp(CurrentConfig.EnemyTypeTable);
 	CurrentConfig = Config;
-	CurrentConfig.WallBounds    = MoveTemp(Walls);
-	CurrentConfig.SpawnWaves    = MoveTemp(Waves);
-	CurrentConfig.EnemyTypeTable = MoveTemp(Table);
+	if (CurrentConfig.WallBounds.IsEmpty())     CurrentConfig.WallBounds     = MoveTemp(Walls);
+	if (CurrentConfig.SpawnWaves.IsEmpty())     CurrentConfig.SpawnWaves     = MoveTemp(Waves);
+	if (CurrentConfig.EnemyTypeTable.IsEmpty()) CurrentConfig.EnemyTypeTable = MoveTemp(Table);
+	if (CurrentConfig.EnemyTypeTable.IsEmpty()) InitDefaultEnemyTable();
+	if (CurrentConfig.SpawnWaves.IsEmpty())     InitDefaultSpawnWaves();
 	CachedObsDim = -1;
 }
 

@@ -116,7 +116,7 @@ public:
 	/** 設定を適用して内部テーブルを初期化する */
 	void Initialize(const FSurvivorsGameLogicConfig& Config);
 
-	/** params 更新時に呼ぶ（WallBounds/SpawnWaves/EnemyTypeTable は更新しない） */
+	/** Apply runtime config. Missing static arrays keep the previous values. */
 	void ApplyConfig(const FSurvivorsGameLogicConfig& Config);
 
 	// ---- 訓練 API ----

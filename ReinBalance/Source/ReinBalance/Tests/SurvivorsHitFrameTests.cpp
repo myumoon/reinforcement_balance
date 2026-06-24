@@ -224,8 +224,10 @@ bool FSurvivorsGarlicKnockbackResistance::RunTest(const FString& Parameters)
 
 	S.AddEnemyAt(FVector2D(10.f, 0.f), /*HP=*/200.f);
 	// EnemyTypeTable[0] に KnockbackResistance=1 を設定
-	if (S.Game->EnemyTypeTable.IsValidIndex(0))
-		S.Game->EnemyTypeTable[0].KnockbackResistance = 1.f;
+	FSurvivorsGameLogic* Logic = FSurvivorsGameTestAccess::GetLogic(S.Game);
+	TArray<FEnemyTypeParams>& EnemyTypeTable = Logic->CurrentConfig.EnemyTypeTable;
+	if (EnemyTypeTable.IsValidIndex(0))
+		EnemyTypeTable[0].KnockbackResistance = 1.f;
 
 	S.RunWeaponHits();
 

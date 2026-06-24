@@ -17,6 +17,8 @@ private:
 	int32 CachedPierce   = 1;
 
 	int32     PendingKnifeShots = 0;
+	int32     BurstShotIndex    = 0;
+	int32     BurstShotCount    = 0;
 	float     KnifeBurstTimer   = 0.f;
 	FVector2D LastFacingDir     = FVector2D(1.f, 0.f);
 
