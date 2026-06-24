@@ -1,6 +1,6 @@
 #include "Training/SurvivorsParallelSetupActor.h"
 #include "Training/SurvivorsHttpEnvService.h"
-#include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/Game/SurvivorsGame.h"
 #include "Survivors/View/SurvivorsGameView.h"
 #include "Kismet/GameplayStatics.h"
 

@@ -1,6 +1,6 @@
 #include "Misc/AutomationTest.h"
 #include "SurvivorsTestHelpers.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsKingBibleWeapon.h"
+#include "Survivors/Game/Weapons/Projectile/SurvivorsKingBibleWeapon.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsWeaponSpecProjectileAmounts,
 	"ReinBalance.Survivors.Wiki.WeaponSpecProjectileAmounts",

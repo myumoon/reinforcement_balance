@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-#include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/Game/SurvivorsGame.h"
 #include "SurvivorsGemViewComponent.generated.h"
 
 class UInstancedStaticMeshComponent;

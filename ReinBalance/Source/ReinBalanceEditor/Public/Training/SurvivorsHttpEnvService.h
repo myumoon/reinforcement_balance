@@ -3,7 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "HttpEnvServerBase.h"
-#include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/Game/SurvivorsGame.h"
 #include "SurvivorsHttpEnvService.generated.h"
 
 /**

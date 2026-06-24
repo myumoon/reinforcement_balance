@@ -1,6 +1,6 @@
 #include "Misc/AutomationTest.h"
 #include "SurvivorsTestHelpers.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsKingBibleWeapon.h"
+#include "Survivors/Game/Weapons/Projectile/SurvivorsKingBibleWeapon.h"
 
 // ============================================================
 // 速度上昇パッシブ（Bracer Lv1-5）武器速度スケーリングテスト
