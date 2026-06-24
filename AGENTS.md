@@ -73,6 +73,7 @@ python train.py --game survivors --total-steps 500000
 
 | ドキュメント | 内容 |
 |---|---|
+| [`docs/goal.md`](docs/goal.md) | プロジェクト最終目標・中間目標・ロードマップ |
 | [`docs/project_structure.md`](docs/project_structure.md) | ディレクトリ構成・モジュール依存関係・エンジン設定 |
 | [`docs/ue5_build.md`](docs/ue5_build.md) | UE5 ビルドコマンド・注意事項 |
 | [`docs/train/overview.md`](docs/train/overview.md) | 訓練スクリプト概要・モジュール構成 |
