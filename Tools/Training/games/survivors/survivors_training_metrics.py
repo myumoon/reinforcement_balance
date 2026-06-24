@@ -87,6 +87,7 @@ class SurvivorsMetricsCallback(BaseCallback):
             "prev_xp":        None,
             "steps":          0,
             "first_weapon_id": None,
+            "start_context":  None,  # episode 開始時の context snapshot
         }
 
     def _on_training_start(self) -> None:
@@ -108,6 +109,10 @@ class SurvivorsMetricsCallback(BaseCallback):
             ep = self._ep_per_env[i]
             ep["steps"] += 1
             self._samples += 1
+
+            # episode 開始時 (steps==1) に context snapshot を取得
+            if ep["steps"] == 1 and ep["start_context"] is None and self._context_provider is not None:
+                ep["start_context"] = self._context_provider()
 
             # HP
             hp = info.get("player_hp")
@@ -203,9 +208,12 @@ class SurvivorsMetricsCallback(BaseCallback):
                         "global_step":               self.num_timesteps,
                     }, step=self.num_timesteps)
 
-                # JSONL 書き出し
+                # JSONL 書き出し（episode 開始時の context snapshot を使う）
                 if self._jsonl_path is not None:
-                    self._write_jsonl(ep_len, ep_base, active_score, first_wid, is_truncated)
+                    self._write_jsonl(
+                        ep_len, ep_base, active_score, first_wid, is_truncated,
+                        ep_context=ep.get("start_context"),
+                    )
 
                 # 武器露出ガード通知
                 if self._on_episode_end_fn is not None:
@@ -254,8 +262,9 @@ class SurvivorsMetricsCallback(BaseCallback):
         active_score: float,
         first_wid: "int | None",
         is_truncated: bool,
+        ep_context: "dict | None" = None,
     ) -> None:
-        ctx = self._context_provider() if self._context_provider is not None else {}
+        ctx = ep_context or {}
         first_name = _WEAPON_NAME.get(first_wid, None) if first_wid is not None else None
         first_cat = _WEAPON_CATEGORY.get(first_wid, None) if first_wid is not None else None
         record: dict = {

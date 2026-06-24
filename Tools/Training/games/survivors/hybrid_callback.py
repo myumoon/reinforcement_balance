@@ -422,6 +422,10 @@ class HybridCurriculumSpalfCallback(BaseCallback):
 
     # ---- Probe 昇格 API ----
 
+    def get_current_enemy_params(self) -> dict:
+        """現在の SPALF サンプル済み敵パラメータ dict を返す。"""
+        return dict(self._spalf._current_params)
+
     def get_current_phase_name(self) -> str:
         """現在のカリキュラムフェーズ名を返す（RSI 用）。"""
         return _CURRICULUM_PHASES[self._curriculum.current_phase].name

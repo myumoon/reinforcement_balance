@@ -1613,12 +1613,16 @@ def main() -> None:
         # SurvivorsMetricsCallback / SurvivorsEvalCallback に context_provider を設定
         _wam_ref = _weapon_auto_module
         _cum_ref = _curriculum_module
+        _cb_ref = curriculum_cb  # CurriculumCallback or HybridCurriculumSpalfCallback
 
         def _build_phase_context():
-            return {
+            ctx = {
                 "curriculum_phase_idx": _cum_ref.current_phase,
                 "weapon_phase_key": _wam_ref.current_phase_key,
             }
+            if hasattr(_cb_ref, "get_current_enemy_params"):
+                ctx["enemy_params"] = _cb_ref.get_current_enemy_params()
+            return ctx
 
         if "_survivors_metrics_cb" in dir():
             _survivors_metrics_cb._on_episode_end_fn = _curriculum_module.on_weapon_exposure_episode_end
