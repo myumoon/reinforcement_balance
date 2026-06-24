@@ -250,7 +250,7 @@ class TestExportImportPreservesGuard:
         c = _make_curriculum(phase_idx=4)
         _trigger_guard(c, new_ids=[7], start_step=12345)
         c._weapon_exposure_guard_normal_rollbacks = 1
-        c._weapon_exposure_guard_new_weapon_episodes = 3
+        c._weapon_exposure_guard_episode_counts[7] = 3
 
         state = c.export_state()
         guard = state["weapon_exposure_guard"]
@@ -258,13 +258,13 @@ class TestExportImportPreservesGuard:
         assert guard["new_weapon_ids"] == [7]
         assert guard["start_step"] == 12345
         assert guard["normal_rollbacks"] == 1
-        assert guard["new_weapon_episodes"] == 3
+        assert guard["episode_counts"] == {"7": 3}
 
     def test_import_restores_guard_state(self):
         c = _make_curriculum(phase_idx=4)
         _trigger_guard(c, new_ids=[7], start_step=12345)
         c._weapon_exposure_guard_normal_rollbacks = 1
-        c._weapon_exposure_guard_new_weapon_episodes = 3
+        c._weapon_exposure_guard_episode_counts[7] = 3
         state = c.export_state()
 
         c2 = _make_curriculum(phase_idx=4)
@@ -273,7 +273,7 @@ class TestExportImportPreservesGuard:
         assert c2._weapon_exposure_guard_new_weapon_ids == [7]
         assert c2._weapon_exposure_guard_start_step == 12345
         assert c2._weapon_exposure_guard_normal_rollbacks == 1
-        assert c2._weapon_exposure_guard_new_weapon_episodes == 3
+        assert c2._weapon_exposure_guard_episode_counts == {7: 3}
 
     def test_guard_continues_after_import(self):
         c = _make_curriculum(window=3, phase_idx=4)
@@ -294,3 +294,111 @@ class TestExportImportPreservesGuard:
             c2.on_episode_end(high_score, ep_len=3000)
         event = c2.check_phase_transition(allow_promotion=True, num_timesteps=100_000)
         assert event != "advance", "import 後もガードが機能すること"
+
+
+# ---------------------------------------------------------------------------
+# 7. probe 経由の昇格もガード中はブロックされる（P1修正の検証）
+# ---------------------------------------------------------------------------
+
+class TestGuardBlocksProbePromotion:
+
+    def test_check_promotion_transition_blocked_during_guard(self):
+        c = _make_curriculum(window=3, phase_idx=3)
+        c.configure_weapon_exposure_guard(guard_steps=200_000, min_new_weapon_episodes=20)
+        _trigger_guard(c, new_ids=[7], start_step=0)
+
+        # probe スコアを昇格条件を満たすレベルに積む
+        from games.survivors.survivors_curriculum import PHASES
+        phase = PHASES[3]
+        threshold = phase.threshold
+        assert threshold is not None
+        high = threshold * 2.0
+        for _ in range(3):
+            c.on_promotion_probe_episode_end(high, ep_len=3000)
+            c._promotion_scores.append(high)
+            c._promotion_episode_lengths.append(3000)
+
+        event = c.check_promotion_transition(promotion_source="probe", num_timesteps=50_000)
+        assert event is None, "ガード中はprobe経由の昇格もブロックされること"
+        assert c._phase_idx == 3
+
+    def test_check_promotion_transition_allowed_after_guard_ends(self):
+        c = _make_curriculum(window=3, phase_idx=3)
+        c.configure_weapon_exposure_guard(guard_steps=100_000, min_new_weapon_episodes=2)
+        _trigger_guard(c, new_ids=[7], start_step=0)
+
+        # ガード終了条件を満たす
+        for _ in range(2):
+            c.on_weapon_exposure_episode_end(7)
+
+        from games.survivors.survivors_curriculum import PHASES
+        phase = PHASES[3]
+        high = phase.threshold * 2.0
+        for _ in range(3):
+            c._promotion_scores.append(high)
+            c._promotion_episode_lengths.append(3000)
+
+        # guard_steps 経過後（ガードが終了する）
+        event = c.check_promotion_transition(promotion_source="probe", num_timesteps=200_000)
+        assert event == "advance", "ガード終了後はprobe昇格できること"
+
+
+# ---------------------------------------------------------------------------
+# 8. W2以降の複数新規武器で全武器が露出されないとガード終了しない（P2修正の検証）
+# ---------------------------------------------------------------------------
+
+class TestMultiWeaponGuard:
+
+    def test_guard_does_not_end_if_only_one_weapon_exposed(self):
+        """W1→W2で FIRE_WAND(8) と LIGHTNING_RING(11) の2武器が追加された場合、
+        FIRE_WAND だけ 20 episode 達成してもガードが終了しないこと。"""
+        c = _make_curriculum(window=3, phase_idx=6)
+        c.configure_weapon_exposure_guard(guard_steps=100_000, min_new_weapon_episodes=5)
+        _trigger_guard(c, new_ids=[8, 11], start_step=0)
+
+        # FIRE_WAND(8) だけ 5 episode 達成
+        for _ in range(5):
+            c.on_weapon_exposure_episode_end(8)
+
+        from games.survivors.survivors_curriculum import PHASES
+        phase = PHASES[6]
+        high = (phase.threshold or 1000.0) * 2.0
+        for _ in range(3):
+            c.on_episode_end(high, ep_len=3000)
+
+        c.check_phase_transition(allow_promotion=True, num_timesteps=200_000)
+        assert c._weapon_exposure_guard_active, \
+            "LIGHTNING_RING が未露出のままガードが終了してはいけない"
+
+    def test_guard_ends_when_all_weapons_exposed(self):
+        """全新規武器が min 以上露出されてからガードが終了すること。"""
+        c = _make_curriculum(window=3, phase_idx=6)
+        c.configure_weapon_exposure_guard(guard_steps=100_000, min_new_weapon_episodes=3)
+        _trigger_guard(c, new_ids=[8, 11], start_step=0)
+
+        # 両武器とも 3 episode 達成
+        for _ in range(3):
+            c.on_weapon_exposure_episode_end(8)
+            c.on_weapon_exposure_episode_end(11)
+
+        from games.survivors.survivors_curriculum import PHASES
+        phase = PHASES[6]
+        high = (phase.threshold or 1000.0) * 2.0
+        for _ in range(3):
+            c.on_episode_end(high, ep_len=3000)
+
+        c.check_phase_transition(allow_promotion=True, num_timesteps=200_000)
+        assert not c._weapon_exposure_guard_active, \
+            "全武器が露出されたのでガードが終了すること"
+
+    def test_episode_counts_tracked_per_weapon(self):
+        """各武器のカウントが個別に記録されること。"""
+        c = _make_curriculum(phase_idx=4)
+        _trigger_guard(c, new_ids=[7, 8], start_step=0)
+
+        c.on_weapon_exposure_episode_end(7)
+        c.on_weapon_exposure_episode_end(7)
+        c.on_weapon_exposure_episode_end(8)
+
+        assert c._weapon_exposure_guard_episode_counts[7] == 2
+        assert c._weapon_exposure_guard_episode_counts[8] == 1

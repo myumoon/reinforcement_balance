@@ -1515,7 +1515,7 @@ def main() -> None:
         if args.eval_freq > 0 and eval_env is not None:
             from games.survivors.survivors_eval_callback import SurvivorsEvalCallback
             _eval_episodes_spalf = args.curriculum_window
-            callbacks.append(SurvivorsEvalCallback(
+            _survivors_eval_cb = SurvivorsEvalCallback(
                 eval_env=eval_env,
                 eval_freq=args.eval_freq,
                 n_eval_episodes=_eval_episodes_spalf,
@@ -1528,7 +1528,8 @@ def main() -> None:
                     hybrid_cb.current_phase,
                     _weapon_auto_module.current_phase_key if _weapon_auto_module is not None else None,
                 ),
-            ))
+            )
+            callbacks.append(_survivors_eval_cb)
             _survivors_eval_registered = True
             print(
                 f"[INFO] SurvivorsEvalCallback (probe 統合) 有効 "
@@ -1609,29 +1610,36 @@ def main() -> None:
             f"weapon_update_freq={args.checkpoint_freq:,})"
         )
 
-        # SurvivorsMetricsCallback に武器露出ガード通知と context_provider を設定
+        # SurvivorsMetricsCallback / SurvivorsEvalCallback に context_provider を設定
+        _wam_ref = _weapon_auto_module
+        _cum_ref = _curriculum_module
+
+        def _build_phase_context():
+            return {
+                "curriculum_phase_idx": _cum_ref.current_phase,
+                "weapon_phase_key": _wam_ref.current_phase_key,
+            }
+
         if "_survivors_metrics_cb" in dir():
             _survivors_metrics_cb._on_episode_end_fn = _curriculum_module.on_weapon_exposure_episode_end
-            _weapon_auto_module_ref = _weapon_auto_module
-            _curriculum_module_ref = _curriculum_module
-            _survivors_metrics_cb._context_provider = lambda: {
-                "curriculum_phase_idx": _curriculum_module_ref.current_phase,
-                "weapon_phase_key": _weapon_auto_module_ref.current_phase_key,
-            }
+            _survivors_metrics_cb._context_provider = _build_phase_context
+        if "_survivors_eval_cb" in dir():
+            _survivors_eval_cb.context_provider = _build_phase_context
 
     # 通常時（非 curriculum_spalf）の eval 登録
     # curriculum_spalf 時は上のブロックで既に登録済みのため、_survivors_eval_registered をチェックする。
     if (args.game == "survivors" and not args.dry_run
             and args.eval_freq > 0 and not _survivors_eval_registered):
         from games.survivors.survivors_eval_callback import SurvivorsEvalCallback
-        callbacks.append(SurvivorsEvalCallback(
+        _survivors_eval_cb = SurvivorsEvalCallback(
             eval_env=eval_env,  # None なら n_envs=1 旧互換（training_env を使用）
             eval_freq=args.eval_freq,
             n_eval_episodes=args.eval_episodes,
             frame_skip=args.frame_skip,
             alive_reward=args.curriculum_alive_reward,
             wandb_logger=wandb_logger,
-        ))
+        )
+        callbacks.append(_survivors_eval_cb)
         if eval_env is not None:
             print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
                   f"n_eval_episodes={args.eval_episodes}, eval_port={args.eval_port}, "

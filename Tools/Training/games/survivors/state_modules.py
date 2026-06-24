@@ -387,7 +387,8 @@ class CurriculumStateModule(BaseStateModule):
         self._weapon_exposure_guard_new_weapon_ids: list[int] = []
         self._weapon_exposure_guard_start_step: int = 0
         self._weapon_exposure_guard_normal_rollbacks: int = 0
-        self._weapon_exposure_guard_new_weapon_episodes: int = 0
+        # 新規武器ごとの first_weapon episode カウント（wid → count）
+        self._weapon_exposure_guard_episode_counts: dict[int, int] = {}
         # パラメータ（configure_weapon_exposure_guard で上書き可能）
         self._weapon_exposure_guard_steps: int = 200_000
         self._weapon_exposure_guard_min_new_weapon_episodes: int = 20
@@ -429,7 +430,7 @@ class CurriculumStateModule(BaseStateModule):
         self._weapon_exposure_guard_new_weapon_ids = list(new_weapon_ids)
         self._weapon_exposure_guard_start_step = num_timesteps
         self._weapon_exposure_guard_normal_rollbacks = 0
-        self._weapon_exposure_guard_new_weapon_episodes = 0
+        self._weapon_exposure_guard_episode_counts = {wid: 0 for wid in new_weapon_ids}
         print(
             f"[Curriculum] 武器露出ガード開始: new_weapon_ids={new_weapon_ids}, "
             f"step={num_timesteps:,}, "
@@ -442,20 +443,26 @@ class CurriculumStateModule(BaseStateModule):
                 or first_weapon_id is None
                 or first_weapon_id not in self._weapon_exposure_guard_new_weapon_ids):
             return
-        self._weapon_exposure_guard_new_weapon_episodes += 1
+        self._weapon_exposure_guard_episode_counts[first_weapon_id] = (
+            self._weapon_exposure_guard_episode_counts.get(first_weapon_id, 0) + 1
+        )
 
     def _check_weapon_exposure_guard_end(self, num_timesteps: int) -> None:
         if not self._weapon_exposure_guard_active:
             return
         steps_elapsed = num_timesteps - self._weapon_exposure_guard_start_step
-        if (steps_elapsed >= self._weapon_exposure_guard_steps
-                and self._weapon_exposure_guard_new_weapon_episodes
-                >= self._weapon_exposure_guard_min_new_weapon_episodes):
+        min_count = self._weapon_exposure_guard_min_new_weapon_episodes
+        # 全新規武器が min_new_weapon_episodes を満たしているか
+        all_exposed = all(
+            self._weapon_exposure_guard_episode_counts.get(wid, 0) >= min_count
+            for wid in self._weapon_exposure_guard_new_weapon_ids
+        )
+        if steps_elapsed >= self._weapon_exposure_guard_steps and all_exposed:
             self._weapon_exposure_guard_active = False
             print(
                 f"[Curriculum] 武器露出ガード終了: "
                 f"steps_elapsed={steps_elapsed:,}, "
-                f"new_weapon_episodes={self._weapon_exposure_guard_new_weapon_episodes}"
+                f"episode_counts={self._weapon_exposure_guard_episode_counts}"
             )
 
     def on_episode_end(self, active_score: float, ep_len: int,
@@ -553,11 +560,25 @@ class CurriculumStateModule(BaseStateModule):
         self._promotion_episode_lengths.append(ep_len)
         self._promotion_base_rewards.append(base_reward)
 
-    def check_promotion_transition(self, *, promotion_source: str = "probe") -> str | None:
+    def check_promotion_transition(
+        self,
+        *,
+        promotion_source: str = "probe",
+        num_timesteps: int = 0,
+    ) -> str | None:
         """probe scores のみで昇格判定を行う（rollback は発生しない）。
 
         probe window が window 数に満たない場合、または昇格条件未達の場合は None を返す。
+        武器露出ガード中は常に None を返す（probe 経由の昇格も禁止）。
         """
+        # ガード終了条件チェック（昇格判定前に評価する）
+        if num_timesteps > 0:
+            self._check_weapon_exposure_guard_end(num_timesteps)
+
+        # ガード中は probe 経由の昇格も禁止
+        if self._weapon_exposure_guard_active:
+            return None
+
         from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
         phase = self._PHASES[self._phase_idx]
         if phase.threshold is None:
@@ -576,7 +597,7 @@ class CurriculumStateModule(BaseStateModule):
             effective_threshold, len(recent_scores), recent_scores
         )
         if can_promote:
-            self._advance_phase(mean, effective_threshold, f"probe:{promotion_reason}")
+            self._advance_phase(mean, effective_threshold, f"probe:{promotion_reason}", num_timesteps=num_timesteps)
             return "advance"
         return None
 
@@ -791,7 +812,9 @@ class CurriculumStateModule(BaseStateModule):
             }),
             "curriculum/weapon_exposure_guard_active": int(self._weapon_exposure_guard_active),
             "curriculum/weapon_exposure_guard_normal_rollbacks": self._weapon_exposure_guard_normal_rollbacks,
-            "curriculum/weapon_exposure_guard_new_weapon_episodes": self._weapon_exposure_guard_new_weapon_episodes,
+            "curriculum/weapon_exposure_guard_new_weapon_episodes": min(
+                self._weapon_exposure_guard_episode_counts.values(), default=0
+            ) if self._weapon_exposure_guard_episode_counts else 0,
         }
 
     def get_diagnostics(self, num_timesteps: int = 0) -> dict:
@@ -1034,7 +1057,7 @@ class CurriculumStateModule(BaseStateModule):
                 "new_weapon_ids": self._weapon_exposure_guard_new_weapon_ids,
                 "start_step": self._weapon_exposure_guard_start_step,
                 "normal_rollbacks": self._weapon_exposure_guard_normal_rollbacks,
-                "new_weapon_episodes": self._weapon_exposure_guard_new_weapon_episodes,
+                "episode_counts": {str(k): v for k, v in self._weapon_exposure_guard_episode_counts.items()},
             },
         }
 
@@ -1067,7 +1090,15 @@ class CurriculumStateModule(BaseStateModule):
         self._weapon_exposure_guard_new_weapon_ids = [int(v) for v in guard.get("new_weapon_ids", [])]
         self._weapon_exposure_guard_start_step = int(guard.get("start_step", 0))
         self._weapon_exposure_guard_normal_rollbacks = int(guard.get("normal_rollbacks", 0))
-        self._weapon_exposure_guard_new_weapon_episodes = int(guard.get("new_weapon_episodes", 0))
+        raw_counts = guard.get("episode_counts")
+        if isinstance(raw_counts, dict):
+            self._weapon_exposure_guard_episode_counts = {int(k): int(v) for k, v in raw_counts.items()}
+        else:
+            # 旧フォーマット互換: 全新規武器に同一カウントを割り当てる
+            n = int(guard.get("new_weapon_episodes", 0))
+            self._weapon_exposure_guard_episode_counts = {
+                wid: n for wid in self._weapon_exposure_guard_new_weapon_ids
+            }
 
     def save_status(self, path=None) -> None:
         import json
