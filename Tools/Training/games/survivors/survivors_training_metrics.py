@@ -110,9 +110,9 @@ class SurvivorsMetricsCallback(BaseCallback):
             ep["steps"] += 1
             self._samples += 1
 
-            # episode 開始時 (steps==1) に context snapshot を取得
+            # episode 開始時 (steps==1) に context snapshot を取得（env_idx を渡して per-env params を得る）
             if ep["steps"] == 1 and ep["start_context"] is None and self._context_provider is not None:
-                ep["start_context"] = self._context_provider()
+                ep["start_context"] = self._context_provider(i)
 
             # HP
             hp = info.get("player_hp")

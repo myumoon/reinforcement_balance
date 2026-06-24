@@ -229,8 +229,8 @@ class CurriculumCallback(BaseCallback):
             f"(phase={self._curriculum.current_phase} を維持)"
         )
 
-    def get_current_enemy_params(self) -> dict:
-        """現在の敵パラメータ dict を返す（フェーズ固定値）。"""
+    def get_current_enemy_params(self, env_idx: "int | None" = None) -> dict:
+        """現在の敵パラメータ dict を返す（フェーズ固定値、env_idx は無視）。"""
         return _phase_to_params(self._curriculum.current_phase)
 
     def _save_status(self, *a):

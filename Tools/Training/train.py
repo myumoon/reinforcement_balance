@@ -1615,13 +1615,13 @@ def main() -> None:
         _cum_ref = _curriculum_module
         _cb_ref = curriculum_cb  # CurriculumCallback or HybridCurriculumSpalfCallback
 
-        def _build_phase_context():
+        def _build_phase_context(env_idx=None):
             ctx = {
                 "curriculum_phase_idx": _cum_ref.current_phase,
                 "weapon_phase_key": _wam_ref.current_phase_key,
             }
             if hasattr(_cb_ref, "get_current_enemy_params"):
-                ctx["enemy_params"] = _cb_ref.get_current_enemy_params()
+                ctx["enemy_params"] = _cb_ref.get_current_enemy_params(env_idx=env_idx)
             return ctx
 
         if "_survivors_metrics_cb" in dir():

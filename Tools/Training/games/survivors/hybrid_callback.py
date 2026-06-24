@@ -422,8 +422,18 @@ class HybridCurriculumSpalfCallback(BaseCallback):
 
     # ---- Probe 昇格 API ----
 
-    def get_current_enemy_params(self) -> dict:
-        """現在の SPALF サンプル済み敵パラメータ dict を返す。"""
+    def get_current_enemy_params(self, env_idx: "int | None" = None) -> dict:
+        """env_idx の SPALF パラメータ dict を返す。
+
+        env_idx が指定された場合は _ep_start_param_vec_per_env[env_idx] から復元する。
+        _current_params はエピソード終了処理の最後に書き換わるため、
+        同一 step で複数 env が終了すると最後の env の値になってしまう。
+        episode 開始時（steps==1）に env_idx 付きで呼ぶことで正しい per-env 値を取得できる。
+        """
+        if (env_idx is not None
+                and self._ep_start_param_vec_per_env
+                and 0 <= env_idx < len(self._ep_start_param_vec_per_env)):
+            return self._spalf.vec_to_params(self._ep_start_param_vec_per_env[env_idx])
         return dict(self._spalf._current_params)
 
     def get_current_phase_name(self) -> str:
