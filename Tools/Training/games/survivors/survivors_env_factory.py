@@ -4,6 +4,30 @@ from __future__ import annotations
 from typing import Optional
 
 
+def _is_multiprocessing_child() -> bool:
+    try:
+        import multiprocessing as mp
+
+        parent_process = getattr(mp, "parent_process", None)
+        if parent_process is not None:
+            return parent_process() is not None
+        return mp.current_process().name != "MainProcess"
+    except Exception:
+        return False
+
+
+def _ignore_sigint_in_subprocess() -> None:
+    if not _is_multiprocessing_child():
+        return
+
+    try:
+        import signal
+
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
 class SurvivorsEnvFactory:
     """SubprocVecEnv 向けの SurvivorsEnv factory。
 
@@ -25,6 +49,8 @@ class SurvivorsEnvFactory:
         self.reward_fn_path = reward_fn_path
 
     def __call__(self):
+        _ignore_sigint_in_subprocess()
+
         from games.survivors.survivors_env import SurvivorsEnv, SurvivorsMonitor
         env = SurvivorsEnv(host=self.host, port=self.port, frame_skip=self.frame_skip)
         try:
