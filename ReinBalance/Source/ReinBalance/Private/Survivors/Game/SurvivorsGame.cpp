@@ -387,9 +387,10 @@ void ASurvivorsGame::SyncConfigToLogic()
 	Cfg.EnemyHPScale        = EnemyHPScale;
 	Cfg.EnemyDamageScale    = EnemyDamageScale;
 	Cfg.EnemySpeedMult      = EnemySpeedMult;
-	Cfg.SpawnMinDistance    = SpawnMinDistance;
-	Cfg.SpawnMaxDistance    = SpawnMaxDistance;
-	Cfg.BossSpawnTime       = BossSpawnTime;
+	Cfg.SpawnMinDistance      = SpawnMinDistance;
+	Cfg.SpawnMaxDistance      = SpawnMaxDistance;
+	Cfg.EnemyRecycleDistance  = EnemyRecycleDistance;
+	Cfg.BossSpawnTime         = BossSpawnTime;
 
 	// ---- プレイヤー設定 ----
 	Cfg.MaxPlayerHP         = MaxPlayerHP;

@@ -207,6 +207,7 @@ void FSurvivorsGameLogic::PhysicsStep(int32 ActionIdx)
 
 	ElapsedTime += PhysicsDt;
 	UpdateEnemies();
+	RecycleDistantEnemies();
 	TickWeapons(PhysicsDt);
 
 	BuildEnemyGrid();
@@ -823,6 +824,21 @@ void FSurvivorsGameLogic::UpdateEnemies()
 		if (E.bFrozen || (bGF && !bRF)) continue;
 		E.Vel = (PlayerPos - E.Pos).GetSafeNormal() * GetEnemySpeed(E.TypeId);
 		E.Pos += E.Vel * PhysicsDt;
+	}
+}
+
+void FSurvivorsGameLogic::RecycleDistantEnemies()
+{
+	const float RecycleSq = FMath::Square(CurrentConfig.EnemyRecycleDistance);
+	for (FEnemyState& E : Enemies)
+	{
+		if (E.bPendingRemove) continue;
+		if (CurrentConfig.EnemyTypeTable.IsValidIndex(E.TypeId) && CurrentConfig.EnemyTypeTable[E.TypeId].bIsBoss) continue;
+		if ((E.Pos - PlayerPos).SizeSquared() > RecycleSq)
+		{
+			E.Pos = RandomSpawnPos();
+			E.Vel = FVector2D::ZeroVector;
+		}
 	}
 }
 
