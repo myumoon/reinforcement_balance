@@ -65,6 +65,7 @@ def run_survivors_eval_episodes(
     frame_skip: int,
     alive_reward: float,
     deterministic: bool = True,
+    context_provider: Callable[[], dict] | None = None,
 ) -> tuple[list[dict], dict, object]:
     """Survivors 評価エピソードを実行して結果を返す。
 
@@ -75,6 +76,9 @@ def run_survivors_eval_episodes(
         frame_skip:       フレームスキップ数
         alive_reward:     alive_reward 値（active_score 計算に使用）
         deterministic:    deterministic policy を使うか
+        context_provider: エピソード開始時に呼び出して context dict を取得する callable。
+                          返り値は episode_result にマージされる。
+                          例: {"curriculum_phase_idx": int, "weapon_phase_key": str}
 
     Returns:
         (episode_results, aggregate_metrics, last_obs)
@@ -90,6 +94,8 @@ def run_survivors_eval_episodes(
         episode_results: list[dict] = []
 
         for _ in range(n_eval_episodes):
+            ep_context = context_provider() if context_provider is not None else {}
+
             done = np.array([False])
             lstm_states = None
             episode_starts = np.ones((env.num_envs,), dtype=bool)
@@ -173,7 +179,7 @@ def run_survivors_eval_episodes(
             alive_total = alive_reward * frame_skip * ep_steps
             active_score = max(0.0, ep_base - alive_total)
 
-            episode_results.append({
+            result = {
                 "ep_length":      ep_steps,
                 "active_score":   active_score,
                 "base_reward":    ep_base,
@@ -192,7 +198,10 @@ def run_survivors_eval_episodes(
                 "terminated":     int(not is_truncated),
                 "weapon_acquired": ep_weapon_acquired,
                 "first_weapon_id": ep_first_weapon_id,
-            })
+            }
+            if ep_context:
+                result.update(ep_context)
+            episode_results.append(result)
 
     finally:
         # VecNormalize を元の状態に必ず戻す
@@ -223,76 +232,98 @@ def _aggregate_eval_results(results: list[dict]) -> dict:
 
 def _aggregate_weapon_metrics(results: list[dict]) -> dict:
     """episode_results から武器別・カテゴリ別メトリクスを集計する。"""
-    # weapon_id ごとにエピソードを集約
     per_weapon: dict[int, list[dict]] = {}    # wid → エピソードリスト
     first_weapon: dict[int, list[dict]] = {}  # wid → first_weapon エピソードリスト
+    # (wid) → {(weapon_phase_key, enemy_phase_idx): count}
+    phase_combo_count: dict[int, dict[tuple[str, int], int]] = {}
 
     for r in results:
         ep_len = r["ep_length"]
         acquired = r.get("weapon_acquired", {})
         first_wid = r.get("first_weapon_id")
+        weapon_phase_key = r.get("weapon_phase_key")
+        curriculum_phase_idx = r.get("curriculum_phase_idx")
 
         for wid, acq_step in acquired.items():
-            # alive_steps_norm: 取得後に実際に生き残ったステップ / 取得時の最大残りステップ
-            # 分母 = max_ep_steps - acq_step（取得時点からゲームタイムアップまでの最大可能ステップ）
-            # 例: acq_step=500, ep_len=3000(time_up) → (3000-500)/(3000-500) = 1.0
-            # 例: acq_step=500, ep_len=1000(死亡)    → (1000-500)/(3000-500) = 0.20
             remaining = max(_MAX_EP_STEPS - acq_step, 1)
-            alive_norm = min((ep_len - acq_step) / remaining, 1.0)  # 取得後の生存率（1.0 にクランプ）
+            alive_norm = min((ep_len - acq_step) / remaining, 1.0)
 
             entry = {
-                "active_score": r["active_score"],
-                "kills":        r["kills"],
+                "active_score":   r["active_score"],
+                "kills":          r["kills"],
                 "kills_per_step": r["kills"] / max(ep_len, 1),
-                "enemy_dist":   r["enemy_dist"],
-                "alive_norm":   alive_norm,
-                "survived":     1.0 - r["terminated"],  # time_up = survived
-                "gem_pickups":  r["gem_pickups"],
+                "enemy_dist":     r["enemy_dist"],
+                "alive_norm":     alive_norm,
+                "survived":       1.0 - r["terminated"],
+                "gem_pickups":    r["gem_pickups"],
             }
             per_weapon.setdefault(wid, []).append(entry)
             if wid == first_wid:
                 first_weapon.setdefault(wid, []).append(entry)
 
+            if weapon_phase_key is not None and curriculum_phase_idx is not None:
+                combo = (str(weapon_phase_key), int(curriculum_phase_idx))
+                wid_combos = phase_combo_count.setdefault(wid, {})
+                wid_combos[combo] = wid_combos.get(combo, 0) + 1
+
     def mean_or_minus1(lst, key):
         return float(np.mean([e[key] for e in lst])) if lst else -1.0
 
-    # 集計
+    def p10_or_minus1(lst, key):
+        return float(np.percentile([e[key] for e in lst], 10.0)) if lst else -1.0
+
+    def cv_or_minus1(lst, key):
+        if not lst:
+            return -1.0
+        vals = [e[key] for e in lst]
+        m = float(np.mean(vals))
+        s = float(np.std(vals))
+        return s / max(m, 1e-8) if m > 0.0 else -1.0
+
     payload: dict = {}
     for wid in _ALL_WEAPON_IDS:
         cat  = _WEAPON_CATEGORY.get(wid, "unknown")
         name = _WEAPON_NAME.get(wid, f"weapon_{wid}")
         prefix = f"weapon/{cat}.{name}"
 
-        eps = per_weapon.get(wid)
+        eps   = per_weapon.get(wid)
         f_eps = first_weapon.get(wid)
 
-        payload[f"{prefix}/active_score_mean"]      = mean_or_minus1(eps, "active_score")
-        payload[f"{prefix}/kills_per_step_mean"]    = mean_or_minus1(eps, "kills_per_step")
-        payload[f"{prefix}/enemy_count_mean"]       = mean_or_minus1(eps, "kills")
-        payload[f"{prefix}/enemy_dist_mean"]        = mean_or_minus1(eps, "enemy_dist")
-        payload[f"{prefix}/alive_steps_mean_norm"]  = mean_or_minus1(eps, "alive_norm")
-        payload[f"{prefix}/survival_rate"]          = mean_or_minus1(eps, "survived")
-        payload[f"{prefix}/gem_pickups_mean"]       = mean_or_minus1(eps, "gem_pickups")
-        payload[f"{prefix}/first_weapon_active_score_mean"]     = mean_or_minus1(f_eps, "active_score")
-        payload[f"{prefix}/first_weapon_alive_steps_mean_norm"] = mean_or_minus1(f_eps, "alive_norm")
+        payload[f"{prefix}/active_score_mean"]               = mean_or_minus1(eps, "active_score")
+        payload[f"{prefix}/active_score_p10"]                = p10_or_minus1(eps, "active_score")
+        payload[f"{prefix}/active_score_cv"]                 = cv_or_minus1(eps, "active_score")
+        payload[f"{prefix}/episode_count"]                   = len(eps) if eps else 0
+        payload[f"{prefix}/kills_per_step_mean"]             = mean_or_minus1(eps, "kills_per_step")
+        payload[f"{prefix}/enemy_count_mean"]                = mean_or_minus1(eps, "kills")
+        payload[f"{prefix}/enemy_dist_mean"]                 = mean_or_minus1(eps, "enemy_dist")
+        payload[f"{prefix}/alive_steps_mean_norm"]           = mean_or_minus1(eps, "alive_norm")
+        payload[f"{prefix}/survival_rate"]                   = mean_or_minus1(eps, "survived")
+        payload[f"{prefix}/gem_pickups_mean"]                = mean_or_minus1(eps, "gem_pickups")
+        payload[f"{prefix}/first_weapon_active_score_mean"]       = mean_or_minus1(f_eps, "active_score")
+        payload[f"{prefix}/first_weapon_active_score_p10"]        = p10_or_minus1(f_eps, "active_score")
+        payload[f"{prefix}/first_weapon_active_score_cv"]         = cv_or_minus1(f_eps, "active_score")
+        payload[f"{prefix}/first_weapon_episode_count"]           = len(f_eps) if f_eps else 0
+        payload[f"{prefix}/first_weapon_alive_steps_mean_norm"]   = mean_or_minus1(f_eps, "alive_norm")
 
-    # カテゴリ集計（そのカテゴリの武器を持っていたエピソードで平均）
+        for (wphase, ephase), count in phase_combo_count.get(wid, {}).items():
+            payload[f"{prefix}/wphase_{wphase}_enemy_phase_{ephase}_episode_count"] = count
+
     for cat in _ALL_CATEGORIES:
-        cat_eps = []
-        cat_f_eps = []
+        cat_eps: list[dict] = []
+        cat_f_eps: list[dict] = []
         for wid, cat_name in _WEAPON_CATEGORY.items():
             if cat_name == cat:
                 cat_eps.extend(per_weapon.get(wid, []))
                 cat_f_eps.extend(first_weapon.get(wid, []))
 
         prefix = f"weapon/{cat}"
-        payload[f"{prefix}/active_score_mean"]      = mean_or_minus1(cat_eps, "active_score")
-        payload[f"{prefix}/kills_per_step_mean"]    = mean_or_minus1(cat_eps, "kills_per_step")
-        payload[f"{prefix}/enemy_count_mean"]       = mean_or_minus1(cat_eps, "kills")
-        payload[f"{prefix}/enemy_dist_mean"]        = mean_or_minus1(cat_eps, "enemy_dist")
-        payload[f"{prefix}/alive_steps_mean_norm"]  = mean_or_minus1(cat_eps, "alive_norm")
-        payload[f"{prefix}/survival_rate"]          = mean_or_minus1(cat_eps, "survived")
-        payload[f"{prefix}/gem_pickups_mean"]       = mean_or_minus1(cat_eps, "gem_pickups")
+        payload[f"{prefix}/active_score_mean"]             = mean_or_minus1(cat_eps, "active_score")
+        payload[f"{prefix}/kills_per_step_mean"]           = mean_or_minus1(cat_eps, "kills_per_step")
+        payload[f"{prefix}/enemy_count_mean"]              = mean_or_minus1(cat_eps, "kills")
+        payload[f"{prefix}/enemy_dist_mean"]               = mean_or_minus1(cat_eps, "enemy_dist")
+        payload[f"{prefix}/alive_steps_mean_norm"]         = mean_or_minus1(cat_eps, "alive_norm")
+        payload[f"{prefix}/survival_rate"]                 = mean_or_minus1(cat_eps, "survived")
+        payload[f"{prefix}/gem_pickups_mean"]              = mean_or_minus1(cat_eps, "gem_pickups")
         payload[f"{prefix}/first_weapon_active_score_mean"]     = mean_or_minus1(cat_f_eps, "active_score")
         payload[f"{prefix}/first_weapon_alive_steps_mean_norm"] = mean_or_minus1(cat_f_eps, "alive_norm")
 
@@ -319,6 +350,9 @@ class SurvivorsEvalCallback(BaseEvalCallback):
         alive_reward:         alive_reward 値（active_score 計算に使用）
         params_provider:      eval 直前に呼び出して phase params を取得する callable。
                               None の場合は _sync_env_params() を使って train env から同期する。
+        context_provider:     各エピソード開始時に呼び出す callable。{"curriculum_phase_idx": int,
+                              "weapon_phase_key": str} を返し、episode_result にマージされる。
+                              wphase_*/enemy_phase_* カウントに使用する。
         after_eval_callback:  eval 完了後に (episode_results, metrics) で呼び出す callable。
         verbose:              1 で評価完了時にコンソールへ要約を表示
     """
@@ -332,6 +366,7 @@ class SurvivorsEvalCallback(BaseEvalCallback):
         alive_reward: float = 0.001,
         wandb_logger=None,
         params_provider: Callable[[], dict] | None = None,
+        context_provider: Callable[[], dict] | None = None,
         after_eval_callback: Callable[[list[dict], dict], None] | None = None,
         stale_check_fn: Callable[[], object] | None = None,
         verbose: int = 1,
@@ -346,6 +381,7 @@ class SurvivorsEvalCallback(BaseEvalCallback):
         self.frame_skip = frame_skip
         self.alive_reward = alive_reward
         self.params_provider = params_provider
+        self.context_provider = context_provider
         self.after_eval_callback = after_eval_callback
         self.stale_check_fn = stale_check_fn
 
@@ -487,6 +523,7 @@ class SurvivorsEvalCallback(BaseEvalCallback):
         alive_reward = self.alive_reward
         n_eval_episodes = self.n_eval_episodes
         eval_env = self.eval_env
+        context_provider = self.context_provider
 
         def _worker():
             try:
@@ -497,6 +534,7 @@ class SurvivorsEvalCallback(BaseEvalCallback):
                     frame_skip=frame_skip,
                     alive_reward=alive_reward,
                     deterministic=True,
+                    context_provider=context_provider,
                 )
                 result_queue.put((episode_results, metrics, stale_snapshot, None))
             except Exception as exc:
@@ -553,6 +591,7 @@ class SurvivorsEvalCallback(BaseEvalCallback):
             frame_skip=self.frame_skip,
             alive_reward=self.alive_reward,
             deterministic=True,
+            context_provider=self.context_provider,
         )
 
         if use_training_env:

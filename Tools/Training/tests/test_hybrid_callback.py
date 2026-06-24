@@ -450,7 +450,7 @@ class TestOnPromotionProbeEvalResults:
 
         received: list[list[dict]] = []
 
-        with patch.object(cb, "on_promotion_probe_results", side_effect=lambda r: received.append(r)) as mock_probe, \
+        with patch.object(cb, "on_promotion_probe_results", side_effect=lambda r, **kw: received.append(r)) as mock_probe, \
              patch.object(cb, "_log_promotion_probe_metrics"):
             cb.on_promotion_probe_eval_results(episode_results, metrics)
 

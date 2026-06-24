@@ -1,6 +1,9 @@
 """Survivors専用の訓練メトリクス出力callback。"""
 
+import json
 import math
+from pathlib import Path
+from typing import Callable
 
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -10,6 +13,9 @@ try:
 except ImportError:
     _WANDB_AVAILABLE = False
 
+# 武器ID → カテゴリ名 / 武器名（eval callback と共有）
+from games.survivors.survivors_eval_callback import _WEAPON_CATEGORY, _WEAPON_NAME
+
 
 class SurvivorsMetricsCallback(BaseCallback):
     """Survivorsウィンドウ統計とエピソード単位ログを W&B へ出力する。
@@ -18,14 +24,35 @@ class SurvivorsMetricsCallback(BaseCallback):
     エピソードログは env ごとに独立してトラッキングし、done 時に出力する。
 
     Args:
-        log_freq:   ウィンドウ統計を出力するステップ間隔
-        frame_skip: train.py の --frame-skip と同じ値（kills推定に使用）
+        log_freq:           ウィンドウ統計を出力するステップ間隔
+        frame_skip:         train.py の --frame-skip と同じ値（kills推定・active_score計算に使用）
+        alive_reward:       alive_reward 値（active_score 計算に使用）
+        log_dir:            JSONL ファイルの出力先ディレクトリ。None なら JSONL を書かない。
+        context_provider:   エピソード終了時に呼び出して dict を取得する callable。
+                            JSONL に curriculum_phase_idx / weapon_phase_key / enemy_params を追加する。
+        on_episode_end_fn:  エピソード終了時に first_weapon_id (int | None) を渡して呼ばれる callable。
+                            武器露出ガードのカウントに使用する。
     """
 
-    def __init__(self, log_freq: int = 5_000, frame_skip: int = 1):
+    def __init__(
+        self,
+        log_freq: int = 5_000,
+        frame_skip: int = 1,
+        alive_reward: float = 0.001,
+        log_dir: "Path | str | None" = None,
+        context_provider: "Callable[[], dict] | None" = None,
+        on_episode_end_fn: "Callable[[int | None], None] | None" = None,
+    ):
         super().__init__(verbose=0)
         self.log_freq = log_freq
         self.frame_skip = frame_skip
+        self.alive_reward = alive_reward
+        self._log_dir = Path(log_dir) if log_dir is not None else None
+        self._context_provider = context_provider
+        self._on_episode_end_fn = on_episode_end_fn
+        self._jsonl_path: Path | None = (
+            self._log_dir / "episode_weapon_metrics.jsonl" if self._log_dir is not None else None
+        )
         self._last_log = 0
         self._ep_per_env: list[dict] = []
         self._reset_window()
@@ -49,21 +76,25 @@ class SurvivorsMetricsCallback(BaseCallback):
 
     def _new_ep_state(self) -> dict:
         return {
-            "base_reward": 0.0,
-            "shaped_reward": 0.0,
-            "damage": 0.0,
-            "hp_sum": 0.0,
-            "hp_min": None,
-            "hp_steps": 0,
+            "base_reward":    0.0,
+            "shaped_reward":  0.0,
+            "damage":         0.0,
+            "hp_sum":         0.0,
+            "hp_min":         None,
+            "hp_steps":       0,
             "gem_pickups_est": 0,
-            "kills_est": 0,
-            "prev_xp": None,
-            "steps": 0,
+            "kills_est":      0,
+            "prev_xp":        None,
+            "steps":          0,
+            "first_weapon_id": None,
+            "start_context":  None,  # episode 開始時の context snapshot
         }
 
     def _on_training_start(self) -> None:
         n = self.training_env.num_envs
         self._ep_per_env = [self._new_ep_state() for _ in range(n)]
+        if self._jsonl_path is not None:
+            self._jsonl_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _on_step(self) -> bool:
         infos = self.locals["infos"]
@@ -78,6 +109,10 @@ class SurvivorsMetricsCallback(BaseCallback):
             ep = self._ep_per_env[i]
             ep["steps"] += 1
             self._samples += 1
+
+            # episode 開始時 (steps==1) に context snapshot を取得（env_idx を渡して per-env params を得る）
+            if ep["steps"] == 1 and ep["start_context"] is None and self._context_provider is not None:
+                ep["start_context"] = self._context_provider(i)
 
             # HP
             hp = info.get("player_hp")
@@ -130,9 +165,14 @@ class SurvivorsMetricsCallback(BaseCallback):
             ep["prev_xp"] = xp_now
 
             # Kill 推定: KillReward=2.0 相当のスパイクを検出
-            alive_step = 0.001 * self.frame_skip
+            alive_step = self.alive_reward * self.frame_skip
             if base_r - alive_step >= 1.9:
                 ep["kills_est"] += max(1, int((base_r - alive_step + 0.05) / 2.0))
+
+            # first_weapon_id 追跡
+            weapon_types = info.get("weapon_types", [])
+            if weapon_types and ep["first_weapon_id"] is None:
+                ep["first_weapon_id"] = int(weapon_types[0])
 
             # エピソード終了時: per-episode ログ
             if done:
@@ -141,23 +181,43 @@ class SurvivorsMetricsCallback(BaseCallback):
                 ep_len = int(ep_info["l"]) if ep_info else ep["steps"]
                 is_truncated = bool(info.get("TimeLimit.truncated", False))
 
+                ep_base = ep["base_reward"]
+                ep_shaped = ep["shaped_reward"]
+                active_score = max(0.0, ep_base - self.alive_reward * self.frame_skip * ep_len)
+                first_wid = ep["first_weapon_id"]
+
                 if _WANDB_AVAILABLE and wandb.run:
-                    ep_base = ep["base_reward"]
-                    ep_shaped = ep["shaped_reward"]
                     wandb.log({
-                        "episode/length":          ep_len,
-                        "episode/base_reward":     ep_base,
-                        "episode/shaped_reward":   ep_shaped,
-                        "episode/shaping_ratio":   abs(ep_shaped) / max(abs(ep_base), 1e-8),
-                        "episode/hp_mean":         ep["hp_sum"] / max(ep["hp_steps"], 1),
-                        "episode/hp_min":          ep["hp_min"] if ep["hp_min"] is not None else 0.0,
-                        "episode/damage_taken":    ep["damage"],
-                        "episode/gem_pickups_est": ep["gem_pickups_est"],
-                        "episode/kills_est":       ep["kills_est"],
-                        "episode/terminated":      int(not is_truncated),
-                        "episode/truncated":       int(is_truncated),
-                        "global_step":             self.num_timesteps,
+                        "episode/length":            ep_len,
+                        "episode/base_reward":       ep_base,
+                        "episode/shaped_reward":     ep_shaped,
+                        "episode/active_score":      active_score,
+                        "episode/shaping_ratio":     abs(ep_shaped) / max(abs(ep_base), 1e-8),
+                        "episode/hp_mean":           ep["hp_sum"] / max(ep["hp_steps"], 1),
+                        "episode/hp_min":            ep["hp_min"] if ep["hp_min"] is not None else 0.0,
+                        "episode/damage_taken":      ep["damage"],
+                        "episode/gem_pickups_est":   ep["gem_pickups_est"],
+                        "episode/kills_est":         ep["kills_est"],
+                        "episode/terminated":        int(not is_truncated),
+                        "episode/truncated":         int(is_truncated),
+                        "episode/first_weapon_id":   first_wid if first_wid is not None else -1,
+                        "episode/first_weapon_category_id": (
+                            list(_WEAPON_CATEGORY.keys()).index(first_wid)
+                            if first_wid is not None and first_wid in _WEAPON_CATEGORY else -1
+                        ),
+                        "global_step":               self.num_timesteps,
                     }, step=self.num_timesteps)
+
+                # JSONL 書き出し（episode 開始時の context snapshot を使う）
+                if self._jsonl_path is not None:
+                    self._write_jsonl(
+                        ep_len, ep_base, active_score, first_wid, is_truncated,
+                        ep_context=ep.get("start_context"),
+                    )
+
+                # 武器露出ガード通知
+                if self._on_episode_end_fn is not None:
+                    self._on_episode_end_fn(first_wid)
 
                 self._ep_per_env[i] = self._new_ep_state()
 
@@ -194,6 +254,33 @@ class SurvivorsMetricsCallback(BaseCallback):
             wandb.log(payload, step=self.num_timesteps)
         self._reset_window()
         return True
+
+    def _write_jsonl(
+        self,
+        ep_len: int,
+        ep_base: float,
+        active_score: float,
+        first_wid: "int | None",
+        is_truncated: bool,
+        ep_context: "dict | None" = None,
+    ) -> None:
+        ctx = ep_context or {}
+        first_name = _WEAPON_NAME.get(first_wid, None) if first_wid is not None else None
+        first_cat = _WEAPON_CATEGORY.get(first_wid, None) if first_wid is not None else None
+        record: dict = {
+            "step":                 self.num_timesteps,
+            "ep_length":            ep_len,
+            "active_score":         round(active_score, 4),
+            "base_reward":          round(ep_base, 4),
+            "terminated":           int(not is_truncated),
+            "truncated":            int(is_truncated),
+            "first_weapon_id":      first_wid,
+            "first_weapon_name":    first_name,
+            "first_weapon_category": first_cat,
+        }
+        record.update(ctx)
+        with self._jsonl_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 class ActionDistributionCallback(BaseCallback):

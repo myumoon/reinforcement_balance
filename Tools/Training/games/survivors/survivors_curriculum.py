@@ -229,6 +229,10 @@ class CurriculumCallback(BaseCallback):
             f"(phase={self._curriculum.current_phase} を維持)"
         )
 
+    def get_current_enemy_params(self, env_idx: "int | None" = None) -> dict:
+        """現在の敵パラメータ dict を返す（フェーズ固定値、env_idx は無視）。"""
+        return _phase_to_params(self._curriculum.current_phase)
+
     def _save_status(self, *a):
         self._curriculum.save_status()
 
@@ -247,13 +251,14 @@ class CurriculumCallback(BaseCallback):
                 terminated=not is_truncated,
             )
         if episode_results:
-            event = self._curriculum.check_phase_transition()
+            event = self._curriculum.check_phase_transition(num_timesteps=self.num_timesteps)
             if event in ("advance", "rollback"):
                 self._param_applier.apply(_phase_to_params(self._curriculum.current_phase))
                 if self._wandb_logger:
                     metrics = self._curriculum.get_wandb_metrics()
                     metrics["curriculum/phase_name"] = self._curriculum._PHASES[self._curriculum._phase_idx].name
                     metrics["curriculum/event"] = event
+                    metrics["curriculum/event_step"] = self.num_timesteps
                     self._wandb_logger.log(metrics, step=self.num_timesteps)
         self._curriculum._steps_in_phase += 1
         return True

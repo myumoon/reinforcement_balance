@@ -382,6 +382,19 @@ class CurriculumStateModule(BaseStateModule):
         self._promotion_base_rewards: list[float] = []
         self._promotion_events: list[dict] = []
 
+        # 武器露出ガード状態
+        self._weapon_exposure_guard_active: bool = False
+        self._weapon_exposure_guard_new_weapon_ids: list[int] = []
+        self._weapon_exposure_guard_start_step: int = 0
+        self._weapon_exposure_guard_normal_rollbacks: int = 0
+        # 新規武器ごとの first_weapon episode カウント（wid → count）
+        self._weapon_exposure_guard_episode_counts: dict[int, int] = {}
+        # パラメータ（configure_weapon_exposure_guard で上書き可能）
+        self._weapon_exposure_guard_steps: int = 200_000
+        self._weapon_exposure_guard_min_new_weapon_episodes: int = 20
+        self._weapon_exposure_guard_max_normal_rollbacks: int = 1
+        self._weapon_exposure_guard_emergency_ep_len_ratio: float = 0.25
+
     @property
     def current_phase(self) -> int:
         return self._phase_idx
@@ -395,6 +408,62 @@ class CurriculumStateModule(BaseStateModule):
         self._completion_min_episodes = max(1, int(min_episodes))
         self._completion_min_score_ratio = max(0.0, float(min_score_ratio))
         self._completion_min_episode_len_ratio = max(0.0, float(min_episode_len_ratio))
+
+    def configure_weapon_exposure_guard(
+        self,
+        guard_steps: int = 200_000,
+        min_new_weapon_episodes: int = 20,
+        max_normal_rollbacks: int = 1,
+        emergency_ep_len_ratio: float = 0.25,
+    ) -> None:
+        self._weapon_exposure_guard_steps = max(0, int(guard_steps))
+        self._weapon_exposure_guard_min_new_weapon_episodes = max(0, int(min_new_weapon_episodes))
+        self._weapon_exposure_guard_max_normal_rollbacks = max(0, int(max_normal_rollbacks))
+        self._weapon_exposure_guard_emergency_ep_len_ratio = max(0.0, float(emergency_ep_len_ratio))
+
+    def start_weapon_exposure_guard(
+        self,
+        new_weapon_ids: list[int],
+        num_timesteps: int,
+    ) -> None:
+        self._weapon_exposure_guard_active = True
+        self._weapon_exposure_guard_new_weapon_ids = list(new_weapon_ids)
+        self._weapon_exposure_guard_start_step = num_timesteps
+        self._weapon_exposure_guard_normal_rollbacks = 0
+        self._weapon_exposure_guard_episode_counts = {wid: 0 for wid in new_weapon_ids}
+        print(
+            f"[Curriculum] 武器露出ガード開始: new_weapon_ids={new_weapon_ids}, "
+            f"step={num_timesteps:,}, "
+            f"guard_steps={self._weapon_exposure_guard_steps:,}, "
+            f"min_new_weapon_episodes={self._weapon_exposure_guard_min_new_weapon_episodes}"
+        )
+
+    def on_weapon_exposure_episode_end(self, first_weapon_id: "int | None") -> None:
+        if (not self._weapon_exposure_guard_active
+                or first_weapon_id is None
+                or first_weapon_id not in self._weapon_exposure_guard_new_weapon_ids):
+            return
+        self._weapon_exposure_guard_episode_counts[first_weapon_id] = (
+            self._weapon_exposure_guard_episode_counts.get(first_weapon_id, 0) + 1
+        )
+
+    def _check_weapon_exposure_guard_end(self, num_timesteps: int) -> None:
+        if not self._weapon_exposure_guard_active:
+            return
+        steps_elapsed = num_timesteps - self._weapon_exposure_guard_start_step
+        min_count = self._weapon_exposure_guard_min_new_weapon_episodes
+        # 全新規武器が min_new_weapon_episodes を満たしているか
+        all_exposed = all(
+            self._weapon_exposure_guard_episode_counts.get(wid, 0) >= min_count
+            for wid in self._weapon_exposure_guard_new_weapon_ids
+        )
+        if steps_elapsed >= self._weapon_exposure_guard_steps and all_exposed:
+            self._weapon_exposure_guard_active = False
+            print(
+                f"[Curriculum] 武器露出ガード終了: "
+                f"steps_elapsed={steps_elapsed:,}, "
+                f"episode_counts={self._weapon_exposure_guard_episode_counts}"
+            )
 
     def on_episode_end(self, active_score: float, ep_len: int,
                        base_reward: float = 0.0, alive_reward: float = 0.0,
@@ -410,7 +479,13 @@ class CurriculumStateModule(BaseStateModule):
             self._truncated_count += 1
         self._episodes_in_phase += 1
 
-    def check_phase_transition(self, *, allow_promotion: bool = True, promotion_source: str = "train"):
+    def check_phase_transition(
+        self,
+        *,
+        allow_promotion: bool = True,
+        promotion_source: str = "train",
+        num_timesteps: int = 0,
+    ):
         from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
         phase = self._PHASES[self._phase_idx]
         effective_threshold = (phase.threshold or float("inf")) * self.threshold_mult
@@ -423,19 +498,57 @@ class CurriculumStateModule(BaseStateModule):
         self.save_status()
         if len(self._scores) < self.window:
             return None
+
+        # ガード終了条件チェック
+        if num_timesteps > 0:
+            self._check_weapon_exposure_guard_end(num_timesteps)
+
         rollback, reason = self._should_rollback(phase, mean, mean_len, effective_threshold, len(recent_scores))
         if rollback:
             self._rollback_bad_windows += 1
             if self._rollback_bad_windows >= self.rollback_patience:
-                self._rollback_phase(mean, effective_threshold, mean_len, reason)
+                # 武器露出ガード: rollback をブロックするか判定
+                if self._weapon_exposure_guard_active:
+                    # 緊急rollback 条件: episode_length が極端に崩壊
+                    emergency_threshold = (
+                        phase.min_episode_steps * self._weapon_exposure_guard_emergency_ep_len_ratio
+                    )
+                    is_emergency = (
+                        phase.min_episode_steps > 0
+                        and mean_len < emergency_threshold
+                    )
+                    # 通常rollback 1段目以内は許可
+                    allow_this_rollback = (
+                        is_emergency
+                        or self._weapon_exposure_guard_normal_rollbacks
+                        < self._weapon_exposure_guard_max_normal_rollbacks
+                    )
+                    if not allow_this_rollback:
+                        # ガードによりブロック: bad_windows をリセットして次回もガード
+                        self._rollback_bad_windows = 0
+                        print(
+                            f"[Curriculum] 武器露出ガード: rollback ブロック "
+                            f"(normal_rollbacks={self._weapon_exposure_guard_normal_rollbacks}, "
+                            f"mean_len={mean_len:.1f}, emergency_threshold={emergency_threshold:.1f}, "
+                            f"reason={reason})"
+                        )
+                        return None
+                    if not is_emergency:
+                        self._weapon_exposure_guard_normal_rollbacks += 1
+                self._rollback_phase(mean, effective_threshold, mean_len, reason, num_timesteps=num_timesteps)
                 return "rollback"
         else:
             self._rollback_bad_windows = 0
+
+        # ガード中は昇格禁止
+        if self._weapon_exposure_guard_active:
+            allow_promotion = False
+
         if not allow_promotion:
             return None
         can_promote, promotion_reason = self._promotion_judgment(phase, mean, mean_len, score_min, score_std, effective_threshold, len(recent_scores), recent_scores)
         if can_promote:
-            self._advance_phase(mean, effective_threshold, promotion_reason)
+            self._advance_phase(mean, effective_threshold, promotion_reason, num_timesteps=num_timesteps)
             return "advance"
         return None
 
@@ -447,11 +560,25 @@ class CurriculumStateModule(BaseStateModule):
         self._promotion_episode_lengths.append(ep_len)
         self._promotion_base_rewards.append(base_reward)
 
-    def check_promotion_transition(self, *, promotion_source: str = "probe") -> str | None:
+    def check_promotion_transition(
+        self,
+        *,
+        promotion_source: str = "probe",
+        num_timesteps: int = 0,
+    ) -> str | None:
         """probe scores のみで昇格判定を行う（rollback は発生しない）。
 
         probe window が window 数に満たない場合、または昇格条件未達の場合は None を返す。
+        武器露出ガード中は常に None を返す（probe 経由の昇格も禁止）。
         """
+        # ガード終了条件チェック（昇格判定前に評価する）
+        if num_timesteps > 0:
+            self._check_weapon_exposure_guard_end(num_timesteps)
+
+        # ガード中は probe 経由の昇格も禁止
+        if self._weapon_exposure_guard_active:
+            return None
+
         from base.curriculum import mean as _mean, stdev as _stdev, percentile as _percentile
         phase = self._PHASES[self._phase_idx]
         if phase.threshold is None:
@@ -470,7 +597,7 @@ class CurriculumStateModule(BaseStateModule):
             effective_threshold, len(recent_scores), recent_scores
         )
         if can_promote:
-            self._advance_phase(mean, effective_threshold, f"probe:{promotion_reason}")
+            self._advance_phase(mean, effective_threshold, f"probe:{promotion_reason}", num_timesteps=num_timesteps)
             return "advance"
         return None
 
@@ -544,7 +671,7 @@ class CurriculumStateModule(BaseStateModule):
             return False, f"score_cv={score_cv:.3f} > promotion_max_score_cv={phase.promotion_max_score_cv:.3f}"
         return True, f"{low_stat_label}={low_score:.3f} >= {min_score_floor:.3f}, score_cv={score_cv:.3f} <= {phase.promotion_max_score_cv:.3f}"
 
-    def _advance_phase(self, mean, threshold, reason):
+    def _advance_phase(self, mean, threshold, reason, num_timesteps: int = 0):
         prev_name = self._PHASES[self._phase_idx].name
         prev_idx = self._phase_idx
         self._phase_idx = min(self._phase_idx + 1, len(self._PHASES) - 1)
@@ -554,11 +681,23 @@ class CurriculumStateModule(BaseStateModule):
         self._episodes_in_phase = 0
         self.clear_promotion_probe_window()
         next_phase = self._PHASES[self._phase_idx]
-        self._phase_events.append({"event": "advance", "from_phase_idx": prev_idx, "from_phase_name": prev_name, "to_phase_idx": self._phase_idx, "to_phase_name": next_phase.name, "active_score_mean": round(mean, 4), "threshold": round(threshold, 4), "reason": reason})
+        event_dict = {
+            "event": "advance",
+            "from_phase_idx": prev_idx,
+            "from_phase_name": prev_name,
+            "to_phase_idx": self._phase_idx,
+            "to_phase_name": next_phase.name,
+            "active_score_mean": round(mean, 4),
+            "threshold": round(threshold, 4),
+            "reason": reason,
+        }
+        if num_timesteps > 0:
+            event_dict["step"] = num_timesteps
+        self._phase_events.append(event_dict)
         msg = "[Curriculum] Phase " + str(self._phase_idx) + " 昇格: " + prev_name + " -> " + next_phase.name + " (score=" + str(round(mean, 3)) + " >= " + str(round(threshold, 1)) + ", " + reason + ")"
         print(msg)
 
-    def _rollback_phase(self, mean, threshold, mean_len, reason):
+    def _rollback_phase(self, mean, threshold, mean_len, reason, num_timesteps: int = 0):
         prev_name = self._PHASES[self._phase_idx].name
         prev_idx = self._phase_idx
         self._phase_idx = max(self._phase_idx - 1, 0)
@@ -568,7 +707,20 @@ class CurriculumStateModule(BaseStateModule):
         self._episodes_in_phase = 0
         self.clear_promotion_probe_window()
         next_phase = self._PHASES[self._phase_idx]
-        self._phase_events.append({"event": "rollback", "from_phase_idx": prev_idx, "from_phase_name": prev_name, "to_phase_idx": self._phase_idx, "to_phase_name": next_phase.name, "active_score_mean": round(mean, 4), "episode_length_mean": round(mean_len, 1), "threshold": round(threshold, 4), "reason": reason})
+        event_dict = {
+            "event": "rollback",
+            "from_phase_idx": prev_idx,
+            "from_phase_name": prev_name,
+            "to_phase_idx": self._phase_idx,
+            "to_phase_name": next_phase.name,
+            "active_score_mean": round(mean, 4),
+            "episode_length_mean": round(mean_len, 1),
+            "threshold": round(threshold, 4),
+            "reason": reason,
+        }
+        if num_timesteps > 0:
+            event_dict["step"] = num_timesteps
+        self._phase_events.append(event_dict)
         msg = "[Curriculum] Phase " + str(self._phase_idx) + " 降格: " + prev_name + " -> " + next_phase.name + " (" + reason + ", score=" + str(round(mean, 3)) + ", ep_len=" + str(round(mean_len, 1)) + ")"
         print(msg)
 
@@ -658,6 +810,11 @@ class CurriculumStateModule(BaseStateModule):
                 "enemy_damage_scale": phase.enemy_damage_scale,
                 "time_scaling": phase.time_scaling,
             }),
+            "curriculum/weapon_exposure_guard_active": int(self._weapon_exposure_guard_active),
+            "curriculum/weapon_exposure_guard_normal_rollbacks": self._weapon_exposure_guard_normal_rollbacks,
+            "curriculum/weapon_exposure_guard_new_weapon_episodes": min(
+                self._weapon_exposure_guard_episode_counts.values(), default=0
+            ) if self._weapon_exposure_guard_episode_counts else 0,
         }
 
     def get_diagnostics(self, num_timesteps: int = 0) -> dict:
@@ -895,6 +1052,13 @@ class CurriculumStateModule(BaseStateModule):
             "promotion_episode_lengths": self._promotion_episode_lengths,
             "promotion_base_rewards": self._promotion_base_rewards,
             "promotion_events": self._promotion_events,
+            "weapon_exposure_guard": {
+                "active": self._weapon_exposure_guard_active,
+                "new_weapon_ids": self._weapon_exposure_guard_new_weapon_ids,
+                "start_step": self._weapon_exposure_guard_start_step,
+                "normal_rollbacks": self._weapon_exposure_guard_normal_rollbacks,
+                "episode_counts": {str(k): v for k, v in self._weapon_exposure_guard_episode_counts.items()},
+            },
         }
 
     def import_state(self, state: dict) -> None:
@@ -921,6 +1085,20 @@ class CurriculumStateModule(BaseStateModule):
         self._promotion_episode_lengths = [int(v) for v in state.get("promotion_episode_lengths", [])]
         self._promotion_base_rewards = [float(v) for v in state.get("promotion_base_rewards", [])]
         self._promotion_events = list(state.get("promotion_events", []))
+        guard = state.get("weapon_exposure_guard", {})
+        self._weapon_exposure_guard_active = bool(guard.get("active", False))
+        self._weapon_exposure_guard_new_weapon_ids = [int(v) for v in guard.get("new_weapon_ids", [])]
+        self._weapon_exposure_guard_start_step = int(guard.get("start_step", 0))
+        self._weapon_exposure_guard_normal_rollbacks = int(guard.get("normal_rollbacks", 0))
+        raw_counts = guard.get("episode_counts")
+        if isinstance(raw_counts, dict):
+            self._weapon_exposure_guard_episode_counts = {int(k): int(v) for k, v in raw_counts.items()}
+        else:
+            # 旧フォーマット互換: 全新規武器に同一カウントを割り当てる
+            n = int(guard.get("new_weapon_episodes", 0))
+            self._weapon_exposure_guard_episode_counts = {
+                wid: n for wid in self._weapon_exposure_guard_new_weapon_ids
+            }
 
     def save_status(self, path=None) -> None:
         import json
@@ -983,6 +1161,7 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         stagnation_steps: int = 500_000,
         rollback_fn: "Callable[[str], None] | None" = None,
         on_weapon_phase_advance_fn: "Callable[[], None] | None" = None,
+        on_weapon_phase_guard_start_fn: "Callable[[list[int], int], None] | None" = None,
         min_wait_steps: int = 100_000,
     ) -> None:
         """
@@ -993,6 +1172,9 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
             on_weapon_phase_advance_fn: 武器フェーズ昇格時に呼ぶ関数。
                 スコアウィンドウのリセットを担う（カリキュラムフェーズは変更しない）。
                 None の場合はスコアウィンドウリセットをスキップ。
+            on_weapon_phase_guard_start_fn: 武器フェーズ昇格時に新規武器ID リストを渡して呼ぶ関数。
+                CurriculumStateModule.start_weapon_exposure_guard() に接続する。
+                None の場合はガード開始をスキップ。
             min_wait_steps: ゲート条件成立後に武器フェーズを昇格するまでの
                 最小待機ステップ数（default: 100_000）。
         """
@@ -1001,6 +1183,7 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         # rollback_fn は v09 では呼ばない（後方互換のため引数は受け付ける）
         self._rollback_fn: Callable[[str], None] | None = rollback_fn
         self._on_weapon_phase_advance_fn: Callable[[], None] | None = on_weapon_phase_advance_fn
+        self._on_weapon_phase_guard_start_fn: Callable[[list[int], int], None] | None = on_weapon_phase_guard_start_fn
         self._weapon_phase_min_wait_steps: int = max(0, int(min_wait_steps))
 
         self._weapon_phase_seq_idx: int = 0
@@ -1010,6 +1193,7 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         self._phase_start_step: int = 0        # 現在の武器フェーズ開始時の num_timesteps
         self._state_restored: bool = False     # import_state() で復元済みか否か
         self._gate_first_met_step: int | None = None  # ゲート条件が最初に成立したステップ
+        self._weapon_phase_events: list[dict] = []    # 武器フェーズ昇格イベント履歴
 
     # ------------------------------------------------------------------ #
     # Properties                                                           #
@@ -1097,14 +1281,30 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         return None
 
     def _advance(self, num_timesteps: int, reason: str = "") -> str:
+        WEAPON_PHASES, _ = _get_weapon_phases()
         old_key = self.current_phase_key
+        old_weapons = set(WEAPON_PHASES.get(old_key, {}).get("allowed_weapon_types", []))
+
         self._weapon_phase_seq_idx += 1
         new_key = self.current_phase_key
         self._phase_start_step = num_timesteps
 
+        new_weapons = set(WEAPON_PHASES.get(new_key, {}).get("allowed_weapon_types", []))
+        new_weapon_ids = sorted(new_weapons - old_weapons)
+
         print(
-            f"[WeaponPhaseAuto] 武器フェーズ昇格: {old_key} -> {new_key} ({reason})"
+            f"[WeaponPhaseAuto] 武器フェーズ昇格: {old_key} -> {new_key} ({reason}), "
+            f"new_weapon_ids={new_weapon_ids}"
         )
+
+        # イベント記録
+        self._weapon_phase_events.append({
+            "step": num_timesteps,
+            "from_phase_key": old_key,
+            "to_phase_key": new_key,
+            "new_weapon_ids": new_weapon_ids,
+            "reason": reason,
+        })
 
         # v09: forced_rollback 廃止。スコアウィンドウのみリセット（カリキュラムフェーズ維持）
         if self._on_weapon_phase_advance_fn is not None:
@@ -1114,6 +1314,10 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
                 f"[WeaponPhaseAuto] WARN: on_weapon_phase_advance_fn が未設定のため"
                 f"スコアウィンドウリセットをスキップします (phase={new_key})"
             )
+
+        # 武器露出ガード開始通知
+        if self._on_weapon_phase_guard_start_fn is not None and new_weapon_ids:
+            self._on_weapon_phase_guard_start_fn(new_weapon_ids, num_timesteps)
 
         # 後方互換用フィールドの更新
         self._last_curriculum_phase = self._curriculum.current_phase
@@ -1142,12 +1346,20 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
             gate_remaining = 0
         else:
             gate_remaining = max(0, gate - self._curriculum.current_phase)
+        last_event_step = self._weapon_phase_events[-1]["step"] if self._weapon_phase_events else None
+        last_event_new_weapon_id = (
+            self._weapon_phase_events[-1]["new_weapon_ids"][0]
+            if self._weapon_phase_events and self._weapon_phase_events[-1]["new_weapon_ids"]
+            else None
+        )
         return {
             "weapon_auto/phase_seq_idx": phase_idx,
             "weapon_auto/phase_key": phase_key,
             "weapon_curriculum/phase_idx": phase_idx,
             "weapon_curriculum/use_weapon_num": use_weapon_num,
             "weapon_curriculum/gate_remaining": gate_remaining,
+            "weapon_curriculum/event_step": last_event_step,
+            "weapon_curriculum/new_weapon_id": last_event_new_weapon_id,
             # 後方互換: stagnation_countdown は -1 固定（ゲートベースのため使用しない）
             "weapon_curriculum/phase_stagnation_countdown": -1,
         }
@@ -1159,6 +1371,7 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
             "max_curriculum_phase": self._max_curriculum_phase,
             "stagnation_start_step": self._stagnation_start_step,
             "gate_first_met_step": self._gate_first_met_step,
+            "weapon_phase_events": self._weapon_phase_events,
         }
 
     def import_state(self, state: dict) -> None:
@@ -1169,6 +1382,7 @@ class WeaponPhaseAutoStateModule(BaseStateModule):
         )
         self._stagnation_start_step = int(state.get("stagnation_start_step", 0))
         self._gate_first_met_step = state.get("gate_first_met_step")
+        self._weapon_phase_events = list(state.get("weapon_phase_events", []))
         self._state_restored = True  # 復元済みフラグを立てる
 
     def save_status(self, path=None) -> None:

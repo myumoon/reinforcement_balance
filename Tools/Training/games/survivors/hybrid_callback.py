@@ -263,7 +263,11 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         # フェーズ遷移判定（エピソード終了があったステップのみ）
         # allow_promotion=False: train episode での昇格は発生させない（probe path に委譲）
         if episode_results:
-            event = self._curriculum.check_phase_transition(allow_promotion=False, promotion_source="train")
+            event = self._curriculum.check_phase_transition(
+                allow_promotion=False,
+                promotion_source="train",
+                num_timesteps=self.num_timesteps,
+            )
             if event in ("rollback",):
                 self._on_phase_changed(event)
 
@@ -418,6 +422,20 @@ class HybridCurriculumSpalfCallback(BaseCallback):
 
     # ---- Probe 昇格 API ----
 
+    def get_current_enemy_params(self, env_idx: "int | None" = None) -> dict:
+        """env_idx の SPALF パラメータ dict を返す。
+
+        env_idx が指定された場合は _ep_start_param_vec_per_env[env_idx] から復元する。
+        _current_params はエピソード終了処理の最後に書き換わるため、
+        同一 step で複数 env が終了すると最後の env の値になってしまう。
+        episode 開始時（steps==1）に env_idx 付きで呼ぶことで正しい per-env 値を取得できる。
+        """
+        if (env_idx is not None
+                and self._ep_start_param_vec_per_env
+                and 0 <= env_idx < len(self._ep_start_param_vec_per_env)):
+            return self._spalf.vec_to_params(self._ep_start_param_vec_per_env[env_idx])
+        return dict(self._spalf._current_params)
+
     def get_current_phase_name(self) -> str:
         """現在のカリキュラムフェーズ名を返す（RSI 用）。"""
         return _CURRICULUM_PHASES[self._curriculum.current_phase].name
@@ -435,11 +453,12 @@ class HybridCurriculumSpalfCallback(BaseCallback):
             return _phase_params_from_phase(current)
         return _phase_params_from_phase(next_phase)
 
-    def on_promotion_probe_results(self, episode_results: list[dict]) -> str | None:
+    def on_promotion_probe_results(self, episode_results: list[dict], num_timesteps: int = 0) -> str | None:
         """probe episode 結果を受け取り昇格判定を行う。
 
         Args:
             episode_results: {"active_score": float, "ep_len": int, "base_reward": float} のリスト
+            num_timesteps:   現在のトータルステップ数。ガード終了判定と phase_events の step 記録に使用。
 
         Returns:
             "advance" | None
@@ -450,7 +469,10 @@ class HybridCurriculumSpalfCallback(BaseCallback):
                 ep_len=result["ep_len"],
                 base_reward=result.get("base_reward", 0.0),
             )
-        event = self._curriculum.check_promotion_transition(promotion_source="probe")
+        event = self._curriculum.check_promotion_transition(
+            promotion_source="probe",
+            num_timesteps=num_timesteps,
+        )
         if event == "advance":
             self._on_phase_changed("advance")
         return event
@@ -467,6 +489,7 @@ class HybridCurriculumSpalfCallback(BaseCallback):
             step:            eval 完了時の timestep（async eval 時は join 後の timestep）。
                              None の場合は self.num_timesteps を使用する。
         """
+        log_step = step if step is not None else self.num_timesteps
         # ep_length → ep_len 変換
         normalized = [
             {**r, "ep_len": r["ep_length"]} if "ep_length" in r else r
@@ -476,8 +499,8 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         # on_promotion_probe_results() で advance が起きると current_phase が変わるため、
         # ログは昇格を発生させた phase の値で記録しなければならない。
         pre_diag = self._curriculum.get_promotion_probe_diagnostics()
-        event = self.on_promotion_probe_results(normalized)
-        self._log_promotion_probe_metrics(metrics, pre_diag=pre_diag, event=event, step=step)
+        event = self.on_promotion_probe_results(normalized, num_timesteps=log_step)
+        self._log_promotion_probe_metrics(metrics, pre_diag=pre_diag, event=event, step=log_step)
 
     def _log_promotion_probe_metrics(self, metrics: dict, *, pre_diag: dict, event: str | None, step: int | None = None) -> None:
         """probe eval の昇格判定関連メトリクスを curriculum/* として W&B に記録する。
