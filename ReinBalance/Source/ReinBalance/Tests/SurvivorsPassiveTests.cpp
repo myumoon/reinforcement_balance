@@ -189,7 +189,9 @@ bool FSurvivorsKingBibleOrbitSpeedBracerPassive::RunTest(const FString& Paramete
 		FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
 
 		EquipTestWeapon(S.Game, EWeaponType::KingBible, 1);
-		if (!TestTrue(FString::Printf(TEXT("[KingBible BracerLv%d] weapon instance"), BracerLv), IsValid(KB)))
+		const FWeaponSlot& EquippedSlot = S.Game->GetLogic()->GetWeaponSlot(0);
+		if (!TestTrue(FString::Printf(TEXT("[KingBible BracerLv%d] weapon slot"), BracerLv),
+			EquippedSlot.Type == EWeaponType::KingBible))
 		{
 			S.Destroy();
 			return false;
