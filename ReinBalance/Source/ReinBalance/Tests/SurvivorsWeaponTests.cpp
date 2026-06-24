@@ -1316,7 +1316,7 @@ bool FSurvivorsAxeRandomUpwardDirection::RunTest(const FString& Parameters)
 // ============================================================
 
 // AWallActor が存在しない環境でも Runetracer がスクリーン端で跳ね返ること
-// Runetracer を装備して実装経路（USurvivorsRunetracerWeapon::Tick → UpdateProjectilesBySlot）を通す
+// Runetracer を装備して実装経路（USurvivorsWeaponRunetracer::Tick → UpdateProjectilesBySlot）を通す
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsRunetracerScreenEdgeBounce,
 	"ReinBalance.Survivors.Wiki.Runetracer_ScreenEdgeBounce",
 	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)

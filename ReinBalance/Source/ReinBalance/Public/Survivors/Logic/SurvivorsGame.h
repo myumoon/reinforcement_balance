@@ -332,22 +332,22 @@ private:
 	friend class USurvivorsSpawnComponent;
 	friend class USurvivorsWeaponComponent;
 	friend class USurvivorsWeaponBase;
-	friend class USurvivorsGarlicWeapon;
-	friend class USurvivorsWhipWeapon;
-	friend class USurvivorsMagicWandWeapon;
-	friend class USurvivorsKnifeWeapon;
-	friend class USurvivorsAxeWeapon;
-	friend class USurvivorsCrossWeapon;
-	friend class USurvivorsKingBibleWeapon;
-	friend class USurvivorsFireWandWeapon;
-	friend class USurvivorsSantaWaterWeapon;
-	friend class USurvivorsRunetracerWeapon;
-	friend class USurvivorsLightningRingWeapon;
-	friend class USurvivorsPentagramWeapon;
-	friend class USurvivorsPeachoneWeapon;
-	friend class USurvivorsEbonyWingsWeapon;
-	friend class USurvivorsVandalierWeapon;
-	friend class USurvivorsLaurelWeapon;
+	friend class USurvivorsWeaponGarlic;
+	friend class USurvivorsWeaponWhip;
+	friend class USurvivorsWeaponMagicWand;
+	friend class USurvivorsWeaponKnife;
+	friend class USurvivorsWeaponAxe;
+	friend class USurvivorsWeaponCross;
+	friend class USurvivorsWeaponKingBible;
+	friend class USurvivorsWeaponFireWand;
+	friend class USurvivorsWeaponSantaWater;
+	friend class USurvivorsWeaponRunetracer;
+	friend class USurvivorsWeaponLightningRing;
+	friend class USurvivorsWeaponPentagram;
+	friend class USurvivorsWeaponPeachone;
+	friend class USurvivorsWeaponEbonyWings;
+	friend class USurvivorsWeaponVandalier;
+	friend class USurvivorsWeaponLaurel;
 #if WITH_AUTOMATION_TESTS
 	friend struct FSurvivorsGameTestAccess;
 #endif

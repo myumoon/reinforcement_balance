@@ -2,22 +2,22 @@
 #include "Survivors/Logic/SurvivorsWikiSpec.h"
 #include "Survivors/Logic/SurvivorsGameConstants.h"
 #include "Survivors/Logic/Weapons/SurvivorsWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsGarlicWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsWhipWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsMagicWandWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsKnifeWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsAxeWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsCrossWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsKingBibleWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsFireWandWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsSantaWaterWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsRunetracerWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsLightningRingWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsPentagramWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsPeachoneWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsEbonyWingsWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsVandalierWeaponLogic.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsLaurelWeaponLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponGarlicLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponWhipLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponMagicWandLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponKnifeLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponAxeLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponCrossLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponKingBibleLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponFireWandLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponSantaWaterLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponRunetracerLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponLightningRingLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponPentagramLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponPeachoneLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponEbonyWingsLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponVandalierLogic.h"
+#include "Survivors/Logic/Weapons/Projectile/SurvivorsWeaponLaurelLogic.h"
 #include "Misc/SecureHash.h"
 #include <algorithm>
 
@@ -1250,48 +1250,48 @@ TUniquePtr<FSurvivorsWeaponLogic> FSurvivorsGameLogic::CreateWeaponLogic(EWeapon
 	{
 	case EWeaponType::Garlic:
 	case EWeaponType::SoulEater:
-		return MakeUnique<FSurvivorsGarlicWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponGarlicLogic>();
 	case EWeaponType::Whip:
 	case EWeaponType::BloodyTear:
-		return MakeUnique<FSurvivorsWhipWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponWhipLogic>();
 	case EWeaponType::MagicWand:
 	case EWeaponType::HolyWand:
-		return MakeUnique<FSurvivorsMagicWandWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponMagicWandLogic>();
 	case EWeaponType::Knife:
 	case EWeaponType::ThousandEdge:
-		return MakeUnique<FSurvivorsKnifeWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponKnifeLogic>();
 	case EWeaponType::Axe:
 	case EWeaponType::DeathSpiral:
-		return MakeUnique<FSurvivorsAxeWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponAxeLogic>();
 	case EWeaponType::Cross:
 	case EWeaponType::HeavenSword:
-		return MakeUnique<FSurvivorsCrossWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponCrossLogic>();
 	case EWeaponType::KingBible:
 	case EWeaponType::UnholyVespers:
-		return MakeUnique<FSurvivorsKingBibleWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponKingBibleLogic>();
 	case EWeaponType::FireWand:
 	case EWeaponType::Hellfire:
-		return MakeUnique<FSurvivorsFireWandWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponFireWandLogic>();
 	case EWeaponType::SantaWater:
 	case EWeaponType::LaBorra:
-		return MakeUnique<FSurvivorsSantaWaterWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponSantaWaterLogic>();
 	case EWeaponType::Runetracer:
 	case EWeaponType::NoFuture:
-		return MakeUnique<FSurvivorsRunetracerWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponRunetracerLogic>();
 	case EWeaponType::LightningRing:
 	case EWeaponType::ThunderLoop:
-		return MakeUnique<FSurvivorsLightningRingWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponLightningRingLogic>();
 	case EWeaponType::Pentagram:
 	case EWeaponType::GorgeousMoon:
-		return MakeUnique<FSurvivorsPentagramWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponPentagramLogic>();
 	case EWeaponType::Peachone:
-		return MakeUnique<FSurvivorsPeachoneWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponPeachoneLogic>();
 	case EWeaponType::EbonyWings:
-		return MakeUnique<FSurvivorsEbonyWingsWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponEbonyWingsLogic>();
 	case EWeaponType::Vandalier:
-		return MakeUnique<FSurvivorsVandalierWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponVandalierLogic>();
 	case EWeaponType::Laurel:
-		return MakeUnique<FSurvivorsLaurelWeaponLogic>();
+		return MakeUnique<FSurvivorsWeaponLaurelLogic>();
 	default:
 		return nullptr;
 	}
