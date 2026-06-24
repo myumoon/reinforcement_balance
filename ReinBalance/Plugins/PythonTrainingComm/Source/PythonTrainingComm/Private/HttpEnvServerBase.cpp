@@ -51,6 +51,37 @@ void FHttpEnvServerBase::StopServer()
 	}
 }
 
+FString FHttpEnvServerBase::BuildResetJson(const FEnvResetResult& Result)
+{
+	FString ObsStr;
+	for (int32 i = 0; i < Result.Obs.Num(); ++i)
+	{
+		ObsStr += FString::SanitizeFloat(Result.Obs[i]);
+		if (i < Result.Obs.Num() - 1) ObsStr += TEXT(",");
+	}
+	return FString::Printf(
+		TEXT("{\"obs\":[%s],\"obs_schema_hash\":\"%s\"}"),
+		*ObsStr, *Result.ObsSchemaHash);
+}
+
+FString FHttpEnvServerBase::BuildStepJson(const FEnvStepResult& Result)
+{
+	FString ObsStr;
+	for (int32 i = 0; i < Result.Obs.Num(); ++i)
+	{
+		ObsStr += FString::SanitizeFloat(Result.Obs[i]);
+		if (i < Result.Obs.Num() - 1) ObsStr += TEXT(",");
+	}
+	const FString InfoJson = Result.InfoJson.IsEmpty() ? TEXT("{}") : Result.InfoJson;
+	return FString::Printf(
+		TEXT("{\"obs\":[%s],\"reward\":%f,\"done\":%s,\"truncated\":%s,\"info\":%s}"),
+		*ObsStr,
+		Result.Reward,
+		Result.bDone      ? TEXT("true") : TEXT("false"),
+		Result.bTruncated ? TEXT("true") : TEXT("false"),
+		*InfoJson);
+}
+
 void FHttpEnvServerBase::Tick()
 {
 	// Reset リクエスト処理
@@ -59,17 +90,7 @@ void FHttpEnvServerBase::Tick()
 		if (ResetQueue.Dequeue(Req))
 		{
 			FEnvResetResult Result = ProcessReset(Req.Seed);
-
-			FString ObsStr;
-			for (int32 i = 0; i < Result.Obs.Num(); ++i)
-			{
-				ObsStr += FString::SanitizeFloat(Result.Obs[i]);
-				if (i < Result.Obs.Num() - 1) ObsStr += TEXT(",");
-			}
-			FString Json = FString::Printf(
-				TEXT("{\"obs\":[%s],\"obs_schema_hash\":\"%s\"}"),
-				*ObsStr, *Result.ObsSchemaHash);
-			Req.Callback(MakeJsonResponse(Json));
+			Req.Callback(MakeJsonResponse(BuildResetJson(Result)));
 		}
 	}
 
@@ -79,24 +100,40 @@ void FHttpEnvServerBase::Tick()
 		if (ActionQueue.Dequeue(Req))
 		{
 			FEnvStepResult Result = ProcessStep(Req.Action, Req.Steps);
-
-			FString ObsStr;
-			for (int32 i = 0; i < Result.Obs.Num(); ++i)
-			{
-				ObsStr += FString::SanitizeFloat(Result.Obs[i]);
-				if (i < Result.Obs.Num() - 1) ObsStr += TEXT(",");
-			}
-			const FString InfoJson = Result.InfoJson.IsEmpty() ? TEXT("{}") : Result.InfoJson;
-			FString Json = FString::Printf(
-				TEXT("{\"obs\":[%s],\"reward\":%f,\"done\":%s,\"truncated\":%s,\"info\":%s}"),
-				*ObsStr,
-				Result.Reward,
-				Result.bDone     ? TEXT("true") : TEXT("false"),
-				Result.bTruncated ? TEXT("true") : TEXT("false"),
-				*InfoJson);
-			Req.Callback(MakeJsonResponse(Json));
+			Req.Callback(MakeJsonResponse(BuildStepJson(Result)));
 		}
 	}
+}
+
+bool FHttpEnvServerBase::TakeStepRequest(
+	TArray<float>& OutAction, int32& OutSteps, FHttpResultCallback& OutCallback)
+{
+	FStepRequest Req;
+	if (!ActionQueue.Dequeue(Req)) return false;
+	OutAction   = MoveTemp(Req.Action);
+	OutSteps    = Req.Steps;
+	OutCallback = MoveTemp(Req.Callback);
+	return true;
+}
+
+bool FHttpEnvServerBase::TakeResetRequest(
+	TOptional<int32>& OutSeed, FHttpResultCallback& OutCallback)
+{
+	FResetRequest Req;
+	if (!ResetQueue.Dequeue(Req)) return false;
+	OutSeed     = Req.Seed;
+	OutCallback = MoveTemp(Req.Callback);
+	return true;
+}
+
+void FHttpEnvServerBase::CompleteStep(FEnvStepResult Result, FHttpResultCallback Callback)
+{
+	Callback(MakeJsonResponse(BuildStepJson(Result)));
+}
+
+void FHttpEnvServerBase::CompleteReset(FEnvResetResult Result, FHttpResultCallback Callback)
+{
+	Callback(MakeJsonResponse(BuildResetJson(Result)));
 }
 
 bool FHttpEnvServerBase::HandleReset(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)

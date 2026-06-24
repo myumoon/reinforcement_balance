@@ -59,7 +59,6 @@ public:
 	/** 武器インスタンスへのアクセス（obs の cooldown 取得用） */
 	USurvivorsWeaponBase* GetWeaponInstance(int32 SlotIdx) const;
 
-	// todo: 弾の管理は専用のクラスを作成し、武器生成時にコンストラクタで渡すようにしたい
 	/** 武器実装がプロジェクタイル・ゾーンを追加するための API */
 	void SpawnProjectile(const FProjectileState& P) { Projectiles.Add(P); }
 	void SpawnGroundZone(const FGroundZoneState& Z) { GroundZones.Add(Z); }

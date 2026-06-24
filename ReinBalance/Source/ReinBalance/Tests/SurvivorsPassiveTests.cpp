@@ -1,6 +1,5 @@
 #include "Misc/AutomationTest.h"
 #include "SurvivorsTestHelpers.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsKingBibleWeapon.h"
 
 // ============================================================
 // 速度上昇パッシブ（Bracer Lv1-5）武器速度スケーリングテスト
@@ -15,7 +14,7 @@ static void SetupBracerPassive(ASurvivorsGame* Game, int32 BracerLevel)
 	FPassiveSlot* Passives = FSurvivorsGameTestAccess::PassiveSlots(Game);
 	Passives[0].Type  = EPassiveItemType::Bracer;
 	Passives[0].Level = BracerLevel;
-	FSurvivorsGameTestAccess::PlayerComp(Game)->RecalcPassiveEffects();
+	FSurvivorsGameTestAccess::RecalcPassiveEffects(Game);
 }
 
 // プロジェクタイル直線速度: MagicWand, Knife, Cross, FireWand, Runetracer
@@ -53,7 +52,6 @@ bool FSurvivorsWeaponProjectileSpeedBracerPassive::RunTest(const FString& Parame
 			S.AddEnemyAt(FVector2D(200.f, 0.f), 100000.f);
 
 			EquipTestWeapon(S.Game, Case.Type, 1);
-			auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
 			const float SpeedMult     = 1.0f + 0.10f * static_cast<float>(BracerLv);
 			const float ExpectedSpeed = Case.BaseSpeed * SpeedMult;
@@ -61,10 +59,10 @@ bool FSurvivorsWeaponProjectileSpeedBracerPassive::RunTest(const FString& Parame
 			if (Case.Type == EWeaponType::FireWand)
 			{
 				// FireWand は 0.02s 間隔の扇撃ち: 全 4 発出そろってから計測
-				WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-				TickTestWeaponsForSeconds(WC, 0.08f);
+				FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+				TickTestWeaponsForSeconds(S.Game, 0.08f);
 				if (!TestEqual(FString::Printf(TEXT("[%s BracerLv%d] 4 fireballs"), Case.Label, BracerLv),
-					WC->GetProjectileCount(), 4))
+					S.Game->GetProjectileCount(), 4))
 				{
 					S.Destroy();
 					continue;
@@ -72,11 +70,11 @@ bool FSurvivorsWeaponProjectileSpeedBracerPassive::RunTest(const FString& Parame
 
 				TArray<FVector2D> Starts;
 				for (int32 i = 0; i < 4; ++i)
-					Starts.Add(WC->GetProjectilePos(i));
+					Starts.Add(S.Game->GetProjectilePos(i));
 
-				const float Elapsed = TickTestWeaponsForSecondsMeasured(WC, 0.20f);
+				const float Elapsed = TickTestWeaponsForSecondsMeasured(S.Game, 0.20f);
 				if (!TestEqual(FString::Printf(TEXT("[%s BracerLv%d] 4 fireballs survive"), Case.Label, BracerLv),
-					WC->GetProjectileCount(), 4))
+					S.Game->GetProjectileCount(), 4))
 				{
 					S.Destroy();
 					continue;
@@ -84,7 +82,7 @@ bool FSurvivorsWeaponProjectileSpeedBracerPassive::RunTest(const FString& Parame
 
 				float TotalSpeed = 0.f;
 				for (int32 i = 0; i < 4; ++i)
-					TotalSpeed += FVector2D::Distance(WC->GetProjectilePos(i), Starts[i]) / Elapsed;
+					TotalSpeed += FVector2D::Distance(S.Game->GetProjectilePos(i), Starts[i]) / Elapsed;
 				const float AvgSpeed = TotalSpeed / 4.f;
 
 				TestTrue(FString::Printf(TEXT("[%s BracerLv%d] avg speed %.1fu/s ≈ %.1fu/s (±10%%)"),
@@ -99,25 +97,25 @@ bool FSurvivorsWeaponProjectileSpeedBracerPassive::RunTest(const FString& Parame
 			// BracerLv5 (480u/s) の折り返し時間 = 75/480 ≈ 0.156s → 0.10s 計測で安全。
 			const float MeasureSecs = (Case.Type == EWeaponType::Cross) ? 0.10f : 0.25f;
 
-			WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+			FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 			if (!TestTrue(FString::Printf(TEXT("[%s BracerLv%d] fires 1st projectile"), Case.Label, BracerLv),
-				WC->GetProjectileCount() > 0))
+				S.Game->GetProjectileCount() > 0))
 			{
 				S.Destroy();
 				return false;
 			}
 
-			const FVector2D StartPos = WC->GetProjectilePos(0);
-			const float Elapsed      = TickTestWeaponsForSecondsMeasured(WC, MeasureSecs);
+			const FVector2D StartPos = S.Game->GetProjectilePos(0);
+			const float Elapsed      = TickTestWeaponsForSecondsMeasured(S.Game, MeasureSecs);
 
 			if (!TestTrue(FString::Printf(TEXT("[%s BracerLv%d] projectile alive"), Case.Label, BracerLv),
-				WC->GetProjectileCount() > 0))
+				S.Game->GetProjectileCount() > 0))
 			{
 				S.Destroy();
 				return false;
 			}
 
-			const float ActualSpeed = FVector2D::Distance(WC->GetProjectilePos(0), StartPos) / Elapsed;
+			const float ActualSpeed = FVector2D::Distance(S.Game->GetProjectilePos(0), StartPos) / Elapsed;
 			TestTrue(FString::Printf(TEXT("[%s BracerLv%d] speed %.1fu/s ≈ %.1fu/s (±10%%)"),
 				Case.Label, BracerLv, ActualSpeed, ExpectedSpeed),
 				ActualSpeed >= ExpectedSpeed * 0.90f && ActualSpeed <= ExpectedSpeed * 1.10f);
@@ -149,16 +147,15 @@ bool FSurvivorsAxeApexHeightBracerPassive::RunTest(const FString& Parameters)
 		FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
 
 		EquipTestWeapon(S.Game, EWeaponType::Axe, 1);
-		auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 
 		float MaxHeight = 0.f;
 		for (int32 Step = 0; Step < SurvivorsStepsForSeconds(1.0f); ++Step)
 		{
-			if (WC->GetProjectileCount() > 0)
-				MaxHeight = FMath::Max(MaxHeight, WC->GetProjectilePos(0).Y);
-			WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+			if (S.Game->GetProjectileCount() > 0)
+				MaxHeight = FMath::Max(MaxHeight, S.Game->GetProjectilePos(0).Y);
+			FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 		}
 
 		const float SpeedMult    = 1.0f + 0.10f * static_cast<float>(BracerLv);
@@ -192,17 +189,15 @@ bool FSurvivorsKingBibleOrbitSpeedBracerPassive::RunTest(const FString& Paramete
 		FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
 
 		EquipTestWeapon(S.Game, EWeaponType::KingBible, 1);
-		auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
-		auto* KB = Cast<USurvivorsKingBibleWeapon>(WC->GetWeaponInstance(0));
 		if (!TestTrue(FString::Printf(TEXT("[KingBible BracerLv%d] weapon instance"), BracerLv), IsValid(KB)))
 		{
 			S.Destroy();
 			return false;
 		}
 
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 		if (!TestTrue(FString::Printf(TEXT("[KingBible BracerLv%d] orbs active"), BracerLv),
-			KB->GetOrbPositions().Num() >= 1))
+			S.Game->GetOrbitOrbCount() >= 1))
 		{
 			S.Destroy();
 			return false;
@@ -210,21 +205,21 @@ bool FSurvivorsKingBibleOrbitSpeedBracerPassive::RunTest(const FString& Paramete
 
 		const FVector2D PlayerPos = FSurvivorsGameTestAccess::PlayerPos(S.Game);
 		const float StartAngle    = FMath::Atan2(
-			KB->GetOrbPositions()[0].Y - PlayerPos.Y,
-			KB->GetOrbPositions()[0].X - PlayerPos.X);
+			S.Game->GetOrbitOrbPos(0).Y - PlayerPos.Y,
+			S.Game->GetOrbitOrbPos(0).X - PlayerPos.X);
 
-		const float Elapsed = TickTestWeaponsForSecondsMeasured(WC, 0.50f);
+		const float Elapsed = TickTestWeaponsForSecondsMeasured(S.Game, 0.50f);
 
 		if (!TestTrue(FString::Printf(TEXT("[KingBible BracerLv%d] orbs active after 0.5s"), BracerLv),
-			KB->GetOrbPositions().Num() >= 1))
+			S.Game->GetOrbitOrbCount() >= 1))
 		{
 			S.Destroy();
 			return false;
 		}
 
 		const float EndAngle  = FMath::Atan2(
-			KB->GetOrbPositions()[0].Y - PlayerPos.Y,
-			KB->GetOrbPositions()[0].X - PlayerPos.X);
+			S.Game->GetOrbitOrbPos(0).Y - PlayerPos.Y,
+			S.Game->GetOrbitOrbPos(0).X - PlayerPos.X);
 		const float ActualRot = FMath::Abs(FMath::FindDeltaAngleRadians(StartAngle, EndAngle)) / Elapsed;
 
 		const float SpeedMult        = 1.0f + 0.10f * static_cast<float>(BracerLv);
@@ -273,23 +268,22 @@ bool FSurvivorsPeachoneOrbitSpeedBracerPassive::RunTest(const FString& Parameter
 			FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
 
 			EquipTestWeapon(S.Game, Case.Type, 1);
-			auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-			WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+			FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 			if (!TestTrue(FString::Printf(TEXT("[%s BracerLv%d] orbit orb exists"), Case.Label, BracerLv),
-				WC->GetOrbitOrbCount() > 0))
+				S.Game->GetOrbitOrbCount() > 0))
 			{
 				S.Destroy();
 				return false;
 			}
 
 			const FVector2D PlayerPos = FSurvivorsGameTestAccess::PlayerPos(S.Game);
-			const FVector2D StartPos  = WC->GetOrbitOrbPos(0);
+			const FVector2D StartPos  = S.Game->GetOrbitOrbPos(0);
 			const float StartAngle    = FMath::Atan2(StartPos.Y - PlayerPos.Y, StartPos.X - PlayerPos.X);
 
-			const float Elapsed = TickTestWeaponsForSecondsMeasured(WC, 1.0f);
+			const float Elapsed = TickTestWeaponsForSecondsMeasured(S.Game, 1.0f);
 
-			const FVector2D EndPos  = WC->GetOrbitOrbPos(0);
+			const FVector2D EndPos  = S.Game->GetOrbitOrbPos(0);
 			const float EndAngle    = FMath::Atan2(EndPos.Y - PlayerPos.Y, EndPos.X - PlayerPos.X);
 			const float ActualRot   = FMath::Abs(FMath::FindDeltaAngleRadians(StartAngle, EndAngle)) / Elapsed;
 

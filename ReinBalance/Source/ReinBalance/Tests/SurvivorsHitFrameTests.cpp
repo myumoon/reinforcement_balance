@@ -109,11 +109,9 @@ bool FSurvivorsSpawnedEnemyNotHitSameTick::RunTest(const FString& Parameters)
 	S.AddEnemyNearPlayer(/*HP=*/1.f);
 
 	// WeaponHits はすでに BuildEnemyGrid 済みのグリッドを使うので新規敵はヒット対象外
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
-	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
 	FSurvivorsHitFrame HF;
-	WC->ComputeAllWeaponHits(CC, HF);
-	WC->ApplyWeaponHits(HF);
+	FSurvivorsGameTestAccess::ComputeAllWeaponHits(S.Game, HF);
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF);
 
 	// スポーン後に追加した敵のHPは変わっていないはず
 	TestTrue("Newly added enemy HP unchanged (not in pre-spawn grid)",
@@ -137,18 +135,16 @@ bool FSurvivorsUniqueIdMismatchSkipped::RunTest(const FString& Parameters)
 	S.AddEnemyNearPlayer(/*HP=*/100.f);
 
 	// HitFrame を生成（この時点では UniqueId 一致）
-	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
-	CC->BuildEnemyGrid();
+	FSurvivorsGameTestAccess::BuildEnemyGrid(S.Game);
 	FSurvivorsHitFrame HF;
-	WC->ComputeAllWeaponHits(CC, HF);
+	FSurvivorsGameTestAccess::ComputeAllWeaponHits(S.Game, HF);
 	TestTrue("Has hit events before corruption", HF.Events.Num() > 0);
 
 	// 配列変化を模倣: UniqueId を変える
 	FSurvivorsGameTestAccess::Enemies(S.Game)[0].UniqueId = 9999;
 	const float HPBefore = FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP;
 
-	WC->ApplyWeaponHits(HF);
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF);
 
 	TestEqual("Damage not applied when UniqueId mismatches",
 		FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, HPBefore);
@@ -263,13 +259,11 @@ bool FSurvivorsProjectileNonPiercingSingleHit::RunTest(const FString& Parameters
 	Proj.WeaponType   = EWeaponType::MagicWand;
 	Proj.WeaponSlotIdx= 1;
 	Proj.LifeTime     = FProjectileLifeTime(5.f);
-	FSurvivorsGameTestAccess::WeaponComp(S.Game)->SpawnProjectile(Proj);
+	S.Game->GetLogic()->SpawnProjectile(Proj);
 
-	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
-	CC->BuildEnemyGrid();
+	FSurvivorsGameTestAccess::BuildEnemyGrid(S.Game);
 	FSurvivorsHitFrame HF;
-	WC->ComputeAllWeaponHits(CC, HF);
+	FSurvivorsGameTestAccess::ComputeAllWeaponHits(S.Game, HF);
 
 	// 非 piercing → HitFrame に ProjectileDamage は 1件のみ
 	int32 ProjDmgCount = 0;
@@ -277,7 +271,7 @@ bool FSurvivorsProjectileNonPiercingSingleHit::RunTest(const FString& Parameters
 		if (Ev.Type == ESurvivorsHitType::ProjectileDamage) ++ProjDmgCount;
 	TestEqual("Non-piercing projectile generates exactly 1 damage event", ProjDmgCount, 1);
 
-	WC->ApplyWeaponHits(HF);
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF);
 
 	// 2体のうち1体だけダメージ
 	int32 DamagedCount = 0;
@@ -310,7 +304,7 @@ bool FSurvivorsGroundZoneHitCooldown::RunTest(const FString& Parameters)
 	Zone.HitCooldown  = 0.5f;
 	Zone.WeaponType   = EWeaponType::SantaWater;
 	Zone.WeaponSlotIdx= 2;
-	FSurvivorsGameTestAccess::WeaponComp(S.Game)->SpawnGroundZone(Zone);
+	S.Game->GetLogic()->SpawnGroundZone(Zone);
 
 	// 1回目ヒット
 	S.RunWeaponHits();
@@ -352,12 +346,12 @@ bool FSurvivorsGroundZoneWarningNoDamage::RunTest(const FString& Parameters)
 	Zone.WeaponType   = EWeaponType::SantaWater;
 	Zone.WeaponSlotIdx= 2;
 	Zone.bIsWarning   = true;
-	FSurvivorsGameTestAccess::WeaponComp(S.Game)->SpawnGroundZone(Zone);
+	S.Game->GetLogic()->SpawnGroundZone(Zone);
 
 	S.RunWeaponHits();
 	TestEqual("Warning GroundZone does not damage", FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, 200.f);
 
-	FSurvivorsGameTestAccess::WeaponComp(S.Game)->TickWeapons(1.01f);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, 1.01f);
 	S.RunWeaponHits();
 	TestTrue("GroundZone damages after warning expires",
 		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, 190.f, 0.01f));
@@ -391,7 +385,7 @@ bool FSurvivorsMixedHitGarlicKillsProjectileConsumed::RunTest(const FString& Par
 	Proj.WeaponType   = EWeaponType::MagicWand;
 	Proj.WeaponSlotIdx= 1;
 	Proj.LifeTime     = FProjectileLifeTime(5.f);
-	FSurvivorsGameTestAccess::WeaponComp(S.Game)->SpawnProjectile(Proj);
+	S.Game->GetLogic()->SpawnProjectile(Proj);
 
 	S.RunWeaponHits();
 
@@ -405,7 +399,7 @@ bool FSurvivorsMixedHitGarlicKillsProjectileConsumed::RunTest(const FString& Par
 
 	// プロジェクタイルは消費済み（ApplyWeaponHits 内で削除される）
 	TestEqual("Projectile removed after hitting dead enemy A",
-		FSurvivorsGameTestAccess::WeaponComp(S.Game)->GetProjectileCount(), 0);
+		S.Game->GetProjectileCount(), 0);
 
 	S.Destroy();
 	return true;

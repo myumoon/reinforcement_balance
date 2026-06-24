@@ -37,7 +37,32 @@ public:
 	 */
 	static TUniquePtr<FHttpServerResponse> MakeJsonResponse(const FString& Json);
 
+	/**
+	 * ActionQueue から Step リクエストを 1 件取り出す。
+	 * ASurvivorsParallelSetupActor の Tick から呼ぶ（GameThread 専用）。
+	 */
+	virtual bool TakeStepRequest(
+		TArray<float>& OutAction, int32& OutSteps, FHttpResultCallback& OutCallback) override;
+
+	/**
+	 * ResetQueue から Reset リクエストを 1 件取り出す。
+	 */
+	virtual bool TakeResetRequest(
+		TOptional<int32>& OutSeed, FHttpResultCallback& OutCallback) override;
+
+	/** Step 結果を JSON に変換して HTTP コールバックを呼ぶ */
+	virtual void CompleteStep(FEnvStepResult Result, FHttpResultCallback Callback) override;
+
+	/** Reset 結果を JSON に変換して HTTP コールバックを呼ぶ */
+	virtual void CompleteReset(FEnvResetResult Result, FHttpResultCallback Callback) override;
+
 protected:
+	/** Step 結果を JSON 文字列に変換する（Tick() と CompleteStep() で共有） */
+	static FString BuildStepJson(const FEnvStepResult& Result);
+
+	/** Reset 結果を JSON 文字列に変換する（Tick() と CompleteReset() で共有） */
+	static FString BuildResetJson(const FEnvResetResult& Result);
+
 	// HTTP ハンドラ（ワーカースレッド）
 	bool HandleReset(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleStep(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
