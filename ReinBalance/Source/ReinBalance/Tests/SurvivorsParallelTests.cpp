@@ -1,6 +1,6 @@
 #include "Misc/AutomationTest.h"
 #include "SurvivorsTestHelpers.h"
-#include "Survivors/Logic/SurvivorsGameLogic.h"
+#include "Survivors/SurvivorsGameLogic.h"
 
 /** FSurvivorsGameLogic::ExecReset が非空の obs を返す */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsParallelLogicResetReturnsObs,

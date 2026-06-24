@@ -1,6 +1,6 @@
 #include "TestHarness.h"
 
-#include "Survivors/Logic/SurvivorsValueTypes.h"
+#include "Survivors/SurvivorsValueTypes.h"
 
 TEST_CASE("Survivors cooldown is ready only when no positive time remains", "[unit][survivors][logic][value-types]")
 {

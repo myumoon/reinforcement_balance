@@ -1,6 +1,6 @@
 #include "TestHarness.h"
 
-#include "Survivors/Logic/SurvivorsWikiSpec.h"
+#include "Survivors/SurvivorsWikiSpec.h"
 
 namespace
 {

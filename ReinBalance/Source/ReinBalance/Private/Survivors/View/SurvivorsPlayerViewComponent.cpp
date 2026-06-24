@@ -1,6 +1,6 @@
 #include "Survivors/View/SurvivorsPlayerViewComponent.h"
 
-#include "Survivors/Logic/SurvivorsGame.h"
+#include "Survivors/Game/SurvivorsGame.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "DrawDebugHelpers.h"

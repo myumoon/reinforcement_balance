@@ -1,7 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Survivors/Logic/SurvivorsTypes.h"
+#include "Survivors/SurvivorsTypes.h"
 
 /**
  * 武器・アイテムを 12 色パレットグループに集約。
