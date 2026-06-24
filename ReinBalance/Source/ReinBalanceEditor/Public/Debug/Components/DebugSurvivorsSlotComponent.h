@@ -4,9 +4,9 @@
 
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
-#include "Survivors/Logic/SurvivorsTypes.h"
-#include "Survivors/Logic/SurvivorsGameConstants.h"
-#include "Survivors/Logic/SurvivorsDebugRegistry.h"
+#include "Survivors/Game/SurvivorsTypes.h"
+#include "Survivors/Game/SurvivorsGameConstants.h"
+#include "Survivors/Game/SurvivorsDebugRegistry.h"
 #include "DebugSurvivorsSlotComponent.generated.h"
 
 class ASurvivorsGame;

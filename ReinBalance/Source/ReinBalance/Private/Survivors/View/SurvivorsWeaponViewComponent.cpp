@@ -1,8 +1,8 @@
 #include "Survivors/View/SurvivorsWeaponViewComponent.h"
 
-#include "Survivors/Logic/SurvivorsGame.h"
-#include "Survivors/Logic/SurvivorsGameConstants.h"
-#include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
+#include "Survivors/Game/SurvivorsGame.h"
+#include "Survivors/Game/SurvivorsGameConstants.h"
+#include "Survivors/Game/Weapons/SurvivorsWeaponComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SceneComponent.h"
 #include "DrawDebugHelpers.h"

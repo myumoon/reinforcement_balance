@@ -1,16 +1,16 @@
 #pragma once
 // AutomationTest.h は各 .cpp で include する（マクロ展開が TU ごとに必要）
 #include "Engine/World.h"
-#include "Survivors/Logic/SurvivorsGame.h"
-#include "Survivors/Logic/SurvivorsGameLogic.h"
-#include "Survivors/Logic/SurvivorsTypes.h"
-#include "Survivors/Logic/SurvivorsGameConstants.h"
-#include "Survivors/Logic/SurvivorsCollisionComponent.h"
-#include "Survivors/Logic/SurvivorsEnemyComponent.h"
-#include "Survivors/Logic/SurvivorsGemComponent.h"
-#include "Survivors/Logic/SurvivorsPickupComponent.h"
-#include "Survivors/Logic/SurvivorsPlayerComponent.h"
-#include "Survivors/Logic/Weapons/SurvivorsWeaponComponent.h"
+#include "Survivors/Game/SurvivorsGame.h"
+#include "Survivors/Game/SurvivorsGameLogic.h"
+#include "Survivors/Game/SurvivorsTypes.h"
+#include "Survivors/Game/SurvivorsGameConstants.h"
+#include "Survivors/Game/SurvivorsCollisionComponent.h"
+#include "Survivors/Game/SurvivorsEnemyComponent.h"
+#include "Survivors/Game/SurvivorsGemComponent.h"
+#include "Survivors/Game/SurvivorsPickupComponent.h"
+#include "Survivors/Game/SurvivorsPlayerComponent.h"
+#include "Survivors/Game/Weapons/SurvivorsWeaponComponent.h"
 
 // ============================================================
 // テストヘルパー: FSurvivorsGameLogic の private 状態・メソッドへのアクセサ
