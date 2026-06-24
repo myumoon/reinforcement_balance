@@ -5,7 +5,7 @@
 #include "HttpEnvServerBase.h"
 #include "IHttpEnvServer.h"
 #include "Survivors/Game/SurvivorsGame.h"
-#include "Survivors/Logic/SurvivorsGameLogic.h"
+#include "Survivors/SurvivorsGameLogic.h"
 #include "SurvivorsHttpEnvService.generated.h"
 
 /**

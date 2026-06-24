@@ -1,11 +1,11 @@
 #include "Survivors/Game/SurvivorsPlayerComponent.h"
 
 #include "Survivors/Game/SurvivorsGame.h"
-#include "Survivors/Logic/SurvivorsWikiSpec.h"
+#include "Survivors/SurvivorsWikiSpec.h"
 #include "Survivors/Game/Weapons/SurvivorsWeaponComponent.h"
 #include "Survivors/Game/Weapons/SurvivorsWeaponBase.h"
 #if WITH_EDITOR
-#include "Survivors/Logic/SurvivorsDebugRegistry.h"
+#include "Survivors/SurvivorsDebugRegistry.h"
 #endif
 
 namespace

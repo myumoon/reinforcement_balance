@@ -2,8 +2,8 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-#include "Survivors/Logic/SurvivorsTypes.h"
-#include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/SurvivorsTypes.h"
+#include "Survivors/SurvivorsGameConstants.h"
 #include "SurvivorsPlayerComponent.generated.h"
 
 class ASurvivorsGame;

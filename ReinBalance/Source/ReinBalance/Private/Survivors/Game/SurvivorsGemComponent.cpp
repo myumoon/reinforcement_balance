@@ -2,9 +2,9 @@
 
 #include "Survivors/Game/SurvivorsCollisionComponent.h"
 #include "Survivors/Game/SurvivorsGame.h"
-#include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/SurvivorsGameConstants.h"
 #include "Survivors/Game/SurvivorsPlayerComponent.h"
-#include "Survivors/Logic/SurvivorsWikiSpec.h"
+#include "Survivors/SurvivorsWikiSpec.h"
 
 USurvivorsGemComponent::USurvivorsGemComponent()
 {

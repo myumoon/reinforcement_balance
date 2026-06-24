@@ -2,7 +2,7 @@
 
 #include "Survivors/Game/SurvivorsCollisionComponent.h"
 #include "Survivors/Game/SurvivorsGame.h"
-#include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/SurvivorsGameConstants.h"
 
 void USurvivorsWeaponPentagram::OnLevelChanged(FWeaponLevel NewLevel)
 {

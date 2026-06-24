@@ -1,6 +1,6 @@
 #pragma once
 #include "CoreMinimal.h"
-#include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/SurvivorsGameConstants.h"
 #include "Survivors/Game/Weapons/SurvivorsWeaponBase.h"
 #include "SurvivorsWeaponKingBible.generated.h"
 

@@ -2,9 +2,9 @@
 // AutomationTest.h は各 .cpp で include する（マクロ展開が TU ごとに必要）
 #include "Engine/World.h"
 #include "Survivors/Game/SurvivorsGame.h"
-#include "Survivors/Logic/SurvivorsGameLogic.h"
-#include "Survivors/Logic/SurvivorsTypes.h"
-#include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/SurvivorsGameLogic.h"
+#include "Survivors/SurvivorsTypes.h"
+#include "Survivors/SurvivorsGameConstants.h"
 #include "Survivors/Game/SurvivorsCollisionComponent.h"
 #include "Survivors/Game/SurvivorsEnemyComponent.h"
 #include "Survivors/Game/SurvivorsGemComponent.h"

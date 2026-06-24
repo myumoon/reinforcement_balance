@@ -1,6 +1,6 @@
 #include "Survivors/Game/SurvivorsPickupComponent.h"
 #include "Survivors/Game/SurvivorsGame.h"
-#include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/SurvivorsGameConstants.h"
 #include "Survivors/Game/SurvivorsGemComponent.h"
 #include "Survivors/Game/SurvivorsPlayerComponent.h"
 

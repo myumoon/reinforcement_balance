@@ -2,7 +2,7 @@
 
 #include "Survivors/Game/SurvivorsCollisionComponent.h"
 #include "Survivors/Game/SurvivorsGame.h"
-#include "Survivors/Logic/SurvivorsGameConstants.h"
+#include "Survivors/SurvivorsGameConstants.h"
 #include "Survivors/Game/Weapons/SurvivorsWeaponComponent.h"
 
 void USurvivorsWeaponVandalier::OnLevelChanged(FWeaponLevel NewLevel)
