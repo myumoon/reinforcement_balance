@@ -69,10 +69,11 @@ bool FSurvivorsEnemyRecycleNearEnemyNoTeleport::RunTest(const FString& Parameter
 
 	const FVector2D NewPos = Enemies[0].Pos;
 
-	// 敵はプレイヤー方向に少し移動しているはず → SpawnMinDistance(500) より近い距離にある
+	// 敵は1ステップで約0.583u移動するだけなので EnemyRecycleDistance(1000u) 以内に留まるはず
+	// テレポートされていないことを確認（元の600u付近、EnemyRecycleDistance未満）
 	const float DistSq = NewPos.SizeSquared();
-	TestTrue("Near enemy not teleported (dist < SpawnMinDistance)",
-		DistSq < FMath::Square(500.f));
+	TestTrue("Near enemy not teleported (dist < EnemyRecycleDistance=1000)",
+		DistSq < FMath::Square(1000.f) && DistSq > 0.f);
 
 	S.Destroy();
 	return true;
