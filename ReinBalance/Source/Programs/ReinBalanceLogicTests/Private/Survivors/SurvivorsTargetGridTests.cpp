@@ -1,6 +1,6 @@
 #include "TestHarness.h"
 
-#include "Survivors/Logic/SurvivorsCollisionTypes.h"
+#include "Survivors/SurvivorsCollisionTypes.h"
 
 namespace
 {

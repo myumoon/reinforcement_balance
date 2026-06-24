@@ -181,14 +181,14 @@ def build_survivors_source_of_truth(
 ) -> dict[str, Any]:
     """Build structured facts from C++ source and, when available, UE5 obs_schema."""
 
-    game_h_path = "ReinBalance/Source/ReinBalance/Public/Survivors/Logic/SurvivorsGame.h"
-    constants_h_path = "ReinBalance/Source/ReinBalance/Public/Survivors/Logic/SurvivorsGameConstants.h"
-    wiki_spec_h_path = "ReinBalance/Source/ReinBalanceLogic/Public/Survivors/Logic/SurvivorsWikiSpec.h"
-    gem_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsGemComponent.cpp"
-    enemy_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsEnemyComponent.cpp"
-    obs_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsObservationComponent.cpp"
-    player_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsPlayerComponent.cpp"
-    spawn_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Logic/SurvivorsSpawnComponent.cpp"
+    game_h_path = "ReinBalance/Source/ReinBalance/Public/Survivors/Game/SurvivorsGame.h"
+    constants_h_path = "ReinBalance/Source/ReinBalanceLogic/Public/Survivors/SurvivorsGameConstants.h"
+    wiki_spec_h_path = "ReinBalance/Source/ReinBalanceLogic/Public/Survivors/SurvivorsWikiSpec.h"
+    gem_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Game/SurvivorsGemComponent.cpp"
+    enemy_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Game/SurvivorsEnemyComponent.cpp"
+    obs_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Game/SurvivorsObservationComponent.cpp"
+    player_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Game/SurvivorsPlayerComponent.cpp"
+    spawn_cpp_path = "ReinBalance/Source/ReinBalance/Private/Survivors/Game/SurvivorsSpawnComponent.cpp"
 
     game_h = _read(repo_root, game_h_path)
     constants_h = _read(repo_root, constants_h_path)

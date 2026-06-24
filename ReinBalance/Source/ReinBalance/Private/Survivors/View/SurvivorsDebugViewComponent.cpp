@@ -1,8 +1,8 @@
 #include "Survivors/View/SurvivorsDebugViewComponent.h"
 
-#include "Survivors/Logic/SurvivorsGame.h"
-#include "Survivors/Logic/SurvivorsGameConstants.h"
-#include "Survivors/Logic/SurvivorsTypes.h"
+#include "Survivors/Game/SurvivorsGame.h"
+#include "Survivors/SurvivorsGameConstants.h"
+#include "Survivors/SurvivorsTypes.h"
 #include "Survivors/View/SurvivorsViewPalette.h"
 #include "Engine/Engine.h"
 #include "GameFramework/PlayerController.h"

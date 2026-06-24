@@ -13,6 +13,7 @@ public class ReinBalanceEditor : ModuleRules
 			"Engine",
 			"InputCore",    // FKey / EKeys (TrainingRenderToggleActor)
 			"ReinBalance",
+			"ReinBalanceLogic",
 			"PythonTrainingComm",
 		});
 

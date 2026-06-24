@@ -1,6 +1,5 @@
 #include "Misc/AutomationTest.h"
 #include "SurvivorsTestHelpers.h"
-#include "Survivors/Logic/Weapons/Projectile/SurvivorsKingBibleWeapon.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsWeaponSpecProjectileAmounts,
 	"ReinBalance.Survivors.Wiki.WeaponSpecProjectileAmounts",
@@ -41,14 +40,14 @@ bool FSurvivorsWeaponSpecProjectileAmounts::RunTest(const FString& Parameters)
 		if (!TestTrue(FString::Printf(TEXT("%s world created"), Case.Label), S.Create())) return false;
 
 		EquipTestWeapon(S.Game, Case.Type, Case.Level);
-		FSurvivorsGameTestAccess::WeaponComp(S.Game)->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 		if (Case.SecondsAfterFirstTick > 0.f)
 		{
-			TickTestWeaponsForSeconds(FSurvivorsGameTestAccess::WeaponComp(S.Game), Case.SecondsAfterFirstTick);
+			TickTestWeaponsForSeconds(S.Game, Case.SecondsAfterFirstTick);
 		}
 
 		TestEqual(FString::Printf(TEXT("%s projectile count"), Case.Label),
-			FSurvivorsGameTestAccess::WeaponComp(S.Game)->GetProjectileCount(),
+			S.Game->GetProjectileCount(),
 			Case.ExpectedProjectiles);
 
 		S.Destroy();
@@ -66,20 +65,19 @@ bool FSurvivorsWhipAlternatingBurst::RunTest(const FString& Parameters)
 	if (!TestTrue("World created", S.Create())) return false;
 
 	EquipTestWeapon(S.Game, EWeaponType::Whip, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("First Whip swing exists", WC->GetProjectileCount(), 1);
-	TestTrue("First Whip swing faces +X", WC->GetProjectilePos(0).X > FSurvivorsGameTestAccess::PlayerPos(S.Game).X);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("First Whip swing exists", S.Game->GetProjectileCount(), 1);
+	TestTrue("First Whip swing faces +X", S.Game->GetProjectilePos(0).X > FSurvivorsGameTestAccess::PlayerPos(S.Game).X);
 
 	const int32 TicksToSecondSwing = FMath::CeilToInt(0.31f / SurvivorsGameConstants::PhysicsDt);
 	for (int32 i = 0; i < TicksToSecondSwing; ++i)
 	{
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 	}
 
-	TestEqual("Second Whip swing exists after 0.3s", WC->GetProjectileCount(), 1);
-	TestTrue("Second Whip swing flips to -X", WC->GetProjectilePos(0).X < FSurvivorsGameTestAccess::PlayerPos(S.Game).X);
+	TestEqual("Second Whip swing exists after 0.3s", S.Game->GetProjectileCount(), 1);
+	TestTrue("Second Whip swing flips to -X", S.Game->GetProjectilePos(0).X < FSurvivorsGameTestAccess::PlayerPos(S.Game).X);
 
 	S.Destroy();
 	return true;
@@ -96,19 +94,18 @@ bool FSurvivorsKnifeBurstCadence::RunTest(const FString& Parameters)
 	// knife_bullet2.mp4 is treated as the Lv1 baseline: two knives at the 0.1s projectile interval.
 	FSurvivorsGameTestAccess::PlayerVel(S.Game) = FVector2D(1.f, 0.f);
 	EquipTestWeapon(S.Game, EWeaponType::Knife, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("Knife fires first projectile immediately", WC->GetProjectileCount(), 1);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Knife fires first projectile immediately", S.Game->GetProjectileCount(), 1);
 
-	TickTestWeaponsForSeconds(WC, 0.05f);
-	TestEqual("Knife does not fire the second projectile before 0.1s", WC->GetProjectileCount(), 1);
+	TickTestWeaponsForSeconds(S.Game, 0.05f);
+	TestEqual("Knife does not fire the second projectile before 0.1s", S.Game->GetProjectileCount(), 1);
 
-	TickTestWeaponsForSeconds(WC, 0.06f);
-	TestEqual("Knife fires second projectile after 0.1s", WC->GetProjectileCount(), 2);
+	TickTestWeaponsForSeconds(S.Game, 0.06f);
+	TestEqual("Knife fires second projectile after 0.1s", S.Game->GetProjectileCount(), 2);
 
-	TickTestWeaponsForSeconds(WC, 0.15f);
-	TestEqual("Knife Lv1 bullet2 baseline stops at two projectiles", WC->GetProjectileCount(), 2);
+	TickTestWeaponsForSeconds(S.Game, 0.15f);
+	TestEqual("Knife Lv1 bullet2 baseline stops at two projectiles", S.Game->GetProjectileCount(), 2);
 
 	S.Destroy();
 	return true;
@@ -127,24 +124,23 @@ bool FSurvivorsKnifeVideoProjectileSpeed::RunTest(const FString& Parameters)
 	FSurvivorsGameTestAccess::PlayerVel(S.Game) = FVector2D(1.f, 0.f);
 
 	EquipTestWeapon(S.Game, EWeaponType::Knife, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	if (!TestTrue("Knife projectile exists", WC->GetProjectileCount() > 0))
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	if (!TestTrue("Knife projectile exists", S.Game->GetProjectileCount() > 0))
 	{
 		S.Destroy();
 		return false;
 	}
 
-	const FVector2D StartPos = WC->GetProjectilePos(0);
-	const float Elapsed = TickTestWeaponsForSecondsMeasured(WC, 0.25f);
-	if (!TestTrue("Knife projectile remains alive for speed sample", WC->GetProjectileCount() > 0))
+	const FVector2D StartPos = S.Game->GetProjectilePos(0);
+	const float Elapsed = TickTestWeaponsForSecondsMeasured(S.Game, 0.25f);
+	if (!TestTrue("Knife projectile remains alive for speed sample", S.Game->GetProjectileCount() > 0))
 	{
 		S.Destroy();
 		return false;
 	}
 
-	const float Speed = FVector2D::Distance(WC->GetProjectilePos(0), StartPos) / Elapsed;
+	const float Speed = FVector2D::Distance(S.Game->GetProjectilePos(0), StartPos) / Elapsed;
 	TestTrue(FString::Printf(TEXT("Knife video speed %.1fu/s should stay near 326u/s"), Speed),
 		Speed >= 295.f && Speed <= 365.f);
 
@@ -166,25 +162,24 @@ bool FSurvivorsKnifeVideoSpawnJitter::RunTest(const FString& Parameters)
 	FSurvivorsGameTestAccess::PlayerVel(S.Game) = FVector2D(1.f, 0.f);
 
 	EquipTestWeapon(S.Game, EWeaponType::Knife, 2);  // baseline 3-shot volley
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
 	TArray<float> SpawnOffsetsY;
 	int32 CapturedProjectiles = 0;
 	auto CaptureNewProjectileOffsets = [&]()
 	{
-		const int32 Count = WC->GetProjectileCount();
+		const int32 Count = S.Game->GetProjectileCount();
 		for (int32 i = CapturedProjectiles; i < Count; ++i)
 		{
-			SpawnOffsetsY.Add(WC->GetProjectilePos(i).Y - PlayerPos.Y);
+			SpawnOffsetsY.Add(S.Game->GetProjectilePos(i).Y - PlayerPos.Y);
 		}
 		CapturedProjectiles = Count;
 	};
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 	CaptureNewProjectileOffsets();
-	TickTestWeaponsForSeconds(WC, 0.11f);
+	TickTestWeaponsForSeconds(S.Game, 0.11f);
 	CaptureNewProjectileOffsets();
-	TickTestWeaponsForSeconds(WC, 0.11f);
+	TickTestWeaponsForSeconds(S.Game, 0.11f);
 	CaptureNewProjectileOffsets();
 
 	if (!TestEqual("Knife Lv2 captures three spawn offsets", SpawnOffsetsY.Num(), 3))
@@ -220,30 +215,23 @@ bool FSurvivorsKingBibleDurationCooldown::RunTest(const FString& Parameters)
 	if (!TestTrue("World created", S.Create())) return false;
 
 	EquipTestWeapon(S.Game, EWeaponType::KingBible, 1);
-	auto* Weapon = Cast<USurvivorsKingBibleWeapon>(
-		FSurvivorsGameTestAccess::WeaponComp(S.Game)->GetWeaponInstance(0));
-	if (!TestTrue("King Bible instance created", Weapon != nullptr))
-	{
-		S.Destroy();
-		return false;
-	}
 
-	FSurvivorsGameTestAccess::WeaponComp(S.Game)->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("King Bible Lv1 starts with 2 active orbs", Weapon->GetOrbPositions().Num(), 2);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("King Bible Lv1 starts with 2 active orbs", S.Game->GetOrbitOrbCount(), 2);
 
 	const int32 TicksPastDuration = FMath::CeilToInt(3.1f / SurvivorsGameConstants::PhysicsDt);
 	for (int32 i = 0; i < TicksPastDuration; ++i)
 	{
-		FSurvivorsGameTestAccess::WeaponComp(S.Game)->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 	}
-	TestEqual("King Bible orbs disappear after Duration", Weapon->GetOrbPositions().Num(), 0);
+	TestEqual("King Bible orbs disappear after Duration", S.Game->GetOrbitOrbCount(), 0);
 
 	const int32 TicksToNextCycle = FMath::CeilToInt(3.1f / SurvivorsGameConstants::PhysicsDt);
 	for (int32 i = 0; i < TicksToNextCycle; ++i)
 	{
-		FSurvivorsGameTestAccess::WeaponComp(S.Game)->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 	}
-	TestEqual("King Bible orbs reactivate after Duration + Cooldown cycle", Weapon->GetOrbPositions().Num(), 2);
+	TestEqual("King Bible orbs reactivate after Duration + Cooldown cycle", S.Game->GetOrbitOrbCount(), 2);
 
 	S.Destroy();
 	return true;
@@ -266,18 +254,17 @@ bool FSurvivorsMagicWandSequentialTargeting::RunTest(const FString& Parameters)
 
 	// MagicWand Lv1 baseline: Amount=2
 	EquipTestWeapon(S.Game, EWeaponType::MagicWand, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("MagicWand Lv1 fires first shot immediately", WC->GetProjectileCount(), 1);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("MagicWand Lv1 fires first shot immediately", S.Game->GetProjectileCount(), 1);
 
-	TickTestWeaponsForSeconds(WC, 0.05f);
-	TestEqual("MagicWand Lv1 does not fire the second shot before 0.1s", WC->GetProjectileCount(), 1);
+	TickTestWeaponsForSeconds(S.Game, 0.05f);
+	TestEqual("MagicWand Lv1 does not fire the second shot before 0.1s", S.Game->GetProjectileCount(), 1);
 
 	// 0.1s 経過後に 2 発目
-	TickTestWeaponsForSeconds(WC, 0.06f);
+	TickTestWeaponsForSeconds(S.Game, 0.06f);
 
-	TestEqual("MagicWand Lv1 fires second shot after 0.1s", WC->GetProjectileCount(), 2);
+	TestEqual("MagicWand Lv1 fires second shot after 0.1s", S.Game->GetProjectileCount(), 2);
 
 	S.Destroy();
 	return true;
@@ -297,24 +284,23 @@ bool FSurvivorsMagicWandVideoProjectileSpeed::RunTest(const FString& Parameters)
 	S.AddEnemyAt(FVector2D(1000.f, 0.f), 10000.f);
 
 	EquipTestWeapon(S.Game, EWeaponType::MagicWand, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	if (!TestTrue("Magic Wand projectile exists", WC->GetProjectileCount() > 0))
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	if (!TestTrue("Magic Wand projectile exists", S.Game->GetProjectileCount() > 0))
 	{
 		S.Destroy();
 		return false;
 	}
 
-	const FVector2D StartPos = WC->GetProjectilePos(0);
-	const float Elapsed = TickTestWeaponsForSecondsMeasured(WC, 0.50f);
-	if (!TestTrue("Magic Wand projectile remains alive for speed sample", WC->GetProjectileCount() > 0))
+	const FVector2D StartPos = S.Game->GetProjectilePos(0);
+	const float Elapsed = TickTestWeaponsForSecondsMeasured(S.Game, 0.50f);
+	if (!TestTrue("Magic Wand projectile remains alive for speed sample", S.Game->GetProjectileCount() > 0))
 	{
 		S.Destroy();
 		return false;
 	}
 
-	const float Speed = FVector2D::Distance(WC->GetProjectilePos(0), StartPos) / Elapsed;
+	const float Speed = FVector2D::Distance(S.Game->GetProjectilePos(0), StartPos) / Elapsed;
 	TestTrue(FString::Printf(TEXT("Magic Wand video speed %.1fu/s should stay near 140u/s"), Speed),
 		Speed >= 120.f && Speed <= 165.f);
 
@@ -337,20 +323,19 @@ bool FSurvivorsCrossVideoBullet2Cadence::RunTest(const FString& Parameters)
 
 	// Cross Lv1 baseline: two projectiles at the 0.1s interval.
 	EquipTestWeapon(S.Game, EWeaponType::Cross, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("Cross Lv1 bullet2 baseline fires first projectile immediately", WC->GetProjectileCount(), 1);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Cross Lv1 bullet2 baseline fires first projectile immediately", S.Game->GetProjectileCount(), 1);
 
-	TickTestWeaponsForSeconds(WC, 0.05f);
-	TestEqual("Cross does not fire the second projectile before 0.1s", WC->GetProjectileCount(), 1);
+	TickTestWeaponsForSeconds(S.Game, 0.05f);
+	TestEqual("Cross does not fire the second projectile before 0.1s", S.Game->GetProjectileCount(), 1);
 
-	TickTestWeaponsForSeconds(WC, 0.06f);
-	TestEqual("Cross fires the second projectile after 0.1s", WC->GetProjectileCount(), 2);
+	TickTestWeaponsForSeconds(S.Game, 0.06f);
+	TestEqual("Cross fires the second projectile after 0.1s", S.Game->GetProjectileCount(), 2);
 
-	for (int32 i = 0; i < WC->GetProjectileCount(); ++i)
+	for (int32 i = 0; i < S.Game->GetProjectileCount(); ++i)
 	{
-		const FVector2D Pos = WC->GetProjectilePos(i);
+		const FVector2D Pos = S.Game->GetProjectilePos(i);
 		TestTrue(FString::Printf(TEXT("Cross projectile %d moves toward +X without fan spread"), i),
 			Pos.X > 0.f && FMath::Abs(Pos.Y) < 1.f);
 	}
@@ -373,17 +358,16 @@ bool FSurvivorsCrossVideoReverseDistance::RunTest(const FString& Parameters)
 	S.AddEnemyAt(FVector2D(200.f, 0.f), 10000.f);
 
 	EquipTestWeapon(S.Game, EWeaponType::Cross, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("Cross Lv1 first volley has one projectile", WC->GetProjectileCount(), 1);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Cross Lv1 first volley has one projectile", S.Game->GetProjectileCount(), 1);
 
 	float MaxForwardDistance = 0.f;
 	for (int32 Step = 0; Step < SurvivorsStepsForSeconds(1.0f); ++Step)
 	{
-		if (WC->GetProjectileCount() <= 0) break;
-		MaxForwardDistance = FMath::Max(MaxForwardDistance, WC->GetProjectilePos(0).X);
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		if (S.Game->GetProjectileCount() <= 0) break;
+		MaxForwardDistance = FMath::Max(MaxForwardDistance, S.Game->GetProjectilePos(0).X);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 	}
 
 	TestTrue(FString::Printf(TEXT("Cross reverse distance %.1fu should match video range 60-90u"), MaxForwardDistance),
@@ -407,14 +391,13 @@ bool FSurvivorsCrossPersistsIntoNextVolley::RunTest(const FString& Parameters)
 	S.AddEnemyAt(FVector2D(200.f, 0.f));
 
 	EquipTestWeapon(S.Game, EWeaponType::Cross, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("Cross Lv1 first volley has one projectile", WC->GetProjectileCount(), 1);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Cross Lv1 first volley has one projectile", S.Game->GetProjectileCount(), 1);
 
-	TickTestWeaponsForSeconds(WC, 2.05f);
+	TickTestWeaponsForSeconds(S.Game, 2.05f);
 	TestTrue("Cross previous projectile is still alive when the next cooldown volley starts",
-		WC->GetProjectileCount() >= 2);
+		S.Game->GetProjectileCount() >= 2);
 
 	S.Destroy();
 	return true;
@@ -432,18 +415,17 @@ bool FSurvivorsAxeVideoApexHeight::RunTest(const FString& Parameters)
 
 	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
 	EquipTestWeapon(S.Game, EWeaponType::Axe, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 
 	float MaxHeight = 0.f;
 	for (int32 Step = 0; Step < SurvivorsStepsForSeconds(1.0f); ++Step)
 	{
-		if (WC->GetProjectileCount() > 0)
+		if (S.Game->GetProjectileCount() > 0)
 		{
-			MaxHeight = FMath::Max(MaxHeight, WC->GetProjectilePos(0).Y);
+			MaxHeight = FMath::Max(MaxHeight, S.Game->GetProjectilePos(0).Y);
 		}
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 	}
 
 	TestTrue(FString::Printf(TEXT("Axe apex %.1fu should match video range 50-75u"), MaxHeight),
@@ -467,21 +449,20 @@ bool FSurvivorsAxeVideoBullet2Cadence::RunTest(const FString& Parameters)
 
 	// Axe Lv1 baseline: two axes at the 0.2s interval.
 	EquipTestWeapon(S.Game, EWeaponType::Axe, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("Axe Lv1 bullet2 baseline fires first axe immediately", WC->GetProjectileCount(), 1);
-	if (WC->GetProjectileCount() > 0)
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Axe Lv1 bullet2 baseline fires first axe immediately", S.Game->GetProjectileCount(), 1);
+	if (S.Game->GetProjectileCount() > 0)
 	{
-		const FVector2D FirstPos = WC->GetProjectilePos(0);
+		const FVector2D FirstPos = S.Game->GetProjectilePos(0);
 		TestTrue("First axe is thrown upward from the player", FMath::Abs(FirstPos.X) < 1.f && FirstPos.Y > 0.f);
 	}
 
-	TickTestWeaponsForSeconds(WC, 0.10f);
-	TestEqual("Axe does not fire the second axe before 0.2s", WC->GetProjectileCount(), 1);
+	TickTestWeaponsForSeconds(S.Game, 0.10f);
+	TestEqual("Axe does not fire the second axe before 0.2s", S.Game->GetProjectileCount(), 1);
 
-	TickTestWeaponsForSeconds(WC, 0.11f);
-	TestEqual("Axe fires the second axe after about 0.2s", WC->GetProjectileCount(), 2);
+	TickTestWeaponsForSeconds(S.Game, 0.11f);
+	TestEqual("Axe fires the second axe after about 0.2s", S.Game->GetProjectileCount(), 2);
 
 	S.Destroy();
 	return true;
@@ -498,16 +479,15 @@ bool FSurvivorsRunetracerVideoBullet2Cadence::RunTest(const FString& Parameters)
 
 	// Runetracer Lv1 baseline: two runes at the 0.2s interval.
 	EquipTestWeapon(S.Game, EWeaponType::Runetracer, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("Runetracer Lv1 bullet2 baseline fires first rune immediately", WC->GetProjectileCount(), 1);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Runetracer Lv1 bullet2 baseline fires first rune immediately", S.Game->GetProjectileCount(), 1);
 
-	TickTestWeaponsForSeconds(WC, 0.10f);
-	TestEqual("Runetracer does not fire the second rune before 0.2s", WC->GetProjectileCount(), 1);
+	TickTestWeaponsForSeconds(S.Game, 0.10f);
+	TestEqual("Runetracer does not fire the second rune before 0.2s", S.Game->GetProjectileCount(), 1);
 
-	TickTestWeaponsForSeconds(WC, 0.11f);
-	TestEqual("Runetracer fires the second rune after about 0.2s", WC->GetProjectileCount(), 2);
+	TickTestWeaponsForSeconds(S.Game, 0.11f);
+	TestEqual("Runetracer fires the second rune after about 0.2s", S.Game->GetProjectileCount(), 2);
 
 	S.Destroy();
 	return true;
@@ -525,19 +505,18 @@ bool FSurvivorsRunetracerDuration225Seconds::RunTest(const FString& Parameters)
 	if (!TestTrue("World created", S.Create())) return false;
 
 	EquipTestWeapon(S.Game, EWeaponType::Runetracer, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("Runetracer Lv1 first projectile exists immediately", WC->GetProjectileCount(), 1);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("Runetracer Lv1 first projectile exists immediately", S.Game->GetProjectileCount(), 1);
 
-	TickTestWeaponsForSeconds(WC, 0.21f);
-	TestEqual("Runetracer Lv1 second projectile appears after about 0.2s", WC->GetProjectileCount(), 2);
+	TickTestWeaponsForSeconds(S.Game, 0.21f);
+	TestEqual("Runetracer Lv1 second projectile appears after about 0.2s", S.Game->GetProjectileCount(), 2);
 
-	TickTestWeaponsForSeconds(WC, 1.80f);
-	TestEqual("Runetracer Lv1 projectiles remain before their 2.33s duration", WC->GetProjectileCount(), 2);
+	TickTestWeaponsForSeconds(S.Game, 1.80f);
+	TestEqual("Runetracer Lv1 projectiles remain before their 2.33s duration", S.Game->GetProjectileCount(), 2);
 
-	TickTestWeaponsForSeconds(WC, 0.60f);
-	TestEqual("Runetracer Lv1 projectiles expire after their 2.33s duration", WC->GetProjectileCount(), 0);
+	TickTestWeaponsForSeconds(S.Game, 0.60f);
+	TestEqual("Runetracer Lv1 projectiles expire after their 2.33s duration", S.Game->GetProjectileCount(), 0);
 
 	S.Destroy();
 	return true;
@@ -556,26 +535,25 @@ bool FSurvivorsRunetracerVideoProjectileSpeed::RunTest(const FString& Parameters
 	FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
 
 	EquipTestWeapon(S.Game, EWeaponType::Runetracer, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	if (!TestTrue("Runetracer Lv1 fires first projectile", WC->GetProjectileCount() > 0))
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	if (!TestTrue("Runetracer Lv1 fires first projectile", S.Game->GetProjectileCount() > 0))
 	{
 		S.Destroy();
 		return false;
 	}
 
 	// 0.25s 以内なら 193u/s で 48u — スクリーン端(225u)に届かず bounce しない
-	const FVector2D StartPos = WC->GetProjectilePos(0);
-	const float Elapsed      = TickTestWeaponsForSecondsMeasured(WC, 0.25f);
-	if (!TestTrue("Runetracer projectile remains alive for speed sample", WC->GetProjectileCount() > 0))
+	const FVector2D StartPos = S.Game->GetProjectilePos(0);
+	const float Elapsed      = TickTestWeaponsForSecondsMeasured(S.Game, 0.25f);
+	if (!TestTrue("Runetracer projectile remains alive for speed sample", S.Game->GetProjectileCount() > 0))
 	{
 		S.Destroy();
 		return false;
 	}
 
 	// 距離は方向によらず Speed × Elapsed （bounce しない距離なので正確）
-	const float Speed = FVector2D::Distance(WC->GetProjectilePos(0), StartPos) / Elapsed;
+	const float Speed = FVector2D::Distance(S.Game->GetProjectilePos(0), StartPos) / Elapsed;
 	TestTrue(FString::Printf(TEXT("Runetracer video speed %.1fu/s should be near 193u/s"), Speed),
 		Speed >= 160.f && Speed <= 225.f);
 
@@ -606,7 +584,7 @@ bool FSurvivorsRunetracerHitboxDelayAllowsRehit::RunTest(const FString& Paramete
 	Proj.LifeTime       = FProjectileLifeTime(5.f);
 	Proj.bPiercing      = true;
 	Proj.KnockbackStrength = 0.f;  // ノックバックなし（敵位置を維持する）
-	FSurvivorsGameTestAccess::WeaponComp(S.Game)->SpawnProjectile(Proj);
+	S.Game->GetLogic()->SpawnProjectile(Proj);
 
 	S.RunWeaponHits();
 	const float HPAfterFirst = FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP;
@@ -638,17 +616,16 @@ bool FSurvivorsFireWandVideoBullet4Baseline::RunTest(const FString& Parameters)
 	S.AddEnemyAt(FVector2D(200.f, 0.f));
 
 	EquipTestWeapon(S.Game, EWeaponType::FireWand, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TickTestWeaponsForSeconds(WC, 0.08f);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TickTestWeaponsForSeconds(S.Game, 0.08f);
 	TestEqual("Fire Wand Lv1 baseline emits four fireballs within the 0.02s interval window",
-		WC->GetProjectileCount(), 4);
+		S.Game->GetProjectileCount(), 4);
 
-	for (int32 i = 0; i < WC->GetProjectileCount(); ++i)
+	for (int32 i = 0; i < S.Game->GetProjectileCount(); ++i)
 	{
 		TestTrue(FString::Printf(TEXT("Fire Wand projectile %d travels generally toward the selected +X enemy"), i),
-			WC->GetProjectilePos(i).X > 0.f);
+			S.Game->GetProjectilePos(i).X > 0.f);
 	}
 
 	S.Destroy();
@@ -669,16 +646,15 @@ bool FSurvivorsFireWandVideoFanAngle::RunTest(const FString& Parameters)
 	S.AddEnemyAt(FVector2D(200.f, 0.f), 10000.f);
 
 	EquipTestWeapon(S.Game, EWeaponType::FireWand, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TickTestWeaponsForSeconds(WC, 0.08f);
-	TestEqual("Fire Wand Lv1 has four fireballs for angle sample", WC->GetProjectileCount(), 4);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TickTestWeaponsForSeconds(S.Game, 0.08f);
+	TestEqual("Fire Wand Lv1 has four fireballs for angle sample", S.Game->GetProjectileCount(), 4);
 
 	TArray<float> AnglesDeg;
-	for (int32 i = 0; i < WC->GetProjectileCount(); ++i)
+	for (int32 i = 0; i < S.Game->GetProjectileCount(); ++i)
 	{
-		const FVector2D Delta = WC->GetProjectilePos(i) - FSurvivorsGameTestAccess::PlayerPos(S.Game);
+		const FVector2D Delta = S.Game->GetProjectilePos(i) - FSurvivorsGameTestAccess::PlayerPos(S.Game);
 		AnglesDeg.Add(FMath::RadiansToDegrees(FMath::Atan2(Delta.Y, Delta.X)));
 	}
 	AnglesDeg.Sort();
@@ -708,35 +684,34 @@ bool FSurvivorsFireWandVideoProjectileSpeed::RunTest(const FString& Parameters)
 	S.AddEnemyAt(FVector2D(200.f, 0.f), 10000.f);
 
 	EquipTestWeapon(S.Game, EWeaponType::FireWand, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TickTestWeaponsForSeconds(WC, 0.08f);
-	if (!TestTrue("Fire Wand Lv1 has four fireballs for speed sample", WC->GetProjectileCount() == 4))
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TickTestWeaponsForSeconds(S.Game, 0.08f);
+	if (!TestTrue("Fire Wand Lv1 has four fireballs for speed sample", S.Game->GetProjectileCount() == 4))
 	{
 		S.Destroy();
 		return false;
 	}
 
 	TArray<FVector2D> StartPositions;
-	for (int32 i = 0; i < WC->GetProjectileCount(); ++i)
+	for (int32 i = 0; i < S.Game->GetProjectileCount(); ++i)
 	{
-		StartPositions.Add(WC->GetProjectilePos(i));
+		StartPositions.Add(S.Game->GetProjectilePos(i));
 	}
 
-	const float Elapsed = TickTestWeaponsForSecondsMeasured(WC, 0.20f);
-	if (!TestTrue("Fire Wand projectiles remain alive for speed sample", WC->GetProjectileCount() == StartPositions.Num()))
+	const float Elapsed = TickTestWeaponsForSecondsMeasured(S.Game, 0.20f);
+	if (!TestTrue("Fire Wand projectiles remain alive for speed sample", S.Game->GetProjectileCount() == StartPositions.Num()))
 	{
 		S.Destroy();
 		return false;
 	}
 
 	float TotalSpeed = 0.f;
-	for (int32 i = 0; i < WC->GetProjectileCount(); ++i)
+	for (int32 i = 0; i < S.Game->GetProjectileCount(); ++i)
 	{
-		TotalSpeed += FVector2D::Distance(WC->GetProjectilePos(i), StartPositions[i]) / Elapsed;
+		TotalSpeed += FVector2D::Distance(S.Game->GetProjectilePos(i), StartPositions[i]) / Elapsed;
 	}
-	const float AvgSpeed = TotalSpeed / static_cast<float>(WC->GetProjectileCount());
+	const float AvgSpeed = TotalSpeed / static_cast<float>(S.Game->GetProjectileCount());
 	TestTrue(FString::Printf(TEXT("Fire Wand video speed %.1fu/s should stay near 96u/s"), AvgSpeed),
 		AvgSpeed >= 80.f && AvgSpeed <= 115.f);
 
@@ -757,14 +732,12 @@ bool FSurvivorsLightningRingVideoBullet2Baseline::RunTest(const FString& Paramet
 	S.AddEnemyAt(FVector2D(100.f, 0.f), 100.f);
 
 	EquipTestWeapon(S.Game, EWeaponType::LightningRing, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
-	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	CC->BuildEnemyGrid();
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	FSurvivorsGameTestAccess::BuildEnemyGrid(S.Game);
 	FSurvivorsHitFrame HF;
-	WC->ComputeAllWeaponHits(CC, HF);
-	WC->ApplyWeaponHits(HF);
+	FSurvivorsGameTestAccess::ComputeAllWeaponHits(S.Game, HF);
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF);
 
 	TestTrue("Lightning Ring baseline strikes first enemy",
 		FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP < 100.f);
@@ -785,16 +758,15 @@ bool FSurvivorsKingBibleVideoBullet2OrbitCount::RunTest(const FString& Parameter
 	if (!TestTrue("World created", S.Create())) return false;
 
 	EquipTestWeapon(S.Game, EWeaponType::KingBible, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("King Bible Lv1 video bullet2 baseline has two orbit orbs", WC->GetOrbitOrbCount(), 2);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("King Bible Lv1 video bullet2 baseline has two orbit orbs", S.Game->GetOrbitOrbCount(), 2);
 
-	if (WC->GetOrbitOrbCount() >= 2)
+	if (S.Game->GetOrbitOrbCount() >= 2)
 	{
 		const FVector2D PlayerPos = FSurvivorsGameTestAccess::PlayerPos(S.Game);
-		const FVector2D D0 = WC->GetOrbitOrbPos(0) - PlayerPos;
-		const FVector2D D1 = WC->GetOrbitOrbPos(1) - PlayerPos;
+		const FVector2D D0 = S.Game->GetOrbitOrbPos(0) - PlayerPos;
+		const FVector2D D1 = S.Game->GetOrbitOrbPos(1) - PlayerPos;
 		TestTrue("King Bible Lv1 orbs use the same orbit radius",
 			FMath::Abs(D0.Size() - D1.Size()) < 0.1f);
 		TestTrue("King Bible Lv1 orbs are evenly spaced on the orbit",
@@ -819,15 +791,14 @@ bool FSurvivorsMagicWandNearestEnemyTargeting::RunTest(const FString& Parameters
 	S.AddEnemyAt(FVector2D(0.f, 100.f));
 
 	EquipTestWeapon(S.Game, EWeaponType::MagicWand, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
 	// 5 tick 分進めて弾の移動方向を確認
 	for (int32 i = 0; i < 5; ++i)
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 
-	if (WC->GetProjectileCount() > 0)
+	if (S.Game->GetProjectileCount() > 0)
 	{
-		const FVector2D FinalPos = WC->GetProjectilePos(0);
+		const FVector2D FinalPos = S.Game->GetProjectilePos(0);
 		TestTrue("MagicWand projectile travels toward enemy (Y+)", FinalPos.Y > 0.f);
 		TestTrue("MagicWand projectile Y velocity dominant",
 			FMath::Abs(FinalPos.Y) > FMath::Abs(FinalPos.X));
@@ -851,16 +822,15 @@ bool FSurvivorsSantaWaterSequentialDrops::RunTest(const FString& Parameters)
 
 	// SantaWater Lv1 baseline: two sequential drops at the 0.3s interval.
 	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("SantaWater first drop spawned immediately", WC->GetGroundZoneCount(), 1);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("SantaWater first drop spawned immediately", S.Game->GetGroundZoneCount(), 1);
 
 	const int32 TicksTo2ndDrop = FMath::CeilToInt(0.31f / SurvivorsGameConstants::PhysicsDt);
 	for (int32 i = 0; i < TicksTo2ndDrop; ++i)
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 
-	TestEqual("SantaWater second drop spawned after 0.3s", WC->GetGroundZoneCount(), 2);
+	TestEqual("SantaWater second drop spawned after 0.3s", S.Game->GetGroundZoneCount(), 2);
 
 	S.Destroy();
 	return true;
@@ -880,14 +850,13 @@ bool FSurvivorsSantaWaterLowAmountTargetsEnemy::RunTest(const FString& Parameter
 
 	// SantaWater Lv1: the first of two low-amount drops targets the nearest enemy.
 	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestEqual("SantaWater Lv1 first drop spawns immediately", WC->GetGroundZoneCount(), 1);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestEqual("SantaWater Lv1 first drop spawns immediately", S.Game->GetGroundZoneCount(), 1);
 
-	if (WC->GetGroundZoneCount() > 0)
+	if (S.Game->GetGroundZoneCount() > 0)
 	{
-		const float Dist = FVector2D::Distance(WC->GetGroundZonePos(0), EnemyPos);
+		const float Dist = FVector2D::Distance(S.Game->GetGroundZonePos(0), EnemyPos);
 		TestTrue("SantaWater Lv1 drop near closest enemy (< 5u)", Dist < 5.f);
 	}
 
@@ -907,16 +876,14 @@ bool FSurvivorsSantaWaterWarningZoneNoDamage::RunTest(const FString& Parameters)
 	S.AddEnemyAt(FVector2D(0.f, 0.f), /*HP=*/100.f);
 
 	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
-	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestTrue("Ground zone is in warning phase", WC->IsGroundZoneWarning(0));
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestTrue("Ground zone is in warning phase", S.Game->IsGroundZoneWarning(0));
 
-	CC->BuildEnemyGrid();
+	FSurvivorsGameTestAccess::BuildEnemyGrid(S.Game);
 	FSurvivorsHitFrame HF;
-	WC->ComputeAllWeaponHits(CC, HF);
-	WC->ApplyWeaponHits(HF);
+	FSurvivorsGameTestAccess::ComputeAllWeaponHits(S.Game, HF);
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF);
 
 	TestEqual("No damage during warning phase",
 		FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, 100.f);
@@ -939,18 +906,17 @@ bool FSurvivorsSantaWaterHighAmountCircular::RunTest(const FString& Parameters)
 
 	// SantaWater Lv6: Amount=5
 	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 6);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
 	// 4 drops 分生成（初回 + 0.3s × 3）
 	const int32 TicksForAll4 = FMath::CeilToInt(1.0f / SurvivorsGameConstants::PhysicsDt);
 	for (int32 i = 0; i < TicksForAll4; ++i)
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 
-	TestTrue("SantaWater Lv6 spawns 2+ drops", WC->GetGroundZoneCount() >= 2);
+	TestTrue("SantaWater Lv6 spawns 2+ drops", S.Game->GetGroundZoneCount() >= 2);
 
-	if (WC->GetGroundZoneCount() >= 2)
+	if (S.Game->GetGroundZoneCount() >= 2)
 	{
-		const float Dist01 = FVector2D::Distance(WC->GetGroundZonePos(0), WC->GetGroundZonePos(1));
+		const float Dist01 = FVector2D::Distance(S.Game->GetGroundZonePos(0), S.Game->GetGroundZonePos(1));
 		// 30°固定間隔: chord = 2 × 140 × sin(15°) ≈ 72.5u、許容 [60, 85]u
 		TestTrue(FString::Printf(TEXT("SantaWater drops 30-degree spacing, dist01 %.1fu in [60,85]u"), Dist01),
 			Dist01 >= 60.f && Dist01 <= 85.f);
@@ -985,21 +951,20 @@ bool FSurvivorsPeachoneVideoOrbitMetrics::RunTest(const FString& Parameters)
 
 		FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
 		EquipTestWeapon(S.Game, Case.Type, 1);
-		auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-		const FVector2D StartPos = WC->GetOrbitOrbPos(0);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+		const FVector2D StartPos = S.Game->GetOrbitOrbPos(0);
 		const float OrbitRadius = StartPos.Size();
 		TestTrue(FString::Printf(TEXT("%s video orbit radius %.1fu should be near 168u"), Case.Label, OrbitRadius),
 			OrbitRadius >= 150.f && OrbitRadius <= 185.f);
 
-		const float ZoneRadius = WC->GetOrbitOrbVisualRadius(0);
+		const float ZoneRadius = S.Game->GetOrbitOrbVisualRadius(0);
 		TestTrue(FString::Printf(TEXT("%s video target-zone radius %.1fu should be near 49u"), Case.Label, ZoneRadius),
 			ZoneRadius >= 45.f && ZoneRadius <= 55.f);
 
 		const float StartAngle = FMath::Atan2(StartPos.Y, StartPos.X);
-		const float Elapsed = TickTestWeaponsForSecondsMeasured(WC, 1.0f);
-		const FVector2D EndPos = WC->GetOrbitOrbPos(0);
+		const float Elapsed = TickTestWeaponsForSecondsMeasured(S.Game, 1.0f);
+		const FVector2D EndPos = S.Game->GetOrbitOrbPos(0);
 		const float EndAngle = FMath::Atan2(EndPos.Y, EndPos.X);
 		const float RotSpeed = FMath::Abs(FMath::FindDeltaAngleRadians(StartAngle, EndAngle)) / Elapsed;
 		TestTrue(FString::Printf(TEXT("%s video orbit speed %.2frad/s should be near 0.8rad/s"), Case.Label, RotSpeed),
@@ -1030,18 +995,17 @@ bool FSurvivorsPeachoneAreaScalesImpactOnly::RunTest(const FString& Parameters)
 
 		FSurvivorsGameTestAccess::PlayerPos(S.Game) = FVector2D::ZeroVector;
 		EquipTestWeapon(S.Game, Type, Level);
-		auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-		if (!TestTrue(FString::Printf(TEXT("%s spawned bombard projectile"), Label), WC->GetProjectileCount() > 0))
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+		if (!TestTrue(FString::Printf(TEXT("%s spawned bombard projectile"), Label), S.Game->GetProjectileCount() > 0))
 		{
 			S.Destroy();
 			return false;
 		}
 
-		Out.OrbitRadius = WC->GetOrbitOrbPos(0).Size();
-		Out.ZoneRadius = WC->GetOrbitOrbVisualRadius(0);
-		Out.ImpactRadius = WC->GetProjectileRadius(0).Value;
+		Out.OrbitRadius = S.Game->GetOrbitOrbPos(0).Size();
+		Out.ZoneRadius = S.Game->GetOrbitOrbVisualRadius(0);
+		Out.ImpactRadius = S.Game->GetProjectileRadius(0).Value;
 
 		S.Destroy();
 		return true;
@@ -1092,24 +1056,23 @@ bool FSurvivorsPeachoneBombardModel::RunTest(const FString& Parameters)
 
 	// Peachone Lv1: Amount=4, PeachoneSetsPerActivation=4 → 計 16 shots
 	EquipTestWeapon(S.Game, EWeaponType::Peachone, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
 	// 初回 tick で最初の 1 発が即時発射
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	TestTrue("Peachone fires at least 1 projectile immediately", WC->GetProjectileCount() >= 1);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	TestTrue("Peachone fires at least 1 projectile immediately", S.Game->GetProjectileCount() >= 1);
 
 	// 0.025s × 2 後に 2 発以上
 	const int32 TicksFor2Shots = FMath::CeilToInt(0.06f / SurvivorsGameConstants::PhysicsDt);
 	for (int32 i = 0; i < TicksFor2Shots; ++i)
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 
 	TestTrue("Peachone fires multiple projectiles (bombard model not single AoE)",
-		WC->GetProjectileCount() >= 2);
+		S.Game->GetProjectileCount() >= 2);
 
 	// 砲撃弾はプレイヤー位置(0,0)ではなく orbit zone 付近（OrbitRadius=60u, BombRadius=30u）
-	if (WC->GetProjectileCount() > 0)
+	if (S.Game->GetProjectileCount() > 0)
 	{
-		const FVector2D ProjPos = WC->GetProjectilePos(0);
+		const FVector2D ProjPos = S.Game->GetProjectilePos(0);
 		const float DistFromPlayer = ProjPos.Size();
 		// Video target zone: orbit center about 168u from player, target-zone radius about 49u.
 		TestTrue("Peachone projectile is in video target-zone range (about 115u-215u from player)",
@@ -1130,13 +1093,12 @@ bool FSurvivorsVandalierTwoZoneBombard::RunTest(const FString& Parameters)
 	if (!TestTrue("World created", S.Create())) return false;
 
 	EquipTestWeapon(S.Game, EWeaponType::Vandalier, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 
 	// 2 zone 分の初回発射 → 2 発以上
-	TestTrue("Vandalier fires from 2 zones (>=2 projectiles)", WC->GetProjectileCount() >= 2);
-	TestEqual("Vandalier has 2 orbit orbs", WC->GetOrbitOrbCount(), 2);
+	TestTrue("Vandalier fires from 2 zones (>=2 projectiles)", S.Game->GetProjectileCount() >= 2);
+	TestEqual("Vandalier has 2 orbit orbs", S.Game->GetOrbitOrbCount(), 2);
 
 	S.Destroy();
 	return true;
@@ -1160,30 +1122,26 @@ bool FSurvivorsKingBiblePerOrbIndependentCooldown::RunTest(const FString& Parame
 
 	EquipTestWeapon(S.Game, EWeaponType::KingBible, 1);  // Lv1 baseline: Amount=2
 
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
-	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
-	auto* KB = Cast<USurvivorsKingBibleWeapon>(WC->GetWeaponInstance(0));
-	if (!TestTrue("KingBible instance exists", KB != nullptr)) { S.Destroy(); return false; }
 
 	// 1tick 起動してオーブをアクティブにする
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	if (!TestEqual("KingBible Lv1 has 2 orbs", KB->GetOrbPositions().Num(), 2)) { S.Destroy(); return false; }
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	if (!TestEqual("KingBible Lv1 has 2 orbs", S.Game->GetOrbitOrbCount(), 2)) { S.Destroy(); return false; }
 
 	// 敵をオーブ 0 の位置に置く → orb 0 ヒット
-	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = KB->GetOrbPositions()[0];
-	CC->BuildEnemyGrid();
+	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = S.Game->GetOrbitOrbPos(0);
+	FSurvivorsGameTestAccess::BuildEnemyGrid(S.Game);
 	FSurvivorsHitFrame HF1;
-	WC->ComputeAllWeaponHits(CC, HF1);
-	WC->ApplyWeaponHits(HF1);
+	FSurvivorsGameTestAccess::ComputeAllWeaponHits(S.Game, HF1);
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF1);
 	const float HPAfterOrb0 = FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP;
 	TestTrue("Orb 0 hit: HP decreased", HPAfterOrb0 < 2000.f);
 
 	// 敵をオーブ 1 の位置に置く → 同じ敵に orb 1 がすぐ当たれるか（per-orb 独立 cooldown）
-	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = KB->GetOrbPositions()[1];
-	CC->BuildEnemyGrid();
+	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = S.Game->GetOrbitOrbPos(1);
+	FSurvivorsGameTestAccess::BuildEnemyGrid(S.Game);
 	FSurvivorsHitFrame HF2;
-	WC->ComputeAllWeaponHits(CC, HF2);
-	WC->ApplyWeaponHits(HF2);
+	FSurvivorsGameTestAccess::ComputeAllWeaponHits(S.Game, HF2);
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF2);
 	const float HPAfterOrb1 = FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP;
 	TestTrue("Orb 1 can immediately hit same enemy (per-orb independent cooldown)",
 		HPAfterOrb1 < HPAfterOrb0);
@@ -1205,42 +1163,38 @@ bool FSurvivorsKingBibleOrbCooldownSameOrb::RunTest(const FString& Parameters)
 
 	EquipTestWeapon(S.Game, EWeaponType::KingBible, 1);  // Lv1 baseline: Amount=2
 
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
-	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
-	auto* KB = Cast<USurvivorsKingBibleWeapon>(WC->GetWeaponInstance(0));
-	if (!TestTrue("KingBible instance exists", KB != nullptr)) { S.Destroy(); return false; }
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	if (!TestEqual("KingBible Lv1 has 2 orbs", KB->GetOrbPositions().Num(), 2)) { S.Destroy(); return false; }
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	if (!TestEqual("KingBible Lv1 has 2 orbs", S.Game->GetOrbitOrbCount(), 2)) { S.Destroy(); return false; }
 
-	const FVector2D Orb0Pos = KB->GetOrbPositions()[0];
+	const FVector2D Orb0Pos = S.Game->GetOrbitOrbPos(0);
 
 	// 敵をオーブ 0 に重ねる → 1回目ヒット
 	// ノックバック(KnockbackSim_1=20u)で敵が離れるため、各 ComputeHits 前に位置をリセットする
 	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = Orb0Pos;
-	CC->BuildEnemyGrid();
+	FSurvivorsGameTestAccess::BuildEnemyGrid(S.Game);
 	FSurvivorsHitFrame HF1;
-	WC->ComputeAllWeaponHits(CC, HF1);
-	WC->ApplyWeaponHits(HF1);
+	FSurvivorsGameTestAccess::ComputeAllWeaponHits(S.Game, HF1);
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF1);
 	const float HPAfterFirst = FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP;
 	TestTrue("First orb hit deals damage", HPAfterFirst < 2000.f);
 
 	// 再度 → same orb cooldown でブロックされるはず（位置をリセットして接触範囲内に戻す）
 	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = Orb0Pos;
-	CC->BuildEnemyGrid();
+	FSurvivorsGameTestAccess::BuildEnemyGrid(S.Game);
 	FSurvivorsHitFrame HF2;
-	WC->ComputeAllWeaponHits(CC, HF2);
-	WC->ApplyWeaponHits(HF2);
+	FSurvivorsGameTestAccess::ComputeAllWeaponHits(S.Game, HF2);
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF2);
 	TestEqual("Same orb does not re-hit immediately",
 		FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, HPAfterFirst);
 
 	// 1.7s 経過後 → 再ヒット可能（位置をリセット）
 	FSurvivorsGameTestAccess::ElapsedTime(S.Game) += 1.71f;
 	FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos = Orb0Pos;
-	CC->BuildEnemyGrid();
+	FSurvivorsGameTestAccess::BuildEnemyGrid(S.Game);
 	FSurvivorsHitFrame HF3;
-	WC->ComputeAllWeaponHits(CC, HF3);
-	WC->ApplyWeaponHits(HF3);
+	FSurvivorsGameTestAccess::ComputeAllWeaponHits(S.Game, HF3);
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF3);
 	TestTrue("Same orb re-hits after 1.7s cooldown",
 		FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP < HPAfterFirst);
 
@@ -1266,25 +1220,23 @@ bool FSurvivorsLightningRingStrikeMarker::RunTest(const FString& Parameters)
 	S.AddEnemyAt(FVector2D( 100.f, 0.f), 100.f);
 
 	EquipTestWeapon(S.Game, EWeaponType::LightningRing, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
-	auto* CC = FSurvivorsGameTestAccess::CollComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	CC->BuildEnemyGrid();
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	FSurvivorsGameTestAccess::BuildEnemyGrid(S.Game);
 	FSurvivorsHitFrame HF;
-	WC->ComputeAllWeaponHits(CC, HF);
-	WC->ApplyWeaponHits(HF);
+	FSurvivorsGameTestAccess::ComputeAllWeaponHits(S.Game, HF);
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF);
 
 	// 落雷位置 marker が GroundZone として生成されていること（Amount=2 なので 2 個）
 	TestTrue("Lightning Ring spawns strike markers (>=2 ground zones)",
-		WC->GetGroundZoneCount() >= 2);
+		S.Game->GetGroundZoneCount() >= 2);
 
 	// marker は敵の位置付近に配置されること
 	bool bFoundNearEnemy0 = false;
 	bool bFoundNearEnemy1 = false;
-	for (int32 i = 0; i < WC->GetGroundZoneCount(); ++i)
+	for (int32 i = 0; i < S.Game->GetGroundZoneCount(); ++i)
 	{
-		const FVector2D ZPos = WC->GetGroundZonePos(i);
+		const FVector2D ZPos = S.Game->GetGroundZonePos(i);
 		if (FVector2D::Distance(ZPos, FVector2D(-100.f, 0.f)) < 50.f) bFoundNearEnemy0 = true;
 		if (FVector2D::Distance(ZPos, FVector2D( 100.f, 0.f)) < 50.f) bFoundNearEnemy1 = true;
 	}
@@ -1292,7 +1244,7 @@ bool FSurvivorsLightningRingStrikeMarker::RunTest(const FString& Parameters)
 	TestTrue("Strike marker placed near enemy 1", bFoundNearEnemy1);
 
 	// marker は短寿命（player center 常時 ring は出ない）
-	TestTrue("Strike markers are not warning zones", !WC->IsGroundZoneWarning(0));
+	TestTrue("Strike markers are not warning zones", !S.Game->IsGroundZoneWarning(0));
 
 	S.Destroy();
 	return true;
@@ -1316,13 +1268,12 @@ bool FSurvivorsMagicWandOnScreenOnly::RunTest(const FString& Parameters)
 	S.AddEnemyAt(FVector2D(500.f, 0.f));
 
 	EquipTestWeapon(S.Game, EWeaponType::MagicWand, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
 	// 画面外敵しかいない場合、弾はランダム方向（≠ 敵方向）に飛ぶ
 	// ここでは単純に「弾が発射されること」だけをテストする（ランダム方向は検証しない）
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 	TestEqual("MagicWand fires even when no on-screen enemy (random direction)",
-		WC->GetProjectileCount(), 1);
+		S.Game->GetProjectileCount(), 1);
 
 	S.Destroy();
 	return true;
@@ -1341,21 +1292,20 @@ bool FSurvivorsAxeRandomUpwardDirection::RunTest(const FString& Parameters)
 	// 敵なし（ランダム方向）
 
 	EquipTestWeapon(S.Game, EWeaponType::Axe, 2);  // Amount=2
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
 	// 初回発射：1発目（真上固定）
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	if (!TestEqual("Axe fires first shot", WC->GetProjectileCount(), 1)) { S.Destroy(); return false; }
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	if (!TestEqual("Axe fires first shot", S.Game->GetProjectileCount(), 1)) { S.Destroy(); return false; }
 
-	const FVector2D Pos0 = WC->GetProjectilePos(0);
+	const FVector2D Pos0 = S.Game->GetProjectilePos(0);
 	// 上方向（Y > 0）であること
 	TestTrue("Axe shot 0 travels upward (Y > 0)", Pos0.Y > 0.f);
 	// 1発目は真上固定（BurstShotsFiredCount==0 → RandomOffset=0）なので X≈0
 	TestTrue("Axe shot 0 is within ±30° of up", FMath::Abs(Pos0.X) <= Pos0.Y + 0.01f);
 
 	// 0.2s 後：2発目
-	TickTestWeaponsForSeconds(WC, 0.21f);
-	if (!TestEqual("Axe fires second shot", WC->GetProjectileCount(), 2)) { S.Destroy(); return false; }
+	TickTestWeaponsForSeconds(S.Game, 0.21f);
+	if (!TestEqual("Axe fires second shot", S.Game->GetProjectileCount(), 2)) { S.Destroy(); return false; }
 
 	S.Destroy();
 	return true;
@@ -1366,7 +1316,7 @@ bool FSurvivorsAxeRandomUpwardDirection::RunTest(const FString& Parameters)
 // ============================================================
 
 // AWallActor が存在しない環境でも Runetracer がスクリーン端で跳ね返ること
-// Runetracer を装備して実装経路（USurvivorsRunetracerWeapon::Tick → UpdateProjectilesBySlot）を通す
+// Runetracer を装備して実装経路（USurvivorsWeaponRunetracer::Tick → UpdateProjectilesBySlot）を通す
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsRunetracerScreenEdgeBounce,
 	"ReinBalance.Survivors.Wiki.Runetracer_ScreenEdgeBounce",
 	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
@@ -1379,7 +1329,6 @@ bool FSurvivorsRunetracerScreenEdgeBounce::RunTest(const FString& Parameters)
 
 	// Runetracer を装備して SlotIdx=0 のバウンス処理経路を有効化
 	EquipTestWeapon(S.Game, EWeaponType::Runetracer, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
 	// バウンス機構のテスト専用速度。
 	// Lv1 実速度(193u/s)では1tick(1/60s)で約3u進むのみでスクリーン端(400u)に届かない。
@@ -1398,29 +1347,29 @@ bool FSurvivorsRunetracerScreenEdgeBounce::RunTest(const FString& Parameters)
 	Proj.LifeTime       = FProjectileLifeTime(10.f);
 	Proj.bPiercing      = true;
 	Proj.BounceCount    = FBounceCount(3);
-	WC->SpawnProjectile(Proj);
-	const int32 PIdx = WC->GetProjectileCount() - 1;
+	S.Game->GetLogic()->SpawnProjectile(Proj);
+	const int32 PIdx = S.Game->GetProjectileCount() - 1;
 
 	// Tick: Runetracer::Tick → UpdateProjectilesBySlot（速度反転）→ TickProjectiles（Pos += Vel * Dt）
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 
-	if (!TestTrue("Runetracer projectile survives after screen edge tick", WC->GetProjectileCount() > PIdx))
+	if (!TestTrue("Runetracer projectile survives after screen edge tick", S.Game->GetProjectileCount() > PIdx))
 	{
 		S.Destroy();
 		return false;
 	}
 
 	// 速度が反転した後に移動しているので、最終位置はスクリーン端内（端を超えない）
-	const float PosX1 = WC->GetProjectilePos(PIdx).X;
+	const float PosX1 = S.Game->GetProjectilePos(PIdx).X;
 	TestTrue(FString::Printf(TEXT("Runetracer pos after bounce %.1fu <= screen edge %.1fu"),
 		PosX1, ScreenEdgeX),
 		PosX1 <= ScreenEdgeX + 1.f);
 
 	// もう 1 tick: 反射済みなので -X 方向に動く（X が減少）
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	if (WC->GetProjectileCount() > PIdx)
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	if (S.Game->GetProjectileCount() > PIdx)
 	{
-		const float PosX2 = WC->GetProjectilePos(PIdx).X;
+		const float PosX2 = S.Game->GetProjectilePos(PIdx).X;
 		TestTrue("Runetracer moves leftward after screen-edge bounce", PosX2 < PosX1);
 	}
 
@@ -1445,18 +1394,17 @@ bool FSurvivorsSantaWaterHighAmountPlacementRadiusFromImage::RunTest(const FStri
 
 	// SantaWater Lv4: Amount=4（高Amount円形配置）
 	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 4);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
 	// 4 drops 全生成（0.3s×3+初回）
 	const int32 TicksForAll = FMath::CeilToInt(1.1f / SurvivorsGameConstants::PhysicsDt);
 	for (int32 i = 0; i < TicksForAll; ++i)
-		WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+		FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
 
-	TestTrue("SantaWater Lv4 spawns at least 4 drops", WC->GetGroundZoneCount() >= 4);
+	TestTrue("SantaWater Lv4 spawns at least 4 drops", S.Game->GetGroundZoneCount() >= 4);
 
-	for (int32 i = 0; i < WC->GetGroundZoneCount(); ++i)
+	for (int32 i = 0; i < S.Game->GetGroundZoneCount(); ++i)
 	{
-		const float Dist = WC->GetGroundZonePos(i).Size();
+		const float Dist = S.Game->GetGroundZonePos(i).Size();
 		TestTrue(FString::Printf(TEXT("Drop %d center distance %.1fu should be 130-150u from player"), i, Dist),
 			Dist >= 130.f && Dist <= 150.f);
 	}
@@ -1482,17 +1430,16 @@ bool FSurvivorsSantaWaterHighAmountBlueAreaDistanceFromImage::RunTest(const FStr
 	S.AddEnemyAt(FVector2D(SurvivorsGameConstants::SantaWaterCircleRadius, 0.f));
 
 	EquipTestWeapon(S.Game, EWeaponType::SantaWater, 1);
-	auto* WC = FSurvivorsGameTestAccess::WeaponComp(S.Game);
 
-	WC->TickWeapons(SurvivorsGameConstants::PhysicsDt);
-	if (!TestTrue("SantaWater Lv1 first drop spawned", WC->GetGroundZoneCount() >= 1))
+	FSurvivorsGameTestAccess::TickWeapons(S.Game, SurvivorsGameConstants::PhysicsDt);
+	if (!TestTrue("SantaWater Lv1 first drop spawned", S.Game->GetGroundZoneCount() >= 1))
 	{
 		S.Destroy();
 		return false;
 	}
 
-	const float ZoneRadius     = WC->GetGroundZoneRadius(0);
-	const float DistFromPlayer = WC->GetGroundZonePos(0).Size();
+	const float ZoneRadius     = S.Game->GetGroundZoneRadius(0);
+	const float DistFromPlayer = S.Game->GetGroundZonePos(0).Size();
 	const float BlueAreaEdge   = DistFromPlayer + ZoneRadius;
 
 	TestTrue(FString::Printf(TEXT("Zone radius %.1fu should be 20-38u (image-derived Lv1=30u)"), ZoneRadius),

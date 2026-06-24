@@ -87,8 +87,13 @@ public:
 	UPROPERTY(VisibleAnywhere, Category = "Training|Debug")
 	TObjectPtr<ASurvivorsGameView> SpawnedGameView;
 
+	/** 全環境の HTTP サービス（Train + Eval を含む）*/
+	UPROPERTY(VisibleAnywhere, Category = "Training|Debug")
+	TArray<TObjectPtr<ASurvivorsHttpEnvService>> AllServices;
+
 protected:
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaTime) override;
 
 private:
 	ASurvivorsGame*           SpawnGame();
