@@ -223,10 +223,10 @@ public:
 	float SpawnMinDistance = 500.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
-	float SpawnMaxDistance = 700.f;
+	float SpawnMaxDistance = 600.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
-	float EnemyRecycleDistance = 1000.f;
+	float EnemyRecycleDistance = 650.f;
 
 	UPROPERTY(EditAnywhere, Category = "Survivors|Spawn")
 	float BossSpawnTime = 300.f;
