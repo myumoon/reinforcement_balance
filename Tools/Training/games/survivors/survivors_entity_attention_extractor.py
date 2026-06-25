@@ -41,7 +41,7 @@ _EXTRA_GLOBAL_KEYS = [
 
 
 class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
-    """Survivors用エンティティアテンション抽出器（v795_projectiles_stride9 obs スキーマ対応）。
+    """Survivors用エンティティアテンション抽出器（v795_projectiles_stride9 obs スキーマ専用）。
 
     基底クラスに加えて以下を追加:
     - 方向別密度/最近傍距離セグメントを global_feats として結合（既存）
@@ -50,13 +50,15 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
     - floor_pickups / special_pickups / destructibles を global_feats に追加
     - enemy_frozen を敵スカラー特徴として enemy_encoder に追加
     - projectiles (プレイヤー武器の攻撃実体) を専用 attention head で集約
-      stride 9: (dx,dy,radius_norm,vx_norm,vy_norm,warning,kind_norm,slot_norm,ttl_norm)
+      stride 9 固定: (dx,dy,radius_norm,vx_norm,vy_norm,warning,kind_norm,slot_norm,ttl_norm)
       kind_norm==0 (EProjectileObsKind::None) の場合は padding として扱う。
+      ⚠️ このクラスは v795 以降の stride 9 schema のみ対応。
+         旧 v794 の projectiles 192 次元（stride 6）では初期化時に ValueError を送出する。
 
-    新スキーマ（v795: 890次元）と旧スキーマの両方に自動対応:
-    - obs_schema に red_gem_rel_pos が存在する場合: 新スキーマとして処理
+    新旧 gem スキーマの自動判別:
+    - obs_schema に red_gem_rel_pos が存在する場合: 新スキーマ（v795）として処理
     - 存在しない場合: 旧スキーマ（gem_rel_pos）として処理
-    - _EXTRA_GLOBAL_KEYS / projectiles / enemy_frozen は存在する場合のみ追加
+    - _EXTRA_GLOBAL_KEYS / enemy_frozen は存在する場合のみ追加
 
     combined ベクトル構成（新スキーマ・全セグメント存在時）:
         self_info (58) + global_proj (64) + gem_agg (32) + enemy_agg (32) + proj_agg (32) = 218
@@ -130,13 +132,19 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
                     global_dim += dim
 
         # プロジェクタイル attention head（存在する場合のみ構築）
-        # stride 9: (dx,dy,radius_norm,vx_norm,vy_norm,warning,kind_norm,slot_norm,ttl_norm)
+        # stride 9 固定: (dx,dy,radius_norm,vx_norm,vy_norm,warning,kind_norm,slot_norm,ttl_norm)
+        # v795 以降の schema のみ対応。旧 v794 の 192 次元（stride 6）は ValueError で早期失敗。
         e = self._EMBED_DIM
         self._proj_slice: tuple[int, int] | None = None
         proj_agg_dim = 0
         if "projectiles" in offsets:
             proj_total_dim = schema_map.get("projectiles", 0)
             if proj_total_dim > 0:
+                if proj_total_dim % 9 != 0:
+                    raise ValueError(
+                        f"projectiles dim={proj_total_dim} は stride 9 の倍数ではありません。"
+                        f"このモデルは v795 以降の schema のみ対応しています。"
+                    )
                 proj_start = offsets["projectiles"]
                 self._proj_slice = (proj_start, proj_start + proj_total_dim)
                 self._num_projectiles = proj_total_dim // 9  # 各プロジェクタイル: stride 9
