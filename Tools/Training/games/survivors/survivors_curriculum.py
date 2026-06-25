@@ -37,7 +37,7 @@ from base.curriculum import (
 from stable_baselines3.common.callbacks import BaseCallback
 
 from games.survivors.survivors_difficulty import compute_difficulty_score
-from games.survivors.state_modules import CurriculumStateModule, EpisodeScoreTracker
+from games.survivors.modules.state_modules import CurriculumStateModule, EpisodeScoreTracker
 from games.survivors.param_applier import ParamApplier
 
 
@@ -374,3 +374,21 @@ def should_rollback(phase, phase_idx: int, mean: float, mean_len: float,
     if length_floor is not None and mean_len < length_floor:
         return True, f"ep_len={mean_len:.1f} < rollback_length_floor={length_floor:.1f}"
     return False, ""
+
+
+def get_enemy_params_for_phase(phase_idx: int) -> dict:
+    """フェーズインデックスから敵パラメータ dict を返す（bool/int 変換を統一）。
+
+    TaskCellSamplerCallback など複数の箇所から参照できる公開 API。
+    """
+    from games.survivors.survivors_difficulty import PARAM_BOUNDS
+    _PARAM_KEYS = list(PARAM_BOUNDS.keys())
+    phase = PHASES[phase_idx]
+    return {
+        key: (
+            bool(getattr(phase, key)) if key == "time_scaling"
+            else int(getattr(phase, key)) if key in ("min_enemies", "max_enemies", "max_enemy_type_id")
+            else float(getattr(phase, key))
+        )
+        for key in _PARAM_KEYS
+    }

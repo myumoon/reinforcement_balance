@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 
-from games.survivors.state_modules import (
+from games.survivors.modules.state_modules import (
     BaseStateModule,
     EpisodeScoreTracker,
     SpalfStateModule,
@@ -19,8 +19,8 @@ from games.survivors.param_applier import ParamApplier
 from games.survivors.survivors_difficulty import PARAM_BOUNDS
 from common.wandb_logger import WandbLogger
 
-# PHASES をインポート（_phase_bounds / _phase_params_from_phase で使用）
-from games.survivors.survivors_curriculum import PHASES as _CURRICULUM_PHASES
+# PHASES をインポート（_phase_bounds / get_enemy_params_for_phase で使用）
+from games.survivors.survivors_curriculum import PHASES as _CURRICULUM_PHASES, get_enemy_params_for_phase
 
 _PARAM_KEYS: list[str] = list(PARAM_BOUNDS.keys())
 
@@ -82,18 +82,6 @@ def _phase_bounds(phase_idx: int, completion_ready: bool = False) -> dict[str, t
         return fixed
 
 
-def _phase_params_from_phase(phase_idx: int) -> dict:
-    """_Phase から SPALF params dict を生成するヘルパー（bool/int 変換を統一）。"""
-    phase = _CURRICULUM_PHASES[phase_idx]
-    return {
-        key: (
-            bool(getattr(phase, key)) if key == "time_scaling"
-            else int(getattr(phase, key)) if key in ("min_enemies", "max_enemies", "max_enemy_type_id")
-            else float(getattr(phase, key))
-        )
-        for key in _PARAM_KEYS
-    }
-
 
 class HybridCurriculumSpalfCallback(BaseCallback):
     """カリキュラムフェーズで探索範囲を制限した SPALF コールバック。
@@ -124,8 +112,11 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         # Infrastructure
         wandb_logger: WandbLogger | None = None,
         verbose: int = 0,
+        param_control_mode: str = "normal",  # "normal" or "external"
     ):
         super().__init__(verbose)
+
+        self._param_control_mode: str = param_control_mode
 
         # UE5 パラメータ送信モジュール
         self._param_applier = ParamApplier(raw_env)
@@ -174,6 +165,12 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         self._param_applier.set_training_env(self.training_env)
         self._score_tracker.reset(n)
 
+        # external モード: TaskCellSamplerCallback が /params を管理するため
+        # Hybrid 側のパラメータ送信は行わず、スコアトラッカーの初期化のみ実施
+        if self._param_control_mode == "external":
+            self._ep_start_param_vec_per_env = [self._spalf._current_param_vec.copy() for _ in range(n)]
+            return
+
         # import_state 後の resume: _ep_start_param_vec_per_env を current_param_vec から再構築
         if self._pending_resume_state:
             self._pending_resume_state = False
@@ -190,7 +187,7 @@ class HybridCurriculumSpalfCallback(BaseCallback):
 
         # 新規開始: フェーズ 0 のパラメータを適用
         self._spalf.set_bounds(_phase_bounds(0))
-        initial_params = _phase_params_from_phase(0)
+        initial_params = get_enemy_params_for_phase(0)
         self._param_applier.apply(initial_params)
         initial_vec = self._spalf.params_to_vec(initial_params)
         self._ep_start_param_vec_per_env = [initial_vec.copy() for _ in range(n)]
@@ -221,6 +218,37 @@ class HybridCurriculumSpalfCallback(BaseCallback):
             self._log_phase_event("completion_ready → 拡張 bounds へ切り替え")
 
         infos = self.locals["infos"]
+
+        if self._param_control_mode == "external":
+            # external モード: TaskCellSamplerCallback が /params を管理する
+            # Curriculum.on_episode_end() は呼ぶ（phase 遷移判定に必要）
+            # SPALF 処理（params サンプル・apply）はスキップ
+            for env_idx, active_score, ep_len, ep_base in episode_results:
+                info = infos[env_idx] if env_idx < len(infos) else {}
+                alive_r = self._score_tracker.alive_reward * self._score_tracker.frame_skip * ep_len
+                is_truncated = bool(info.get("TimeLimit.truncated", False))
+                self._curriculum.on_episode_end(
+                    active_score, ep_len,
+                    base_reward=ep_base,
+                    alive_reward=alive_r,
+                    terminated=not is_truncated,
+                )
+                ep_active_scores.append(active_score)
+                ep_score_norms.append(active_score / self._spalf._max_score)
+            # フェーズ遷移判定（rollback のみ）
+            if episode_results:
+                event = self._curriculum.check_phase_transition(
+                    allow_promotion=False,
+                    promotion_source="train",
+                    num_timesteps=self.num_timesteps,
+                )
+                if event in ("rollback",):
+                    self._on_phase_changed(event)
+            self._curriculum._steps_in_phase += 1
+            if ep_active_scores:
+                self._log_wandb_per_step(ep_active_scores, ep_score_norms, ep_has_warmup)
+            return True
+
         # EpisodeScoreTracker.process() は 4-tuple (env_idx, active_score, ep_len, ep_base) を返す
         for env_idx, active_score, ep_len, ep_base in episode_results:
             # Curriculum モジュールへ通知（診断情報を既存 CurriculumCallback と同等に渡す）
@@ -276,6 +304,12 @@ class HybridCurriculumSpalfCallback(BaseCallback):
 
     def _on_phase_changed(self, event: str) -> None:
         """フェーズ変化時の処理。"""
+        if self._param_control_mode == "external":
+            # external モード: /params 送信・SPALF 更新はスキップ
+            # フェーズイベントのログのみ記録
+            phase_name = _CURRICULUM_PHASES[self._curriculum.current_phase].name
+            self._log_phase_event(f"{event}: Phase {self._curriculum.current_phase} {phase_name} (external mode - params skipped)")
+            return
         # SPALF バッファリセット（習熟度 _recent_reward_buffer / _total_episodes は維持）
         self._spalf.reset_buffers_for_phase_change()
         # 最終フェーズ completion 済みなら拡張 bounds へ
@@ -289,7 +323,7 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         # per-phase warmup（set_phase_warmup を使用）
         self._spalf.set_phase_warmup(self._phase_warmup_episodes)
         # フェーズのパラメータを適用
-        phase_params = _phase_params_from_phase(self._curriculum.current_phase)
+        phase_params = get_enemy_params_for_phase(self._curriculum.current_phase)
         self._apply_params(phase_params)
         self._spalf._current_params = phase_params
         phase_vec = self._spalf.params_to_vec(phase_params)
@@ -450,8 +484,8 @@ class HybridCurriculumSpalfCallback(BaseCallback):
         current = self._curriculum.current_phase
         next_phase = current + 1
         if next_phase >= len(_CURRICULUM_PHASES):
-            return _phase_params_from_phase(current)
-        return _phase_params_from_phase(next_phase)
+            return get_enemy_params_for_phase(current)
+        return get_enemy_params_for_phase(next_phase)
 
     def on_promotion_probe_results(self, episode_results: list[dict], num_timesteps: int = 0) -> str | None:
         """probe episode 結果を受け取り昇格判定を行う。

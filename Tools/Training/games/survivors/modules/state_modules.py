@@ -11,13 +11,16 @@ import random
 from abc import ABC, abstractmethod
 from collections import deque
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 import numpy as np
 
 from games.survivors.survivors_difficulty import PARAM_BOUNDS, compute_difficulty_score
 
 from abc import ABC, abstractmethod
+
+RollbackMode = Literal["normal", "emergency_only"]
+
 
 class BaseStateModule(ABC):
     """SpalfStateModule / CurriculumStateModule の共通インターフェース。"""
@@ -345,6 +348,7 @@ class CurriculumStateModule(BaseStateModule):
         threshold_mult: float,
         rollback_patience: int = 3,
         status_path=None,
+        rollback_mode: "RollbackMode" = "normal",
     ):
         from games.survivors.survivors_curriculum import PHASES
         self._PHASES = PHASES
@@ -356,6 +360,8 @@ class CurriculumStateModule(BaseStateModule):
         # 必要数を永遠に満たせなくなるため、window を上限にする。
         self.rollback_min_episodes = min(max(1, window // 2), window)
         self._status_path = status_path
+        self._rollback_mode: str = rollback_mode
+        self._last_blocked_rollback_reason: str = ""
 
         self._phase_idx: int = 0
         self._scores: list[float] = []
@@ -505,6 +511,14 @@ class CurriculumStateModule(BaseStateModule):
 
         rollback, reason = self._should_rollback(phase, mean, mean_len, effective_threshold, len(recent_scores))
         if rollback:
+            # emergency_only モード: 緊急崩壊（ep_len急落）以外のrollbackを抑制
+            if self._rollback_mode == "emergency_only":
+                emergency_threshold = phase.min_episode_steps * self._weapon_exposure_guard_emergency_ep_len_ratio
+                is_emergency = phase.min_episode_steps > 0 and mean_len < emergency_threshold
+                if not is_emergency:
+                    self._last_blocked_rollback_reason = reason
+                    self._rollback_bad_windows = 0
+                    return None
             self._rollback_bad_windows += 1
             if self._rollback_bad_windows >= self.rollback_patience:
                 # 武器露出ガード: rollback をブロックするか判定

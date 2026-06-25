@@ -20,7 +20,7 @@ if str(_TRAINING_ROOT) not in sys.path:
 
 import pytest
 
-from games.survivors.state_modules import (
+from games.survivors.modules.state_modules import (
     WeaponPhaseAutoStateModule,
     CurriculumStateModule,
     WEAPON_PHASE_CURRICULUM_GATES,

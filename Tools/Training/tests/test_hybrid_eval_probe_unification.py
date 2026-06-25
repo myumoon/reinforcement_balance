@@ -17,7 +17,8 @@ _TRAINING_ROOT = Path(__file__).resolve().parent.parent
 if str(_TRAINING_ROOT) not in sys.path:
     sys.path.insert(0, str(_TRAINING_ROOT))
 
-from games.survivors.hybrid_callback import HybridCurriculumSpalfCallback, _phase_params_from_phase
+from games.survivors.hybrid_callback import HybridCurriculumSpalfCallback
+from games.survivors.survivors_curriculum import get_enemy_params_for_phase as _phase_params_from_phase
 from games.survivors.survivors_eval_callback import SurvivorsEvalCallback
 from games.survivors.param_applier import ParamApplier
 

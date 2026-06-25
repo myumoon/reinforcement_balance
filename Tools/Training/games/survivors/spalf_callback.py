@@ -4,7 +4,7 @@ import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 from games.survivors.survivors_difficulty import PARAM_BOUNDS
 from games.survivors.param_applier import ParamApplier
-from games.survivors.state_modules import EpisodeScoreTracker, SpalfStateModule, _PHASE0_PARAMS
+from games.survivors.modules.state_modules import EpisodeScoreTracker, SpalfStateModule, _PHASE0_PARAMS
 _PARAM_BOUNDS = PARAM_BOUNDS
 _PARAM_KEYS = list(_PARAM_BOUNDS.keys())
 _N_PARAMS = len(_PARAM_KEYS)
