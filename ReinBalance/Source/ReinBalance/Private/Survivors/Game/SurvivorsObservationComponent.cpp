@@ -425,19 +425,19 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 	{
 		TArray<FProjectileObsState> ProjView = Game->GetProjectileObsViewForObs();
 
-		// 武器 Level 高い順 → 距離近い順でソート（top-N partial sort）
+		// Kind!=None → 距離近い順 → slot 昇順（SurvivorsGameLogic::GetObservation() と同一）
 		const int32 TakeProjN = FMath::Min(MaxProjectileObs, ProjView.Num());
 		std::partial_sort(ProjView.GetData(), ProjView.GetData() + TakeProjN,
 			ProjView.GetData() + ProjView.Num(),
 			[&](const FProjectileObsState& A, const FProjectileObsState& B)
 			{
-				const int32 LvA = (A.WeaponSlotIdx >= 0 && A.WeaponSlotIdx < MaxWeaponSlots)
-					? Game->WeaponSlots[A.WeaponSlotIdx].Level.Value : 0;
-				const int32 LvB = (B.WeaponSlotIdx >= 0 && B.WeaponSlotIdx < MaxWeaponSlots)
-					? Game->WeaponSlots[B.WeaponSlotIdx].Level.Value : 0;
-				if (LvA != LvB) return LvA > LvB;
-				return FVector2D::DistSquared(A.Pos, Game->PlayerPos)
-					 < FVector2D::DistSquared(B.Pos, Game->PlayerPos);
+				const bool AValid = A.Kind != EProjectileObsKind::None;
+				const bool BValid = B.Kind != EProjectileObsKind::None;
+				if (AValid != BValid) return AValid > BValid;
+				const float DA = FVector2D::DistSquared(A.Pos, Game->PlayerPos);
+				const float DB = FVector2D::DistSquared(B.Pos, Game->PlayerPos);
+				if (DA != DB) return DA < DB;
+				return A.WeaponSlotIdx < B.WeaponSlotIdx;
 			});
 
 		const float VNorm = Game->MoveSpeed > 0.f ? Game->MoveSpeed : 1.f;
