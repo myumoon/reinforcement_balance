@@ -2,6 +2,12 @@
 #include "Survivors/SurvivorsGameLogic.h"
 #include "Survivors/SurvivorsGameConstants.h"
 
+float FSurvivorsWeaponGarlicLogic::GetCooldownObsDenominator() const
+{
+	// Garlic/SoulEater: hit interval をそのまま使う（1.0〜1.3s）
+	return FMath::Max(CachedHitInterval, KINDA_SMALL_NUMBER);
+}
+
 void FSurvivorsWeaponGarlicLogic::OnLevelChanged(FWeaponLevel NewLevel)
 {
 	CacheParams();

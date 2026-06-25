@@ -34,9 +34,16 @@ public:
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) {}
 
 	// ---- 軌道オーブ View API（KingBible / Peachone / EbonyWings / Vandalier） ----
-	virtual int32     GetOrbitOrbCount()           const { return 0; }
-	virtual FVector2D GetOrbitOrbPos(int32 OrbIdx) const { return FVector2D::ZeroVector; }
-	virtual float     GetOrbitOrbVisualRadius()    const { return 0.f; }
+	virtual int32     GetOrbitOrbCount()                  const { return 0; }
+	virtual FVector2D GetOrbitOrbPos(int32 OrbIdx)        const { return FVector2D::ZeroVector; }
+	virtual float     GetOrbitOrbVisualRadius()           const { return 0.f; }
+	virtual int32     GetOrbitOrbSlotIdx(int32 OrbIdx)    const { return SlotIdx; }
+	virtual float     GetOrbitOrbTtl(int32 OrbIdx)        const { return 1.f; }
+
+	// ---- obs 正規化用 cooldown 分母 ----
+	// 武器ごとに適切な正規化分母を返す。
+	// KingBible は cooldown + duration、その他は武器の発動間隔に応じた値。
+	virtual float     GetCooldownObsDenominator()         const { return 2.f; }
 
 	// ---- アクセサ ----
 	EWeaponType      GetWeaponType()          const { return WeaponType; }

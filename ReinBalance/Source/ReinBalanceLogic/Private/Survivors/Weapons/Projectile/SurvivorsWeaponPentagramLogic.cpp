@@ -2,6 +2,13 @@
 #include "Survivors/SurvivorsGameLogic.h"
 #include "Survivors/SurvivorsGameConstants.h"
 
+float FSurvivorsWeaponPentagramLogic::GetCooldownObsDenominator() const
+{
+	// Pentagram/GorgeousMoon: 60〜90s の長 CD を正規化するため、cached cooldown を使う
+	const FPassiveEffects& PE = GetPassiveEffects();
+	return FMath::Max(CachedCooldown * PE.CooldownMult, KINDA_SMALL_NUMBER);
+}
+
 void FSurvivorsWeaponPentagramLogic::OnLevelChanged(FWeaponLevel NewLevel)
 {
 	CacheParams();

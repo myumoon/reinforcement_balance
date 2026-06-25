@@ -2,6 +2,13 @@
 #include "Survivors/SurvivorsGameLogic.h"
 #include "Survivors/SurvivorsGameConstants.h"
 
+float FSurvivorsWeaponFireWandLogic::GetCooldownObsDenominator() const
+{
+	// FireWand/Hellfire: 3.0s の CD を正規化
+	const FPassiveEffects& PE = GetPassiveEffects();
+	return FMath::Max(CachedCooldown * PE.CooldownMult, KINDA_SMALL_NUMBER);
+}
+
 void FSurvivorsWeaponFireWandLogic::OnLevelChanged(FWeaponLevel NewLevel)
 {
 	CacheParams();
@@ -64,9 +71,10 @@ void FSurvivorsWeaponFireWandLogic::Tick(float Dt)
 
 	CooldownTimer = FCooldownSeconds(CachedCooldown * PE.CooldownMult);
 
-	const float EffSpeed  = CachedSpeed * PE.SpeedMult;
-	const float LifeTime  = 9.0f * PE.DurationMult;
-	const int32 EffAmount = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
+	const float EffSpeed        = CachedSpeed * PE.SpeedMult;
+	const float EffFireballRadius = 8.f * PE.AreaMult;
+	const float LifeTime        = 9.0f * PE.DurationMult;
+	const int32 EffAmount       = FMath::Max(1, CachedAmount + static_cast<int32>(PE.ExtraAmount));
 
 	FVector2D Dir = FVector2D::ZeroVector;
 	TArray<int32> Candidates;
@@ -99,7 +107,7 @@ void FSurvivorsWeaponFireWandLogic::Tick(float Dt)
 		FProjectileState P;
 		P.Pos           = Logic->PlayerPos;
 		P.Vel           = ShotDir * EffSpeed;
-		P.Radius        = FSimRadius(8.f);
+		P.Radius        = FSimRadius(EffFireballRadius);
 		P.Damage        = FDamage(0.f);
 		P.WeaponType    = WeaponType;
 		P.WeaponSlotIdx = SlotIdx;

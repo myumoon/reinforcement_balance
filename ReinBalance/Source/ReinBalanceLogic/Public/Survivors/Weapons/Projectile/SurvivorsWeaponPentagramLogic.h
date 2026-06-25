@@ -9,6 +9,7 @@ public:
 	virtual void Tick(float Dt) override;
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
 	virtual void ComputeHits(FSurvivorsHitFrame& HitFrame) override;
+	virtual float GetCooldownObsDenominator() const override;
 
 private:
 	float CachedDamage   = 999.f;

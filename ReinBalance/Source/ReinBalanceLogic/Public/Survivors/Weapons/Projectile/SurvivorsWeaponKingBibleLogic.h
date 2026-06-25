@@ -11,9 +11,11 @@ public:
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
 	virtual void ComputeHits(FSurvivorsHitFrame& HitFrame) override;
 
-	virtual int32     GetOrbitOrbCount()           const override { return OrbPositions.Num(); }
-	virtual FVector2D GetOrbitOrbPos(int32 OrbIdx) const override { return OrbPositions.IsValidIndex(OrbIdx) ? OrbPositions[OrbIdx] : FVector2D::ZeroVector; }
-	virtual float     GetOrbitOrbVisualRadius()    const override { return OrbVisualRadius; }
+	virtual int32     GetOrbitOrbCount()                  const override { return OrbPositions.Num(); }
+	virtual FVector2D GetOrbitOrbPos(int32 OrbIdx)        const override { return OrbPositions.IsValidIndex(OrbIdx) ? OrbPositions[OrbIdx] : FVector2D::ZeroVector; }
+	virtual float     GetOrbitOrbVisualRadius()           const override;
+	virtual float     GetOrbitOrbTtl(int32 OrbIdx)        const override { return bOrbsActive ? ActiveTimer : 0.f; }
+	virtual float     GetCooldownObsDenominator()         const override;
 
 private:
 	float CachedDamage            = 10.f;

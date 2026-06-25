@@ -37,8 +37,9 @@ namespace SurvivorsGameConstants
 	static constexpr int32 MaxPassiveTypeCountReserved   = 32;  // EPassiveItemType は 18種、18〜31 は予約
 
 	// ---- obs バッファサイズ定数 ----
-	static constexpr int32 MaxProjectileObs              = 32;  // 新規（6 dim each: dx,dy,r,vx,vy,warning）
-	static constexpr int32 ProjectileObsStride           = 6;
+	static constexpr int32 MaxProjectileObs              = 32;  // 新規（9 dim each: dx,dy,r,vx,vy,warning,kind,slot,ttl）
+	static constexpr int32 ProjectileObsStride           = 9;
+	static constexpr float MaxProjectileObsTtl           = 8.f;
 	static constexpr int32 MaxEnemyObs                   = 32;  // 20 → 32 に拡大
 	static constexpr int32 MaxRedGemObs                  = 10;  // 新規
 	static constexpr int32 MaxGreenGemObs                = 12;  // 新規
