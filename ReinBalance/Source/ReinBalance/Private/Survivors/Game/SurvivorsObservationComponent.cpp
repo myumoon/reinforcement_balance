@@ -67,7 +67,7 @@ FString USurvivorsObservationComponent::GetObsSchemaHash() const
 {
 	using namespace SurvivorsGameConstants;
 	FString Schema = FString::Printf(
-		TEXT("SurvivorsGame_v794"
+		TEXT("SurvivorsGame_v795_projectiles_stride9"
 		     ",MaxEnemyObs=%d,MaxWeaponSlots=%d,MaxPassiveSlots=%d"
 		     ",MaxProjectileObs=%d,ProjectileObsStride=%d,MaxRedGemObs=%d,MaxGreenGemObs=%d,MaxBlueGemObs=%d"
 		     ",MaxFloorPickupObs=%d,MaxSpecialPickupObs=%d,MaxDestructibleObs=%d"
@@ -422,15 +422,14 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 	}
 
 	// ---- projectiles (MaxProjectileObs * ProjectileObsStride = 288) ----
-	if (Game->WeaponComponent)
 	{
-		TArray<FProjectileState> ProjView = Game->WeaponComponent->GetProjectileObsView();
+		TArray<FProjectileObsState> ProjView = Game->GetProjectileObsViewForObs();
 
 		// 武器 Level 高い順 → 距離近い順でソート（top-N partial sort）
 		const int32 TakeProjN = FMath::Min(MaxProjectileObs, ProjView.Num());
 		std::partial_sort(ProjView.GetData(), ProjView.GetData() + TakeProjN,
 			ProjView.GetData() + ProjView.Num(),
-			[&](const FProjectileState& A, const FProjectileState& B)
+			[&](const FProjectileObsState& A, const FProjectileObsState& B)
 			{
 				const int32 LvA = (A.WeaponSlotIdx >= 0 && A.WeaponSlotIdx < MaxWeaponSlots)
 					? Game->WeaponSlots[A.WeaponSlotIdx].Level.Value : 0;
@@ -446,28 +445,19 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 		{
 			if (p < ProjView.Num())
 			{
-				const FProjectileState& P = ProjView[p];
-				// 既存の6フィールド
+				const FProjectileObsState& P = ProjView[p];
 				Obs.Add((P.Pos.X - Game->PlayerPos.X) / DN);
 				Obs.Add((P.Pos.Y - Game->PlayerPos.Y) / DN);
-				Obs.Add(FMath::Clamp(P.Radius.Value / MaxProjectileRadius, 0.f, 1.f));
-				Obs.Add(P.Vel.X / VNorm);
-				Obs.Add(P.Vel.Y / VNorm);
+				Obs.Add(FMath::Clamp(P.Radius / MaxProjectileRadius, 0.f, 1.f));
+				Obs.Add(FMath::Clamp(P.Vel.X / VNorm, -1.f, 1.f));
+				Obs.Add(FMath::Clamp(P.Vel.Y / VNorm, -1.f, 1.f));
 				Obs.Add(P.bIsWarning ? 1.f : 0.f);
-				// 新規追加の3フィールド（kind, slot, ttl）
-				// kind: warning=true → GroundZone(2/4), else → Projectile(1/4)
-				const float KindNorm = P.bIsWarning ? (2.f / 4.f) : (1.f / 4.f);
-				Obs.Add(KindNorm);
+				Obs.Add(GetProjectileObsKindNorm(P.Kind));
 				Obs.Add(P.WeaponSlotIdx >= 0 ? (float)P.WeaponSlotIdx / (float)(MaxWeaponSlots - 1) : 0.f);
-				Obs.Add(FMath::Clamp(P.LifeTime.Seconds / MaxProjectileObsTtl, 0.f, 1.f));
+				Obs.Add(FMath::Clamp(P.Ttl / MaxProjectileObsTtl, 0.f, 1.f));
 			}
 			else { for (int32 k = 0; k < ProjectileObsStride; ++k) Obs.Add(0.f); }
 		}
-	}
-	else
-	{
-		// WeaponComponent なし時は 0 パディング
-		for (int32 p = 0; p < MaxProjectileObs * ProjectileObsStride; ++p) Obs.Add(0.f);
 	}
 
 	// ---- floor_pickups (MaxFloorPickupObs * 3 = 24) ----

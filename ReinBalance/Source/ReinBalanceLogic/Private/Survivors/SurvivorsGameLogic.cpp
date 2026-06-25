@@ -501,7 +501,7 @@ TArray<float> FSurvivorsGameLogic::GetObservation() const
 				Obs.Add(FMath::Clamp(P.Vel.X / MS, -1.f, 1.f));
 				Obs.Add(FMath::Clamp(P.Vel.Y / MS, -1.f, 1.f));
 				Obs.Add(P.bIsWarning ? 1.f : 0.f);
-				Obs.Add((float)(uint8)P.Kind / 4.f);
+				Obs.Add(GetProjectileObsKindNorm(P.Kind));
 				Obs.Add(P.WeaponSlotIdx >= 0 ? (float)P.WeaponSlotIdx / (float)(MaxWeaponSlots - 1) : 0.f);
 				Obs.Add(FMath::Clamp(P.Ttl / MaxProjectileObsTtl, 0.f, 1.f));
 			}
@@ -630,12 +630,19 @@ TArray<FProjectileObsState> FSurvivorsGameLogic::GetProjectileObsView() const
 		V.Add(OS);
 	}
 
-	// Orbit orbs (KingBible / UnholyVespers)
+	// orbit orbs: Phase 1 = KingBible / UnholyVespers のみ
+	// Peachone/EbonyWings/Vandalier は Phase 2 スコープ外のため除外
 	int32 OrbOff = 0;
 	for (int32 si = 0; si < Weapons.Num(); ++si)
 	{
 		if (!Weapons[si]) continue;
+		const EWeaponType OrbWType = Weapons[si]->GetWeaponType();
 		const int32 OrbCount = Weapons[si]->GetOrbitOrbCount();
+		if (OrbWType != EWeaponType::KingBible && OrbWType != EWeaponType::UnholyVespers)
+		{
+			OrbOff += OrbCount;
+			continue;
+		}
 		for (int32 oi = 0; oi < OrbCount; ++oi)
 		{
 			FProjectileObsState OS;

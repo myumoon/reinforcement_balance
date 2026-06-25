@@ -222,6 +222,11 @@ FVector2D  ASurvivorsGame::GetOrbitOrbPos(int32 i)            const { return Log
 EWeaponType ASurvivorsGame::GetOrbitOrbWeaponType(int32 i)    const { return Logic.GetOrbitOrbWeaponType(i); }
 float      ASurvivorsGame::GetOrbitOrbVisualRadius(int32 i)   const { return Logic.GetOrbitOrbVisualRadius(i); }
 
+TArray<FProjectileObsState> ASurvivorsGame::GetProjectileObsViewForObs() const
+{
+	return Logic.GetProjectileObsView();
+}
+
 // ---- 内部ユーティリティ -------------------------------------------------------
 
 float ASurvivorsGame::GetEnemySpeed(int32 TypeId) const

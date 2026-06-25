@@ -295,6 +295,11 @@ enum class EProjectileObsKind : uint8
 	Aura       = 4,
 };
 
+inline float GetProjectileObsKindNorm(EProjectileObsKind Kind)
+{
+    return static_cast<float>(static_cast<uint8>(Kind)) / 4.f;
+}
+
 // obs 用軽量攻撃実体状態
 struct FProjectileObsState
 {

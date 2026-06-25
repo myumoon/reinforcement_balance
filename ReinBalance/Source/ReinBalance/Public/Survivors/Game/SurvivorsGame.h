@@ -497,6 +497,9 @@ public:
 	FSurvivorsGameLogic* GetLogic() { return &Logic; }
 	const FSurvivorsGameLogic* GetLogic() const { return &Logic; }
 
+	/** obs 生成用: Logic.GetProjectileObsView() に委譲 */
+	TArray<FProjectileObsState> GetProjectileObsViewForObs() const;
+
 	/**
 	 * 全 UPROPERTY フィールドを FSurvivorsGameLogicConfig に変換して Logic に同期する。
 	 * /params 適用後・ResetState() 前に呼ぶ（ゲームスレッド専用）。
