@@ -102,6 +102,11 @@ class TaskCellSamplerCallback(BaseCallback):
         episode_results = self._score_tracker.process(self.locals["infos"])
         infos = self.locals["infos"]
 
+        # 敵フェーズ変化検出（probe 昇格・rollback を TCS に反映）
+        current_enemy_phase = self._hybrid_cb.current_phase
+        if current_enemy_phase != self._tcs._max_unlocked_enemy_phase_idx:
+            self._on_enemy_phase_changed(current_enemy_phase)
+
         for env_idx, active_score, ep_len, ep_base in episode_results:
             info = infos[env_idx] if env_idx < len(infos) else {}
             is_truncated = bool(info.get("TimeLimit.truncated", False))
@@ -154,6 +159,20 @@ class TaskCellSamplerCallback(BaseCallback):
             self._wandb_logger.log(metrics, step=self.num_timesteps)
 
         return True
+
+    def _on_enemy_phase_changed(self, new_max_phase: int) -> None:
+        """敵フェーズ変化時に候補セルを再構築する。"""
+        old_phase = self._tcs._max_unlocked_enemy_phase_idx
+        min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
+        self._tcs.rebuild_candidate_cells(
+            stage_key=self._weapon_unlock.current_stage_key,
+            max_unlocked_enemy_phase_idx=new_max_phase,
+            min_episode_steps_by_phase=min_ep_steps,
+        )
+        print(
+            f"[TaskCellSampler] 敵フェーズ変化を検出: {old_phase} → {new_max_phase}, "
+            f"候補セルを再構築しました"
+        )
 
     def _build_params_for_cell(self, cell: TaskCell) -> dict:
         """セルから UE5 /params 送信用 dict を構築する。"""

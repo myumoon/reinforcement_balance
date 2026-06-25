@@ -304,6 +304,12 @@ class HybridCurriculumSpalfCallback(BaseCallback):
 
     def _on_phase_changed(self, event: str) -> None:
         """フェーズ変化時の処理。"""
+        if self._param_control_mode == "external":
+            # external モード: /params 送信・SPALF 更新はスキップ
+            # フェーズイベントのログのみ記録
+            phase_name = _CURRICULUM_PHASES[self._curriculum.current_phase].name
+            self._log_phase_event(f"{event}: Phase {self._curriculum.current_phase} {phase_name} (external mode - params skipped)")
+            return
         # SPALF バッファリセット（習熟度 _recent_reward_buffer / _total_episodes は維持）
         self._spalf.reset_buffers_for_phase_change()
         # 最終フェーズ completion 済みなら拡張 bounds へ

@@ -84,3 +84,31 @@ def test_active_pending_cell_lifecycle():
     assert stats_0 is not None
     assert stats_0.episode_count == 1
     assert stats_0.active_score_mean == pytest.approx(400.0)
+
+
+def test_enemy_phase_change_rebuilds_candidates():
+    """敵フェーズが変化したとき候補セルが再構築されることを確認する。"""
+    from games.survivors.modules.task_cell_sampler_module import TaskCell, TaskCellSamplerStateModule
+
+    tcs = TaskCellSamplerStateModule(enemy_phase_backtrack=1)
+    # 初期: phase 0, backtrack=1 → enemy_phase 候補は max(0, 0-1)..0 = [0]
+    tcs.rebuild_candidate_cells("WU0", 0, {0: 100, 1: 200})
+    assert all(c.enemy_phase_idx == 0 for c in tcs._candidate_cells)
+
+    # 事前に phase 0 のセルで stats を記録しておく
+    phase0_cells = list(tcs._candidate_cells)
+    assert len(phase0_cells) > 0
+    sample_cell = phase0_cells[0]
+    tcs.on_episode_end(sample_cell, active_score=500.0, ep_len=100, terminated=True, num_timesteps=0)
+
+    # phase 1 に昇格 → enemy_phase 候補は max(0, 1-1)..1 = [0, 1]
+    tcs.rebuild_candidate_cells("WU0", 1, {0: 100, 1: 200})
+    phase_idxs = {c.enemy_phase_idx for c in tcs._candidate_cells}
+    assert 0 in phase_idxs
+    assert 1 in phase_idxs
+
+    # 既存 stats が保持されていること
+    stats_phase0 = tcs.get_cell_stats(sample_cell.first_weapon_id, 0)
+    assert stats_phase0 is not None  # 再構築後もstatsが保持される
+    assert stats_phase0.episode_count == 1
+    assert stats_phase0.active_score_mean == pytest.approx(500.0)
