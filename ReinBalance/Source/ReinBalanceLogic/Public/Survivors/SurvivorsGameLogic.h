@@ -51,8 +51,8 @@ struct FSurvivorsGameLogicConfig
 	float  EnemyDamageScale   = 1.0f;
 	float  EnemySpeedMult     = 1.0f;
 	float  SpawnMinDistance   = 500.f;
-	float  SpawnMaxDistance   = 700.f;
-	float  EnemyRecycleDistance = 1000.f;
+	float  SpawnMaxDistance   = 600.f;
+	float  EnemyRecycleDistance = 650.f;
 	float  BossSpawnTime      = 300.f;
 
 	// ---- プレイヤー設定 ----
