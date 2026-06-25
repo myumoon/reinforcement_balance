@@ -15,12 +15,12 @@ if str(_TRAINING_ROOT) not in sys.path:
 from games.survivors.hybrid_callback import (
     HybridCurriculumSpalfCallback,
     _phase_bounds,
-    _phase_params_from_phase,
     _FINAL_PHASE_EXTENDED_BOUNDS,
     _CURRICULUM_PHASES,
 )
+from games.survivors.survivors_curriculum import get_enemy_params_for_phase as _phase_params_from_phase
 from games.survivors.survivors_difficulty import PARAM_BOUNDS
-from games.survivors.state_modules import _PARAM_KEYS
+from games.survivors.modules.state_modules import _PARAM_KEYS
 
 
 def _make_callback(**kwargs) -> HybridCurriculumSpalfCallback:

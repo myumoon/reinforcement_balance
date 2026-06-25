@@ -19,7 +19,7 @@ if str(_TRAINING_ROOT) not in sys.path:
 
 import pytest
 
-from games.survivors.state_modules import CurriculumStateModule
+from games.survivors.modules.state_modules import CurriculumStateModule
 
 
 # ---------------------------------------------------------------------------

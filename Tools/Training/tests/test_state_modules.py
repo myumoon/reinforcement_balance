@@ -8,7 +8,7 @@ _TRAINING_ROOT = Path(__file__).resolve().parent.parent
 if str(_TRAINING_ROOT) not in sys.path:
     sys.path.insert(0, str(_TRAINING_ROOT))
 
-from games.survivors.state_modules import EpisodeScoreTracker, SpalfStateModule, CurriculumStateModule, _PHASE0_PARAMS
+from games.survivors.modules.state_modules import EpisodeScoreTracker, SpalfStateModule, CurriculumStateModule, _PHASE0_PARAMS
 
 
 class TestEpisodeScoreTracker:
@@ -337,7 +337,7 @@ class TestSpalfStateModuleHybridMethods:
         params["min_enemies"] = 20
         vec = m.params_to_vec(params)
         # ゼロ幅キーは 0.5 になること
-        from games.survivors.state_modules import _PARAM_KEYS
+        from games.survivors.modules.state_modules import _PARAM_KEYS
         idx = _PARAM_KEYS.index("min_enemies")
         assert abs(vec[idx] - 0.5) < 1e-6
 
@@ -370,6 +370,6 @@ class TestSpalfStateModuleHybridMethods:
         vec_narrow = m.params_to_vec(params_mid)
 
         # 幅が変わったので min_enemies の正規化値が変わるはず
-        from games.survivors.state_modules import _PARAM_KEYS
+        from games.survivors.modules.state_modules import _PARAM_KEYS
         idx = _PARAM_KEYS.index("min_enemies")
         assert abs(vec_default[idx] - vec_narrow[idx]) > 1e-3

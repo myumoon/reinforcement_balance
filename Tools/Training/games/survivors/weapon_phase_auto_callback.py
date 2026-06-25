@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from stable_baselines3.common.callbacks import BaseCallback
 
 from games.survivors.survivors_weapon_curriculum import get_params_for_phase
-from games.survivors.state_modules import WeaponPhaseAutoStateModule
+from games.survivors.modules.state_modules import WeaponPhaseAutoStateModule
 
 if TYPE_CHECKING:
     from common.wandb_logger import WandbLogger

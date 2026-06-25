@@ -44,6 +44,9 @@ from common.wandb_logger import WandbLogger
 from common.reward_analysis_logger import RewardAnalysisLogger, RewardAnalysisCallback, RewardAnalysisCheckpointCallback, SURVIVORS_OBS_SCHEMA
 from curriculum_callback import CurriculumCallback
 from games.survivors.weapon_curriculum_callback import WeaponCurriculumCallback as _WeaponCurriculumCallback
+from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
+from games.survivors.modules.task_cell_sampler_module import TaskCellSamplerStateModule
+from games.survivors.modules.weapon_unlock_module import WeaponUnlockStateModule
 
 try:
     import wandb
@@ -340,6 +343,8 @@ def _save_training_status(
     mirror_paths: list[Path] | None = None,
     noveld_state_path: Path | None = None,
     weapon_auto_module=None,
+    task_cell_sampler_module=None,
+    weapon_unlock_module=None,
 ) -> None:
     # run_dir からの相対パスで記録することで新旧両構成に対応
     def _rel(p: Path) -> str:
@@ -360,6 +365,8 @@ def _save_training_status(
         "curriculum_completion": curriculum_completion,
         "noveld_state_path": _rel(noveld_state_path) if noveld_state_path is not None else None,
         "weapon_phase_auto": weapon_auto_module.export_state() if weapon_auto_module is not None else None,
+        "task_cell_sampler": task_cell_sampler_module.export_state() if task_cell_sampler_module is not None else None,
+        "weapon_unlock": weapon_unlock_module.export_state() if weapon_unlock_module is not None else None,
     }
     if exit_reason is not None:
         data["last_exit_reason"] = exit_reason
@@ -909,6 +916,41 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb-project", default="rl-balance", help="W&B プロジェクト名")
     p.add_argument("--wandb-run-name", default=None, help="W&B ラン名（未指定時は自動生成）")
 
+    # タスクセルサンプラー
+    p.add_argument("--task-cell-sampler", action="store_true",
+                   help="タスクセルサンプラーを有効にする（--curriculum-spalf 必須）")
+    p.add_argument("--task-cell-min-episodes", type=int, default=30,
+                   help="セルごとの最低エピソード数 (default: 30)")
+    p.add_argument("--task-cell-progress-scale", type=float, default=300.0,
+                   help="学習進捗スケール (default: 300)")
+    p.add_argument("--task-cell-random-floor", type=float, default=0.05,
+                   help="ランダムフロア重み (default: 0.05)")
+    p.add_argument("--task-cell-blocked-steps", type=int, default=200_000,
+                   help="ブロック持続ステップ数 (default: 200000)")
+    p.add_argument("--task-cell-enemy-phase-backtrack", type=int, default=1,
+                   help="サンプル対象の敵Phase backtrack幅 (default: 1)")
+    p.add_argument("--task-cell-target-p10", type=float, default=300.0,
+                   help="weakness_bonus の p10 ターゲット (default: 300)")
+    p.add_argument("--task-cell-enemy-param-mode", type=str, default="phase_fixed",
+                   choices=["phase_fixed"],
+                   help="敵パラメータ決定モード (default: phase_fixed)")
+    p.add_argument("--weapon-unlock-table", type=str, default="default_v1",
+                   help="武器アンロックテーブル名 (default: default_v1)")
+    p.add_argument("--weapon-pool-policy", type=str, default="target_plus_anchor",
+                   help="episode武器プールポリシー (default: target_plus_anchor)")
+    p.add_argument("--weapon-item-stage", type=str, default="IS0",
+                   help="passive/evolution有効化段階 (default: IS0)")
+    p.add_argument("--weapon-unlock-min-episodes", type=int, default=30,
+                   help="武器アンロック昇格の最低エピソード数 (default: 30)")
+    p.add_argument("--weapon-unlock-target-p10", type=float, default=300.0,
+                   help="武器アンロック昇格の p10 ターゲット (default: 300)")
+    p.add_argument("--weapon-unlock-max-terminated-rate", type=float, default=0.5,
+                   help="武器アンロック昇格の最大terminated率 (default: 0.5)")
+    p.add_argument("--weapon-unlock-min-steps", type=int, default=100_000,
+                   help="武器アンロック昇格の最低ステップ数 (default: 100000)")
+    p.add_argument("--weapon-unlock-readiness-enemy-phase-cap", type=int, default=2,
+                   help="武器アンロック判定で使う敵Phase上限 (default: 2)")
+
     # YAML があればデフォルトを差し込む（CLI が常に優先）
     if pre_args.config:
         from common.config import load_yaml_config, apply_yaml_defaults
@@ -942,6 +984,11 @@ def main() -> None:
         raise ValueError("--curriculum-spalf は --n-envs > 1 が必要です（probe eval 専用 env に使用）。")
     if args.curriculum_spalf and args.eval_freq == 0:
         raise ValueError("--curriculum-spalf は --eval-freq > 0 が必要です（probe eval に使用）。")
+    if getattr(args, "task_cell_sampler", False):
+        if not args.curriculum_spalf:
+            raise ValueError("--task-cell-sampler は --curriculum-spalf が必要です。")
+        if getattr(args, "task_cell_enemy_param_mode", "phase_fixed") != "phase_fixed":
+            raise ValueError("--task-cell-enemy-param-mode は MVP では phase_fixed のみ対応しています。")
     if args.recurrent and args.frame_stack > 1:
         print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
               " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")
@@ -1381,7 +1428,8 @@ def main() -> None:
     # branch resume 時: source_dir/work を checkpoint_dir として渡すことで、
     # チェックポイントと同じ場所に保存された weapon_curriculum_status.json から
     # phase_start_step を復元できる。
-    if args.game == "survivors" and not args.dry_run and _weapon_phase_key != "auto":
+    if (args.game == "survivors" and not args.dry_run and _weapon_phase_key != "auto"
+            and not getattr(args, "task_cell_sampler", False)):
         # branch resume 時は source_dir が元 run ディレクトリを指すため work サブディレクトリを使用する。
         # 同一 run resume / 新規 run 時は source_dir が None のため checkpoint_dir は空文字列とする。
         _weapon_ckpt_dir = str(source_dir / "work") if (is_branch and source_dir is not None) else ""
@@ -1492,6 +1540,7 @@ def main() -> None:
             threshold_mult=args.curriculum_threshold,
             curriculum_status_path=str(curriculum_status_path),
             wandb_logger=wandb_logger,
+            param_control_mode="external" if getattr(args, "task_cell_sampler", False) else "normal",
         )
         if args.resume:
             # train.py の _save_training_status は curriculum_cb.export_state() を "curriculum" キーに保存する。
@@ -1563,12 +1612,13 @@ def main() -> None:
     # v09: ゲートベース昇格に変更。on_weapon_phase_advance_fn でスコアウィンドウのみリセット。
     # resume 状態は train_status_{step}_steps.json の "weapon_phase_auto" キーから復元する。
     _weapon_auto_module = None
-    if args.game == "survivors" and not args.dry_run and _weapon_phase_key == "auto":
+    if (args.game == "survivors" and not args.dry_run and _weapon_phase_key == "auto"
+            and not getattr(args, "task_cell_sampler", False)):
         if curriculum_cb is None:
             raise ValueError(
                 "--weapon-phase auto は --curriculum または --curriculum-spalf と組み合わせて使用してください。"
             )
-        from games.survivors.state_modules import WeaponPhaseAutoStateModule
+        from games.survivors.modules.state_modules import WeaponPhaseAutoStateModule
         from games.survivors.weapon_phase_auto_callback import WeaponPhaseAutoCallback
         _curriculum_module = curriculum_cb._curriculum
         _curriculum_module.configure_weapon_exposure_guard(
@@ -1655,6 +1705,68 @@ def main() -> None:
         else:
             print(f"[INFO] SurvivorsEvalCallback 有効 (eval_freq={args.eval_freq:,}, "
                   f"n_eval_episodes={args.eval_episodes}, eval_env=training_env[n_envs=1互換])")
+
+    # --task-cell-sampler 有効時の追加処理
+    _task_cell_sampler_module = None
+    _weapon_unlock_module = None
+    _tcs_cb = None
+    if args.game == "survivors" and getattr(args, "task_cell_sampler", False) and not args.dry_run:
+        _hybrid_cb_ref = locals().get("hybrid_cb")
+        _curriculum_module = getattr(_hybrid_cb_ref, "_curriculum", None) if _hybrid_cb_ref is not None else None
+
+        # CurriculumStateModule の rollback_mode を emergency_only に設定
+        if _curriculum_module is not None:
+            _curriculum_module._rollback_mode = "emergency_only"
+
+        _weapon_unlock_module = WeaponUnlockStateModule(
+            initial_stage_key="WU0",
+            weapon_unlock_min_episodes=args.weapon_unlock_min_episodes,
+            weapon_unlock_target_p10=args.weapon_unlock_target_p10,
+            weapon_unlock_max_terminated_rate=args.weapon_unlock_max_terminated_rate,
+            weapon_unlock_min_steps=args.weapon_unlock_min_steps,
+            weapon_unlock_readiness_enemy_phase_cap=args.weapon_unlock_readiness_enemy_phase_cap,
+        )
+        _task_cell_sampler_module = TaskCellSamplerStateModule(
+            min_episodes_per_cell=args.task_cell_min_episodes,
+            target_p10=args.task_cell_target_p10,
+            progress_scale=args.task_cell_progress_scale,
+            random_floor=args.task_cell_random_floor,
+            blocked_steps=args.task_cell_blocked_steps,
+            enemy_phase_backtrack=args.task_cell_enemy_phase_backtrack,
+        )
+        # resume 対応
+        _train_status = resume_status if args.resume else None
+        if _train_status is not None:
+            if "task_cell_sampler" in _train_status:
+                _task_cell_sampler_module.import_state(_train_status["task_cell_sampler"])
+                print("[INFO] task_cell_sampler state を復元")
+            if "weapon_unlock" in _train_status:
+                _weapon_unlock_module.import_state(_train_status["weapon_unlock"])
+                print("[INFO] weapon_unlock state を復元")
+
+        if _hybrid_cb_ref is not None and _task_cell_sampler_module and _weapon_unlock_module:
+            from games.survivors.param_applier import ParamApplier as _ParamApplier
+            _alive_reward_tcs = getattr(args, "curriculum_alive_reward", 0.001)
+            _tcs_cb = TaskCellSamplerCallback(
+                hybrid_cb=_hybrid_cb_ref,
+                task_cell_sampler=_task_cell_sampler_module,
+                weapon_unlock=_weapon_unlock_module,
+                param_applier=_ParamApplier(_get_raw_env(env)),
+                frame_skip=args.frame_skip,
+                alive_reward=_alive_reward_tcs,
+                item_stage_key=getattr(args, "weapon_item_stage", "IS0"),
+                enemy_param_mode=getattr(args, "task_cell_enemy_param_mode", "phase_fixed"),
+                pool_policy=getattr(args, "weapon_pool_policy", "target_plus_anchor"),
+                wandb_logger=wandb_logger,
+                log_dir=log_dir,
+            )
+            callbacks.append(_tcs_cb)
+            print(
+                f"[INFO] TaskCellSamplerCallback 有効 "
+                f"(item_stage={getattr(args, 'weapon_item_stage', 'IS0')}, "
+                f"pool_policy={getattr(args, 'weapon_pool_policy', 'target_plus_anchor')}, "
+                f"enemy_param_mode={getattr(args, 'task_cell_enemy_param_mode', 'phase_fixed')})"
+            )
 
     if args.until_curriculum_complete:
         if curriculum_cb is None:
@@ -1759,6 +1871,8 @@ def main() -> None:
             ],
             noveld_state_path=noveld_pt_path,
             weapon_auto_module=_weapon_auto_module,
+            task_cell_sampler_module=_task_cell_sampler_module,
+            weapon_unlock_module=_weapon_unlock_module,
         )
 
     checkpoint_cb = _RunCheckpointCallback(
