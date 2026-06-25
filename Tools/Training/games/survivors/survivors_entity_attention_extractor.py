@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from base.entity_attention_extractor import EntityAttentionExtractor
 
-# v794 obs スキーマの方向別密度特徴セグメント
+# v795_projectiles_stride9 obs スキーマの方向別密度特徴セグメント
 # 旧スキーマ（gem_nearest_dist_16dir 等）と新スキーマ（gem_density_all_16dir）の両方に対応
 _GLOBAL_KEYS_NEW = [
     "enemy_nearest_dist_16dir",
@@ -41,7 +41,7 @@ _EXTRA_GLOBAL_KEYS = [
 
 
 class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
-    """Survivors用エンティティアテンション抽出器（v794 obs スキーマ対応）。
+    """Survivors用エンティティアテンション抽出器（v795_projectiles_stride9 obs スキーマ専用）。
 
     基底クラスに加えて以下を追加:
     - 方向別密度/最近傍距離セグメントを global_feats として結合（既存）
@@ -49,12 +49,16 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
       global_feats に追加（v794 追加セグメント）
     - floor_pickups / special_pickups / destructibles を global_feats に追加
     - enemy_frozen を敵スカラー特徴として enemy_encoder に追加
-    - projectiles (プレイヤー武器の飛翔体) を専用 attention head で集約
+    - projectiles (プレイヤー武器の攻撃実体) を専用 attention head で集約
+      stride 9 固定: (dx,dy,radius_norm,vx_norm,vy_norm,warning,kind_norm,slot_norm,ttl_norm)
+      kind_norm==0 (EProjectileObsKind::None) の場合は padding として扱う。
+      ⚠️ このクラスは v795 以降の stride 9 schema のみ対応。
+         旧 v794 の projectiles 192 次元（stride 6）では初期化時に ValueError を送出する。
 
-    新スキーマ（v794: 794次元）と旧スキーマの両方に自動対応:
-    - obs_schema に red_gem_rel_pos が存在する場合: 新スキーマとして処理
+    新旧 gem スキーマの自動判別:
+    - obs_schema に red_gem_rel_pos が存在する場合: 新スキーマ（v795）として処理
     - 存在しない場合: 旧スキーマ（gem_rel_pos）として処理
-    - _EXTRA_GLOBAL_KEYS / projectiles / enemy_frozen は存在する場合のみ追加
+    - _EXTRA_GLOBAL_KEYS / enemy_frozen は存在する場合のみ追加
 
     combined ベクトル構成（新スキーマ・全セグメント存在時）:
         self_info (58) + global_proj (64) + gem_agg (32) + enemy_agg (32) + proj_agg (32) = 218
@@ -128,17 +132,24 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
                     global_dim += dim
 
         # プロジェクタイル attention head（存在する場合のみ構築）
+        # stride 9 固定: (dx,dy,radius_norm,vx_norm,vy_norm,warning,kind_norm,slot_norm,ttl_norm)
+        # v795 以降の schema のみ対応。旧 v794 の 192 次元（stride 6）は ValueError で早期失敗。
         e = self._EMBED_DIM
         self._proj_slice: tuple[int, int] | None = None
         proj_agg_dim = 0
         if "projectiles" in offsets:
             proj_total_dim = schema_map.get("projectiles", 0)
             if proj_total_dim > 0:
+                if proj_total_dim % 9 != 0:
+                    raise ValueError(
+                        f"projectiles dim={proj_total_dim} は stride 9 の倍数ではありません。"
+                        f"このモデルは v795 以降の schema のみ対応しています。"
+                    )
                 proj_start = offsets["projectiles"]
                 self._proj_slice = (proj_start, proj_start + proj_total_dim)
-                self._num_projectiles = proj_total_dim // 6  # 各プロジェクタイル: (dx,dy,r,vx,vy,warning)
+                self._num_projectiles = proj_total_dim // 9  # 各プロジェクタイル: stride 9
                 self.proj_encoder = nn.Sequential(
-                    nn.Linear(6, e), nn.ReLU(),
+                    nn.Linear(9, e), nn.ReLU(),
                     nn.Linear(e, e), nn.ReLU(),
                 )
                 self.proj_query = nn.Parameter(torch.randn(e))
@@ -212,9 +223,11 @@ class SurvivorsEntityAttentionExtractor(EntityAttentionExtractor):
 
         if self._proj_slice is not None:
             s, e_idx = self._proj_slice
-            proj_raw = obs[:, s:e_idx].reshape(B, self._num_projectiles, 6)
+            proj_raw = obs[:, s:e_idx].reshape(B, self._num_projectiles, 9)
+            # kind_norm (index 6) が 0 の場合は padding（EProjectileObsKind::None）
+            kind = proj_raw[:, :, 6]
             proj_dist = torch.norm(proj_raw[:, :, :2], dim=-1)
-            proj_pad_mask = (proj_dist < 1e-3)
+            proj_pad_mask = (kind <= 1e-6)
             proj_enc  = self.proj_encoder(proj_raw)
             proj_agg  = self._attend(proj_enc, self.proj_query, self.dist_alpha * proj_dist, proj_pad_mask)
             parts.append(proj_agg)

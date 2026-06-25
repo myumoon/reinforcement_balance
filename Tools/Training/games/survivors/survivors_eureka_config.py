@@ -132,15 +132,17 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         )
 
     def _prompt_section_obs_index(self) -> str:
-        # 794次元 obs スキーマ（v794 全武器・パッシブ対応スキーマ）に合わせた説明を生成する。
+        # 890次元 obs スキーマ（v795_projectiles_stride9 全武器・パッシブ対応スキーマ）に合わせた説明を生成する。
         # セグメント開始オフセットは _offsets dict（実 C++ schema から取得）を優先し、
-        # 取得できない場合は v794 schema の既定値にフォールバックする。
+        # 取得できない場合は v795 schema の既定値にフォールバックする。
         o = self._offsets
         max_player_hp = self._player_constant("MaxPlayerHP", 100.0)
         item_reward = self._reward_constant("ItemReward", 1.0)
         max_player_level = self._observation_constant("MaxPlayerLevel", 100)
 
-        # --- v794 schema オフセット（デフォルト値は schema 計算値） ---
+        # --- v795 schema オフセット（デフォルト値は schema 計算値） ---
+        # v795: projectiles が 288 次元 (stride 9, ×32) に拡張。旧 v794 は 192 次元 (stride 6)。
+        # 以下の fallback は v795 の正しいオフセットを使用すること。
         hp_i        = o.get("player_hp",               12)
         wpn_i       = o.get("weapon_slots",             23)   # 18 dims: (type,level,cd)×6
         psvslot_i   = o.get("passive_slots",            41)   # 12 dims: (type,level)×6
@@ -162,18 +164,18 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
         end_dm_i    = o.get("enemy_density_mid_16dir",  383)
         gem_da_i    = o.get("gem_density_all_16dir",   399)   # 48 dims
         gem_drg_i   = o.get("red_green_gem_density_16dir", 447)  # 48 dims
-        proj_i      = o.get("projectiles",             495)   # 192 dims: (dx,dy,r,vx,vy,warning)×32
-        fp_i        = o.get("floor_pickups",           687)   # 24 dims
-        sp_i        = o.get("special_pickups",         711)   # 9 dims
-        dest_i      = o.get("destructibles",           720)   # 20 dims
-        war_i       = o.get("weapon_attack_range_norm", 740)  # 6 dims: 有効射程×6スロット
-        wdir_i      = o.get("weapon_is_directional",   746)   # 6 dims: 方向性フラグ×6スロット
-        wcat_i      = o.get("weapon_category_onehot",  752)   # 42 dims: one-hot(7カテゴリ)×6スロット
+        proj_i      = o.get("projectiles",             495)   # 288 dims: (dx,dy,r,vx,vy,warning,kind,slot,ttl)×32
+        fp_i        = o.get("floor_pickups",           783)   # 24 dims  (495+288=783)
+        sp_i        = o.get("special_pickups",         807)   # 9 dims   (783+24=807)
+        dest_i      = o.get("destructibles",           816)   # 20 dims  (807+9=816)
+        war_i       = o.get("weapon_attack_range_norm", 836)  # 6 dims: 有効射程×6スロット  (816+20=836)
+        wdir_i      = o.get("weapon_is_directional",   842)   # 6 dims: 方向性フラグ×6スロット  (836+6=842)
+        wcat_i      = o.get("weapon_category_onehot",  848)   # 42 dims: one-hot(7カテゴリ)×6スロット  (842+6=848)
 
         max_enemy   = (ev_i - er_i) // 2   # = 32
 
         return (
-            f"**obs 合計: 794 次元（v794 全武器・パッシブ対応スキーマ）**\n"
+            f"**obs 合計: 890 次元（v795_projectiles_stride9 全武器・パッシブ対応スキーマ）**\n"
             f"\n"
             f"**プレイヤー状態**\n"
             f"  obs[0:2]    = player_pos (x,y) / FieldHalfSize → [-1, 1]\n"
@@ -224,9 +226,12 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
             f"  obs[{gem_da_i}:{gem_da_i+48}]   = gem_density_all_16dir (全Gem ×3密度特徴量)\n"
             f"  obs[{gem_drg_i}:{gem_drg_i+48}]  = red_green_gem_density_16dir (Red+Green ×3)\n"
             f"\n"
-            f"**プロジェクタイル（武器弾・GroundZone 混在、Level高い順→距離近い順）**\n"
-            f"  obs[{proj_i}:{proj_i+192}] = projectiles ×32: (dx,dy,radius_norm,vx_norm,vy_norm,warning) 各6次元\n"
-            f"    warning=1 は Santa Water / La Borra の着弾予兆、未使用スロット = (0,0,0,0,0,0)\n"
+            f"**プロジェクタイル（Kind!=None→距離近い順→slot昇順）**\n"
+            f"  obs[{proj_i}:{proj_i+288}] = projectiles ×32: (dx,dy,radius_norm,vx_norm,vy_norm,warning,kind_norm,slot_norm,ttl_norm) 各9次元\n"
+            f"    kind_norm: 0=None(padding), 0.25=Projectile, 0.5=GroundZone, 0.75=Orbit, 1.0=Aura\n"
+            f"    slot_norm: WeaponSlotIdx / (MaxWeaponSlots-1)\n"
+            f"    ttl_norm: 残有効時間 / 8.0s (Aura=常時1.0)\n"
+            f"    warning=1 は Santa Water / La Borra の着弾予兆、未使用スロット = (0×9)\n"
             f"\n"
             f"**フロアアイテム・特殊アイテム・破壊物**\n"
             f"  obs[{fp_i}:{fp_i+24}]   = floor_pickups ×8: (dx,dy,type_norm) 各3次元\n"
@@ -282,9 +287,9 @@ class SurvivorsEurekaConfig(EurekaGameConfig):
 
     def _prompt_section_weapon_profiles(self) -> str:
         wpn_i  = self._offsets.get("weapon_slots",            23)
-        war_i  = self._offsets.get("weapon_attack_range_norm", 740)
-        wdir_i = self._offsets.get("weapon_is_directional",   746)
-        wcat_i = self._offsets.get("weapon_category_onehot",  752)
+        war_i  = self._offsets.get("weapon_attack_range_norm", 836)
+        wdir_i = self._offsets.get("weapon_is_directional",   842)
+        wcat_i = self._offsets.get("weapon_category_onehot",  848)
         W = WeaponType
         melee   = [W.GARLIC, W.WHIP, W.KING_BIBLE, W.SOUL_EATER, W.BLOODY_TEAR, W.UNHOLY_VESPERS]
         ranged  = [W.MAGIC_WAND, W.KNIFE, W.AXE, W.CROSS, W.FIRE_WAND,

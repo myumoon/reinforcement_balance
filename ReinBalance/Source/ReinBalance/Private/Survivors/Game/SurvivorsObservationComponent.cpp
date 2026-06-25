@@ -67,7 +67,7 @@ FString USurvivorsObservationComponent::GetObsSchemaHash() const
 {
 	using namespace SurvivorsGameConstants;
 	FString Schema = FString::Printf(
-		TEXT("SurvivorsGame_v794"
+		TEXT("SurvivorsGame_v795_projectiles_stride9"
 		     ",MaxEnemyObs=%d,MaxWeaponSlots=%d,MaxPassiveSlots=%d"
 		     ",MaxProjectileObs=%d,ProjectileObsStride=%d,MaxRedGemObs=%d,MaxGreenGemObs=%d,MaxBlueGemObs=%d"
 		     ",MaxFloorPickupObs=%d,MaxSpecialPickupObs=%d,MaxDestructibleObs=%d"
@@ -421,24 +421,23 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 			GemDensityNearNormalizeFactor, GemDensityMidNormalizeFactor, Obs);
 	}
 
-	// ---- projectiles (MaxProjectileObs * ProjectileObsStride = 192) ----
-	if (Game->WeaponComponent)
+	// ---- projectiles (MaxProjectileObs * ProjectileObsStride = 288) ----
 	{
-		TArray<FProjectileState> ProjView = Game->WeaponComponent->GetProjectileObsView();
+		TArray<FProjectileObsState> ProjView = Game->GetProjectileObsViewForObs();
 
-		// 武器 Level 高い順 → 距離近い順でソート（top-N partial sort）
+		// Kind!=None → 距離近い順 → slot 昇順（SurvivorsGameLogic::GetObservation() と同一）
 		const int32 TakeProjN = FMath::Min(MaxProjectileObs, ProjView.Num());
 		std::partial_sort(ProjView.GetData(), ProjView.GetData() + TakeProjN,
 			ProjView.GetData() + ProjView.Num(),
-			[&](const FProjectileState& A, const FProjectileState& B)
+			[&](const FProjectileObsState& A, const FProjectileObsState& B)
 			{
-				const int32 LvA = (A.WeaponSlotIdx >= 0 && A.WeaponSlotIdx < MaxWeaponSlots)
-					? Game->WeaponSlots[A.WeaponSlotIdx].Level.Value : 0;
-				const int32 LvB = (B.WeaponSlotIdx >= 0 && B.WeaponSlotIdx < MaxWeaponSlots)
-					? Game->WeaponSlots[B.WeaponSlotIdx].Level.Value : 0;
-				if (LvA != LvB) return LvA > LvB;
-				return FVector2D::DistSquared(A.Pos, Game->PlayerPos)
-					 < FVector2D::DistSquared(B.Pos, Game->PlayerPos);
+				const bool AValid = A.Kind != EProjectileObsKind::None;
+				const bool BValid = B.Kind != EProjectileObsKind::None;
+				if (AValid != BValid) return AValid > BValid;
+				const float DA = FVector2D::DistSquared(A.Pos, Game->PlayerPos);
+				const float DB = FVector2D::DistSquared(B.Pos, Game->PlayerPos);
+				if (DA != DB) return DA < DB;
+				return A.WeaponSlotIdx < B.WeaponSlotIdx;
 			});
 
 		const float VNorm = Game->MoveSpeed > 0.f ? Game->MoveSpeed : 1.f;
@@ -446,21 +445,19 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 		{
 			if (p < ProjView.Num())
 			{
-				const FProjectileState& P = ProjView[p];
+				const FProjectileObsState& P = ProjView[p];
 				Obs.Add((P.Pos.X - Game->PlayerPos.X) / DN);
 				Obs.Add((P.Pos.Y - Game->PlayerPos.Y) / DN);
-				Obs.Add(FMath::Clamp(P.Radius.Value / MaxProjectileRadius, 0.f, 1.f));
-				Obs.Add(P.Vel.X / VNorm);
-				Obs.Add(P.Vel.Y / VNorm);
+				Obs.Add(FMath::Clamp(P.Radius / MaxProjectileRadius, 0.f, 1.f));
+				Obs.Add(FMath::Clamp(P.Vel.X / VNorm, -1.f, 1.f));
+				Obs.Add(FMath::Clamp(P.Vel.Y / VNorm, -1.f, 1.f));
 				Obs.Add(P.bIsWarning ? 1.f : 0.f);
+				Obs.Add(GetProjectileObsKindNorm(P.Kind));
+				Obs.Add(P.WeaponSlotIdx >= 0 ? (float)P.WeaponSlotIdx / (float)(MaxWeaponSlots - 1) : 0.f);
+				Obs.Add(FMath::Clamp(P.Ttl / MaxProjectileObsTtl, 0.f, 1.f));
 			}
 			else { for (int32 k = 0; k < ProjectileObsStride; ++k) Obs.Add(0.f); }
 		}
-	}
-	else
-	{
-		// WeaponComponent なし時は 0 パディング
-		for (int32 p = 0; p < MaxProjectileObs * ProjectileObsStride; ++p) Obs.Add(0.f);
 	}
 
 	// ---- floor_pickups (MaxFloorPickupObs * 3 = 24) ----

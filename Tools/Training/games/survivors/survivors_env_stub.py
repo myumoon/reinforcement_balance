@@ -3,9 +3,9 @@
 import numpy as np
 import gymnasium as gym
 
-# obs schema v794 に対応（SurvivorsObservationComponent.cpp GetObsSchema() と一致させる）
+# obs schema v795_projectiles_stride9 に対応（SurvivorsGameLogic.cpp GetObsSchema() と一致させる）
 # MaxWeaponSlots=6, MaxPassiveSlots=6, MaxEnemyObs=32, MaxRedGemObs=10,
-# MaxGreenGemObs=12, MaxBlueGemObs=12, MaxProjectileObs=32, ProjectileObsStride=6,
+# MaxGreenGemObs=12, MaxBlueGemObs=12, MaxProjectileObs=32, ProjectileObsStride=9,
 # MaxFloorPickupObs=8, MaxSpecialPickupObs=3, MaxDestructibleObs=10,
 # EnemyDensityDirCount=16, GemDensityDirCount=16
 _OBS_SCHEMA = [
@@ -40,7 +40,7 @@ _OBS_SCHEMA = [
     {"name": "enemy_density_mid_16dir",     "dim": 16},   # EnemyDensityDirCount(16)
     {"name": "gem_density_all_16dir",       "dim": 48},   # GemDensityDirCount(16) × 3
     {"name": "red_green_gem_density_16dir", "dim": 48},   # GemDensityDirCount(16) × 3
-    {"name": "projectiles",                 "dim": 192},  # MaxProjectileObs(32) × ProjectileObsStride(6)
+    {"name": "projectiles",                 "dim": 288},  # MaxProjectileObs(32) × ProjectileObsStride(9)
     {"name": "floor_pickups",               "dim": 24},   # MaxFloorPickupObs(8) × 3
     {"name": "special_pickups",             "dim": 9},    # MaxSpecialPickupObs(3) × 3
     {"name": "destructibles",               "dim": 20},   # MaxDestructibleObs(10) × 2
@@ -49,7 +49,7 @@ _OBS_SCHEMA = [
     {"name": "weapon_category_onehot",      "dim": 42},   # MaxWeaponSlots(6) × 7カテゴリ
 ]
 
-_OBS_DIM = sum(seg["dim"] for seg in _OBS_SCHEMA)  # = 794
+_OBS_DIM = sum(seg["dim"] for seg in _OBS_SCHEMA)  # = 890 (794 - 192 + 288)
 
 _NUM_ACTIONS = 9
 

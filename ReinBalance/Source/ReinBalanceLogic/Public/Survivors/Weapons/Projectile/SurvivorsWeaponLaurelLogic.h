@@ -8,6 +8,7 @@ class REINBALANCELOGIC_API FSurvivorsWeaponLaurelLogic : public FSurvivorsWeapon
 public:
 	virtual void Tick(float Dt) override;
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
+	virtual float GetCooldownObsDenominator() const override;
 
 private:
 	float CachedShieldDuration = 1.0f;

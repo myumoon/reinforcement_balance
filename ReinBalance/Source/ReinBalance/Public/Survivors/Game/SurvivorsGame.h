@@ -24,7 +24,7 @@ class USurvivorsWeaponComponent;
  * ビジュアル表示は別クラスが担う。
  *
  * 行動: 離散9方向 (0=+Y, 1=北東, 2=+X, 3=南東, 4=-Y, 5=南西, 6=-X, 7=北西, 8=静止)
- * 観測: 740次元（GetObsSchema() のセグメント合計）
+ * 観測: 890次元（GetObsSchema() のセグメント合計、v795 schema）
  */
 UCLASS()
 class REINBALANCE_API ASurvivorsGame : public AActor
@@ -496,6 +496,9 @@ public:
 	/** ゲームロジックへのポインタ（ParallelFor / テストから参照用） */
 	FSurvivorsGameLogic* GetLogic() { return &Logic; }
 	const FSurvivorsGameLogic* GetLogic() const { return &Logic; }
+
+	/** obs 生成用: Logic.GetProjectileObsView() に委譲 */
+	TArray<FProjectileObsState> GetProjectileObsViewForObs() const;
 
 	/**
 	 * 全 UPROPERTY フィールドを FSurvivorsGameLogicConfig に変換して Logic に同期する。

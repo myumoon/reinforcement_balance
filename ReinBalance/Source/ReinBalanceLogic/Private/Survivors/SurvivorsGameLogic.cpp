@@ -315,7 +315,7 @@ FString FSurvivorsGameLogic::GetObsSchemaHash() const
 {
 	using namespace SurvivorsGameConstants;
 	FString S = FString::Printf(
-		TEXT("SurvivorsGame_v794,MaxEnemyObs=%d,MaxWeaponSlots=%d,MaxPassiveSlots=%d"
+		TEXT("SurvivorsGame_v795_projectiles_stride9,MaxEnemyObs=%d,MaxWeaponSlots=%d,MaxPassiveSlots=%d"
 		     ",MaxProjectileObs=%d,ProjectileObsStride=%d,MaxRedGemObs=%d,MaxGreenGemObs=%d,MaxBlueGemObs=%d"
 		     ",MaxFloorPickupObs=%d,MaxSpecialPickupObs=%d,MaxDestructibleObs=%d"
 		     ",MaxWeaponTypeCountReserved=%d,MaxPassiveTypeCountReserved=%d"
@@ -400,7 +400,8 @@ TArray<float> FSurvivorsGameLogic::GetObservation() const
 		const int32 WML = SurvivorsGameConstants::GetWeaponMaxLevel(Slot.Type);
 		Obs.Add(WML > 0 ? (float)Slot.Level.Value / (float)WML : 0.f);
 		const FSurvivorsWeaponLogic* WI = Weapons.IsValidIndex(s) ? Weapons[s].Get() : nullptr;
-		Obs.Add(WI && Slot.Type != EWeaponType::None ? FMath::Clamp(WI->GetCooldownRemaining().Value / 2.f, 0.f, 1.f) : 0.f);
+		const float CooldownDen = WI ? FMath::Max(WI->GetCooldownObsDenominator(), KINDA_SMALL_NUMBER) : 1.0f;
+		Obs.Add(WI && Slot.Type != EWeaponType::None ? FMath::Clamp(WI->GetCooldownRemaining().Value / CooldownDen, 0.f, 1.f) : 0.f);
 	}
 
 	// passive_slots (MaxPassiveSlots*2)
@@ -473,25 +474,38 @@ TArray<float> FSurvivorsGameLogic::GetObservation() const
 	{ TArray<FVector2D> RGP; for (const FGemState& G:Gems) if(G.Type!=EGemType::Blue) RGP.Add(G.Pos);
 	  BuildDirDensity(RGP,PlayerPos,GemDensityDirCount,GemNearestDistanceMax,GemDensityNearDistanceMax,GemDensityMidDistanceMax,GemDensityNearNormalizeFactor,GemDensityMidNormalizeFactor,Obs); }
 
-	// projectiles
+	// projectiles (stride 9: dx,dy,radius_norm,vx_norm,vy_norm,warning,kind_norm,slot_norm,ttl_norm)
 	{
-		TArray<FProjectileState> PV = GetProjectileObsView();
+		TArray<FProjectileObsState> PV = GetProjectileObsView();
 		const int32 TPN = FMath::Min(MaxProjectileObs, PV.Num());
+		// ソート: Kind!=None → 距離近い順 → slot 昇順
 		std::partial_sort(PV.GetData(), PV.GetData()+TPN, PV.GetData()+PV.Num(),
-			[&](const FProjectileState& A, const FProjectileState& B)
+			[&](const FProjectileObsState& A, const FProjectileObsState& B)
 			{
-				const int32 LA = (A.WeaponSlotIdx>=0&&A.WeaponSlotIdx<MaxWeaponSlots)?WeaponSlots[A.WeaponSlotIdx].Level.Value:0;
-				const int32 LB = (B.WeaponSlotIdx>=0&&B.WeaponSlotIdx<MaxWeaponSlots)?WeaponSlots[B.WeaponSlotIdx].Level.Value:0;
-				if (LA!=LB) return LA>LB;
-				return FVector2D::DistSquared(A.Pos,PlayerPos)<FVector2D::DistSquared(B.Pos,PlayerPos);
+				const bool AValid = A.Kind != EProjectileObsKind::None;
+				const bool BValid = B.Kind != EProjectileObsKind::None;
+				if (AValid != BValid) return AValid > BValid;
+				const float DA = FVector2D::DistSquared(A.Pos, PlayerPos);
+				const float DB = FVector2D::DistSquared(B.Pos, PlayerPos);
+				if (DA != DB) return DA < DB;
+				return A.WeaponSlotIdx < B.WeaponSlotIdx;
 			});
 		for (int32 p = 0; p < MaxProjectileObs; ++p)
 		{
-			if (p < PV.Num()) { const FProjectileState& P=PV[p];
-				Obs.Add((P.Pos.X-PlayerPos.X)/DN); Obs.Add((P.Pos.Y-PlayerPos.Y)/DN);
-				Obs.Add(FMath::Clamp(P.Radius.Value/MaxProjectileRadius,0.f,1.f));
-				Obs.Add(P.Vel.X/MS); Obs.Add(P.Vel.Y/MS); Obs.Add(P.bIsWarning?1.f:0.f); }
-			else { for (int32 k=0;k<ProjectileObsStride;++k) Obs.Add(0.f); }
+			if (p < PV.Num())
+			{
+				const FProjectileObsState& P = PV[p];
+				Obs.Add((P.Pos.X - PlayerPos.X) / DN);
+				Obs.Add((P.Pos.Y - PlayerPos.Y) / DN);
+				Obs.Add(FMath::Clamp(P.Radius / MaxProjectileRadius, 0.f, 1.f));
+				Obs.Add(FMath::Clamp(P.Vel.X / MS, -1.f, 1.f));
+				Obs.Add(FMath::Clamp(P.Vel.Y / MS, -1.f, 1.f));
+				Obs.Add(P.bIsWarning ? 1.f : 0.f);
+				Obs.Add(GetProjectileObsKindNorm(P.Kind));
+				Obs.Add(P.WeaponSlotIdx >= 0 ? (float)P.WeaponSlotIdx / (float)(MaxWeaponSlots - 1) : 0.f);
+				Obs.Add(FMath::Clamp(P.Ttl / MaxProjectileObsTtl, 0.f, 1.f));
+			}
+			else { for (int32 k = 0; k < ProjectileObsStride; ++k) Obs.Add(0.f); }
 		}
 	}
 
@@ -581,14 +595,105 @@ EWeaponType FSurvivorsGameLogic::GetOrbitOrbWeaponType(int32 GI)  const
 float     FSurvivorsGameLogic::GetOrbitOrbVisualRadius(int32 GI)  const
 { int32 Off=0; for(const auto& W:Weapons){if(!W)continue;const int32 C=W->GetOrbitOrbCount();if(GI<Off+C)return W->GetOrbitOrbVisualRadius();Off+=C;} return 0.f; }
 
-TArray<FProjectileState> FSurvivorsGameLogic::GetProjectileObsView() const
+TArray<FProjectileObsState> FSurvivorsGameLogic::GetProjectileObsView() const
 {
-	TArray<FProjectileState> V; V.Reserve(Projectiles.Num()+GroundZones.Num());
-	for (const FProjectileState& P:Projectiles) V.Add(P);
-	for (const FGroundZoneState& Z:GroundZones)
-	{ FProjectileState ZP; ZP.Pos=Z.Pos; ZP.Vel=FVector2D::ZeroVector; ZP.Radius=FSimRadius(Z.Radius);
-	  ZP.WeaponType=Z.WeaponType; ZP.WeaponSlotIdx=Z.WeaponSlotIdx; ZP.bIsWarning=Z.bIsWarning; ZP.LifeTime=FProjectileLifeTime(Z.LifeTime); V.Add(ZP); }
+	using namespace SurvivorsGameConstants;
+
+	TArray<FProjectileObsState> V;
+	V.Reserve(Projectiles.Num() + GroundZones.Num() + GetOrbitOrbCount() + MaxWeaponSlots);
+
+	// 通常 Projectiles
+	for (const FProjectileState& P : Projectiles)
+	{
+		FProjectileObsState OS;
+		OS.Pos           = P.Pos;
+		OS.Vel           = P.Vel;
+		OS.Radius        = P.Radius.Value;
+		OS.Ttl           = P.LifeTime.Seconds;
+		OS.Kind          = EProjectileObsKind::Projectile;
+		OS.WeaponSlotIdx = P.WeaponSlotIdx;
+		OS.bIsWarning    = P.bIsWarning;
+		V.Add(OS);
+	}
+
+	// GroundZones
+	for (const FGroundZoneState& Z : GroundZones)
+	{
+		FProjectileObsState OS;
+		OS.Pos           = Z.Pos;
+		OS.Vel           = FVector2D::ZeroVector;
+		OS.Radius        = Z.Radius;
+		OS.Ttl           = Z.LifeTime;
+		OS.Kind          = EProjectileObsKind::GroundZone;
+		OS.WeaponSlotIdx = Z.WeaponSlotIdx;
+		OS.bIsWarning    = Z.bIsWarning;
+		V.Add(OS);
+	}
+
+	// orbit orbs: Phase 1 = KingBible / UnholyVespers のみ
+	// Peachone/EbonyWings/Vandalier は Phase 2 スコープ外のため除外
+	int32 OrbOff = 0;
+	for (int32 si = 0; si < Weapons.Num(); ++si)
+	{
+		if (!Weapons[si]) continue;
+		const EWeaponType OrbWType = Weapons[si]->GetWeaponType();
+		const int32 OrbCount = Weapons[si]->GetOrbitOrbCount();
+		if (OrbWType != EWeaponType::KingBible && OrbWType != EWeaponType::UnholyVespers)
+		{
+			OrbOff += OrbCount;
+			continue;
+		}
+		for (int32 oi = 0; oi < OrbCount; ++oi)
+		{
+			FProjectileObsState OS;
+			OS.Pos           = Weapons[si]->GetOrbitOrbPos(oi);
+			OS.Vel           = FVector2D::ZeroVector;
+			OS.Radius        = Weapons[si]->GetOrbitOrbVisualRadius();
+			OS.Ttl           = Weapons[si]->GetOrbitOrbTtl(oi);
+			OS.Kind          = EProjectileObsKind::Orbit;
+			OS.WeaponSlotIdx = Weapons[si]->GetOrbitOrbSlotIdx(oi);
+			OS.bIsWarning    = false;
+			V.Add(OS);
+		}
+		OrbOff += OrbCount;
+	}
+
+	// Garlic / SoulEater aura
+	for (int32 s = 0; s < MaxWeaponSlots; ++s)
+	{
+		const FWeaponSlot& Slot = WeaponSlots[s];
+		if (Slot.Type != EWeaponType::Garlic && Slot.Type != EWeaponType::SoulEater) continue;
+
+		const int32 Lv = FMath::Clamp(Slot.Level.Value, 1, MaxWeaponLevel);
+		const float BaseRadius = (Slot.Type == EWeaponType::SoulEater)
+			? SurvivorsGameConstants::SoulEaterTable[Lv - 1].AreaRadius.Value
+			: SurvivorsGameConstants::GarlicTable[Lv - 1].AreaRadius.Value;
+
+		FProjectileObsState OS;
+		OS.Pos           = PlayerPos;
+		OS.Vel           = FVector2D::ZeroVector;
+		OS.Radius        = BaseRadius * CachedPassiveEffects.AreaMult;
+		OS.Ttl           = MaxProjectileObsTtl;  // 常時 active
+		OS.Kind          = EProjectileObsKind::Aura;
+		OS.WeaponSlotIdx = s;
+		OS.bIsWarning    = false;
+		V.Add(OS);
+	}
+
 	return V;
+}
+
+int32 FSurvivorsGameLogic::GetOrbitOrbSlotIdx(int32 GI) const
+{
+	int32 Off = 0;
+	for (int32 si = 0; si < Weapons.Num(); ++si)
+	{
+		if (!Weapons[si]) continue;
+		const int32 C = Weapons[si]->GetOrbitOrbCount();
+		if (GI < Off + C) return Weapons[si]->GetOrbitOrbSlotIdx(GI - Off);
+		Off += C;
+	}
+	return -1;
 }
 
 // ============================================================================

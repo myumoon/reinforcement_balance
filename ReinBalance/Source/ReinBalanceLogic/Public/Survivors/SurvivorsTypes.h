@@ -284,6 +284,34 @@ struct FGemState
 	bool      bPendingRemove = false;
 };
 
+// ---- 攻撃実体 obs 種別 -------------------------------------------------------
+
+enum class EProjectileObsKind : uint8
+{
+	None       = 0,
+	Projectile = 1,
+	GroundZone = 2,
+	Orbit      = 3,
+	Aura       = 4,
+};
+
+inline float GetProjectileObsKindNorm(EProjectileObsKind Kind)
+{
+    return static_cast<float>(static_cast<uint8>(Kind)) / 4.f;
+}
+
+// obs 用軽量攻撃実体状態
+struct FProjectileObsState
+{
+	FVector2D        Pos           = FVector2D::ZeroVector;
+	FVector2D        Vel           = FVector2D::ZeroVector;
+	float            Radius        = 0.f;
+	float            Ttl           = 0.f;
+	EProjectileObsKind Kind        = EProjectileObsKind::None;
+	int32            WeaponSlotIdx = -1;
+	bool             bIsWarning    = false;
+};
+
 // ---- 既存強型（後方互換維持） ------------------------------------------------
 
 struct FEnemyTypeId

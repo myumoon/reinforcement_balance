@@ -2,6 +2,24 @@
 #include "Survivors/SurvivorsGameLogic.h"
 #include "Survivors/SurvivorsGameConstants.h"
 
+float FSurvivorsWeaponKingBibleLogic::GetOrbitOrbVisualRadius() const
+{
+	return OrbVisualRadius * GetPassiveEffects().AreaMult;
+}
+
+float FSurvivorsWeaponKingBibleLogic::GetCooldownObsDenominator() const
+{
+	const FPassiveEffects& PE = GetPassiveEffects();
+	if (WeaponType == EWeaponType::UnholyVespers)
+	{
+		// UnholyVespers: オーブは常時 active。cooldown のみ。
+		return FMath::Max(CachedCooldown * PE.CooldownMult, KINDA_SMALL_NUMBER);
+	}
+	// KingBible: cooldown + duration（オーブ active 期間込みの再発動間隔）
+	// ActivateOrbs() の CooldownInterval と同じ式（DurationMult なし）
+	return FMath::Max(CachedCooldown * PE.CooldownMult + CachedDuration, KINDA_SMALL_NUMBER);
+}
+
 void FSurvivorsWeaponKingBibleLogic::OnLevelChanged(FWeaponLevel NewLevel)
 {
 	CacheParams();
@@ -101,17 +119,18 @@ void FSurvivorsWeaponKingBibleLogic::ComputeHits(FSurvivorsHitFrame& HitFrame)
 
 	const FPassiveEffects& PE = GetPassiveEffects();
 	const float EffDamage  = CachedDamage * PE.DamageMult;
+	const float EffOrbRadius = OrbVisualRadius * PE.AreaMult;
 
 	for (int32 OrbIdx = 0; OrbIdx < OrbPositions.Num(); ++OrbIdx)
 	{
 		const FVector2D& OrbPos = OrbPositions[OrbIdx];
 
 		TArray<const FSurvivorsTargetProxy*> Contacts;
-		Logic->QueryEnemyContacts(OrbPos, OrbVisualRadius, Contacts);
+		Logic->QueryEnemyContacts(OrbPos, EffOrbRadius, Contacts);
 
 		for (const FSurvivorsTargetProxy* Proxy : Contacts)
 		{
-			if ((OrbPos - Proxy->Pos).SizeSquared() > FMath::Square(OrbVisualRadius + Proxy->Radius)) continue;
+			if ((OrbPos - Proxy->Pos).SizeSquared() > FMath::Square(EffOrbRadius + Proxy->Radius)) continue;
 
 			const int32 EIdx = Proxy->Ref.IndexAtBuildTime;
 			if (!Logic->Enemies.IsValidIndex(EIdx) || Logic->Enemies[EIdx].UniqueId != Proxy->Ref.UniqueId) continue;

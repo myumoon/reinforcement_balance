@@ -19,7 +19,7 @@ namespace SurvivorsGameConstants
 {
 	// ---- 基本定数 ----
 	static constexpr int32 MaxWeaponSlots                = 6;   // 3 → 6 に拡大
-	static constexpr int32 MaxPassiveSlots               = 6;   // 新規
+	static constexpr int32 MaxPassiveSlots               = 6;
 	static constexpr int32 MaxWeaponLevel                = SurvivorsWikiSpec::BaseWeaponMaxLevel;
 	static constexpr int32 MaxPlayerLevel                = 100;
 	static constexpr float PhysicsDt                    = 1.f / 60.f;
@@ -37,15 +37,16 @@ namespace SurvivorsGameConstants
 	static constexpr int32 MaxPassiveTypeCountReserved   = 32;  // EPassiveItemType は 18種、18〜31 は予約
 
 	// ---- obs バッファサイズ定数 ----
-	static constexpr int32 MaxProjectileObs              = 32;  // 新規（6 dim each: dx,dy,r,vx,vy,warning）
-	static constexpr int32 ProjectileObsStride           = 6;
+	static constexpr int32 MaxProjectileObs              = 32;  // 9 dim each: dx,dy,r,vx,vy,warning,kind,slot,ttl
+	static constexpr int32 ProjectileObsStride           = 9;
+	static constexpr float MaxProjectileObsTtl           = 8.f;
 	static constexpr int32 MaxEnemyObs                   = 32;  // 20 → 32 に拡大
-	static constexpr int32 MaxRedGemObs                  = 10;  // 新規
-	static constexpr int32 MaxGreenGemObs                = 12;  // 新規
-	static constexpr int32 MaxBlueGemObs                 = 12;  // 新規
-	static constexpr int32 MaxFloorPickupObs             = 8;   // 新規
-	static constexpr int32 MaxSpecialPickupObs           = 3;   // 新規
-	static constexpr int32 MaxDestructibleObs            = 10;  // 新規
+	static constexpr int32 MaxRedGemObs                  = 10;
+	static constexpr int32 MaxGreenGemObs                = 12;
+	static constexpr int32 MaxBlueGemObs                 = 12;
+	static constexpr int32 MaxFloorPickupObs             = 8;
+	static constexpr int32 MaxSpecialPickupObs           = 3;
+	static constexpr int32 MaxDestructibleObs            = 10;
 
 	// 後方互換用（旧 NumGemObs / MaxWeaponTypeSlots は廃止し定義を残すのみ）
 	static constexpr int32 NumGemObs                    = MaxRedGemObs + MaxGreenGemObs + MaxBlueGemObs;  // 34 → obs 内ではタイプ別に分割

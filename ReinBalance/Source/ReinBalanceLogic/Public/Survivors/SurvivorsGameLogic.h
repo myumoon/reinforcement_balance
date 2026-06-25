@@ -242,7 +242,8 @@ public:
 	void  SpawnGroundZone(const FGroundZoneState& Z) { GroundZones.Add(Z); }
 	TArray<FProjectileState>& GetProjectiles() { return Projectiles; }
 	void  UpdateProjectilesBySlot(int32 InSlotIdx, float Dt, TFunctionRef<bool(FProjectileState&, float)> Callback);
-	TArray<FProjectileState> GetProjectileObsView() const;
+	TArray<FProjectileObsState> GetProjectileObsView() const;
+	int32 GetOrbitOrbSlotIdx(int32 GI) const;
 	void  QueryEnemyContacts(FVector2D Pos, float Radius, TArray<const struct FSurvivorsTargetProxy*>& Out) const;
 	bool  ReflectOffWall(FVector2D& InOutPos, FVector2D& InOutVel, float Radius) const;
 

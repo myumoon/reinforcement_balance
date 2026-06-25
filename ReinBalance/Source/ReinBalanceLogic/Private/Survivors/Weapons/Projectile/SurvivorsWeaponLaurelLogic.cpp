@@ -17,6 +17,13 @@ void FSurvivorsWeaponLaurelLogic::CacheParams()
 	CachedCooldown       = P.Cooldown;
 }
 
+float FSurvivorsWeaponLaurelLogic::GetCooldownObsDenominator() const
+{
+	// Laurel: 8〜10s の CD を正規化するため、cached cooldown を使う
+	const FPassiveEffects& PE = GetPassiveEffects();
+	return FMath::Max(CachedCooldown * PE.CooldownMult, KINDA_SMALL_NUMBER);
+}
+
 void FSurvivorsWeaponLaurelLogic::Tick(float Dt)
 {
 	if (!Logic) return;
