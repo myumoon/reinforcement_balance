@@ -85,25 +85,44 @@ class TaskCellSamplerStateModule(BaseStateModule):
         self._stats: dict[str, TaskCellStats] = {}
         # 候補セルリスト（現在サンプリング対象）
         self._candidate_cells: list[TaskCell] = []
+        # 武器アンロック判定に使う enemy_phase（候補セルに必ず含める）
+        self._readiness_cap_phase: int | None = None
 
     def rebuild_candidate_cells(
         self,
         stage_key: str,
         max_unlocked_enemy_phase_idx: int,
         min_episode_steps_by_phase: dict[int, int],
+        readiness_cap_phase: int | None = None,
     ) -> None:
-        """候補セルリストを再構築する。既存 stats は保持する。"""
+        """候補セルリストを再構築する。既存 stats は保持する。
+
+        Args:
+            readiness_cap_phase: 武器アンロック判定に使う enemy_phase。
+                backtrack 範囲外でも候補セルに強制追加し、stats を確実に収集する。
+                None の場合は追加しない。
+        """
         self._current_stage_key = stage_key
         self._max_unlocked_enemy_phase_idx = max_unlocked_enemy_phase_idx
         self._min_episode_steps_by_phase = dict(min_episode_steps_by_phase)
+        if readiness_cap_phase is not None:
+            self._readiness_cap_phase = readiness_cap_phase
 
         startable_ids = get_unlocked_startable_weapon_ids(stage_key)
         lo_phase = max(0, max_unlocked_enemy_phase_idx - self._enemy_phase_backtrack)
         hi_phase = max_unlocked_enemy_phase_idx
 
+        # メインの候補 phase 範囲
+        candidate_phases = list(range(lo_phase, hi_phase + 1))
+        # readiness_cap_phase が範囲外なら強制追加（武器アンロード判定のためのstats収集）
+        if (self._readiness_cap_phase is not None
+                and self._readiness_cap_phase < lo_phase
+                and self._readiness_cap_phase <= hi_phase):
+            candidate_phases = [self._readiness_cap_phase] + candidate_phases
+
         new_cells: list[TaskCell] = []
         for wid in startable_ids:
-            for phase_idx in range(lo_phase, hi_phase + 1):
+            for phase_idx in candidate_phases:
                 cell = TaskCell(
                     weapon_unlock_stage_key=stage_key,
                     first_weapon_id=wid,
@@ -259,12 +278,13 @@ class TaskCellSamplerStateModule(BaseStateModule):
             stage_key=event.to_stage_key,
             max_unlocked_enemy_phase_idx=self._max_unlocked_enemy_phase_idx,
             min_episode_steps_by_phase=self._min_episode_steps_by_phase,
+            readiness_cap_phase=self._readiness_cap_phase,
         )
 
-    def get_wandb_metrics(self) -> dict:
+    def get_wandb_metrics(self, num_timesteps: int = 0) -> dict:
         metrics: dict = {
             "task_cell_sampler/blocked_cell_count": sum(
-                1 for s in self._stats.values() if s.blocked_until_step > 0
+                1 for s in self._stats.values() if s.blocked_until_step > num_timesteps
             ),
         }
         # セル別メトリクス

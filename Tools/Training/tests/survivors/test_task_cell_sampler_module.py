@@ -115,3 +115,56 @@ def test_export_import():
     assert stats is not None
     assert stats.episode_count == 1
     assert stats.active_score_mean == pytest.approx(400.0)
+
+
+def test_readiness_cap_phase_always_in_candidates():
+    """readiness_cap_phase が backtrack 範囲外でも候補セルに含まれることを確認する。
+
+    max_phase=4, backtrack=1 の場合: 通常候補は [3, 4]
+    readiness_cap_phase=2 を渡すと [2, 3, 4] になる。
+    """
+    s = make_sampler()
+    s.rebuild_candidate_cells(
+        "WU0",
+        max_unlocked_enemy_phase_idx=4,
+        min_episode_steps_by_phase={0: 100, 1: 200, 2: 300, 3: 400, 4: 500},
+        readiness_cap_phase=2,
+    )
+    phase_idxs = {c.enemy_phase_idx for c in s._candidate_cells}
+    assert 2 in phase_idxs  # cap が強制追加されている
+    assert 3 in phase_idxs
+    assert 4 in phase_idxs
+    assert 0 not in phase_idxs  # cap より低い phase は追加されない
+    assert 1 not in phase_idxs
+
+
+def test_readiness_cap_phase_not_added_if_already_in_range():
+    """readiness_cap_phase が backtrack 範囲内なら重複して追加されないことを確認する。"""
+    s = make_sampler()
+    s.rebuild_candidate_cells(
+        "WU0",
+        max_unlocked_enemy_phase_idx=3,
+        min_episode_steps_by_phase={0: 100, 1: 200, 2: 300, 3: 400},
+        readiness_cap_phase=2,  # backtrack=1 なので lo_phase=2、cap=2 は範囲内
+    )
+    # 重複していないこと
+    phase_list = [c.enemy_phase_idx for c in s._candidate_cells]
+    assert phase_list.count(2) == 1  # Phase 2 は1度だけ
+
+
+def test_blocked_cell_count_excludes_expired():
+    """期限切れのブロックは blocked_cell_count に含まれないことを確認する。"""
+    s = make_sampler(unlearnable_min_episodes=2, unlearnable_score_floor=100.0)
+    s.rebuild_candidate_cells("WU0", 0, {0: 1000})
+    cell = s._candidate_cells[0]
+
+    # ブロック状態にする
+    for _ in range(3):
+        s.on_episode_end(cell, active_score=10.0, ep_len=50, terminated=True, num_timesteps=1000)
+
+    if s._stats[cell.key()].blocked_until_step > 0:
+        blocked_step = s._stats[cell.key()].blocked_until_step
+        # ブロック中
+        assert s.get_wandb_metrics(num_timesteps=1000)["task_cell_sampler/blocked_cell_count"] == 1
+        # ブロック解除後
+        assert s.get_wandb_metrics(num_timesteps=blocked_step + 1)["task_cell_sampler/blocked_cell_count"] == 0

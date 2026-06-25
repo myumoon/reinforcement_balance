@@ -86,10 +86,12 @@ class TaskCellSamplerCallback(BaseCallback):
         # 候補セルを初期化
         max_phase = self._hybrid_cb.current_phase
         min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
+        readiness_cap = min(max_phase, self._weapon_unlock._readiness_enemy_phase_cap)
         self._tcs.rebuild_candidate_cells(
             stage_key=self._weapon_unlock.current_stage_key,
             max_unlocked_enemy_phase_idx=max_phase,
             min_episode_steps_by_phase=min_ep_steps,
+            readiness_cap_phase=readiness_cap,
         )
 
         if self._log_dir is not None:
@@ -139,10 +141,9 @@ class TaskCellSamplerCallback(BaseCallback):
             self._param_applier.apply(params, env_idx=env_idx)
 
             # 4-5. 武器アンロック判定
-            # target_phase: backtrack 範囲の下限と cap の大きい方（候補セルに必ず存在する phase）
+            # target_phase: cap が候補セルに強制追加されているので min(max_phase, cap) を使える
             max_phase = self._hybrid_cb.current_phase
-            lo_phase = max(0, max_phase - self._tcs._enemy_phase_backtrack)
-            target_phase = max(lo_phase, min(max_phase, self._weapon_unlock._readiness_enemy_phase_cap))
+            target_phase = min(max_phase, self._weapon_unlock._readiness_enemy_phase_cap)
             event = self._weapon_unlock.maybe_advance(
                 stats_provider=self._tcs,
                 num_timesteps=self.num_timesteps,
@@ -163,7 +164,7 @@ class TaskCellSamplerCallback(BaseCallback):
                 and self.num_timesteps - self._last_wandb_log >= self._wandb_log_freq):
             self._last_wandb_log = self.num_timesteps
             metrics: dict = {}
-            metrics.update(self._tcs.get_wandb_metrics())
+            metrics.update(self._tcs.get_wandb_metrics(self.num_timesteps))
             metrics.update(self._weapon_unlock.get_wandb_metrics())
             # 直近サンプルされたセルのメトリクス
             if self._active_cell_by_env:
@@ -179,10 +180,12 @@ class TaskCellSamplerCallback(BaseCallback):
         """敵フェーズ変化時に候補セルを再構築する。"""
         old_phase = self._tcs._max_unlocked_enemy_phase_idx
         min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
+        readiness_cap = min(new_max_phase, self._weapon_unlock._readiness_enemy_phase_cap)
         self._tcs.rebuild_candidate_cells(
             stage_key=self._weapon_unlock.current_stage_key,
             max_unlocked_enemy_phase_idx=new_max_phase,
             min_episode_steps_by_phase=min_ep_steps,
+            readiness_cap_phase=readiness_cap,
         )
         print(
             f"[TaskCellSampler] 敵フェーズ変化を検出: {old_phase} → {new_max_phase}, "
