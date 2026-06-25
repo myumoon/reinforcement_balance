@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 from games.survivors.modules.state_modules import BaseStateModule
-from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER
+from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER, get_added_weapon_id
 
 
 @dataclass
@@ -86,9 +86,8 @@ class WeaponUnlockStateModule(BaseStateModule):
         if self.is_final_stage:
             return None
 
-        next_order = self._stage_order + 1
-        next_entry = WEAPON_UNLOCK_ORDER[next_order]
-        new_weapon_id = next_entry.weapon_id
+        # 現在ステージの武器（= 候補セルに必ず存在する）の stats を確認
+        current_weapon_id = get_added_weapon_id(self.current_stage_key)
 
         # 最低ステップ数チェック
         ref_step = self._last_advance_step if self._last_advance_step is not None else self._start_step
@@ -97,7 +96,7 @@ class WeaponUnlockStateModule(BaseStateModule):
 
         # 対象 enemy_phase: max_unlocked_enemy_phase_idx と cap の小さい方
         target_phase = min(max_unlocked_enemy_phase_idx, self._readiness_enemy_phase_cap)
-        stats = stats_provider.get_cell_stats(new_weapon_id, target_phase)
+        stats = stats_provider.get_cell_stats(current_weapon_id, target_phase)
         if stats is None:
             return None
 
@@ -110,6 +109,8 @@ class WeaponUnlockStateModule(BaseStateModule):
             return None
 
         from_key = self.current_stage_key
+        next_order = self._stage_order + 1
+        next_entry = WEAPON_UNLOCK_ORDER[next_order]
         self._stage_order = next_order
         self._last_advance_step = num_timesteps
         to_key = self.current_stage_key
@@ -117,18 +118,18 @@ class WeaponUnlockStateModule(BaseStateModule):
         event = WeaponUnlockAdvanceEvent(
             from_stage_key=from_key,
             to_stage_key=to_key,
-            new_weapon_id=new_weapon_id,
+            new_weapon_id=next_entry.weapon_id,
             step=num_timesteps,
         )
         self._events.append({
             "from_stage_key": from_key,
             "to_stage_key": to_key,
-            "new_weapon_id": new_weapon_id,
+            "new_weapon_id": next_entry.weapon_id,
             "step": num_timesteps,
         })
         print(
             f"[WeaponUnlock] 武器アンロック: {from_key} -> {to_key} "
-            f"(weapon_id={new_weapon_id}, step={num_timesteps:,})"
+            f"(new_weapon_id={next_entry.weapon_id}, step={num_timesteps:,})"
         )
         return event
 

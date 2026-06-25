@@ -90,11 +90,11 @@ class TaskCellSamplerCallback(BaseCallback):
         if self._jsonl_path is not None:
             self._jsonl_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 初期セルをサンプルして pending に設定
+        # 初期セルをサンプルして pending に設定（active は None から始める）
         for env_idx in range(n):
             cell = self._tcs.sample_cell(self.num_timesteps)
-            self._active_cell_by_env[env_idx] = cell
-            self._pending_cell_by_env[env_idx] = None
+            self._active_cell_by_env[env_idx] = None
+            self._pending_cell_by_env[env_idx] = cell
             params = self._build_params_for_cell(cell)
             self._param_applier.apply(params, env_idx=env_idx)
 
@@ -119,9 +119,8 @@ class TaskCellSamplerCallback(BaseCallback):
                 )
                 self._write_jsonl(env_idx, active_cell, active_score, ep_len, terminated, ep_base)
 
-            # 2. pending -> active に昇格
-            pending = self._pending_cell_by_env.get(env_idx)
-            self._active_cell_by_env[env_idx] = pending if pending is not None else self._tcs.sample_cell(self.num_timesteps)
+            # 2. pending -> active に昇格（pending が None の場合も active = None に昇格）
+            self._active_cell_by_env[env_idx] = self._pending_cell_by_env.get(env_idx)
 
             # 3. 次 episode 用の新セルをサンプルして pending に設定
             next_cell = self._tcs.sample_cell(self.num_timesteps)
