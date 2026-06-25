@@ -71,6 +71,11 @@ class TaskCellSamplerCallback(BaseCallback):
         self._score_tracker = EpisodeScoreTracker(frame_skip=frame_skip, alive_reward=alive_reward)
         self._active_cell_by_env: dict[int, TaskCell | None] = {}
         self._pending_cell_by_env: dict[int, TaskCell | None] = {}
+        self._status_path: Path | None = (
+            self._log_dir / "task_cell_sampler_status.json" if self._log_dir else None
+        )
+        self._last_status_save: int = -1
+        self._status_save_freq: int = 10_000
 
     def _on_training_start(self) -> None:
         n = self.training_env.num_envs
@@ -87,8 +92,8 @@ class TaskCellSamplerCallback(BaseCallback):
             min_episode_steps_by_phase=min_ep_steps,
         )
 
-        if self._jsonl_path is not None:
-            self._jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        if self._log_dir is not None:
+            self._log_dir.mkdir(parents=True, exist_ok=True)
 
         # 初期セルをサンプルして pending に設定（active は None から始める）
         for env_idx in range(n):
@@ -134,14 +139,24 @@ class TaskCellSamplerCallback(BaseCallback):
             self._param_applier.apply(params, env_idx=env_idx)
 
             # 4-5. 武器アンロック判定
+            # target_phase: backtrack 範囲の下限と cap の大きい方（候補セルに必ず存在する phase）
             max_phase = self._hybrid_cb.current_phase
+            lo_phase = max(0, max_phase - self._tcs._enemy_phase_backtrack)
+            target_phase = max(lo_phase, min(max_phase, self._weapon_unlock._readiness_enemy_phase_cap))
             event = self._weapon_unlock.maybe_advance(
                 stats_provider=self._tcs,
                 num_timesteps=self.num_timesteps,
                 max_unlocked_enemy_phase_idx=max_phase,
+                target_enemy_phase=target_phase,
             )
             if event is not None:
                 self._tcs.on_weapon_unlock_advanced(event)
+
+        # status JSON 定期保存
+        if (self._status_path is not None
+                and self.num_timesteps - self._last_status_save >= self._status_save_freq):
+            self._save_status()
+            self._last_status_save = self.num_timesteps
 
         # W&B ログ
         if (episode_results and self._wandb_logger and self._wandb_logger.enabled
@@ -172,6 +187,18 @@ class TaskCellSamplerCallback(BaseCallback):
         print(
             f"[TaskCellSampler] 敵フェーズ変化を検出: {old_phase} → {new_max_phase}, "
             f"候補セルを再構築しました"
+        )
+
+    def _save_status(self) -> None:
+        """task_cell_sampler_status.json に現在状態を書き出す。"""
+        if self._status_path is None:
+            return
+        state = {
+            "task_cell_sampler": self._tcs.export_state(),
+            "weapon_unlock": self._weapon_unlock.export_state(),
+        }
+        self._status_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
     def _build_params_for_cell(self, cell: TaskCell) -> dict:

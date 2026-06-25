@@ -989,6 +989,8 @@ def main() -> None:
             raise ValueError("--task-cell-sampler は --curriculum-spalf が必要です。")
         if getattr(args, "task_cell_enemy_param_mode", "phase_fixed") != "phase_fixed":
             raise ValueError("--task-cell-enemy-param-mode は MVP では phase_fixed のみ対応しています。")
+        if getattr(args, "rsi_mode", "none") != "none":
+            raise ValueError("--task-cell-sampler と --rsi-mode は同時に使用できません（/params の競合）。")
     if args.recurrent and args.frame_stack > 1:
         print(f"[WARN] --recurrent と --frame-stack={args.frame_stack} を併用しています。"
               " 部分観測対応が二重になるため意図的でなければ片方のみ使用してください。")

@@ -75,3 +75,39 @@ def test_export_import():
     m2.import_state(state)
     assert m2.current_stage_key == m.current_stage_key
     assert m2.current_stage_order == m.current_stage_order
+
+
+def test_set_start_step_skipped_after_resume():
+    """resume 時は set_start_step() が start_step を上書きしないことを確認する。"""
+    m = WeaponUnlockStateModule(weapon_unlock_min_steps=100_000)
+    m.set_start_step(0)
+    assert m._start_step == 0
+
+    state = m.export_state()
+    m2 = WeaponUnlockStateModule(weapon_unlock_min_steps=100_000)
+    m2.import_state(state)
+    # resume 後は set_start_step を呼んでも上書きされない
+    m2.set_start_step(500_000)
+    assert m2._start_step == 0  # 復元値を保持
+
+
+def test_target_enemy_phase_parameter():
+    """target_enemy_phase を明示指定したとき、その phase の stats が参照されることを確認する。"""
+    seen_phases: list[int] = []
+
+    class TrackingProvider:
+        def get_cell_stats(self, first_weapon_id, enemy_phase_idx):
+            seen_phases.append(enemy_phase_idx)
+            return MockStats(episode_count=35, active_score_p10=350.0, terminated_rate=0.3)
+
+    m = WeaponUnlockStateModule(
+        weapon_unlock_min_steps=0,
+        weapon_unlock_readiness_enemy_phase_cap=2,
+    )
+    m.maybe_advance(
+        TrackingProvider(),
+        num_timesteps=0,
+        max_unlocked_enemy_phase_idx=4,
+        target_enemy_phase=3,  # backtrack 考慮済みの値を呼び出し側が指定
+    )
+    assert seen_phases == [3]  # cap=2 ではなく指定した 3 が使われること

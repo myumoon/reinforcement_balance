@@ -48,6 +48,7 @@ class WeaponUnlockStateModule(BaseStateModule):
         self._last_advance_step: int | None = None
         self._start_step: int = 0  # training開始ステップ（import_state前に設定）
         self._events: list[dict] = []
+        self._state_restored: bool = False  # import_state() 後に True になる
 
     @staticmethod
     def _key_to_order(stage_key: str) -> int:
@@ -73,7 +74,9 @@ class WeaponUnlockStateModule(BaseStateModule):
         return self._stage_order >= len(WEAPON_UNLOCK_ORDER) - 1
 
     def set_start_step(self, num_timesteps: int) -> None:
-        """訓練開始時のステップ数を記録する（min_steps 判定に使用）。"""
+        """訓練開始時のステップ数を記録する（min_steps 判定に使用）。resume 時はスキップする。"""
+        if self._state_restored:
+            return
         self._start_step = num_timesteps
 
     def maybe_advance(
@@ -81,8 +84,15 @@ class WeaponUnlockStateModule(BaseStateModule):
         stats_provider: TaskCellStatsProvider,
         num_timesteps: int,
         max_unlocked_enemy_phase_idx: int,
+        target_enemy_phase: int | None = None,
     ) -> WeaponUnlockAdvanceEvent | None:
-        """次武器の解禁条件を確認し、条件を満たせば進行してイベントを返す。"""
+        """次武器の解禁条件を確認し、条件を満たせば進行してイベントを返す。
+
+        Args:
+            target_enemy_phase: 解禁判定に使う enemy_phase。省略時は
+                min(max_unlocked_enemy_phase_idx, readiness_cap) を使う。
+                呼び出し側でバックトラック範囲を考慮した値を渡すことを推奨する。
+        """
         if self.is_final_stage:
             return None
 
@@ -94,9 +104,10 @@ class WeaponUnlockStateModule(BaseStateModule):
         if num_timesteps - ref_step < self._min_steps:
             return None
 
-        # 対象 enemy_phase: max_unlocked_enemy_phase_idx と cap の小さい方
-        target_phase = min(max_unlocked_enemy_phase_idx, self._readiness_enemy_phase_cap)
-        stats = stats_provider.get_cell_stats(current_weapon_id, target_phase)
+        # 対象 enemy_phase: 呼び出し側が指定しない場合は cap と max の小さい方
+        if target_enemy_phase is None:
+            target_enemy_phase = min(max_unlocked_enemy_phase_idx, self._readiness_enemy_phase_cap)
+        stats = stats_provider.get_cell_stats(current_weapon_id, target_enemy_phase)
         if stats is None:
             return None
 
@@ -156,3 +167,4 @@ class WeaponUnlockStateModule(BaseStateModule):
         self._last_advance_step = state.get("last_advance_step")
         self._start_step = int(state.get("start_step", 0))
         self._events = list(state.get("events", []))
+        self._state_restored = True
