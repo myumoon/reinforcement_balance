@@ -16,7 +16,8 @@ float FSurvivorsWeaponKingBibleLogic::GetCooldownObsDenominator() const
 		return FMath::Max(CachedCooldown * PE.CooldownMult, KINDA_SMALL_NUMBER);
 	}
 	// KingBible: cooldown + duration（オーブ active 期間込みの再発動間隔）
-	return FMath::Max(CachedCooldown * PE.CooldownMult + CachedDuration * PE.DurationMult, KINDA_SMALL_NUMBER);
+	// ActivateOrbs() の CooldownInterval と同じ式（DurationMult なし）
+	return FMath::Max(CachedCooldown * PE.CooldownMult + CachedDuration, KINDA_SMALL_NUMBER);
 }
 
 void FSurvivorsWeaponKingBibleLogic::OnLevelChanged(FWeaponLevel NewLevel)

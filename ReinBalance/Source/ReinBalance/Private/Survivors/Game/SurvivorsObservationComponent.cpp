@@ -421,7 +421,7 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 			GemDensityNearNormalizeFactor, GemDensityMidNormalizeFactor, Obs);
 	}
 
-	// ---- projectiles (MaxProjectileObs * ProjectileObsStride = 192) ----
+	// ---- projectiles (MaxProjectileObs * ProjectileObsStride = 288) ----
 	if (Game->WeaponComponent)
 	{
 		TArray<FProjectileState> ProjView = Game->WeaponComponent->GetProjectileObsView();
@@ -447,12 +447,19 @@ TArray<float> USurvivorsObservationComponent::GetObservation() const
 			if (p < ProjView.Num())
 			{
 				const FProjectileState& P = ProjView[p];
+				// 既存の6フィールド
 				Obs.Add((P.Pos.X - Game->PlayerPos.X) / DN);
 				Obs.Add((P.Pos.Y - Game->PlayerPos.Y) / DN);
 				Obs.Add(FMath::Clamp(P.Radius.Value / MaxProjectileRadius, 0.f, 1.f));
 				Obs.Add(P.Vel.X / VNorm);
 				Obs.Add(P.Vel.Y / VNorm);
 				Obs.Add(P.bIsWarning ? 1.f : 0.f);
+				// 新規追加の3フィールド（kind, slot, ttl）
+				// kind: warning=true → GroundZone(2/4), else → Projectile(1/4)
+				const float KindNorm = P.bIsWarning ? (2.f / 4.f) : (1.f / 4.f);
+				Obs.Add(KindNorm);
+				Obs.Add(P.WeaponSlotIdx >= 0 ? (float)P.WeaponSlotIdx / (float)(MaxWeaponSlots - 1) : 0.f);
+				Obs.Add(FMath::Clamp(P.LifeTime.Seconds / MaxProjectileObsTtl, 0.f, 1.f));
 			}
 			else { for (int32 k = 0; k < ProjectileObsStride; ++k) Obs.Add(0.f); }
 		}
