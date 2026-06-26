@@ -925,6 +925,8 @@ void FSurvivorsGameLogic::UpdateEnemies()
 	const bool bGF = (ElapsedTime < GlobalFreezeUntilTime);
 	for (FEnemyState& E : Enemies)
 	{
+		// Knockback takes priority over freeze: ongoing knockback continues through GlobalFreeze/bFrozen.
+		// New knockback during freeze is prevented in ApplyWeaponHits (bFrozen check).
 		if (E.KnockbackFramesLeft > 0)
 		{
 			E.Pos += E.KnockbackVelPerFrame;
@@ -1081,6 +1083,8 @@ void FSurvivorsGameLogic::InitDefaultEnemyTable()
 	for (const FRow& R : Rows)
 	{ FEnemyTypeParams P; P.Name=R.Name; P.BaseHP=R.HP; P.Speed=R.Spd; P.ContactDamage=R.Dmg; P.XPDrop=R.XP;
 	  P.CollisionRadius=R.R; P.KnockbackResistance=R.KB; P.bIsBoss=R.Boss; P.bResistsFreeze=R.Boss; P.bResistsInstantKill=R.Boss; P.bResistsDebuff=R.Boss;
+	  // bResistsKnockback: intentionally left at default (false) for all enemies including GiantBat.
+	  // GiantBat is subject to knockback by design; only future Reaper-type bosses set this to true.
 	  CurrentConfig.EnemyTypeTable.Add(P); }
 }
 

@@ -569,6 +569,44 @@ bool FSurvivorsKnockbackRehitReset::RunTest(const FString& Parameters)
 	return true;
 }
 
+// GlobalFreeze 中も進行中ノックバックは継続すること（ノックバック優先設計の確認）
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsKnockbackContinuesDuringFreeze,
+	"ReinBalance.Survivors.HitFrame.Knockback_Continues_During_Freeze",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FSurvivorsKnockbackContinuesDuringFreeze::RunTest(const FString& Parameters)
+{
+	using namespace SurvivorsGameConstants;
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	// 敵を X+10 位置に置いてヒット → KnockbackFramesLeft=7 を確認
+	S.AddEnemyAt(FVector2D(10.f, 0.f), /*HP=*/200.f);
+	S.RunWeaponHits();
+	TestEqual("KnockbackFramesLeft == 7 after hit",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].KnockbackFramesLeft, KnockbackFrames);
+
+	// GlobalFreeze を設定（Orologion/Freeze アイテム相当）
+	FSurvivorsGameTestAccess::GlobalFreezeUntilTime(S.Game) = 100.f;
+
+	// GlobalFreeze 中に UpdateEnemies を 3 回実行
+	const FVector2D PosBeforeFreeze = FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos;
+	for (int32 i = 0; i < 3; ++i)
+		S.RunUpdateEnemies();
+
+	// KnockbackFramesLeft が減少していること（フリーズ中もノックバック継続）
+	TestEqual("KnockbackFramesLeft decreased during GlobalFreeze (knockback takes priority)",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].KnockbackFramesLeft, KnockbackFrames - 3);
+
+	// 位置が変化していること（ノックバックが継続された）
+	const FVector2D PosAfterFreeze = FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos;
+	TestTrue("Enemy position changed during GlobalFreeze (knockback continued)",
+		!FMath::IsNearlyEqual(PosAfterFreeze.X, PosBeforeFreeze.X, 0.01f));
+
+	S.Destroy();
+	return true;
+}
+
 // Garlic が同 tick で敵Aを倒し、非 piercing 弾も敵Aを狙っていた場合の挙動
 // 期待: 弾は死亡済み敵Aに当たって消費され、敵Bはダメージを受けない
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsMixedHitGarlicKillsProjectileConsumed,

@@ -88,6 +88,8 @@ void USurvivorsSpawnComponent::InitDefaultEnemyTable()
 		P.bResistsFreeze = R.Boss;
 		P.bResistsInstantKill = R.Boss;
 		P.bResistsDebuff = R.Boss;
+		// bResistsKnockback: intentionally left at default (false) for all enemies including GiantBat.
+		// GiantBat is subject to knockback by design; only future Reaper-type bosses set this to true.
 		Game->EnemyTypeTable.Add(P);
 	}
 }
