@@ -929,7 +929,7 @@ void FSurvivorsGameLogic::UpdateEnemies()
 		// New knockback during freeze is prevented in ApplyWeaponHits (bFrozen check).
 		if (E.KnockbackFramesLeft > 0)
 		{
-			E.Vel  = E.KnockbackVelPerFrame;  // keep Vel in sync so GetObservation() reflects actual movement
+			E.Vel  = E.KnockbackVelPerFrame / PhysicsDt;  // convert units/frame → units/sec to match normal Vel convention
 			E.Pos += E.KnockbackVelPerFrame;
 			--E.KnockbackFramesLeft;
 			continue;
