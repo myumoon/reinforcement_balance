@@ -19,6 +19,7 @@ namespace SurvivorsGameConstants
 {
 	// ---- 基本定数 ----
 	static constexpr int32 MaxWeaponSlots                = 6;   // 3 → 6 に拡大
+	static constexpr int32 KnockbackFrames               = 7;   // ノックバック段階移動フレーム数
 	static constexpr int32 MaxPassiveSlots               = 6;
 	static constexpr int32 MaxWeaponLevel                = SurvivorsWikiSpec::BaseWeaponMaxLevel;
 	static constexpr int32 MaxPlayerLevel                = 100;

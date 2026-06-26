@@ -70,7 +70,7 @@ void USurvivorsSpawnComponent::InitDefaultEnemyTable()
 		{ TEXT("BatSwarm"),   2.f,    52.f,  3.f, 2.f,  8.f, 0.f, false },
 		{ TEXT("FireBeast"), 30.f,    32.f, 10.f, 9.f, 16.f, 0.f, false },
 		{ TEXT("MedusaHead"),25.f,    48.f, 10.f, 9.f, 12.f, 0.f, false },
-		{ TEXT("GiantBat"), 3000.f,  24.f, 12.f, 2.f, 32.f, 1.f, true  },
+		{ TEXT("GiantBat"), 3000.f,  24.f, 12.f, 2.f, 32.f, 0.f, true  },
 	};
 
 	Game->EnemyTypeTable.Empty();

@@ -925,6 +925,12 @@ void FSurvivorsGameLogic::UpdateEnemies()
 	const bool bGF = (ElapsedTime < GlobalFreezeUntilTime);
 	for (FEnemyState& E : Enemies)
 	{
+		if (E.KnockbackFramesLeft > 0)
+		{
+			E.Pos += E.KnockbackVelPerFrame;
+			--E.KnockbackFramesLeft;
+			continue;
+		}
 		const bool bRF = CurrentConfig.EnemyTypeTable.IsValidIndex(E.TypeId) && CurrentConfig.EnemyTypeTable[E.TypeId].bResistsFreeze;
 		if (E.bFrozen || (bGF && !bRF)) continue;
 		E.Vel = (PlayerPos - E.Pos).GetSafeNormal() * GetEnemySpeed(E.TypeId);
@@ -1069,7 +1075,7 @@ void FSurvivorsGameLogic::InitDefaultEnemyTable()
 		{TEXT("Werewolf"),10.f,40.f,5.f,9.f,14.f,0.f,false},{TEXT("Mummy"),15.f,18.f,6.f,9.f,14.f,0.f,false},
 		{TEXT("Plant"),20.f,16.f,7.f,9.f,14.f,0.f,false},{TEXT("BatSwarm"),2.f,52.f,3.f,2.f,8.f,0.f,false},
 		{TEXT("FireBeast"),30.f,32.f,10.f,9.f,16.f,0.f,false},{TEXT("MedusaHead"),25.f,48.f,10.f,9.f,12.f,0.f,false},
-		{TEXT("GiantBat"),3000.f,24.f,12.f,2.f,32.f,1.f,true},
+		{TEXT("GiantBat"),3000.f,24.f,12.f,2.f,32.f,0.f,true},
 	};
 	CurrentConfig.EnemyTypeTable.Empty();
 	for (const FRow& R : Rows)
@@ -1514,6 +1520,8 @@ void FSurvivorsGameLogic::ComputeProjectileHits(FSurvivorsHitFrame& HitFrame)
 void FSurvivorsGameLogic::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 {
 	TSet<int32> PR;
+	TSet<int32> KBHitEnemies;
+	const bool bGF = (ElapsedTime < GlobalFreezeUntilTime);
 	for (const FSurvivorsHitEvent& Ev : HitFrame.Events)
 	{
 		if(Ev.Type!=ESurvivorsHitType::WeaponAreaDamage&&Ev.Type!=ESurvivorsHitType::GroundZoneDamage&&Ev.Type!=ESurvivorsHitType::ProjectileDamage) continue;
@@ -1528,7 +1536,31 @@ void FSurvivorsGameLogic::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 		if(Ev.Type==ESurvivorsHitType::WeaponAreaDamage){if(E.WeaponLastHitTime[Ev.WeaponSlot].Seconds<ElapsedTime)E.WeaponLastHitTime[Ev.WeaponSlot]=FSurvivorsElapsedTime(ElapsedTime);if(Ev.OrbIdx>=0){const int32 OK=Ev.WeaponSlot*10+Ev.OrbIdx;E.OrbHitTimes.Add(OK,ElapsedTime);}}
 		else if(Ev.Type==ESurvivorsHitType::GroundZoneDamage){if(GroundZones.IsValidIndex(Ev.WeaponSlot))GroundZones[Ev.WeaponSlot].EnemyLastHitTime.Add(E.UniqueId,ElapsedTime);}
 		else if(Ev.Type==ESurvivorsHitType::ProjectileDamage){if(Projectiles.IsValidIndex(Ev.WeaponSlot)){const FProjectileState& P=Projectiles[Ev.WeaponSlot];if((P.MaxPierceCount>0&&P.HitEnemyIds.Num()>=P.MaxPierceCount)||(P.MaxPierceCount==0&&!P.bPiercing))PR.Add(Ev.WeaponSlot);}}
-		if(Ev.KnockbackStrength>0.f&&Ev.KnockbackResistance<1.f) E.Pos+=Ev.KnockbackDir*Ev.KnockbackStrength*(1.f-Ev.KnockbackResistance);
+		{
+			const bool bRF = CurrentConfig.EnemyTypeTable.IsValidIndex(E.TypeId)
+				&& CurrentConfig.EnemyTypeTable[E.TypeId].bResistsFreeze;
+			const bool bResistsKB = CurrentConfig.EnemyTypeTable.IsValidIndex(E.TypeId)
+				&& CurrentConfig.EnemyTypeTable[E.TypeId].bResistsKnockback;
+			const bool bFrozen = E.bFrozen || (bGF && !bRF);
+			if (!bFrozen && !bResistsKB)
+			{
+				const float EffKB = (Ev.KnockbackStrength > 0.f && Ev.KnockbackResistance < 1.f)
+					? Ev.KnockbackStrength * (1.f - Ev.KnockbackResistance) : 0.f;
+				const FVector2D KBVel = (EffKB > 0.f)
+					? Ev.KnockbackDir * EffKB / SurvivorsGameConstants::KnockbackFrames
+					: FVector2D::ZeroVector;
+				if (!KBHitEnemies.Contains(E.UniqueId))
+				{
+					E.KnockbackFramesLeft  = SurvivorsGameConstants::KnockbackFrames;  // 7
+					E.KnockbackVelPerFrame = KBVel;
+					KBHitEnemies.Add(E.UniqueId);
+				}
+				else
+				{
+					E.KnockbackVelPerFrame += KBVel;  // 同フレーム複数ヒットは合算
+				}
+			}
+		}
 		if(E.HP<=0.f){E.bPendingRemove=true;LastReward+=CurrentConfig.KillReward;}
 	}
 	TArray<int32> SR=PR.Array(); SR.Sort([](int32 A,int32 B){return A>B;});
