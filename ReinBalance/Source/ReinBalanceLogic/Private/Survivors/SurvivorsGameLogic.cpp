@@ -1553,6 +1553,9 @@ void FSurvivorsGameLogic::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 				const FVector2D KBVel = (EffKB > 0.f)
 					? Ev.KnockbackDir * EffKB / SurvivorsGameConstants::KnockbackFrames
 					: FVector2D::ZeroVector;
+				// All hits (including KnockbackStrength=0) cause a 7-frame stop by design.
+				// This prevents enemies from continuing to move through the hit animation window.
+				// bResistsKnockback=true skips this stop entirely (reserved for future boss types).
 				if (!KBHitEnemies.Contains(E.UniqueId))
 				{
 					E.KnockbackFramesLeft  = SurvivorsGameConstants::KnockbackFrames;  // 7
