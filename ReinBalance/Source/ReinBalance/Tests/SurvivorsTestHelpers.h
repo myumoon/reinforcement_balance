@@ -29,6 +29,7 @@ struct FSurvivorsGameTestAccess
 	static bool& bShieldActive(ASurvivorsGame* G)          { return G->GetLogic()->bShieldActive; }
 	static float& LastReward(ASurvivorsGame* G)            { return G->GetLogic()->LastReward; }
 	static float& ElapsedTime(ASurvivorsGame* G)           { return G->GetLogic()->ElapsedTime; }
+	static float& GlobalFreezeUntilTime(ASurvivorsGame* G){ return G->GetLogic()->GlobalFreezeUntilTime; }
 	static float& GemPickupRadius(ASurvivorsGame* G)       { return G->GetLogic()->CurrentConfig.GemPickupRadius; }
 	static int32& NextEnemyId(ASurvivorsGame* G)           { return G->GetLogic()->NextEnemyId; }
 	static int32& NextGemId(ASurvivorsGame* G)             { return G->GetLogic()->NextGemId; }
@@ -63,6 +64,7 @@ struct FSurvivorsGameTestAccess
 	static void ApplyContactHits(ASurvivorsGame* G, FSurvivorsHitFrame& HF)     { G->GetLogic()->ApplyContactHits(HF); }
 	static void ComputePickupHits(ASurvivorsGame* G, FSurvivorsHitFrame& HF)    { G->GetLogic()->ComputePickupHits(HF); }
 	static void ApplyPickupHits(ASurvivorsGame* G, FSurvivorsHitFrame& HF)      { G->GetLogic()->ApplyPickupHits(HF); }
+	static void UpdateEnemies(ASurvivorsGame* G)                                { G->GetLogic()->UpdateEnemies(); }
 };
 
 // ============================================================
@@ -145,6 +147,11 @@ struct FSurvivorsTestWorld
 		FSurvivorsGameTestAccess::BuildPickupGrid(Game);
 		FSurvivorsGameTestAccess::ComputePickupHits(Game, HF);
 		FSurvivorsGameTestAccess::ApplyPickupHits(Game, HF);
+	}
+
+	void RunUpdateEnemies()
+	{
+		FSurvivorsGameTestAccess::UpdateEnemies(Game);
 	}
 };
 

@@ -265,6 +265,8 @@ struct FEnemyState
 	int32     UniqueId       = 0;  // スポーン時にゲームグローバルカウンタで割り当て
 	bool      bFrozen        = false;  // フリーズ状態（将来 freeze 武器用、現在は常に false）
 	bool      bPendingRemove = false;  // Apply フェーズで死亡マーク済み（Finalize で削除）
+	int32     KnockbackFramesLeft  = 0;
+	FVector2D KnockbackVelPerFrame = FVector2D::ZeroVector;
 	// 武器スロット別最終ヒット時刻（MaxWeaponSlots=6 に対応）
 	FSurvivorsElapsedTime WeaponLastHitTime[6] = {
 		FSurvivorsElapsedTime(-1000.f), FSurvivorsElapsedTime(-1000.f),
@@ -374,6 +376,9 @@ struct FEnemyTypeParams
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	bool bResistsFreeze = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	bool bResistsKnockback = false;  // Reaper型ボス用：7f停止・移動を完全免除
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	bool bResistsInstantKill = false;

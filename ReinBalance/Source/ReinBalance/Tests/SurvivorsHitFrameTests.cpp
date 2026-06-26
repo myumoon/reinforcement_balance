@@ -187,7 +187,7 @@ bool FSurvivorsGarlicHitInterval::RunTest(const FString& Parameters)
 	return true;
 }
 
-// Garlic knockback: 命中後に敵が KnockbackDir * Strength * (1-Resistance) だけ移動すること
+// Garlic knockback: 命中後に KnockbackFramesLeft=7 が設定され、7回 UpdateEnemies 後に期待位置に到達すること
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsGarlicKnockback,
 	"ReinBalance.Survivors.HitFrame.Garlic_Knockback",
 	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
@@ -204,21 +204,34 @@ bool FSurvivorsGarlicKnockback::RunTest(const FString& Parameters)
 
 	S.RunWeaponHits();
 
+	// RunWeaponHits 直後: 位置変化なし、KnockbackFramesLeft == 7
+	const FEnemyState& EAfterHit = FSurvivorsGameTestAccess::Enemies(S.Game)[0];
+	TestTrue("Enemy position unchanged immediately after hit",
+		FMath::IsNearlyEqual(EAfterHit.Pos.X, 10.f, 0.01f));
+	TestEqual("KnockbackFramesLeft == 7 after hit",
+		EAfterHit.KnockbackFramesLeft, KnockbackFrames);
+
+	// 7 回 UpdateEnemies 後: 期待位置に到達
+	for (int32 i = 0; i < KnockbackFrames; ++i)
+		S.RunUpdateEnemies();
+
 	const FVector2D EnemyPos = FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos;
-	TestTrue("Enemy knocked back along X", FMath::IsNearlyEqual(EnemyPos.X, 10.f + ExpectedDelta, 0.5f));
+	TestTrue("Enemy knocked back along X after 7 frames",
+		FMath::IsNearlyEqual(EnemyPos.X, 10.f + ExpectedDelta, 0.5f));
 	TestTrue("No Y knockback", FMath::IsNearlyEqual(EnemyPos.Y, 0.f, 0.01f));
 
 	S.Destroy();
 	return true;
 }
 
-// KnockbackResistance=1 なら位置が変わらないこと
+// KnockbackResistance=1 なら KnockbackFramesLeft=7 が設定されるが、7f後も位置変化なし（EffKB=0 のため）
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsGarlicKnockbackResistance,
 	"ReinBalance.Survivors.HitFrame.Garlic_Knockback_FullResistance",
 	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
 
 bool FSurvivorsGarlicKnockbackResistance::RunTest(const FString& Parameters)
 {
+	using namespace SurvivorsGameConstants;
 	FSurvivorsTestWorld S;
 	if (!TestTrue("World created", S.Create())) return false;
 
@@ -231,7 +244,15 @@ bool FSurvivorsGarlicKnockbackResistance::RunTest(const FString& Parameters)
 
 	S.RunWeaponHits();
 
-	TestTrue("Enemy position unchanged with full resistance",
+	// Resistance=1 でも KnockbackFramesLeft=7 が設定される（7f停止は発生する）
+	TestEqual("KnockbackFramesLeft == 7 even with full resistance",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].KnockbackFramesLeft, KnockbackFrames);
+
+	// 7 回 UpdateEnemies 後: 位置は変化なし（EffKB=0 のため KnockbackVelPerFrame=zero）
+	for (int32 i = 0; i < KnockbackFrames; ++i)
+		S.RunUpdateEnemies();
+
+	TestTrue("Enemy position unchanged with full resistance after 7 frames",
 		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos.X, 10.f, 0.01f));
 
 	S.Destroy();
@@ -357,6 +378,230 @@ bool FSurvivorsGroundZoneWarningNoDamage::RunTest(const FString& Parameters)
 	S.RunWeaponHits();
 	TestTrue("GroundZone damages after warning expires",
 		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::Enemies(S.Game)[0].HP, 190.f, 0.01f));
+
+	S.Destroy();
+	return true;
+}
+
+// KnockbackStrength=0 のヒットでも KnockbackFramesLeft=7 が設定され、7f後も位置変化なし
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsZeroKnockbackStop,
+	"ReinBalance.Survivors.HitFrame.Zero_Knockback_Stop",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FSurvivorsZeroKnockbackStop::RunTest(const FString& Parameters)
+{
+	using namespace SurvivorsGameConstants;
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	// KnockbackStrength=0 のプロジェクタイルで敵をヒット
+	S.AddEnemyAt(FVector2D(50.f, 0.f), /*HP=*/200.f);
+
+	FProjectileState Proj;
+	Proj.Pos              = FVector2D(50.f, 0.f);
+	Proj.Radius           = FSimRadius(10.f);
+	Proj.Damage           = FDamage(5.f);
+	Proj.bPiercing        = true;
+	Proj.WeaponType       = EWeaponType::MagicWand;
+	Proj.WeaponSlotIdx    = 1;
+	Proj.LifeTime         = FProjectileLifeTime(5.f);
+	Proj.KnockbackStrength= 0.f;  // KnockbackStrength=0
+	S.Game->GetLogic()->SpawnProjectile(Proj);
+
+	FSurvivorsGameTestAccess::BuildEnemyGrid(S.Game);
+	FSurvivorsHitFrame HF;
+	FSurvivorsGameTestAccess::ComputeAllWeaponHits(S.Game, HF);
+	// KnockbackStrength=0 のイベントを手動生成してApply
+	FSurvivorsHitEvent Ev;
+	Ev.Type              = ESurvivorsHitType::WeaponAreaDamage;
+	Ev.Target.IndexAtBuildTime = 0;
+	Ev.Target.UniqueId   = FSurvivorsGameTestAccess::Enemies(S.Game)[0].UniqueId;
+	Ev.Damage            = 0.f;
+	Ev.WeaponSlot        = 0;
+	Ev.KnockbackDir      = FVector2D(1.f, 0.f);
+	Ev.KnockbackStrength = 0.f;
+	Ev.KnockbackResistance = 0.f;
+	HF.Events.Add(Ev);
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF);
+
+	// KnockbackFramesLeft == 7 が設定されること（EffKB=0 でも停止フレームは発生）
+	TestEqual("KnockbackFramesLeft == 7 even with zero knockback strength",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].KnockbackFramesLeft, KnockbackFrames);
+
+	const float PosXBefore = FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos.X;
+
+	// 7 回 UpdateEnemies 後: 位置変化なし（KnockbackVelPerFrame = zero）
+	for (int32 i = 0; i < KnockbackFrames; ++i)
+		S.RunUpdateEnemies();
+
+	TestTrue("Position unchanged after 7 frames with zero knockback velocity",
+		FMath::IsNearlyEqual(FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos.X, PosXBefore, 0.01f));
+
+	S.Destroy();
+	return true;
+}
+
+// GlobalFreeze 中はノックバック（7f停止）が発生しないこと
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsGlobalFreezeNoKnockback,
+	"ReinBalance.Survivors.HitFrame.GlobalFreeze_No_Knockback",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FSurvivorsGlobalFreezeNoKnockback::RunTest(const FString& Parameters)
+{
+	using namespace SurvivorsGameConstants;
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	S.AddEnemyAt(FVector2D(10.f, 0.f), /*HP=*/200.f);
+
+	// GlobalFreezeUntilTime を ElapsedTime 以降に設定（全体フリーズ中）
+	FSurvivorsGameTestAccess::ElapsedTime(S.Game)           = 5.f;
+	FSurvivorsGameTestAccess::GlobalFreezeUntilTime(S.Game) = 100.f;
+
+	S.RunWeaponHits();
+
+	// フリーズ中はノックバックが免除される → KnockbackFramesLeft == 0
+	TestEqual("KnockbackFramesLeft == 0 during global freeze",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].KnockbackFramesLeft, 0);
+
+	S.Destroy();
+	return true;
+}
+
+// 同フレームに2回ヒット → KnockbackVelPerFrame が合算されること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsMultiHitAccumulation,
+	"ReinBalance.Survivors.HitFrame.Multi_Hit_Accumulation",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FSurvivorsMultiHitAccumulation::RunTest(const FString& Parameters)
+{
+	using namespace SurvivorsGameConstants;
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	S.AddEnemyAt(FVector2D(10.f, 0.f), /*HP=*/200.f);
+	const int32 EnemyUID = FSurvivorsGameTestAccess::Enemies(S.Game)[0].UniqueId;
+
+	// 2つの WeaponAreaDamage イベントを同フレームに送信（異なる方向）
+	FSurvivorsHitFrame HF;
+	// ヒット1: X方向
+	FSurvivorsHitEvent Ev1;
+	Ev1.Type               = ESurvivorsHitType::WeaponAreaDamage;
+	Ev1.Target.IndexAtBuildTime = 0;
+	Ev1.Target.UniqueId    = EnemyUID;
+	Ev1.Damage             = 0.f;
+	Ev1.WeaponSlot         = 0;
+	Ev1.KnockbackDir       = FVector2D(1.f, 0.f);
+	Ev1.KnockbackStrength  = GarlicKnockbackStrength;  // 10u
+	Ev1.KnockbackResistance= 0.f;
+	HF.Events.Add(Ev1);
+	// ヒット2: Y方向（スロット1）
+	FSurvivorsHitEvent Ev2;
+	Ev2.Type               = ESurvivorsHitType::WeaponAreaDamage;
+	Ev2.Target.IndexAtBuildTime = 0;
+	Ev2.Target.UniqueId    = EnemyUID;
+	Ev2.Damage             = 0.f;
+	Ev2.WeaponSlot         = 1;
+	Ev2.KnockbackDir       = FVector2D(0.f, 1.f);
+	Ev2.KnockbackStrength  = GarlicKnockbackStrength;  // 10u
+	Ev2.KnockbackResistance= 0.f;
+	HF.Events.Add(Ev2);
+
+	FSurvivorsGameTestAccess::ApplyWeaponHits(S.Game, HF);
+
+	const FEnemyState& E = FSurvivorsGameTestAccess::Enemies(S.Game)[0];
+	TestEqual("KnockbackFramesLeft == 7 after multi-hit", E.KnockbackFramesLeft, KnockbackFrames);
+
+	// KnockbackVelPerFrame は X と Y の合算
+	const float ExpVelPerFrame = GarlicKnockbackStrength / static_cast<float>(KnockbackFrames);
+	TestTrue("KnockbackVelPerFrame.X accumulated",
+		FMath::IsNearlyEqual(E.KnockbackVelPerFrame.X, ExpVelPerFrame, 0.01f));
+	TestTrue("KnockbackVelPerFrame.Y accumulated",
+		FMath::IsNearlyEqual(E.KnockbackVelPerFrame.Y, ExpVelPerFrame, 0.01f));
+
+	// 7 回 UpdateEnemies 後: 合算後の総移動量に到達
+	for (int32 i = 0; i < KnockbackFrames; ++i)
+		S.RunUpdateEnemies();
+
+	const FVector2D FinalPos = FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos;
+	TestTrue("Final X position after multi-hit accumulation",
+		FMath::IsNearlyEqual(FinalPos.X, 10.f + GarlicKnockbackStrength, 0.5f));
+	TestTrue("Final Y position after multi-hit accumulation",
+		FMath::IsNearlyEqual(FinalPos.Y, 0.f + GarlicKnockbackStrength, 0.5f));
+
+	S.Destroy();
+	return true;
+}
+
+// ヒット後 3f 経過後に再ヒット → KnockbackFramesLeft が 7 にリセットされること
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsKnockbackRehitReset,
+	"ReinBalance.Survivors.HitFrame.Knockback_Rehit_Reset",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FSurvivorsKnockbackRehitReset::RunTest(const FString& Parameters)
+{
+	using namespace SurvivorsGameConstants;
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	S.AddEnemyAt(FVector2D(10.f, 0.f), /*HP=*/200.f);
+
+	// 1回目ヒット
+	S.RunWeaponHits();
+	TestEqual("KnockbackFramesLeft == 7 after first hit",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].KnockbackFramesLeft, KnockbackFrames);
+
+	// 3 回 UpdateEnemies（残り 4f）
+	for (int32 i = 0; i < 3; ++i)
+		S.RunUpdateEnemies();
+	TestEqual("KnockbackFramesLeft == 4 after 3 UpdateEnemies",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].KnockbackFramesLeft, KnockbackFrames - 3);
+
+	// Garlic HitInterval を経過させて再ヒット可能にする
+	FSurvivorsGameTestAccess::ElapsedTime(S.Game) += GarlicTable[0].HitInterval + 0.01f;
+
+	// 2回目ヒット → KnockbackFramesLeft が 7 にリセット
+	S.RunWeaponHits();
+	TestEqual("KnockbackFramesLeft reset to 7 on rehit",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].KnockbackFramesLeft, KnockbackFrames);
+
+	S.Destroy();
+	return true;
+}
+
+// GlobalFreeze 中も進行中ノックバックは継続すること（ノックバック優先設計の確認）
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsKnockbackContinuesDuringFreeze,
+	"ReinBalance.Survivors.HitFrame.Knockback_Continues_During_Freeze",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FSurvivorsKnockbackContinuesDuringFreeze::RunTest(const FString& Parameters)
+{
+	using namespace SurvivorsGameConstants;
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	// 敵を X+10 位置に置いてヒット → KnockbackFramesLeft=7 を確認
+	S.AddEnemyAt(FVector2D(10.f, 0.f), /*HP=*/200.f);
+	S.RunWeaponHits();
+	TestEqual("KnockbackFramesLeft == 7 after hit",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].KnockbackFramesLeft, KnockbackFrames);
+
+	// GlobalFreeze を設定（Orologion/Freeze アイテム相当）
+	FSurvivorsGameTestAccess::GlobalFreezeUntilTime(S.Game) = 100.f;
+
+	// GlobalFreeze 中に UpdateEnemies を 3 回実行
+	const FVector2D PosBeforeFreeze = FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos;
+	for (int32 i = 0; i < 3; ++i)
+		S.RunUpdateEnemies();
+
+	// KnockbackFramesLeft が減少していること（フリーズ中もノックバック継続）
+	TestEqual("KnockbackFramesLeft decreased during GlobalFreeze (knockback takes priority)",
+		FSurvivorsGameTestAccess::Enemies(S.Game)[0].KnockbackFramesLeft, KnockbackFrames - 3);
+
+	// 位置が変化していること（ノックバックが継続された）
+	const FVector2D PosAfterFreeze = FSurvivorsGameTestAccess::Enemies(S.Game)[0].Pos;
+	TestTrue("Enemy position changed during GlobalFreeze (knockback continued)",
+		!FMath::IsNearlyEqual(PosAfterFreeze.X, PosBeforeFreeze.X, 0.01f));
 
 	S.Destroy();
 	return true;
