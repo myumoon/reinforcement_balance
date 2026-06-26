@@ -929,6 +929,7 @@ void FSurvivorsGameLogic::UpdateEnemies()
 		// New knockback during freeze is prevented in ApplyWeaponHits (bFrozen check).
 		if (E.KnockbackFramesLeft > 0)
 		{
+			E.Vel  = E.KnockbackVelPerFrame;  // keep Vel in sync so GetObservation() reflects actual movement
 			E.Pos += E.KnockbackVelPerFrame;
 			--E.KnockbackFramesLeft;
 			continue;
@@ -949,8 +950,10 @@ void FSurvivorsGameLogic::RecycleDistantEnemies()
 		if (CurrentConfig.EnemyTypeTable.IsValidIndex(E.TypeId) && CurrentConfig.EnemyTypeTable[E.TypeId].bIsBoss) continue;
 		if ((E.Pos - PlayerPos).SizeSquared() > RecycleSq)
 		{
-			E.Pos = RandomSpawnPos();
-			E.Vel = FVector2D::ZeroVector;
+			E.Pos                  = RandomSpawnPos();
+			E.Vel                  = FVector2D::ZeroVector;
+			E.KnockbackFramesLeft  = 0;
+			E.KnockbackVelPerFrame = FVector2D::ZeroVector;
 		}
 	}
 }
