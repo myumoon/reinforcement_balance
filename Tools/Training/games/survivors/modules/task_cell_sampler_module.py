@@ -387,10 +387,29 @@ class TaskCellSamplerStateModule(BaseStateModule):
             stats.regression_score = float(s.get("regression_score", 0.0))
             stats.last_sample_step = int(s.get("last_sample_step", 0))
             stats.blocked_until_step = int(s.get("blocked_until_step", 0))
-            stats.episode_length_p10 = float(s.get("episode_length_p10", 0.0))
-            stats.short_episode_rate = float(s.get("short_episode_rate", 0.0))
-            stats.recent_terminated_rate = float(s.get("recent_terminated_rate", 0.0))
+            # 新フィールドが旧 state に無い場合は保存済みの履歴から再計算して乖離を防ぐ
+            lengths = list(stats.recent_episode_lengths)
+            if "episode_length_p10" in s:
+                stats.episode_length_p10 = float(s["episode_length_p10"])
+            else:
+                stats.episode_length_p10 = float(np.percentile(lengths, 10)) if lengths else 0.0
+            if "short_episode_rate" in s:
+                stats.short_episode_rate = float(s["short_episode_rate"])
+            else:
+                stats.short_episode_rate = (
+                    sum(1 for l in lengths if l < self._short_episode_steps) / len(lengths)
+                    if lengths else 0.0
+                )
             stats.recent_terminated_flags = deque(s.get("recent_terminated_flags", []), maxlen=40)
+            if "recent_terminated_rate" in s:
+                stats.recent_terminated_rate = float(s["recent_terminated_rate"])
+            else:
+                recent_flags = list(stats.recent_terminated_flags)
+                if recent_flags:
+                    stats.recent_terminated_rate = sum(recent_flags) / len(recent_flags)
+                else:
+                    # flags が旧 state に無い場合は全体 terminated_rate に fallback
+                    stats.recent_terminated_rate = stats.terminated_rate
             self._stats[cell.key()] = stats
         # 候補セルをstage_keyから再構築
         if self._current_stage_key:

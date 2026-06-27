@@ -224,11 +224,20 @@ def test_recent_terminated_rate_computed():
 
 
 def test_import_state_backward_compat():
-    """旧 state から import_state() が 0.0 / 空deque defaultで復元できる。"""
-    s = make_sampler()
+    """旧 state（新フィールドなし）の import_state() が recent_episode_lengths から再計算する。
+
+    - episode_length_p10 / short_episode_rate は recent_episode_lengths から再計算する。
+    - recent_terminated_rate は recent_terminated_flags がない場合に terminated_rate へ fallback する。
+    """
+    import numpy as np
+
+    short_steps = 600
+    s = make_sampler(short_episode_steps=short_steps)
     s.rebuild_candidate_cells("WU0", 0, {0: 100})
     cell = s._candidate_cells[0]
-    s.on_episode_end(cell, active_score=400.0, ep_len=200, terminated=False, num_timesteps=5000)
+    # ep_len=800 は short_steps(600) 以上なので short 扱いにならない
+    # terminated=False → terminated_rate=0.0
+    s.on_episode_end(cell, active_score=400.0, ep_len=800, terminated=False, num_timesteps=5000)
 
     # 旧フォーマット（新フィールドなし）のstateを手動構築
     state = s.export_state()
@@ -239,11 +248,36 @@ def test_import_state_backward_compat():
         stat_dict.pop("recent_terminated_rate", None)
         stat_dict.pop("recent_terminated_flags", None)
 
+    s2 = make_sampler(short_episode_steps=short_steps)
+    s2.import_state(state)
+    stats = s2.get_cell_stats(WeaponType.GARLIC, 0)
+    assert stats is not None
+    # recent_episode_lengths=[800] から再計算
+    assert stats.episode_length_p10 == pytest.approx(float(np.percentile([800], 10)))
+    # 800 >= short_steps(600) → short ではないので rate=0.0
+    assert stats.short_episode_rate == pytest.approx(0.0)
+    # recent_terminated_flags が無いので terminated_rate(0.0) に fallback
+    assert stats.recent_terminated_rate == pytest.approx(0.0)
+    assert len(stats.recent_terminated_flags) == 0
+
+
+def test_import_state_backward_compat_terminated_fallback():
+    """旧 state で terminated があった場合、recent_terminated_rate が terminated_rate に fallback する。"""
+    s = make_sampler()
+    s.rebuild_candidate_cells("WU0", 0, {0: 100})
+    cell = s._candidate_cells[0]
+    # 2エピソード: 1つ terminated=True → terminated_rate=0.5
+    s.on_episode_end(cell, active_score=400.0, ep_len=300, terminated=True, num_timesteps=1000)
+    s.on_episode_end(cell, active_score=400.0, ep_len=300, terminated=False, num_timesteps=2000)
+
+    state = s.export_state()
+    for stat_dict in state["stats"]:
+        stat_dict.pop("recent_terminated_rate", None)
+        stat_dict.pop("recent_terminated_flags", None)
+
     s2 = make_sampler()
     s2.import_state(state)
     stats = s2.get_cell_stats(WeaponType.GARLIC, 0)
     assert stats is not None
-    assert stats.episode_length_p10 == pytest.approx(0.0)
-    assert stats.short_episode_rate == pytest.approx(0.0)
-    assert stats.recent_terminated_rate == pytest.approx(0.0)
-    assert len(stats.recent_terminated_flags) == 0
+    # flags 不在 → terminated_rate(=0.5) に fallback
+    assert stats.recent_terminated_rate == pytest.approx(0.5)
