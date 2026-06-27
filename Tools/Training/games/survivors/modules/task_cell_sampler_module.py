@@ -9,6 +9,7 @@ import numpy as np
 from games.survivors.modules.state_modules import BaseStateModule
 from games.survivors.survivors_weapon_table import (
     WEAPON_UNLOCK_ORDER,
+    WeaponEntry,
     get_unlocked_startable_weapon_ids,
 )
 
@@ -65,6 +66,7 @@ class TaskCellSamplerStateModule(BaseStateModule):
         emergency_length_floor_ratio: float = 0.25,
         blocked_steps: int = 200_000,
         enemy_phase_backtrack: int = 1,
+        weapon_unlock_order: list[WeaponEntry] | None = None,
     ) -> None:
         self._min_episodes = min_episodes_per_cell
         self._target_p10 = target_p10
@@ -76,6 +78,7 @@ class TaskCellSamplerStateModule(BaseStateModule):
         self._emergency_length_floor_ratio = emergency_length_floor_ratio
         self._blocked_steps = blocked_steps
         self._enemy_phase_backtrack = enemy_phase_backtrack
+        self._weapon_unlock_order: list[WeaponEntry] = weapon_unlock_order if weapon_unlock_order is not None else WEAPON_UNLOCK_ORDER
 
         self._current_stage_key: str = "WU0"
         self._max_unlocked_enemy_phase_idx: int = 0
@@ -108,7 +111,7 @@ class TaskCellSamplerStateModule(BaseStateModule):
         if readiness_cap_phase is not None:
             self._readiness_cap_phase = readiness_cap_phase
 
-        startable_ids = get_unlocked_startable_weapon_ids(stage_key)
+        startable_ids = get_unlocked_startable_weapon_ids(stage_key, self._weapon_unlock_order)
         lo_phase = max(0, max_unlocked_enemy_phase_idx - self._enemy_phase_backtrack)
         hi_phase = max_unlocked_enemy_phase_idx
 
@@ -292,7 +295,7 @@ class TaskCellSamplerStateModule(BaseStateModule):
             cell = stats.cell
             # weapon_name: WeaponUnlockOrder から key を引く
             weapon_name = next(
-                (e.key for e in WEAPON_UNLOCK_ORDER if e.weapon_id == cell.first_weapon_id),
+                (e.key for e in self._weapon_unlock_order if e.weapon_id == cell.first_weapon_id),
                 str(cell.first_weapon_id),
             )
             prefix = f"task_cell/{cell.weapon_unlock_stage_key}/{weapon_name}/enemy_phase/{cell.enemy_phase_idx}"

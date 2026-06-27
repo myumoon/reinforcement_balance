@@ -47,6 +47,7 @@ from games.survivors.weapon_curriculum_callback import WeaponCurriculumCallback 
 from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
 from games.survivors.modules.task_cell_sampler_module import TaskCellSamplerStateModule
 from games.survivors.modules.weapon_unlock_module import WeaponUnlockStateModule
+from games.survivors.survivors_weapon_table import resolve_weapon_unlock_order
 
 try:
     import wandb
@@ -1720,6 +1721,7 @@ def main() -> None:
         if _curriculum_module is not None:
             _curriculum_module._rollback_mode = "emergency_only"
 
+        _weapon_unlock_order = resolve_weapon_unlock_order(getattr(args, "weapon_unlock_table", "default_v1"))
         _weapon_unlock_module = WeaponUnlockStateModule(
             initial_stage_key="WU0",
             weapon_unlock_min_episodes=args.weapon_unlock_min_episodes,
@@ -1727,6 +1729,7 @@ def main() -> None:
             weapon_unlock_max_terminated_rate=args.weapon_unlock_max_terminated_rate,
             weapon_unlock_min_steps=args.weapon_unlock_min_steps,
             weapon_unlock_readiness_enemy_phase_cap=args.weapon_unlock_readiness_enemy_phase_cap,
+            weapon_unlock_order=_weapon_unlock_order,
         )
         _task_cell_sampler_module = TaskCellSamplerStateModule(
             min_episodes_per_cell=args.task_cell_min_episodes,
@@ -1735,6 +1738,7 @@ def main() -> None:
             random_floor=args.task_cell_random_floor,
             blocked_steps=args.task_cell_blocked_steps,
             enemy_phase_backtrack=args.task_cell_enemy_phase_backtrack,
+            weapon_unlock_order=_weapon_unlock_order,
         )
         # resume 対応
         _train_status = resume_status if args.resume else None
@@ -1761,6 +1765,7 @@ def main() -> None:
                 pool_policy=getattr(args, "weapon_pool_policy", "target_plus_anchor"),
                 wandb_logger=wandb_logger,
                 log_dir=log_dir,
+                weapon_unlock_table_name=getattr(args, "weapon_unlock_table", "default_v1"),
             )
             callbacks.append(_tcs_cb)
             print(

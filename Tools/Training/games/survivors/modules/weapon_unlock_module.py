@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 from games.survivors.modules.state_modules import BaseStateModule
-from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER, get_added_weapon_id
+from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER, WeaponEntry, get_added_weapon_id
 
 
 @dataclass
@@ -38,7 +38,9 @@ class WeaponUnlockStateModule(BaseStateModule):
         weapon_unlock_max_terminated_rate: float = 0.5,
         weapon_unlock_min_steps: int = 100_000,
         weapon_unlock_readiness_enemy_phase_cap: int = 2,
+        weapon_unlock_order: list[WeaponEntry] | None = None,
     ) -> None:
+        self._weapon_unlock_order: list[WeaponEntry] = weapon_unlock_order if weapon_unlock_order is not None else WEAPON_UNLOCK_ORDER
         self._stage_order: int = self._key_to_order(initial_stage_key)
         self._min_episodes = weapon_unlock_min_episodes
         self._target_p10 = weapon_unlock_target_p10
@@ -50,16 +52,14 @@ class WeaponUnlockStateModule(BaseStateModule):
         self._events: list[dict] = []
         self._state_restored: bool = False  # import_state() 後に True になる
 
-    @staticmethod
-    def _key_to_order(stage_key: str) -> int:
-        for e in WEAPON_UNLOCK_ORDER:
+    def _key_to_order(self, stage_key: str) -> int:
+        for e in self._weapon_unlock_order:
             if e.unlock_stage_key == stage_key:
                 return e.unlock_order
         raise ValueError(f"Unknown stage_key: {stage_key!r}")
 
-    @staticmethod
-    def _order_to_key(order: int) -> str:
-        return WEAPON_UNLOCK_ORDER[order].unlock_stage_key
+    def _order_to_key(self, order: int) -> str:
+        return self._weapon_unlock_order[order].unlock_stage_key
 
     @property
     def current_stage_key(self) -> str:
@@ -71,7 +71,7 @@ class WeaponUnlockStateModule(BaseStateModule):
 
     @property
     def is_final_stage(self) -> bool:
-        return self._stage_order >= len(WEAPON_UNLOCK_ORDER) - 1
+        return self._stage_order >= len(self._weapon_unlock_order) - 1
 
     def set_start_step(self, num_timesteps: int) -> None:
         """訓練開始時のステップ数を記録する（min_steps 判定に使用）。resume 時はスキップする。"""
@@ -97,7 +97,7 @@ class WeaponUnlockStateModule(BaseStateModule):
             return None
 
         # 現在ステージの武器（= 候補セルに必ず存在する）の stats を確認
-        current_weapon_id = get_added_weapon_id(self.current_stage_key)
+        current_weapon_id = get_added_weapon_id(self.current_stage_key, self._weapon_unlock_order)
 
         # 最低ステップ数チェック
         ref_step = self._last_advance_step if self._last_advance_step is not None else self._start_step
@@ -121,7 +121,7 @@ class WeaponUnlockStateModule(BaseStateModule):
 
         from_key = self.current_stage_key
         next_order = self._stage_order + 1
-        next_entry = WEAPON_UNLOCK_ORDER[next_order]
+        next_entry = self._weapon_unlock_order[next_order]
         self._stage_order = next_order
         self._last_advance_step = num_timesteps
         to_key = self.current_stage_key
@@ -145,7 +145,7 @@ class WeaponUnlockStateModule(BaseStateModule):
         return event
 
     def get_wandb_metrics(self) -> dict:
-        entry = WEAPON_UNLOCK_ORDER[self._stage_order]
+        entry = self._weapon_unlock_order[self._stage_order]
         return {
             "weapon_unlock/stage_order": self._stage_order,
             "weapon_unlock/stage_key_id": self._stage_order,
