@@ -16,6 +16,7 @@ from games.survivors.param_applier import ParamApplier
 from games.survivors.survivors_weapon_table import (
     WEAPON_UNLOCK_ORDER,
     build_weapon_params_for_cell,
+    resolve_weapon_unlock_order,
 )
 from games.survivors.survivors_curriculum import get_enemy_params_for_phase, PHASES
 
@@ -51,6 +52,7 @@ class TaskCellSamplerCallback(BaseCallback):
         wandb_logger: "WandbLogger | None" = None,
         wandb_log_freq: int = 10_000,
         log_dir: "Path | str | None" = None,
+        weapon_unlock_table_name: str = "default_v1",
     ) -> None:
         super().__init__(verbose=0)
         self._hybrid_cb = hybrid_cb
@@ -67,10 +69,13 @@ class TaskCellSamplerCallback(BaseCallback):
         self._jsonl_path: Path | None = (
             self._log_dir / "task_cell_episode_metrics.jsonl" if self._log_dir else None
         )
+        self._weapon_unlock_table_name = weapon_unlock_table_name
 
         self._score_tracker = EpisodeScoreTracker(frame_skip=frame_skip, alive_reward=alive_reward)
         self._active_cell_by_env: dict[int, TaskCell | None] = {}
+        self._active_params_by_env: dict[int, dict | None] = {}
         self._pending_cell_by_env: dict[int, TaskCell | None] = {}
+        self._pending_params_by_env: dict[int, dict | None] = {}
         self._status_path: Path | None = (
             self._log_dir / "task_cell_sampler_status.json" if self._log_dir else None
         )
@@ -101,8 +106,10 @@ class TaskCellSamplerCallback(BaseCallback):
         for env_idx in range(n):
             cell = self._tcs.sample_cell(self.num_timesteps)
             self._active_cell_by_env[env_idx] = None
+            self._active_params_by_env[env_idx] = None
             self._pending_cell_by_env[env_idx] = cell
             params = self._build_params_for_cell(cell)
+            self._pending_params_by_env[env_idx] = params
             self._param_applier.apply(params, env_idx=env_idx)
 
     def _on_step(self) -> bool:
@@ -121,6 +128,7 @@ class TaskCellSamplerCallback(BaseCallback):
 
             # 1. 終了 episode の active_cell で stats を更新
             active_cell = self._active_cell_by_env.get(env_idx)
+            active_params = self._active_params_by_env.get(env_idx)
             if active_cell is not None:
                 self._tcs.on_episode_end(
                     cell=active_cell,
@@ -129,16 +137,18 @@ class TaskCellSamplerCallback(BaseCallback):
                     terminated=terminated,
                     num_timesteps=self.num_timesteps,
                 )
-                self._write_jsonl(env_idx, active_cell, active_score, ep_len, terminated, ep_base)
+                self._write_jsonl(env_idx, active_cell, active_score, ep_len, terminated, ep_base, active_params)
 
             # 2. pending -> active に昇格（pending が None の場合も active = None に昇格）
             self._active_cell_by_env[env_idx] = self._pending_cell_by_env.get(env_idx)
+            self._active_params_by_env[env_idx] = self._pending_params_by_env.get(env_idx)
 
             # 3. 次 episode 用の新セルをサンプルして pending に設定
             next_cell = self._tcs.sample_cell(self.num_timesteps)
             self._pending_cell_by_env[env_idx] = next_cell
-            params = self._build_params_for_cell(next_cell)
-            self._param_applier.apply(params, env_idx=env_idx)
+            next_params = self._build_params_for_cell(next_cell)
+            self._pending_params_by_env[env_idx] = next_params
+            self._param_applier.apply(next_params, env_idx=env_idx)
 
             # 4-5. 武器アンロック判定
             # target_phase: cap が候補セルに強制追加されているので min(max_phase, cap) を使える
@@ -211,6 +221,7 @@ class TaskCellSamplerCallback(BaseCallback):
             max_unlocked_stage_key=cell.weapon_unlock_stage_key,
             item_stage_key=self._item_stage_key,
             pool_policy=self._pool_policy,
+            weapon_unlock_order=self._tcs._weapon_unlock_order,
         )
         if self._enemy_param_mode == "phase_fixed":
             enemy_params = get_enemy_params_for_phase(cell.enemy_phase_idx)
@@ -226,10 +237,11 @@ class TaskCellSamplerCallback(BaseCallback):
         ep_len: int,
         terminated: bool,
         ep_base: float,
+        params: dict | None = None,
     ) -> None:
         if self._jsonl_path is None:
             return
-        weapon_entry = next((e for e in WEAPON_UNLOCK_ORDER if e.weapon_id == cell.first_weapon_id), None)
+        weapon_entry = next((e for e in self._tcs._weapon_unlock_order if e.weapon_id == cell.first_weapon_id), None)
         weapon_name = weapon_entry.key if weapon_entry else str(cell.first_weapon_id)
         enemy_params = get_enemy_params_for_phase(cell.enemy_phase_idx)
         record = {
@@ -247,6 +259,9 @@ class TaskCellSamplerCallback(BaseCallback):
             "terminated": terminated,
             "truncated": not terminated,
             "task_cell_key": cell.key(),
+            "weapon_unlock_table": self._weapon_unlock_table_name,
+            "initial_weapon_slots": params.get("initial_weapon_slots") if params else None,
+            "allowed_weapon_types": params.get("allowed_weapon_types") if params else None,
         }
         with open(self._jsonl_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
