@@ -73,6 +73,7 @@ class TaskCellSamplerCallback(BaseCallback):
 
         self._score_tracker = EpisodeScoreTracker(frame_skip=frame_skip, alive_reward=alive_reward)
         self._active_cell_by_env: dict[int, TaskCell | None] = {}
+        self._active_params_by_env: dict[int, dict | None] = {}
         self._pending_cell_by_env: dict[int, TaskCell | None] = {}
         self._pending_params_by_env: dict[int, dict | None] = {}
         self._status_path: Path | None = (
@@ -105,6 +106,7 @@ class TaskCellSamplerCallback(BaseCallback):
         for env_idx in range(n):
             cell = self._tcs.sample_cell(self.num_timesteps)
             self._active_cell_by_env[env_idx] = None
+            self._active_params_by_env[env_idx] = None
             self._pending_cell_by_env[env_idx] = cell
             params = self._build_params_for_cell(cell)
             self._pending_params_by_env[env_idx] = params
@@ -126,7 +128,7 @@ class TaskCellSamplerCallback(BaseCallback):
 
             # 1. 終了 episode の active_cell で stats を更新
             active_cell = self._active_cell_by_env.get(env_idx)
-            active_params = self._pending_params_by_env.get(env_idx)
+            active_params = self._active_params_by_env.get(env_idx)
             if active_cell is not None:
                 self._tcs.on_episode_end(
                     cell=active_cell,
@@ -139,6 +141,7 @@ class TaskCellSamplerCallback(BaseCallback):
 
             # 2. pending -> active に昇格（pending が None の場合も active = None に昇格）
             self._active_cell_by_env[env_idx] = self._pending_cell_by_env.get(env_idx)
+            self._active_params_by_env[env_idx] = self._pending_params_by_env.get(env_idx)
 
             # 3. 次 episode 用の新セルをサンプルして pending に設定
             next_cell = self._tcs.sample_cell(self.num_timesteps)
