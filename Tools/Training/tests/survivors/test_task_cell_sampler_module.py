@@ -168,3 +168,82 @@ def test_blocked_cell_count_excludes_expired():
         assert s.get_wandb_metrics(num_timesteps=1000)["task_cell_sampler/blocked_cell_count"] == 1
         # ブロック解除後
         assert s.get_wandb_metrics(num_timesteps=blocked_step + 1)["task_cell_sampler/blocked_cell_count"] == 0
+
+
+def test_episode_length_p10_computed():
+    """episode_length_p10 が recent window の10%ile で計算される。"""
+    s = make_sampler(short_episode_steps=600)
+    s.rebuild_candidate_cells("WU0", 0, {0: 100})
+    cell = s._candidate_cells[0]
+
+    # 10エピソードのep_lenを記録（p10 = 10%ile）
+    ep_lens = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+    for ep_len in ep_lens:
+        s.on_episode_end(cell, active_score=500.0, ep_len=ep_len, terminated=False, num_timesteps=1000)
+
+    stats = s.get_cell_stats(WeaponType.GARLIC, 0)
+    assert stats is not None
+    import numpy as np
+    expected_p10 = float(np.percentile(ep_lens, 10))
+    assert stats.episode_length_p10 == pytest.approx(expected_p10)
+
+
+def test_short_episode_rate_computed():
+    """short_episode_rate が閾値通り計算される。"""
+    short_threshold = 500
+    s = make_sampler(short_episode_steps=short_threshold)
+    s.rebuild_candidate_cells("WU0", 0, {0: 100})
+    cell = s._candidate_cells[0]
+
+    # 10エピソード: 4つが threshold 未満（100, 200, 300, 400）、6つが以上
+    ep_lens = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+    for ep_len in ep_lens:
+        s.on_episode_end(cell, active_score=500.0, ep_len=ep_len, terminated=False, num_timesteps=1000)
+
+    stats = s.get_cell_stats(WeaponType.GARLIC, 0)
+    assert stats is not None
+    # 100, 200, 300, 400 の4つが short_threshold(500) 未満
+    expected_rate = 4 / 10
+    assert stats.short_episode_rate == pytest.approx(expected_rate)
+
+
+def test_recent_terminated_rate_computed():
+    """recent_terminated_rate が recent_terminated_flags から計算される。"""
+    s = make_sampler()
+    s.rebuild_candidate_cells("WU0", 0, {0: 100})
+    cell = s._candidate_cells[0]
+
+    # 10エピソード: 3つが terminated=True
+    for i in range(10):
+        terminated = i < 3
+        s.on_episode_end(cell, active_score=500.0, ep_len=300, terminated=terminated, num_timesteps=1000)
+
+    stats = s.get_cell_stats(WeaponType.GARLIC, 0)
+    assert stats is not None
+    assert stats.recent_terminated_rate == pytest.approx(3 / 10)
+
+
+def test_import_state_backward_compat():
+    """旧 state から import_state() が 0.0 / 空deque defaultで復元できる。"""
+    s = make_sampler()
+    s.rebuild_candidate_cells("WU0", 0, {0: 100})
+    cell = s._candidate_cells[0]
+    s.on_episode_end(cell, active_score=400.0, ep_len=200, terminated=False, num_timesteps=5000)
+
+    # 旧フォーマット（新フィールドなし）のstateを手動構築
+    state = s.export_state()
+    # 新フィールドを削除して旧フォーマットを模擬
+    for stat_dict in state["stats"]:
+        stat_dict.pop("episode_length_p10", None)
+        stat_dict.pop("short_episode_rate", None)
+        stat_dict.pop("recent_terminated_rate", None)
+        stat_dict.pop("recent_terminated_flags", None)
+
+    s2 = make_sampler()
+    s2.import_state(state)
+    stats = s2.get_cell_stats(WeaponType.GARLIC, 0)
+    assert stats is not None
+    assert stats.episode_length_p10 == pytest.approx(0.0)
+    assert stats.short_episode_rate == pytest.approx(0.0)
+    assert stats.recent_terminated_rate == pytest.approx(0.0)
+    assert len(stats.recent_terminated_flags) == 0

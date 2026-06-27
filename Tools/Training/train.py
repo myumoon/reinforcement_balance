@@ -951,6 +951,18 @@ def parse_args() -> argparse.Namespace:
                    help="武器アンロック昇格の最低ステップ数 (default: 100000)")
     p.add_argument("--weapon-unlock-readiness-enemy-phase-cap", type=int, default=2,
                    help="武器アンロック判定で使う敵Phase上限 (default: 2)")
+    p.add_argument("--weapon-unlock-min-ep-len-p10-phase0", type=int, default=600,
+                   help="武器アンロック判定: phase0 の最低 ep_len_p10 (default: 600)")
+    p.add_argument("--weapon-unlock-min-ep-len-p10-phase1", type=int, default=900,
+                   help="武器アンロック判定: phase1 の最低 ep_len_p10 (default: 900)")
+    p.add_argument("--weapon-unlock-min-ep-len-p10-phase2", type=int, default=1200,
+                   help="武器アンロック判定: phase2 の最低 ep_len_p10 (default: 1200)")
+    p.add_argument("--weapon-unlock-min-ep-len-p10-phase3", type=int, default=1200,
+                   help="武器アンロック判定: phase3 の最低 ep_len_p10 (default: 1200)")
+    p.add_argument("--weapon-unlock-short-episode-steps", type=int, default=600,
+                   help="short episode 判定閾値（ステップ数）(default: 600)")
+    p.add_argument("--weapon-unlock-max-short-episode-rate", type=float, default=0.15,
+                   help="武器アンロック判定: 最大 short_episode_rate (default: 0.15)")
 
     # YAML があればデフォルトを差し込む（CLI が常に優先）
     if pre_args.config:
@@ -1730,6 +1742,13 @@ def main() -> None:
             weapon_unlock_min_steps=args.weapon_unlock_min_steps,
             weapon_unlock_readiness_enemy_phase_cap=args.weapon_unlock_readiness_enemy_phase_cap,
             weapon_unlock_order=_weapon_unlock_order,
+            weapon_unlock_min_ep_len_p10_by_phase={
+                0: args.weapon_unlock_min_ep_len_p10_phase0,
+                1: args.weapon_unlock_min_ep_len_p10_phase1,
+                2: args.weapon_unlock_min_ep_len_p10_phase2,
+                3: args.weapon_unlock_min_ep_len_p10_phase3,
+            },
+            weapon_unlock_max_short_episode_rate=args.weapon_unlock_max_short_episode_rate,
         )
         _task_cell_sampler_module = TaskCellSamplerStateModule(
             min_episodes_per_cell=args.task_cell_min_episodes,
@@ -1739,6 +1758,7 @@ def main() -> None:
             blocked_steps=args.task_cell_blocked_steps,
             enemy_phase_backtrack=args.task_cell_enemy_phase_backtrack,
             weapon_unlock_order=_weapon_unlock_order,
+            short_episode_steps=args.weapon_unlock_short_episode_steps,
         )
         # resume 対応
         _train_status = resume_status if args.resume else None

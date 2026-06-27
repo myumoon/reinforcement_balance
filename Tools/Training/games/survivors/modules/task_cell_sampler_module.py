@@ -45,6 +45,10 @@ class TaskCellStats:
     regression_score: float = 0.0
     last_sample_step: int = 0
     blocked_until_step: int = 0
+    episode_length_p10: float = 0.0
+    short_episode_rate: float = 0.0
+    recent_terminated_rate: float = 0.0
+    recent_terminated_flags: deque = field(default_factory=lambda: deque(maxlen=40))
 
 
 class TaskCellSamplerStateModule(BaseStateModule):
@@ -67,6 +71,7 @@ class TaskCellSamplerStateModule(BaseStateModule):
         blocked_steps: int = 200_000,
         enemy_phase_backtrack: int = 1,
         weapon_unlock_order: list[WeaponEntry] | None = None,
+        short_episode_steps: int = 600,
     ) -> None:
         self._min_episodes = min_episodes_per_cell
         self._target_p10 = target_p10
@@ -79,6 +84,7 @@ class TaskCellSamplerStateModule(BaseStateModule):
         self._blocked_steps = blocked_steps
         self._enemy_phase_backtrack = enemy_phase_backtrack
         self._weapon_unlock_order: list[WeaponEntry] = weapon_unlock_order if weapon_unlock_order is not None else WEAPON_UNLOCK_ORDER
+        self._short_episode_steps = short_episode_steps
 
         self._current_stage_key: str = "WU0"
         self._max_unlocked_enemy_phase_idx: int = 0
@@ -154,6 +160,7 @@ class TaskCellSamplerStateModule(BaseStateModule):
         stats.episode_count += 1
         stats.recent_scores.append(active_score)
         stats.recent_episode_lengths.append(ep_len)
+        stats.recent_terminated_flags.append(terminated)
         if terminated:
             stats.terminated_count += 1
         else:
@@ -176,6 +183,10 @@ class TaskCellSamplerStateModule(BaseStateModule):
 
         lengths = list(stats.recent_episode_lengths)
         stats.episode_length_mean = float(np.mean(lengths)) if lengths else 0.0
+        stats.episode_length_p10 = float(np.percentile(lengths, 10)) if lengths else 0.0
+        stats.short_episode_rate = sum(1 for l in lengths if l < self._short_episode_steps) / len(lengths) if lengths else 0.0
+        recent_flags = list(stats.recent_terminated_flags)
+        stats.recent_terminated_rate = sum(recent_flags) / len(recent_flags) if recent_flags else 0.0
         ep_total = stats.terminated_count + stats.truncated_count
         stats.terminated_rate = stats.terminated_count / ep_total if ep_total > 0 else 0.0
 
@@ -305,6 +316,9 @@ class TaskCellSamplerStateModule(BaseStateModule):
             metrics[f"{prefix}/episode_count"] = stats.episode_count
             metrics[f"{prefix}/terminated_rate"] = stats.terminated_rate
             metrics[f"{prefix}/episode_length_mean"] = stats.episode_length_mean
+            metrics[f"{prefix}/episode_length_p10"] = stats.episode_length_p10
+            metrics[f"{prefix}/short_episode_rate"] = stats.short_episode_rate
+            metrics[f"{prefix}/recent_terminated_rate"] = stats.recent_terminated_rate
         return metrics
 
     def export_state(self) -> dict:
@@ -332,6 +346,10 @@ class TaskCellSamplerStateModule(BaseStateModule):
                 "regression_score": s.regression_score,
                 "last_sample_step": s.last_sample_step,
                 "blocked_until_step": s.blocked_until_step,
+                "episode_length_p10": s.episode_length_p10,
+                "short_episode_rate": s.short_episode_rate,
+                "recent_terminated_rate": s.recent_terminated_rate,
+                "recent_terminated_flags": list(s.recent_terminated_flags),
             })
         return {
             "current_stage_key": self._current_stage_key,
@@ -369,6 +387,10 @@ class TaskCellSamplerStateModule(BaseStateModule):
             stats.regression_score = float(s.get("regression_score", 0.0))
             stats.last_sample_step = int(s.get("last_sample_step", 0))
             stats.blocked_until_step = int(s.get("blocked_until_step", 0))
+            stats.episode_length_p10 = float(s.get("episode_length_p10", 0.0))
+            stats.short_episode_rate = float(s.get("short_episode_rate", 0.0))
+            stats.recent_terminated_rate = float(s.get("recent_terminated_rate", 0.0))
+            stats.recent_terminated_flags = deque(s.get("recent_terminated_flags", []), maxlen=40)
             self._stats[cell.key()] = stats
         # 候補セルをstage_keyから再構築
         if self._current_stage_key:

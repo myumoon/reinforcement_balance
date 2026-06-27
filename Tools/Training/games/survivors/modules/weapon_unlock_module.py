@@ -35,18 +35,26 @@ class WeaponUnlockStateModule(BaseStateModule):
         initial_stage_key: str = "WU0",
         weapon_unlock_min_episodes: int = 30,
         weapon_unlock_target_p10: float = 300.0,
-        weapon_unlock_max_terminated_rate: float = 0.5,
+        weapon_unlock_max_terminated_rate: float | None = 0.5,
         weapon_unlock_min_steps: int = 100_000,
         weapon_unlock_readiness_enemy_phase_cap: int = 2,
         weapon_unlock_order: list[WeaponEntry] | None = None,
+        weapon_unlock_min_ep_len_p10_by_phase: dict[int, int] | None = None,
+        weapon_unlock_max_short_episode_rate: float | None = 0.15,
     ) -> None:
         self._weapon_unlock_order: list[WeaponEntry] = weapon_unlock_order if weapon_unlock_order is not None else WEAPON_UNLOCK_ORDER
         self._stage_order: int = self._key_to_order(initial_stage_key)
         self._min_episodes = weapon_unlock_min_episodes
         self._target_p10 = weapon_unlock_target_p10
-        self._max_terminated_rate = weapon_unlock_max_terminated_rate
+        self._max_terminated_rate: float | None = weapon_unlock_max_terminated_rate
         self._min_steps = weapon_unlock_min_steps
         self._readiness_enemy_phase_cap = weapon_unlock_readiness_enemy_phase_cap
+        self._min_ep_len_p10_by_phase: dict[int, int] = (
+            weapon_unlock_min_ep_len_p10_by_phase
+            if weapon_unlock_min_ep_len_p10_by_phase is not None
+            else {0: 600, 1: 900, 2: 1200, 3: 1200}
+        )
+        self._max_short_episode_rate = weapon_unlock_max_short_episode_rate
         self._last_advance_step: int | None = None
         self._start_step: int = 0  # training開始ステップ（import_state前に設定）
         self._events: list[dict] = []
@@ -111,12 +119,37 @@ class WeaponUnlockStateModule(BaseStateModule):
         if stats is None:
             return None
 
+        # min_ep_len_p10 を target_enemy_phase から決定（定義外は最大定義phaseの値にfallback）
+        defined_phases = sorted(self._min_ep_len_p10_by_phase.keys())
+        if not defined_phases:
+            raise ValueError("weapon_unlock_min_ep_len_p10_by_phase が空です")
+        if target_enemy_phase in self._min_ep_len_p10_by_phase:
+            min_ep_len_p10 = self._min_ep_len_p10_by_phase[target_enemy_phase]
+        else:
+            min_ep_len_p10 = self._min_ep_len_p10_by_phase[max(defined_phases)]
+
         ready = (
             stats.episode_count >= self._min_episodes
             and stats.active_score_p10 >= self._target_p10
-            and stats.terminated_rate <= self._max_terminated_rate
+            and stats.episode_length_p10 >= min_ep_len_p10
+            and (self._max_short_episode_rate is None or stats.short_episode_rate <= self._max_short_episode_rate)
+            and (self._max_terminated_rate is None or stats.recent_terminated_rate <= self._max_terminated_rate)
         )
         if not ready:
+            cell_key = f"{self.current_stage_key}/{current_weapon_id}/{target_enemy_phase}"
+            reasons = []
+            if stats.episode_count < self._min_episodes:
+                reasons.append(f"  episodes={stats.episode_count} < {self._min_episodes}")
+            if stats.active_score_p10 < self._target_p10:
+                reasons.append(f"  p10={stats.active_score_p10:.1f} < {self._target_p10:.1f}")
+            if stats.episode_length_p10 < min_ep_len_p10:
+                reasons.append(f"  ep_len_p10={stats.episode_length_p10:.0f} < {min_ep_len_p10}")
+            if self._max_short_episode_rate is not None and stats.short_episode_rate > self._max_short_episode_rate:
+                reasons.append(f"  short_rate={stats.short_episode_rate:.2f} > {self._max_short_episode_rate:.2f}")
+            if self._max_terminated_rate is not None and stats.recent_terminated_rate > self._max_terminated_rate:
+                reasons.append(f"  recent_terminated_rate={stats.recent_terminated_rate:.2f} > {self._max_terminated_rate:.2f}")
+            if reasons:
+                print(f"[WeaponUnlock] not ready {cell_key}:\n" + "\n".join(reasons))
             return None
 
         from_key = self.current_stage_key
