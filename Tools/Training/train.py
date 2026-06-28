@@ -1801,6 +1801,20 @@ def main() -> None:
             _initial_best = json.loads(args.weapon_bootstrap_initial_best_phase2_p10) if getattr(args, "weapon_bootstrap_initial_best_phase2_p10", None) else None
             _sample_mix_str = getattr(args, "weapon_bootstrap_sample_mix", None)
             _sample_mix = json.loads(_sample_mix_str) if _sample_mix_str else {"solo_bootstrap": 0.35, "weak_cells": 0.30, "maintenance": 0.20, "integration": 0.15}
+            # initial_status が未指定の場合、現在stageの追加武器を solo_bootstrap に自動設定する
+            # (全武器lockedのままだと rebuild_bootstrap_candidate_cells() が候補セル0件になり RuntimeError になるため)
+            if _initial_status is None:
+                _current_stage_weapon_entry = next(
+                    (e for e in _weapon_unlock_order if e.unlock_stage_key == _weapon_unlock_module.current_stage_key),
+                    None
+                )
+                if _current_stage_weapon_entry is not None:
+                    _initial_status = {_current_stage_weapon_entry.key: "solo_bootstrap"}
+                    print(
+                        f"[INFO] weapon_bootstrap_initial_status が未指定のため、"
+                        f"現在stage ({_weapon_unlock_module.current_stage_key}) の武器 "
+                        f"'{_current_stage_weapon_entry.key}' を solo_bootstrap に自動設定"
+                    )
             _weapon_bootstrap_module = _WeaponBootstrapStateModule(
                 weapon_unlock_order=_weapon_unlock_order,
                 initial_status=_initial_status,

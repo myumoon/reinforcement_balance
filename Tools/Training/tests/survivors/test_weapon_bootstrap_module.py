@@ -144,6 +144,44 @@ def test_solo_bootstrap_not_ready_if_count_low():
     assert module._states[garlic_id].status == "solo_bootstrap"
 
 
+def test_solo_bootstrap_not_complete_on_phase0():
+    """solo_bootstrap: phase0のエピソードで全条件を満たしても integration に昇格しない。"""
+    module = make_module(initial_status={"garlic": "solo_bootstrap"})
+    provider = MockStatsProvider()
+    garlic_id = WeaponType.GARLIC
+    cell = make_cell(garlic_id, phase=0, task_kind="solo_bootstrap")
+    provider.set_stats(
+        cell,
+        episode_count=50,
+        active_score_p10=350.0,
+        episode_length_p10=1300.0,
+        short_episode_rate=0.05,
+    )
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    # phase0 なので完了判定はスキップ → solo_bootstrap のまま
+    assert module._states[garlic_id].status == "solo_bootstrap"
+
+
+def test_solo_bootstrap_not_complete_on_phase1():
+    """solo_bootstrap: phase1のエピソードで全条件を満たしても integration に昇格しない。"""
+    module = make_module(initial_status={"garlic": "solo_bootstrap"})
+    provider = MockStatsProvider()
+    garlic_id = WeaponType.GARLIC
+    cell = make_cell(garlic_id, phase=1, task_kind="solo_bootstrap")
+    provider.set_stats(
+        cell,
+        episode_count=50,
+        active_score_p10=350.0,
+        episode_length_p10=1300.0,
+        short_episode_rate=0.05,
+    )
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    # phase1 なので完了判定はスキップ → solo_bootstrap のまま
+    assert module._states[garlic_id].status == "solo_bootstrap"
+
+
 # ---------------------------------------------------------------------------
 # テスト: best_phase2_p10 の更新タイミング
 # ---------------------------------------------------------------------------

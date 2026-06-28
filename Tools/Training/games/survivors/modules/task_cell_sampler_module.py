@@ -505,7 +505,7 @@ class TaskCellSamplerStateModule(BaseStateModule):
                 (e.key for e in self._weapon_unlock_order if e.weapon_id == cell.first_weapon_id),
                 str(cell.first_weapon_id),
             )
-            prefix = f"task_cell/{cell.weapon_unlock_stage_key}/{weapon_name}/enemy_phase/{cell.enemy_phase_idx}"
+            prefix = f"task_cell/{cell.task_kind}/{cell.weapon_unlock_stage_key}/{weapon_name}/enemy_phase/{cell.enemy_phase_idx}"
             metrics[f"{prefix}/active_score_mean"] = stats.active_score_mean
             metrics[f"{prefix}/active_score_p10"] = stats.active_score_p10
             metrics[f"{prefix}/active_score_cv"] = stats.active_score_cv

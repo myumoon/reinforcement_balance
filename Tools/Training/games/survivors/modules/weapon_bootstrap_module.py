@@ -98,8 +98,9 @@ class WeaponBootstrapStateModule(BaseStateModule):
             if stats.active_score_p10 > state.best_phase2_p10:
                 state.best_phase2_p10 = stats.active_score_p10
 
-        # solo_bootstrap 完了判定
-        if state.status == "solo_bootstrap":
+        # solo_bootstrap 完了判定 (phase2のみ)
+        # phase0/1 のエピソード結果だけで integration へ昇格しないようにする
+        if state.status == "solo_bootstrap" and cell.enemy_phase_idx == 2:
             ready = (
                 stats.episode_count >= self._solo_bootstrap_min_episodes
                 and stats.active_score_p10 >= self._solo_bootstrap_target_p10
