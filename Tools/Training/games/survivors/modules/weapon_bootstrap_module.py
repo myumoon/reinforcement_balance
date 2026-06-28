@@ -79,28 +79,33 @@ class WeaponBootstrapStateModule(BaseStateModule):
         stats_provider: "TaskCellSamplerStateModule",
         current_stage_key: str,
         num_timesteps: int,
-    ) -> None:
-        """エピソード終了時にブートストラップ状態を更新する。"""
+    ) -> bool:
+        """エピソード終了時にブートストラップ状態を更新する。
+
+        Returns:
+            bool: status 遷移が発生したかどうか（True なら候補セル再構築が必要）。
+        """
         weapon_id = cell.first_weapon_id
         state = self._states.get(weapon_id)
         if state is None:
-            return
+            return False
 
         stats = stats_provider.get_stats_for_cell(cell)
         if stats is None:
-            return
+            return False
 
-        # 更新前の best_phase2_p10 を保存（regression計算に使用）
-        prev_best_phase2_p10 = state.best_phase2_p10
+        status_changed = False
 
         # phase2エピソードの場合のみ best_phase2_p10 を更新
         if cell.enemy_phase_idx == 2:
             if stats.active_score_p10 > state.best_phase2_p10:
                 state.best_phase2_p10 = stats.active_score_p10
 
-        # solo_bootstrap 完了判定 (phase2のみ)
+        # solo_bootstrap 完了判定 (task_kind="solo_bootstrap" かつ phase2のみ)
         # phase0/1 のエピソード結果だけで integration へ昇格しないようにする
-        if state.status == "solo_bootstrap" and cell.enemy_phase_idx == 2:
+        if (state.status == "solo_bootstrap"
+                and cell.task_kind == "solo_bootstrap"
+                and cell.enemy_phase_idx == 2):
             ready = (
                 stats.episode_count >= self._solo_bootstrap_min_episodes
                 and stats.active_score_p10 >= self._solo_bootstrap_target_p10
@@ -109,14 +114,17 @@ class WeaponBootstrapStateModule(BaseStateModule):
             )
             if ready:
                 state.status = "integration"
+                status_changed = True
                 print(
                     f"[WeaponBootstrap] solo_bootstrap → integration: weapon_id={weapon_id}, "
                     f"p10={stats.active_score_p10:.1f}, ep_len_p10={stats.episode_length_p10:.0f}, "
                     f"short_rate={stats.short_episode_rate:.3f}"
                 )
 
-        # integration 完了判定
-        elif state.status == "integration":
+        # integration 完了判定 (task_kind="integration" かつ phase2のみ)
+        elif (state.status == "integration"
+              and cell.task_kind == "integration"
+              and cell.enemy_phase_idx == 2):
             solo_best = state.best_phase2_p10
             if solo_best > 0:
                 regression_from_solo = 1.0 - stats.active_score_p10 / solo_best
@@ -132,18 +140,27 @@ class WeaponBootstrapStateModule(BaseStateModule):
             )
             if ready:
                 state.status = "maintenance"
+                status_changed = True
                 print(
                     f"[WeaponBootstrap] integration → maintenance: weapon_id={weapon_id}, "
                     f"p10={stats.active_score_p10:.1f}, regression_from_solo={regression_from_solo:.3f}"
                 )
 
-        # maintenance 状態で phase2エピソードの場合 regression_from_best を更新
-        elif state.status == "maintenance":
-            if cell.enemy_phase_idx == 2 and prev_best_phase2_p10 > 0:
-                regression = 1.0 - stats.active_score_p10 / prev_best_phase2_p10
-                state.regression_from_best = regression
-                if regression > self._maintenance_regression_ratio:
-                    state.regression_count += 1
+        # maintenance 状態で task_kind="maintenance" かつ phase2 の場合のみ regression_from_best を更新
+        elif (state.status == "maintenance"
+              and cell.task_kind == "maintenance"
+              and cell.enemy_phase_idx == 2):
+            if state.best_phase2_p10 > 0:
+                if stats.episode_count >= self._maintenance_min_probe_episodes:
+                    regression = 1.0 - stats.active_score_p10 / state.best_phase2_p10
+                    state.regression_from_best = regression
+                    if regression > self._maintenance_regression_ratio:
+                        state.regression_count += 1
+                else:
+                    # maintenance_min_probe_episodes 未満ではregression未計算
+                    state.regression_from_best = None
+
+        return status_changed
 
     def maybe_advance_stage(
         self,

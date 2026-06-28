@@ -163,12 +163,21 @@ class TaskCellSamplerCallback(BaseCallback):
                     num_timesteps=self.num_timesteps,
                 )
                 if self._weapon_bootstrap is not None:
-                    self._weapon_bootstrap.on_episode_end(
+                    status_changed = self._weapon_bootstrap.on_episode_end(
                         cell=active_cell,
                         stats_provider=self._tcs,
                         current_stage_key=self._weapon_unlock.current_stage_key,
                         num_timesteps=self.num_timesteps,
                     )
+                    # status 遷移が発生したら候補セルを再構築
+                    if status_changed:
+                        min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
+                        self._tcs.rebuild_bootstrap_candidate_cells(
+                            stage_key=self._weapon_unlock.current_stage_key,
+                            max_unlocked_enemy_phase_idx=self._hybrid_cb.current_phase,
+                            min_episode_steps_by_phase=min_ep_steps,
+                            weapon_bootstrap=self._weapon_bootstrap,
+                        )
                 self._write_jsonl(env_idx, active_cell, active_score, ep_len, terminated, ep_base, active_params)
 
             # 2. pending -> active に昇格（pending が None の場合も active = None に昇格）

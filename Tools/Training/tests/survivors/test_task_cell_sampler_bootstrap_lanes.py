@@ -357,3 +357,77 @@ def test_import_state_old_format_key_conversion():
     stats = tcs.get_stats_for_cell(wave_main_cell)
     assert stats is not None
     assert stats.episode_count == 100
+
+
+# ---------------------------------------------------------------------------
+# テスト: status 遷移後の候補セル再構築
+# ---------------------------------------------------------------------------
+
+def test_on_episode_end_returns_true_on_status_change():
+    """on_episode_end() が solo_bootstrap→integration 遷移時に True を返す。"""
+    bs = make_bootstrap_module(initial_status={"garlic": "solo_bootstrap"})
+    tcs = make_tcs()
+
+    # solo_bootstrap phase2 セルで条件を満たすように stats を設定
+    cell = TaskCell(
+        weapon_unlock_stage_key="WU0",
+        first_weapon_id=WeaponType.GARLIC,
+        enemy_phase_idx=2,
+        task_kind="solo_bootstrap",
+        build_policy="target_only",
+    )
+    # stats を TCS に登録
+    tcs.rebuild_bootstrap_candidate_cells(
+        stage_key="WU0",
+        max_unlocked_enemy_phase_idx=2,
+        min_episode_steps_by_phase={0: 600, 1: 900, 2: 1200},
+        weapon_bootstrap=bs,
+    )
+    # stats を手動で設定（完了条件を満たす）
+    stats = tcs._stats.get(cell.key())
+    if stats is None:
+        from games.survivors.modules.task_cell_sampler_module import TaskCellStats
+        stats = TaskCellStats(cell=cell)
+        tcs._stats[cell.key()] = stats
+    stats.episode_count = 50
+    stats.active_score_p10 = 350.0
+    stats.episode_length_p10 = 1300.0
+    stats.short_episode_rate = 0.05
+
+    result = bs.on_episode_end(
+        cell=cell,
+        stats_provider=tcs,
+        current_stage_key="WU0",
+        num_timesteps=1000,
+    )
+    assert result is True
+    assert bs._states[WeaponType.GARLIC].status == "integration"
+
+
+def test_candidate_cells_rebuilt_after_status_change():
+    """status 遷移後に候補セルが再構築されると integration セルが含まれる。"""
+    bs = make_bootstrap_module(initial_status={"garlic": "solo_bootstrap"})
+    tcs = make_tcs()
+
+    # 初期候補セル（solo_bootstrap のみ）
+    tcs.rebuild_bootstrap_candidate_cells(
+        stage_key="WU0",
+        max_unlocked_enemy_phase_idx=2,
+        min_episode_steps_by_phase={0: 600, 1: 900, 2: 1200},
+        weapon_bootstrap=bs,
+    )
+    initial_task_kinds = {c.task_kind for c in tcs._candidate_cells}
+    assert "integration" not in initial_task_kinds
+
+    # status を integration に変更
+    bs._states[WeaponType.GARLIC].status = "integration"
+
+    # 候補セルを再構築
+    tcs.rebuild_bootstrap_candidate_cells(
+        stage_key="WU0",
+        max_unlocked_enemy_phase_idx=2,
+        min_episode_steps_by_phase={0: 600, 1: 900, 2: 1200},
+        weapon_bootstrap=bs,
+    )
+    task_kinds = {c.task_kind for c in tcs._candidate_cells}
+    assert "integration" in task_kinds
