@@ -168,3 +168,116 @@ def test_blocked_cell_count_excludes_expired():
         assert s.get_wandb_metrics(num_timesteps=1000)["task_cell_sampler/blocked_cell_count"] == 1
         # ブロック解除後
         assert s.get_wandb_metrics(num_timesteps=blocked_step + 1)["task_cell_sampler/blocked_cell_count"] == 0
+
+
+def test_episode_length_p10_computed():
+    """episode_length_p10 が recent window の10%ile で計算される。"""
+    s = make_sampler(short_episode_steps=600)
+    s.rebuild_candidate_cells("WU0", 0, {0: 100})
+    cell = s._candidate_cells[0]
+
+    # 10エピソードのep_lenを記録（p10 = 10%ile）
+    ep_lens = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+    for ep_len in ep_lens:
+        s.on_episode_end(cell, active_score=500.0, ep_len=ep_len, terminated=False, num_timesteps=1000)
+
+    stats = s.get_cell_stats(WeaponType.GARLIC, 0)
+    assert stats is not None
+    import numpy as np
+    expected_p10 = float(np.percentile(ep_lens, 10))
+    assert stats.episode_length_p10 == pytest.approx(expected_p10)
+
+
+def test_short_episode_rate_computed():
+    """short_episode_rate が閾値通り計算される。"""
+    short_threshold = 500
+    s = make_sampler(short_episode_steps=short_threshold)
+    s.rebuild_candidate_cells("WU0", 0, {0: 100})
+    cell = s._candidate_cells[0]
+
+    # 10エピソード: 4つが threshold 未満（100, 200, 300, 400）、6つが以上
+    ep_lens = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+    for ep_len in ep_lens:
+        s.on_episode_end(cell, active_score=500.0, ep_len=ep_len, terminated=False, num_timesteps=1000)
+
+    stats = s.get_cell_stats(WeaponType.GARLIC, 0)
+    assert stats is not None
+    # 100, 200, 300, 400 の4つが short_threshold(500) 未満
+    expected_rate = 4 / 10
+    assert stats.short_episode_rate == pytest.approx(expected_rate)
+
+
+def test_recent_terminated_rate_computed():
+    """recent_terminated_rate が recent_terminated_flags から計算される。"""
+    s = make_sampler()
+    s.rebuild_candidate_cells("WU0", 0, {0: 100})
+    cell = s._candidate_cells[0]
+
+    # 10エピソード: 3つが terminated=True
+    for i in range(10):
+        terminated = i < 3
+        s.on_episode_end(cell, active_score=500.0, ep_len=300, terminated=terminated, num_timesteps=1000)
+
+    stats = s.get_cell_stats(WeaponType.GARLIC, 0)
+    assert stats is not None
+    assert stats.recent_terminated_rate == pytest.approx(3 / 10)
+
+
+def test_import_state_backward_compat():
+    """旧 state（新フィールドなし）の import_state() が recent_episode_lengths から再計算する。
+
+    - episode_length_p10 / short_episode_rate は recent_episode_lengths から再計算する。
+    - recent_terminated_rate は recent_terminated_flags がない場合に terminated_rate へ fallback する。
+    """
+    import numpy as np
+
+    short_steps = 600
+    s = make_sampler(short_episode_steps=short_steps)
+    s.rebuild_candidate_cells("WU0", 0, {0: 100})
+    cell = s._candidate_cells[0]
+    # ep_len=800 は short_steps(600) 以上なので short 扱いにならない
+    # terminated=False → terminated_rate=0.0
+    s.on_episode_end(cell, active_score=400.0, ep_len=800, terminated=False, num_timesteps=5000)
+
+    # 旧フォーマット（新フィールドなし）のstateを手動構築
+    state = s.export_state()
+    # 新フィールドを削除して旧フォーマットを模擬
+    for stat_dict in state["stats"]:
+        stat_dict.pop("episode_length_p10", None)
+        stat_dict.pop("short_episode_rate", None)
+        stat_dict.pop("recent_terminated_rate", None)
+        stat_dict.pop("recent_terminated_flags", None)
+
+    s2 = make_sampler(short_episode_steps=short_steps)
+    s2.import_state(state)
+    stats = s2.get_cell_stats(WeaponType.GARLIC, 0)
+    assert stats is not None
+    # recent_episode_lengths=[800] から再計算
+    assert stats.episode_length_p10 == pytest.approx(float(np.percentile([800], 10)))
+    # 800 >= short_steps(600) → short ではないので rate=0.0
+    assert stats.short_episode_rate == pytest.approx(0.0)
+    # recent_terminated_flags が無いので terminated_rate(0.0) に fallback
+    assert stats.recent_terminated_rate == pytest.approx(0.0)
+    assert len(stats.recent_terminated_flags) == 0
+
+
+def test_import_state_backward_compat_terminated_fallback():
+    """旧 state で terminated があった場合、recent_terminated_rate が terminated_rate に fallback する。"""
+    s = make_sampler()
+    s.rebuild_candidate_cells("WU0", 0, {0: 100})
+    cell = s._candidate_cells[0]
+    # 2エピソード: 1つ terminated=True → terminated_rate=0.5
+    s.on_episode_end(cell, active_score=400.0, ep_len=300, terminated=True, num_timesteps=1000)
+    s.on_episode_end(cell, active_score=400.0, ep_len=300, terminated=False, num_timesteps=2000)
+
+    state = s.export_state()
+    for stat_dict in state["stats"]:
+        stat_dict.pop("recent_terminated_rate", None)
+        stat_dict.pop("recent_terminated_flags", None)
+
+    s2 = make_sampler()
+    s2.import_state(state)
+    stats = s2.get_cell_stats(WeaponType.GARLIC, 0)
+    assert stats is not None
+    # flags 不在 → terminated_rate(=0.5) に fallback
+    assert stats.recent_terminated_rate == pytest.approx(0.5)

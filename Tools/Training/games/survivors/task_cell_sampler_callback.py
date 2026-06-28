@@ -258,6 +258,7 @@ class TaskCellSamplerCallback(BaseCallback):
             "ep_len": ep_len,
             "terminated": terminated,
             "truncated": not terminated,
+            "is_short_episode": ep_len < self._tcs._short_episode_steps,
             "task_cell_key": cell.key(),
             "weapon_unlock_table": self._weapon_unlock_table_name,
             "initial_weapon_slots": params.get("initial_weapon_slots") if params else None,
