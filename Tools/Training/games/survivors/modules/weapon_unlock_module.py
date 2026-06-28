@@ -177,6 +177,31 @@ class WeaponUnlockStateModule(BaseStateModule):
         )
         return event
 
+    def advance_to_next_stage(self, num_timesteps: int) -> "WeaponUnlockAdvanceEvent | None":
+        """条件確認なしで次stageへ進め WeaponUnlockAdvanceEvent を返す。final_stageなら None。"""
+        if self.is_final_stage:
+            return None
+        from_key = self.current_stage_key
+        next_order = self._stage_order + 1
+        next_entry = self._weapon_unlock_order[next_order]
+        self._stage_order = next_order
+        self._last_advance_step = num_timesteps  # 必ず更新
+        to_key = self.current_stage_key
+        event = WeaponUnlockAdvanceEvent(
+            from_stage_key=from_key,
+            to_stage_key=to_key,
+            new_weapon_id=next_entry.weapon_id,
+            step=num_timesteps,
+        )
+        self._events.append({
+            "from_stage_key": from_key,
+            "to_stage_key": to_key,
+            "new_weapon_id": next_entry.weapon_id,
+            "step": num_timesteps,
+        })
+        print(f"[WeaponUnlock] 武器アンロック: {from_key} -> {to_key} (new_weapon_id={next_entry.weapon_id}, step={num_timesteps:,})")
+        return event
+
     def get_wandb_metrics(self) -> dict:
         entry = self._weapon_unlock_order[self._stage_order]
         return {

@@ -10,7 +10,9 @@ if str(_TRAINING_ROOT) not in sys.path:
 import pytest
 from unittest.mock import MagicMock, patch
 from games.survivors.modules.task_cell_sampler_module import TaskCellSamplerStateModule
+from games.survivors.modules.weapon_bootstrap_module import WeaponBootstrapStateModule
 from games.survivors.modules.weapon_unlock_module import WeaponUnlockStateModule
+from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER
 from games.survivors.survivors_weapon_curriculum import WeaponType
 
 
@@ -112,3 +114,71 @@ def test_enemy_phase_change_rebuilds_candidates():
     assert stats_phase0 is not None  # 再構築後もstatsが保持される
     assert stats_phase0.episode_count == 1
     assert stats_phase0.active_score_mean == pytest.approx(500.0)
+
+
+def test_bootstrap_stage_advance_resamples_pending_from_new_stage_and_logs_metrics():
+    from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
+
+    hybrid_cb = make_mock_hybrid_cb(current_phase=2)
+    tcs = TaskCellSamplerStateModule(
+        min_episodes_per_cell=1,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+    weapon_unlock = WeaponUnlockStateModule(
+        weapon_unlock_min_steps=0,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+    weapon_bootstrap = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={"garlic": "maintenance"},
+    )
+    min_steps = {0: 600, 1: 900, 2: 1200}
+    tcs.rebuild_bootstrap_candidate_cells(
+        stage_key="WU0",
+        max_unlocked_enemy_phase_idx=2,
+        min_episode_steps_by_phase=min_steps,
+        weapon_bootstrap=weapon_bootstrap,
+    )
+    old_stage_cell = next(
+        cell for cell in tcs._candidate_cells
+        if cell.weapon_unlock_stage_key == "WU0"
+    )
+
+    wandb_logger = MagicMock()
+    wandb_logger.enabled = True
+    callback = TaskCellSamplerCallback(
+        hybrid_cb=hybrid_cb,
+        task_cell_sampler=tcs,
+        weapon_unlock=weapon_unlock,
+        param_applier=MagicMock(),
+        wandb_logger=wandb_logger,
+        wandb_log_freq=1,
+        weapon_bootstrap=weapon_bootstrap,
+        weapon_bootstrap_sample_mix={
+            "solo_bootstrap": 1.0,
+            "weak_cells": 0.0,
+            "maintenance": 0.0,
+            "integration": 0.0,
+        },
+    )
+    callback.num_timesteps = 10_000
+    callback.locals = {"infos": [{}]}
+    callback._score_tracker.process = MagicMock(
+        return_value=[(0, 0.0, 1200, 0.0)]
+    )
+    callback._active_cell_by_env[0] = None
+    callback._active_params_by_env[0] = None
+    callback._pending_cell_by_env[0] = old_stage_cell
+    callback._pending_params_by_env[0] = {}
+
+    assert callback._on_step() is True
+
+    next_cell = callback._pending_cell_by_env[0]
+    assert weapon_unlock.current_stage_key == "WU1"
+    assert next_cell.weapon_unlock_stage_key == "WU1"
+    assert next_cell.first_weapon_id == WeaponType.KING_BIBLE
+    assert next_cell.task_kind == "solo_bootstrap"
+
+    logged_metrics = wandb_logger.log.call_args[0][0]
+    assert "weapon_bootstrap/garlic/status" in logged_metrics
+    assert "weapon_bootstrap/king_bible/status" in logged_metrics
