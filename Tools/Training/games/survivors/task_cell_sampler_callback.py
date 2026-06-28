@@ -34,9 +34,9 @@ class TaskCellSamplerCallback(BaseCallback):
     - done=True 検出時:
         1. active_cell の stats を更新
         2. pending -> active に昇格
-        3. 新セルをサンプルして /params 送信、pending に設定
-        4. weapon_unlock.maybe_advance() を呼ぶ
-        5. 進行したら task_cell_sampler.on_weapon_unlock_advanced(event) を呼ぶ
+        3. weapon_unlock.maybe_advance() を呼ぶ
+        4. 進行したら task_cell_sampler.on_weapon_unlock_advanced(event) を呼ぶ
+        5. 新セルをサンプルして /params 送信、pending に設定
     """
 
     def __init__(
@@ -184,21 +184,7 @@ class TaskCellSamplerCallback(BaseCallback):
             self._active_cell_by_env[env_idx] = self._pending_cell_by_env.get(env_idx)
             self._active_params_by_env[env_idx] = self._pending_params_by_env.get(env_idx)
 
-            # 3. 次 episode 用の新セルをサンプルして pending に設定
-            if self._weapon_bootstrap is None:
-                next_cell = self._tcs.sample_cell(self.num_timesteps)
-            else:
-                next_cell = self._tcs.sample_cell_with_lane_mix(
-                    num_timesteps=self.num_timesteps,
-                    weapon_bootstrap=self._weapon_bootstrap,
-                    sample_mix=self._weapon_bootstrap_sample_mix,
-                )
-            self._pending_cell_by_env[env_idx] = next_cell
-            next_params = self._build_params_for_cell(next_cell)
-            self._pending_params_by_env[env_idx] = next_params
-            self._param_applier.apply(next_params, env_idx=env_idx)
-
-            # 4-5. 武器アンロック判定
+            # 3-4. 武器アンロック判定
             max_phase = self._hybrid_cb.current_phase
             if self._weapon_bootstrap is None:
                 # target_phase: cap が候補セルに強制追加されているので min(max_phase, cap) を使える
@@ -227,6 +213,20 @@ class TaskCellSamplerCallback(BaseCallback):
                         weapon_bootstrap=self._weapon_bootstrap,
                     )
 
+            # 5. 次 episode 用の新セルをサンプルして pending に設定
+            if self._weapon_bootstrap is None:
+                next_cell = self._tcs.sample_cell(self.num_timesteps)
+            else:
+                next_cell = self._tcs.sample_cell_with_lane_mix(
+                    num_timesteps=self.num_timesteps,
+                    weapon_bootstrap=self._weapon_bootstrap,
+                    sample_mix=self._weapon_bootstrap_sample_mix,
+                )
+            self._pending_cell_by_env[env_idx] = next_cell
+            next_params = self._build_params_for_cell(next_cell)
+            self._pending_params_by_env[env_idx] = next_params
+            self._param_applier.apply(next_params, env_idx=env_idx)
+
         # status JSON 定期保存
         if (self._status_path is not None
                 and self.num_timesteps - self._last_status_save >= self._status_save_freq):
@@ -240,6 +240,8 @@ class TaskCellSamplerCallback(BaseCallback):
             metrics: dict = {}
             metrics.update(self._tcs.get_wandb_metrics(self.num_timesteps))
             metrics.update(self._weapon_unlock.get_wandb_metrics())
+            if self._weapon_bootstrap is not None:
+                metrics.update(self._weapon_bootstrap.get_wandb_metrics())
             # 直近サンプルされたセルのメトリクス
             if self._active_cell_by_env:
                 sample_cell = next(iter(v for v in self._active_cell_by_env.values() if v is not None), None)

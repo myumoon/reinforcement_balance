@@ -8,7 +8,12 @@ import pytest
 _TRAINING_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(_TRAINING_DIR))
 
-from train import _parse_step_shorthand, _parse_resume_spec
+from train import (
+    _default_weapon_bootstrap_initial_status,
+    _parse_resume_spec,
+    _parse_step_shorthand,
+)
+from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER
 
 
 class TestParseStepShorthand:
@@ -91,3 +96,14 @@ class TestParseResumeSpec:
         path, step = _parse_resume_spec("/home/user/runs/run-base")
         assert path == Path("/home/user/runs/run-base")
         assert step is None
+
+
+class TestWeaponBootstrapInitialStatus:
+    def test_resume_stage_uses_current_weapon_for_solo_bootstrap(self):
+        status = _default_weapon_bootstrap_initial_status(
+            WEAPON_UNLOCK_ORDER,
+            "WU1",
+        )
+        assert status["garlic"] == "maintenance"
+        assert status["king_bible"] == "solo_bootstrap"
+        assert "magic_wand" not in status

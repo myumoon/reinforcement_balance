@@ -152,6 +152,26 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _default_weapon_bootstrap_initial_status(
+    weapon_unlock_order: list,
+    current_stage_key: str,
+) -> dict[str, str]:
+    current_entry = next(
+        (entry for entry in weapon_unlock_order if entry.unlock_stage_key == current_stage_key),
+        None,
+    )
+    if current_entry is None:
+        raise ValueError(f"Unknown weapon unlock stage key: {current_stage_key!r}")
+
+    status = {
+        entry.key: "maintenance"
+        for entry in weapon_unlock_order
+        if entry.unlock_order < current_entry.unlock_order
+    }
+    status[current_entry.key] = "solo_bootstrap"
+    return status
+
+
 
 
 def _parse_step_shorthand(s: str) -> int:
@@ -1061,6 +1081,8 @@ def main() -> None:
     port = args.port if args.port is not None else defaults["port"]
     base_port = args.base_port if args.base_port is not None else port
 
+    if args.weapon_bootstrap_lanes and not args.task_cell_sampler:
+        raise ValueError("--weapon-bootstrap-lanes requires --task-cell-sampler")
     if args.n_envs > 1 and args.game != "survivors":
         raise ValueError("--n-envs > 1 は survivors ゲームのみ対応しています")
     if args.n_envs > 1 and args.dry_run:
@@ -1793,28 +1815,41 @@ def main() -> None:
             maintenance_regression_ratio=getattr(args, "maintenance_regression_ratio", 0.35),
         )
 
-        # weapon bootstrap module の初期化
+        # resume 対応
         _weapon_bootstrap_module = None
+        _sample_mix = None
+        _train_status = resume_status if args.resume else None
+        if _train_status is not None:
+            if "task_cell_sampler" in _train_status:
+                _task_cell_sampler_module.import_state(_train_status["task_cell_sampler"])
+                print("[INFO] task_cell_sampler state を復元")
+            if "weapon_unlock" in _train_status:
+                _weapon_unlock_module.import_state(_train_status["weapon_unlock"])
+                print("[INFO] weapon_unlock state を復元")
+
+        # weapon bootstrap module の初期化
         if getattr(args, "weapon_bootstrap_lanes", False):
             from games.survivors.modules.weapon_bootstrap_module import WeaponBootstrapStateModule as _WeaponBootstrapStateModule
             _initial_status = json.loads(args.weapon_bootstrap_initial_status) if getattr(args, "weapon_bootstrap_initial_status", None) else None
             _initial_best = json.loads(args.weapon_bootstrap_initial_best_phase2_p10) if getattr(args, "weapon_bootstrap_initial_best_phase2_p10", None) else None
             _sample_mix_str = getattr(args, "weapon_bootstrap_sample_mix", None)
             _sample_mix = json.loads(_sample_mix_str) if _sample_mix_str else {"solo_bootstrap": 0.35, "weak_cells": 0.30, "maintenance": 0.20, "integration": 0.15}
-            # initial_status が未指定の場合、現在stageの追加武器を solo_bootstrap に自動設定する
-            # (全武器lockedのままだと rebuild_bootstrap_candidate_cells() が候補セル0件になり RuntimeError になるため)
-            if _initial_status is None:
-                _current_stage_weapon_entry = next(
-                    (e for e in _weapon_unlock_order if e.unlock_stage_key == _weapon_unlock_module.current_stage_key),
-                    None
+            _resume_bootstrap_state = (
+                _train_status.get("weapon_bootstrap")
+                if _train_status is not None
+                else None
+            )
+            # When resuming older runs without weapon_bootstrap state, derive a
+            # usable default from the restored weapon_unlock stage.
+            if _initial_status is None and _resume_bootstrap_state is None:
+                _initial_status = _default_weapon_bootstrap_initial_status(
+                    _weapon_unlock_order,
+                    _weapon_unlock_module.current_stage_key,
                 )
-                if _current_stage_weapon_entry is not None:
-                    _initial_status = {_current_stage_weapon_entry.key: "solo_bootstrap"}
-                    print(
-                        f"[INFO] weapon_bootstrap_initial_status が未指定のため、"
-                        f"現在stage ({_weapon_unlock_module.current_stage_key}) の武器 "
-                        f"'{_current_stage_weapon_entry.key}' を solo_bootstrap に自動設定"
-                    )
+                print(
+                    f"[INFO] weapon_bootstrap_initial_status defaulted from "
+                    f"stage={_weapon_unlock_module.current_stage_key}: {_initial_status}"
+                )
             _weapon_bootstrap_module = _WeaponBootstrapStateModule(
                 weapon_unlock_order=_weapon_unlock_order,
                 initial_status=_initial_status,
@@ -1829,23 +1864,10 @@ def main() -> None:
                 maintenance_regression_ratio=getattr(args, "maintenance_regression_ratio", 0.35),
                 maintenance_min_probe_episodes=getattr(args, "maintenance_min_probe_episodes", 20),
             )
+            if _resume_bootstrap_state is not None:
+                _weapon_bootstrap_module.import_state(_resume_bootstrap_state)
+                print("[INFO] weapon_bootstrap state を復元")
             print(f"[INFO] WeaponBootstrapStateModule 有効 (initial_status={_initial_status})")
-        else:
-            _sample_mix = None
-
-        # resume 対応
-        _train_status = resume_status if args.resume else None
-        if _train_status is not None:
-            if "task_cell_sampler" in _train_status:
-                _task_cell_sampler_module.import_state(_train_status["task_cell_sampler"])
-                print("[INFO] task_cell_sampler state を復元")
-            if "weapon_unlock" in _train_status:
-                _weapon_unlock_module.import_state(_train_status["weapon_unlock"])
-                print("[INFO] weapon_unlock state を復元")
-            if "weapon_bootstrap" in _train_status and _train_status["weapon_bootstrap"] is not None:
-                if _weapon_bootstrap_module is not None:
-                    _weapon_bootstrap_module.import_state(_train_status["weapon_bootstrap"])
-                    print("[INFO] weapon_bootstrap state を復元")
 
         if _hybrid_cb_ref is not None and _task_cell_sampler_module and _weapon_unlock_module:
             from games.survivors.param_applier import ParamApplier as _ParamApplier
