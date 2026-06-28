@@ -130,8 +130,11 @@ def build_weapon_params_for_cell(
         if garlic_id in unlocked_ids and garlic_id != first_weapon_id:
             allowed.append(garlic_id)
         initial_slots = [{"weapon_id": first_weapon_id, "level": 1}]
+    elif pool_policy == "target_only":
+        allowed = [first_weapon_id]
+        initial_slots = [{"weapon_id": first_weapon_id, "level": 1}]
     else:
-        raise ValueError(f"Unknown pool_policy: {pool_policy!r}. Supported: 'target_plus_anchor', 'target_plus_anchor_if_unlocked'.")
+        raise ValueError(f"Unknown pool_policy: {pool_policy!r}. Supported: 'target_plus_anchor', 'target_plus_anchor_if_unlocked', 'target_only'.")
 
     return {
         "weapon_pool_mode": "fixed_subset",

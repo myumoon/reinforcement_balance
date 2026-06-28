@@ -346,6 +346,7 @@ def _save_training_status(
     weapon_auto_module=None,
     task_cell_sampler_module=None,
     weapon_unlock_module=None,
+    weapon_bootstrap_module=None,
 ) -> None:
     # run_dir からの相対パスで記録することで新旧両構成に対応
     def _rel(p: Path) -> str:
@@ -368,6 +369,7 @@ def _save_training_status(
         "weapon_phase_auto": weapon_auto_module.export_state() if weapon_auto_module is not None else None,
         "task_cell_sampler": task_cell_sampler_module.export_state() if task_cell_sampler_module is not None else None,
         "weapon_unlock": weapon_unlock_module.export_state() if weapon_unlock_module is not None else None,
+        "weapon_bootstrap": weapon_bootstrap_module.export_state() if weapon_bootstrap_module is not None else None,
     }
     if exit_reason is not None:
         data["last_exit_reason"] = exit_reason
@@ -963,6 +965,34 @@ def parse_args() -> argparse.Namespace:
                    help="short episode 判定閾値（ステップ数）(default: 600)")
     p.add_argument("--weapon-unlock-max-short-episode-rate", type=float, default=0.15,
                    help="武器アンロック判定: 最大 short_episode_rate (default: 0.15)")
+
+    # 武器別 Bootstrap Lane 関連
+    p.add_argument("--weapon-bootstrap-lanes", action="store_true",
+                   help="武器別bootstrap lane を有効にする（--task-cell-sampler が必要）")
+    p.add_argument("--weapon-bootstrap-initial-status", type=str, default=None,
+                   help='武器bootstrap初期ステータスのJSON (例: \'{"garlic":"maintenance","king_bible":"solo_bootstrap"}\')')
+    p.add_argument("--weapon-bootstrap-initial-best-phase2-p10", type=str, default=None,
+                   help='武器bootstrap初期best_phase2_p10のJSON (例: \'{"garlic":590.0}\')')
+    p.add_argument("--weapon-bootstrap-sample-mix", type=str, default=None,
+                   help='bootstrap laneサンプリング比率のJSON (デフォルト: {"solo_bootstrap":0.35,"weak_cells":0.30,"maintenance":0.20,"integration":0.15})')
+    p.add_argument("--solo-bootstrap-target-p10", type=float, default=300.0,
+                   help="solo bootstrap完了のp10ターゲット (default: 300.0)")
+    p.add_argument("--solo-bootstrap-min-ep-len-p10", type=float, default=1200.0,
+                   help="solo bootstrap完了の最低ep_len_p10 (default: 1200.0)")
+    p.add_argument("--solo-bootstrap-max-short-episode-rate", type=float, default=0.15,
+                   help="solo bootstrap完了の最大short_episode_rate (default: 0.15)")
+    p.add_argument("--solo-bootstrap-min-episodes", type=int, default=40,
+                   help="solo bootstrap完了の最低エピソード数 (default: 40)")
+    p.add_argument("--integration-target-p10", type=float, default=300.0,
+                   help="integration完了のp10ターゲット (default: 300.0)")
+    p.add_argument("--integration-max-regression-from-solo", type=float, default=0.35,
+                   help="integration完了の最大regression_from_solo (default: 0.35)")
+    p.add_argument("--integration-min-episodes", type=int, default=40,
+                   help="integration完了の最低エピソード数 (default: 40)")
+    p.add_argument("--maintenance-regression-ratio", type=float, default=0.35,
+                   help="maintenance regression判定の閾値 (default: 0.35)")
+    p.add_argument("--maintenance-min-probe-episodes", type=int, default=20,
+                   help="maintenance regression判定に必要な最小エピソード数 (default: 20)")
 
     # YAML があればデフォルトを差し込む（CLI が常に優先）
     if pre_args.config:
@@ -1759,7 +1789,36 @@ def main() -> None:
             enemy_phase_backtrack=args.task_cell_enemy_phase_backtrack,
             weapon_unlock_order=_weapon_unlock_order,
             short_episode_steps=args.weapon_unlock_short_episode_steps,
+            integration_target_p10=getattr(args, "integration_target_p10", 300.0),
+            maintenance_regression_ratio=getattr(args, "maintenance_regression_ratio", 0.35),
         )
+
+        # weapon bootstrap module の初期化
+        _weapon_bootstrap_module = None
+        if getattr(args, "weapon_bootstrap_lanes", False):
+            from games.survivors.modules.weapon_bootstrap_module import WeaponBootstrapStateModule as _WeaponBootstrapStateModule
+            _initial_status = json.loads(args.weapon_bootstrap_initial_status) if getattr(args, "weapon_bootstrap_initial_status", None) else None
+            _initial_best = json.loads(args.weapon_bootstrap_initial_best_phase2_p10) if getattr(args, "weapon_bootstrap_initial_best_phase2_p10", None) else None
+            _sample_mix_str = getattr(args, "weapon_bootstrap_sample_mix", None)
+            _sample_mix = json.loads(_sample_mix_str) if _sample_mix_str else {"solo_bootstrap": 0.35, "weak_cells": 0.30, "maintenance": 0.20, "integration": 0.15}
+            _weapon_bootstrap_module = _WeaponBootstrapStateModule(
+                weapon_unlock_order=_weapon_unlock_order,
+                initial_status=_initial_status,
+                initial_best_phase2_p10=_initial_best,
+                solo_bootstrap_target_p10=getattr(args, "solo_bootstrap_target_p10", 300.0),
+                solo_bootstrap_min_ep_len_p10=getattr(args, "solo_bootstrap_min_ep_len_p10", 1200.0),
+                solo_bootstrap_max_short_episode_rate=getattr(args, "solo_bootstrap_max_short_episode_rate", 0.15),
+                solo_bootstrap_min_episodes=getattr(args, "solo_bootstrap_min_episodes", 40),
+                integration_target_p10=getattr(args, "integration_target_p10", 300.0),
+                integration_max_regression_from_solo=getattr(args, "integration_max_regression_from_solo", 0.35),
+                integration_min_episodes=getattr(args, "integration_min_episodes", 40),
+                maintenance_regression_ratio=getattr(args, "maintenance_regression_ratio", 0.35),
+                maintenance_min_probe_episodes=getattr(args, "maintenance_min_probe_episodes", 20),
+            )
+            print(f"[INFO] WeaponBootstrapStateModule 有効 (initial_status={_initial_status})")
+        else:
+            _sample_mix = None
+
         # resume 対応
         _train_status = resume_status if args.resume else None
         if _train_status is not None:
@@ -1769,6 +1828,10 @@ def main() -> None:
             if "weapon_unlock" in _train_status:
                 _weapon_unlock_module.import_state(_train_status["weapon_unlock"])
                 print("[INFO] weapon_unlock state を復元")
+            if "weapon_bootstrap" in _train_status and _train_status["weapon_bootstrap"] is not None:
+                if _weapon_bootstrap_module is not None:
+                    _weapon_bootstrap_module.import_state(_train_status["weapon_bootstrap"])
+                    print("[INFO] weapon_bootstrap state を復元")
 
         if _hybrid_cb_ref is not None and _task_cell_sampler_module and _weapon_unlock_module:
             from games.survivors.param_applier import ParamApplier as _ParamApplier
@@ -1786,13 +1849,16 @@ def main() -> None:
                 wandb_logger=wandb_logger,
                 log_dir=log_dir,
                 weapon_unlock_table_name=getattr(args, "weapon_unlock_table", "default_v1"),
+                weapon_bootstrap=_weapon_bootstrap_module,
+                weapon_bootstrap_sample_mix=_sample_mix if _weapon_bootstrap_module else None,
             )
             callbacks.append(_tcs_cb)
             print(
                 f"[INFO] TaskCellSamplerCallback 有効 "
                 f"(item_stage={getattr(args, 'weapon_item_stage', 'IS0')}, "
                 f"pool_policy={getattr(args, 'weapon_pool_policy', 'target_plus_anchor')}, "
-                f"enemy_param_mode={getattr(args, 'task_cell_enemy_param_mode', 'phase_fixed')})"
+                f"enemy_param_mode={getattr(args, 'task_cell_enemy_param_mode', 'phase_fixed')}, "
+                f"weapon_bootstrap_lanes={getattr(args, 'weapon_bootstrap_lanes', False)})"
             )
 
     if args.until_curriculum_complete:
@@ -1900,6 +1966,7 @@ def main() -> None:
             weapon_auto_module=_weapon_auto_module,
             task_cell_sampler_module=_task_cell_sampler_module,
             weapon_unlock_module=_weapon_unlock_module,
+            weapon_bootstrap_module=_weapon_bootstrap_module if '_weapon_bootstrap_module' in locals() else None,
         )
 
     checkpoint_cb = _RunCheckpointCallback(

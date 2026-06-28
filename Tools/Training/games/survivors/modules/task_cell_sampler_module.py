@@ -15,6 +15,7 @@ from games.survivors.survivors_weapon_table import (
 
 if TYPE_CHECKING:
     from games.survivors.modules.weapon_unlock_module import WeaponUnlockAdvanceEvent
+    from games.survivors.modules.weapon_bootstrap_module import WeaponBootstrapStateModule
 
 
 @dataclass(frozen=True)
@@ -22,9 +23,11 @@ class TaskCell:
     weapon_unlock_stage_key: str
     first_weapon_id: int
     enemy_phase_idx: int
+    task_kind: str = "wave_main"
+    build_policy: str = ""
 
     def key(self) -> str:
-        return f"{self.weapon_unlock_stage_key}/{self.first_weapon_id}/{self.enemy_phase_idx}"
+        return f"{self.task_kind}/{self.weapon_unlock_stage_key}/{self.first_weapon_id}/{self.enemy_phase_idx}"
 
 
 @dataclass
@@ -72,6 +75,8 @@ class TaskCellSamplerStateModule(BaseStateModule):
         enemy_phase_backtrack: int = 1,
         weapon_unlock_order: list[WeaponEntry] | None = None,
         short_episode_steps: int = 600,
+        integration_target_p10: float = 300.0,
+        maintenance_regression_ratio: float = 0.35,
     ) -> None:
         self._min_episodes = min_episodes_per_cell
         self._target_p10 = target_p10
@@ -85,6 +90,8 @@ class TaskCellSamplerStateModule(BaseStateModule):
         self._enemy_phase_backtrack = enemy_phase_backtrack
         self._weapon_unlock_order: list[WeaponEntry] = weapon_unlock_order if weapon_unlock_order is not None else WEAPON_UNLOCK_ORDER
         self._short_episode_steps = short_episode_steps
+        self._integration_target_p10 = integration_target_p10
+        self._maintenance_regression_ratio = maintenance_regression_ratio
 
         self._current_stage_key: str = "WU0"
         self._max_unlocked_enemy_phase_idx: int = 0
@@ -277,12 +284,17 @@ class TaskCellSamplerStateModule(BaseStateModule):
             + self._random_floor
         )
 
-    def get_cell_stats(self, first_weapon_id: int, enemy_phase_idx: int) -> TaskCellStats | None:
-        """現在の stage_key でセルの統計を返す。存在しない場合は None。"""
+    def get_stats_for_cell(self, cell: TaskCell) -> "TaskCellStats | None":
+        """指定されたセルの統計を返す。存在しない場合は None。"""
+        return self._stats.get(cell.key())
+
+    def get_cell_stats(self, first_weapon_id: int, enemy_phase_idx: int) -> "TaskCellStats | None":
+        """現在の stage_key でセルの統計を返す（wave_main互換用）。存在しない場合は None。"""
         cell = TaskCell(
             weapon_unlock_stage_key=self._current_stage_key,
             first_weapon_id=first_weapon_id,
             enemy_phase_idx=enemy_phase_idx,
+            task_kind="wave_main",
         )
         return self._stats.get(cell.key())
 
@@ -294,6 +306,190 @@ class TaskCellSamplerStateModule(BaseStateModule):
             min_episode_steps_by_phase=self._min_episode_steps_by_phase,
             readiness_cap_phase=self._readiness_cap_phase,
         )
+
+    def rebuild_bootstrap_candidate_cells(
+        self,
+        *,
+        stage_key: str,
+        max_unlocked_enemy_phase_idx: int,
+        min_episode_steps_by_phase: dict[int, int],
+        weapon_bootstrap: "WeaponBootstrapStateModule",
+    ) -> None:
+        """Bootstrap lane用の候補セルリストを再構築する。既存 stats は保持する。
+
+        solo_bootstrap/integration/maintenance 武器ごとにセルを生成する。
+        """
+        self._current_stage_key = stage_key
+        self._max_unlocked_enemy_phase_idx = max_unlocked_enemy_phase_idx
+        self._min_episode_steps_by_phase = dict(min_episode_steps_by_phase)
+
+        new_cells: list[TaskCell] = []
+
+        from games.survivors.survivors_weapon_curriculum import WeaponType
+        garlic_id = WeaponType.GARLIC
+
+        # solo_bootstrap 武器: phase 0..min(max_enemy_phase, 2) のセル
+        for state in weapon_bootstrap.get_weapons_by_status("solo_bootstrap"):
+            max_phase = min(max_unlocked_enemy_phase_idx, 2)
+            for phase_idx in range(0, max_phase + 1):
+                cell = TaskCell(
+                    weapon_unlock_stage_key=stage_key,
+                    first_weapon_id=state.weapon_id,
+                    enemy_phase_idx=phase_idx,
+                    task_kind="solo_bootstrap",
+                    build_policy="target_only",
+                )
+                new_cells.append(cell)
+                if cell.key() not in self._stats:
+                    self._stats[cell.key()] = TaskCellStats(cell=cell)
+
+        # integration 武器: phase2のセル
+        garlic_bootstrap_status = weapon_bootstrap.get_garlic_bootstrap_status()
+        from games.survivors.survivors_weapon_table import get_unlocked_weapon_ids
+        unlocked_ids = get_unlocked_weapon_ids(stage_key, self._weapon_unlock_order)
+        garlic_in_unlocked = garlic_id in unlocked_ids
+
+        for state in weapon_bootstrap.get_weapons_by_status("integration"):
+            if max_unlocked_enemy_phase_idx < 2:
+                # phase 2 が未解禁の場合は利用可能な最大フェーズを使う
+                phase_idx = max_unlocked_enemy_phase_idx
+            else:
+                phase_idx = 2
+
+            # Garlicがmaintenanceかつアンロック済みなら target_plus_anchor_if_unlocked
+            if (garlic_bootstrap_status == "maintenance" and garlic_in_unlocked):
+                build_policy = "target_plus_anchor_if_unlocked"
+            else:
+                build_policy = "target_only"
+
+            cell = TaskCell(
+                weapon_unlock_stage_key=stage_key,
+                first_weapon_id=state.weapon_id,
+                enemy_phase_idx=phase_idx,
+                task_kind="integration",
+                build_policy=build_policy,
+            )
+            new_cells.append(cell)
+            if cell.key() not in self._stats:
+                self._stats[cell.key()] = TaskCellStats(cell=cell)
+
+        # maintenance 武器: phase2のセル
+        for state in weapon_bootstrap.get_weapons_by_status("maintenance"):
+            if max_unlocked_enemy_phase_idx < 2:
+                phase_idx = max_unlocked_enemy_phase_idx
+            else:
+                phase_idx = 2
+
+            cell = TaskCell(
+                weapon_unlock_stage_key=stage_key,
+                first_weapon_id=state.weapon_id,
+                enemy_phase_idx=phase_idx,
+                task_kind="maintenance",
+                build_policy="target_plus_anchor_if_unlocked",
+            )
+            new_cells.append(cell)
+            if cell.key() not in self._stats:
+                self._stats[cell.key()] = TaskCellStats(cell=cell)
+
+        self._candidate_cells = new_cells
+
+    def sample_cell_with_lane_mix(
+        self,
+        *,
+        num_timesteps: int,
+        weapon_bootstrap: "WeaponBootstrapStateModule",
+        sample_mix: dict[str, float],
+    ) -> "TaskCell":
+        """レーン別サンプリング比率でセルを選択する。
+
+        2段階サンプリング:
+        1. sample_mix の比率でレーンを選択
+        2. 選ばれたレーン内の候補セルを重み付き選択
+        """
+        if not self._candidate_cells:
+            raise RuntimeError("候補セルが空です。rebuild_bootstrap_candidate_cells() を先に呼んでください。")
+
+        # weak_cells の判定
+        def _is_weak(cell: TaskCell) -> bool:
+            if cell.task_kind not in {"integration", "maintenance", "wave_main_probe"}:
+                return False
+            stats = self._stats.get(cell.key())
+            if stats is None or stats.episode_count < self._min_episodes:
+                return False
+            if stats.blocked_until_step > num_timesteps:
+                return False
+            if cell.task_kind == "integration":
+                return stats.active_score_p10 < self._integration_target_p10
+            elif cell.task_kind == "maintenance":
+                state = weapon_bootstrap._states.get(cell.first_weapon_id)
+                if state is None or state.best_phase2_p10 <= 0:
+                    return False
+                target = state.best_phase2_p10 * (1 - self._maintenance_regression_ratio)
+                return stats.active_score_p10 < target
+            return False
+
+        # レーン別セルリストを構築
+        lanes: dict[str, list[TaskCell]] = {
+            "solo_bootstrap": [],
+            "weak_cells": [],
+            "maintenance": [],
+            "integration": [],
+        }
+
+        for cell in self._candidate_cells:
+            stats = self._stats.get(cell.key())
+            if stats is None:
+                continue
+            if stats.blocked_until_step > num_timesteps:
+                continue
+
+            if cell.task_kind == "solo_bootstrap":
+                lanes["solo_bootstrap"].append(cell)
+            elif cell.task_kind == "integration":
+                lanes["integration"].append(cell)
+                if _is_weak(cell):
+                    lanes["weak_cells"].append(cell)
+            elif cell.task_kind == "maintenance":
+                lanes["maintenance"].append(cell)
+                if _is_weak(cell):
+                    lanes["weak_cells"].append(cell)
+
+        # 有効なレーンのみで再正規化
+        active_lanes = {k: v for k, v in lanes.items() if v and k in sample_mix and sample_mix[k] > 0}
+        if not active_lanes:
+            # 全レーンが空: 最もブロック解除が早いか全候補から選ぶ
+            active = [c for c in self._candidate_cells
+                      if self._stats[c.key()].blocked_until_step <= num_timesteps]
+            if not active:
+                active = sorted(
+                    self._candidate_cells,
+                    key=lambda c: self._stats[c.key()].blocked_until_step
+                )[:1]
+            weights = np.array([self._compute_weight(c, num_timesteps) for c in active], dtype=float)
+            weights /= weights.sum()
+            idx = int(np.random.choice(len(active), p=weights))
+            chosen = active[idx]
+            self._stats[chosen.key()].last_sample_step = num_timesteps
+            return chosen
+
+        # レーンの比率を正規化
+        total_weight = sum(sample_mix.get(k, 0.0) for k in active_lanes)
+        lane_weights = {k: sample_mix.get(k, 0.0) / total_weight for k in active_lanes}
+
+        # レーン選択
+        lane_keys = list(active_lanes.keys())
+        lane_probs = np.array([lane_weights[k] for k in lane_keys], dtype=float)
+        lane_probs /= lane_probs.sum()
+        selected_lane_key = lane_keys[int(np.random.choice(len(lane_keys), p=lane_probs))]
+        lane_cells = active_lanes[selected_lane_key]
+
+        # レーン内でセル選択
+        weights = np.array([self._compute_weight(c, num_timesteps) for c in lane_cells], dtype=float)
+        weights /= weights.sum()
+        idx = int(np.random.choice(len(lane_cells), p=weights))
+        chosen = lane_cells[idx]
+        self._stats[chosen.key()].last_sample_step = num_timesteps
+        return chosen
 
     def get_wandb_metrics(self, num_timesteps: int = 0) -> dict:
         metrics: dict = {
@@ -330,6 +526,8 @@ class TaskCellSamplerStateModule(BaseStateModule):
                     "weapon_unlock_stage_key": s.cell.weapon_unlock_stage_key,
                     "first_weapon_id": s.cell.first_weapon_id,
                     "enemy_phase_idx": s.cell.enemy_phase_idx,
+                    "task_kind": s.cell.task_kind,
+                    "build_policy": s.cell.build_policy,
                 },
                 "episode_count": s.episode_count,
                 "recent_scores": list(s.recent_scores),
@@ -366,10 +564,20 @@ class TaskCellSamplerStateModule(BaseStateModule):
         }
         self._stats = {}
         for s in state.get("stats", []):
+            # 旧形式keyの変換: "/" が2つ (WU0/7/2 形式) なら wave_main/ プレフィックスを付加
+            raw_key = s.get("cell_key", "")
+            if raw_key.count("/") == 2:
+                raw_key = "wave_main/" + raw_key
+
+            cell_data = s["cell"]
+            task_kind = cell_data.get("task_kind", "wave_main")
+            build_policy = cell_data.get("build_policy", "")
             cell = TaskCell(
-                weapon_unlock_stage_key=s["cell"]["weapon_unlock_stage_key"],
-                first_weapon_id=int(s["cell"]["first_weapon_id"]),
-                enemy_phase_idx=int(s["cell"]["enemy_phase_idx"]),
+                weapon_unlock_stage_key=cell_data["weapon_unlock_stage_key"],
+                first_weapon_id=int(cell_data["first_weapon_id"]),
+                enemy_phase_idx=int(cell_data["enemy_phase_idx"]),
+                task_kind=task_kind,
+                build_policy=build_policy,
             )
             stats = TaskCellStats(cell=cell)
             stats.episode_count = int(s.get("episode_count", 0))

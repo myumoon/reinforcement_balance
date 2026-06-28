@@ -23,6 +23,7 @@ from games.survivors.survivors_curriculum import get_enemy_params_for_phase, PHA
 if TYPE_CHECKING:
     from games.survivors.hybrid_callback import HybridCurriculumSpalfCallback
     from common.wandb_logger import WandbLogger
+    from games.survivors.modules.weapon_bootstrap_module import WeaponBootstrapStateModule
 
 
 class TaskCellSamplerCallback(BaseCallback):
@@ -53,6 +54,8 @@ class TaskCellSamplerCallback(BaseCallback):
         wandb_log_freq: int = 10_000,
         log_dir: "Path | str | None" = None,
         weapon_unlock_table_name: str = "default_v1",
+        weapon_bootstrap: "WeaponBootstrapStateModule | None" = None,
+        weapon_bootstrap_sample_mix: "dict[str, float] | None" = None,
     ) -> None:
         super().__init__(verbose=0)
         self._hybrid_cb = hybrid_cb
@@ -70,6 +73,12 @@ class TaskCellSamplerCallback(BaseCallback):
             self._log_dir / "task_cell_episode_metrics.jsonl" if self._log_dir else None
         )
         self._weapon_unlock_table_name = weapon_unlock_table_name
+        self._weapon_bootstrap = weapon_bootstrap
+        self._weapon_bootstrap_sample_mix: dict[str, float] = (
+            weapon_bootstrap_sample_mix
+            if weapon_bootstrap_sample_mix is not None
+            else {"solo_bootstrap": 0.35, "weak_cells": 0.30, "maintenance": 0.20, "integration": 0.15}
+        )
 
         self._score_tracker = EpisodeScoreTracker(frame_skip=frame_skip, alive_reward=alive_reward)
         self._active_cell_by_env: dict[int, TaskCell | None] = {}
@@ -91,20 +100,36 @@ class TaskCellSamplerCallback(BaseCallback):
         # 候補セルを初期化
         max_phase = self._hybrid_cb.current_phase
         min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
-        readiness_cap = min(max_phase, self._weapon_unlock._readiness_enemy_phase_cap)
-        self._tcs.rebuild_candidate_cells(
-            stage_key=self._weapon_unlock.current_stage_key,
-            max_unlocked_enemy_phase_idx=max_phase,
-            min_episode_steps_by_phase=min_ep_steps,
-            readiness_cap_phase=readiness_cap,
-        )
+
+        if self._weapon_bootstrap is None:
+            readiness_cap = min(max_phase, self._weapon_unlock._readiness_enemy_phase_cap)
+            self._tcs.rebuild_candidate_cells(
+                stage_key=self._weapon_unlock.current_stage_key,
+                max_unlocked_enemy_phase_idx=max_phase,
+                min_episode_steps_by_phase=min_ep_steps,
+                readiness_cap_phase=readiness_cap,
+            )
+        else:
+            self._tcs.rebuild_bootstrap_candidate_cells(
+                stage_key=self._weapon_unlock.current_stage_key,
+                max_unlocked_enemy_phase_idx=max_phase,
+                min_episode_steps_by_phase=min_ep_steps,
+                weapon_bootstrap=self._weapon_bootstrap,
+            )
 
         if self._log_dir is not None:
             self._log_dir.mkdir(parents=True, exist_ok=True)
 
         # 初期セルをサンプルして pending に設定（active は None から始める）
         for env_idx in range(n):
-            cell = self._tcs.sample_cell(self.num_timesteps)
+            if self._weapon_bootstrap is None:
+                cell = self._tcs.sample_cell(self.num_timesteps)
+            else:
+                cell = self._tcs.sample_cell_with_lane_mix(
+                    num_timesteps=self.num_timesteps,
+                    weapon_bootstrap=self._weapon_bootstrap,
+                    sample_mix=self._weapon_bootstrap_sample_mix,
+                )
             self._active_cell_by_env[env_idx] = None
             self._active_params_by_env[env_idx] = None
             self._pending_cell_by_env[env_idx] = cell
@@ -137,6 +162,13 @@ class TaskCellSamplerCallback(BaseCallback):
                     terminated=terminated,
                     num_timesteps=self.num_timesteps,
                 )
+                if self._weapon_bootstrap is not None:
+                    self._weapon_bootstrap.on_episode_end(
+                        cell=active_cell,
+                        stats_provider=self._tcs,
+                        current_stage_key=self._weapon_unlock.current_stage_key,
+                        num_timesteps=self.num_timesteps,
+                    )
                 self._write_jsonl(env_idx, active_cell, active_score, ep_len, terminated, ep_base, active_params)
 
             # 2. pending -> active に昇格（pending が None の場合も active = None に昇格）
@@ -144,24 +176,47 @@ class TaskCellSamplerCallback(BaseCallback):
             self._active_params_by_env[env_idx] = self._pending_params_by_env.get(env_idx)
 
             # 3. 次 episode 用の新セルをサンプルして pending に設定
-            next_cell = self._tcs.sample_cell(self.num_timesteps)
+            if self._weapon_bootstrap is None:
+                next_cell = self._tcs.sample_cell(self.num_timesteps)
+            else:
+                next_cell = self._tcs.sample_cell_with_lane_mix(
+                    num_timesteps=self.num_timesteps,
+                    weapon_bootstrap=self._weapon_bootstrap,
+                    sample_mix=self._weapon_bootstrap_sample_mix,
+                )
             self._pending_cell_by_env[env_idx] = next_cell
             next_params = self._build_params_for_cell(next_cell)
             self._pending_params_by_env[env_idx] = next_params
             self._param_applier.apply(next_params, env_idx=env_idx)
 
             # 4-5. 武器アンロック判定
-            # target_phase: cap が候補セルに強制追加されているので min(max_phase, cap) を使える
             max_phase = self._hybrid_cb.current_phase
-            target_phase = min(max_phase, self._weapon_unlock._readiness_enemy_phase_cap)
-            event = self._weapon_unlock.maybe_advance(
-                stats_provider=self._tcs,
-                num_timesteps=self.num_timesteps,
-                max_unlocked_enemy_phase_idx=max_phase,
-                target_enemy_phase=target_phase,
-            )
+            if self._weapon_bootstrap is None:
+                # target_phase: cap が候補セルに強制追加されているので min(max_phase, cap) を使える
+                target_phase = min(max_phase, self._weapon_unlock._readiness_enemy_phase_cap)
+                event = self._weapon_unlock.maybe_advance(
+                    stats_provider=self._tcs,
+                    num_timesteps=self.num_timesteps,
+                    max_unlocked_enemy_phase_idx=max_phase,
+                    target_enemy_phase=target_phase,
+                )
+            else:
+                event = self._weapon_bootstrap.maybe_advance_stage(
+                    weapon_unlock=self._weapon_unlock,
+                    num_timesteps=self.num_timesteps,
+                )
             if event is not None:
                 self._tcs.on_weapon_unlock_advanced(event)
+                if self._weapon_bootstrap is not None:
+                    self._weapon_bootstrap.on_weapon_unlock_advanced(event)
+                    # bootstrap lane の場合は候補セルを再構築
+                    min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
+                    self._tcs.rebuild_bootstrap_candidate_cells(
+                        stage_key=self._weapon_unlock.current_stage_key,
+                        max_unlocked_enemy_phase_idx=self._hybrid_cb.current_phase,
+                        min_episode_steps_by_phase=min_ep_steps,
+                        weapon_bootstrap=self._weapon_bootstrap,
+                    )
 
         # status JSON 定期保存
         if (self._status_path is not None
@@ -190,13 +245,21 @@ class TaskCellSamplerCallback(BaseCallback):
         """敵フェーズ変化時に候補セルを再構築する。"""
         old_phase = self._tcs._max_unlocked_enemy_phase_idx
         min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
-        readiness_cap = min(new_max_phase, self._weapon_unlock._readiness_enemy_phase_cap)
-        self._tcs.rebuild_candidate_cells(
-            stage_key=self._weapon_unlock.current_stage_key,
-            max_unlocked_enemy_phase_idx=new_max_phase,
-            min_episode_steps_by_phase=min_ep_steps,
-            readiness_cap_phase=readiness_cap,
-        )
+        if self._weapon_bootstrap is None:
+            readiness_cap = min(new_max_phase, self._weapon_unlock._readiness_enemy_phase_cap)
+            self._tcs.rebuild_candidate_cells(
+                stage_key=self._weapon_unlock.current_stage_key,
+                max_unlocked_enemy_phase_idx=new_max_phase,
+                min_episode_steps_by_phase=min_ep_steps,
+                readiness_cap_phase=readiness_cap,
+            )
+        else:
+            self._tcs.rebuild_bootstrap_candidate_cells(
+                stage_key=self._weapon_unlock.current_stage_key,
+                max_unlocked_enemy_phase_idx=new_max_phase,
+                min_episode_steps_by_phase=min_ep_steps,
+                weapon_bootstrap=self._weapon_bootstrap,
+            )
         print(
             f"[TaskCellSampler] 敵フェーズ変化を検出: {old_phase} → {new_max_phase}, "
             f"候補セルを再構築しました"
@@ -214,13 +277,24 @@ class TaskCellSamplerCallback(BaseCallback):
             json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+        if self._weapon_bootstrap is not None and self._log_dir is not None:
+            bs_path = self._log_dir / "weapon_bootstrap_status.json"
+            bs_path.write_text(
+                json.dumps(self._weapon_bootstrap.export_state(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+    def _effective_pool_policy_for_cell(self, cell: TaskCell) -> str:
+        """セルの有効なpool_policyを返す。cell.build_policyが空の場合はデフォルトを使用。"""
+        return cell.build_policy or self._pool_policy
+
     def _build_params_for_cell(self, cell: TaskCell) -> dict:
         """セルから UE5 /params 送信用 dict を構築する。"""
         weapon_params = build_weapon_params_for_cell(
             first_weapon_id=cell.first_weapon_id,
             max_unlocked_stage_key=cell.weapon_unlock_stage_key,
             item_stage_key=self._item_stage_key,
-            pool_policy=self._pool_policy,
+            pool_policy=self._effective_pool_policy_for_cell(cell),
             weapon_unlock_order=self._tcs._weapon_unlock_order,
         )
         if self._enemy_param_mode == "phase_fixed":
@@ -263,6 +337,19 @@ class TaskCellSamplerCallback(BaseCallback):
             "weapon_unlock_table": self._weapon_unlock_table_name,
             "initial_weapon_slots": params.get("initial_weapon_slots") if params else None,
             "allowed_weapon_types": params.get("allowed_weapon_types") if params else None,
+            # bootstrap 関連フィールド
+            "task_kind": cell.task_kind,
+            "build_policy": cell.build_policy,
+            "effective_pool_policy": self._effective_pool_policy_for_cell(cell),
+            "weapon_bootstrap_status": (
+                self._weapon_bootstrap.get_weapon_snapshot(cell.first_weapon_id).get("status")
+                if self._weapon_bootstrap is not None else None
+            ),
+            "bootstrap_lane": cell.task_kind if self._weapon_bootstrap is not None else None,
+            "regression_from_best": (
+                self._weapon_bootstrap.get_weapon_snapshot(cell.first_weapon_id).get("regression_from_best")
+                if self._weapon_bootstrap is not None else None
+            ),
         }
         with open(self._jsonl_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
