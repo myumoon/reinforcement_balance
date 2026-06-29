@@ -12,6 +12,7 @@ from train import (
     _default_weapon_bootstrap_initial_status,
     _parse_resume_spec,
     _parse_step_shorthand,
+    parse_args,
 )
 from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER
 
@@ -107,3 +108,25 @@ class TestWeaponBootstrapInitialStatus:
         assert status["garlic"] == "maintenance"
         assert status["king_bible"] == "solo_bootstrap"
         assert "magic_wand" not in status
+
+
+class TestTrainArgs:
+    def test_weapon_unlock_initial_stage_key_cli(self, monkeypatch):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["train.py", "--game", "survivors", "--weapon-unlock-initial-stage-key", "WU1"],
+        )
+
+        args = parse_args()
+
+        assert args.weapon_unlock_initial_stage_key == "WU1"
+
+    def test_weapon_unlock_initial_stage_key_yaml(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "train_config.yaml"
+        config_path.write_text("weapon_unlock_initial_stage_key: WU1\n", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["train.py", "--config", str(config_path)])
+
+        args = parse_args()
+
+        assert args.weapon_unlock_initial_stage_key == "WU1"
