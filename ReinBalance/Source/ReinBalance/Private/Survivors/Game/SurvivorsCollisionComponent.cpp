@@ -15,6 +15,12 @@ void USurvivorsCollisionComponent::Initialize(ASurvivorsGame* InGame)
 	Game = InGame;
 }
 
+void USurvivorsCollisionComponent::Reset()
+{
+	EnemyGrid.Clear();
+	PickupGrid.Clear();
+}
+
 void USurvivorsCollisionComponent::CollectWallActors()
 {
 	if (!Game) return;

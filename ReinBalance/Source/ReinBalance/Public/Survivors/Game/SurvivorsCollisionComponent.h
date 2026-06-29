@@ -16,6 +16,7 @@ public:
 	USurvivorsCollisionComponent();
 
 	void Initialize(ASurvivorsGame* InGame);
+	void Reset();
 	void CollectWallActors();
 	void ResolveWallCollisions();
 	float CastRayToObstacles(FVector2D Origin, FVector2D Dir) const;

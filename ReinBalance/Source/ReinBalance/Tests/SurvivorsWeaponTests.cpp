@@ -241,6 +241,42 @@ bool FSurvivorsKingBibleDurationCooldown::RunTest(const FString& Parameters)
 // P0 武器仕様テスト（動画観察・wiki 由来）
 // ============================================================
 
+// ResetState clears active weapon runtime state across orbit, projectile, and ground-zone weapons.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsResetStateClearsWeaponComponentRuntimeState,
+	"ReinBalance.Survivors.Reset.ResetState_ClearsWeaponComponentRuntimeState",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsResetStateClearsWeaponComponentRuntimeState::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	USurvivorsWeaponComponent* WeaponComp = FSurvivorsGameTestAccess::WeaponComp(S.Game);
+	if (!TestTrue("Weapon component exists", WeaponComp != nullptr))
+	{
+		S.Destroy();
+		return false;
+	}
+
+	WeaponComp->EquipWeapon(0, EWeaponType::KingBible, 1);
+	WeaponComp->EquipWeapon(1, EWeaponType::MagicWand, 1);
+	WeaponComp->EquipWeapon(2, EWeaponType::SantaWater, 1);
+	WeaponComp->TickWeapons(SurvivorsGameConstants::PhysicsDt);
+
+	TestTrue("King Bible orbs are active before reset", WeaponComp->GetOrbitOrbCount() > 0);
+	TestTrue("Projectile weapon spawned runtime state before reset", WeaponComp->GetProjectileCount() > 0);
+	TestTrue("Ground-zone weapon spawned runtime state before reset", WeaponComp->GetGroundZoneCount() > 0);
+
+	S.Game->ResetState(TOptional<int32>(321));
+
+	TestEqual("ResetState clears King Bible orbit orbs on the weapon component", WeaponComp->GetOrbitOrbCount(), 0);
+	TestEqual("ResetState clears projectile runtime state on the weapon component", WeaponComp->GetProjectileCount(), 0);
+	TestEqual("ResetState clears ground-zone runtime state on the weapon component", WeaponComp->GetGroundZoneCount(), 0);
+	TestTrue("ResetState clears weapon instances on the weapon component", WeaponComp->GetWeaponInstance(0) == nullptr);
+
+	S.Destroy();
+	return true;
+}
+
 // MagicWand: Lv1 baseline fires the first shot immediately and the second after 0.1s.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsMagicWandSequentialTargeting,
 	"ReinBalance.Survivors.Wiki.MagicWand_SequentialTargeting",
