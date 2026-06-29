@@ -121,6 +121,68 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 
 	SyncConfigToLogic();
 	Logic.Reset(Seed);
+	if (Seed.IsSet()) RandStream.Initialize(Seed.GetValue());
+	else              RandStream.GenerateNewSeed();
+
+	MaxPlayerHP = BaseMaxPlayerHPConst;
+	GemPickupRadius = BaseGemPickupRadiusConst;
+
+	for (int32 i = 0; i < MaxWeaponSlots; ++i)
+	{
+		WeaponSlots[i].Type = EWeaponType::None;
+		WeaponSlots[i].Level = FWeaponLevel(0);
+		WeaponSlots[i].Cooldown = FCooldownSeconds(0.f);
+	}
+	for (int32 i = 0; i < MaxPassiveSlots; ++i)
+	{
+		PassiveSlots[i].Type = EPassiveItemType::None;
+		PassiveSlots[i].Level = 0;
+	}
+
+	CachedPassiveEffects = FPassiveEffects();
+	GlobalFreezeUntilTime = -1.f;
+	PlayerShieldTimer = 0.f;
+	bShieldActive = false;
+	MaxRevivalCount = 0;
+	UsedRevivalCount = 0;
+	NextEnemyId = 0;
+	NextGemId = 0;
+	FloorPickups.Empty();
+	SpecialPickups.Empty();
+	Destructibles.Empty();
+	ElapsedTime = 0.f;
+	LastReward = 0.f;
+	EpisodeBaseReward = 0.f;
+	EpisodeStepCount = 0;
+	bDone = false;
+	bTruncated = false;
+
+	if (PlayerComponent)
+	{
+		PlayerComponent->Reset();
+	}
+	if (EnemyComponent)
+	{
+		EnemyComponent->Reset();
+	}
+	if (GemComponent)
+	{
+		GemComponent->Reset();
+	}
+	if (SpawnComponent)
+	{
+		SpawnComponent->Reset();
+	}
+	else
+	{
+		SpawnAccumulator = 0.f;
+		bBossSpawned = false;
+		LastSpawnDebug = FSurvivorsSpawnDebug();
+	}
+	if (CollisionComponent)
+	{
+		CollisionComponent->Reset();
+	}
 	if (WeaponComponent)
 	{
 		WeaponComponent->Reset();
@@ -129,6 +191,7 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 	// Logic.Reset() 内で CurrentConfig の override フラグがクリアされるため、
 	// SyncConfigToLogic() が再度呼ばれても再適用されないよう ASurvivorsGame 側も同期してクリアする
 	bHasInitialOverride = false;
+	InitialElapsedTime = 0.f;
 	InitialWeaponSlots.Empty();
 	InitialPassiveSlots.Empty();
 }

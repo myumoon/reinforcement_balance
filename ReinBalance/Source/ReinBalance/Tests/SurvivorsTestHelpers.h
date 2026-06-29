@@ -37,6 +37,38 @@ struct FSurvivorsGameTestAccess
 	static FPassiveSlot* PassiveSlots(ASurvivorsGame* G)   { return G->GetLogic()->PassiveSlots; }
 	static FPassiveEffects& PassiveEffects(ASurvivorsGame* G) { return G->GetLogic()->CachedPassiveEffects; }
 
+	// Legacy actor/component state accessors.
+	static TArray<FEnemyState>& ActorEnemies(ASurvivorsGame* G) { return G->Enemies; }
+	static TArray<FGemState>& ActorGems(ASurvivorsGame* G) { return G->Gems; }
+	static TArray<FFloorPickupState>& ActorFloorPickups(ASurvivorsGame* G) { return G->FloorPickups; }
+	static TArray<FSpecialPickupState>& ActorSpecialPickups(ASurvivorsGame* G) { return G->SpecialPickups; }
+	static TArray<FDestructibleState>& ActorDestructibles(ASurvivorsGame* G) { return G->Destructibles; }
+	static FVector2D& ActorPlayerPos(ASurvivorsGame* G) { return G->PlayerPos; }
+	static FVector2D& ActorPlayerVel(ASurvivorsGame* G) { return G->PlayerVel; }
+	static float& ActorPlayerHP(ASurvivorsGame* G) { return G->PlayerHP; }
+	static float& ActorPlayerXP(ASurvivorsGame* G) { return G->PlayerXP; }
+	static int32& ActorPlayerLevel(ASurvivorsGame* G) { return G->PlayerLevel; }
+	static FWeaponSlot* ActorWeaponSlots(ASurvivorsGame* G) { return G->WeaponSlots; }
+	static FPassiveSlot* ActorPassiveSlots(ASurvivorsGame* G) { return G->PassiveSlots; }
+	static FPassiveEffects& ActorPassiveEffects(ASurvivorsGame* G) { return G->CachedPassiveEffects; }
+	static float& ActorGlobalFreezeUntilTime(ASurvivorsGame* G) { return G->GlobalFreezeUntilTime; }
+	static float& ActorPlayerShieldTimer(ASurvivorsGame* G) { return G->PlayerShieldTimer; }
+	static bool& ActorShieldActive(ASurvivorsGame* G) { return G->bShieldActive; }
+	static int32& ActorMaxRevivalCount(ASurvivorsGame* G) { return G->MaxRevivalCount; }
+	static int32& ActorUsedRevivalCount(ASurvivorsGame* G) { return G->UsedRevivalCount; }
+	static int32& ActorNextEnemyId(ASurvivorsGame* G) { return G->NextEnemyId; }
+	static int32& ActorNextGemId(ASurvivorsGame* G) { return G->NextGemId; }
+	static float& ActorElapsedTime(ASurvivorsGame* G) { return G->ElapsedTime; }
+	static float& ActorSpawnAccumulator(ASurvivorsGame* G) { return G->SpawnAccumulator; }
+	static bool& ActorBossSpawned(ASurvivorsGame* G) { return G->bBossSpawned; }
+	static float& ActorLastReward(ASurvivorsGame* G) { return G->LastReward; }
+	static float& ActorEpisodeBaseReward(ASurvivorsGame* G) { return G->EpisodeBaseReward; }
+	static int32& ActorEpisodeStepCount(ASurvivorsGame* G) { return G->EpisodeStepCount; }
+	static bool& ActorDone(ASurvivorsGame* G) { return G->bDone; }
+	static bool& ActorTruncated(ASurvivorsGame* G) { return G->bTruncated; }
+	static float& ActorPhysicsAccumTime(ASurvivorsGame* G) { return G->PhysicsAccumTime; }
+	static FSurvivorsSpawnDebug& ActorLastSpawnDebug(ASurvivorsGame* G) { return G->LastSpawnDebug; }
+
 	// コンポーネントアクセサ（既存テストが使用するため維持）
 	static USurvivorsCollisionComponent* CollComp(ASurvivorsGame* G) { return G->CollisionComponent; }
 	static USurvivorsEnemyComponent*     EnemyComp(ASurvivorsGame* G){ return G->EnemyComponent; }

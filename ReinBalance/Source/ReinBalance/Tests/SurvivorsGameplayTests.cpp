@@ -37,6 +37,115 @@ bool FSurvivorsWikiDefaultStartWeaponMode::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsResetStateClearsActorRuntimeState,
+	"ReinBalance.Survivors.Reset.ResetState_ClearsActorRuntimeState",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FSurvivorsResetStateClearsActorRuntimeState::RunTest(const FString& Parameters)
+{
+	FSurvivorsTestWorld S;
+	if (!TestTrue("World created", S.Create())) return false;
+
+	ASurvivorsGame* Game = S.Game;
+
+	FSurvivorsGameTestAccess::ActorPlayerPos(Game) = FVector2D(120.f, -45.f);
+	FSurvivorsGameTestAccess::ActorPlayerVel(Game) = FVector2D(9.f, 3.f);
+	FSurvivorsGameTestAccess::ActorPlayerHP(Game) = 1.f;
+	FSurvivorsGameTestAccess::ActorPlayerXP(Game) = 42.f;
+	FSurvivorsGameTestAccess::ActorPlayerLevel(Game) = 7;
+
+	FWeaponSlot* ActorWeapons = FSurvivorsGameTestAccess::ActorWeaponSlots(Game);
+	ActorWeapons[0].Type = EWeaponType::KingBible;
+	ActorWeapons[0].Level = FWeaponLevel(8);
+	ActorWeapons[0].Cooldown = FCooldownSeconds(3.f);
+
+	FPassiveSlot* ActorPassives = FSurvivorsGameTestAccess::ActorPassiveSlots(Game);
+	ActorPassives[0].Type = EPassiveItemType::Tirajisu;
+	ActorPassives[0].Level = 2;
+
+	FSurvivorsGameTestAccess::ActorPassiveEffects(Game).DamageMult = 2.f;
+	FSurvivorsGameTestAccess::ActorPassiveEffects(Game).CooldownMult = 0.5f;
+	FSurvivorsGameTestAccess::ActorPassiveEffects(Game).MaxRevivalCount = 2;
+	FSurvivorsGameTestAccess::ActorGlobalFreezeUntilTime(Game) = 99.f;
+	FSurvivorsGameTestAccess::ActorPlayerShieldTimer(Game) = 5.f;
+	FSurvivorsGameTestAccess::ActorShieldActive(Game) = true;
+	FSurvivorsGameTestAccess::ActorMaxRevivalCount(Game) = 2;
+	FSurvivorsGameTestAccess::ActorUsedRevivalCount(Game) = 1;
+	FSurvivorsGameTestAccess::ActorNextEnemyId(Game) = 11;
+	FSurvivorsGameTestAccess::ActorNextGemId(Game) = 13;
+	FSurvivorsGameTestAccess::ActorElapsedTime(Game) = 50.f;
+	FSurvivorsGameTestAccess::ActorSpawnAccumulator(Game) = 4.f;
+	FSurvivorsGameTestAccess::ActorBossSpawned(Game) = true;
+	FSurvivorsGameTestAccess::ActorLastReward(Game) = 7.f;
+	FSurvivorsGameTestAccess::ActorEpisodeBaseReward(Game) = 8.f;
+	FSurvivorsGameTestAccess::ActorEpisodeStepCount(Game) = 9;
+	FSurvivorsGameTestAccess::ActorDone(Game) = true;
+	FSurvivorsGameTestAccess::ActorTruncated(Game) = true;
+	FSurvivorsGameTestAccess::ActorPhysicsAccumTime(Game) = 0.01f;
+	FSurvivorsGameTestAccess::ActorLastSpawnDebug(Game).EnemyCount = 1;
+	FSurvivorsGameTestAccess::ActorLastSpawnDebug(Game).SpawnAccumulator = 4.f;
+
+	FEnemyState Enemy;
+	Enemy.Pos = FVector2D::ZeroVector;
+	Enemy.UniqueId = 101;
+	Enemy.CollisionRadius = 10.f;
+	FSurvivorsGameTestAccess::ActorEnemies(Game).Add(Enemy);
+
+	FGemState Gem;
+	Gem.Pos = FVector2D(20.f, 0.f);
+	Gem.UniqueId = 202;
+	FSurvivorsGameTestAccess::ActorGems(Game).Add(Gem);
+	FSurvivorsGameTestAccess::ActorFloorPickups(Game).Add(FFloorPickupState());
+	FSurvivorsGameTestAccess::ActorSpecialPickups(Game).Add(FSpecialPickupState());
+	FSurvivorsGameTestAccess::ActorDestructibles(Game).Add(FDestructibleState());
+
+	USurvivorsCollisionComponent* CollComp = FSurvivorsGameTestAccess::CollComp(Game);
+	CollComp->BuildEnemyGrid();
+	TArray<const FSurvivorsTargetProxy*> ContactsBefore;
+	CollComp->QueryEnemyContacts(FVector2D::ZeroVector, 50.f, ContactsBefore);
+	TestTrue("Legacy collision grid is populated before reset", ContactsBefore.Num() > 0);
+
+	Game->ResetState(TOptional<int32>(321));
+
+	TestTrue("Actor player position reset", FSurvivorsGameTestAccess::ActorPlayerPos(Game).IsNearlyZero());
+	TestTrue("Actor player velocity reset", FSurvivorsGameTestAccess::ActorPlayerVel(Game).IsNearlyZero());
+	TestEqual("Actor player HP reset", FSurvivorsGameTestAccess::ActorPlayerHP(Game), Game->MaxPlayerHP);
+	TestEqual("Actor player XP reset", FSurvivorsGameTestAccess::ActorPlayerXP(Game), 0.f);
+	TestEqual("Actor player level reset", FSurvivorsGameTestAccess::ActorPlayerLevel(Game), 1);
+	TestEqual("Actor weapon slot reset", static_cast<int32>(ActorWeapons[0].Type), static_cast<int32>(EWeaponType::None));
+	TestEqual("Actor weapon cooldown reset", ActorWeapons[0].Cooldown.Value, 0.f);
+	TestEqual("Actor passive slot reset", static_cast<int32>(ActorPassives[0].Type), static_cast<int32>(EPassiveItemType::None));
+	TestEqual("Actor passive effects reset", FSurvivorsGameTestAccess::ActorPassiveEffects(Game).DamageMult, 1.f);
+	TestEqual("Actor freeze timer reset", FSurvivorsGameTestAccess::ActorGlobalFreezeUntilTime(Game), -1.f);
+	TestEqual("Actor shield timer reset", FSurvivorsGameTestAccess::ActorPlayerShieldTimer(Game), 0.f);
+	TestFalse("Actor shield flag reset", FSurvivorsGameTestAccess::ActorShieldActive(Game));
+	TestEqual("Actor max revival reset", FSurvivorsGameTestAccess::ActorMaxRevivalCount(Game), 0);
+	TestEqual("Actor used revival reset", FSurvivorsGameTestAccess::ActorUsedRevivalCount(Game), 0);
+	TestEqual("Actor enemy id reset", FSurvivorsGameTestAccess::ActorNextEnemyId(Game), 0);
+	TestEqual("Actor gem id reset", FSurvivorsGameTestAccess::ActorNextGemId(Game), 0);
+	TestEqual("Actor enemies cleared", FSurvivorsGameTestAccess::ActorEnemies(Game).Num(), 0);
+	TestEqual("Actor gems cleared", FSurvivorsGameTestAccess::ActorGems(Game).Num(), 0);
+	TestEqual("Actor floor pickups cleared", FSurvivorsGameTestAccess::ActorFloorPickups(Game).Num(), 0);
+	TestEqual("Actor special pickups cleared", FSurvivorsGameTestAccess::ActorSpecialPickups(Game).Num(), 0);
+	TestEqual("Actor destructibles cleared", FSurvivorsGameTestAccess::ActorDestructibles(Game).Num(), 0);
+	TestEqual("Actor elapsed time reset", FSurvivorsGameTestAccess::ActorElapsedTime(Game), 0.f);
+	TestEqual("Actor spawn accumulator reset", FSurvivorsGameTestAccess::ActorSpawnAccumulator(Game), 0.f);
+	TestFalse("Actor boss flag reset", FSurvivorsGameTestAccess::ActorBossSpawned(Game));
+	TestEqual("Actor last reward reset", FSurvivorsGameTestAccess::ActorLastReward(Game), 0.f);
+	TestEqual("Actor episode base reward reset", FSurvivorsGameTestAccess::ActorEpisodeBaseReward(Game), 0.f);
+	TestEqual("Actor episode step count reset", FSurvivorsGameTestAccess::ActorEpisodeStepCount(Game), 0);
+	TestFalse("Actor done flag reset", FSurvivorsGameTestAccess::ActorDone(Game));
+	TestFalse("Actor truncated flag reset", FSurvivorsGameTestAccess::ActorTruncated(Game));
+	TestEqual("Actor variable-step accumulator reset", FSurvivorsGameTestAccess::ActorPhysicsAccumTime(Game), 0.f);
+	TestEqual("Actor spawn debug reset", FSurvivorsGameTestAccess::ActorLastSpawnDebug(Game).EnemyCount, 0);
+
+	TArray<const FSurvivorsTargetProxy*> ContactsAfter;
+	CollComp->QueryEnemyContacts(FVector2D::ZeroVector, 50.f, ContactsAfter);
+	TestEqual("Legacy collision grid cleared", ContactsAfter.Num(), 0);
+
+	S.Destroy();
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSurvivorsWikiPassiveGrowthAndAttractorb,
 	"ReinBalance.Survivors.Wiki.PassiveGrowthAndAttractorb",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
