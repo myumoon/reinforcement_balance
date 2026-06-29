@@ -959,6 +959,8 @@ def parse_args() -> argparse.Namespace:
                    help="敵パラメータ決定モード (default: phase_fixed)")
     p.add_argument("--weapon-unlock-table", type=str, default="default_v1",
                    help="武器アンロックテーブル名 (default: default_v1)")
+    p.add_argument("--weapon-unlock-initial-stage-key", type=str, default="WU0",
+                   help="武器アンロック初期stage key (default: WU0)")
     p.add_argument("--weapon-pool-policy", type=str, default="target_plus_anchor",
                    help="episode武器プールポリシー (default: target_plus_anchor)")
     p.add_argument("--weapon-item-stage", type=str, default="IS0",
@@ -1787,7 +1789,7 @@ def main() -> None:
 
         _weapon_unlock_order = resolve_weapon_unlock_order(getattr(args, "weapon_unlock_table", "default_v1"))
         _weapon_unlock_module = WeaponUnlockStateModule(
-            initial_stage_key="WU0",
+            initial_stage_key=args.weapon_unlock_initial_stage_key,
             weapon_unlock_min_episodes=args.weapon_unlock_min_episodes,
             weapon_unlock_target_p10=args.weapon_unlock_target_p10,
             weapon_unlock_max_terminated_rate=args.weapon_unlock_max_terminated_rate,
