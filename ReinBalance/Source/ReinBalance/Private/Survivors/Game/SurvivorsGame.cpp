@@ -121,6 +121,10 @@ void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 
 	SyncConfigToLogic();
 	Logic.Reset(Seed);
+	if (WeaponComponent)
+	{
+		WeaponComponent->Reset();
+	}
 	PhysicsAccumTime = 0.f;  // variable frame rate 用アキュムレータはASurvivorsGame側でリセット
 	// Logic.Reset() 内で CurrentConfig の override フラグがクリアされるため、
 	// SyncConfigToLogic() が再度呼ばれても再適用されないよう ASurvivorsGame 側も同期してクリアする
