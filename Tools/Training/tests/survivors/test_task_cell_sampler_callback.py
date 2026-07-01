@@ -182,3 +182,199 @@ def test_bootstrap_stage_advance_resamples_pending_from_new_stage_and_logs_metri
     logged_metrics = wandb_logger.log.call_args[0][0]
     assert "weapon_bootstrap/garlic/status" in logged_metrics
     assert "weapon_bootstrap/king_bible/status" in logged_metrics
+
+
+# ---------------------------------------------------------------------------
+# selected lane logging: JSONL 出力
+# ---------------------------------------------------------------------------
+
+def test_write_jsonl_includes_selected_lane_fields(tmp_path):
+    """episode JSONL に selected_bootstrap_lane / bootstrap_task_kind が入り、
+    既存 bootstrap_lane フィールドも残ること。"""
+    import json
+    from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
+    from games.survivors.modules.task_cell_sampler_module import TaskCell, TaskCellSampleDecision
+
+    hybrid_cb = make_mock_hybrid_cb(current_phase=2)
+    tcs = TaskCellSamplerStateModule(
+        min_episodes_per_cell=1,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+    weapon_unlock = WeaponUnlockStateModule(
+        weapon_unlock_min_steps=0,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+    weapon_bootstrap = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={"garlic": "maintenance"},
+    )
+    callback = TaskCellSamplerCallback(
+        hybrid_cb=hybrid_cb,
+        task_cell_sampler=tcs,
+        weapon_unlock=weapon_unlock,
+        param_applier=MagicMock(),
+        log_dir=str(tmp_path),
+        weapon_bootstrap=weapon_bootstrap,
+    )
+    callback.num_timesteps = 5000
+
+    cell = TaskCell(
+        weapon_unlock_stage_key="WU0",
+        first_weapon_id=WeaponType.GARLIC,
+        enemy_phase_idx=2,
+        task_kind="maintenance",
+        build_policy="target_plus_anchor_if_unlocked",
+    )
+    decision = TaskCellSampleDecision(
+        selected_lane="weak_cells",
+        active_lanes={"solo_bootstrap": 3, "weak_cells": 2, "maintenance": 1, "integration": 0},
+        lane_probabilities={"solo_bootstrap": 0.4118, "weak_cells": 0.3529, "maintenance": 0.2353},
+        selected_task_kind="maintenance",
+        selected_weapon_id=WeaponType.GARLIC,
+        selected_enemy_phase_idx=2,
+    )
+
+    callback._write_jsonl(
+        env_idx=0, cell=cell, active_score=250.0, ep_len=1200,
+        terminated=False, ep_base=300.0, params={}, decision=decision,
+    )
+
+    lines = (tmp_path / "task_cell_episode_metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+
+    # 新フィールド
+    assert record["selected_bootstrap_lane"] == "weak_cells"
+    assert record["bootstrap_task_kind"] == cell.task_kind
+    assert record["bootstrap_lane_candidates"]["weak_cells"] == 2
+    assert record["bootstrap_lane_probabilities"]["weak_cells"] == pytest.approx(0.3529)
+    # 既存 bootstrap_lane は削除せず残す（backward compatible）
+    assert "bootstrap_lane" in record
+    assert record["bootstrap_lane"] == cell.task_kind
+
+
+def test_write_jsonl_selected_lane_none_when_no_decision(tmp_path):
+    """decision が None の場合でも既存フィールドは残り新フィールドは None になる。"""
+    import json
+    from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
+    from games.survivors.modules.task_cell_sampler_module import TaskCell
+
+    hybrid_cb = make_mock_hybrid_cb(current_phase=2)
+    tcs = TaskCellSamplerStateModule(min_episodes_per_cell=1, weapon_unlock_order=WEAPON_UNLOCK_ORDER)
+    weapon_unlock = WeaponUnlockStateModule(weapon_unlock_min_steps=0, weapon_unlock_order=WEAPON_UNLOCK_ORDER)
+    weapon_bootstrap = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={"garlic": "maintenance"},
+    )
+    callback = TaskCellSamplerCallback(
+        hybrid_cb=hybrid_cb,
+        task_cell_sampler=tcs,
+        weapon_unlock=weapon_unlock,
+        param_applier=MagicMock(),
+        log_dir=str(tmp_path),
+        weapon_bootstrap=weapon_bootstrap,
+    )
+    callback.num_timesteps = 5000
+    cell = TaskCell(
+        weapon_unlock_stage_key="WU0",
+        first_weapon_id=WeaponType.GARLIC,
+        enemy_phase_idx=2,
+        task_kind="maintenance",
+    )
+    callback._write_jsonl(
+        env_idx=0, cell=cell, active_score=250.0, ep_len=1200,
+        terminated=False, ep_base=300.0, params={}, decision=None,
+    )
+    record = json.loads((tmp_path / "task_cell_episode_metrics.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["selected_bootstrap_lane"] is None
+    assert record["bootstrap_lane_candidates"] is None
+    assert record["bootstrap_lane"] == cell.task_kind
+
+
+# ---------------------------------------------------------------------------
+# analyze_bootstrap_lane_mix ヘルパー: parser / aggregation
+# ---------------------------------------------------------------------------
+
+def test_analyze_helper_selected_lane_counts_and_ratios():
+    from games.survivors.analyze_bootstrap_lane_mix import (
+        selected_lane_counts,
+        selected_lane_ratios,
+    )
+    records = [
+        {"selected_bootstrap_lane": "weak_cells"},
+        {"selected_bootstrap_lane": "weak_cells"},
+        {"selected_bootstrap_lane": "solo_bootstrap"},
+        {"selected_bootstrap_lane": "fallback"},
+    ]
+    counts = selected_lane_counts(records)
+    assert counts["weak_cells"] == 2
+    assert counts["solo_bootstrap"] == 1
+    assert counts["fallback"] == 1
+
+    ratios = selected_lane_ratios(records)
+    assert ratios["weak_cells"] == pytest.approx(0.5)
+
+
+def test_analyze_helper_falls_back_to_legacy_bootstrap_lane():
+    """新フィールドが無い旧 record は legacy bootstrap_lane を使う。"""
+    from games.survivors.analyze_bootstrap_lane_mix import selected_lane_counts
+    records = [
+        {"bootstrap_lane": "maintenance"},  # 旧 record
+        {"selected_bootstrap_lane": "weak_cells"},  # 新 record
+    ]
+    counts = selected_lane_counts(records)
+    assert counts["maintenance"] == 1
+    assert counts["weak_cells"] == 1
+
+
+def test_analyze_helper_lane_task_kind_crosstab():
+    from games.survivors.analyze_bootstrap_lane_mix import lane_task_kind_crosstab
+    records = [
+        {"selected_bootstrap_lane": "weak_cells", "bootstrap_task_kind": "maintenance"},
+        {"selected_bootstrap_lane": "weak_cells", "bootstrap_task_kind": "integration"},
+        {"selected_bootstrap_lane": "weak_cells", "bootstrap_task_kind": "maintenance"},
+    ]
+    table = lane_task_kind_crosstab(records)
+    assert table["weak_cells"]["maintenance"] == 2
+    assert table["weak_cells"]["integration"] == 1
+
+
+def test_analyze_helper_weapon_phase_lane_counts_and_filter():
+    from games.survivors.analyze_bootstrap_lane_mix import (
+        filter_records,
+        weapon_phase_lane_counts,
+        recent_lane_ratios,
+    )
+    records = [
+        {"selected_bootstrap_lane": "solo_bootstrap", "first_weapon_id": 7, "enemy_phase_idx": 2},
+        {"selected_bootstrap_lane": "weak_cells", "first_weapon_id": 7, "enemy_phase_idx": 2},
+        {"selected_bootstrap_lane": "maintenance", "first_weapon_id": 1, "enemy_phase_idx": 2},
+    ]
+    wp = weapon_phase_lane_counts(records)
+    assert wp[(7, 2)]["solo_bootstrap"] == 1
+    assert wp[(7, 2)]["weak_cells"] == 1
+    assert wp[(1, 2)]["maintenance"] == 1
+
+    # filter by weapon
+    filtered = filter_records(records, weapon_id=7)
+    assert len(filtered) == 2
+
+    # recent window
+    recent = recent_lane_ratios(records, window_episodes=1)
+    assert recent == {"maintenance": 1.0}
+
+
+def test_analyze_helper_load_records_skips_broken_lines(tmp_path):
+    from games.survivors.analyze_bootstrap_lane_mix import load_records, resolve_jsonl_path
+    jsonl = tmp_path / "task_cell_episode_metrics.jsonl"
+    jsonl.write_text(
+        '{"selected_bootstrap_lane": "weak_cells"}\n'
+        'THIS IS NOT JSON\n'
+        '\n'
+        '{"selected_bootstrap_lane": "solo_bootstrap"}\n',
+        encoding="utf-8",
+    )
+    resolved = resolve_jsonl_path(tmp_path)
+    assert resolved == jsonl
+    records = load_records(resolved)
+    assert len(records) == 2

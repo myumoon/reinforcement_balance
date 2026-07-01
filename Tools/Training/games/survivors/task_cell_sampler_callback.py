@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from stable_baselines3.common.callbacks import BaseCallback
 from games.survivors.modules.state_modules import EpisodeScoreTracker
-from games.survivors.modules.task_cell_sampler_module import TaskCell, TaskCellSamplerStateModule
+from games.survivors.modules.task_cell_sampler_module import (
+    LANE_INDEX,
+    TaskCell,
+    TaskCellSampleDecision,
+    TaskCellSamplerStateModule,
+)
 from games.survivors.modules.weapon_unlock_module import WeaponUnlockStateModule
 from games.survivors.param_applier import ParamApplier
 from games.survivors.survivors_weapon_table import (
@@ -85,6 +90,9 @@ class TaskCellSamplerCallback(BaseCallback):
         self._active_params_by_env: dict[int, dict | None] = {}
         self._pending_cell_by_env: dict[int, TaskCell | None] = {}
         self._pending_params_by_env: dict[int, dict | None] = {}
+        # selected lane logging: episode を動かした cell と同一 decision を保持する
+        self._active_decision_by_env: dict[int, TaskCellSampleDecision | None] = {}
+        self._pending_decision_by_env: dict[int, TaskCellSampleDecision | None] = {}
         self._status_path: Path | None = (
             self._log_dir / "task_cell_sampler_status.json" if self._log_dir else None
         )
@@ -124,15 +132,20 @@ class TaskCellSamplerCallback(BaseCallback):
         for env_idx in range(n):
             if self._weapon_bootstrap is None:
                 cell = self._tcs.sample_cell(self.num_timesteps)
+                decision = None
             else:
                 cell = self._tcs.sample_cell_with_lane_mix(
                     num_timesteps=self.num_timesteps,
                     weapon_bootstrap=self._weapon_bootstrap,
                     sample_mix=self._weapon_bootstrap_sample_mix,
                 )
+                # cell 取得直後に同一 decision を保持する（後続 resample で上書きされないよう）
+                decision = self._tcs.last_sample_decision
             self._active_cell_by_env[env_idx] = None
             self._active_params_by_env[env_idx] = None
+            self._active_decision_by_env[env_idx] = None
             self._pending_cell_by_env[env_idx] = cell
+            self._pending_decision_by_env[env_idx] = decision
             params = self._build_params_for_cell(cell)
             self._pending_params_by_env[env_idx] = params
             self._param_applier.apply(params, env_idx=env_idx)
@@ -154,6 +167,7 @@ class TaskCellSamplerCallback(BaseCallback):
             # 1. 終了 episode の active_cell で stats を更新
             active_cell = self._active_cell_by_env.get(env_idx)
             active_params = self._active_params_by_env.get(env_idx)
+            active_decision = self._active_decision_by_env.get(env_idx)
             if active_cell is not None:
                 self._tcs.on_episode_end(
                     cell=active_cell,
@@ -178,11 +192,15 @@ class TaskCellSamplerCallback(BaseCallback):
                             min_episode_steps_by_phase=min_ep_steps,
                             weapon_bootstrap=self._weapon_bootstrap,
                         )
-                self._write_jsonl(env_idx, active_cell, active_score, ep_len, terminated, ep_base, active_params)
+                self._write_jsonl(
+                    env_idx, active_cell, active_score, ep_len, terminated, ep_base,
+                    active_params, active_decision,
+                )
 
             # 2. pending -> active に昇格（pending が None の場合も active = None に昇格）
             self._active_cell_by_env[env_idx] = self._pending_cell_by_env.get(env_idx)
             self._active_params_by_env[env_idx] = self._pending_params_by_env.get(env_idx)
+            self._active_decision_by_env[env_idx] = self._pending_decision_by_env.get(env_idx)
 
             # 3-4. 武器アンロック判定
             max_phase = self._hybrid_cb.current_phase
@@ -216,13 +234,17 @@ class TaskCellSamplerCallback(BaseCallback):
             # 5. 次 episode 用の新セルをサンプルして pending に設定
             if self._weapon_bootstrap is None:
                 next_cell = self._tcs.sample_cell(self.num_timesteps)
+                next_decision = None
             else:
                 next_cell = self._tcs.sample_cell_with_lane_mix(
                     num_timesteps=self.num_timesteps,
                     weapon_bootstrap=self._weapon_bootstrap,
                     sample_mix=self._weapon_bootstrap_sample_mix,
                 )
+                # cell 取得直後に同一 decision を保持する
+                next_decision = self._tcs.last_sample_decision
             self._pending_cell_by_env[env_idx] = next_cell
+            self._pending_decision_by_env[env_idx] = next_decision
             next_params = self._build_params_for_cell(next_cell)
             self._pending_params_by_env[env_idx] = next_params
             self._param_applier.apply(next_params, env_idx=env_idx)
@@ -248,6 +270,19 @@ class TaskCellSamplerCallback(BaseCallback):
                 if sample_cell is not None:
                     metrics["task_cell_sampler/selected_enemy_phase_idx"] = sample_cell.enemy_phase_idx
                     metrics["task_cell_sampler/selected_first_weapon_id"] = sample_cell.first_weapon_id
+            # selected lane logging: 数値 index と lane 別候補数を出力する
+            if self._weapon_bootstrap is not None:
+                sample_decision = next(
+                    iter(v for v in self._active_decision_by_env.values() if v is not None), None
+                )
+                if sample_decision is not None:
+                    metrics["task_cell_sampler/selected_bootstrap_lane_index"] = LANE_INDEX.get(
+                        sample_decision.selected_lane, -1
+                    )
+                    for lane in ("solo_bootstrap", "weak_cells", "maintenance", "integration"):
+                        metrics[f"task_cell_sampler/bootstrap_lane_candidate_count/{lane}"] = (
+                            sample_decision.active_lanes.get(lane, 0)
+                        )
             self._wandb_logger.log(metrics, step=self.num_timesteps)
 
         return True
@@ -323,6 +358,7 @@ class TaskCellSamplerCallback(BaseCallback):
         terminated: bool,
         ep_base: float,
         params: dict | None = None,
+        decision: TaskCellSampleDecision | None = None,
     ) -> None:
         if self._jsonl_path is None:
             return
@@ -357,6 +393,21 @@ class TaskCellSamplerCallback(BaseCallback):
                 if self._weapon_bootstrap is not None else None
             ),
             "bootstrap_lane": cell.task_kind if self._weapon_bootstrap is not None else None,
+            # selected lane logging（backward compatible: 既存 bootstrap_lane は残す）
+            "selected_bootstrap_lane": (
+                decision.selected_lane if decision is not None else None
+            ),
+            "bootstrap_task_kind": cell.task_kind if self._weapon_bootstrap is not None else None,
+            "bootstrap_lane_candidates": (
+                dict(decision.active_lanes) if decision is not None else None
+            ),
+            "bootstrap_lane_probabilities": (
+                {k: round(v, 4) for k, v in decision.lane_probabilities.items()}
+                if decision is not None else None
+            ),
+            "bootstrap_lane_fallback_reason": (
+                decision.fallback_reason if decision is not None else None
+            ),
             "regression_from_best": (
                 self._weapon_bootstrap.get_weapon_snapshot(cell.first_weapon_id).get("regression_from_best")
                 if self._weapon_bootstrap is not None else None

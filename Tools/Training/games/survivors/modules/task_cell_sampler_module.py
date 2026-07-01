@@ -30,6 +30,39 @@ class TaskCell:
         return f"{self.task_kind}/{self.weapon_unlock_stage_key}/{self.first_weapon_id}/{self.enemy_phase_idx}"
 
 
+# selected lane を index 化する際のマッピング（wandb 数値 metric 用）
+LANE_INDEX: dict[str, int] = {
+    "solo_bootstrap": 0,
+    "weak_cells": 1,
+    "maintenance": 2,
+    "integration": 3,
+    "fallback": 4,
+}
+
+
+@dataclass
+class TaskCellSampleDecision:
+    """sample_cell_with_lane_mix() が下した lane 選択の内訳。
+
+    selected_lane:        実際に選ばれた lane 名。fallback パスに落ちた場合は "fallback"。
+                          候補が全く無い場合は None。
+    active_lanes:         lane 名 -> その lane の候補セル数。
+    lane_probabilities:   lane 名 -> 正規化後の選択確率。
+    selected_task_kind:   選ばれた cell の task_kind。
+    selected_weapon_id:   選ばれた cell の first_weapon_id。
+    selected_enemy_phase_idx: 選ばれた cell の enemy_phase_idx。
+    fallback_reason:      fallback / None 選択に落ちた理由（診断用）。
+    """
+
+    selected_lane: str | None
+    active_lanes: dict[str, int]
+    lane_probabilities: dict[str, float]
+    selected_task_kind: str | None
+    selected_weapon_id: int | None
+    selected_enemy_phase_idx: int | None
+    fallback_reason: str | None = None
+
+
 @dataclass
 class TaskCellStats:
     cell: TaskCell
@@ -103,6 +136,16 @@ class TaskCellSamplerStateModule(BaseStateModule):
         self._candidate_cells: list[TaskCell] = []
         # 武器アンロック判定に使う enemy_phase（候補セルに必ず含める）
         self._readiness_cap_phase: int | None = None
+        # 直近の sample_cell_with_lane_mix() の lane 選択内訳（selected lane logging 用）
+        self._last_sample_decision: TaskCellSampleDecision | None = None
+
+    @property
+    def last_sample_decision(self) -> "TaskCellSampleDecision | None":
+        """直近の sample_cell_with_lane_mix() が下した lane 選択内訳（read-only）。
+
+        legacy sample_cell() は lane を持たないため更新しない。
+        """
+        return self._last_sample_decision
 
     def rebuild_candidate_cells(
         self,
@@ -407,6 +450,17 @@ class TaskCellSamplerStateModule(BaseStateModule):
         2. 選ばれたレーン内の候補セルを重み付き選択
         """
         if not self._candidate_cells:
+            # 候補が全く無い場合は decision を初期化してから raise する
+            # （呼び出し側が last_sample_decision を参照しても None 相当の空 lane が読める）
+            self._last_sample_decision = TaskCellSampleDecision(
+                selected_lane=None,
+                active_lanes={},
+                lane_probabilities={},
+                selected_task_kind=None,
+                selected_weapon_id=None,
+                selected_enemy_phase_idx=None,
+                fallback_reason="no_candidate_cells",
+            )
             raise RuntimeError("候補セルが空です。rebuild_bootstrap_candidate_cells() を先に呼んでください。")
 
         # weak_cells の判定
@@ -456,20 +510,34 @@ class TaskCellSamplerStateModule(BaseStateModule):
 
         # 有効なレーンのみで再正規化
         active_lanes = {k: v for k, v in lanes.items() if v and k in sample_mix and sample_mix[k] > 0}
+        # active lane の候補数（selected lane logging 用）
+        active_lane_counts = {k: len(v) for k, v in active_lanes.items()}
         if not active_lanes:
             # 全レーンが空: 最もブロック解除が早いか全候補から選ぶ
             active = [c for c in self._candidate_cells
                       if self._stats[c.key()].blocked_until_step <= num_timesteps]
             if not active:
+                fallback_reason = "all_lanes_empty_no_unblocked_cells"
                 active = sorted(
                     self._candidate_cells,
                     key=lambda c: self._stats[c.key()].blocked_until_step
                 )[:1]
+            else:
+                fallback_reason = "all_lanes_empty"
             weights = np.array([self._compute_weight(c, num_timesteps) for c in active], dtype=float)
             weights /= weights.sum()
             idx = int(np.random.choice(len(active), p=weights))
             chosen = active[idx]
             self._stats[chosen.key()].last_sample_step = num_timesteps
+            self._last_sample_decision = TaskCellSampleDecision(
+                selected_lane="fallback",
+                active_lanes=active_lane_counts,
+                lane_probabilities={},
+                selected_task_kind=chosen.task_kind,
+                selected_weapon_id=chosen.first_weapon_id,
+                selected_enemy_phase_idx=chosen.enemy_phase_idx,
+                fallback_reason=fallback_reason,
+            )
             return chosen
 
         # レーンの比率を正規化
@@ -489,6 +557,15 @@ class TaskCellSamplerStateModule(BaseStateModule):
         idx = int(np.random.choice(len(lane_cells), p=weights))
         chosen = lane_cells[idx]
         self._stats[chosen.key()].last_sample_step = num_timesteps
+        self._last_sample_decision = TaskCellSampleDecision(
+            selected_lane=selected_lane_key,
+            active_lanes=active_lane_counts,
+            lane_probabilities={k: float(lane_weights[k]) for k in lane_keys},
+            selected_task_kind=chosen.task_kind,
+            selected_weapon_id=chosen.first_weapon_id,
+            selected_enemy_phase_idx=chosen.enemy_phase_idx,
+            fallback_reason=None,
+        )
         return chosen
 
     def get_wandb_metrics(self, num_timesteps: int = 0) -> dict:
