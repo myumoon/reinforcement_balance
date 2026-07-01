@@ -431,3 +431,109 @@ def test_candidate_cells_rebuilt_after_status_change():
     )
     task_kinds = {c.task_kind for c in tcs._candidate_cells}
     assert "integration" in task_kinds
+
+
+# ---------------------------------------------------------------------------
+# selected lane logging: last_sample_decision
+# ---------------------------------------------------------------------------
+
+def test_last_sample_decision_records_selected_lane():
+    """weak_cells=1.0 のとき selected_lane == 'weak_cells' が記録される。"""
+    tcs = make_tcs(min_episodes_per_cell=1)
+    bs = make_bootstrap_module(
+        initial_status={"garlic": "maintenance"},
+        initial_best={"garlic": 400.0},
+    )
+    tcs.rebuild_bootstrap_candidate_cells(
+        stage_key="WU0",
+        max_unlocked_enemy_phase_idx=2,
+        min_episode_steps_by_phase={0: 600, 1: 900, 2: 1200},
+        weapon_bootstrap=bs,
+    )
+    # maintenance セルを regression 状態にして weak_cells に入れる
+    maintenance_cell = next(c for c in tcs._candidate_cells if c.task_kind == "maintenance")
+    stats = tcs._stats[maintenance_cell.key()]
+    stats.episode_count = 10
+    stats.active_score_p10 = 200.0  # 200/400 = 0.5 < 0.65 → regression
+
+    sample_mix = {"solo_bootstrap": 0.0, "weak_cells": 1.0, "maintenance": 0.0, "integration": 0.0}
+    tcs.sample_cell_with_lane_mix(num_timesteps=0, weapon_bootstrap=bs, sample_mix=sample_mix)
+
+    decision = tcs.last_sample_decision
+    assert decision is not None
+    assert decision.selected_lane == "weak_cells"
+    assert decision.fallback_reason is None
+    # candidate counts が active lane と一致する
+    assert decision.active_lanes.get("weak_cells", 0) >= 1
+    assert decision.lane_probabilities.get("weak_cells") == pytest.approx(1.0)
+
+
+def test_last_sample_decision_solo_bootstrap_lane():
+    """solo_bootstrap=1.0 のとき selected_lane == 'solo_bootstrap'。"""
+    tcs = make_tcs(min_episodes_per_cell=1)
+    bs = make_bootstrap_module(initial_status={"garlic": "solo_bootstrap"})
+    tcs.rebuild_bootstrap_candidate_cells(
+        stage_key="WU0",
+        max_unlocked_enemy_phase_idx=2,
+        min_episode_steps_by_phase={0: 600, 1: 900, 2: 1200},
+        weapon_bootstrap=bs,
+    )
+    sample_mix = {"solo_bootstrap": 1.0, "weak_cells": 0.0, "maintenance": 0.0, "integration": 0.0}
+    chosen = tcs.sample_cell_with_lane_mix(num_timesteps=0, weapon_bootstrap=bs, sample_mix=sample_mix)
+
+    decision = tcs.last_sample_decision
+    assert decision is not None
+    assert decision.selected_lane == "solo_bootstrap"
+    assert decision.selected_task_kind == chosen.task_kind
+    assert decision.selected_weapon_id == chosen.first_weapon_id
+    assert decision.selected_enemy_phase_idx == chosen.enemy_phase_idx
+    assert decision.active_lanes.get("solo_bootstrap", 0) >= 1
+
+
+def test_last_sample_decision_fallback_when_no_active_lane():
+    """選択した lane に候補が無い場合 fallback になり reason が入る。"""
+    tcs = make_tcs(min_episodes_per_cell=1)
+    bs = make_bootstrap_module(initial_status={"garlic": "solo_bootstrap"})
+    tcs.rebuild_bootstrap_candidate_cells(
+        stage_key="WU0",
+        max_unlocked_enemy_phase_idx=2,
+        min_episode_steps_by_phase={0: 600, 1: 900, 2: 1200},
+        weapon_bootstrap=bs,
+    )
+    # solo_bootstrap しか候補が無いのに maintenance lane のみ要求 → fallback
+    sample_mix = {"solo_bootstrap": 0.0, "weak_cells": 0.0, "maintenance": 1.0, "integration": 0.0}
+    tcs.sample_cell_with_lane_mix(num_timesteps=0, weapon_bootstrap=bs, sample_mix=sample_mix)
+
+    decision = tcs.last_sample_decision
+    assert decision is not None
+    assert decision.selected_lane == "fallback"
+    assert decision.fallback_reason is not None
+
+
+def test_last_sample_decision_none_when_no_candidates():
+    """候補セルが空のとき decision が初期化され selected_lane=None になる。"""
+    tcs = make_tcs()
+    bs = make_bootstrap_module(initial_status={"garlic": "solo_bootstrap"})
+    # rebuild しない → _candidate_cells が空
+    with pytest.raises(RuntimeError):
+        tcs.sample_cell_with_lane_mix(
+            num_timesteps=0, weapon_bootstrap=bs,
+            sample_mix={"solo_bootstrap": 1.0, "weak_cells": 0.0, "maintenance": 0.0, "integration": 0.0},
+        )
+    decision = tcs.last_sample_decision
+    assert decision is not None
+    assert decision.selected_lane is None
+    assert decision.fallback_reason == "no_candidate_cells"
+
+
+def test_legacy_sample_cell_does_not_update_decision():
+    """legacy sample_cell() は lane decision を更新しない。"""
+    tcs = make_tcs()
+    tcs.rebuild_candidate_cells(
+        stage_key="WU0",
+        max_unlocked_enemy_phase_idx=2,
+        min_episode_steps_by_phase={0: 600, 1: 900, 2: 1200},
+    )
+    assert tcs.last_sample_decision is None
+    tcs.sample_cell(0)
+    assert tcs.last_sample_decision is None
