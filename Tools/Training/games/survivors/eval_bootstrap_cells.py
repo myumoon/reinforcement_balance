@@ -19,8 +19,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import datetime
 from pathlib import Path
+
+# checkpoint model 名 model_<step>_steps.zip から step を抽出する
+_MODEL_STEP_RE = re.compile(r"model_(\d+)_steps$")
+
+
+def _extract_checkpoint_step(model_path: Path) -> int | None:
+    """model_<step>_steps.zip から step を抽出する（該当しなければ None）。"""
+    m = _MODEL_STEP_RE.match(model_path.stem)
+    return int(m.group(1)) if m else None
 
 from games.survivors.bootstrap_eval import (
     build_eval_params,
@@ -75,15 +85,45 @@ def resolve_model_path(run_dir: Path, model_path: str | None) -> Path:
 
 
 def resolve_vecnormalize_path(run_dir: Path, model_path: Path) -> Path | None:
-    """vecnormalize.pkl のパスを解決する（存在しなければ None）。"""
-    candidates = [
+    """model_path に対応する VecNormalize 統計の pkl パスを解決する（無ければ None）。
+
+    train.py の checkpoint 保存規約に厳密に合わせる:
+      - model checkpoint: run/work/model_steps/model_<step>_steps.zip
+      - vecnormalize    : run/work/vecnormalize/vecnormalize_<step>_steps.pkl
+    （train.py の resolve ロジック line 274/291、CheckpointCallback line 433 参照）
+
+    step 付き checkpoint の場合は対応する work/vecnormalize/vecnormalize_<step>_steps.pkl
+    を最優先候補にする。非 checkpoint（result/model.zip 等）の場合は従来どおり
+    result/vecnormalize.pkl 等を探す（backward compatible）。
+    """
+    candidates: list[Path] = []
+
+    # checkpoint 名から step を抽出できる場合は train.py と同じ規約のパスを最優先候補にする
+    step = _extract_checkpoint_step(model_path)
+    if step is not None:
+        candidates.append(run_dir / "work" / "vecnormalize" / f"vecnormalize_{step}_steps.pkl")
+
+    # 従来の非 checkpoint パス（backward compatible）
+    candidates.extend([
         model_path.parent / "vecnormalize.pkl",
         run_dir / "result" / "vecnormalize.pkl",
         run_dir / "vecnormalize.pkl",
-    ]
+    ])
+
     for c in candidates:
         if c.exists():
             return c
+
+    # step 付き checkpoint なのに対応 vecnormalize が見つからない場合は明確に警告する。
+    # ここで静かに None を返すと VecNormalize 済みモデルを生観測評価してしまうため。
+    if step is not None:
+        expected = run_dir / "work" / "vecnormalize" / f"vecnormalize_{step}_steps.pkl"
+        print(
+            f"[WARN] checkpoint model_{step}_steps.zip に対応する VecNormalize 統計が "
+            f"見つかりません: {expected}\n"
+            f"       VecNormalize なしで評価します（正規化して訓練したモデルなら評価値が"
+            f"無効になる可能性があります）。"
+        )
     return None
 
 
@@ -150,6 +190,11 @@ def evaluate_cells(
 
     model_zip = resolve_model_path(run_dir, model_path)
     vecnorm_path = resolve_vecnormalize_path(run_dir, model_zip)
+    print(f"[bootstrap_eval] model_path={model_zip}")
+    print(
+        f"[bootstrap_eval] vecnormalize_path="
+        f"{vecnorm_path if vecnorm_path is not None else '(none: 生観測で評価)'}"
+    )
 
     # cell spec を先に parse して不正な spec で env を立てる前に落とす
     parsed_cells = [parse_cell_spec(spec) for spec in cells]

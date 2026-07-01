@@ -171,3 +171,82 @@ def test_summarize_short_episode_rate():
         short_episode_steps=600,
     )
     assert summary["short_episode_rate"] == pytest.approx(2 / 3)
+
+
+# ---------------------------------------------------------------------------
+# vecnormalize path resolution（checkpoint 規約: work/vecnormalize/vecnormalize_<step>_steps.pkl）
+# ---------------------------------------------------------------------------
+
+def test_resolve_vecnormalize_for_step_checkpoint(tmp_path):
+    """step 付き checkpoint model_<step>_steps.zip から対応する
+    work/vecnormalize/vecnormalize_<step>_steps.pkl を解決できること。
+    （train.py の resume 解決規約 line 274/291 と一致）"""
+    from games.survivors.eval_bootstrap_cells import resolve_vecnormalize_path
+
+    run_dir = tmp_path / "run07"
+    model_dir = run_dir / "work" / "model_steps"
+    vecnorm_dir = run_dir / "work" / "vecnormalize"
+    model_dir.mkdir(parents=True)
+    vecnorm_dir.mkdir(parents=True)
+
+    model_path = model_dir / "model_500000_steps.zip"
+    model_path.write_text("dummy")
+    expected_vecnorm = vecnorm_dir / "vecnormalize_500000_steps.pkl"
+    expected_vecnorm.write_text("dummy")
+
+    resolved = resolve_vecnormalize_path(run_dir, model_path)
+    assert resolved == expected_vecnorm
+
+
+def test_resolve_vecnormalize_step_checkpoint_missing_returns_none_with_warning(tmp_path, capsys):
+    """step 付き checkpoint に対応する vecnormalize が無い場合は None を返し警告する。"""
+    from games.survivors.eval_bootstrap_cells import resolve_vecnormalize_path
+
+    run_dir = tmp_path / "run07"
+    model_dir = run_dir / "work" / "model_steps"
+    model_dir.mkdir(parents=True)
+    model_path = model_dir / "model_500000_steps.zip"
+    model_path.write_text("dummy")
+
+    resolved = resolve_vecnormalize_path(run_dir, model_path)
+    assert resolved is None
+    captured = capsys.readouterr()
+    assert "vecnormalize_500000_steps.pkl" in captured.out
+
+
+def test_resolve_vecnormalize_non_checkpoint_result_path(tmp_path):
+    """非 checkpoint（result/model.zip）では従来どおり result/vecnormalize.pkl を解決する。"""
+    from games.survivors.eval_bootstrap_cells import resolve_vecnormalize_path
+
+    run_dir = tmp_path / "run07"
+    result_dir = run_dir / "result"
+    result_dir.mkdir(parents=True)
+    model_path = result_dir / "model.zip"
+    model_path.write_text("dummy")
+    expected_vecnorm = result_dir / "vecnormalize.pkl"
+    expected_vecnorm.write_text("dummy")
+
+    resolved = resolve_vecnormalize_path(run_dir, model_path)
+    assert resolved == expected_vecnorm
+
+
+def test_resolve_vecnormalize_step_checkpoint_prefers_step_path_over_result(tmp_path):
+    """step 付き checkpoint のときは result/vecnormalize.pkl があっても
+    step 対応の work/vecnormalize/vecnormalize_<step>_steps.pkl を優先する。"""
+    from games.survivors.eval_bootstrap_cells import resolve_vecnormalize_path
+
+    run_dir = tmp_path / "run07"
+    model_dir = run_dir / "work" / "model_steps"
+    vecnorm_dir = run_dir / "work" / "vecnormalize"
+    result_dir = run_dir / "result"
+    for d in (model_dir, vecnorm_dir, result_dir):
+        d.mkdir(parents=True)
+
+    model_path = model_dir / "model_300000_steps.zip"
+    model_path.write_text("dummy")
+    step_vecnorm = vecnorm_dir / "vecnormalize_300000_steps.pkl"
+    step_vecnorm.write_text("dummy")
+    (result_dir / "vecnormalize.pkl").write_text("dummy")
+
+    resolved = resolve_vecnormalize_path(run_dir, model_path)
+    assert resolved == step_vecnorm

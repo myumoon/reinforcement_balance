@@ -29,13 +29,14 @@ def test_task_cell_sampler_callback_imports():
 
 
 def test_active_pending_cell_lifecycle():
-    """active/pending のライフサイクルが正しいことを確認する。
+    """active/pending のライフサイクルが base(main) と一致することを確認する。
 
-    VecEnv auto-reset の 1 episode ラグを補償するため、初期セル cell_0 は
-    active と pending の両方に設定され、episode 1 と episode 2 の両方を動かす。
+    SB3 は on_training_start より前に env を reset して episode 1 を開始しており、
+    training_start で apply した初期セルの /params は episode 1 には反映されない。
+    したがって episode 1 は task cell として記録しない（active=None から始める）。
 
-    training_start: active=cell_0, pending=cell_0, params=cell_0送信
-    episode 1 終了: active=cell_0→stats更新, active=cell_0(pending昇格), new cell_1→pending
+    training_start: active=None, pending=cell_0, params=cell_0送信
+    episode 1 終了: active=None→記録なし, active=cell_0(pending昇格), new cell_1→pending
     episode 2 終了: active=cell_0→stats更新, active=cell_1(pending昇格), new cell_2→pending
     episode 3 終了: active=cell_1→stats更新, ...
     """
@@ -45,46 +46,52 @@ def test_active_pending_cell_lifecycle():
     tcs.rebuild_candidate_cells("WU0", 0, {0: 100})
 
     applied_cells = []  # apply() が呼ばれたセルを追跡
+    recorded_cells = []  # stats 更新（＝JSONL 記録）された cell を追跡
 
-    # シミュレーション: training_start（初期セルを active/pending 両方に設定）
+    # シミュレーション: training_start（active=None, pending=cell_0）
     cell_0 = tcs.sample_cell(0)
-    active_by_env = {0: cell_0}
+    active_by_env = {0: None}
     pending_by_env = {0: cell_0}
-    applied_cells.append(cell_0)  # params apply（ep1・ep2 を動かす）
+    applied_cells.append(cell_0)  # params apply
 
-    # シミュレーション: episode 1 終了（初回 episode も記録される）
-    active_cell = active_by_env[0]  # = cell_0
-    assert active_cell == cell_0  # 初回 episode を取りこぼさず stats 更新
-    tcs.on_episode_end(active_cell, active_score=400.0, ep_len=200, terminated=False, num_timesteps=100)
+    # シミュレーション: episode 1 終了（active=None のため記録しない）
+    active_cell = active_by_env[0]
+    assert active_cell is None  # 初回 episode は task cell として記録しない
+    if active_cell is not None:
+        recorded_cells.append(active_cell)
 
     # pending -> active に昇格（pending=cell_0 → active=cell_0）
     active_by_env[0] = pending_by_env.get(0)
-    cell_1 = tcs.sample_cell(100)
+    cell_1 = tcs.sample_cell(0)
     pending_by_env[0] = cell_1
-    applied_cells.append(cell_1)  # params apply（効くのは ep3）
+    applied_cells.append(cell_1)
 
     # シミュレーション: episode 2 終了（cell_0 の params で動いた episode）
     active_cell = active_by_env[0]  # = cell_0
     assert active_cell == cell_0
-    tcs.on_episode_end(active_cell, active_score=420.0, ep_len=200, terminated=False, num_timesteps=200)
+    recorded_cells.append(active_cell)
+    tcs.on_episode_end(active_cell, active_score=400.0, ep_len=200, terminated=False, num_timesteps=200)
 
     # pending -> active に昇格（pending=cell_1 → active=cell_1）
     active_by_env[0] = pending_by_env.get(0)
     cell_2 = tcs.sample_cell(200)
     pending_by_env[0] = cell_2
-    applied_cells.append(cell_2)  # params apply
+    applied_cells.append(cell_2)
 
     # シミュレーション: episode 3 終了（cell_1 の params で動いた episode）
     active_cell = active_by_env[0]  # = cell_1
     assert active_cell == cell_1
+    recorded_cells.append(active_cell)
 
     assert len(applied_cells) == 3
+    # ep1 は記録されず、ep2 以降のみ記録される（base と同一）
+    assert recorded_cells == [cell_0, cell_1]
 
-    # cell_0 の stats が ep1・ep2 の 2 回更新されていることを確認
+    # cell_0 の stats は ep2 の 1 回のみ更新（ep1 は除外）
     stats_0 = tcs.get_cell_stats(cell_0.first_weapon_id, cell_0.enemy_phase_idx)
     assert stats_0 is not None
-    assert stats_0.episode_count == 2
-    assert stats_0.active_score_mean == pytest.approx(410.0)
+    assert stats_0.episode_count == 1
+    assert stats_0.active_score_mean == pytest.approx(400.0)
 
 
 def test_enemy_phase_change_rebuilds_candidates():
@@ -215,15 +222,18 @@ def _make_bootstrap_callback(tmp_path, current_phase=2):
     return callback, tcs, weapon_bootstrap
 
 
-def test_two_episode_vecenv_logs_completed_episode_cell_and_lane(tmp_path):
-    """擬似 VecEnv を 3 episode 分回し、各 JSONL record が『その episode を実際に
-    動かした cell の selected lane』を出すことと、初回 episode も取りこぼさず
-    記録されることを検証する。
+def test_vecenv_logs_completed_episode_cell_and_lane_matches_base(tmp_path):
+    """擬似 VecEnv を複数 episode 分回し、各 JSONL record が『その episode を実際に
+    動かした cell の selected lane』を出すことと、記録される episode 集合・cell 割り当てが
+    base(main) と一致すること（ep1 は task cell として記録しない）を検証する。
 
-    VecEnv auto-reset の 1 episode ラグにより:
-      - training_start で apply した cell_A が episode 1 と episode 2 を動かす
-      - episode 1 done 時に sample した cell_B は episode 3 から効く
-    したがって JSONL は [A, A, B, ...] の順で cell/lane を記録するはず。
+    SB3 は on_training_start より前に env を reset して episode 1 を開始しているため、
+    training_start で apply した cell_A の /params は episode 1 には反映されない。
+    active=None から始めるので episode 1 は記録されない。VecEnv auto-reset の
+    1 episode ラグにより:
+      - training_start で apply した cell_A は（次 reset 以降）ep2 を動かす
+      - ep1 done 時に sample した cell_B は ep3 を動かす
+    したがって記録されるのは ep2 以降で JSONL は [A, B, ...] の順になる。
     """
     import json
     from games.survivors.modules.task_cell_sampler_module import TaskCell, TaskCellSampleDecision
@@ -250,9 +260,9 @@ def test_two_episode_vecenv_logs_completed_episode_cell_and_lane(tmp_path):
         return cell, decision
 
     seq = [
-        _mk("solo_bootstrap", WeaponType.GARLIC, 0),   # cell_A: training_start で apply → ep1, ep2 を動かす
-        _mk("integration", WeaponType.GARLIC, 2),      # cell_B: ep1 done で sample → ep3 から効く
-        _mk("maintenance", WeaponType.GARLIC, 2),      # cell_C
+        _mk("solo_bootstrap", WeaponType.GARLIC, 0),   # cell_A: training_start で apply
+        _mk("integration", WeaponType.GARLIC, 2),      # cell_B: ep1 done で sample
+        _mk("maintenance", WeaponType.GARLIC, 2),      # cell_C: ep2 done で sample
         _mk("solo_bootstrap", WeaponType.GARLIC, 1),   # cell_D
     ]
     calls = {"i": 0}
@@ -272,12 +282,11 @@ def test_two_episode_vecenv_logs_completed_episode_cell_and_lane(tmp_path):
     callback.model.get_env.return_value = training_env
     callback.num_timesteps = 1000
 
-    # _on_training_start: 初期セル cell_A を active/pending 両方に設定
+    # _on_training_start: 初期セル cell_A を pending に設定（active は None、base と同一）
     callback._on_training_start()
-    assert callback._active_cell_by_env[0] is not None
-    assert callback._active_cell_by_env[0].task_kind == "solo_bootstrap"
-    # active と pending は同一 decision を指す
-    assert callback._active_decision_by_env[0] is callback._pending_decision_by_env[0]
+    assert callback._active_cell_by_env[0] is None
+    assert callback._active_decision_by_env[0] is None
+    assert callback._pending_cell_by_env[0].task_kind == "solo_bootstrap"
 
     # 3 episode 分 _on_step を回す。各 step で 1 episode 完了させる。
     scores = [111.0, 222.0, 333.0]
@@ -290,23 +299,22 @@ def test_two_episode_vecenv_logs_completed_episode_cell_and_lane(tmp_path):
         assert callback._on_step() is True
 
     lines = (tmp_path / "task_cell_episode_metrics.jsonl").read_text(encoding="utf-8").splitlines()
-    # 初回 episode を取りこぼさず 3 件記録されている
-    assert len(lines) == 3
+    # ep1（score=111.0）は active=None のため記録しない → ep2, ep3 の 2 件のみ
+    assert len(lines) == 2
     records = [json.loads(l) for l in lines]
 
-    # ep1, ep2 は cell_A (solo_bootstrap) で動いた → 両方 solo_bootstrap を記録
-    assert records[0]["active_score"] == pytest.approx(111.0)
+    # ep2 は cell_A (solo_bootstrap) で動いた
+    assert records[0]["active_score"] == pytest.approx(222.0)
     assert records[0]["selected_bootstrap_lane"] == "solo_bootstrap"
     assert records[0]["bootstrap_lane"] == "solo_bootstrap"
 
-    assert records[1]["active_score"] == pytest.approx(222.0)
-    assert records[1]["selected_bootstrap_lane"] == "solo_bootstrap"
-    assert records[1]["bootstrap_lane"] == "solo_bootstrap"
-
     # ep3 は cell_B (integration) で動いた
-    assert records[2]["active_score"] == pytest.approx(333.0)
-    assert records[2]["selected_bootstrap_lane"] == "integration"
-    assert records[2]["bootstrap_lane"] == "integration"
+    assert records[1]["active_score"] == pytest.approx(333.0)
+    assert records[1]["selected_bootstrap_lane"] == "integration"
+    assert records[1]["bootstrap_lane"] == "integration"
+
+    # 111.0（ep1）は記録されていない
+    assert all(rec["active_score"] != pytest.approx(111.0) for rec in records)
 
     # 全 record で新旧フィールドが同一 decision/cell を指す
     for rec in records:
@@ -353,14 +361,17 @@ def test_two_episode_vecenv_new_and_legacy_lane_fields_share_single_decision(tmp
     callback.num_timesteps = 1000
     callback._on_training_start()
 
-    callback.num_timesteps += 1000
-    callback.locals = {"infos": [{}]}
-    callback._score_tracker.process = MagicMock(return_value=[(0, 250.0, 1200, 0.0)])
-    callback._on_step()
+    # ep1 done は active=None のため記録されない（base と同一）。
+    # ep2 done で initial cell（=fake_sample が返す cell）が active に昇格して記録される。
+    for _ in range(2):
+        callback.num_timesteps += 1000
+        callback.locals = {"infos": [{}]}
+        callback._score_tracker.process = MagicMock(return_value=[(0, 250.0, 1200, 0.0)])
+        callback._on_step()
 
-    rec = json.loads(
-        (tmp_path / "task_cell_episode_metrics.jsonl").read_text(encoding="utf-8").splitlines()[0]
-    )
+    lines = (tmp_path / "task_cell_episode_metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1  # ep1 は記録されず ep2 のみ
+    rec = json.loads(lines[0])
     # selected_bootstrap_lane は decision.selected_lane（"weak_cells"）
     assert rec["selected_bootstrap_lane"] == "weak_cells"
     # 既存 bootstrap_lane / bootstrap_task_kind は cell.task_kind（"maintenance"）

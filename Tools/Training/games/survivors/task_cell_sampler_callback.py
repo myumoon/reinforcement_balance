@@ -37,15 +37,24 @@ class TaskCellSamplerCallback(BaseCallback):
     - episode終了を独自の EpisodeScoreTracker で検出する
     - CurriculumStateModule.on_episode_end() は呼ばない（Hybrid 側が担当）
     - active/pending ライフサイクル（VecEnv auto-reset の 1 episode ラグを補償）:
-        - _on_training_start: 初期セルを sample し active/pending 両方に設定して apply。
-          この初期 apply は episode 1（active）と episode 2（pending）の両方を動かす。
+        - _on_training_start: 初期セルを sample し pending に設定して apply。
+          active は None から始める（base(main) と同一の episode↔cell 対応）。
+          SB3 の learn() は on_training_start より前に env を reset して episode 1 を
+          開始しており、_on_training_start で apply した /params は episode 1 には
+          反映されない。よって episode 1 は default / 前 params の episode なので
+          task cell 統計・JSONL には記録しない（active=None のため _write_jsonl は
+          呼ばれない）。これは base(main) の挙動と完全に一致する。
         - done=True 検出時（このとき VecEnv は既に次 episode の reset() 済み）:
-            1. active_cell の stats を更新し、active_cell/active_decision で JSONL を書く
-               （＝いま完了した episode を実際に動かした cell と一致する）
+            1. active_cell が None でなければ stats を更新し、active_cell/active_decision
+               で JSONL を書く（＝いま完了した episode を実際に動かした cell と一致する）
             2. pending -> active に昇格（cell/params/decision を同時に昇格）
             3. weapon_unlock.maybe_advance() を呼ぶ
             4. 進行したら task_cell_sampler.on_weapon_unlock_advanced(event) を呼ぶ
             5. 新セルをサンプルして /params 送信し pending に設定（効くのは次の次の episode）
+    - どの episode を記録し、どの cell を各 episode に割り当てるかは base(main) と同一。
+      本 PR は selected_bootstrap_lane / bootstrap_task_kind / bootstrap_lane_candidates /
+      bootstrap_lane_probabilities を JSONL に追加するのみで、記録タイミング・episode 対応は
+      変更しない。
     - active_cell と active_decision は常に単一の (cell, decision) ペアから昇格されるため、
       JSONL の bootstrap_lane (=cell.task_kind) と selected_bootstrap_lane
       (=decision.selected_lane) は必ず同一 episode / 同一 decision を指す。
@@ -135,18 +144,21 @@ class TaskCellSamplerCallback(BaseCallback):
         if self._log_dir is not None:
             self._log_dir.mkdir(parents=True, exist_ok=True)
 
-        # 初期セルをサンプルして active と pending の両方に設定する。
+        # 初期セルをサンプルして pending に設定する（active は None から始める）。
         #
-        # SB3 VecEnv は done=True を検出した時点で既に次 episode の reset() を済ませて
-        # いるため、_on_step() 内で apply() した params は「次の次」の episode から
-        # 効き始める（weapon_slot_sampler_callback.py と同じ 1 episode ラグ）。
-        # そのため training_start で apply した初期セルは episode 1 と episode 2 の
-        # 両方を実際に動かす。両方を取りこぼさず active として記録するため、
-        # active / pending を同一の初期 (cell, decision, params) で初期化する。
-        # これにより episode 1 も必ず JSONL に記録され、かつ active_cell と
-        # active_decision は常に単一の decision オブジェクトを指すため、
-        # bootstrap_lane (=cell.task_kind) と selected_bootstrap_lane
-        # (=decision.selected_lane) が同一 episode / 同一 decision に対応する。
+        # SB3 の learn() は on_training_start より前に env を reset して episode 1 を
+        # 開始しており、BaseUE5Env.reset() は /reset に seed だけを送る（set_params は
+        # 別の /params 呼び出し）。したがってここで apply した初期セルの /params は
+        # 既に開始済みの episode 1 には反映されず、少なくとも次 reset 以降に効く。
+        # episode 1 は default / 前 params の episode なので task cell として記録しない
+        # （active=None のため最初の done では _write_jsonl も stats 更新も呼ばれない）。
+        # これは base(main) の active/pending ライフサイクルと完全に一致する。
+        #
+        # active_decision も active_cell と同じく None から始め、pending -> active への
+        # 昇格時に (cell, decision) を原子的に一緒に昇格する。これにより active_cell と
+        # active_decision は常に単一の decision オブジェクトを指し、bootstrap_lane
+        # (=cell.task_kind) と selected_bootstrap_lane (=decision.selected_lane) が
+        # 同一 episode / 同一 decision に対応する。
         for env_idx in range(n):
             if self._weapon_bootstrap is None:
                 cell = self._tcs.sample_cell(self.num_timesteps)
@@ -160,10 +172,9 @@ class TaskCellSamplerCallback(BaseCallback):
                 # cell 取得直後に同一 decision を保持する（後続 resample で上書きされないよう）
                 decision = self._tcs.last_sample_decision
             params = self._build_params_for_cell(cell)
-            # 初期セルは episode 1（active）と episode 2（pending）の両方を動かす
-            self._active_cell_by_env[env_idx] = cell
-            self._active_params_by_env[env_idx] = params
-            self._active_decision_by_env[env_idx] = decision
+            self._active_cell_by_env[env_idx] = None
+            self._active_params_by_env[env_idx] = None
+            self._active_decision_by_env[env_idx] = None
             self._pending_cell_by_env[env_idx] = cell
             self._pending_params_by_env[env_idx] = params
             self._pending_decision_by_env[env_idx] = decision
