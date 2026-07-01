@@ -31,9 +31,13 @@ def test_task_cell_sampler_callback_imports():
 def test_active_pending_cell_lifecycle():
     """active/pending のライフサイクルが正しいことを確認する。
 
-    training_start: active=None, pending=cellA, params=A送信
-    episode 0 終了: active=None→skip, active=cellA, new cellB→pending+params送信
-    episode 1 終了: active=cellA→stats更新, active=cellB, new cellC→pending+params送信
+    VecEnv auto-reset の 1 episode ラグを補償するため、初期セル cell_0 は
+    active と pending の両方に設定され、episode 1 と episode 2 の両方を動かす。
+
+    training_start: active=cell_0, pending=cell_0, params=cell_0送信
+    episode 1 終了: active=cell_0→stats更新, active=cell_0(pending昇格), new cell_1→pending
+    episode 2 終了: active=cell_0→stats更新, active=cell_1(pending昇格), new cell_2→pending
+    episode 3 終了: active=cell_1→stats更新, ...
     """
     from games.survivors.modules.task_cell_sampler_module import TaskCell, TaskCellSamplerStateModule
 
@@ -42,27 +46,27 @@ def test_active_pending_cell_lifecycle():
 
     applied_cells = []  # apply() が呼ばれたセルを追跡
 
-    # シミュレーション: training_start
+    # シミュレーション: training_start（初期セルを active/pending 両方に設定）
     cell_0 = tcs.sample_cell(0)
-    active_by_env = {0: None}
+    active_by_env = {0: cell_0}
     pending_by_env = {0: cell_0}
-    applied_cells.append(cell_0)  # params apply
+    applied_cells.append(cell_0)  # params apply（ep1・ep2 を動かす）
 
-    # シミュレーション: episode 0 終了
-    active_cell = active_by_env[0]  # = None
-    assert active_cell is None  # 最初のepisodeはstats更新をスキップ
+    # シミュレーション: episode 1 終了（初回 episode も記録される）
+    active_cell = active_by_env[0]  # = cell_0
+    assert active_cell == cell_0  # 初回 episode を取りこぼさず stats 更新
+    tcs.on_episode_end(active_cell, active_score=400.0, ep_len=200, terminated=False, num_timesteps=100)
 
     # pending -> active に昇格（pending=cell_0 → active=cell_0）
     active_by_env[0] = pending_by_env.get(0)
     cell_1 = tcs.sample_cell(100)
     pending_by_env[0] = cell_1
-    applied_cells.append(cell_1)  # params apply
+    applied_cells.append(cell_1)  # params apply（効くのは ep3）
 
-    # シミュレーション: episode 1 終了
+    # シミュレーション: episode 2 終了（cell_0 の params で動いた episode）
     active_cell = active_by_env[0]  # = cell_0
-    assert active_cell is not None
-    assert active_cell == cell_0  # cell_0 で stats 更新される
-    tcs.on_episode_end(active_cell, active_score=400.0, ep_len=200, terminated=False, num_timesteps=200)
+    assert active_cell == cell_0
+    tcs.on_episode_end(active_cell, active_score=420.0, ep_len=200, terminated=False, num_timesteps=200)
 
     # pending -> active に昇格（pending=cell_1 → active=cell_1）
     active_by_env[0] = pending_by_env.get(0)
@@ -70,22 +74,17 @@ def test_active_pending_cell_lifecycle():
     pending_by_env[0] = cell_2
     applied_cells.append(cell_2)  # params apply
 
-    # シミュレーション: episode 2 終了
+    # シミュレーション: episode 3 終了（cell_1 の params で動いた episode）
     active_cell = active_by_env[0]  # = cell_1
     assert active_cell == cell_1
 
-    # applied_cells と active セルの対応を確認:
-    # applied[0]=cell_0 → episode 0 のパラメータ
-    # episode 0 終了後: active=None（スキップ）、active=cell_0、applied[1]=cell_1
-    # episode 1 終了後: active=cell_0→stats更新、active=cell_1、applied[2]=cell_2
-    # episode 1 のスコアは cell_0 に記録される（cell_0 の params で動いたepisode）
     assert len(applied_cells) == 3
 
-    # cell_0 の stats が更新されていることを確認
+    # cell_0 の stats が ep1・ep2 の 2 回更新されていることを確認
     stats_0 = tcs.get_cell_stats(cell_0.first_weapon_id, cell_0.enemy_phase_idx)
     assert stats_0 is not None
-    assert stats_0.episode_count == 1
-    assert stats_0.active_score_mean == pytest.approx(400.0)
+    assert stats_0.episode_count == 2
+    assert stats_0.active_score_mean == pytest.approx(410.0)
 
 
 def test_enemy_phase_change_rebuilds_candidates():
@@ -182,6 +181,193 @@ def test_bootstrap_stage_advance_resamples_pending_from_new_stage_and_logs_metri
     logged_metrics = wandb_logger.log.call_args[0][0]
     assert "weapon_bootstrap/garlic/status" in logged_metrics
     assert "weapon_bootstrap/king_bible/status" in logged_metrics
+
+
+# ---------------------------------------------------------------------------
+# 2-episode 擬似 VecEnv: 完了 episode を動かした cell/decision が JSONL に一致する
+# ---------------------------------------------------------------------------
+
+def _make_bootstrap_callback(tmp_path, current_phase=2):
+    """weapon_bootstrap 有効な TaskCellSamplerCallback を構築する。"""
+    from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
+
+    hybrid_cb = make_mock_hybrid_cb(current_phase=current_phase)
+    tcs = TaskCellSamplerStateModule(
+        min_episodes_per_cell=1,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+    weapon_unlock = WeaponUnlockStateModule(
+        weapon_unlock_min_steps=10**9,  # このテスト中はステージ進行させない
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+    weapon_bootstrap = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={"garlic": "maintenance"},
+    )
+    callback = TaskCellSamplerCallback(
+        hybrid_cb=hybrid_cb,
+        task_cell_sampler=tcs,
+        weapon_unlock=weapon_unlock,
+        param_applier=MagicMock(),
+        log_dir=str(tmp_path),
+        weapon_bootstrap=weapon_bootstrap,
+    )
+    return callback, tcs, weapon_bootstrap
+
+
+def test_two_episode_vecenv_logs_completed_episode_cell_and_lane(tmp_path):
+    """擬似 VecEnv を 3 episode 分回し、各 JSONL record が『その episode を実際に
+    動かした cell の selected lane』を出すことと、初回 episode も取りこぼさず
+    記録されることを検証する。
+
+    VecEnv auto-reset の 1 episode ラグにより:
+      - training_start で apply した cell_A が episode 1 と episode 2 を動かす
+      - episode 1 done 時に sample した cell_B は episode 3 から効く
+    したがって JSONL は [A, A, B, ...] の順で cell/lane を記録するはず。
+    """
+    import json
+    from games.survivors.modules.task_cell_sampler_module import TaskCell, TaskCellSampleDecision
+
+    callback, tcs, weapon_bootstrap = _make_bootstrap_callback(tmp_path)
+
+    # 決定論的な (cell, decision) 列を用意する
+    def _mk(lane, weapon_id, phase):
+        cell = TaskCell(
+            weapon_unlock_stage_key="WU0",
+            first_weapon_id=weapon_id,
+            enemy_phase_idx=phase,
+            task_kind=lane,
+            build_policy="target_only",
+        )
+        decision = TaskCellSampleDecision(
+            selected_lane=lane,
+            active_lanes={lane: 1},
+            lane_probabilities={lane: 1.0},
+            selected_task_kind=lane,
+            selected_weapon_id=weapon_id,
+            selected_enemy_phase_idx=phase,
+        )
+        return cell, decision
+
+    seq = [
+        _mk("solo_bootstrap", WeaponType.GARLIC, 0),   # cell_A: training_start で apply → ep1, ep2 を動かす
+        _mk("integration", WeaponType.GARLIC, 2),      # cell_B: ep1 done で sample → ep3 から効く
+        _mk("maintenance", WeaponType.GARLIC, 2),      # cell_C
+        _mk("solo_bootstrap", WeaponType.GARLIC, 1),   # cell_D
+    ]
+    calls = {"i": 0}
+
+    def fake_sample(*args, **kwargs):
+        cell, decision = seq[min(calls["i"], len(seq) - 1)]
+        calls["i"] += 1
+        tcs._last_sample_decision = decision
+        return cell
+
+    tcs.sample_cell_with_lane_mix = fake_sample  # type: ignore[assignment]
+
+    # training_env は BaseCallback で read-only property（model.get_env() 経由）
+    training_env = MagicMock()
+    training_env.num_envs = 1
+    callback.model = MagicMock()
+    callback.model.get_env.return_value = training_env
+    callback.num_timesteps = 1000
+
+    # _on_training_start: 初期セル cell_A を active/pending 両方に設定
+    callback._on_training_start()
+    assert callback._active_cell_by_env[0] is not None
+    assert callback._active_cell_by_env[0].task_kind == "solo_bootstrap"
+    # active と pending は同一 decision を指す
+    assert callback._active_decision_by_env[0] is callback._pending_decision_by_env[0]
+
+    # 3 episode 分 _on_step を回す。各 step で 1 episode 完了させる。
+    scores = [111.0, 222.0, 333.0]
+    for score in scores:
+        callback.num_timesteps += 1000
+        callback.locals = {"infos": [{}]}
+        callback._score_tracker.process = MagicMock(
+            return_value=[(0, score, 1200, 0.0)]
+        )
+        assert callback._on_step() is True
+
+    lines = (tmp_path / "task_cell_episode_metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    # 初回 episode を取りこぼさず 3 件記録されている
+    assert len(lines) == 3
+    records = [json.loads(l) for l in lines]
+
+    # ep1, ep2 は cell_A (solo_bootstrap) で動いた → 両方 solo_bootstrap を記録
+    assert records[0]["active_score"] == pytest.approx(111.0)
+    assert records[0]["selected_bootstrap_lane"] == "solo_bootstrap"
+    assert records[0]["bootstrap_lane"] == "solo_bootstrap"
+
+    assert records[1]["active_score"] == pytest.approx(222.0)
+    assert records[1]["selected_bootstrap_lane"] == "solo_bootstrap"
+    assert records[1]["bootstrap_lane"] == "solo_bootstrap"
+
+    # ep3 は cell_B (integration) で動いた
+    assert records[2]["active_score"] == pytest.approx(333.0)
+    assert records[2]["selected_bootstrap_lane"] == "integration"
+    assert records[2]["bootstrap_lane"] == "integration"
+
+    # 全 record で新旧フィールドが同一 decision/cell を指す
+    for rec in records:
+        assert rec["selected_bootstrap_lane"] == rec["bootstrap_lane"]
+        assert rec["bootstrap_task_kind"] == rec["bootstrap_lane"]
+
+
+def test_two_episode_vecenv_new_and_legacy_lane_fields_share_single_decision(tmp_path):
+    """selected_bootstrap_lane と bootstrap_lane が異なる source から書かれて
+    ズレることが無いこと（同一 decision を指すこと）を、lane と task_kind が
+    ずれ得るケースで確認する。"""
+    import json
+    from games.survivors.modules.task_cell_sampler_module import TaskCell, TaskCellSampleDecision
+
+    callback, tcs, weapon_bootstrap = _make_bootstrap_callback(tmp_path)
+
+    # weak_cells lane で maintenance cell が選ばれるケース（lane != task_kind）
+    cell = TaskCell(
+        weapon_unlock_stage_key="WU0",
+        first_weapon_id=WeaponType.GARLIC,
+        enemy_phase_idx=2,
+        task_kind="maintenance",
+        build_policy="target_plus_anchor_if_unlocked",
+    )
+    decision = TaskCellSampleDecision(
+        selected_lane="weak_cells",
+        active_lanes={"weak_cells": 2},
+        lane_probabilities={"weak_cells": 1.0},
+        selected_task_kind="maintenance",
+        selected_weapon_id=WeaponType.GARLIC,
+        selected_enemy_phase_idx=2,
+    )
+
+    def fake_sample(*args, **kwargs):
+        tcs._last_sample_decision = decision
+        return cell
+
+    tcs.sample_cell_with_lane_mix = fake_sample  # type: ignore[assignment]
+
+    training_env = MagicMock()
+    training_env.num_envs = 1
+    callback.model = MagicMock()
+    callback.model.get_env.return_value = training_env
+    callback.num_timesteps = 1000
+    callback._on_training_start()
+
+    callback.num_timesteps += 1000
+    callback.locals = {"infos": [{}]}
+    callback._score_tracker.process = MagicMock(return_value=[(0, 250.0, 1200, 0.0)])
+    callback._on_step()
+
+    rec = json.loads(
+        (tmp_path / "task_cell_episode_metrics.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    # selected_bootstrap_lane は decision.selected_lane（"weak_cells"）
+    assert rec["selected_bootstrap_lane"] == "weak_cells"
+    # 既存 bootstrap_lane / bootstrap_task_kind は cell.task_kind（"maintenance"）
+    assert rec["bootstrap_lane"] == "maintenance"
+    assert rec["bootstrap_task_kind"] == "maintenance"
+    # 両者は同一 (cell, decision) ペアから書かれるため候補内訳も一致
+    assert rec["bootstrap_lane_candidates"] == {"weak_cells": 2}
 
 
 # ---------------------------------------------------------------------------
