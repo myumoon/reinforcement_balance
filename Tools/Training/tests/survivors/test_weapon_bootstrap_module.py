@@ -1,8 +1,6 @@
-"""tests/survivors/test_weapon_bootstrap_module.py
-
-WeaponBootstrapStateModule のユニットテスト。
-"""
+"""tests/survivors/test_weapon_bootstrap_module.py WeaponBootstrapStateModule のユニットテスト。"""
 from __future__ import annotations
+
 import sys
 from pathlib import Path
 
@@ -64,58 +62,71 @@ def make_module(
     )
 
 
-def make_cell(weapon_id: int, phase: int = 2, task_kind: str = "solo_bootstrap") -> TaskCell:
-    """テスト用のTaskCellを作成するヘルパー。"""
+def make_cell(weapon_id: int, phase: int, task_kind: str = "solo_bootstrap") -> TaskCell:
     return TaskCell(
-        weapon_unlock_stage_key="WU0",
         first_weapon_id=weapon_id,
-        enemy_phase_idx=phase,
+        weapon_unlock_stage_key="WU0",
         task_kind=task_kind,
-        build_policy="target_only",
+        enemy_phase_idx=phase,
+    )
+
+
+def _set_det(module: WeaponBootstrapStateModule, weapon_id: int, task_kind: str, *,
+             p10: float = 350.0, ep_len: float = 1300.0, short_rate: float = 0.05,
+             enemy_phase_idx: int = 2, num_timesteps: int = 1000) -> None:
+    """テスト用のヘルパー: deterministic 結果を一括設定する。"""
+    module.set_deterministic_result(
+        weapon_id=weapon_id,
+        task_kind=task_kind,
+        enemy_phase_idx=enemy_phase_idx,
+        p10=p10,
+        episode_length_p10=ep_len,
+        short_episode_rate=short_rate,
+        num_timesteps=num_timesteps,
     )
 
 
 # ---------------------------------------------------------------------------
-# テスト: 初期化
+# テスト: 初期状態
 # ---------------------------------------------------------------------------
 
 def test_initial_status_locked_by_default():
-    """initial_statusに記載のない武器がlockedになる。"""
+    """全武器のステータスが初期値 locked になる。"""
     module = make_module()
-    garlic_id = WeaponType.GARLIC
-    state = module._states[garlic_id]
-    assert state.status == "locked"
+    for entry in WEAPON_UNLOCK_ORDER:
+        state = module._states[entry.weapon_id]
+        assert state.status == "locked"
 
 
 def test_initial_status_specified():
-    """initial_statusに記載の武器が正しいステータスになる。"""
-    module = make_module(initial_status={"garlic": "maintenance", "king_bible": "solo_bootstrap"})
+    """initial_status で指定された武器のステータスが設定される。"""
+    module = make_module(
+        initial_status={"garlic": "maintenance", "king_bible": "solo_bootstrap"},
+    )
     assert module._states[WeaponType.GARLIC].status == "maintenance"
     assert module._states[WeaponType.KING_BIBLE].status == "solo_bootstrap"
-    # 他の武器は locked
     assert module._states[WeaponType.MAGIC_WAND].status == "locked"
 
 
 def test_initial_best_phase2_p10():
-    """initial_best_phase2_p10が正しく設定される。"""
+    """initial_best_phase2_p10 で指定された武器の best_phase2_p10 が設定される。"""
     module = make_module(
         initial_status={"garlic": "maintenance"},
         initial_best_phase2_p10={"garlic": 590.0},
     )
     assert module._states[WeaponType.GARLIC].best_phase2_p10 == 590.0
-    # 記載のない武器は 0.0
     assert module._states[WeaponType.KING_BIBLE].best_phase2_p10 == 0.0
 
 
 # ---------------------------------------------------------------------------
-# テスト: solo_bootstrap 完了判定
+# テスト: solo_bootstrap 完了判定（deterministic ゲート）
 # ---------------------------------------------------------------------------
 
 def test_solo_bootstrap_to_integration_on_condition():
-    """solo_bootstrap完了条件でintegrationへ進む (phase2エピソードで条件を満たした場合)。"""
+    """solo_bootstrap: deterministic 結果あり + 全条件満足で integration へ昇格する。"""
     module = make_module(initial_status={"garlic": "solo_bootstrap"})
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=2, task_kind="solo_bootstrap")
     provider.set_stats(
         cell,
@@ -124,16 +135,18 @@ def test_solo_bootstrap_to_integration_on_condition():
         episode_length_p10=1300.0,
         short_episode_rate=0.05,
     )
+    # deterministic 結果を注入
+    _set_det(module, garlic_id, "solo_bootstrap", p10=350.0, ep_len=1300.0, short_rate=0.05)
 
     module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     assert module._states[garlic_id].status == "integration"
 
 
 def test_solo_bootstrap_not_ready_if_count_low():
-    """solo_bootstrap: エピソード数が不足する場合は進まない。"""
+    """solo_bootstrap: エピソード数が不足する場合は進まない（deterministic 結果があっても）。"""
     module = make_module(initial_status={"garlic": "solo_bootstrap"})
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=2, task_kind="solo_bootstrap")
     provider.set_stats(
         cell,
@@ -142,16 +155,17 @@ def test_solo_bootstrap_not_ready_if_count_low():
         episode_length_p10=1300.0,
         short_episode_rate=0.05,
     )
+    _set_det(module, garlic_id, "solo_bootstrap", p10=350.0, ep_len=1300.0, short_rate=0.05)
 
     module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     assert module._states[garlic_id].status == "solo_bootstrap"
 
 
 def test_solo_bootstrap_not_complete_on_phase0():
-    """solo_bootstrap: phase0のエピソードで全条件を満たしても integration に昇格しない。"""
+    """solo_bootstrap: phase0 のエピソードで全条件を満たしても integration に昇格しない。"""
     module = make_module(initial_status={"garlic": "solo_bootstrap"})
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=0, task_kind="solo_bootstrap")
     provider.set_stats(
         cell,
@@ -160,6 +174,7 @@ def test_solo_bootstrap_not_complete_on_phase0():
         episode_length_p10=1300.0,
         short_episode_rate=0.05,
     )
+    _set_det(module, garlic_id, "solo_bootstrap", p10=350.0, ep_len=1300.0, short_rate=0.05)
 
     module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     # phase0 なので完了判定はスキップ → solo_bootstrap のまま
@@ -167,10 +182,10 @@ def test_solo_bootstrap_not_complete_on_phase0():
 
 
 def test_solo_bootstrap_not_complete_on_phase1():
-    """solo_bootstrap: phase1のエピソードで全条件を満たしても integration に昇格しない。"""
+    """solo_bootstrap: phase1 のエピソードで全条件を満たしても integration に昇格しない。"""
     module = make_module(initial_status={"garlic": "solo_bootstrap"})
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=1, task_kind="solo_bootstrap")
     provider.set_stats(
         cell,
@@ -179,6 +194,7 @@ def test_solo_bootstrap_not_complete_on_phase1():
         episode_length_p10=1300.0,
         short_episode_rate=0.05,
     )
+    _set_det(module, garlic_id, "solo_bootstrap", p10=350.0, ep_len=1300.0, short_rate=0.05)
 
     module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     # phase1 なので完了判定はスキップ → solo_bootstrap のまま
@@ -186,104 +202,114 @@ def test_solo_bootstrap_not_complete_on_phase1():
 
 
 # ---------------------------------------------------------------------------
-# テスト: best_phase2_p10 の更新タイミング
+# テスト: best_phase2_p10 の更新タイミング（gate 通過時に deterministic 値で設定）
 # ---------------------------------------------------------------------------
 
 def test_best_phase2_p10_updated_only_on_phase2():
-    """best_phase2_p10がphase_idx==2のepisodeでのみ更新される (phase0/1では更新されない)。"""
+    """best_phase2_p10 は solo_bootstrap → integration gate 通過時に det_p10 で設定される。"""
     module = make_module(initial_status={"garlic": "solo_bootstrap"})
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
 
-    # phase0 エピソード
+    # phase0 エピソード（gate には関係しない）
     cell_phase0 = make_cell(garlic_id, phase=0, task_kind="solo_bootstrap")
     provider.set_stats(cell_phase0, episode_count=5, active_score_p10=200.0, episode_length_p10=1000.0, short_episode_rate=0.1)
     module.on_episode_end(cell=cell_phase0, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     assert module._states[garlic_id].best_phase2_p10 == 0.0  # 更新されない
 
-    # phase1 エピソード
+    # phase1 エピソード（gate には関係しない）
     cell_phase1 = make_cell(garlic_id, phase=1, task_kind="solo_bootstrap")
     provider.set_stats(cell_phase1, episode_count=5, active_score_p10=250.0, episode_length_p10=1100.0, short_episode_rate=0.1)
     module.on_episode_end(cell=cell_phase1, stats_provider=provider, current_stage_key="WU0", num_timesteps=2000)
     assert module._states[garlic_id].best_phase2_p10 == 0.0  # 更新されない
 
-    # phase2 エピソード
+    # phase2 エピソード + deterministic 結果設定 → gate 通過 → best_phase2_p10 が det_p10 に設定される
     cell_phase2 = make_cell(garlic_id, phase=2, task_kind="solo_bootstrap")
-    provider.set_stats(cell_phase2, episode_count=5, active_score_p10=400.0, episode_length_p10=1300.0, short_episode_rate=0.05)
+    provider.set_stats(cell_phase2, episode_count=50, active_score_p10=400.0, episode_length_p10=1300.0, short_episode_rate=0.05)
+    _set_det(module, garlic_id, "solo_bootstrap", p10=350.0, ep_len=1300.0, short_rate=0.05, num_timesteps=3000)
     module.on_episode_end(cell=cell_phase2, stats_provider=provider, current_stage_key="WU0", num_timesteps=3000)
-    assert module._states[garlic_id].best_phase2_p10 == 400.0  # 更新される
+    # gate 通過時に det_p10=350.0 が best_phase2_p10 に設定される
+    assert module._states[garlic_id].best_phase2_p10 == 350.0
+    assert module._states[garlic_id].status == "integration"
 
 
 # ---------------------------------------------------------------------------
-# テスト: integration 完了判定
+# テスト: integration 完了判定（deterministic ゲート）
 # ---------------------------------------------------------------------------
 
 def test_integration_to_maintenance():
-    """integration完了条件でmaintenanceへ進む。"""
+    """integration: deterministic 結果あり + 全条件満足で maintenance へ昇格する。"""
     module = make_module(initial_status={"garlic": "integration"})
-    # best_phase2_p10 を手動設定
     module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=2, task_kind="integration")
     provider.set_stats(
         cell,
         episode_count=50,
-        active_score_p10=340.0,  # 340/400 = regression 0.15 <= 0.35
+        active_score_p10=340.0,
         episode_length_p10=1300.0,
         short_episode_rate=0.05,
     )
+    # deterministic 結果: regression = 1 - 340/400 = 0.15 <= 0.35
+    _set_det(module, garlic_id, "integration", p10=340.0, ep_len=1300.0, short_rate=0.05)
 
     module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     assert module._states[garlic_id].status == "maintenance"
 
 
 def test_integration_not_ready_if_regression_high():
-    """integration: regression_from_soloが高い場合は進まない。"""
+    """integration: regression_from_solo が高い場合は進まない。"""
     module = make_module(initial_status={"garlic": "integration"})
     module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=2, task_kind="integration")
     provider.set_stats(
         cell,
         episode_count=50,
-        active_score_p10=200.0,  # 200/400 = regression 0.5 > 0.35
+        active_score_p10=200.0,
         episode_length_p10=1300.0,
         short_episode_rate=0.05,
     )
+    # deterministic: regression = 1 - 200/400 = 0.5 > 0.35 → 昇格しない
+    _set_det(module, garlic_id, "integration", p10=200.0, ep_len=1300.0, short_rate=0.05)
 
     module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     assert module._states[garlic_id].status == "integration"
 
 
 def test_regression_from_best_is_none_when_below_min_probe_episodes():
-    """maintenance_min_probe_episodes 未満の episode_count では regression_from_best が None になる。"""
+    """maintenance_min_probe_episodes 未満の episode_count では regression_from_best が None になる。
+
+    新ロジックでは deterministic 未設定（det_fresh=False）のとき regression_from_best=None。
+    """
     module = make_module(initial_status={"garlic": "maintenance"}, maintenance_min_probe_episodes=20)
     module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=2, task_kind="maintenance")
-    # episode_count が maintenance_min_probe_episodes 未満
     provider.set_stats(cell, episode_count=5, active_score_p10=200.0)
+    # deterministic 結果を設定しない → det_fresh=False → regression_from_best=None
 
     module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
-    # episode_count 不足なので regression_from_best は None のまま
     assert module._states[garlic_id].regression_from_best is None
 
 
 # ---------------------------------------------------------------------------
-# テスト: maintenance
+# テスト: maintenance（deterministic ゲート）
 # ---------------------------------------------------------------------------
 
 def test_maintenance_regression_updates():
-    """maintenance状態でphase2のregression_from_bestが更新される。"""
+    """maintenance: deterministic 結果あり + regression > ratio で regression_count が増える。"""
     module = make_module(initial_status={"garlic": "maintenance"})
     module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=2, task_kind="maintenance")
     provider.set_stats(cell, episode_count=30, active_score_p10=200.0)
+    # deterministic 結果設定
+    _set_det(module, garlic_id, "maintenance", p10=200.0, ep_len=1300.0, short_rate=0.05)
 
     module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     # regression = 1 - 200/400 = 0.5
@@ -297,7 +323,7 @@ def test_maintenance_regression_updates():
 # ---------------------------------------------------------------------------
 
 def test_advance_to_next_stage_updates_last_advance_step():
-    """advance_to_next_stage()がlast_advance_stepをnum_timestepsで更新する。"""
+    """advance_to_next_stage() が last_advance_step を num_timesteps で更新する。"""
     wu = WeaponUnlockStateModule(weapon_unlock_min_steps=0)
     event = wu.advance_to_next_stage(num_timesteps=50_000)
     assert event is not None
@@ -322,29 +348,26 @@ def test_advance_to_next_stage_on_final_stage_returns_none():
 # ---------------------------------------------------------------------------
 
 def test_maybe_advance_stage_advances_when_maintenance():
-    """maybe_advance_stage()が現在stage武器がmaintenanceになった場合のみ次stageへ進める。"""
+    """maybe_advance_stage() が現在 stage 武器が maintenance のとき次 stage へ進める。"""
     wu = WeaponUnlockStateModule(weapon_unlock_min_steps=0)
     module = make_module(initial_status={"garlic": "maintenance"})
-
     event = module.maybe_advance_stage(weapon_unlock=wu, num_timesteps=10_000)
     assert event is not None
     assert event.from_stage_key == "WU0"
 
 
 def test_maybe_advance_stage_no_advance_when_solo_bootstrap():
-    """maybe_advance_stage()がsolo_bootstrapの場合は進めない。"""
+    """maybe_advance_stage() が solo_bootstrap の場合は進めない。"""
     wu = WeaponUnlockStateModule(weapon_unlock_min_steps=0)
     module = make_module(initial_status={"garlic": "solo_bootstrap"})
-
     event = module.maybe_advance_stage(weapon_unlock=wu, num_timesteps=10_000)
     assert event is None
 
 
 def test_maybe_advance_stage_no_advance_when_integration():
-    """maybe_advance_stage()がintegrationの場合は進めない。"""
+    """maybe_advance_stage() が integration の場合は進めない。"""
     wu = WeaponUnlockStateModule(weapon_unlock_min_steps=0)
     module = make_module(initial_status={"garlic": "integration"})
-
     event = module.maybe_advance_stage(weapon_unlock=wu, num_timesteps=10_000)
     assert event is None
 
@@ -354,11 +377,10 @@ def test_maybe_advance_stage_no_advance_when_integration():
 # ---------------------------------------------------------------------------
 
 def test_on_weapon_unlock_advanced_sets_new_weapon_solo_bootstrap():
-    """on_weapon_unlock_advanced()が新武器(locked)のみをsolo_bootstrapにする。"""
-    module = make_module(initial_status={"garlic": "maintenance"})
-    # 初期: garlic=maintenance, king_bible=locked
+    """on_weapon_unlock_advanced() が新規武器のステータスを solo_bootstrap にする。"""
+    module = make_module()
     assert module._states[WeaponType.KING_BIBLE].status == "locked"
-    assert module._states[WeaponType.GARLIC].status == "maintenance"
+    assert module._states[WeaponType.GARLIC].status == "locked"
 
     event = WeaponUnlockAdvanceEvent(
         from_stage_key="WU0",
@@ -367,35 +389,31 @@ def test_on_weapon_unlock_advanced_sets_new_weapon_solo_bootstrap():
         step=10_000,
     )
     module.on_weapon_unlock_advanced(event)
-
-    # king_bible が solo_bootstrap になる
     assert module._states[WeaponType.KING_BIBLE].status == "solo_bootstrap"
-    # garlic は変わらない
-    assert module._states[WeaponType.GARLIC].status == "maintenance"
+    assert module._states[WeaponType.GARLIC].status == "locked"
 
 
 def test_on_weapon_unlock_advanced_does_not_change_non_locked():
-    """on_weapon_unlock_advanced()が locked でない武器のステータスを変更しない。"""
-    module = make_module(initial_status={"garlic": "integration", "king_bible": "solo_bootstrap"})
+    """on_weapon_unlock_advanced() が locked 以外のステータスを変更しない。"""
+    module = make_module()
 
+    # WU0 → WU1 で king_bible が unlock される
     event = WeaponUnlockAdvanceEvent(
         from_stage_key="WU1",
         to_stage_key="WU2",
-        new_weapon_id=WeaponType.KING_BIBLE,  # solo_bootstrap
-        step=10_000,
+        new_weapon_id=WeaponType.KING_BIBLE,
+        step=20_000,
     )
     module.on_weapon_unlock_advanced(event)
-
-    # solo_bootstrap のままで変わらない
     assert module._states[WeaponType.KING_BIBLE].status == "solo_bootstrap"
 
 
 # ---------------------------------------------------------------------------
-# テスト: export_state / import_state
+# テスト: export_state / import_state の往復
 # ---------------------------------------------------------------------------
 
 def test_export_import_state_roundtrip():
-    """export_state()/import_state()が状態を正しく往復できる。"""
+    """export_state() / import_state() が状態を正しく往復できる。"""
     module = make_module(
         initial_status={"garlic": "maintenance", "king_bible": "integration"},
         initial_best_phase2_p10={"garlic": 590.0},
@@ -419,7 +437,7 @@ def test_export_import_state_roundtrip():
 # ---------------------------------------------------------------------------
 
 def test_get_weapons_by_status():
-    """get_weapons_by_status()が正しく動作する。"""
+    """get_weapons_by_status() が正しく動作する。"""
     module = make_module(initial_status={
         "garlic": "maintenance",
         "king_bible": "solo_bootstrap",
@@ -439,14 +457,14 @@ def test_get_weapons_by_status():
 
 
 # ---------------------------------------------------------------------------
-# テスト: on_episode_end の戻り値（status変化フラグ）
+# テスト: on_episode_end の戻り値（status 変化フラグ）
 # ---------------------------------------------------------------------------
 
 def test_on_episode_end_returns_true_on_solo_to_integration():
-    """solo_bootstrap→integration 遷移時に on_episode_end が True を返す。"""
+    """solo_bootstrap → integration 遷移時に on_episode_end が True を返す。"""
     module = make_module(initial_status={"garlic": "solo_bootstrap"})
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=2, task_kind="solo_bootstrap")
     provider.set_stats(
         cell,
@@ -455,6 +473,7 @@ def test_on_episode_end_returns_true_on_solo_to_integration():
         episode_length_p10=1300.0,
         short_episode_rate=0.05,
     )
+    _set_det(module, garlic_id, "solo_bootstrap", p10=350.0, ep_len=1300.0, short_rate=0.05)
 
     result = module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     assert result is True
@@ -464,8 +483,8 @@ def test_on_episode_end_returns_true_on_solo_to_integration():
 def test_on_episode_end_returns_false_when_no_transition():
     """status 遷移がない場合に on_episode_end が False を返す。"""
     module = make_module(initial_status={"garlic": "solo_bootstrap"})
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=2, task_kind="solo_bootstrap")
     provider.set_stats(
         cell,
@@ -481,11 +500,11 @@ def test_on_episode_end_returns_false_when_no_transition():
 
 
 def test_on_episode_end_returns_true_on_integration_to_maintenance():
-    """integration→maintenance 遷移時に on_episode_end が True を返す。"""
+    """integration → maintenance 遷移時に on_episode_end が True を返す。"""
     module = make_module(initial_status={"garlic": "integration"})
     module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=2, task_kind="integration")
     provider.set_stats(
         cell,
@@ -494,6 +513,7 @@ def test_on_episode_end_returns_true_on_integration_to_maintenance():
         episode_length_p10=1300.0,
         short_episode_rate=0.05,
     )
+    _set_det(module, garlic_id, "integration", p10=340.0, ep_len=1300.0, short_rate=0.05)
 
     result = module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     assert result is True
@@ -508,8 +528,8 @@ def test_integration_not_triggered_by_solo_bootstrap_cell():
     """status=integration のときでも task_kind=solo_bootstrap のセルでは integration 完了判定をしない。"""
     module = make_module(initial_status={"garlic": "integration"})
     module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     # task_kind が solo_bootstrap のままのセル（status 遷移後に古いセルが終了した場合を再現）
     cell = make_cell(garlic_id, phase=2, task_kind="solo_bootstrap")
     provider.set_stats(
@@ -519,6 +539,7 @@ def test_integration_not_triggered_by_solo_bootstrap_cell():
         episode_length_p10=1300.0,
         short_episode_rate=0.05,
     )
+    _set_det(module, garlic_id, "integration", p10=340.0, ep_len=1300.0, short_rate=0.05)
 
     result = module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     assert result is False
@@ -530,8 +551,8 @@ def test_maintenance_not_triggered_by_integration_cell():
     """status=maintenance のときでも task_kind=integration のセルでは regression 更新をしない。"""
     module = make_module(initial_status={"garlic": "maintenance"})
     module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     # task_kind が integration のままのセル
     cell = make_cell(garlic_id, phase=2, task_kind="integration")
     provider.set_stats(cell, episode_count=30, active_score_p10=200.0)
@@ -546,17 +567,18 @@ def test_maintenance_not_triggered_by_integration_cell():
 # ---------------------------------------------------------------------------
 
 def test_maintenance_regression_none_when_below_min_probe_episodes():
-    """maintenance_min_probe_episodes 未満では regression_from_best が None になる。"""
+    """maintenance_min_probe_episodes 未満では regression_from_best が None になる（deterministic 未設定）。"""
     module = make_module(
         initial_status={"garlic": "maintenance"},
         maintenance_min_probe_episodes=20,
     )
     module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=2, task_kind="maintenance")
     # episode_count が maintenance_min_probe_episodes 未満
     provider.set_stats(cell, episode_count=10, active_score_p10=200.0)
+    # deterministic 結果を設定しない → det_fresh=False → regression_from_best=None
 
     module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     assert module._states[garlic_id].regression_from_best is None
@@ -564,19 +586,462 @@ def test_maintenance_regression_none_when_below_min_probe_episodes():
 
 
 def test_maintenance_regression_updated_when_above_min_probe_episodes():
-    """maintenance_min_probe_episodes 以上では regression_from_best が更新される。"""
+    """maintenance_min_probe_episodes 以上 + deterministic 結果あり → regression_from_best が更新される。"""
     module = make_module(
         initial_status={"garlic": "maintenance"},
         maintenance_min_probe_episodes=20,
     )
     module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
-    provider = MockStatsProvider()
     garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
     cell = make_cell(garlic_id, phase=2, task_kind="maintenance")
-    # episode_count が maintenance_min_probe_episodes 以上
     provider.set_stats(cell, episode_count=20, active_score_p10=200.0)
+    # deterministic 結果設定
+    _set_det(module, garlic_id, "maintenance", p10=200.0, ep_len=1300.0, short_rate=0.05)
 
     module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
     # regression = 1 - 200/400 = 0.5
     assert module._states[garlic_id].regression_from_best == pytest.approx(0.5)
     assert module._states[garlic_id].regression_count == 1
+
+
+# ---------------------------------------------------------------------------
+# テスト: set_deterministic_result() （プラン 変更 2）
+# ---------------------------------------------------------------------------
+
+def test_set_deterministic_result_stores_all_fields():
+    """set_deterministic_result() が全フィールドを正しく設定する。"""
+    module = make_module(initial_status={"garlic": "solo_bootstrap"})
+    garlic_id = WeaponType.GARLIC
+
+    module.set_deterministic_result(
+        weapon_id=garlic_id,
+        task_kind="solo_bootstrap",
+        enemy_phase_idx=2,
+        p10=350.0,
+        episode_length_p10=1350.0,
+        short_episode_rate=0.04,
+        num_timesteps=50_000,
+    )
+
+    state = module._states[garlic_id]
+    assert state.deterministic_p10 == 350.0
+    assert state.deterministic_episode_length_p10 == 1350.0
+    assert state.deterministic_short_episode_rate == 0.04
+    assert state.deterministic_eval_step == 50_000
+    assert state.deterministic_task_kind == "solo_bootstrap"
+    assert state.deterministic_enemy_phase_idx == 2
+
+
+def test_set_deterministic_result_unknown_weapon_ignored():
+    """set_deterministic_result() で未知の weapon_id は無視される（例外なし）。"""
+    module = make_module()
+    # 存在しない weapon_id → 例外なし
+    module.set_deterministic_result(
+        weapon_id=999999,
+        task_kind="solo_bootstrap",
+        enemy_phase_idx=2,
+        p10=350.0,
+        episode_length_p10=1300.0,
+        short_episode_rate=0.05,
+        num_timesteps=1000,
+    )
+
+
+# ---------------------------------------------------------------------------
+# テスト: solo_bootstrap gate（プラン 変更 4 のテスト項目）
+# ---------------------------------------------------------------------------
+
+def test_solo_gate_opens_with_valid_det_and_sufficient_episodes():
+    """テスト項目 6: score/ep_len/short_rate 全条件満足 + det_fresh で gate が開く。"""
+    module = make_module(initial_status={"garlic": "solo_bootstrap"})
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="solo_bootstrap")
+    provider.set_stats(cell, episode_count=50, active_score_p10=350.0,
+                       episode_length_p10=1300.0, short_episode_rate=0.05)
+    _set_det(module, garlic_id, "solo_bootstrap", p10=350.0, ep_len=1300.0, short_rate=0.05)
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    assert module._states[garlic_id].status == "integration"
+    # gate 通過時に best_phase2_p10 が det_p10 で設定される
+    assert module._states[garlic_id].best_phase2_p10 == 350.0
+
+
+def test_solo_gate_does_not_open_without_det():
+    """テスト項目 7: deterministic 結果なし（det_fresh=False）のとき gate が開かない。"""
+    module = make_module(initial_status={"garlic": "solo_bootstrap"})
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="solo_bootstrap")
+    provider.set_stats(cell, episode_count=50, active_score_p10=350.0,
+                       episode_length_p10=1300.0, short_episode_rate=0.05)
+    # deterministic 結果を設定しない
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    assert module._states[garlic_id].status == "solo_bootstrap"
+
+
+def test_solo_gate_freshness_check_disabled_when_max_age_zero():
+    """テスト項目 8: max_eval_age_steps=0 のとき鮮度チェックが行われない（古い結果でも通過できる）。"""
+    module = make_module(
+        initial_status={"garlic": "solo_bootstrap"},
+        deterministic_gate_max_eval_age_steps=0,  # 無効化
+    )
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="solo_bootstrap")
+    provider.set_stats(cell, episode_count=50, active_score_p10=350.0,
+                       episode_length_p10=1300.0, short_episode_rate=0.05)
+    # 古い eval 結果（num_timesteps=0 で設定、現在の step=1_000_000）
+    _set_det(module, garlic_id, "solo_bootstrap", p10=350.0, ep_len=1300.0,
+             short_rate=0.05, num_timesteps=0)
+
+    # max_eval_age_steps=0 なので鮮度チェック無効 → gate が開く
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1_000_000)
+    assert module._states[garlic_id].status == "integration"
+
+
+def test_solo_gate_freshness_check_fails_when_too_old():
+    """テスト項目 8: max_eval_age_steps>0 のとき古すぎる結果では gate が開かない。"""
+    module = make_module(
+        initial_status={"garlic": "solo_bootstrap"},
+        deterministic_gate_max_eval_age_steps=100_000,
+    )
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="solo_bootstrap")
+    provider.set_stats(cell, episode_count=50, active_score_p10=350.0,
+                       episode_length_p10=1300.0, short_episode_rate=0.05)
+    # 古すぎる eval 結果
+    _set_det(module, garlic_id, "solo_bootstrap", p10=350.0, ep_len=1300.0,
+             short_rate=0.05, num_timesteps=0)
+
+    # num_timesteps=200_000 → age=200_000 > 100_000 → gate が開かない
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=200_000)
+    assert module._states[garlic_id].status == "solo_bootstrap"
+
+
+def test_solo_gate_does_not_open_when_enemy_phase_mismatch():
+    """テスト項目 14: deterministic_enemy_phase_idx が期待値と異なる場合に gate が開かない（P2 fix）。"""
+    module = make_module(
+        initial_status={"garlic": "solo_bootstrap"},
+        deterministic_gate_enemy_phase_idx=2,
+    )
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="solo_bootstrap")
+    provider.set_stats(cell, episode_count=50, active_score_p10=350.0,
+                       episode_length_p10=1300.0, short_episode_rate=0.05)
+    # enemy_phase_idx=1 で結果を設定（期待値=2 とずれる）
+    _set_det(module, garlic_id, "solo_bootstrap", p10=350.0, ep_len=1300.0,
+             short_rate=0.05, enemy_phase_idx=1)
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    assert module._states[garlic_id].status == "solo_bootstrap"
+
+
+def test_solo_gate_best_phase2_p10_set_to_det_p10_on_pass():
+    """テスト項目 6: gate 通過時に best_phase2_p10 が deterministic 実力値に設定される。"""
+    module = make_module(initial_status={"garlic": "solo_bootstrap"})
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="solo_bootstrap")
+    provider.set_stats(cell, episode_count=50, active_score_p10=500.0,
+                       episode_length_p10=1300.0, short_episode_rate=0.05)
+    # det_p10=350.0（stochastic の 500.0 とは別値）
+    _set_det(module, garlic_id, "solo_bootstrap", p10=350.0, ep_len=1300.0, short_rate=0.05)
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    # gate 通過時 best_phase2_p10 = det_p10 = 350.0
+    assert module._states[garlic_id].best_phase2_p10 == 350.0
+
+
+# ---------------------------------------------------------------------------
+# テスト: integration gate（プラン 変更 5）
+# ---------------------------------------------------------------------------
+
+def test_integration_gate_does_not_open_when_det_missing():
+    """integration gate: deterministic 結果なしのとき gate が開かない。"""
+    module = make_module(initial_status={"garlic": "integration"})
+    module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="integration")
+    provider.set_stats(cell, episode_count=50, active_score_p10=340.0,
+                       episode_length_p10=1300.0, short_episode_rate=0.05)
+    # deterministic 結果なし
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    assert module._states[garlic_id].status == "integration"
+
+
+def test_integration_gate_regression_check_from_solo():
+    """テスト項目 12: regression_from_solo が integration_max_regression を超えると gate が開かない。"""
+    module = make_module(initial_status={"garlic": "integration"})
+    module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="integration")
+    provider.set_stats(cell, episode_count=50, active_score_p10=200.0,
+                       episode_length_p10=1300.0, short_episode_rate=0.05)
+    # det_p10=200 → regression = 1-200/400=0.5 > 0.35 → gate 不通過
+    _set_det(module, garlic_id, "integration", p10=200.0, ep_len=1300.0, short_rate=0.05)
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    assert module._states[garlic_id].status == "integration"
+
+
+def test_integration_gate_best_phase2_updated_on_transition():
+    """テスト項目 13: integration → maintenance 遷移時に best_phase2_p10 が max(old, det_p10) になる。"""
+    module = make_module(initial_status={"garlic": "integration"})
+    module._states[WeaponType.GARLIC].best_phase2_p10 = 300.0  # old value
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="integration")
+    provider.set_stats(cell, episode_count=50, active_score_p10=350.0,
+                       episode_length_p10=1300.0, short_episode_rate=0.05)
+    # det_p10=350 → regression = 1-350/300... wait, solo_best=300, det=350 → regression negative → gate open
+    # actually regression_from_solo = 1 - 350/300 = negative → <= 0.35, so gate opens
+    _set_det(module, garlic_id, "integration", p10=350.0, ep_len=1300.0, short_rate=0.05)
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    assert module._states[garlic_id].status == "maintenance"
+    # best_phase2_p10 = max(300.0, 350.0) = 350.0
+    assert module._states[garlic_id].best_phase2_p10 == 350.0
+
+
+def test_integration_gate_does_not_open_when_enemy_phase_mismatch():
+    """テスト項目 14: integration gate - deterministic_enemy_phase_idx が期待値と異なる場合に gate が開かない（P2 fix）。"""
+    module = make_module(
+        initial_status={"garlic": "integration"},
+        deterministic_gate_enemy_phase_idx=2,
+    )
+    module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="integration")
+    provider.set_stats(cell, episode_count=50, active_score_p10=340.0,
+                       episode_length_p10=1300.0, short_episode_rate=0.05)
+    # enemy_phase_idx=0 で結果設定（期待値=2 とずれる）
+    _set_det(module, garlic_id, "integration", p10=340.0, ep_len=1300.0,
+             short_rate=0.05, enemy_phase_idx=0)
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    assert module._states[garlic_id].status == "integration"
+
+
+# ---------------------------------------------------------------------------
+# テスト: maintenance（プラン 変更 6）
+# ---------------------------------------------------------------------------
+
+def test_maintenance_det_fresh_true_regression_over_threshold():
+    """テスト項目 15: det_fresh=True かつ regression が閾値超のとき regression_count がインクリメントされる。"""
+    module = make_module(initial_status={"garlic": "maintenance"})
+    module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="maintenance")
+    provider.set_stats(cell, episode_count=30, active_score_p10=200.0)
+    _set_det(module, garlic_id, "maintenance", p10=200.0, ep_len=1300.0, short_rate=0.05, num_timesteps=1000)
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    assert module._states[garlic_id].regression_from_best == pytest.approx(0.5)
+    assert module._states[garlic_id].regression_count == 1
+
+
+def test_maintenance_det_fresh_false_regression_is_none():
+    """テスト項目 16: det_fresh=False のとき regression_from_best が None になる。"""
+    module = make_module(initial_status={"garlic": "maintenance"})
+    module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="maintenance")
+    provider.set_stats(cell, episode_count=30, active_score_p10=200.0)
+    # deterministic 結果なし → det_fresh=False
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    assert module._states[garlic_id].regression_from_best is None
+
+
+def test_maintenance_best_phase2_zero_no_regression():
+    """テスト項目 17: best_phase2_p10=0 のとき regression が計算されない。"""
+    module = make_module(initial_status={"garlic": "maintenance"})
+    assert module._states[WeaponType.GARLIC].best_phase2_p10 == 0.0
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="maintenance")
+    provider.set_stats(cell, episode_count=30, active_score_p10=200.0)
+    _set_det(module, garlic_id, "maintenance", p10=200.0, ep_len=1300.0, short_rate=0.05)
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    # best_phase2_p10=0 なので regression は計算されない
+    assert module._states[garlic_id].regression_from_best is None
+
+
+def test_maintenance_same_det_step_increments_regression_count_once():
+    """テスト項目 18: 同一 det_step では regression_count が 1 回しかインクリメントされない（P2 fix: 過剰カウント防止）。"""
+    module = make_module(initial_status={"garlic": "maintenance"})
+    module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="maintenance")
+    provider.set_stats(cell, episode_count=30, active_score_p10=200.0)
+    # 同じ det_step=5000 で 3 回 on_episode_end を呼ぶ
+    _set_det(module, garlic_id, "maintenance", p10=200.0, ep_len=1300.0, short_rate=0.05, num_timesteps=5000)
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=5000)
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=5000)
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=5000)
+
+    # 同一 det_step での呼び出しは 1 回しかカウントされない
+    assert module._states[garlic_id].regression_count == 1
+
+
+def test_maintenance_different_det_steps_increments_multiple():
+    """テスト項目 18 の逆: 異なる det_step なら複数回インクリメントされる。"""
+    module = make_module(initial_status={"garlic": "maintenance"})
+    module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="maintenance")
+    provider.set_stats(cell, episode_count=30, active_score_p10=200.0)
+
+    # det_step=1000 で 1 回
+    _set_det(module, garlic_id, "maintenance", p10=200.0, ep_len=1300.0, short_rate=0.05, num_timesteps=1000)
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    assert module._states[garlic_id].regression_count == 1
+
+    # det_step=2000 で 1 回（異なる step）
+    _set_det(module, garlic_id, "maintenance", p10=200.0, ep_len=1300.0, short_rate=0.05, num_timesteps=2000)
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=2000)
+    assert module._states[garlic_id].regression_count == 2
+
+
+def test_maintenance_enemy_phase_mismatch_skips_regression():
+    """テスト項目 19: deterministic_enemy_phase_idx が期待値と異なる場合に regression 判定がスキップされる（P2 fix）。"""
+    module = make_module(
+        initial_status={"garlic": "maintenance"},
+        deterministic_gate_enemy_phase_idx=2,
+    )
+    module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="maintenance")
+    provider.set_stats(cell, episode_count=30, active_score_p10=200.0)
+    # enemy_phase_idx=1 で結果設定（期待値=2 とずれる）
+    _set_det(module, garlic_id, "maintenance", p10=200.0, ep_len=1300.0,
+             short_rate=0.05, enemy_phase_idx=1)
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+    # phase ずれなので regression 判定スキップ → regression_from_best は None
+    assert module._states[garlic_id].regression_from_best is None
+    assert module._states[garlic_id].regression_count == 0
+
+
+# ---------------------------------------------------------------------------
+# テスト: export_state / import_state（プラン 変更 8）
+# ---------------------------------------------------------------------------
+
+def test_export_import_state_roundtrip_all_deterministic_fields():
+    """テスト項目 20: export_state() / import_state() で全 7 フィールドが往復保持される。"""
+    module = make_module(initial_status={"garlic": "maintenance"})
+    garlic_id = WeaponType.GARLIC
+    state = module._states[garlic_id]
+    state.deterministic_p10 = 350.0
+    state.deterministic_episode_length_p10 = 1300.0
+    state.deterministic_short_episode_rate = 0.05
+    state.deterministic_eval_step = 50_000
+    state.deterministic_task_kind = "maintenance"
+    state.deterministic_enemy_phase_idx = 2
+    state.last_regression_eval_step = 49_000
+
+    exported = module.export_state()
+    module2 = make_module()
+    module2.import_state(exported)
+
+    s2 = module2._states[garlic_id]
+    assert s2.deterministic_p10 == 350.0
+    assert s2.deterministic_episode_length_p10 == 1300.0
+    assert s2.deterministic_short_episode_rate == 0.05
+    assert s2.deterministic_eval_step == 50_000
+    assert s2.deterministic_task_kind == "maintenance"
+    assert s2.deterministic_enemy_phase_idx == 2
+    assert s2.last_regression_eval_step == 49_000
+
+
+def test_import_state_old_checkpoint_no_key_error():
+    """テスト項目 21: 旧 checkpoint（deterministic_p10 キーなし等）を import_state() しても KeyError が出ない。"""
+    module = make_module()
+    # 旧形式の state（新フィールドなし）
+    old_state = {
+        "weapons": [
+            {
+                "weapon_id": WeaponType.GARLIC,
+                "weapon_key": "garlic",
+                "status": "maintenance",
+                "best_phase2_p10": 400.0,
+                "regression_from_best": 0.1,
+                "regression_count": 2,
+                "last_probe_step": 10000,
+                # deterministic_p10, last_regression_eval_step などは含まれていない
+            }
+        ]
+    }
+    # KeyError が出ないことを確認
+    module.import_state(old_state)
+    s = module._states[WeaponType.GARLIC]
+    assert s.status == "maintenance"
+    assert s.deterministic_p10 is None
+    assert s.deterministic_episode_length_p10 is None
+    assert s.deterministic_short_episode_rate is None
+    assert s.deterministic_eval_step == 0
+    assert s.deterministic_task_kind is None
+    assert s.deterministic_enemy_phase_idx is None
+    assert s.last_regression_eval_step == -1
+
+
+# ---------------------------------------------------------------------------
+# テスト: get_eval_build_policy()（プラン 変更 2）
+# ---------------------------------------------------------------------------
+
+def test_get_eval_build_policy_solo_bootstrap():
+    """get_eval_build_policy() - solo_bootstrap は target_only を返す。"""
+    module = make_module()
+    assert module.get_eval_build_policy("solo_bootstrap", current_stage_key="WU0") == "target_only"
+
+
+def test_get_eval_build_policy_maintenance():
+    """get_eval_build_policy() - maintenance は target_plus_anchor_if_unlocked を返す。"""
+    module = make_module()
+    assert module.get_eval_build_policy("maintenance", current_stage_key="WU0") == "target_plus_anchor_if_unlocked"
+
+
+def test_get_eval_build_policy_integration_garlic_not_maintenance():
+    """get_eval_build_policy() - integration 中 garlic が maintenance でない → target_only。"""
+    module = make_module(initial_status={"garlic": "solo_bootstrap"})
+    # garlic は solo_bootstrap なので target_only
+    policy = module.get_eval_build_policy("integration", current_stage_key="WU1")
+    assert policy == "target_only"
+
+
+def test_get_eval_build_policy_integration_garlic_maintenance_unlocked():
+    """get_eval_build_policy() - integration 中 garlic が maintenance かつアンロック済み → target_plus_anchor_if_unlocked。"""
+    module = make_module(initial_status={"garlic": "maintenance"})
+    # WU1 以上では garlic がアンロック済みになっている（unlock_stage_key="WU0"）
+    policy = module.get_eval_build_policy("integration", current_stage_key="WU1")
+    assert policy == "target_plus_anchor_if_unlocked"
+
+
+def test_get_eval_build_policy_no_stage_key():
+    """get_eval_build_policy() - current_stage_key=None の integration は target_only を返す。"""
+    module = make_module(initial_status={"garlic": "maintenance"})
+    # stage_key がない場合は integration の条件分岐がスキップされる（フォールバック）
+    policy = module.get_eval_build_policy("integration", current_stage_key=None)
+    assert policy == "target_only"
+
+
+def test_get_eval_build_policy_unknown_task_kind():
+    """get_eval_build_policy() - 未知の task_kind は target_only を返す（デフォルト）。"""
+    module = make_module()
+    assert module.get_eval_build_policy("unknown_task", current_stage_key="WU0") == "target_only"
