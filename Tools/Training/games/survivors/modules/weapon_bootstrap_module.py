@@ -288,7 +288,9 @@ class WeaponBootstrapStateModule(BaseStateModule):
                         # P2 fix: 同一 eval 結果で複数カウントを防ぐ
                         state.regression_count += 1
                         state.last_regression_eval_step = det_step
-                # episode_count が不足の場合は判定保留（regression_from_best = None のまま）
+                else:
+                    # episode_count が不足の場合は古い値をクリアして判定保留
+                    state.regression_from_best = None
             elif not det_fresh:
                 # task_kind/phase ずれ or 鮮度切れ: regression 判定不可
                 state.regression_from_best = None

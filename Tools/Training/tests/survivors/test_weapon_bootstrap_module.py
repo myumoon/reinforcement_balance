@@ -634,6 +634,32 @@ def test_maintenance_regression_count_not_incremented_when_below_min_probe_episo
     assert module._states[garlic_id].regression_count == 0
 
 
+def test_maintenance_regression_from_best_cleared_when_below_min_probe_with_det_fresh():
+    """det_fresh=True かつ episode_count < min_probe の場合、既存の regression_from_best がクリアされる。
+
+    レビュー指摘（iteration 2 minor): 古い regression_from_best 値が残らないことを確認。
+    """
+    module = make_module(
+        initial_status={"garlic": "maintenance"},
+        maintenance_min_probe_episodes=20,
+        maintenance_regression_ratio=0.35,
+    )
+    garlic_id = WeaponType.GARLIC
+    module._states[garlic_id].best_phase2_p10 = 400.0
+    # 既存の regression_from_best に非 None 値をセット（前回の判定結果が残っている状態）
+    module._states[garlic_id].regression_from_best = 0.12
+
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="maintenance")
+    provider.set_stats(cell, episode_count=5, active_score_p10=350.0)  # episode_count < 20
+    _set_det(module, garlic_id, "maintenance", p10=350.0, ep_len=1400.0, short_rate=0.03, num_timesteps=2000)
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=2000)
+
+    # episode_count < min_probe なので古い regression_from_best はクリアされる
+    assert module._states[garlic_id].regression_from_best is None
+
+
 # ---------------------------------------------------------------------------
 # テスト: set_deterministic_result() （プラン 変更 2）
 # ---------------------------------------------------------------------------
