@@ -605,6 +605,35 @@ def test_maintenance_regression_updated_when_above_min_probe_episodes():
     assert module._states[garlic_id].regression_count == 1
 
 
+def test_maintenance_regression_count_not_incremented_when_below_min_probe_episodes_with_det_fresh():
+    """det_fresh=True でも episode_count < maintenance_min_probe_episodes なら regression_count が増えない。
+
+    指摘2 の修正確認: deterministic 結果が先に入っても episode_count が不足していれば
+    regression_from_best=None のまま（判定保留）で regression_count はインクリメントされない。
+    """
+    module = make_module(
+        initial_status={"garlic": "maintenance"},
+        maintenance_min_probe_episodes=20,
+        maintenance_regression_ratio=0.35,
+    )
+    module._states[WeaponType.GARLIC].best_phase2_p10 = 400.0
+    garlic_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(garlic_id, phase=2, task_kind="maintenance")
+    # episode_count が maintenance_min_probe_episodes 未満（1 や 0 を想定）
+    provider.set_stats(cell, episode_count=5, active_score_p10=200.0)
+    # deterministic 結果は有効（det_fresh=True になる条件を満たす）
+    _set_det(module, garlic_id, "maintenance", p10=200.0, ep_len=1300.0, short_rate=0.05, num_timesteps=1000)
+
+    module.on_episode_end(cell=cell, stats_provider=provider, current_stage_key="WU0", num_timesteps=1000)
+
+    # episode_count < maintenance_min_probe_episodes なので判定保留
+    # regression_from_best は None のまま
+    assert module._states[garlic_id].regression_from_best is None
+    # regression_count はインクリメントされない
+    assert module._states[garlic_id].regression_count == 0
+
+
 # ---------------------------------------------------------------------------
 # テスト: set_deterministic_result() （プラン 変更 2）
 # ---------------------------------------------------------------------------

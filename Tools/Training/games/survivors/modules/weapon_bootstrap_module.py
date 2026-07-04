@@ -94,7 +94,12 @@ class WeaponBootstrapStateModule(BaseStateModule):
         short_episode_rate: float,
         num_timesteps: int,
     ) -> None:
-        """BootstrapGateEvalCallback から deterministic eval 結果を注入する。"""
+        """BootstrapGateEvalCallback から deterministic eval 結果を注入する。
+
+        このメソッドは BootstrapGateEvalCallback から呼ばれる（Phase B で実装）。
+        Phase A では set_deterministic_result() を呼ぶ本番経路は存在しないが、
+        on_episode_end() 内の gate 判定はこのメソッドで注入された結果を参照する。
+        """
         state = self._states.get(weapon_id)
         if state is None:
             return
@@ -273,15 +278,17 @@ class WeaponBootstrapStateModule(BaseStateModule):
             )
 
             if state.best_phase2_p10 > 0 and det_fresh:
-                # det_p10 が best を上回った場合は high-water mark を更新
-                state.best_phase2_p10 = max(state.best_phase2_p10, det_p10)
-                regression = 1.0 - det_p10 / state.best_phase2_p10
-                state.regression_from_best = regression
-                if (regression > self._maintenance_regression_ratio
-                        and det_step != state.last_regression_eval_step):
-                    # P2 fix: 同一 eval 結果で複数カウントを防ぐ
-                    state.regression_count += 1
-                    state.last_regression_eval_step = det_step
+                if stats.episode_count >= self._maintenance_min_probe_episodes:
+                    # det_p10 が best を上回った場合は high-water mark を更新
+                    state.best_phase2_p10 = max(state.best_phase2_p10, det_p10)
+                    regression = 1.0 - det_p10 / state.best_phase2_p10
+                    state.regression_from_best = regression
+                    if (regression > self._maintenance_regression_ratio
+                            and det_step != state.last_regression_eval_step):
+                        # P2 fix: 同一 eval 結果で複数カウントを防ぐ
+                        state.regression_count += 1
+                        state.last_regression_eval_step = det_step
+                # episode_count が不足の場合は判定保留（regression_from_best = None のまま）
             elif not det_fresh:
                 # task_kind/phase ずれ or 鮮度切れ: regression 判定不可
                 state.regression_from_best = None
