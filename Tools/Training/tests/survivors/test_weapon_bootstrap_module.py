@@ -394,10 +394,16 @@ def test_on_weapon_unlock_advanced_sets_new_weapon_solo_bootstrap():
 
 
 def test_on_weapon_unlock_advanced_does_not_change_non_locked():
-    """on_weapon_unlock_advanced() が locked 以外のステータスを変更しない。"""
-    module = make_module()
+    """on_weapon_unlock_advanced() が locked 以外のステータスを変更しない。
 
-    # WU0 → WU1 で king_bible が unlock される
+    KING_BIBLE を integration 状態に初期化してから unlock イベントを発火しても
+    ステータスが変化しないことを確認する（locked 以外は保護される）。
+    """
+    module = make_module(initial_status={"king_bible": "integration"})
+
+    # king_bible を integration 状態に初期化されているはず
+    assert module._states[WeaponType.KING_BIBLE].status == "integration"
+
     event = WeaponUnlockAdvanceEvent(
         from_stage_key="WU1",
         to_stage_key="WU2",
@@ -405,7 +411,8 @@ def test_on_weapon_unlock_advanced_does_not_change_non_locked():
         step=20_000,
     )
     module.on_weapon_unlock_advanced(event)
-    assert module._states[WeaponType.KING_BIBLE].status == "solo_bootstrap"
+    # integration のまま変化しない
+    assert module._states[WeaponType.KING_BIBLE].status == "integration"
 
 
 # ---------------------------------------------------------------------------
