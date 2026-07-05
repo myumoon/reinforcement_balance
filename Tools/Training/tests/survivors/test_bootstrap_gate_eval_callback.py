@@ -1,0 +1,526 @@
+"""tests/survivors/test_bootstrap_gate_eval_callback.py
+
+BootstrapGateEvalCallback のユニットテスト。
+UE5 不要。eval_env / model / run_survivors_eval_episodes はモック。
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch, call
+
+_TRAINING_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_TRAINING_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TRAINING_ROOT))
+
+import pytest
+
+from games.survivors.bootstrap_gate_eval_callback import BootstrapGateEvalCallback
+from games.survivors.modules.weapon_bootstrap_module import (
+    WeaponBootstrapStateModule,
+    WeaponBootstrapState,
+)
+from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER, WeaponEntry
+from games.survivors.survivors_weapon_curriculum import WeaponType
+
+
+# ---------------------------------------------------------------------------
+# テスト用ヘルパー
+# ---------------------------------------------------------------------------
+
+def _make_module(
+    initial_status: dict[str, str] | None = None,
+    solo_bootstrap_target_p10: float = 300.0,
+    integration_target_p10: float = 300.0,
+) -> WeaponBootstrapStateModule:
+    """テスト用の WeaponBootstrapStateModule を作成する。"""
+    return WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status=initial_status,
+        solo_bootstrap_target_p10=solo_bootstrap_target_p10,
+        integration_target_p10=integration_target_p10,
+    )
+
+
+def _make_eval_env(training: bool = True) -> MagicMock:
+    """モック eval_env を作成する。set_params は True を返す。
+
+    venv=None を設定して _sync_vecnormalize() の venv チェーン走査で無限ループしないようにする。
+    """
+    env = MagicMock()
+    env.training = training
+    env.venv = None  # _sync_vecnormalize() の while ループを止める
+    env.env_method.return_value = [True]  # set_params の成功を示す
+    return env
+
+
+def _make_model() -> MagicMock:
+    """モック SB3 モデルを作成する。"""
+    return MagicMock()
+
+
+def _make_fake_ep_results(n: int = 3, active_score: float = 350.0) -> list[dict]:
+    """ダミーのエピソード結果リストを作成する。"""
+    return [
+        {
+            "active_score": active_score,
+            "ep_length": 1500,
+            "terminated": 0,
+        }
+        for _ in range(n)
+    ]
+
+
+def _make_callback(
+    module: WeaponBootstrapStateModule,
+    eval_env=None,
+    probe_freq: int = 10_000,
+    n_probe_episodes: int = 3,
+    enemy_phase_idx: int = 2,
+    stage_key_provider=None,
+    wandb_logger=None,
+) -> BootstrapGateEvalCallback:
+    """テスト用の BootstrapGateEvalCallback を作成する。"""
+    if eval_env is None:
+        eval_env = _make_eval_env()
+    return BootstrapGateEvalCallback(
+        weapon_bootstrap_module=module,
+        eval_env=eval_env,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        probe_freq=probe_freq,
+        n_probe_episodes=n_probe_episodes,
+        alive_reward=0.001,
+        frame_skip=2,
+        enemy_phase_idx=enemy_phase_idx,
+        item_stage_key="IS0",
+        stage_key_provider=stage_key_provider,
+        wandb_logger=wandb_logger,
+    )
+
+
+def _setup_callback(cb: BootstrapGateEvalCallback, model=None, num_timesteps: int = 0):
+    """コールバックを初期化して model / num_timesteps をセットする。
+
+    BaseCallback の training_env / logger は property で self.model 経由でアクセスされるため、
+    model.get_env() と model.logger が MagicMock を返すよう設定する。
+
+    _sync_vecnormalize() が venv チェーンを辿る際に MagicMock で無限ループしないよう、
+    training_env の venv を None に設定する。
+    """
+    if model is None:
+        model = _make_model()
+    # training_env は property -> model.get_env() を呼ぶ
+    # venv=None にすることで _sync_vecnormalize() の while ループが終了する
+    mock_training_env = MagicMock()
+    mock_training_env.venv = None
+    model.get_env = MagicMock(return_value=mock_training_env)
+    # logger は property -> model.logger を返す
+    model.logger = MagicMock()
+    cb.model = model
+    cb.num_timesteps = num_timesteps
+    return cb
+
+
+# ---------------------------------------------------------------------------
+# テスト 1: 全ステータスの武器が 0 件のとき eval が走らない
+# ---------------------------------------------------------------------------
+
+def test_run_probe_no_targets_skips_eval():
+    """solo_bootstrap / integration / maintenance の武器が 0 件のとき eval が走らない。"""
+    module = _make_module()  # 全武器が locked 状態
+    eval_env = _make_eval_env()
+    cb = _make_callback(module, eval_env=eval_env)
+    _setup_callback(cb)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes"
+    ) as mock_run:
+        cb._run_probe()
+        mock_run.assert_not_called()
+
+    eval_env.env_method.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# テスト 2: solo_bootstrap 武器に対して cell_spec = "{key}:solo_bootstrap:2" で eval が走る
+# ---------------------------------------------------------------------------
+
+def test_eval_weapon_solo_bootstrap_uses_correct_cell_spec():
+    """solo_bootstrap ステータスの武器に対して正しい cell_spec で eval が走ること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    eval_env = _make_eval_env()
+    cb = _make_callback(module, eval_env=eval_env, enemy_phase_idx=2)
+    _setup_callback(cb, num_timesteps=10_000)
+
+    fake_results = _make_fake_ep_results(3, active_score=350.0)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        return_value=(fake_results, {}, None),
+    ) as mock_run:
+        cb._run_probe()
+        mock_run.assert_called_once()
+        # module.set_deterministic_result が garlic の weapon_id で呼ばれること
+        garlic_id = WeaponType.GARLIC
+        state = module._states[garlic_id]
+        assert state.deterministic_task_kind == "solo_bootstrap"
+        assert state.deterministic_enemy_phase_idx == 2
+
+
+# ---------------------------------------------------------------------------
+# テスト 3: integration 武器に対して cell_spec = "{key}:integration:2" で eval が走る
+# ---------------------------------------------------------------------------
+
+def test_eval_weapon_integration_uses_correct_cell_spec():
+    """integration ステータスの武器に対して正しい task_kind で eval が走ること。"""
+    module = _make_module(initial_status={"garlic": "integration"})
+    eval_env = _make_eval_env()
+    cb = _make_callback(module, eval_env=eval_env, enemy_phase_idx=2)
+    _setup_callback(cb, num_timesteps=20_000)
+
+    fake_results = _make_fake_ep_results(3, active_score=310.0)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        return_value=(fake_results, {}, None),
+    ):
+        cb._run_probe()
+
+    garlic_id = WeaponType.GARLIC
+    state = module._states[garlic_id]
+    assert state.deterministic_task_kind == "integration"
+    assert state.deterministic_enemy_phase_idx == 2
+    assert state.deterministic_p10 is not None
+
+
+# ---------------------------------------------------------------------------
+# テスト 4: maintenance 武器に対して cell_spec = "{key}:maintenance:2" で eval が走る
+# ---------------------------------------------------------------------------
+
+def test_eval_weapon_maintenance_uses_correct_cell_spec():
+    """maintenance ステータスの武器に対して正しい task_kind で eval が走ること。"""
+    module = _make_module(initial_status={"garlic": "maintenance"})
+    eval_env = _make_eval_env()
+    cb = _make_callback(module, eval_env=eval_env, enemy_phase_idx=2)
+    _setup_callback(cb, num_timesteps=30_000)
+
+    fake_results = _make_fake_ep_results(3, active_score=320.0)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        return_value=(fake_results, {}, None),
+    ):
+        cb._run_probe()
+
+    garlic_id = WeaponType.GARLIC
+    state = module._states[garlic_id]
+    assert state.deterministic_task_kind == "maintenance"
+    assert state.deterministic_enemy_phase_idx == 2
+
+
+# ---------------------------------------------------------------------------
+# テスト 5: 複数ステータスの複数武器がある場合、全武器分が走り全員 set_deterministic_result が呼ばれる
+# ---------------------------------------------------------------------------
+
+def test_run_probe_multiple_weapons_all_evaluated():
+    """複数ステータスの複数武器がある場合、全武器分の eval が走ること。"""
+    module = _make_module(
+        initial_status={
+            "garlic": "solo_bootstrap",
+            "king_bible": "integration",
+            "magic_wand": "maintenance",
+        }
+    )
+    eval_env = _make_eval_env()
+    cb = _make_callback(module, eval_env=eval_env)
+    _setup_callback(cb, num_timesteps=50_000)
+
+    fake_results = _make_fake_ep_results(3, active_score=300.0)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        return_value=(fake_results, {}, None),
+    ) as mock_run:
+        cb._run_probe()
+
+    # 3武器分の eval が実行されること
+    assert mock_run.call_count == 3
+
+    # 全武器の set_deterministic_result が呼ばれること（deterministic_p10 が None でないこと）
+    for weapon_key in ["garlic", "king_bible", "magic_wand"]:
+        entry = next(e for e in WEAPON_UNLOCK_ORDER if e.key == weapon_key)
+        state = module._states[entry.weapon_id]
+        assert state.deterministic_p10 is not None, f"{weapon_key} の deterministic_p10 が None"
+        assert state.deterministic_task_kind is not None
+
+
+# ---------------------------------------------------------------------------
+# テスト 6: eval_env.training が _run_probe() の前後で復元される
+# ---------------------------------------------------------------------------
+
+def test_run_probe_restores_eval_env_training_flag():
+    """_run_probe() の前後で eval_env.training が元の値に戻ること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    eval_env = _make_eval_env(training=True)
+    cb = _make_callback(module, eval_env=eval_env)
+    _setup_callback(cb, num_timesteps=10_000)
+
+    fake_results = _make_fake_ep_results(3)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        return_value=(fake_results, {}, None),
+    ):
+        cb._run_probe()
+
+    # training フラグが True に戻ること
+    assert eval_env.training is True
+
+
+def test_run_probe_restores_training_flag_even_on_exception():
+    """eval_weapon が例外を出しても eval_env.training が復元されること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    eval_env = _make_eval_env(training=True)
+    cb = _make_callback(module, eval_env=eval_env)
+    _setup_callback(cb, num_timesteps=10_000)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        side_effect=RuntimeError("テスト用例外"),
+    ):
+        cb._run_probe()  # 例外が外に出ないこと
+
+    # 例外後も training フラグが復元されること
+    assert eval_env.training is True
+
+
+# ---------------------------------------------------------------------------
+# テスト 7: 特定武器の _eval_weapon() が例外を出しても他武器の eval が継続する
+# ---------------------------------------------------------------------------
+
+def test_run_probe_continues_on_single_weapon_exception():
+    """1武器の eval が例外を出しても、他武器の eval が継続すること。"""
+    module = _make_module(
+        initial_status={
+            "garlic": "solo_bootstrap",
+            "king_bible": "solo_bootstrap",
+        }
+    )
+    eval_env = _make_eval_env()
+    cb = _make_callback(module, eval_env=eval_env)
+    _setup_callback(cb, num_timesteps=10_000)
+
+    fake_results = _make_fake_ep_results(3, active_score=350.0)
+    call_count = 0
+
+    def side_effect_first_fails(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("最初の武器で失敗")
+        return (fake_results, {}, None)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        side_effect=side_effect_first_fails,
+    ):
+        cb._run_probe()  # 例外が外に出ないこと
+
+    # 2回試みられること（1回失敗、1回成功）
+    assert call_count == 2
+
+    # 成功した武器は set_deterministic_result が呼ばれること
+    garlic_id = WeaponType.GARLIC
+    king_bible_id = WeaponType.KING_BIBLE
+    garlic_state = module._states[garlic_id]
+    king_bible_state = module._states[king_bible_id]
+    # どちらか一方が設定されていること
+    assert (
+        garlic_state.deterministic_p10 is not None
+        or king_bible_state.deterministic_p10 is not None
+    )
+
+
+# ---------------------------------------------------------------------------
+# テスト 8: probe_freq 未満のステップでは _run_probe() が呼ばれない
+# ---------------------------------------------------------------------------
+
+def test_on_step_probe_freq_not_reached():
+    """probe_freq に達していない場合は _run_probe() が呼ばれないこと。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module, probe_freq=50_000)
+    _setup_callback(cb, num_timesteps=0)
+
+    with patch.object(cb, "_run_probe") as mock_probe:
+        # 49_999 ステップ（freq 未満）
+        cb.num_timesteps = 49_999
+        cb._on_step()
+        mock_probe.assert_not_called()
+
+
+def test_on_step_probe_freq_reached():
+    """probe_freq に達した場合は _run_probe() が呼ばれること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module, probe_freq=50_000)
+    _setup_callback(cb, num_timesteps=0)
+
+    with patch.object(cb, "_run_probe") as mock_probe:
+        cb.num_timesteps = 50_000
+        cb._on_step()
+        mock_probe.assert_called_once()
+
+
+def test_on_step_probe_freq_called_twice_at_double_freq():
+    """probe_freq の 2 倍に達した場合は 2 回目の _run_probe() が呼ばれること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module, probe_freq=50_000)
+    _setup_callback(cb, num_timesteps=0)
+
+    with patch.object(cb, "_run_probe"):
+        cb.num_timesteps = 50_000
+        cb._on_step()
+        cb.num_timesteps = 99_999
+        with patch.object(cb, "_run_probe") as mock_probe2:
+            cb._on_step()
+            mock_probe2.assert_not_called()
+
+        cb.num_timesteps = 100_000
+        with patch.object(cb, "_run_probe") as mock_probe3:
+            cb._on_step()
+            mock_probe3.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# テスト 9: stage_key_provider あり: stage_key_provider() が呼ばれ、返り値が build_eval_params の stage_key に渡される
+# ---------------------------------------------------------------------------
+
+def test_stage_key_provider_is_called_and_passed_to_build_eval_params():
+    """stage_key_provider がある場合、それが呼ばれ stage_key として build_eval_params に渡されること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    eval_env = _make_eval_env()
+    provider_return = "WU3"
+    stage_key_provider = MagicMock(return_value=provider_return)
+
+    cb = _make_callback(module, eval_env=eval_env, stage_key_provider=stage_key_provider)
+    _setup_callback(cb, num_timesteps=10_000)
+
+    fake_results = _make_fake_ep_results(3)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        return_value=(fake_results, {}, None),
+    ), patch(
+        "games.survivors.bootstrap_gate_eval_callback.build_eval_params",
+        wraps=__import__(
+            "games.survivors.bootstrap_eval",
+            fromlist=["build_eval_params"],
+        ).build_eval_params,
+    ) as mock_build:
+        cb._run_probe()
+
+    # stage_key_provider が呼ばれたこと
+    stage_key_provider.assert_called()
+
+    # build_eval_params が stage_key=provider_return で呼ばれたこと
+    for call_args in mock_build.call_args_list:
+        assert call_args.kwargs.get("stage_key") == provider_return
+
+
+# ---------------------------------------------------------------------------
+# テスト 10: stage_key_provider が None のとき entry.unlock_stage_key がフォールバックとして使われる
+# ---------------------------------------------------------------------------
+
+def test_stage_key_provider_none_uses_entry_unlock_stage_key():
+    """stage_key_provider が None の場合、entry.unlock_stage_key がフォールバックとして使われ AttributeError が出ないこと。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    eval_env = _make_eval_env()
+
+    cb = _make_callback(module, eval_env=eval_env, stage_key_provider=None)
+    _setup_callback(cb, num_timesteps=10_000)
+
+    garlic_entry = next(e for e in WEAPON_UNLOCK_ORDER if e.key == "garlic")
+    expected_stage_key = garlic_entry.unlock_stage_key
+
+    fake_results = _make_fake_ep_results(3)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        return_value=(fake_results, {}, None),
+    ), patch(
+        "games.survivors.bootstrap_gate_eval_callback.build_eval_params",
+        wraps=__import__(
+            "games.survivors.bootstrap_eval",
+            fromlist=["build_eval_params"],
+        ).build_eval_params,
+    ) as mock_build:
+        # AttributeError が出ないこと
+        cb._run_probe()
+
+    # build_eval_params が entry.unlock_stage_key で呼ばれたこと
+    for call_args in mock_build.call_args_list:
+        assert call_args.kwargs.get("stage_key") == expected_stage_key
+
+
+# ---------------------------------------------------------------------------
+# テスト 11: set_params が False を返した場合 RuntimeError が発生する
+# ---------------------------------------------------------------------------
+
+def test_set_params_failure_raises_runtime_error():
+    """set_params が失敗（False を返す）場合に RuntimeError が発生すること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    eval_env = _make_eval_env()
+    eval_env.env_method.return_value = [False]  # set_params 失敗
+
+    cb = _make_callback(module, eval_env=eval_env)
+    _setup_callback(cb, num_timesteps=10_000)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes"
+    ) as mock_run:
+        # _eval_weapon 内で RuntimeError が発生すること
+        with pytest.raises(RuntimeError, match="set_params"):
+            cb._eval_weapon("garlic", WeaponType.GARLIC, "solo_bootstrap")
+
+        # RuntimeError が発生したので eval は実行されないこと
+        mock_run.assert_not_called()
+
+
+def test_set_params_failure_is_caught_in_run_probe_and_eval_continues():
+    """set_params 失敗（RuntimeError）が _run_probe() 内で握られ、他武器の eval が継続すること。"""
+    module = _make_module(
+        initial_status={
+            "garlic": "solo_bootstrap",
+            "king_bible": "solo_bootstrap",
+        }
+    )
+    eval_env = _make_eval_env()
+
+    # garlic の set_params は失敗、king_bible は成功
+    garlic_id = WeaponType.GARLIC
+    king_bible_id = WeaponType.KING_BIBLE
+
+    set_params_call_count = 0
+
+    def set_params_side_effect(*args, **kwargs):
+        nonlocal set_params_call_count
+        set_params_call_count += 1
+        # 1回目の呼び出しは失敗、2回目は成功（武器の順序依存）
+        return [set_params_call_count != 1]
+
+    eval_env.env_method.side_effect = set_params_side_effect
+
+    cb = _make_callback(module, eval_env=eval_env)
+    _setup_callback(cb, num_timesteps=10_000)
+
+    fake_results = _make_fake_ep_results(3, active_score=350.0)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        return_value=(fake_results, {}, None),
+    ) as mock_run:
+        cb._run_probe()  # 例外が外に出ないこと
+
+    # 2武器を試みること
+    assert set_params_call_count == 2
+    # 成功した1武器は eval が実行されること
+    assert mock_run.call_count == 1
