@@ -1966,7 +1966,7 @@ def main() -> None:
                 enemy_phase_idx=2,
                 item_stage_key=getattr(args, "weapon_item_stage", "IS0"),
                 stage_key_provider=(
-                    _weapon_unlock_module.current_stage_key
+                    (lambda: _weapon_unlock_module.current_stage_key)
                     if "_weapon_unlock_module" in locals() and _weapon_unlock_module is not None
                     else None
                 ),
