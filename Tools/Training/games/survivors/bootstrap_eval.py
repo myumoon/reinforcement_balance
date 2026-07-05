@@ -117,6 +117,7 @@ def build_eval_params(
     stage_key: str | None = None,
     item_stage_key: str = "IS0",
     weapon_unlock_order: list[WeaponEntry] = WEAPON_UNLOCK_ORDER,
+    build_policy_override: str | None = None,  # None のとき既存の _TASK_KIND_BUILD_POLICY による自動選択を維持
 ) -> dict:
     """eval cell から UE5 /params の full dict（UE key 形式）を組み立てる。
 
@@ -126,6 +127,8 @@ def build_eval_params(
     Args:
         stage_key: 武器プールのアンロック段階。None の場合は対象武器がちょうど
                    アンロックされる段階（entry.unlock_stage_key）を使う。
+        build_policy_override: 武器プール構築ポリシーの上書き。None のとき task_kind に応じた
+                               _TASK_KIND_BUILD_POLICY による自動選択を維持（後方互換）。
     """
     entry = _weapon_id_to_entry(weapon_unlock_order).get(cell.weapon_id)
     if entry is None:
@@ -134,7 +137,11 @@ def build_eval_params(
     if stage_key is None:
         stage_key = entry.unlock_stage_key
 
-    build_policy = _TASK_KIND_BUILD_POLICY[cell.task_kind]
+    build_policy = (
+        build_policy_override
+        if build_policy_override is not None
+        else _TASK_KIND_BUILD_POLICY[cell.task_kind]
+    )
 
     weapon_params = build_weapon_params_for_cell(
         first_weapon_id=cell.weapon_id,

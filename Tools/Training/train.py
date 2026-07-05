@@ -174,6 +174,42 @@ def _default_weapon_bootstrap_initial_status(
 
 
 
+def validate_bootstrap_gate_args(args: argparse.Namespace, *, base_port: int) -> None:
+    """bootstrap gate 関連の引数バリデーション。テストから直接呼べるよう独立関数として定義。"""
+    if args.game != "survivors" or args.dry_run:
+        return
+    if getattr(args, "weapon_bootstrap_lanes", False):
+        if getattr(args, "bootstrap_gate_eval_port", None) is None:
+            raise ValueError(
+                "--weapon-bootstrap-lanes を使用する場合は --bootstrap-gate-eval-port が必須です。\n"
+                "例: --bootstrap-gate-eval-port 8769"
+            )
+        if getattr(args, "eval_freq", 0) <= 0:
+            raise ValueError(
+                "--weapon-bootstrap-lanes を使用する場合は --eval-freq > 0 が必須です。\n"
+                "例: --eval-freq 50000"
+            )
+        if getattr(args, "bootstrap_gate_eval_episodes", 0) <= 0:
+            raise ValueError(
+                "--bootstrap-gate-eval-episodes には 1 以上の整数を指定してください。\n"
+                "0 または負数を指定すると p10=0 の deterministic result が注入され、偽の regression が記録されます。"
+            )
+    bgate_port = getattr(args, "bootstrap_gate_eval_port", None)
+    if bgate_port is not None:
+        if bgate_port <= 0:
+            raise ValueError(
+                f"--bootstrap-gate-eval-port には正の整数を指定してください: {bgate_port}"
+            )
+        _used = set(range(base_port, base_port + args.n_envs))
+        if args.eval_port is not None:
+            _used.add(args.eval_port)
+        if bgate_port in _used:
+            raise ValueError(
+                f"--bootstrap-gate-eval-port が他のポートと重複しています: "
+                f"bootstrap_gate_eval_port={bgate_port}, eval_port={args.eval_port}"
+            )
+
+
 def _parse_step_shorthand(s: str) -> int:
     """200k/2M/2.5M/2_000k/200_000 などを int に変換する。
 
@@ -1016,6 +1052,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--maintenance-min-probe-episodes", type=int, default=20,
                    help="maintenance regression判定に必要な最小エピソード数 (default: 20)")
 
+    # Bootstrap Gate Eval 関連
+    p.add_argument("--bootstrap-gate-eval-port", type=int, default=None,
+                   help="weapon bootstrap gate 専用の UE5 ポート。"
+                        "--weapon-bootstrap-lanes 有効時は必須（未指定の場合は起動時 ValueError）。"
+                        "weapon_bootstrap_lanes を使わない通常 run では省略可能（callback 無効）。"
+                        "指定時は UE5 PIE をこのポートで起動しておくこと。")
+    p.add_argument("--bootstrap-gate-eval-episodes", type=int, default=40,
+                   help="bootstrap gate deterministic のエピソード数（default: 40）")
+
     # YAML があればデフォルトを差し込む（CLI が常に優先）
     if pre_args.config:
         from common.config import load_yaml_config, apply_yaml_defaults
@@ -1108,6 +1153,8 @@ def main() -> None:
                 f"--eval-port が train ports と重複しています: "
                 f"eval_port={args.eval_port}, train_ports={sorted(_train_ports)}"
             )
+
+    validate_bootstrap_gate_args(args, base_port=base_port)
 
     resume_status = {}
     model_zip_to_load = None
@@ -1422,6 +1469,50 @@ def main() -> None:
     if eval_env is not None and args.frame_stack > 1:
         eval_env = VecFrameStack(eval_env, n_stack=args.frame_stack)
         print(f"[INFO] eval env に VecFrameStack を適用しました (n_stack={args.frame_stack})")
+
+    # bootstrap gate 専用 eval env 生成
+    # --bootstrap-gate-eval-port かつ --weapon-bootstrap-lanes かつ非 dry-run の場合のみ生成
+    bootstrap_gate_eval_env = None
+    if (args.game == "survivors"
+            and getattr(args, "bootstrap_gate_eval_port", None) is not None
+            and getattr(args, "weapon_bootstrap_lanes", False)
+            and not args.dry_run):
+        from games.survivors.survivors_env_factory import SurvivorsEnvFactory  # 正しいパス
+        _bg_base = None
+        try:
+            _bg_base = DummyVecEnv([SurvivorsEnvFactory(
+                host=args.host,
+                port=args.bootstrap_gate_eval_port,
+                frame_skip=args.frame_skip,
+                reward_fn_path=_reward_fn_path,
+            )])
+            # obs_schema_hash の一致確認（train env と揃っているか）
+            _bg_hash = _bg_base.env_method("get_obs_schema_hash")[0]
+            _train_hash = env.env_method("get_obs_schema_hash")[0]
+            if _bg_hash != _train_hash:
+                raise RuntimeError(
+                    f"[ERROR] bootstrap_gate env の obs_schema_hash が train env と一致しません。\n"
+                    f"  train: {_train_hash}\n"
+                    f"  bgate: {_bg_hash}"
+                )
+            # eval_env と同じ構成（VecNormalize + VecFrameStack の順）
+            if not args.no_vec_normalize:
+                bootstrap_gate_eval_env = VecNormalize(
+                    _bg_base, norm_obs=True, norm_reward=False, clip_obs=10.0, training=False
+                )
+            else:
+                bootstrap_gate_eval_env = _bg_base
+            if args.frame_stack > 1:
+                bootstrap_gate_eval_env = VecFrameStack(bootstrap_gate_eval_env, n_stack=args.frame_stack)
+            print(f"[INFO] bootstrap gate env 作成完了 (port={args.bootstrap_gate_eval_port})")
+        except Exception:
+            # P2 fix: hash 不一致・wrapper 例外等で close 漏れしないよう確実に閉じる
+            if "_bg_base" in dir() and _bg_base is not None:
+                try:
+                    _bg_base.close()
+                except Exception:
+                    pass
+            raise
 
     algo_class = RecurrentPPO if args.recurrent else PPO
     default_policy = "MlpLstmPolicy" if args.recurrent else "MlpPolicy"
@@ -1865,11 +1956,48 @@ def main() -> None:
                 integration_min_episodes=getattr(args, "integration_min_episodes", 40),
                 maintenance_regression_ratio=getattr(args, "maintenance_regression_ratio", 0.35),
                 maintenance_min_probe_episodes=getattr(args, "maintenance_min_probe_episodes", 20),
+                # eval_freq * 2 を鮮度上限に設定: 2 probe サイクル以内の結果だけを gate 判定に使う
+                # 0（無期限）だと set_params 失敗で古い結果が残り誤 gate 通過のリスクがある
+                deterministic_gate_max_eval_age_steps=args.eval_freq * 2,
             )
             if _resume_bootstrap_state is not None:
                 _weapon_bootstrap_module.import_state(_resume_bootstrap_state)
                 print("[INFO] weapon_bootstrap state を復元")
             print(f"[INFO] WeaponBootstrapStateModule 有効 (initial_status={_initial_status})")
+
+        # BootstrapGateEvalCallback の登録
+        # _weapon_bootstrap_module と bootstrap_gate_eval_env の両方が有効な場合のみ登録
+        if (
+            "_weapon_bootstrap_module" in locals()
+            and _weapon_bootstrap_module is not None
+            and bootstrap_gate_eval_env is not None
+        ):
+            from games.survivors.bootstrap_gate_eval_callback import BootstrapGateEvalCallback
+            _bootstrap_gate_cb = BootstrapGateEvalCallback(
+                weapon_bootstrap_module=_weapon_bootstrap_module,
+                eval_env=bootstrap_gate_eval_env,
+                weapon_unlock_order=_weapon_unlock_order,  # fix: WEAPON_UNLOCK_ORDER → _weapon_unlock_order
+                probe_freq=args.eval_freq,
+                n_probe_episodes=args.bootstrap_gate_eval_episodes,
+                short_episode_steps=args.weapon_unlock_short_episode_steps,
+                alive_reward=args.curriculum_alive_reward,
+                frame_skip=args.frame_skip,
+                enemy_phase_idx=2,
+                item_stage_key=getattr(args, "weapon_item_stage", "IS0"),
+                stage_key_provider=(
+                    (lambda: _weapon_unlock_module.current_stage_key)
+                    if "_weapon_unlock_module" in locals() and _weapon_unlock_module is not None
+                    else None
+                ),
+                wandb_logger=wandb_logger,
+            )
+            callbacks.append(_bootstrap_gate_cb)
+            print(
+                f"[INFO] BootstrapGateEvalCallback 登録 "
+                f"(port={args.bootstrap_gate_eval_port}, "
+                f"probe_freq={args.eval_freq:,}, "
+                f"n_episodes={args.bootstrap_gate_eval_episodes})"
+            )
 
         if _hybrid_cb_ref is not None and _task_cell_sampler_module and _weapon_unlock_module:
             from games.survivors.param_applier import ParamApplier as _ParamApplier
@@ -2106,6 +2234,12 @@ def main() -> None:
                         cb._eval_result_queue = None
                 try:
                     eval_env.close()
+                except (BrokenPipeError, OSError):
+                    pass
+            # bootstrap gate env のクローズ（eval_env の有無と独立して実行）
+            if bootstrap_gate_eval_env is not None:
+                try:
+                    bootstrap_gate_eval_env.close()
                 except (BrokenPipeError, OSError):
                     pass
         if args.curriculum and curriculum_cb is not None and args.total_steps >= 20_000:

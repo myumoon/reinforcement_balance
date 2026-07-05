@@ -22,6 +22,43 @@ void ASurvivorsParallelSetupActor::BeginPlay()
 		return;
 	}
 
+	// ── 重複ポート検査（設定ミスを BeginPlay 時点で検出）────────────────
+	{
+		TSet<int32> UsedPorts;
+
+		// 訓練ポート
+		for (int32 i = 0; i < NumTrainEnvs; ++i)
+			UsedPorts.Add(BasePort + i);
+
+		// 主評価ポート
+		if (EvalPort > 0)
+		{
+			if (UsedPorts.Contains(EvalPort))
+			{
+				UE_LOG(LogTemp, Error,
+					TEXT("[SurvivorsParallelSetup] EvalPort %d が訓練ポートと重複しています。"
+					     "生成をスキップします。"), EvalPort);
+				return;
+			}
+			UsedPorts.Add(EvalPort);
+		}
+
+		// 追加評価ポート
+		for (int32 Port : ExtraEvalPorts)
+		{
+			if (Port <= 0) continue;
+			if (UsedPorts.Contains(Port))
+			{
+				UE_LOG(LogTemp, Error,
+					TEXT("[SurvivorsParallelSetup] ExtraEvalPorts のポート %d が"
+					     "他のポートと重複しています。このポートの生成をスキップします。"), Port);
+				// スキップするが他のポートは続行（return しない）
+				continue;
+			}
+			UsedPorts.Add(Port);
+		}
+	}
+
 	AllServices.Reset();
 
 	// 訓練 env をスポーン
@@ -63,6 +100,49 @@ void ASurvivorsParallelSetupActor::BeginPlay()
 		TrainGames.Num(),
 		BasePort, BasePort + TrainGames.Num() - 1,
 		EvalGame ? *FString::Printf(TEXT("ポート %d"), EvalPort) : TEXT("なし"));
+
+	// 追加評価 env をスポーン（有効ポートのみ TMap に格納）
+	ExtraEvalGameMap.Reset();
+	{
+		// 既に使用済みのポートセットを再構築（重複検査済みだが念のため）
+		TSet<int32> SpawnedPorts;
+		for (int32 i = 0; i < NumTrainEnvs; ++i) SpawnedPorts.Add(BasePort + i);
+		if (EvalPort > 0) SpawnedPorts.Add(EvalPort);
+
+		for (int32 Port : ExtraEvalPorts)
+		{
+			if (Port <= 0) continue;
+			if (SpawnedPorts.Contains(Port)) continue;  // 重複はスキップ
+			SpawnedPorts.Add(Port);
+
+			ASurvivorsGame* ExtraGame = SpawnGame();
+			if (!ExtraGame) continue;
+
+			ASurvivorsHttpEnvService* ExtraSvc = SpawnService(ExtraGame, Port);
+			if (!ExtraSvc)
+			{
+				// Service 作成失敗時は orphan の Game actor を破棄する
+				ExtraGame->Destroy();
+				continue;
+			}
+
+			// Game と Service の両方が成功した場合のみ Map に登録
+			ExtraEvalGameMap.Add(Port, ExtraGame);
+			ExtraSvc->bManagedExternally = true;
+			AllServices.Add(ExtraSvc);
+		}
+	}
+
+	if (ExtraEvalGameMap.Num() > 0)
+	{
+		TArray<FString> PortStrs;
+		for (const auto& Pair : ExtraEvalGameMap)
+			PortStrs.Add(FString::FromInt(Pair.Key));
+		UE_LOG(LogTemp, Log,
+			TEXT("[SurvivorsParallelSetup] 追加評価 env %d 個（ポート: %s）を生成しました。"),
+			ExtraEvalGameMap.Num(),
+			*FString::Join(PortStrs, TEXT(", ")));
+	}
 
 	// GameView をスポーン（ViewPort > 0 の場合のみ）
 	SpawnedGameView = nullptr;
@@ -219,10 +299,19 @@ void ASurvivorsParallelSetupActor::Tick(float DeltaTime)
 
 ASurvivorsGame* ASurvivorsParallelSetupActor::FindGameByPort(int32 Port) const
 {
+	// 主評価 env
 	if (EvalPort > 0 && Port == EvalPort)
 	{
 		return EvalGame.Get();
 	}
+
+	// 追加評価 env（TMap で O(1) 検索）
+	if (const TObjectPtr<ASurvivorsGame>* Found = ExtraEvalGameMap.Find(Port))
+	{
+		return Found->Get();
+	}
+
+	// 訓練 env
 	const int32 Idx = Port - BasePort;
 	if (TrainGames.IsValidIndex(Idx))
 	{

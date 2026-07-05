@@ -1,8 +1,9 @@
 """WeaponBootstrapStateModule: 武器別 Solo Bootstrap Lane と Maintenance の状態管理。"""
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from games.survivors.modules.state_modules import BaseStateModule
-from games.survivors.survivors_weapon_table import WeaponEntry, get_added_weapon_id
+from games.survivors.survivors_weapon_table import WeaponEntry, get_added_weapon_id, get_unlocked_weapon_ids
 from games.survivors.survivors_weapon_curriculum import WeaponType
 from typing import TYPE_CHECKING
 
@@ -19,6 +20,14 @@ class WeaponBootstrapState:
     regression_from_best: float | None = None
     last_probe_step: int = 0
     regression_count: int = 0
+    # --- 追加: deterministic 結果を保持 ---
+    last_regression_eval_step: int = -1  # regression_count を最後にインクリメントした eval_step（同一 eval で複数カウントを防ぐ）
+    deterministic_p10: float | None = None  # 最新の deterministic eval active_score_p10
+    deterministic_episode_length_p10: float | None = None  # 同 episode_length_p10
+    deterministic_short_episode_rate: float | None = None  # 同 short_episode_rate
+    deterministic_eval_step: int = 0  # eval が実施された timestep
+    deterministic_task_kind: str | None = None  # 実施時の task_kind（"solo_bootstrap" 等）
+    deterministic_enemy_phase_idx: int | None = None  # 実施時の enemy_phase_idx（gate 側で phase ずれ検知用）
 
 
 class WeaponBootstrapStateModule(BaseStateModule):
@@ -43,6 +52,8 @@ class WeaponBootstrapStateModule(BaseStateModule):
         integration_min_episodes: int = 40,
         maintenance_regression_ratio: float = 0.35,
         maintenance_min_probe_episodes: int = 20,
+        deterministic_gate_max_eval_age_steps: int = 0,  # 0 = 鮮度チェック無効（無期限）
+        deterministic_gate_enemy_phase_idx: int = 2,    # gate が期待する enemy_phase_idx（現在は 2 固定）
     ) -> None:
         self._weapon_unlock_order = weapon_unlock_order
         self._solo_bootstrap_target_p10 = solo_bootstrap_target_p10
@@ -54,11 +65,11 @@ class WeaponBootstrapStateModule(BaseStateModule):
         self._integration_min_episodes = integration_min_episodes
         self._maintenance_regression_ratio = maintenance_regression_ratio
         self._maintenance_min_probe_episodes = maintenance_min_probe_episodes
+        self._deterministic_gate_max_eval_age_steps = deterministic_gate_max_eval_age_steps
+        self._deterministic_gate_enemy_phase_idx = deterministic_gate_enemy_phase_idx
 
-        # 全武器の状態を weapon_unlock_order順に初期化
         self._states: dict[int, WeaponBootstrapState] = {}
         for entry in weapon_unlock_order:
-            # initial_status のキーは entry.key と同じ文字列 (例: "garlic", "king_bible")
             status = "locked"
             if initial_status is not None and entry.key in initial_status:
                 status = initial_status[entry.key]
@@ -72,6 +83,60 @@ class WeaponBootstrapStateModule(BaseStateModule):
                 status=status,
                 best_phase2_p10=best_p10,
             )
+
+    def set_deterministic_result(
+        self,
+        weapon_id: int,
+        task_kind: str,
+        enemy_phase_idx: int,
+        p10: float,
+        episode_length_p10: float,
+        short_episode_rate: float,
+        num_timesteps: int,
+    ) -> None:
+        """BootstrapGateEvalCallback から deterministic eval 結果を注入する。
+
+        このメソッドは BootstrapGateEvalCallback から呼ばれる（Phase B で実装）。
+        Phase A では set_deterministic_result() を呼ぶ本番経路は存在しないが、
+        on_episode_end() 内の gate 判定はこのメソッドで注入された結果を参照する。
+        """
+        state = self._states.get(weapon_id)
+        if state is None:
+            return
+        state.deterministic_p10 = p10
+        state.deterministic_episode_length_p10 = episode_length_p10
+        state.deterministic_short_episode_rate = short_episode_rate
+        state.deterministic_eval_step = num_timesteps
+        state.deterministic_task_kind = task_kind
+        state.deterministic_enemy_phase_idx = enemy_phase_idx
+
+    def get_eval_build_policy(
+        self,
+        task_kind: str,
+        *,
+        current_stage_key: str | None = None,
+    ) -> str:
+        """eval 用の build_policy を task_kind と現在ステージに応じて返す。
+
+        integration 中は garlic が maintenance 済みかつアンロック済みなら
+        target_plus_anchor_if_unlocked を返す。
+        solo_bootstrap / maintenance は固定。
+        """
+        if task_kind == "integration" and current_stage_key is not None:
+            garlic_id = WeaponType.GARLIC
+            garlic_status = self.get_garlic_bootstrap_status()
+            unlocked_ids = get_unlocked_weapon_ids(current_stage_key, self._weapon_unlock_order)
+            garlic_unlocked = garlic_id in unlocked_ids
+            if garlic_status == "maintenance" and garlic_unlocked:
+                return "target_plus_anchor_if_unlocked"
+            return "target_only"
+
+        # solo_bootstrap / maintenance は固定
+        _POLICY = {
+            "solo_bootstrap": "target_only",
+            "maintenance": "target_plus_anchor_if_unlocked",
+        }
+        return _POLICY.get(task_kind, "target_only")
 
     def on_episode_end(
         self,
@@ -96,44 +161,86 @@ class WeaponBootstrapStateModule(BaseStateModule):
 
         status_changed = False
 
-        # phase2エピソードの場合のみ best_phase2_p10 を更新
-        if cell.enemy_phase_idx == 2:
-            if stats.active_score_p10 > state.best_phase2_p10:
-                state.best_phase2_p10 = stats.active_score_p10
-
         # solo_bootstrap 完了判定 (task_kind="solo_bootstrap" かつ phase2のみ)
         # phase0/1 のエピソード結果だけで integration へ昇格しないようにする
+        # 判定は deterministic 結果のみを使用（stochastic stats は episode_count のみ）
         if (state.status == "solo_bootstrap"
                 and cell.task_kind == "solo_bootstrap"
                 and cell.enemy_phase_idx == 2):
+
+            det_p10 = state.deterministic_p10
+            det_ep_len = state.deterministic_episode_length_p10
+            det_short = state.deterministic_short_episode_rate
+            det_step = state.deterministic_eval_step
+
+            # 鮮度チェック: None ガード + task_kind チェック + phase ずれ検知
+            det_fresh = (
+                det_p10 is not None
+                and det_ep_len is not None
+                and det_short is not None
+                and state.deterministic_task_kind == "solo_bootstrap"
+                and state.deterministic_enemy_phase_idx == self._deterministic_gate_enemy_phase_idx
+                and (
+                    self._deterministic_gate_max_eval_age_steps == 0  # 0 = 鮮度チェック無効
+                    or (num_timesteps - det_step) <= self._deterministic_gate_max_eval_age_steps
+                )
+            )
+
+            # exposure 数のみ stochastic（生存品質は deterministic 側で判定）
             ready = (
                 stats.episode_count >= self._solo_bootstrap_min_episodes
-                and stats.active_score_p10 >= self._solo_bootstrap_target_p10
-                and stats.episode_length_p10 >= self._solo_bootstrap_min_ep_len_p10
-                and stats.short_episode_rate <= self._solo_bootstrap_max_short_episode_rate
+                and det_fresh
+                and det_p10 >= self._solo_bootstrap_target_p10
+                and det_ep_len >= self._solo_bootstrap_min_ep_len_p10
+                and det_short <= self._solo_bootstrap_max_short_episode_rate
             )
             if ready:
                 state.status = "integration"
                 status_changed = True
+                # gate 通過時に best_phase2_p10 を deterministic 実力値に設定する
+                # （solo_bootstrap 中の stochastic 更新は行わないため、ここが唯一の設定タイミング）
+                state.best_phase2_p10 = det_p10
                 print(
                     f"[WeaponBootstrap] solo_bootstrap → integration: weapon_id={weapon_id}, "
-                    f"p10={stats.active_score_p10:.1f}, ep_len_p10={stats.episode_length_p10:.0f}, "
-                    f"short_rate={stats.short_episode_rate:.3f}"
+                    f"det_p10={det_p10:.1f}, det_ep_len={det_ep_len:.0f}, "
+                    f"det_short={det_short:.3f}"
                 )
 
         # integration 完了判定 (task_kind="integration" かつ phase2のみ)
         elif (state.status == "integration"
               and cell.task_kind == "integration"
               and cell.enemy_phase_idx == 2):
+
+            det_p10 = state.deterministic_p10
+            det_ep_len = state.deterministic_episode_length_p10
+            det_short = state.deterministic_short_episode_rate
+            det_step = state.deterministic_eval_step
+
+            # 鮮度チェック: None ガード + task_kind チェック + phase ずれ検知
+            det_fresh = (
+                det_p10 is not None
+                and det_ep_len is not None
+                and det_short is not None
+                and state.deterministic_task_kind == "integration"
+                and state.deterministic_enemy_phase_idx == self._deterministic_gate_enemy_phase_idx
+                and (
+                    self._deterministic_gate_max_eval_age_steps == 0
+                    or (num_timesteps - det_step) <= self._deterministic_gate_max_eval_age_steps
+                )
+            )
+
             solo_best = state.best_phase2_p10
-            if solo_best > 0:
-                regression_from_solo = 1.0 - stats.active_score_p10 / solo_best
+            regression_from_solo: float | None
+            if solo_best > 0 and det_fresh and det_p10 is not None:
+                regression_from_solo = 1.0 - det_p10 / solo_best
             else:
                 regression_from_solo = None
 
             ready = (
                 stats.episode_count >= self._integration_min_episodes
-                and stats.active_score_p10 >= self._integration_target_p10
+                and det_fresh
+                and det_p10 is not None
+                and det_p10 >= self._integration_target_p10
                 and solo_best > 0
                 and regression_from_solo is not None
                 and regression_from_solo <= self._integration_max_regression_from_solo
@@ -141,24 +248,52 @@ class WeaponBootstrapStateModule(BaseStateModule):
             if ready:
                 state.status = "maintenance"
                 status_changed = True
+                # integration → maintenance 遷移時に best_phase2_p10 を更新（高い方を採用）
+                state.best_phase2_p10 = max(state.best_phase2_p10, det_p10)
                 print(
                     f"[WeaponBootstrap] integration → maintenance: weapon_id={weapon_id}, "
-                    f"p10={stats.active_score_p10:.1f}, regression_from_solo={regression_from_solo:.3f}"
+                    f"det_p10={det_p10:.1f}, regression_from_solo={regression_from_solo:.3f}"
                 )
 
         # maintenance 状態で task_kind="maintenance" かつ phase2 の場合のみ regression_from_best を更新
         elif (state.status == "maintenance"
               and cell.task_kind == "maintenance"
               and cell.enemy_phase_idx == 2):
-            if state.best_phase2_p10 > 0:
+
+            det_p10 = state.deterministic_p10
+            det_step = state.deterministic_eval_step
+            det_ep_len = state.deterministic_episode_length_p10
+            det_short = state.deterministic_short_episode_rate
+
+            det_fresh = (
+                det_p10 is not None
+                and det_ep_len is not None
+                and det_short is not None
+                and state.deterministic_task_kind == "maintenance"
+                and state.deterministic_enemy_phase_idx == self._deterministic_gate_enemy_phase_idx
+                and (
+                    self._deterministic_gate_max_eval_age_steps == 0
+                    or (num_timesteps - det_step) <= self._deterministic_gate_max_eval_age_steps
+                )
+            )
+
+            if state.best_phase2_p10 > 0 and det_fresh:
                 if stats.episode_count >= self._maintenance_min_probe_episodes:
-                    regression = 1.0 - stats.active_score_p10 / state.best_phase2_p10
+                    # det_p10 が best を上回った場合は high-water mark を更新
+                    state.best_phase2_p10 = max(state.best_phase2_p10, det_p10)
+                    regression = 1.0 - det_p10 / state.best_phase2_p10
                     state.regression_from_best = regression
-                    if regression > self._maintenance_regression_ratio:
+                    if (regression > self._maintenance_regression_ratio
+                            and det_step != state.last_regression_eval_step):
+                        # P2 fix: 同一 eval 結果で複数カウントを防ぐ
                         state.regression_count += 1
+                        state.last_regression_eval_step = det_step
                 else:
-                    # maintenance_min_probe_episodes 未満ではregression未計算
+                    # episode_count が不足の場合は古い値をクリアして判定保留
                     state.regression_from_best = None
+            elif not det_fresh:
+                # task_kind/phase ずれ or 鮮度切れ: regression 判定不可
+                state.regression_from_best = None
 
         return status_changed
 
@@ -201,6 +336,13 @@ class WeaponBootstrapStateModule(BaseStateModule):
             "regression_from_best": state.regression_from_best,
             "regression_count": state.regression_count,
             "last_probe_step": state.last_probe_step,
+            "deterministic_p10": state.deterministic_p10,
+            "deterministic_episode_length_p10": state.deterministic_episode_length_p10,
+            "deterministic_short_episode_rate": state.deterministic_short_episode_rate,
+            "deterministic_eval_step": state.deterministic_eval_step,
+            "deterministic_task_kind": state.deterministic_task_kind,
+            "deterministic_enemy_phase_idx": state.deterministic_enemy_phase_idx,
+            "last_regression_eval_step": state.last_regression_eval_step,
         }
 
     def get_weapons_by_status(self, status: str) -> list[WeaponBootstrapState]:
@@ -224,6 +366,12 @@ class WeaponBootstrapStateModule(BaseStateModule):
             metrics[f"{prefix}/best_phase2_p10"] = state.best_phase2_p10
             metrics[f"{prefix}/regression_from_best"] = state.regression_from_best if state.regression_from_best is not None else 0.0
             metrics[f"{prefix}/regression_count"] = state.regression_count
+            metrics[f"{prefix}/deterministic_p10"] = state.deterministic_p10 if state.deterministic_p10 is not None else 0.0
+            metrics[f"{prefix}/deterministic_ep_len_p10"] = state.deterministic_episode_length_p10 if state.deterministic_episode_length_p10 is not None else 0.0
+            metrics[f"{prefix}/deterministic_short_rate"] = state.deterministic_short_episode_rate if state.deterministic_short_episode_rate is not None else 0.0
+            metrics[f"{prefix}/deterministic_eval_step"] = state.deterministic_eval_step
+            metrics[f"{prefix}/deterministic_enemy_phase_idx"] = state.deterministic_enemy_phase_idx if state.deterministic_enemy_phase_idx is not None else -1
+            metrics[f"{prefix}/last_regression_eval_step"] = state.last_regression_eval_step if state.last_regression_eval_step is not None else -1
         return metrics
 
     def export_state(self) -> dict:
@@ -240,6 +388,13 @@ class WeaponBootstrapStateModule(BaseStateModule):
                 "regression_from_best": state.regression_from_best,
                 "regression_count": state.regression_count,
                 "last_probe_step": state.last_probe_step,
+                "deterministic_p10": state.deterministic_p10,
+                "deterministic_episode_length_p10": state.deterministic_episode_length_p10,
+                "deterministic_short_episode_rate": state.deterministic_short_episode_rate,
+                "deterministic_eval_step": state.deterministic_eval_step,
+                "deterministic_task_kind": state.deterministic_task_kind,
+                "deterministic_enemy_phase_idx": state.deterministic_enemy_phase_idx,
+                "last_regression_eval_step": state.last_regression_eval_step,
             })
         return {"weapons": weapons}
 
@@ -263,3 +418,11 @@ class WeaponBootstrapStateModule(BaseStateModule):
             s.regression_from_best = w.get("regression_from_best")
             s.regression_count = int(w.get("regression_count", 0))
             s.last_probe_step = int(w.get("last_probe_step", 0))
+            # 新フィールド（欠損しても KeyError にしない）
+            s.deterministic_p10 = w.get("deterministic_p10")
+            s.deterministic_episode_length_p10 = w.get("deterministic_episode_length_p10")
+            s.deterministic_short_episode_rate = w.get("deterministic_short_episode_rate")
+            s.deterministic_eval_step = int(w.get("deterministic_eval_step", 0))
+            s.deterministic_task_kind = w.get("deterministic_task_kind")  # None をデフォルト
+            s.deterministic_enemy_phase_idx = w.get("deterministic_enemy_phase_idx")  # None をデフォルト
+            s.last_regression_eval_step = int(w.get("last_regression_eval_step", -1))  # -1 = 未カウント
