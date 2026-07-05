@@ -133,6 +133,20 @@ class TestBootstrapGateValidation:
         with pytest.raises(ValueError, match="bootstrap_gate_eval_port"):
             validate_bootstrap_gate_args(args, base_port=args.base_port)
 
+    def test_bootstrap_gate_eval_port_zero_raises(self):
+        """bootstrap_gate_eval_port=0 → ValueError。"""
+        from train import validate_bootstrap_gate_args
+        args = self._make_args_namespace(bootstrap_gate_eval_port=0, weapon_bootstrap_lanes=True)
+        with pytest.raises(ValueError, match="正の整数"):
+            validate_bootstrap_gate_args(args, base_port=args.base_port)
+
+    def test_bootstrap_gate_eval_port_negative_raises(self):
+        """bootstrap_gate_eval_port=-1 → ValueError。"""
+        from train import validate_bootstrap_gate_args
+        args = self._make_args_namespace(bootstrap_gate_eval_port=-1, weapon_bootstrap_lanes=True)
+        with pytest.raises(ValueError, match="正の整数"):
+            validate_bootstrap_gate_args(args, base_port=args.base_port)
+
     def test_no_port_no_bootstrap_gate_env(self):
         """--bootstrap-gate-eval-port が None のとき bootstrap_gate_eval_env は None のまま。"""
         args = self._make_args_namespace(

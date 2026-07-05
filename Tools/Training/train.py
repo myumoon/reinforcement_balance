@@ -191,6 +191,10 @@ def validate_bootstrap_gate_args(args: argparse.Namespace, *, base_port: int) ->
             )
     bgate_port = getattr(args, "bootstrap_gate_eval_port", None)
     if bgate_port is not None:
+        if bgate_port <= 0:
+            raise ValueError(
+                f"--bootstrap-gate-eval-port には正の整数を指定してください: {bgate_port}"
+            )
         _used = set(range(base_port, base_port + args.n_envs))
         if args.eval_port is not None:
             _used.add(args.eval_port)
@@ -1947,6 +1951,9 @@ def main() -> None:
                 integration_min_episodes=getattr(args, "integration_min_episodes", 40),
                 maintenance_regression_ratio=getattr(args, "maintenance_regression_ratio", 0.35),
                 maintenance_min_probe_episodes=getattr(args, "maintenance_min_probe_episodes", 20),
+                # eval_freq * 2 を鮮度上限に設定: 2 probe サイクル以内の結果だけを gate 判定に使う
+                # 0（無期限）だと set_params 失敗で古い結果が残り誤 gate 通過のリスクがある
+                deterministic_gate_max_eval_age_steps=args.eval_freq * 2,
             )
             if _resume_bootstrap_state is not None:
                 _weapon_bootstrap_module.import_state(_resume_bootstrap_state)
