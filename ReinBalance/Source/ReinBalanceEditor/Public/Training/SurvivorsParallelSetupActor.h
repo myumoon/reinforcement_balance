@@ -42,9 +42,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Training|Parallel")
 	int32 BasePort = 8767;
 
-	/** 評価 env のポート。0 の場合は評価 env を生成しない */
+	/** 主評価 env のポート。0 の場合は生成しない（後方互換） */
 	UPROPERTY(EditAnywhere, Category = "Training|Parallel")
 	int32 EvalPort = 8771;
+
+	/**
+	 * 追加評価 env のポート一覧（任意数）。
+	 * 各ポートに ASurvivorsGame + ASurvivorsHttpEnvService を 1 つずつスポーンする。
+	 * 例: bootstrap gate eval ポートを入れる。0 は無視する。
+	 */
+	UPROPERTY(EditAnywhere, Category = "Training|Parallel")
+	TArray<int32> ExtraEvalPorts;
 
 	// ── 表示設定 ──────────────────────────────────────────────────────────
 
@@ -82,6 +90,13 @@ public:
 	/** スポーン済み評価 Game（EvalPort=0 の場合は null）*/
 	UPROPERTY(VisibleAnywhere, Category = "Training|Debug")
 	TObjectPtr<ASurvivorsGame> EvalGame;
+
+	/**
+	 * ポート → Game のマップ（ExtraEvalPorts で実際にスポーンできたもののみ格納）。
+	 * TArray の index ずれを防ぐため TMap で管理する。
+	 */
+	UPROPERTY(VisibleAnywhere, Category = "Training|Debug")
+	TMap<int32, TObjectPtr<ASurvivorsGame>> ExtraEvalGameMap;
 
 	/** スポーン済み GameView（ViewPort=0 の場合は null）*/
 	UPROPERTY(VisibleAnywhere, Category = "Training|Debug")
