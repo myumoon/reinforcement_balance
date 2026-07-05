@@ -87,93 +87,51 @@ class TestBootstrapGateValidation:
 
     def test_p1_weapon_bootstrap_lanes_without_port_raises(self):
         """weapon_bootstrap_lanes + bootstrap_gate_eval_port 未指定 → ValueError。"""
-        args = self._make_args_namespace(
-            weapon_bootstrap_lanes=True,
-            bootstrap_gate_eval_port=None,
-        )
-
-        from train import _GAME_DEFAULTS
-        base_port = args.base_port
-
+        from train import validate_bootstrap_gate_args
+        args = self._make_args_namespace(weapon_bootstrap_lanes=True, bootstrap_gate_eval_port=None)
         with pytest.raises(ValueError, match="--bootstrap-gate-eval-port"):
-            # P1 fix のバリデーションロジックを直接実行
-            if (args.game == "survivors"
-                    and not args.dry_run
-                    and getattr(args, "weapon_bootstrap_lanes", False)
-                    and getattr(args, "bootstrap_gate_eval_port", None) is None):
-                raise ValueError(
-                    "--weapon-bootstrap-lanes を使用する場合は --bootstrap-gate-eval-port が必須です。\n"
-                    "例: --bootstrap-gate-eval-port 8769"
-                )
+            validate_bootstrap_gate_args(args, base_port=args.base_port)
 
     def test_p1_weapon_bootstrap_lanes_with_port_no_raise(self):
         """weapon_bootstrap_lanes + bootstrap_gate_eval_port 指定済み → ValueError が出ないこと。"""
-        args = self._make_args_namespace(
-            weapon_bootstrap_lanes=True,
-            bootstrap_gate_eval_port=8769,
-        )
+        from train import validate_bootstrap_gate_args
+        args = self._make_args_namespace(weapon_bootstrap_lanes=True, bootstrap_gate_eval_port=8769)
+        validate_bootstrap_gate_args(args, base_port=args.base_port)  # 例外なし
 
-        # P1 fix: 例外が出ないこと
-        if (args.game == "survivors"
-                and not args.dry_run
-                and getattr(args, "weapon_bootstrap_lanes", False)
-                and getattr(args, "bootstrap_gate_eval_port", None) is None):
-            pytest.fail("ValueError が発生するべきではない")
+    def test_weapon_bootstrap_lanes_with_eval_freq_zero_raises(self):
+        """weapon_bootstrap_lanes + eval_freq=0 → ValueError。"""
+        from train import validate_bootstrap_gate_args
+        args = self._make_args_namespace(
+            weapon_bootstrap_lanes=True, bootstrap_gate_eval_port=8769, eval_freq=0
+        )
+        with pytest.raises(ValueError, match="--eval-freq"):
+            validate_bootstrap_gate_args(args, base_port=args.base_port)
 
     def test_p1_dry_run_skips_validation(self):
         """dry_run=True のとき、weapon_bootstrap_lanes があっても ValueError が出ないこと。"""
+        from train import validate_bootstrap_gate_args
         args = self._make_args_namespace(
-            dry_run=True,
-            weapon_bootstrap_lanes=True,
-            bootstrap_gate_eval_port=None,
+            dry_run=True, weapon_bootstrap_lanes=True, bootstrap_gate_eval_port=None,
         )
-
-        # dry_run では P1 fix をスキップ
-        if (args.game == "survivors"
-                and not args.dry_run
-                and getattr(args, "weapon_bootstrap_lanes", False)
-                and getattr(args, "bootstrap_gate_eval_port", None) is None):
-            pytest.fail("dry_run のとき ValueError が発生するべきではない")
+        validate_bootstrap_gate_args(args, base_port=args.base_port)  # 例外なし
 
     def test_port_collision_with_eval_port_raises(self):
         """bootstrap_gate_eval_port が eval_port と重複 → ValueError。"""
+        from train import validate_bootstrap_gate_args
         args = self._make_args_namespace(
-            bootstrap_gate_eval_port=8771,  # eval_port と同じ
-            eval_port=8771,
+            bootstrap_gate_eval_port=8771, eval_port=8771, weapon_bootstrap_lanes=True,
         )
-        base_port = args.base_port
-
         with pytest.raises(ValueError, match="bootstrap_gate_eval_port"):
-            _bgate_port = args.bootstrap_gate_eval_port
-            _all_used = set(range(base_port, base_port + args.n_envs))
-            if args.eval_port is not None:
-                _all_used.add(args.eval_port)
-            if _bgate_port in _all_used:
-                raise ValueError(
-                    f"--bootstrap-gate-eval-port が他のポートと重複しています: "
-                    f"bootstrap_gate_eval_port={_bgate_port}, "
-                    f"eval_port={args.eval_port}"
-                )
+            validate_bootstrap_gate_args(args, base_port=args.base_port)
 
     def test_port_collision_with_train_port_raises(self):
         """bootstrap_gate_eval_port が train ports と重複 → ValueError。"""
+        from train import validate_bootstrap_gate_args
         args = self._make_args_namespace(
-            bootstrap_gate_eval_port=8767,  # base_port と同じ（train port 衝突）
-            eval_port=8771,
+            bootstrap_gate_eval_port=8767, eval_port=8771, weapon_bootstrap_lanes=True,
         )
-        base_port = args.base_port
-
         with pytest.raises(ValueError, match="bootstrap_gate_eval_port"):
-            _bgate_port = args.bootstrap_gate_eval_port
-            _all_used = set(range(base_port, base_port + args.n_envs))
-            if args.eval_port is not None:
-                _all_used.add(args.eval_port)
-            if _bgate_port in _all_used:
-                raise ValueError(
-                    f"--bootstrap-gate-eval-port が他のポートと重複しています: "
-                    f"bootstrap_gate_eval_port={_bgate_port}, "
-                    f"eval_port={args.eval_port}"
-                )
+            validate_bootstrap_gate_args(args, base_port=args.base_port)
 
     def test_no_port_no_bootstrap_gate_env(self):
         """--bootstrap-gate-eval-port が None のとき bootstrap_gate_eval_env は None のまま。"""

@@ -174,6 +174,33 @@ def _default_weapon_bootstrap_initial_status(
 
 
 
+def validate_bootstrap_gate_args(args: argparse.Namespace, *, base_port: int) -> None:
+    """bootstrap gate 関連の引数バリデーション。テストから直接呼べるよう独立関数として定義。"""
+    if args.game != "survivors" or args.dry_run:
+        return
+    if getattr(args, "weapon_bootstrap_lanes", False):
+        if getattr(args, "bootstrap_gate_eval_port", None) is None:
+            raise ValueError(
+                "--weapon-bootstrap-lanes を使用する場合は --bootstrap-gate-eval-port が必須です。\n"
+                "例: --bootstrap-gate-eval-port 8769"
+            )
+        if getattr(args, "eval_freq", 0) <= 0:
+            raise ValueError(
+                "--weapon-bootstrap-lanes を使用する場合は --eval-freq > 0 が必須です。\n"
+                "例: --eval-freq 50000"
+            )
+    bgate_port = getattr(args, "bootstrap_gate_eval_port", None)
+    if bgate_port is not None:
+        _used = set(range(base_port, base_port + args.n_envs))
+        if args.eval_port is not None:
+            _used.add(args.eval_port)
+        if bgate_port in _used:
+            raise ValueError(
+                f"--bootstrap-gate-eval-port が他のポートと重複しています: "
+                f"bootstrap_gate_eval_port={bgate_port}, eval_port={args.eval_port}"
+            )
+
+
 def _parse_step_shorthand(s: str) -> int:
     """200k/2M/2.5M/2_000k/200_000 などを int に変換する。
 
@@ -1118,28 +1145,7 @@ def main() -> None:
                 f"eval_port={args.eval_port}, train_ports={sorted(_train_ports)}"
             )
 
-    # P1 fix: weapon_bootstrap_lanes 有効時は --bootstrap-gate-eval-port が必須
-    if (args.game == "survivors"
-            and not args.dry_run
-            and getattr(args, "weapon_bootstrap_lanes", False)
-            and getattr(args, "bootstrap_gate_eval_port", None) is None):
-        raise ValueError(
-            "--weapon-bootstrap-lanes を使用する場合は --bootstrap-gate-eval-port が必須です。\n"
-            "例: --bootstrap-gate-eval-port 8769"
-        )
-
-    # bootstrap_gate_eval_port のポート衝突検査
-    if getattr(args, "bootstrap_gate_eval_port", None) is not None and args.game == "survivors" and not args.dry_run:
-        _bgate_port = args.bootstrap_gate_eval_port
-        _all_used = set(range(base_port, base_port + args.n_envs))
-        if args.eval_port is not None:
-            _all_used.add(args.eval_port)
-        if _bgate_port in _all_used:
-            raise ValueError(
-                f"--bootstrap-gate-eval-port が他のポートと重複しています: "
-                f"bootstrap_gate_eval_port={_bgate_port}, "
-                f"eval_port={args.eval_port}"
-            )
+    validate_bootstrap_gate_args(args, base_port=base_port)
 
     resume_status = {}
     model_zip_to_load = None
@@ -1953,7 +1959,6 @@ def main() -> None:
             "_weapon_bootstrap_module" in locals()
             and _weapon_bootstrap_module is not None
             and bootstrap_gate_eval_env is not None
-            and args.eval_freq > 0  # eval_freq=0 だと毎 step probe になるため防ぐ
         ):
             from games.survivors.bootstrap_gate_eval_callback import BootstrapGateEvalCallback
             _bootstrap_gate_cb = BootstrapGateEvalCallback(
