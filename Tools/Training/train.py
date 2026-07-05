@@ -189,6 +189,11 @@ def validate_bootstrap_gate_args(args: argparse.Namespace, *, base_port: int) ->
                 "--weapon-bootstrap-lanes を使用する場合は --eval-freq > 0 が必須です。\n"
                 "例: --eval-freq 50000"
             )
+        if getattr(args, "bootstrap_gate_eval_episodes", 0) <= 0:
+            raise ValueError(
+                "--bootstrap-gate-eval-episodes には 1 以上の整数を指定してください。\n"
+                "0 または負数を指定すると p10=0 の deterministic result が注入され、偽の regression が記録されます。"
+            )
     bgate_port = getattr(args, "bootstrap_gate_eval_port", None)
     if bgate_port is not None:
         if bgate_port <= 0:
@@ -1974,6 +1979,7 @@ def main() -> None:
                 weapon_unlock_order=_weapon_unlock_order,  # fix: WEAPON_UNLOCK_ORDER → _weapon_unlock_order
                 probe_freq=args.eval_freq,
                 n_probe_episodes=args.bootstrap_gate_eval_episodes,
+                short_episode_steps=args.weapon_unlock_short_episode_steps,
                 alive_reward=args.curriculum_alive_reward,
                 frame_skip=args.frame_skip,
                 enemy_phase_idx=2,

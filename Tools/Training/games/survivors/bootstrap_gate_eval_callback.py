@@ -69,6 +69,7 @@ class BootstrapGateEvalCallback(BaseCallback):
         enemy_phase_idx: int = 2,
         item_stage_key: str = "IS0",
         stage_key_provider: "Callable[[], str] | None" = None,
+        short_episode_steps: int = 600,
         wandb_logger=None,
         verbose: int = 0,
     ) -> None:
@@ -83,6 +84,7 @@ class BootstrapGateEvalCallback(BaseCallback):
         self._enemy_phase_idx = enemy_phase_idx
         self._item_stage_key = item_stage_key
         self._stage_key_provider = stage_key_provider  # 必ず代入（代入漏れで AttributeError 防止）
+        self._short_episode_steps = short_episode_steps
         self._wandb_logger = wandb_logger
         self._last_probe_step: int = 0
         self._id_to_key: dict[int, str] = {e.weapon_id: e.key for e in weapon_unlock_order}
@@ -215,6 +217,7 @@ class BootstrapGateEvalCallback(BaseCallback):
         )
 
         summary = summarize_eval_results(
+            short_episode_steps=self._short_episode_steps,
             cell_spec=cell_spec,
             episode_results=ep_results,
             deterministic=True,
