@@ -1953,12 +1953,13 @@ def main() -> None:
             "_weapon_bootstrap_module" in locals()
             and _weapon_bootstrap_module is not None
             and bootstrap_gate_eval_env is not None
+            and args.eval_freq > 0  # eval_freq=0 だと毎 step probe になるため防ぐ
         ):
             from games.survivors.bootstrap_gate_eval_callback import BootstrapGateEvalCallback
             _bootstrap_gate_cb = BootstrapGateEvalCallback(
                 weapon_bootstrap_module=_weapon_bootstrap_module,
                 eval_env=bootstrap_gate_eval_env,
-                weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+                weapon_unlock_order=_weapon_unlock_order,  # fix: WEAPON_UNLOCK_ORDER → _weapon_unlock_order
                 probe_freq=args.eval_freq,
                 n_probe_episodes=args.bootstrap_gate_eval_episodes,
                 alive_reward=args.curriculum_alive_reward,
