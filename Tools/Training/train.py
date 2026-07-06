@@ -2256,6 +2256,16 @@ def main() -> None:
                 except (BrokenPipeError, OSError):
                     pass
             # bootstrap gate env のクローズ（eval_env の有無と独立して実行）
+            # KeyboardInterrupt 等で on_training_end が呼ばれない場合でも、
+            # 非同期 probe worker を join してから env を close する
+            # （worker と env close の競合を防ぐ）
+            if '_bootstrap_gate_cb' in locals() and _bootstrap_gate_cb is not None:
+                if (hasattr(_bootstrap_gate_cb, '_probe_thread')
+                        and _bootstrap_gate_cb._probe_thread is not None):
+                    try:
+                        _bootstrap_gate_cb._probe_thread.join(timeout=30)
+                    except Exception:
+                        pass
             if bootstrap_gate_eval_env is not None:
                 try:
                     bootstrap_gate_eval_env.close()

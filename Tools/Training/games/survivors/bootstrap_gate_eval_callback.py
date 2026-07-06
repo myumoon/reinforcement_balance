@@ -54,6 +54,7 @@ class BootstrapGateEvalTarget:
     ue_params: dict
     snapshot_step: int
     snapshot_stage_key: str | None
+    build_policy: str | None = None
 
 
 @dataclass
@@ -258,6 +259,7 @@ class BootstrapGateEvalCallback(BaseCallback):
             ue_params=ue_params,
             snapshot_step=snapshot_step,
             snapshot_stage_key=current_stage_key,
+            build_policy=build_policy_override,
         )
 
     # ------------------------------------------------------------------
@@ -354,6 +356,23 @@ class BootstrapGateEvalCallback(BaseCallback):
                 print(
                     f"[BootstrapGateEval][WARN] weapon={target.weapon_key}: stage_key 変化 "
                     f"({target.snapshot_stage_key} -> {current_stage_key})、stale result を破棄"
+                )
+                return
+
+        # build_policy stale guard:
+        # integration eval の build_policy は garlic の bootstrap 状態にも依存するため、
+        # snapshot 撮影時と apply 時で build_policy が変化していたら（例: garlic が
+        # maintenance に到達して target_only → target_plus_anchor_if_unlocked に切り替わった）
+        # 古い条件で走った deterministic 結果を注入せず破棄する。
+        if target.build_policy is not None:
+            current_build_policy = self._weapon_bootstrap_module.get_eval_build_policy(
+                target.status,
+                current_stage_key=target.snapshot_stage_key,
+            )
+            if current_build_policy != target.build_policy:
+                print(
+                    f"[BootstrapGateEval][WARN] weapon={target.weapon_key}: build_policy 変化 "
+                    f"({target.build_policy} -> {current_build_policy})、stale result を破棄"
                 )
                 return
 
