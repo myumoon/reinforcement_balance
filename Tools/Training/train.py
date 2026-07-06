@@ -174,20 +174,36 @@ def _default_weapon_bootstrap_initial_status(
 
 
 
+def get_effective_bootstrap_gate_eval_freq(args: argparse.Namespace) -> int:
+    """bootstrap gate deterministic eval の実効実行間隔を返す。
+
+    --bootstrap-gate-eval-freq が指定されていればそれを使い、未指定なら eval_freq を使う。
+    """
+    freq = getattr(args, "bootstrap_gate_eval_freq", None)
+    return int(freq if freq is not None else getattr(args, "eval_freq", 0))
+
+
 def validate_bootstrap_gate_args(args: argparse.Namespace, *, base_port: int) -> None:
     """bootstrap gate 関連の引数バリデーション。テストから直接呼べるよう独立関数として定義。"""
     if args.game != "survivors" or args.dry_run:
         return
+    bgate_freq = getattr(args, "bootstrap_gate_eval_freq", None)
+    if bgate_freq is not None and bgate_freq <= 0:
+        raise ValueError(
+            f"--bootstrap-gate-eval-freq には正の整数を指定してください: {bgate_freq}"
+        )
     if getattr(args, "weapon_bootstrap_lanes", False):
         if getattr(args, "bootstrap_gate_eval_port", None) is None:
             raise ValueError(
                 "--weapon-bootstrap-lanes を使用する場合は --bootstrap-gate-eval-port が必須です。\n"
                 "例: --bootstrap-gate-eval-port 8769"
             )
-        if getattr(args, "eval_freq", 0) <= 0:
+        effective_gate_freq = get_effective_bootstrap_gate_eval_freq(args)
+        if effective_gate_freq <= 0:
             raise ValueError(
-                "--weapon-bootstrap-lanes を使用する場合は --eval-freq > 0 が必須です。\n"
-                "例: --eval-freq 50000"
+                "--weapon-bootstrap-lanes を使用する場合は gate probe の実行間隔が必要です。\n"
+                "--eval-freq または --bootstrap-gate-eval-freq に正の整数を指定してください。\n"
+                "例: --eval-freq 50000 もしくは --bootstrap-gate-eval-freq 200000"
             )
         if getattr(args, "bootstrap_gate_eval_episodes", 0) <= 0:
             raise ValueError(
@@ -1060,6 +1076,8 @@ def parse_args() -> argparse.Namespace:
                         "指定時は UE5 PIE をこのポートで起動しておくこと。")
     p.add_argument("--bootstrap-gate-eval-episodes", type=int, default=40,
                    help="bootstrap gate deterministic のエピソード数（default: 40）")
+    p.add_argument("--bootstrap-gate-eval-freq", type=int, default=None,
+                   help="bootstrap gate deterministic eval の実行間隔。未指定時は eval_freq を使う。")
 
     # YAML があればデフォルトを差し込む（CLI が常に優先）
     if pre_args.config:
@@ -1958,7 +1976,7 @@ def main() -> None:
                 maintenance_min_probe_episodes=getattr(args, "maintenance_min_probe_episodes", 20),
                 # eval_freq * 2 を鮮度上限に設定: 2 probe サイクル以内の結果だけを gate 判定に使う
                 # 0（無期限）だと set_params 失敗で古い結果が残り誤 gate 通過のリスクがある
-                deterministic_gate_max_eval_age_steps=args.eval_freq * 2,
+                deterministic_gate_max_eval_age_steps=get_effective_bootstrap_gate_eval_freq(args) * 2,
             )
             if _resume_bootstrap_state is not None:
                 _weapon_bootstrap_module.import_state(_resume_bootstrap_state)
@@ -1973,11 +1991,12 @@ def main() -> None:
             and bootstrap_gate_eval_env is not None
         ):
             from games.survivors.bootstrap_gate_eval_callback import BootstrapGateEvalCallback
+            _bootstrap_gate_probe_freq = get_effective_bootstrap_gate_eval_freq(args)
             _bootstrap_gate_cb = BootstrapGateEvalCallback(
                 weapon_bootstrap_module=_weapon_bootstrap_module,
                 eval_env=bootstrap_gate_eval_env,
                 weapon_unlock_order=_weapon_unlock_order,  # fix: WEAPON_UNLOCK_ORDER → _weapon_unlock_order
-                probe_freq=args.eval_freq,
+                probe_freq=_bootstrap_gate_probe_freq,
                 n_probe_episodes=args.bootstrap_gate_eval_episodes,
                 short_episode_steps=args.weapon_unlock_short_episode_steps,
                 alive_reward=args.curriculum_alive_reward,
@@ -1995,7 +2014,7 @@ def main() -> None:
             print(
                 f"[INFO] BootstrapGateEvalCallback 登録 "
                 f"(port={args.bootstrap_gate_eval_port}, "
-                f"probe_freq={args.eval_freq:,}, "
+                f"probe_freq={_bootstrap_gate_probe_freq:,}, "
                 f"n_episodes={args.bootstrap_gate_eval_episodes})"
             )
 
@@ -2237,6 +2256,16 @@ def main() -> None:
                 except (BrokenPipeError, OSError):
                     pass
             # bootstrap gate env のクローズ（eval_env の有無と独立して実行）
+            # KeyboardInterrupt 等で on_training_end が呼ばれない場合でも、
+            # 非同期 probe worker を join してから env を close する
+            # （worker と env close の競合を防ぐ）
+            if '_bootstrap_gate_cb' in locals() and _bootstrap_gate_cb is not None:
+                if (hasattr(_bootstrap_gate_cb, '_probe_thread')
+                        and _bootstrap_gate_cb._probe_thread is not None):
+                    try:
+                        _bootstrap_gate_cb._probe_thread.join(timeout=30)
+                    except Exception:
+                        pass
             if bootstrap_gate_eval_env is not None:
                 try:
                     bootstrap_gate_eval_env.close()

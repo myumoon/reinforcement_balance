@@ -15,7 +15,13 @@ if str(_TRAINING_ROOT) not in sys.path:
 
 import pytest
 
-from games.survivors.bootstrap_gate_eval_callback import BootstrapGateEvalCallback
+import time
+
+from games.survivors.bootstrap_gate_eval_callback import (
+    BootstrapGateEvalCallback,
+    BootstrapGateEvalTarget,
+    BootstrapGateEvalResult,
+)
 from games.survivors.modules.weapon_bootstrap_module import (
     WeaponBootstrapStateModule,
     WeaponBootstrapState,
@@ -79,8 +85,13 @@ def _make_callback(
     enemy_phase_idx: int = 2,
     stage_key_provider=None,
     wandb_logger=None,
+    async_eval: bool = False,
 ) -> BootstrapGateEvalCallback:
-    """テスト用の BootstrapGateEvalCallback を作成する。"""
+    """テスト用の BootstrapGateEvalCallback を作成する。
+
+    デフォルトは async_eval=False（同期）。同期経路のテストが多いため。
+    非同期経路のテストは async_eval=True を明示的に渡す。
+    """
     if eval_env is None:
         eval_env = _make_eval_env()
     return BootstrapGateEvalCallback(
@@ -94,6 +105,7 @@ def _make_callback(
         enemy_phase_idx=enemy_phase_idx,
         item_stage_key="IS0",
         stage_key_provider=stage_key_provider,
+        async_eval=async_eval,
         wandb_logger=wandb_logger,
     )
 
@@ -524,3 +536,365 @@ def test_set_params_failure_is_caught_in_run_probe_and_eval_continues():
     assert set_params_call_count == 2
     # 成功した1武器は eval が実行されること
     assert mock_run.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 3: _apply_result / stale guard / set_params error isolation
+# ---------------------------------------------------------------------------
+
+def _make_target(
+    weapon_key: str = "garlic",
+    weapon_id: int = WeaponType.GARLIC,
+    status: str = "solo_bootstrap",
+    snapshot_step: int = 12345,
+    snapshot_stage_key: str | None = None,
+) -> BootstrapGateEvalTarget:
+    return BootstrapGateEvalTarget(
+        weapon_key=weapon_key,
+        weapon_id=weapon_id,
+        status=status,
+        cell_spec=f"{weapon_key}:{status}:2",
+        ue_params={},
+        snapshot_step=snapshot_step,
+        snapshot_stage_key=snapshot_stage_key,
+    )
+
+
+def _make_summary(p10: float = 350.0) -> dict:
+    return {
+        "active_score_p10": p10,
+        "episode_length_p10": 1500.0,
+        "short_episode_rate": 0.0,
+    }
+
+
+def test_apply_result_uses_snapshot_step_for_deterministic_eval_step():
+    """_apply_result() が target.snapshot_step を deterministic_eval_step に入れること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module)
+    _setup_callback(cb, num_timesteps=99_999)
+
+    target = _make_target(snapshot_step=42_000)
+    result = BootstrapGateEvalResult(target=target, summary=_make_summary(), n_episodes=3)
+
+    cb._apply_result(result, log_step=cb.num_timesteps)
+
+    state = module._states[WeaponType.GARLIC]
+    # snapshot_step が eval_step に入り、num_timesteps ではないこと
+    assert state.deterministic_eval_step == 42_000
+    assert state.deterministic_p10 == 350.0
+
+
+def test_apply_result_discards_stale_status_change():
+    """status が変わった stale result は set_deterministic_result されないこと。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module)
+    _setup_callback(cb, num_timesteps=50_000)
+
+    # eval 時点は solo_bootstrap だったが、apply 時点で maintenance に変化
+    target = _make_target(status="solo_bootstrap", snapshot_step=40_000)
+    module._states[WeaponType.GARLIC].status = "maintenance"
+
+    result = BootstrapGateEvalResult(target=target, summary=_make_summary(), n_episodes=3)
+    cb._apply_result(result, log_step=cb.num_timesteps)
+
+    # 破棄されるので deterministic_p10 は更新されない
+    assert module._states[WeaponType.GARLIC].deterministic_p10 is None
+
+
+def test_apply_result_discards_on_stage_key_change():
+    """stage_key_provider の返り値が snapshot_stage_key と違えば破棄されること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    stage_key_provider = MagicMock(return_value="WU5")
+    cb = _make_callback(module, stage_key_provider=stage_key_provider)
+    _setup_callback(cb, num_timesteps=50_000)
+
+    target = _make_target(snapshot_step=40_000, snapshot_stage_key="WU1")
+    result = BootstrapGateEvalResult(target=target, summary=_make_summary(), n_episodes=3)
+    cb._apply_result(result, log_step=cb.num_timesteps)
+
+    assert module._states[WeaponType.GARLIC].deterministic_p10 is None
+
+
+def test_apply_result_error_is_skipped():
+    """error を持つ result は set_deterministic_result されずスキップされること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module)
+    _setup_callback(cb, num_timesteps=50_000)
+
+    target = _make_target(snapshot_step=40_000)
+    result = BootstrapGateEvalResult(
+        target=target, summary=None, n_episodes=0, error=RuntimeError("boom")
+    )
+    cb._apply_result(result, log_step=cb.num_timesteps)
+
+    assert module._states[WeaponType.GARLIC].deterministic_p10 is None
+
+
+def test_eval_target_set_params_failure_becomes_error_not_raise():
+    """set_params 失敗は target 単位 error になり raise されないこと。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    eval_env = _make_eval_env()
+    eval_env.env_method.return_value = [False]  # set_params 失敗
+    cb = _make_callback(module, eval_env=eval_env)
+    _setup_callback(cb, num_timesteps=10_000)
+
+    target = _make_target()
+    model = _make_model()
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes"
+    ) as mock_run:
+        result = cb._eval_target(target, model_snapshot=model)
+
+    # raise せず error に入ること
+    assert result.error is not None
+    assert isinstance(result.error, RuntimeError)
+    # eval は実行されないこと
+    mock_run.assert_not_called()
+
+
+def test_eval_target_error_does_not_stop_other_targets():
+    """1 target の set_params 失敗が他 target の eval を止めないこと（_eval_target 単位の分離）。"""
+    module = _make_module(
+        initial_status={"garlic": "solo_bootstrap", "king_bible": "solo_bootstrap"}
+    )
+    eval_env = _make_eval_env()
+    cb = _make_callback(module, eval_env=eval_env)
+    _setup_callback(cb, num_timesteps=10_000)
+
+    call_count = 0
+
+    def set_params_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return [call_count != 1]  # 1回目失敗、2回目成功
+
+    eval_env.env_method.side_effect = set_params_side_effect
+
+    t1 = _make_target(weapon_key="garlic", weapon_id=WeaponType.GARLIC)
+    t2 = _make_target(weapon_key="king_bible", weapon_id=WeaponType.KING_BIBLE)
+    model = _make_model()
+
+    fake_results = _make_fake_ep_results(3, active_score=350.0)
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        return_value=(fake_results, {}, None),
+    ):
+        r1 = cb._eval_target(t1, model_snapshot=model)
+        r2 = cb._eval_target(t2, model_snapshot=model)
+
+    assert r1.error is not None  # 1つ目失敗
+    assert r2.error is None       # 2つ目成功
+
+
+# ---------------------------------------------------------------------------
+# Task 4: async scheduling
+# ---------------------------------------------------------------------------
+
+def test_on_step_sync_calls_run_probe_when_async_disabled():
+    """async_eval=False では _on_step() が _run_probe() を呼ぶこと。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module, probe_freq=50_000, async_eval=False)
+    _setup_callback(cb, num_timesteps=0)
+
+    with patch.object(cb, "_run_probe") as mock_probe, \
+         patch.object(cb, "_start_probe_async_or_skip") as mock_async:
+        cb.num_timesteps = 50_000
+        cb._on_step()
+        mock_probe.assert_called_once()
+        mock_async.assert_not_called()
+
+
+def test_on_step_async_starts_thread_and_returns_immediately():
+    """async_eval=True で周期到達時に thread 起動し、_on_step が即返ること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module, probe_freq=50_000, async_eval=True)
+    _setup_callback(cb, num_timesteps=0)
+
+    with patch.object(cb, "_start_probe_async_or_skip") as mock_async, \
+         patch.object(cb, "_run_probe") as mock_sync:
+        cb.num_timesteps = 50_000
+        ret = cb._on_step()
+        assert ret is True
+        mock_async.assert_called_once()
+        mock_sync.assert_not_called()
+
+
+def test_start_probe_async_starts_worker_thread():
+    """_start_probe_async_or_skip() が worker thread を起動すること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    eval_env = _make_eval_env()
+    cb = _make_callback(module, eval_env=eval_env, async_eval=True)
+    model = _make_model()
+    # policy.predict がある model
+    model.policy = MagicMock()
+    _setup_callback(cb, model=model, num_timesteps=50_000)
+
+    fake_results = _make_fake_ep_results(3, active_score=350.0)
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        return_value=(fake_results, {}, None),
+    ):
+        cb._start_probe_async_or_skip()
+        assert cb._probe_thread is not None
+        cb._probe_thread.join(timeout=10)
+        assert not cb._probe_thread.is_alive()
+
+
+def test_async_skip_when_worker_in_flight():
+    """worker 走行中に次周期到達しても join されず skip metric がログされること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    wandb_logger = MagicMock()
+    wandb_logger.enabled = True
+    cb = _make_callback(module, async_eval=True, wandb_logger=wandb_logger)
+    _setup_callback(cb, num_timesteps=50_000)
+
+    # 走行中の thread を偽装
+    running_thread = MagicMock()
+    running_thread.is_alive.return_value = True
+    cb._probe_thread = running_thread
+
+    cb._start_probe_async_or_skip()
+
+    # skip metric がログされること
+    logged_keys = []
+    for c in wandb_logger.log.call_args_list:
+        logged_keys.extend(c.args[0].keys() if c.args else c.kwargs.get("data", {}).keys())
+    assert any("async_skipped_in_flight" in k for k in logged_keys)
+    # join されない（thread はそのまま）
+    running_thread.join.assert_not_called()
+
+
+def test_try_process_pending_applies_results_after_worker_done():
+    """worker 完了後 _try_process_pending_probe_result() が module を更新すること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module, async_eval=True)
+    _setup_callback(cb, num_timesteps=60_000)
+
+    # 完了済み thread を偽装
+    done_thread = MagicMock()
+    done_thread.is_alive.return_value = False
+    cb._probe_thread = done_thread
+    cb._probe_started_at = time.time()
+    cb._probe_snapshot_step = 50_000
+
+    q = __import__("queue").Queue()
+    target = _make_target(snapshot_step=50_000)
+    q.put([BootstrapGateEvalResult(target=target, summary=_make_summary(320.0), n_episodes=3)])
+    cb._probe_result_queue = q
+
+    cb._try_process_pending_probe_result()
+
+    state = module._states[WeaponType.GARLIC]
+    assert state.deterministic_p10 == 320.0
+    assert state.deterministic_eval_step == 50_000
+    # 内部状態がリセットされること
+    assert cb._probe_thread is None
+    assert cb._probe_result_queue is None
+
+
+def test_try_process_pending_noop_while_worker_alive():
+    """worker 走行中は _try_process_pending_probe_result() が何もしないこと。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module, async_eval=True)
+    _setup_callback(cb, num_timesteps=60_000)
+
+    alive_thread = MagicMock()
+    alive_thread.is_alive.return_value = True
+    cb._probe_thread = alive_thread
+
+    cb._try_process_pending_probe_result()
+
+    # thread はリセットされない
+    assert cb._probe_thread is alive_thread
+    assert module._states[WeaponType.GARLIC].deterministic_p10 is None
+
+
+def test_start_probe_processes_pending_result_before_overwrite():
+    """指摘1: 前回 thread が完了済みで pending result が残っている場合、
+    次の probe 起動前にその result を必ず取り込むこと（queue/thread 上書きによる消失を防ぐ）。
+
+    新 probe の起動有無に依存しないよう、_collect_targets() を空にして
+    「pending result を取り込んでから overwrite する」経路だけを検証する。
+    """
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module, async_eval=True)
+    _setup_callback(cb, num_timesteps=120_000)
+
+    # 前回の完了済み thread + 未処理の deterministic result を仕込む
+    done_thread = MagicMock()
+    done_thread.is_alive.return_value = False
+    cb._probe_thread = done_thread
+    cb._probe_started_at = time.time()
+    cb._probe_snapshot_step = 50_000
+
+    q = __import__("queue").Queue()
+    target = _make_target(snapshot_step=50_000)
+    q.put([BootstrapGateEvalResult(target=target, summary=_make_summary(315.0), n_episodes=3)])
+    cb._probe_result_queue = q
+
+    # 新しい probe は起動させない（target 無し）ことで pending 処理経路のみを検証
+    with patch.object(cb, "_collect_targets", return_value=[]):
+        cb._start_probe_async_or_skip()
+
+    # 前回 result が消えず module に適用され、queue/thread がクリアされていること
+    state = module._states[WeaponType.GARLIC]
+    assert state.deterministic_p10 == 315.0
+    assert state.deterministic_eval_step == 50_000
+    assert cb._probe_thread is None
+    assert cb._probe_result_queue is None
+
+
+def test_async_worker_exception_not_reraised():
+    """worker 内の例外が外に再 raise されず、result_queue に put されること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    eval_env = _make_eval_env()
+    cb = _make_callback(module, eval_env=eval_env, async_eval=True)
+    model = _make_model()
+    model.policy = MagicMock()
+    _setup_callback(cb, model=model, num_timesteps=50_000)
+
+    # _eval_target 自体を例外源にする（worker 全体の try/except を検証）
+    with patch.object(
+        cb, "_eval_target", side_effect=RuntimeError("worker crash")
+    ):
+        cb._start_probe_async_or_skip()  # 例外が外に出ないこと
+        assert cb._probe_thread is not None
+        cb._probe_thread.join(timeout=10)
+        assert not cb._probe_thread.is_alive()
+
+    # queue には（空でも）put されていること
+    assert cb._probe_result_queue is not None
+    assert not cb._probe_result_queue.empty()
+
+
+def test_on_training_end_joins_thread_and_processes():
+    """_on_training_end() が thread を join し残 result を処理すること。"""
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module, async_eval=True)
+    _setup_callback(cb, num_timesteps=70_000)
+
+    join_called = {"v": False}
+
+    class _FakeThread:
+        def join(self, *a, **k):
+            join_called["v"] = True
+
+        def is_alive(self):
+            # join 後は完了扱い
+            return not join_called["v"]
+
+    cb._probe_thread = _FakeThread()
+    cb._probe_started_at = time.time()
+    cb._probe_snapshot_step = 60_000
+
+    q = __import__("queue").Queue()
+    target = _make_target(snapshot_step=60_000)
+    q.put([BootstrapGateEvalResult(target=target, summary=_make_summary(310.0), n_episodes=3)])
+    cb._probe_result_queue = q
+
+    cb._on_training_end()
+
+    assert join_called["v"] is True
+    assert module._states[WeaponType.GARLIC].deterministic_p10 == 310.0
