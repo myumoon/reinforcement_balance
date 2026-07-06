@@ -296,3 +296,61 @@ class TestBootstrapGateCleanup:
         if bootstrap_gate_eval_env is not None:
             bootstrap_gate_eval_env.close()
         # ここに到達すれば OK（close が呼ばれていない）
+
+
+# ---------------------------------------------------------------------------
+# curriculum_spalf + eval_freq=0 の main() 統合バリデーション（指摘4 の修正）
+#
+# validate_bootstrap_gate_args() は eval_freq=0 + bootstrap_gate_eval_freq>0 を
+# 許可するが、curriculum_spalf=True の実使用経路では main() の
+# 「curriculum_spalf + eval_freq==0」チェックが先に走り、gate freq を指定しても
+# 拒否される（probe eval が eval_freq を必要とするため）。この end-to-end 制約を
+# main() を実際に呼び出して検証する。
+# ---------------------------------------------------------------------------
+class TestCurriculumSpalfEvalFreqValidation:
+    """curriculum_spalf=True + eval_freq=0 は bootstrap_gate_eval_freq を
+    指定しても main() で拒否されることを検証する統合テスト。"""
+
+    def test_curriculum_spalf_eval_freq_zero_with_gate_freq_raises_from_main(self, monkeypatch):
+        """curriculum_spalf=True + eval_freq=0 は bootstrap_gate_eval_freq を
+        指定しても拒否される。
+
+        curriculum_spalf の probe eval は eval_freq を使用するため eval_freq > 0 が
+        必要。この制約は main() の curriculum_spalf + eval_freq==0 チェックで強制され、
+        validate_bootstrap_gate_args() より前に走る。ここでは main() を実際に呼び、
+        gate freq を指定しても ValueError（--eval-freq 関連メッセージ）になることを確認する。
+        """
+        from train import main
+
+        monkeypatch.setattr(sys, "argv", [
+            "train.py", "--game", "survivors",
+            "--curriculum-spalf", "--eval-freq", "0",
+            "--bootstrap-gate-eval-freq", "200000",
+            "--n-envs", "2",  # curriculum_spalf requires n_envs > 1
+        ])
+        with pytest.raises(ValueError, match="--eval-freq"):
+            main()
+
+    def test_curriculum_spalf_eval_freq_positive_passes_gate_validation(self, monkeypatch):
+        """対照ケース: curriculum_spalf=True + eval_freq>0 は main() の
+        curriculum_spalf/eval_freq チェックを通過する（validate_bootstrap_gate_args
+        単体では curriculum_spalf を参照しない）。
+
+        validate_bootstrap_gate_args() は curriculum_spalf を参照しないため、
+        weapon_bootstrap_lanes 経由の port 必須チェックのみが対象になる。ここでは
+        port を明示して例外が出ないことを確認する。
+        """
+        from train import validate_bootstrap_gate_args
+
+        monkeypatch.setattr(sys, "argv", [
+            "train.py", "--game", "survivors",
+            "--curriculum-spalf", "--eval-freq", "50000",
+            "--bootstrap-gate-eval-port", "8769",
+            "--base-port", "8767",
+            "--n-envs", "2",
+        ])
+        args = parse_args()
+        # curriculum_spalf + eval_freq>0 は main() の L1113 相当チェックを通過する
+        assert not (args.curriculum_spalf and args.eval_freq == 0)
+        # validate_bootstrap_gate_args は curriculum_spalf 非依存で例外を出さない
+        validate_bootstrap_gate_args(args, base_port=args.base_port)
