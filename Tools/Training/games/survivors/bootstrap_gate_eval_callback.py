@@ -4,11 +4,19 @@ SurvivorsEvalCallback とは独立した BaseCallback サブクラス。
 probe_freq ごとに全対象武器（solo_bootstrap / integration / maintenance）の
 deterministic eval を実行し、WeaponBootstrapStateModule.set_deterministic_result() に
 結果を注入する。
+
+async_eval=True（デフォルト）の場合、eval はバックグラウンドスレッドで実行され、
+訓練ループをブロックしない。結果は次の _on_step() 周期でメインスレッドに取り込まれ、
+WeaponBootstrapStateModule へ注入される（module 更新はメインスレッドで実行される）。
 """
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING
+import queue
+import threading
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable
 
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecNormalize
@@ -31,6 +39,33 @@ except ImportError:
     _WANDB_AVAILABLE = False
 
 
+@dataclass(frozen=True)
+class BootstrapGateEvalTarget:
+    """1 武器分の eval を実行するために必要な情報（プラン）。
+
+    メインスレッドで構築し、非同期 worker はこれと policy snapshot だけを使って eval する。
+    module への参照は持たず、スレッド間で共有可能な immutable なプランに保つ。
+    """
+
+    weapon_key: str
+    weapon_id: int
+    status: str
+    cell_spec: str
+    ue_params: dict
+    snapshot_step: int
+    snapshot_stage_key: str | None
+
+
+@dataclass
+class BootstrapGateEvalResult:
+    """1 武器分の eval 結果。error があれば apply 時に破棄される。"""
+
+    target: BootstrapGateEvalTarget
+    summary: dict | None
+    n_episodes: int
+    error: Exception | None = None
+
+
 class BootstrapGateEvalCallback(BaseCallback):
     """Bootstrap Lane のゲート判定用 deterministic eval コールバック。
 
@@ -50,6 +85,8 @@ class BootstrapGateEvalCallback(BaseCallback):
         stage_key_provider:     現在の weapon unlock stage key を返す callable。
                                 integration の build_policy 判定に使用する。
                                 None の場合は各武器の unlock_stage_key をフォールバックとして使う。
+        short_episode_steps:    short episode 判定のステップ数。
+        async_eval:             True の場合 eval をバックグラウンドスレッドで実行する。
         wandb_logger:           W&B ロガー。None の場合はログなし。
         verbose:                詳細出力レベル。
     """
@@ -70,6 +107,7 @@ class BootstrapGateEvalCallback(BaseCallback):
         item_stage_key: str = "IS0",
         stage_key_provider: "Callable[[], str] | None" = None,
         short_episode_steps: int = 600,
+        async_eval: bool = True,
         wandb_logger=None,
         verbose: int = 0,
     ) -> None:
@@ -85,6 +123,7 @@ class BootstrapGateEvalCallback(BaseCallback):
         self._item_stage_key = item_stage_key
         self._stage_key_provider = stage_key_provider  # 必ず代入（代入漏れで AttributeError 防止）
         self._short_episode_steps = short_episode_steps
+        self._async_eval = async_eval
         self._wandb_logger = wandb_logger
         self._last_probe_step: int = 0
         self._id_to_key: dict[int, str] = {e.weapon_id: e.key for e in weapon_unlock_order}
@@ -93,11 +132,38 @@ class BootstrapGateEvalCallback(BaseCallback):
         self._solo_target_p10: float = weapon_bootstrap_module._solo_bootstrap_target_p10
         self._integration_target_p10: float = weapon_bootstrap_module._integration_target_p10
 
+        # 非同期 eval 用の内部状態
+        self._probe_thread: threading.Thread | None = None
+        self._probe_result_queue: queue.Queue | None = None
+        self._probe_started_at: float | None = None
+        self._probe_snapshot_step: int | None = None
+
+    # ------------------------------------------------------------------
+    # BaseCallback フック
+    # ------------------------------------------------------------------
+
     def _on_step(self) -> bool:
+        # 走行中の非同期 eval があれば定期的に取り込む
+        if self.n_calls % 64 == 0:
+            self._try_process_pending_probe_result()
+
         if self.num_timesteps - self._last_probe_step >= self._probe_freq:
             self._last_probe_step = self.num_timesteps
-            self._run_probe()
+            if self._async_eval:
+                self._start_probe_async_or_skip()
+            else:
+                self._run_probe()
         return True
+
+    def _on_training_end(self) -> None:
+        """訓練終了時、走行中の非同期 eval があれば join して結果を取り込む。"""
+        if self._probe_thread is not None:
+            self._probe_thread.join()
+        self._try_process_pending_probe_result()
+
+    # ------------------------------------------------------------------
+    # VecNormalize 同期
+    # ------------------------------------------------------------------
 
     def _sync_vecnormalize(self) -> None:
         """訓練側 VecNormalize の obs_rms/ret_rms を eval_env へコピーする。"""
@@ -121,10 +187,13 @@ class BootstrapGateEvalCallback(BaseCallback):
             eval_vecnorm.obs_rms = copy.deepcopy(train_vecnorm.obs_rms)
             eval_vecnorm.ret_rms = copy.deepcopy(train_vecnorm.ret_rms)
 
-    def _run_probe(self) -> None:
-        """全対象武器に deterministic eval を実行する。"""
-        # 対象ステータスの武器を全て収集
-        targets: list[tuple[str, int, str]] = []  # (weapon_key, weapon_id, status)
+    # ------------------------------------------------------------------
+    # ターゲット収集 / 構築 (plan)
+    # ------------------------------------------------------------------
+
+    def _collect_targets(self) -> list[tuple[str, int, str]]:
+        """対象ステータスの武器を (weapon_key, weapon_id, status) の raw タプルで列挙する。"""
+        targets: list[tuple[str, int, str]] = []
         for status in self._EVAL_STATUSES:
             for state in self._weapon_bootstrap_module.get_weapons_by_status(status):
                 weapon_key = self._id_to_key.get(state.weapon_id)
@@ -132,32 +201,16 @@ class BootstrapGateEvalCallback(BaseCallback):
                     print(f"[BootstrapGateEval][WARN] unknown weapon_id={state.weapon_id}, skip")
                     continue
                 targets.append((weapon_key, state.weapon_id, status))
+        return targets
 
-        if not targets:
-            return
-
-        self._sync_vecnormalize()
-
-        was_training = getattr(self._eval_env, "training", None)
-        try:
-            if was_training is not None:
-                self._eval_env.training = False
-
-            for weapon_key, weapon_id, status in targets:
-                try:
-                    self._eval_weapon(weapon_key, weapon_id, status)
-                except Exception as e:
-                    # 武器単位で握って訓練継続。この cycle は deterministic_p10 を更新しない
-                    print(
-                        f"[BootstrapGateEval][WARN] weapon={weapon_key}({weapon_id})"
-                        f"[{status}] failed: {e}"
-                    )
-        finally:
-            if was_training is not None:
-                self._eval_env.training = was_training
-
-    def _eval_weapon(self, weapon_key: str, weapon_id: int, status: str) -> None:
-        """単一武器の deterministic eval を実行して結果を注入する。
+    def _build_target(
+        self,
+        weapon_key: str,
+        weapon_id: int,
+        status: str,
+        snapshot_step: int,
+    ) -> BootstrapGateEvalTarget:
+        """1 武器分の eval プランを構築する（メインスレッドで実行）。
 
         cell_spec の task_kind は武器の現在のステータスに合わせる。
         integration の build_policy は weapon_bootstrap_module.get_eval_build_policy() で
@@ -165,7 +218,6 @@ class BootstrapGateEvalCallback(BaseCallback):
 
         BootstrapEvalCell が含まれないため、entry.unlock_stage_key から取得する。
         self._id_to_entry は __init__ 時に構築済みなので KeyError は起きない。
-        train.py の weapon_unlock_order と合わせて entry.unlock_stage_key を利用する。
         """
         entry = self._id_to_entry.get(weapon_id)
         if entry is None:
@@ -198,57 +250,301 @@ class BootstrapGateEvalCallback(BaseCallback):
             build_policy_override=build_policy_override,
         )
 
-        # set_params の戻り値をリストで返すため、全 env で成功したか確認する
-        set_params_results = self._eval_env.env_method("set_params", **ue_params)
-        if not all(set_params_results):
-            failed_indices = [i for i, ok in enumerate(set_params_results) if not ok]
-            raise RuntimeError(
-                f"[BootstrapGateEval] set_params が失敗しました（env indices: {failed_indices}）。"
-                f"前の武器の条件で eval が走るのを防ぐため、この武器の eval をスキップします。"
+        return BootstrapGateEvalTarget(
+            weapon_key=weapon_key,
+            weapon_id=weapon_id,
+            status=status,
+            cell_spec=cell_spec,
+            ue_params=ue_params,
+            snapshot_step=snapshot_step,
+            snapshot_stage_key=current_stage_key,
+        )
+
+    # ------------------------------------------------------------------
+    # eval 実行 (worker / sync 共通)
+    # ------------------------------------------------------------------
+
+    def _eval_target(
+        self,
+        target: BootstrapGateEvalTarget,
+        model_snapshot,
+        eval_env=None,
+    ) -> BootstrapGateEvalResult:
+        """1 武器分の deterministic eval を実行する。
+
+        set_params 失敗 / eval 例外はともに error フィールドに入れて返す（raise しない）。
+        これにより、非同期 worker が 1 武器の失敗で全体クラッシュしないようにする。
+        """
+        env = eval_env if eval_env is not None else self._eval_env
+        try:
+            # set_params の戻り値をリストで返すため、全 env で成功したか確認する
+            set_params_results = env.env_method("set_params", **target.ue_params)
+            if not all(set_params_results):
+                failed_indices = [i for i, ok in enumerate(set_params_results) if not ok]
+                raise RuntimeError(
+                    f"[BootstrapGateEval] set_params が失敗しました（env indices: {failed_indices}）。"
+                    f"前の武器の条件で eval が走るのを防ぐため、この武器の eval をスキップします。"
+                )
+
+            ep_results, _, _ = run_survivors_eval_episodes(
+                model=model_snapshot,
+                env=env,
+                n_eval_episodes=self._n_probe_episodes,
+                deterministic=True,
+                frame_skip=self._frame_skip,
+                alive_reward=self._alive_reward,
             )
 
-        ep_results, _, _ = run_survivors_eval_episodes(
-            model=self.model,
-            env=self._eval_env,
-            n_eval_episodes=self._n_probe_episodes,
-            deterministic=True,
-            frame_skip=self._frame_skip,
-            alive_reward=self._alive_reward,
-        )
+            summary = summarize_eval_results(
+                short_episode_steps=self._short_episode_steps,
+                cell_spec=target.cell_spec,
+                episode_results=ep_results,
+                deterministic=True,
+                model_path="",
+                global_timestep=target.snapshot_step,
+            )
+            return BootstrapGateEvalResult(
+                target=target,
+                summary=summary,
+                n_episodes=len(ep_results),
+            )
+        except Exception as e:  # noqa: BLE001 - target 単位で握って worker を継続させる
+            return BootstrapGateEvalResult(
+                target=target,
+                summary=None,
+                n_episodes=0,
+                error=e,
+            )
 
-        summary = summarize_eval_results(
-            short_episode_steps=self._short_episode_steps,
-            cell_spec=cell_spec,
-            episode_results=ep_results,
-            deterministic=True,
-            model_path="",
-            global_timestep=self.num_timesteps,
-        )
+    # ------------------------------------------------------------------
+    # 結果注入 (apply, メインスレッド専用)
+    # ------------------------------------------------------------------
+
+    def _apply_result(self, result: BootstrapGateEvalResult, log_step: int) -> None:
+        """eval 結果を WeaponBootstrapStateModule へ注入する（メインスレッドで実行）。
+
+        非同期 eval では snapshot 撮影から apply までの間に武器の状態が変化しうるため、
+        stale guard で古い結果を破棄する。
+        """
+        target = result.target
+        if result.error is not None:
+            print(
+                f"[BootstrapGateEval][WARN] weapon={target.weapon_key}({target.weapon_id})"
+                f"[{target.status}] failed: {result.error}"
+            )
+            return
+
+        # stale guard: 現在の状態が eval 時点と変わっていたら破棄する
+        state = self._weapon_bootstrap_module._states.get(target.weapon_id)
+        if state is None:
+            print(
+                f"[BootstrapGateEval][WARN] weapon={target.weapon_key}: current state なし、"
+                f"stale result を破棄"
+            )
+            return
+        if state.status != target.status:
+            print(
+                f"[BootstrapGateEval][WARN] weapon={target.weapon_key}: status 変化 "
+                f"({target.status} -> {state.status})、stale result を破棄"
+            )
+            return
+        if self._stage_key_provider is not None:
+            current_stage_key = self._stage_key_provider()
+            if current_stage_key != target.snapshot_stage_key:
+                print(
+                    f"[BootstrapGateEval][WARN] weapon={target.weapon_key}: stage_key 変化 "
+                    f"({target.snapshot_stage_key} -> {current_stage_key})、stale result を破棄"
+                )
+                return
+
+        summary = result.summary
         p10 = summary["active_score_p10"]
 
         self._weapon_bootstrap_module.set_deterministic_result(
-            weapon_id=weapon_id,
-            task_kind=status,  # どの task_kind の eval かを記録
+            weapon_id=target.weapon_id,
+            task_kind=target.status,  # どの task_kind の eval かを記録
             enemy_phase_idx=self._enemy_phase_idx,
             p10=p10,
             episode_length_p10=summary["episode_length_p10"],
             short_episode_rate=summary["short_episode_rate"],
-            num_timesteps=self.num_timesteps,
+            num_timesteps=target.snapshot_step,
         )
 
-        self._log_wandb(weapon_key, status, summary, len(ep_results))
+        self._log_wandb(
+            target.weapon_key, target.status, summary, result.n_episodes, step=log_step
+        )
 
         threshold = (
-            self._solo_target_p10 if status == "solo_bootstrap"
-            else self._integration_target_p10 if status == "integration"
+            self._solo_target_p10 if target.status == "solo_bootstrap"
+            else self._integration_target_p10 if target.status == "integration"
             else -1
         )
         threshold_str = f"{threshold:.1f}" if threshold >= 0 else "(regression-based)"
         print(
-            f"[BootstrapGateEval] weapon={weapon_key}[{status}], det_p10={p10:.1f}, "
+            f"[BootstrapGateEval] weapon={target.weapon_key}[{target.status}], det_p10={p10:.1f}, "
             f"ep_len_p10={summary['episode_length_p10']:.0f}, "
             f"threshold={threshold_str}"
         )
+
+    # ------------------------------------------------------------------
+    # 同期 probe（async_eval=False）
+    # ------------------------------------------------------------------
+
+    def _run_probe(self) -> None:
+        """全対象武器に deterministic eval を同期実行する。"""
+        raw_targets = self._collect_targets()
+        if not raw_targets:
+            return
+
+        self._sync_vecnormalize()
+
+        was_training = getattr(self._eval_env, "training", None)
+        try:
+            if was_training is not None:
+                self._eval_env.training = False
+
+            for weapon_key, weapon_id, status in raw_targets:
+                try:
+                    self._eval_weapon(weapon_key, weapon_id, status)
+                except Exception as e:
+                    # 武器単位で握って訓練継続。この cycle は deterministic_p10 を更新しない
+                    print(
+                        f"[BootstrapGateEval][WARN] weapon={weapon_key}({weapon_id})"
+                        f"[{status}] failed: {e}"
+                    )
+        finally:
+            if was_training is not None:
+                self._eval_env.training = was_training
+
+    def _eval_weapon(self, weapon_key: str, weapon_id: int, status: str) -> None:
+        """単一武器の deterministic eval を実行して結果を注入する（thin wrapper）。"""
+        target = self._build_target(
+            weapon_key, weapon_id, status, snapshot_step=self.num_timesteps
+        )
+        result = self._eval_target(target, model_snapshot=self.model)
+        if result.error is not None:
+            raise result.error
+        self._apply_result(result, log_step=self.num_timesteps)
+
+    # ------------------------------------------------------------------
+    # 非同期 probe（async_eval=True）
+    # ------------------------------------------------------------------
+
+    def _start_probe_async_or_skip(self) -> None:
+        """非同期 eval worker を起動する。既に走行中なら skip する。"""
+        if self._probe_thread is not None and self._probe_thread.is_alive():
+            self._log_wandb_scalar("bootstrap_gate/async_skipped_in_flight", 1)
+            print("[BootstrapGateEval] 前回の非同期 eval が走行中のため今周期は skip")
+            return
+
+        raw_targets = self._collect_targets()
+        if not raw_targets:
+            return
+
+        # snapshot をメインスレッドで撮る
+        self._sync_vecnormalize()
+        snapshot_step = self.num_timesteps
+        policy_snapshot = copy.deepcopy(self.model.policy)
+
+        built_targets: list[BootstrapGateEvalTarget] = []
+        for weapon_key, weapon_id, status in raw_targets:
+            try:
+                built_targets.append(
+                    self._build_target(weapon_key, weapon_id, status, snapshot_step=snapshot_step)
+                )
+            except Exception as e:  # noqa: BLE001 - target 構築失敗は skip して他を続行
+                print(
+                    f"[BootstrapGateEval][WARN] weapon={weapon_key}({weapon_id})"
+                    f"[{status}] target 構築失敗: {e}"
+                )
+
+        if not built_targets:
+            return
+
+        result_queue: queue.Queue = queue.Queue()
+        eval_env = self._eval_env
+
+        # worker が使う model は policy snapshot をラップした軽量オブジェクト。
+        # run_survivors_eval_episodes は model.predict を呼ぶので policy を持てば足りる。
+        class _PolicyModel:
+            def __init__(self, policy):
+                self.policy = policy
+
+            def predict(self, *args, **kwargs):
+                return self.policy.predict(*args, **kwargs)
+
+        model_snapshot = _PolicyModel(policy_snapshot)
+
+        def _worker():
+            results: list[BootstrapGateEvalResult] = []
+            was_training = getattr(eval_env, "training", None)
+            try:
+                if was_training is not None:
+                    eval_env.training = False
+                for target in built_targets:
+                    results.append(
+                        self._eval_target(target, model_snapshot=model_snapshot, eval_env=eval_env)
+                    )
+            except Exception as e:  # noqa: BLE001 - worker crash でも result を必ず put する
+                print(f"[BootstrapGateEval][WARN] 非同期 eval worker が例外で終了: {e}")
+            finally:
+                if was_training is not None:
+                    eval_env.training = was_training
+                # crash 時も含め必ず put（受信側が queue 空で待たないように）
+                result_queue.put(results)
+
+        thread = threading.Thread(target=_worker, name="bootstrap-gate-eval", daemon=True)
+        self._probe_result_queue = result_queue
+        self._probe_thread = thread
+        self._probe_started_at = time.time()
+        self._probe_snapshot_step = snapshot_step
+        thread.start()
+        self._log_wandb_scalar("bootstrap_gate/async_running", 1)
+
+    def _try_process_pending_probe_result(self) -> None:
+        """走行中の非同期 eval が完了していれば結果を取り込む。"""
+        if self._probe_thread is None:
+            return
+        if self._probe_thread.is_alive():
+            return
+
+        results: list[BootstrapGateEvalResult] = []
+        if self._probe_result_queue is not None:
+            try:
+                results = self._probe_result_queue.get_nowait()
+            except queue.Empty:
+                results = []
+
+        log_step = self.num_timesteps
+        for result in results:
+            self._apply_result(result, log_step=log_step)
+
+        # メトリクス（duration / age / errors）
+        if self._probe_started_at is not None:
+            duration = time.time() - self._probe_started_at
+            self._log_wandb_scalar("bootstrap_gate/async_duration_sec", duration)
+        if self._probe_snapshot_step is not None:
+            age = self.num_timesteps - self._probe_snapshot_step
+            self._log_wandb_scalar("bootstrap_gate/async_result_age_steps", age)
+        n_errors = sum(1 for r in results if r.error is not None)
+        self._log_wandb_scalar("bootstrap_gate/async_errors", n_errors)
+
+        # 内部状態をリセット
+        self._probe_thread = None
+        self._probe_result_queue = None
+        self._probe_started_at = None
+        self._probe_snapshot_step = None
+        self._log_wandb_scalar("bootstrap_gate/async_running", 0)
+
+    # ------------------------------------------------------------------
+    # W&B ロギング
+    # ------------------------------------------------------------------
+
+    def _log_wandb_scalar(self, key: str, value) -> None:
+        """単一スカラーを W&B へログする。logger が無効ならなにもしない。"""
+        if not (self._wandb_logger and self._wandb_logger.enabled):
+            return
+        self._wandb_logger.log({key: value}, step=self.num_timesteps)
 
     def _log_wandb(
         self,
@@ -256,6 +552,7 @@ class BootstrapGateEvalCallback(BaseCallback):
         status: str,
         summary: dict,
         n_episodes: int,
+        step: int | None = None,
     ) -> None:
         """W&B へ eval 結果をログする。"""
         if not (self._wandb_logger and self._wandb_logger.enabled):
@@ -281,5 +578,5 @@ class BootstrapGateEvalCallback(BaseCallback):
                 f"{prefix}/score_passed": score_passed,
                 f"{prefix}/n_episodes": n_episodes,
             },
-            step=self.num_timesteps,
+            step=step if step is not None else self.num_timesteps,
         )

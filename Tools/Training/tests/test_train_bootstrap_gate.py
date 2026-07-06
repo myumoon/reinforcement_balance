@@ -58,6 +58,41 @@ class TestBootstrapGateCliDefaults:
         args = parse_args()
         assert args.bootstrap_gate_eval_port == 8769
 
+    def test_bootstrap_gate_eval_freq_default_none(self, monkeypatch):
+        """--bootstrap-gate-eval-freq のデフォルトは None であること。"""
+        monkeypatch.setattr(sys, "argv", ["train.py", "--game", "survivors"])
+        args = parse_args()
+        assert args.bootstrap_gate_eval_freq is None
+
+    def test_bootstrap_gate_eval_freq_custom(self, monkeypatch):
+        """--bootstrap-gate-eval-freq を指定した値で設定できること。"""
+        monkeypatch.setattr(
+            sys, "argv",
+            ["train.py", "--game", "survivors", "--bootstrap-gate-eval-freq", "200000"]
+        )
+        args = parse_args()
+        assert args.bootstrap_gate_eval_freq == 200000
+
+
+# ---------------------------------------------------------------------------
+# get_effective_bootstrap_gate_eval_freq ヘルパー
+# ---------------------------------------------------------------------------
+
+class TestEffectiveBootstrapGateEvalFreq:
+    """get_effective_bootstrap_gate_eval_freq のテスト。"""
+
+    def test_uses_eval_freq_when_not_specified(self):
+        """bootstrap_gate_eval_freq が未指定なら eval_freq を返すこと。"""
+        from train import get_effective_bootstrap_gate_eval_freq
+        args = types.SimpleNamespace(bootstrap_gate_eval_freq=None, eval_freq=50_000)
+        assert get_effective_bootstrap_gate_eval_freq(args) == 50_000
+
+    def test_uses_bootstrap_gate_eval_freq_when_specified(self):
+        """bootstrap_gate_eval_freq が指定されていればそれを返すこと。"""
+        from train import get_effective_bootstrap_gate_eval_freq
+        args = types.SimpleNamespace(bootstrap_gate_eval_freq=200_000, eval_freq=50_000)
+        assert get_effective_bootstrap_gate_eval_freq(args) == 200_000
+
 
 # ---------------------------------------------------------------------------
 # バリデーション: P1 fix (weapon_bootstrap_lanes + missing port)
@@ -79,6 +114,7 @@ class TestBootstrapGateValidation:
             base_port=8767,
             port=None,
             eval_freq=10000,
+            bootstrap_gate_eval_freq=None,
             task_cell_sampler=True,
         )
         defaults.update(kwargs)
@@ -146,6 +182,30 @@ class TestBootstrapGateValidation:
         args = self._make_args_namespace(bootstrap_gate_eval_port=-1, weapon_bootstrap_lanes=True)
         with pytest.raises(ValueError, match="正の整数"):
             validate_bootstrap_gate_args(args, base_port=args.base_port)
+
+    def test_bootstrap_gate_eval_freq_zero_raises(self):
+        """bootstrap_gate_eval_freq=0 → ValueError。"""
+        from train import validate_bootstrap_gate_args
+        args = self._make_args_namespace(
+            bootstrap_gate_eval_port=8769, weapon_bootstrap_lanes=True,
+            bootstrap_gate_eval_freq=0,
+        )
+        with pytest.raises(ValueError, match="--bootstrap-gate-eval-freq"):
+            validate_bootstrap_gate_args(args, base_port=args.base_port)
+
+    def test_eval_freq_zero_with_bootstrap_gate_eval_freq_set_no_raise(self):
+        """eval_freq=0 でも bootstrap_gate_eval_freq が指定されていれば freq バリデーションで ValueError にならないこと。
+
+        weapon_bootstrap_lanes=False にして既存の eval_freq>0 必須チェックを回避する。
+        """
+        from train import validate_bootstrap_gate_args
+        args = self._make_args_namespace(
+            weapon_bootstrap_lanes=False,
+            bootstrap_gate_eval_port=None,
+            eval_freq=0,
+            bootstrap_gate_eval_freq=200_000,
+        )
+        validate_bootstrap_gate_args(args, base_port=args.base_port)  # 例外なし
 
     def test_no_port_no_bootstrap_gate_env(self):
         """--bootstrap-gate-eval-port が None のとき bootstrap_gate_eval_env は None のまま。"""
