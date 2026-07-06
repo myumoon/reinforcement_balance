@@ -811,6 +811,41 @@ def test_try_process_pending_noop_while_worker_alive():
     assert module._states[WeaponType.GARLIC].deterministic_p10 is None
 
 
+def test_start_probe_processes_pending_result_before_overwrite():
+    """指摘1: 前回 thread が完了済みで pending result が残っている場合、
+    次の probe 起動前にその result を必ず取り込むこと（queue/thread 上書きによる消失を防ぐ）。
+
+    新 probe の起動有無に依存しないよう、_collect_targets() を空にして
+    「pending result を取り込んでから overwrite する」経路だけを検証する。
+    """
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    cb = _make_callback(module, async_eval=True)
+    _setup_callback(cb, num_timesteps=120_000)
+
+    # 前回の完了済み thread + 未処理の deterministic result を仕込む
+    done_thread = MagicMock()
+    done_thread.is_alive.return_value = False
+    cb._probe_thread = done_thread
+    cb._probe_started_at = time.time()
+    cb._probe_snapshot_step = 50_000
+
+    q = __import__("queue").Queue()
+    target = _make_target(snapshot_step=50_000)
+    q.put([BootstrapGateEvalResult(target=target, summary=_make_summary(315.0), n_episodes=3)])
+    cb._probe_result_queue = q
+
+    # 新しい probe は起動させない（target 無し）ことで pending 処理経路のみを検証
+    with patch.object(cb, "_collect_targets", return_value=[]):
+        cb._start_probe_async_or_skip()
+
+    # 前回 result が消えず module に適用され、queue/thread がクリアされていること
+    state = module._states[WeaponType.GARLIC]
+    assert state.deterministic_p10 == 315.0
+    assert state.deterministic_eval_step == 50_000
+    assert cb._probe_thread is None
+    assert cb._probe_result_queue is None
+
+
 def test_async_worker_exception_not_reraised():
     """worker 内の例外が外に再 raise されず、result_queue に put されること。"""
     module = _make_module(initial_status={"garlic": "solo_bootstrap"})

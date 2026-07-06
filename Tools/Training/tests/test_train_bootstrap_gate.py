@@ -135,13 +135,24 @@ class TestBootstrapGateValidation:
         validate_bootstrap_gate_args(args, base_port=args.base_port)  # 例外なし
 
     def test_weapon_bootstrap_lanes_with_eval_freq_zero_raises(self):
-        """weapon_bootstrap_lanes + eval_freq=0 → ValueError。"""
+        """weapon_bootstrap_lanes + eval_freq=0 かつ gate freq 未指定 → ValueError。"""
         from train import validate_bootstrap_gate_args
         args = self._make_args_namespace(
-            weapon_bootstrap_lanes=True, bootstrap_gate_eval_port=8769, eval_freq=0
+            weapon_bootstrap_lanes=True, bootstrap_gate_eval_port=8769, eval_freq=0,
+            bootstrap_gate_eval_freq=None,
         )
         with pytest.raises(ValueError, match="--eval-freq"):
             validate_bootstrap_gate_args(args, base_port=args.base_port)
+
+    def test_weapon_bootstrap_lanes_eval_freq_zero_with_gate_freq_no_raise(self):
+        """weapon_bootstrap_lanes=True + eval_freq=0 でも bootstrap_gate_eval_freq が指定されていれば
+        gate probe freq が独立するため ValueError にならないこと（指摘2 の修正）。"""
+        from train import validate_bootstrap_gate_args
+        args = self._make_args_namespace(
+            weapon_bootstrap_lanes=True, bootstrap_gate_eval_port=8769, eval_freq=0,
+            bootstrap_gate_eval_freq=200_000,
+        )
+        validate_bootstrap_gate_args(args, base_port=args.base_port)  # 例外なし
 
     def test_p1_dry_run_skips_validation(self):
         """dry_run=True のとき、weapon_bootstrap_lanes があっても ValueError が出ないこと。"""

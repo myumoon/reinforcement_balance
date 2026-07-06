@@ -198,10 +198,12 @@ def validate_bootstrap_gate_args(args: argparse.Namespace, *, base_port: int) ->
                 "--weapon-bootstrap-lanes を使用する場合は --bootstrap-gate-eval-port が必須です。\n"
                 "例: --bootstrap-gate-eval-port 8769"
             )
-        if getattr(args, "eval_freq", 0) <= 0:
+        effective_gate_freq = get_effective_bootstrap_gate_eval_freq(args)
+        if effective_gate_freq <= 0:
             raise ValueError(
-                "--weapon-bootstrap-lanes を使用する場合は --eval-freq > 0 が必須です。\n"
-                "例: --eval-freq 50000"
+                "--weapon-bootstrap-lanes を使用する場合は gate probe の実行間隔が必要です。\n"
+                "--eval-freq または --bootstrap-gate-eval-freq に正の整数を指定してください。\n"
+                "例: --eval-freq 50000 もしくは --bootstrap-gate-eval-freq 200000"
             )
         if getattr(args, "bootstrap_gate_eval_episodes", 0) <= 0:
             raise ValueError(

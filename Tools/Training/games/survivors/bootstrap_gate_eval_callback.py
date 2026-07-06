@@ -431,7 +431,15 @@ class BootstrapGateEvalCallback(BaseCallback):
     # ------------------------------------------------------------------
 
     def _start_probe_async_or_skip(self) -> None:
-        """非同期 eval worker を起動する。既に走行中なら skip する。"""
+        """非同期 eval worker を起動する。既に走行中なら skip する。
+
+        起動前に、前回の完了済み thread の結果を必ず取り込む。これを怠ると
+        result_queue / thread を上書きしてしまい、前回の deterministic result が
+        失われる（_on_step の 64 周期ポーリングでまだ取り込まれていない場合に発生しうる）。
+        """
+        # 前回の完了済み結果を先に処理（queue/thread 上書きによる result 消失を防ぐ）
+        self._try_process_pending_probe_result()
+
         if self._probe_thread is not None and self._probe_thread.is_alive():
             self._log_wandb_scalar("bootstrap_gate/async_skipped_in_flight", 1)
             print("[BootstrapGateEval] 前回の非同期 eval が走行中のため今周期は skip")
