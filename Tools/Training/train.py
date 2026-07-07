@@ -1230,6 +1230,11 @@ def main() -> None:
     for d in [work_dir, log_dir, result_dir, model_steps_dir, vecnorm_dir, status_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
+    survivors_event_logger = None
+    if args.game == "survivors":
+        from games.survivors.run_event_logger import JsonlEventLogger
+        survivors_event_logger = JsonlEventLogger(log_dir / "survivors_run_events.jsonl")
+
     if not args.resume:
         existing_models = [
             *model_steps_dir.glob("model_*_steps.zip"),
@@ -2013,6 +2018,7 @@ def main() -> None:
                     else None
                 ),
                 wandb_logger=wandb_logger,
+                event_logger=survivors_event_logger,
                 maintenance_eval_every=args.bootstrap_gate_maintenance_eval_every,
             )
             callbacks.append(_bootstrap_gate_cb)
@@ -2041,6 +2047,7 @@ def main() -> None:
                 weapon_unlock_table_name=getattr(args, "weapon_unlock_table", "default_v1"),
                 weapon_bootstrap=_weapon_bootstrap_module,
                 weapon_bootstrap_sample_mix=_sample_mix if _weapon_bootstrap_module else None,
+                event_logger=survivors_event_logger,
             )
             callbacks.append(_tcs_cb)
             print(
