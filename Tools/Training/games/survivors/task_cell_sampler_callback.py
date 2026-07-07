@@ -23,6 +23,7 @@ from games.survivors.survivors_weapon_table import (
     build_weapon_params_for_cell,
     resolve_weapon_unlock_order,
 )
+from games.survivors.run_event_logger import JsonlEventLogger
 from games.survivors.survivors_curriculum import get_enemy_params_for_phase, PHASES
 
 if TYPE_CHECKING:
@@ -77,6 +78,7 @@ class TaskCellSamplerCallback(BaseCallback):
         weapon_unlock_table_name: str = "default_v1",
         weapon_bootstrap: "WeaponBootstrapStateModule | None" = None,
         weapon_bootstrap_sample_mix: "dict[str, float] | None" = None,
+        event_logger: "JsonlEventLogger | None" = None,
     ) -> None:
         super().__init__(verbose=0)
         self._hybrid_cb = hybrid_cb
@@ -95,6 +97,7 @@ class TaskCellSamplerCallback(BaseCallback):
         )
         self._weapon_unlock_table_name = weapon_unlock_table_name
         self._weapon_bootstrap = weapon_bootstrap
+        self._event_logger = event_logger.child("task_cell") if event_logger is not None else None
         self._weapon_bootstrap_sample_mix: dict[str, float] = (
             weapon_bootstrap_sample_mix
             if weapon_bootstrap_sample_mix is not None
@@ -114,6 +117,11 @@ class TaskCellSamplerCallback(BaseCallback):
         )
         self._last_status_save: int = -1
         self._status_save_freq: int = 10_000
+
+    def _write_event(self, event: str, payload: dict) -> None:
+        if self._event_logger is None:
+            return
+        self._event_logger.write(event, step=self.num_timesteps, payload=payload)
 
     def _on_training_start(self) -> None:
         n = self.training_env.num_envs
@@ -215,6 +223,16 @@ class TaskCellSamplerCallback(BaseCallback):
                     )
                     # status 遷移が発生したら候補セルを再構築
                     if status_changed:
+                        self._write_event(
+                            "bootstrap_status_changed",
+                            {
+                                "cell_key": active_cell.key(),
+                                "weapon_id": active_cell.first_weapon_id,
+                                "task_kind": active_cell.task_kind,
+                                "stage_key": self._weapon_unlock.current_stage_key,
+                                "snapshot": self._weapon_bootstrap.get_weapon_snapshot(active_cell.first_weapon_id),
+                            },
+                        )
                         min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
                         self._tcs.rebuild_bootstrap_candidate_cells(
                             stage_key=self._weapon_unlock.current_stage_key,
@@ -249,6 +267,14 @@ class TaskCellSamplerCallback(BaseCallback):
                     num_timesteps=self.num_timesteps,
                 )
             if event is not None:
+                self._write_event(
+                    "weapon_unlock_advanced",
+                    {
+                        "from_stage_key": event.from_stage_key,
+                        "to_stage_key": event.to_stage_key,
+                        "new_weapon_id": event.new_weapon_id,
+                    },
+                )
                 self._tcs.on_weapon_unlock_advanced(event)
                 if self._weapon_bootstrap is not None:
                     self._weapon_bootstrap.on_weapon_unlock_advanced(event)
@@ -336,6 +362,10 @@ class TaskCellSamplerCallback(BaseCallback):
                 min_episode_steps_by_phase=min_ep_steps,
                 weapon_bootstrap=self._weapon_bootstrap,
             )
+        self._write_event(
+            "enemy_phase_changed",
+            {"old_phase": old_phase, "new_phase": new_max_phase},
+        )
         print(
             f"[TaskCellSampler] 敵フェーズ変化を検出: {old_phase} → {new_max_phase}, "
             f"候補セルを再構築しました"
