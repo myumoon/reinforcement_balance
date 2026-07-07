@@ -26,6 +26,7 @@ from games.survivors.bootstrap_eval import (
     parse_cell_spec,
     summarize_eval_results,
 )
+from games.survivors.run_event_logger import JsonlEventLogger
 from games.survivors.survivors_eval_callback import run_survivors_eval_episodes
 from games.survivors.survivors_weapon_table import WeaponEntry
 
@@ -110,6 +111,7 @@ class BootstrapGateEvalCallback(BaseCallback):
         short_episode_steps: int = 600,
         async_eval: bool = True,
         wandb_logger=None,
+        event_logger: "JsonlEventLogger | None" = None,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose=verbose)
@@ -126,6 +128,7 @@ class BootstrapGateEvalCallback(BaseCallback):
         self._short_episode_steps = short_episode_steps
         self._async_eval = async_eval
         self._wandb_logger = wandb_logger
+        self._event_logger = event_logger.child("bootstrap_gate") if event_logger is not None else None
         self._last_probe_step: int = 0
         self._id_to_key: dict[int, str] = {e.weapon_id: e.key for e in weapon_unlock_order}
         self._id_to_entry: dict[int, WeaponEntry] = {e.weapon_id: e for e in weapon_unlock_order}
@@ -329,10 +332,26 @@ class BootstrapGateEvalCallback(BaseCallback):
         stale guard で古い結果を破棄する。
         """
         target = result.target
+        base_payload = {
+            "weapon_key": target.weapon_key,
+            "weapon_id": target.weapon_id,
+            "status": target.status,
+            "cell_spec": target.cell_spec,
+            "snapshot_step": target.snapshot_step,
+            "apply_step": log_step,
+            "snapshot_stage_key": target.snapshot_stage_key,
+            "build_policy": target.build_policy,
+            "n_episodes": result.n_episodes,
+        }
         if result.error is not None:
             print(
                 f"[BootstrapGateEval][WARN] weapon={target.weapon_key}({target.weapon_id})"
                 f"[{target.status}] failed: {result.error}"
+            )
+            self._write_event(
+                "error",
+                step=log_step,
+                payload={**base_payload, "error": str(result.error)},
             )
             return
 
@@ -349,6 +368,11 @@ class BootstrapGateEvalCallback(BaseCallback):
                 f"[BootstrapGateEval][WARN] weapon={target.weapon_key}: status 変化 "
                 f"({target.status} -> {state.status})、stale result を破棄"
             )
+            self._write_event(
+                "stale_status",
+                step=log_step,
+                payload={**base_payload, "current_status": state.status},
+            )
             return
         if self._stage_key_provider is not None:
             current_stage_key = self._stage_key_provider()
@@ -356,6 +380,11 @@ class BootstrapGateEvalCallback(BaseCallback):
                 print(
                     f"[BootstrapGateEval][WARN] weapon={target.weapon_key}: stage_key 変化 "
                     f"({target.snapshot_stage_key} -> {current_stage_key})、stale result を破棄"
+                )
+                self._write_event(
+                    "stale_stage",
+                    step=log_step,
+                    payload={**base_payload, "current_stage_key": current_stage_key},
                 )
                 return
 
@@ -374,6 +403,11 @@ class BootstrapGateEvalCallback(BaseCallback):
                     f"[BootstrapGateEval][WARN] weapon={target.weapon_key}: build_policy 変化 "
                     f"({target.build_policy} -> {current_build_policy})、stale result を破棄"
                 )
+                self._write_event(
+                    "stale_build_policy",
+                    step=log_step,
+                    payload={**base_payload, "current_build_policy": current_build_policy},
+                )
                 return
 
         summary = result.summary
@@ -387,6 +421,16 @@ class BootstrapGateEvalCallback(BaseCallback):
             episode_length_p10=summary["episode_length_p10"],
             short_episode_rate=summary["short_episode_rate"],
             num_timesteps=target.snapshot_step,
+        )
+        self._write_event(
+            "result",
+            step=log_step,
+            payload={
+                **base_payload,
+                "p10": p10,
+                "episode_length_p10": summary["episode_length_p10"],
+                "short_episode_rate": summary["short_episode_rate"],
+            },
         )
 
         self._log_wandb(
@@ -462,6 +506,14 @@ class BootstrapGateEvalCallback(BaseCallback):
         if self._probe_thread is not None and self._probe_thread.is_alive():
             self._log_wandb_scalar("bootstrap_gate/async_skipped_in_flight", 1)
             print("[BootstrapGateEval] 前回の非同期 eval が走行中のため今周期は skip")
+            self._write_event(
+                "skip_in_flight",
+                step=self.num_timesteps,
+                payload={
+                    "reason": "previous_probe_in_flight",
+                    "previous_snapshot_step": self._probe_snapshot_step,
+                },
+            )
             return
 
         raw_targets = self._collect_targets()
@@ -526,6 +578,25 @@ class BootstrapGateEvalCallback(BaseCallback):
         self._probe_started_at = time.time()
         self._probe_snapshot_step = snapshot_step
         thread.start()
+        self._write_event(
+            "started",
+            step=snapshot_step,
+            payload={
+                "snapshot_step": snapshot_step,
+                "target_count": len(built_targets),
+                "targets": [
+                    {
+                        "weapon_key": t.weapon_key,
+                        "weapon_id": t.weapon_id,
+                        "status": t.status,
+                        "cell_spec": t.cell_spec,
+                        "stage_key": t.snapshot_stage_key,
+                        "build_policy": t.build_policy,
+                    }
+                    for t in built_targets
+                ],
+            },
+        )
         self._log_wandb_scalar("bootstrap_gate/async_running", 1)
 
     def _try_process_pending_probe_result(self) -> None:
@@ -547,14 +618,28 @@ class BootstrapGateEvalCallback(BaseCallback):
             self._apply_result(result, log_step=log_step)
 
         # メトリクス（duration / age / errors）
+        duration: float | None = None
         if self._probe_started_at is not None:
             duration = time.time() - self._probe_started_at
             self._log_wandb_scalar("bootstrap_gate/async_duration_sec", duration)
+        age: int | None = None
         if self._probe_snapshot_step is not None:
             age = self.num_timesteps - self._probe_snapshot_step
             self._log_wandb_scalar("bootstrap_gate/async_result_age_steps", age)
         n_errors = sum(1 for r in results if r.error is not None)
         self._log_wandb_scalar("bootstrap_gate/async_errors", n_errors)
+
+        self._write_event(
+            "finished",
+            step=log_step,
+            payload={
+                "snapshot_step": self._probe_snapshot_step,
+                "result_count": len(results),
+                "error_count": n_errors,
+                "duration_sec": duration,
+                "age_steps": age,
+            },
+        )
 
         # 内部状態をリセット
         self._probe_thread = None
@@ -564,6 +649,14 @@ class BootstrapGateEvalCallback(BaseCallback):
         self._log_wandb_scalar("bootstrap_gate/async_running", 0)
 
     # ------------------------------------------------------------------
+    # イベントロギング
+    # ------------------------------------------------------------------
+
+    def _write_event(self, event: str, step: int, payload: dict) -> None:
+        if self._event_logger is None:
+            return
+        self._event_logger.write(event, step=step, payload=payload)
+
     # W&B ロギング
     # ------------------------------------------------------------------
 

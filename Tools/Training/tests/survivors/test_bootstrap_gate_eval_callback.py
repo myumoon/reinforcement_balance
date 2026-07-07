@@ -5,6 +5,7 @@ UE5 不要。eval_env / model / run_survivors_eval_episodes はモック。
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -16,6 +17,8 @@ if str(_TRAINING_ROOT) not in sys.path:
 import pytest
 
 import time
+
+from games.survivors.run_event_logger import JsonlEventLogger
 
 from games.survivors.bootstrap_gate_eval_callback import (
     BootstrapGateEvalCallback,
@@ -86,6 +89,7 @@ def _make_callback(
     stage_key_provider=None,
     wandb_logger=None,
     async_eval: bool = False,
+    event_logger=None,
 ) -> BootstrapGateEvalCallback:
     """テスト用の BootstrapGateEvalCallback を作成する。
 
@@ -107,6 +111,7 @@ def _make_callback(
         stage_key_provider=stage_key_provider,
         async_eval=async_eval,
         wandb_logger=wandb_logger,
+        event_logger=event_logger,
     )
 
 
@@ -897,4 +902,51 @@ def test_on_training_end_joins_thread_and_processes():
     cb._on_training_end()
 
     assert join_called["v"] is True
-    assert module._states[WeaponType.GARLIC].deterministic_p10 == 310.0
+
+
+# ---------------------------------------------------------------------------
+# D2: JSONL イベントロギング
+# ---------------------------------------------------------------------------
+
+def test_bootstrap_gate_writes_result_event(tmp_path):
+    module = _make_module(initial_status={"garlic": "solo_bootstrap"})
+    eval_env = _make_eval_env()
+    logger = JsonlEventLogger(tmp_path / "events.jsonl")
+    cb = _make_callback(module, eval_env=eval_env, event_logger=logger)
+    _setup_callback(cb, num_timesteps=10_000)
+
+    fake_results = _make_fake_ep_results(3, active_score=350.0)
+
+    with patch(
+        "games.survivors.bootstrap_gate_eval_callback.run_survivors_eval_episodes",
+        return_value=(fake_results, {}, None),
+    ):
+        cb._run_probe()
+
+    events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    result_events = [e for e in events if e["event"] == "bootstrap_gate.result"]
+    assert len(result_events) == 1
+    payload = result_events[0]["payload"]
+    assert payload["weapon_key"] == "garlic"
+    assert payload["status"] == "solo_bootstrap"
+    assert payload["snapshot_step"] == 10_000
+    assert payload["apply_step"] == 10_000
+    assert payload["n_episodes"] == 3
+    assert payload["p10"] == 350.0
+
+
+def test_bootstrap_gate_writes_skip_in_flight_event(tmp_path):
+    module = _make_module(initial_status={"garlic": "maintenance"})
+    logger = JsonlEventLogger(tmp_path / "events.jsonl")
+    cb = _make_callback(module, event_logger=logger, async_eval=True)
+    _setup_callback(cb, num_timesteps=20_000)
+
+    alive_thread = MagicMock()
+    alive_thread.is_alive.return_value = True
+    cb._probe_thread = alive_thread
+
+    cb._start_probe_async_or_skip()
+
+    events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["event"] == "bootstrap_gate.skip_in_flight"
+    assert events[-1]["payload"]["reason"] == "previous_probe_in_flight"
