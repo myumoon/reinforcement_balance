@@ -210,6 +210,8 @@ def validate_bootstrap_gate_args(args: argparse.Namespace, *, base_port: int) ->
                 "--bootstrap-gate-eval-episodes には 1 以上の整数を指定してください。\n"
                 "0 または負数を指定すると p10=0 の deterministic result が注入され、偽の regression が記録されます。"
             )
+    if getattr(args, "bootstrap_gate_maintenance_eval_every", 1) <= 0:
+        raise ValueError("--bootstrap-gate-maintenance-eval-every must be >= 1")
     bgate_port = getattr(args, "bootstrap_gate_eval_port", None)
     if bgate_port is not None:
         if bgate_port <= 0:
@@ -1078,6 +1080,8 @@ def parse_args() -> argparse.Namespace:
                    help="bootstrap gate deterministic のエピソード数（default: 40）")
     p.add_argument("--bootstrap-gate-eval-freq", type=int, default=None,
                    help="bootstrap gate deterministic eval の実行間隔。未指定時は eval_freq を使う。")
+    p.add_argument("--bootstrap-gate-maintenance-eval-every", type=int, default=1,
+                   help="maintenance 状態の bootstrap gate eval を N cycle に 1 回へ間引く。1 は従来通り毎回。")
 
     # YAML があればデフォルトを差し込む（CLI が常に優先）
     if pre_args.config:
@@ -2009,6 +2013,7 @@ def main() -> None:
                     else None
                 ),
                 wandb_logger=wandb_logger,
+                maintenance_eval_every=args.bootstrap_gate_maintenance_eval_every,
             )
             callbacks.append(_bootstrap_gate_cb)
             print(

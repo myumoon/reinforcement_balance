@@ -354,3 +354,32 @@ class TestCurriculumSpalfEvalFreqValidation:
         assert not (args.curriculum_spalf and args.eval_freq == 0)
         # validate_bootstrap_gate_args は curriculum_spalf 非依存で例外を出さない
         validate_bootstrap_gate_args(args, base_port=args.base_port)
+
+
+def test_bootstrap_gate_maintenance_eval_every_custom(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["train.py", "--bootstrap-gate-maintenance-eval-every", "3"],
+    )
+    args = parse_args()
+    assert args.bootstrap_gate_maintenance_eval_every == 3
+
+
+def test_bootstrap_gate_maintenance_eval_every_zero_raises():
+    import types
+    from train import validate_bootstrap_gate_args
+    args = types.SimpleNamespace(
+        game="survivors",
+        dry_run=False,
+        weapon_bootstrap_lanes=True,
+        bootstrap_gate_eval_port=8768,
+        bootstrap_gate_eval_episodes=10,
+        bootstrap_gate_eval_freq=200000,
+        bootstrap_gate_maintenance_eval_every=0,
+        eval_freq=200000,
+        task_cell_sampler=True,
+        n_envs=4,
+        eval_port=None,
+    )
+    with pytest.raises(ValueError, match="maintenance-eval-every"):
+        validate_bootstrap_gate_args(args, base_port=8769)

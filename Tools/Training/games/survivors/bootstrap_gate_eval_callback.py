@@ -112,6 +112,7 @@ class BootstrapGateEvalCallback(BaseCallback):
         async_eval: bool = True,
         wandb_logger=None,
         event_logger: "JsonlEventLogger | None" = None,
+        maintenance_eval_every: int = 1,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose=verbose)
@@ -129,6 +130,8 @@ class BootstrapGateEvalCallback(BaseCallback):
         self._async_eval = async_eval
         self._wandb_logger = wandb_logger
         self._event_logger = event_logger.child("bootstrap_gate") if event_logger is not None else None
+        self._maintenance_eval_every = max(int(maintenance_eval_every), 1)
+        self._probe_cycle_index = 0
         self._last_probe_step: int = 0
         self._id_to_key: dict[int, str] = {e.weapon_id: e.key for e in weapon_unlock_order}
         self._id_to_entry: dict[int, WeaponEntry] = {e.weapon_id: e for e in weapon_unlock_order}
@@ -197,12 +200,19 @@ class BootstrapGateEvalCallback(BaseCallback):
 
     def _collect_targets(self) -> list[tuple[str, int, str]]:
         """対象ステータスの武器を (weapon_key, weapon_id, status) の raw タプルで列挙する。"""
+        self._probe_cycle_index += 1
+        include_maintenance = (
+            self._maintenance_eval_every <= 1
+            or self._probe_cycle_index % self._maintenance_eval_every == 0
+        )
         targets: list[tuple[str, int, str]] = []
         for status in self._EVAL_STATUSES:
             for state in self._weapon_bootstrap_module.get_weapons_by_status(status):
                 weapon_key = self._id_to_key.get(state.weapon_id)
                 if weapon_key is None:
                     print(f"[BootstrapGateEval][WARN] unknown weapon_id={state.weapon_id}, skip")
+                    continue
+                if status == "maintenance" and not include_maintenance:
                     continue
                 targets.append((weapon_key, state.weapon_id, status))
         return targets

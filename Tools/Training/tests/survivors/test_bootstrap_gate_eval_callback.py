@@ -908,6 +908,25 @@ def test_on_training_end_joins_thread_and_processes():
 # D2: JSONL イベントロギング
 # ---------------------------------------------------------------------------
 
+def test_collect_targets_throttles_maintenance_every_two_cycles():
+    module = _make_module(initial_status={
+        "garlic": "maintenance",
+        "king_bible": "integration",
+    })
+    cb = _make_callback(module, async_eval=False)
+    cb._maintenance_eval_every = 2
+
+    first = cb._collect_targets()
+    second = cb._collect_targets()
+
+    first_statuses = [status for _, _, status in first]
+    second_statuses = [status for _, _, status in second]
+    assert "integration" in first_statuses
+    assert "maintenance" not in first_statuses
+    assert "integration" in second_statuses
+    assert "maintenance" in second_statuses
+
+
 def test_bootstrap_gate_writes_result_event(tmp_path):
     module = _make_module(initial_status={"garlic": "solo_bootstrap"})
     eval_env = _make_eval_env()
