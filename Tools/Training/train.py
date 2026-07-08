@@ -2108,6 +2108,11 @@ def main() -> None:
                 f"[INFO] SurvivorsRunSupervisorCallback 有効 "
                 f"(target_stage={args.bootstrap_target_stage_key}, post_bootstrap_mode={args.post_bootstrap_mode})"
             )
+            if args.post_bootstrap_mode == "combination_smoke":
+                print(
+                    "[INFO] post_bootstrap_mode=combination_smoke: "
+                    "Phase B 実装後に post_bootstrap_transition_requested フラグを確認してください。"
+                )
 
     if args.until_curriculum_complete:
         if curriculum_cb is None:

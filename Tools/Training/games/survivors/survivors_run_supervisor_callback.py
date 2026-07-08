@@ -48,7 +48,8 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
         self._stage_entered_step = self.num_timesteps
 
     def _on_step(self) -> bool:
-        if self.num_timesteps % self._check_freq != 0:
+        # n_calls は _on_step() 呼び出し回数のため VecEnv の n_envs 増分に依存しない
+        if self.n_calls % self._check_freq != 0:
             return True
 
         current_stage = self._weapon_unlock.current_stage_key
@@ -93,6 +94,7 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
                 return False
             if self._post_bootstrap_mode == "combination_smoke":
                 self._post_bootstrap_transition_requested = True
+                # Phase B: train.py 側で post_bootstrap_transition_requested を確認し遷移を実施する
                 return True
 
         return True

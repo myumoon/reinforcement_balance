@@ -23,6 +23,7 @@ def _setup(cb: SurvivorsRunSupervisorCallback, step: int):
     model.logger = MagicMock()
     cb.model = model
     cb.num_timesteps = step
+    cb.n_calls = step  # check_freq 判定に使用
     return cb
 
 
