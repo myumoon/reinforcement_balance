@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from games.survivors.modules.state_modules import BaseStateModule
-from games.survivors.survivors_weapon_table import WeaponEntry, get_added_weapon_id, get_unlocked_weapon_ids
+from games.survivors.survivors_weapon_table import WeaponEntry, get_added_weapon_id, get_unlocked_weapon_ids, get_unlocked_startable_weapon_ids
 from games.survivors.survivors_weapon_curriculum import WeaponType
 from typing import TYPE_CHECKING
 
@@ -296,6 +296,55 @@ class WeaponBootstrapStateModule(BaseStateModule):
                 state.regression_from_best = None
 
         return status_changed
+
+    def is_complete_through_stage(self, target_stage_key: str) -> bool:
+        unlocked_ids = get_unlocked_startable_weapon_ids(target_stage_key, self._weapon_unlock_order)
+        return all(
+            self._states[weapon_id].status == "maintenance"
+            for weapon_id in unlocked_ids
+            if weapon_id in self._states
+        )
+
+    def get_completion_snapshot(self, target_stage_key: str) -> dict:
+        unlocked_ids = get_unlocked_startable_weapon_ids(target_stage_key, self._weapon_unlock_order)
+        unfinished = []
+        weapons = []
+        for entry in self._weapon_unlock_order:
+            if entry.weapon_id not in unlocked_ids:
+                continue
+            state = self._states.get(entry.weapon_id)
+            if state is None:
+                continue
+            row = {
+                "weapon_key": entry.key,
+                "weapon_id": entry.weapon_id,
+                "status": state.status,
+            }
+            weapons.append(row)
+            if state.status != "maintenance":
+                unfinished.append(row)
+        return {
+            "target_stage_key": target_stage_key,
+            "complete": len(unfinished) == 0,
+            "weapons": weapons,
+            "unfinished_weapons": unfinished,
+        }
+
+    def get_regressed_weapons(self, max_regression_count: int) -> list[dict]:
+        rows = []
+        for entry in self._weapon_unlock_order:
+            state = self._states.get(entry.weapon_id)
+            if state is None:
+                continue
+            if state.regression_count > max_regression_count:
+                rows.append({
+                    "weapon_key": entry.key,
+                    "weapon_id": entry.weapon_id,
+                    "status": state.status,
+                    "regression_count": state.regression_count,
+                    "regression_from_best": state.regression_from_best,
+                })
+        return rows
 
     def maybe_advance_stage(
         self,

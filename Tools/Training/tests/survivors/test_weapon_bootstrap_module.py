@@ -1107,3 +1107,54 @@ def test_get_eval_build_policy_unknown_task_kind():
     """get_eval_build_policy() - 未知の task_kind は target_only を返す（デフォルト）。"""
     module = make_module()
     assert module.get_eval_build_policy("unknown_task", current_stage_key="WU0") == "target_only"
+
+
+def test_is_complete_through_stage_requires_all_unlocked_weapons_maintenance():
+    module = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={
+            "garlic": "maintenance",
+            "king_bible": "maintenance",
+            "magic_wand": "integration",
+        },
+    )
+
+    assert module.is_complete_through_stage("WU1") is True
+    assert module.is_complete_through_stage("WU2") is False
+
+
+def test_get_completion_snapshot_contains_unfinished_weapons():
+    module = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={
+            "garlic": "maintenance",
+            "king_bible": "integration",
+        },
+    )
+
+    snapshot = module.get_completion_snapshot("WU1")
+
+    assert snapshot["target_stage_key"] == "WU1"
+    assert snapshot["complete"] is False
+    assert snapshot["unfinished_weapons"] == [
+        {"weapon_key": "king_bible", "weapon_id": WeaponType.KING_BIBLE, "status": "integration"}
+    ]
+
+
+def test_get_regressed_weapons_filters_by_regression_count():
+    module = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={"garlic": "maintenance", "king_bible": "maintenance"},
+    )
+    module._states[WeaponType.GARLIC].regression_count = 1
+    module._states[WeaponType.KING_BIBLE].regression_count = 3
+
+    regressed = module.get_regressed_weapons(max_regression_count=2)
+
+    assert regressed == [{
+        "weapon_key": "king_bible",
+        "weapon_id": WeaponType.KING_BIBLE,
+        "status": "maintenance",
+        "regression_count": 3,
+        "regression_from_best": None,
+    }]

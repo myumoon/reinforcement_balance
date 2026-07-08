@@ -228,6 +228,28 @@ def validate_bootstrap_gate_args(args: argparse.Namespace, *, base_port: int) ->
             )
 
 
+def validate_survivors_supervisor_args(args: argparse.Namespace) -> None:
+    """survivors supervisor 関連の引数バリデーション。テストから直接呼べるよう独立関数として定義。"""
+    if not getattr(args, "survivors_supervisor", False):
+        return
+    if not getattr(args, "weapon_bootstrap_lanes", False):
+        raise ValueError("--survivors-supervisor requires --weapon-bootstrap-lanes")
+    if getattr(args, "survivors_supervisor_check_freq", 0) <= 0:
+        raise ValueError("--survivors-supervisor-check-freq must be >= 1")
+    if getattr(args, "bootstrap_max_regression_count", -1) < 0:
+        raise ValueError("--bootstrap-max-regression-count must be >= 0")
+    if getattr(args, "bootstrap_stage_timeout_steps", 0) < 0:
+        raise ValueError("--bootstrap-stage-timeout-steps must be >= 0 (use 0 to disable)")
+    from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER as _WUO
+    _valid_stage_keys = {e.unlock_stage_key for e in _WUO}
+    _target = getattr(args, "bootstrap_target_stage_key", "WU12")
+    if _target not in _valid_stage_keys:
+        raise ValueError(
+            f"--bootstrap-target-stage-key {_target!r} は不正です。"
+            f"有効値: {sorted(_valid_stage_keys)}"
+        )
+
+
 def _parse_step_shorthand(s: str) -> int:
     """200k/2M/2.5M/2_000k/200_000 などを int に変換する。
 
@@ -421,6 +443,7 @@ def _save_training_status(
     task_cell_sampler_module=None,
     weapon_unlock_module=None,
     weapon_bootstrap_module=None,
+    survivors_supervisor_cb=None,
 ) -> None:
     # run_dir からの相対パスで記録することで新旧両構成に対応
     def _rel(p: Path) -> str:
@@ -444,6 +467,7 @@ def _save_training_status(
         "task_cell_sampler": task_cell_sampler_module.export_state() if task_cell_sampler_module is not None else None,
         "weapon_unlock": weapon_unlock_module.export_state() if weapon_unlock_module is not None else None,
         "weapon_bootstrap": weapon_bootstrap_module.export_state() if weapon_bootstrap_module is not None else None,
+        "survivors_supervisor": survivors_supervisor_cb.export_state() if survivors_supervisor_cb is not None else None,
     }
     if exit_reason is not None:
         data["last_exit_reason"] = exit_reason
@@ -1083,6 +1107,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bootstrap-gate-maintenance-eval-every", type=int, default=1,
                    help="maintenance 状態の bootstrap gate eval を N cycle に 1 回へ間引く。1 は従来通り毎回。")
 
+    # Survivors long-run supervisor 関連
+    p.add_argument("--survivors-supervisor", action="store_true",
+                   help="Survivors の長期 run supervisor を有効化する。")
+    p.add_argument("--bootstrap-target-stage-key", type=str, default="WU12",
+                   help="全武器 bootstrap 完走判定の target stage key。")
+    p.add_argument("--post-bootstrap-mode", type=str, default="stop",
+                   choices=["stop", "combination_smoke"],
+                   help="bootstrap 完了後の動作。stop は停止、combination_smoke は B-smoke へ遷移要求。")
+    p.add_argument("--survivors-supervisor-check-freq", type=int, default=2048,
+                   help="supervisor の判定間隔 step。")
+    p.add_argument("--bootstrap-stage-timeout-steps", type=int, default=2_000_000,
+                   help="同一 bootstrap stage に滞留できる最大 step。0 で無効。")
+    p.add_argument("--bootstrap-max-regression-count", type=int, default=3,
+                   help="maintenance regression_count がこの値を超えたら停止する。")
+
     # YAML があればデフォルトを差し込む（CLI が常に優先）
     if pre_args.config:
         from common.config import load_yaml_config, apply_yaml_defaults
@@ -1152,6 +1191,7 @@ def main() -> None:
 
     if args.weapon_bootstrap_lanes and not args.task_cell_sampler:
         raise ValueError("--weapon-bootstrap-lanes requires --task-cell-sampler")
+    validate_survivors_supervisor_args(args)
     if args.n_envs > 1 and args.game != "survivors":
         raise ValueError("--n-envs > 1 は survivors ゲームのみ対応しています")
     if args.n_envs > 1 and args.dry_run:
@@ -2058,6 +2098,38 @@ def main() -> None:
                 f"weapon_bootstrap_lanes={getattr(args, 'weapon_bootstrap_lanes', False)})"
             )
 
+        # SurvivorsRunSupervisorCallback の登録（長期 run の完走・停止監視）
+        _survivors_supervisor_cb = None
+        if (
+            args.game == "survivors"
+            and getattr(args, "survivors_supervisor", False)
+            and "_weapon_unlock_module" in locals()
+            and _weapon_unlock_module is not None
+            and "_weapon_bootstrap_module" in locals()
+            and _weapon_bootstrap_module is not None
+        ):
+            from games.survivors.survivors_run_supervisor_callback import SurvivorsRunSupervisorCallback
+            _survivors_supervisor_cb = SurvivorsRunSupervisorCallback(
+                weapon_unlock=_weapon_unlock_module,
+                weapon_bootstrap=_weapon_bootstrap_module,
+                target_stage_key=args.bootstrap_target_stage_key,
+                post_bootstrap_mode=args.post_bootstrap_mode,
+                check_freq=args.survivors_supervisor_check_freq,
+                stage_timeout_steps=args.bootstrap_stage_timeout_steps,
+                max_regression_count=args.bootstrap_max_regression_count,
+                event_logger=survivors_event_logger,
+            )
+            callbacks.append(_survivors_supervisor_cb)
+            print(
+                f"[INFO] SurvivorsRunSupervisorCallback 有効 "
+                f"(target_stage={args.bootstrap_target_stage_key}, post_bootstrap_mode={args.post_bootstrap_mode})"
+            )
+            if args.post_bootstrap_mode == "combination_smoke":
+                print(
+                    "[INFO] post_bootstrap_mode=combination_smoke: "
+                    "Phase B 実装後に post_bootstrap_transition_requested フラグを確認してください。"
+                )
+
     if args.until_curriculum_complete:
         if curriculum_cb is None:
             raise ValueError("--until-curriculum-complete には survivors の --curriculum が必要です")
@@ -2164,6 +2236,7 @@ def main() -> None:
             task_cell_sampler_module=_task_cell_sampler_module,
             weapon_unlock_module=_weapon_unlock_module,
             weapon_bootstrap_module=_weapon_bootstrap_module if '_weapon_bootstrap_module' in locals() else None,
+            survivors_supervisor_cb=_survivors_supervisor_cb if '_survivors_supervisor_cb' in locals() else None,
         )
 
     checkpoint_cb = _RunCheckpointCallback(
@@ -2200,6 +2273,11 @@ def main() -> None:
                     reset_num_timesteps=reset_timesteps)
         if curriculum_completion_cb is not None and curriculum_completion_cb.completed:
             exit_reason = "curriculum_complete"
+        if '_survivors_supervisor_cb' in locals() and _survivors_supervisor_cb is not None:
+            supervisor_state = _survivors_supervisor_cb.export_state()
+            supervisor_exit_reason = supervisor_state.get("exit_reason")
+            if supervisor_exit_reason:
+                exit_reason = f"survivors_supervisor:{supervisor_exit_reason}"
     except KeyboardInterrupt:
         exit_reason = "keyboard_interrupt"
         print("\n[INFO] 訓練を中断しました。モデルを保存します...")
