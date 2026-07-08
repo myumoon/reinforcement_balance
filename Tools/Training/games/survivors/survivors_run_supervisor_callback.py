@@ -72,18 +72,7 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
             self._write_event("blocked", {"reason": self._exit_reason, **self._exit_payload})
             return False
 
-        stage_age = self.num_timesteps - self._stage_entered_step
-        if self._stage_timeout_steps > 0 and stage_age > self._stage_timeout_steps:
-            self._exit_reason = "bootstrap_stage_timeout"
-            self._exit_payload = {
-                "stage_key": current_stage,
-                "stage_age_steps": stage_age,
-                "timeout_steps": self._stage_timeout_steps,
-                "completion": self._weapon_bootstrap.get_completion_snapshot(self._target_stage_key),
-            }
-            self._write_event("blocked", {"reason": self._exit_reason, **self._exit_payload})
-            return False
-
+        # completion を timeout より先に評価する（完走済みなら timeout は無視）
         snapshot = self._weapon_bootstrap.get_completion_snapshot(self._target_stage_key)
         if snapshot["complete"]:
             self._bootstrap_complete = True
@@ -99,6 +88,18 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
                 self._exit_reason = "bootstrap_complete_combination_smoke_requested"
                 self._exit_payload = snapshot
                 return False
+
+        stage_age = self.num_timesteps - self._stage_entered_step
+        if self._stage_timeout_steps > 0 and stage_age > self._stage_timeout_steps:
+            self._exit_reason = "bootstrap_stage_timeout"
+            self._exit_payload = {
+                "stage_key": current_stage,
+                "stage_age_steps": stage_age,
+                "timeout_steps": self._stage_timeout_steps,
+                "completion": snapshot,
+            }
+            self._write_event("blocked", {"reason": self._exit_reason, **self._exit_payload})
+            return False
 
         return True
 

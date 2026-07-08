@@ -56,6 +56,33 @@ def test_supervisor_stops_when_bootstrap_complete(tmp_path):
     assert events[-1]["event"] == "survivors_supervisor.bootstrap_complete"
 
 
+def test_supervisor_complete_takes_priority_over_timeout():
+    bootstrap = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={
+            "garlic": "maintenance",
+            "king_bible": "maintenance",
+            "magic_wand": "maintenance",
+        },
+    )
+    unlock = WeaponUnlockStateModule(initial_stage_key="WU2", weapon_unlock_order=WEAPON_UNLOCK_ORDER)
+    cb = SurvivorsRunSupervisorCallback(
+        weapon_unlock=unlock,
+        weapon_bootstrap=bootstrap,
+        target_stage_key="WU2",
+        post_bootstrap_mode="stop",
+        check_freq=1,
+        stage_timeout_steps=100,
+    )
+    _setup(cb, step=101)  # stage_age > timeout だが全武器 maintenance 済み
+
+    assert cb._on_step() is False
+    state = cb.export_state()
+    assert state["exit_reason"] == "bootstrap_complete", (
+        f"完走済みなのに timeout が優先された: {state['exit_reason']}"
+    )
+
+
 def test_supervisor_stops_when_bootstrap_complete_combination_smoke(tmp_path):
     bootstrap = WeaponBootstrapStateModule(
         weapon_unlock_order=WEAPON_UNLOCK_ORDER,
