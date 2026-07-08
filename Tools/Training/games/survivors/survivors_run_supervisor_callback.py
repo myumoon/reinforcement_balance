@@ -93,9 +93,12 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
                 self._exit_payload = snapshot
                 return False
             if self._post_bootstrap_mode == "combination_smoke":
+                # Phase B が未実装のため training を停止する。
+                # train.py は exit_reason と post_bootstrap_transition_requested を確認し遷移を実施する。
                 self._post_bootstrap_transition_requested = True
-                # Phase B: train.py 側で post_bootstrap_transition_requested を確認し遷移を実施する
-                return True
+                self._exit_reason = "bootstrap_complete_combination_smoke_requested"
+                self._exit_payload = snapshot
+                return False
 
         return True
 

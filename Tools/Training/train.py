@@ -228,6 +228,28 @@ def validate_bootstrap_gate_args(args: argparse.Namespace, *, base_port: int) ->
             )
 
 
+def validate_survivors_supervisor_args(args: argparse.Namespace) -> None:
+    """survivors supervisor 関連の引数バリデーション。テストから直接呼べるよう独立関数として定義。"""
+    if not getattr(args, "survivors_supervisor", False):
+        return
+    if not getattr(args, "weapon_bootstrap_lanes", False):
+        raise ValueError("--survivors-supervisor requires --weapon-bootstrap-lanes")
+    if getattr(args, "survivors_supervisor_check_freq", 0) <= 0:
+        raise ValueError("--survivors-supervisor-check-freq must be >= 1")
+    if getattr(args, "bootstrap_max_regression_count", -1) < 0:
+        raise ValueError("--bootstrap-max-regression-count must be >= 0")
+    if getattr(args, "bootstrap_stage_timeout_steps", 0) < 0:
+        raise ValueError("--bootstrap-stage-timeout-steps must be >= 0 (use 0 to disable)")
+    from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER as _WUO
+    _valid_stage_keys = {e.unlock_stage_key for e in _WUO}
+    _target = getattr(args, "bootstrap_target_stage_key", "WU12")
+    if _target not in _valid_stage_keys:
+        raise ValueError(
+            f"--bootstrap-target-stage-key {_target!r} は不正です。"
+            f"有効値: {sorted(_valid_stage_keys)}"
+        )
+
+
 def _parse_step_shorthand(s: str) -> int:
     """200k/2M/2.5M/2_000k/200_000 などを int に変換する。
 
@@ -1169,13 +1191,7 @@ def main() -> None:
 
     if args.weapon_bootstrap_lanes and not args.task_cell_sampler:
         raise ValueError("--weapon-bootstrap-lanes requires --task-cell-sampler")
-    if getattr(args, "survivors_supervisor", False):
-        if not getattr(args, "weapon_bootstrap_lanes", False):
-            raise ValueError("--survivors-supervisor requires --weapon-bootstrap-lanes")
-        if getattr(args, "survivors_supervisor_check_freq", 0) <= 0:
-            raise ValueError("--survivors-supervisor-check-freq must be >= 1")
-        if getattr(args, "bootstrap_max_regression_count", -1) < 0:
-            raise ValueError("--bootstrap-max-regression-count must be >= 0")
+    validate_survivors_supervisor_args(args)
     if args.n_envs > 1 and args.game != "survivors":
         raise ValueError("--n-envs > 1 は survivors ゲームのみ対応しています")
     if args.n_envs > 1 and args.dry_run:

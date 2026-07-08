@@ -406,3 +406,35 @@ def test_survivors_supervisor_args_parse(monkeypatch):
     assert args.survivors_supervisor_check_freq == 4096
     assert args.bootstrap_stage_timeout_steps == 2_000_000
     assert args.bootstrap_max_regression_count == 4
+
+
+def test_survivors_supervisor_invalid_stage_key_raises():
+    import argparse
+    import pytest
+    from train import validate_survivors_supervisor_args
+    args = argparse.Namespace(
+        survivors_supervisor=True,
+        weapon_bootstrap_lanes=True,
+        survivors_supervisor_check_freq=2048,
+        bootstrap_max_regression_count=3,
+        bootstrap_stage_timeout_steps=0,
+        bootstrap_target_stage_key="WU99",
+    )
+    with pytest.raises(ValueError, match="不正です"):
+        validate_survivors_supervisor_args(args)
+
+
+def test_survivors_supervisor_negative_timeout_raises():
+    import argparse
+    import pytest
+    from train import validate_survivors_supervisor_args
+    args = argparse.Namespace(
+        survivors_supervisor=True,
+        weapon_bootstrap_lanes=True,
+        survivors_supervisor_check_freq=2048,
+        bootstrap_max_regression_count=3,
+        bootstrap_stage_timeout_steps=-1,
+        bootstrap_target_stage_key="WU12",
+    )
+    with pytest.raises(ValueError, match=">= 0"):
+        validate_survivors_supervisor_args(args)

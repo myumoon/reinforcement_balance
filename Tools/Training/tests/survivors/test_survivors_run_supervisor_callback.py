@@ -56,6 +56,32 @@ def test_supervisor_stops_when_bootstrap_complete(tmp_path):
     assert events[-1]["event"] == "survivors_supervisor.bootstrap_complete"
 
 
+def test_supervisor_stops_when_bootstrap_complete_combination_smoke(tmp_path):
+    bootstrap = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={
+            "garlic": "maintenance",
+            "king_bible": "maintenance",
+            "magic_wand": "maintenance",
+        },
+    )
+    unlock = WeaponUnlockStateModule(initial_stage_key="WU2", weapon_unlock_order=WEAPON_UNLOCK_ORDER)
+    cb = SurvivorsRunSupervisorCallback(
+        weapon_unlock=unlock,
+        weapon_bootstrap=bootstrap,
+        target_stage_key="WU2",
+        post_bootstrap_mode="combination_smoke",
+        check_freq=1,
+    )
+    _setup(cb, step=100)
+
+    assert cb._on_step() is False
+    state = cb.export_state()
+    assert state["bootstrap_complete"] is True
+    assert state["post_bootstrap_transition_requested"] is True
+    assert state["exit_reason"] == "bootstrap_complete_combination_smoke_requested"
+
+
 def test_supervisor_blocks_on_regression_count_limit():
     bootstrap = WeaponBootstrapStateModule(
         weapon_unlock_order=WEAPON_UNLOCK_ORDER,
