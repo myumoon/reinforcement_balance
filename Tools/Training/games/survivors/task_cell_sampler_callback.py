@@ -387,6 +387,8 @@ class TaskCellSamplerCallback(BaseCallback):
         min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
         max_phase = self._hybrid_cb.current_phase
         stage_key = self._weapon_unlock.current_stage_key
+        # rebuild 前に既存候補を保存し、空になった場合の復元に使う
+        prev_candidates = self._tcs._candidate_cells
         self._tcs.rebuild_combination_smoke_candidate_cells(
             stage_key=stage_key,
             max_unlocked_enemy_phase_idx=max_phase,
@@ -394,9 +396,10 @@ class TaskCellSamplerCallback(BaseCallback):
             max_cells=self._combination_smoke_max_cells,
             seed=self._combination_smoke_seed,
         )
-        # 候補セルが空の場合はフォールバック: bootstrap を継続する
+        # 候補セルが空の場合はフォールバック: 既存候補を復元して bootstrap を継続する
         if not self._tcs._candidate_cells:
             import warnings
+            self._tcs._candidate_cells = prev_candidates
             warnings.warn(
                 f"[TaskCellSampler] combination_smoke 候補セルが空です "
                 f"(stage={stage_key}, phase={max_phase}, max_cells={self._combination_smoke_max_cells}). "
@@ -433,16 +436,10 @@ class TaskCellSamplerCallback(BaseCallback):
             f"stage={stage_key}, phase={max_phase}, "
             f"cells={len(self._tcs._candidate_cells)}, item_stage={self._item_stage_key}"
         )
-        # 遷移直後の pending セルを combination_smoke セルで上書きする。
-        # VecEnv の auto-reset ラグにより pending セルが次 episode を制御するため、
-        # 上書きしないと bootstrap params のまま次 episode が開始される。
-        for env_idx in list(self._pending_cell_by_env.keys()):
-            cell, decision = self._sample_next_cell()
-            params = self._build_params_for_cell(cell)
-            self._pending_cell_by_env[env_idx] = cell
-            self._pending_params_by_env[env_idx] = params
-            self._pending_decision_by_env[env_idx] = decision
-            self._param_applier.apply(params, env_idx=env_idx)
+        # pending セルは上書きしない（1 episode 遅延を明示的に許容する）。
+        # 遷移直後の pending → active 昇格は bootstrap episode のままとなるが、
+        # stats/JSONL の記録は active_cell 側のタイプで行われるため位相ずれは生じない。
+        # 次の done 処理で _sample_next_cell() が combination_smoke セルを返す。
 
     def _on_enemy_phase_changed(self, new_max_phase: int) -> None:
         """敵フェーズ変化時に候補セルを再構築する。"""

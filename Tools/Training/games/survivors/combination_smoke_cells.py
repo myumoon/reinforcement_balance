@@ -50,10 +50,14 @@ def build_combination_smoke_cells(
     # anchor ペア（カバレッジ保証）: (anchor, other) を全 other について作る
     pairs: list[tuple[int, int]] = [(anchor_id, other) for other in others]
 
-    # anchor ペアだけで max_cells を超える場合は先頭 max_cells 件を採用する。
-    # シャッフルしないことで同じ seed・stage_key に対して決定論的な結果を保つ。
-    # 全武器カバレッジを保証するには max_cells >= len(startable_ids) - 1 が必要。
-    # max_cells がこの値を下回る場合は unlock 順の先頭 max_cells 武器のみがカバーされる。
+    # 全武器カバレッジには anchor ペアの数（= len(startable_ids) - 1）が必要。
+    coverage_min = len(others)
+    if max_cells < coverage_min:
+        raise ValueError(
+            f"max_cells={max_cells} は全武器カバレッジに必要な {coverage_min} を下回ります。"
+            f" max_cells >= {coverage_min} を指定してください（stage_key={stage_key!r}）。"
+        )
+
     if len(pairs) > max_cells:
         pairs = pairs[:max_cells]
     else:

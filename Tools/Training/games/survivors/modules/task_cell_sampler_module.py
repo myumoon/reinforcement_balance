@@ -611,12 +611,16 @@ class TaskCellSamplerStateModule(BaseStateModule):
         # セル別メトリクス
         for k, stats in self._stats.items():
             cell = stats.cell
-            # weapon_name: WeaponUnlockOrder から key を引く
-            weapon_name = next(
-                (e.key for e in self._weapon_unlock_order if e.weapon_id == cell.first_weapon_id),
-                str(cell.first_weapon_id),
-            )
-            prefix = f"task_cell/{cell.task_kind}/{cell.weapon_unlock_stage_key}/{weapon_name}/enemy_phase/{cell.enemy_phase_idx}"
+            # combination_smoke セルは combo_key をプレフィックスに使う
+            # (first_weapon_id ベースだと同じ anchor を持つ複数セルが同一キーに衝突するため)
+            if cell.combo_key:
+                cell_id = cell.combo_key
+            else:
+                cell_id = next(
+                    (e.key for e in self._weapon_unlock_order if e.weapon_id == cell.first_weapon_id),
+                    str(cell.first_weapon_id),
+                )
+            prefix = f"task_cell/{cell.task_kind}/{cell.weapon_unlock_stage_key}/{cell_id}/enemy_phase/{cell.enemy_phase_idx}"
             metrics[f"{prefix}/active_score_mean"] = stats.active_score_mean
             metrics[f"{prefix}/active_score_p10"] = stats.active_score_p10
             metrics[f"{prefix}/active_score_cv"] = stats.active_score_cv

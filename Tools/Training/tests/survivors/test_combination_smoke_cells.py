@@ -10,6 +10,8 @@ _TRAINING_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_TRAINING_ROOT) not in sys.path:
     sys.path.insert(0, str(_TRAINING_ROOT))
 
+import pytest
+
 from games.survivors.combination_smoke_cells import build_combination_smoke_cells
 from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER, get_unlocked_startable_weapon_ids
 
@@ -44,3 +46,10 @@ def test_combination_smoke_cell_has_slot_params():
     assert cell.build_policy == "combination_slots"
     assert len(cell.initial_weapon_slots) >= 2
     assert set(wid for wid, _ in cell.initial_weapon_slots) <= set(cell.allowed_weapon_ids)
+
+
+def test_build_raises_when_max_cells_below_coverage_min():
+    # WU12 には 13 startable weapons があるため coverage_min = 12
+    # max_cells=5 では全武器カバレッジ不能 -> ValueError
+    with pytest.raises(ValueError, match="max_cells=5"):
+        build_combination_smoke_cells("WU12", 2, 5, 1, WEAPON_UNLOCK_ORDER)
