@@ -59,6 +59,20 @@ def test_task_cell_key_format():
     assert cell.key() == f"solo_bootstrap/WU0/{WeaponType.GARLIC}/2"
 
 
+def test_combination_cell_key():
+    """combination_smoke セルの key() が combo_key ベースになる。"""
+    cell = TaskCell(
+        weapon_unlock_stage_key="WU12",
+        first_weapon_id=WeaponType.GARLIC,
+        enemy_phase_idx=2,
+        task_kind="combination_smoke",
+        combo_key="garlic_king_bible",
+        initial_weapon_slots=((WeaponType.GARLIC, 4), (WeaponType.KING_BIBLE, 4)),
+        allowed_weapon_ids=(WeaponType.GARLIC, WeaponType.KING_BIBLE),
+    )
+    assert cell.key() == "combination_smoke/WU12/garlic_king_bible/2"
+
+
 def test_task_cell_default_task_kind():
     """TaskCellのデフォルト task_kind='wave_main', build_policy='' で既存コードが壊れない。"""
     cell = TaskCell(
@@ -176,6 +190,26 @@ def test_rebuild_bootstrap_creates_integration_and_maintenance():
     maintenance_cells = [c for c in tcs._candidate_cells if c.task_kind == "maintenance"]
     assert len(integration_cells) >= 1
     assert len(maintenance_cells) >= 1
+
+
+# ---------------------------------------------------------------------------
+# テスト: rebuild_combination_smoke_candidate_cells
+# ---------------------------------------------------------------------------
+
+def test_rebuild_combination_smoke_candidate_cells_creates_combo_cells():
+    """rebuild_combination_smoke_candidate_cells()が combination_smoke セルを構築する。"""
+    tcs = make_tcs()
+    tcs.rebuild_combination_smoke_candidate_cells(
+        stage_key="WU12",
+        max_unlocked_enemy_phase_idx=2,
+        min_episode_steps_by_phase={0: 600, 1: 900, 2: 1200},
+        max_cells=32,
+        seed=123,
+    )
+    combo_cells = [c for c in tcs._candidate_cells if c.task_kind == "combination_smoke"]
+    assert len(combo_cells) > 0
+    assert all(c.enemy_phase_idx == 2 for c in combo_cells)
+    assert all(c.key() in tcs._stats for c in combo_cells)
 
 
 # ---------------------------------------------------------------------------

@@ -82,12 +82,17 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
                 self._exit_payload = snapshot
                 return False
             if self._post_bootstrap_mode == "combination_smoke":
-                # Phase B が未実装のため training を停止する。
-                # train.py は exit_reason と post_bootstrap_transition_requested を確認し遷移を実施する。
-                self._post_bootstrap_transition_requested = True
-                self._exit_reason = "bootstrap_complete_combination_smoke_requested"
-                self._exit_payload = snapshot
-                return False
+                # combination_smoke モードでは training を停止せず、遷移フラグのみ立てる。
+                # 同一 iteration 内で TaskCellSamplerCallback が
+                # post_bootstrap_transition_requested を参照し combination_smoke へ切り替える
+                # （callback 登録順は supervisor → TCS）。
+                # イベントは初回のみ書き、以降は継続する。
+                if not self._post_bootstrap_transition_requested:
+                    self._post_bootstrap_transition_requested = True
+                    self._write_event(
+                        "combination_smoke_transition_requested", snapshot
+                    )
+                return True
 
         stage_age = self.num_timesteps - self._stage_entered_step
         if self._stage_timeout_steps > 0 and stage_age > self._stage_timeout_steps:

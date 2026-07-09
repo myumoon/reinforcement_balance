@@ -83,7 +83,8 @@ def test_supervisor_complete_takes_priority_over_timeout():
     )
 
 
-def test_supervisor_stops_when_bootstrap_complete_combination_smoke(tmp_path):
+def test_supervisor_requests_transition_when_bootstrap_complete_combination_smoke(tmp_path):
+    """combination_smoke モードでは training を停止せず遷移フラグのみ立てる。"""
     bootstrap = WeaponBootstrapStateModule(
         weapon_unlock_order=WEAPON_UNLOCK_ORDER,
         initial_status={
@@ -102,11 +103,18 @@ def test_supervisor_stops_when_bootstrap_complete_combination_smoke(tmp_path):
     )
     _setup(cb, step=100)
 
-    assert cb._on_step() is False
+    # training は継続する（True）が遷移フラグは立つ
+    assert cb._on_step() is True
+    assert cb.post_bootstrap_transition_requested is True
     state = cb.export_state()
     assert state["bootstrap_complete"] is True
     assert state["post_bootstrap_transition_requested"] is True
-    assert state["exit_reason"] == "bootstrap_complete_combination_smoke_requested"
+    # 停止しないので exit_reason は None のまま
+    assert state["exit_reason"] is None
+
+    # 2 回目の呼び出しでもフラグは維持され、継続する
+    assert cb._on_step() is True
+    assert cb.post_bootstrap_transition_requested is True
 
 
 def test_supervisor_blocks_on_regression_count_limit():

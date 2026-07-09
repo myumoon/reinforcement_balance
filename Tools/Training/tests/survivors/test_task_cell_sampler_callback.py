@@ -191,6 +191,137 @@ def test_bootstrap_stage_advance_resamples_pending_from_new_stage_and_logs_metri
 
 
 # ---------------------------------------------------------------------------
+# combination_smoke: _build_params_for_cell 分岐
+# ---------------------------------------------------------------------------
+
+def _make_simple_callback(item_stage_key="IS1", current_phase=2):
+    from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
+
+    hybrid_cb = make_mock_hybrid_cb(current_phase=current_phase)
+    tcs = TaskCellSamplerStateModule(min_episodes_per_cell=1, weapon_unlock_order=WEAPON_UNLOCK_ORDER)
+    weapon_unlock = WeaponUnlockStateModule(weapon_unlock_min_steps=0, weapon_unlock_order=WEAPON_UNLOCK_ORDER)
+    return TaskCellSamplerCallback(
+        hybrid_cb=hybrid_cb,
+        task_cell_sampler=tcs,
+        weapon_unlock=weapon_unlock,
+        param_applier=MagicMock(),
+        item_stage_key=item_stage_key,
+    )
+
+
+def test_combination_smoke_cell_uses_slots():
+    from games.survivors.modules.task_cell_sampler_module import TaskCell
+
+    cb = _make_simple_callback(item_stage_key="IS1")
+    cell = TaskCell(
+        weapon_unlock_stage_key="WU12",
+        first_weapon_id=WeaponType.GARLIC,
+        enemy_phase_idx=2,
+        task_kind="combination_smoke",
+        build_policy="combination_slots",
+        combo_key="w1_2",
+        initial_weapon_slots=((WeaponType.GARLIC, 4), (WeaponType.KING_BIBLE, 4)),
+        initial_passive_slots=(),
+        allowed_weapon_ids=(WeaponType.GARLIC, WeaponType.KING_BIBLE),
+    )
+    params = cb._build_params_for_cell(cell)
+    assert params["weapon_pool_mode"] == "fixed_subset"
+    assert params["allowed_weapon_types"] == [WeaponType.GARLIC, WeaponType.KING_BIBLE]
+    assert params["initial_weapon_slots"] == [
+        {"weapon_id": WeaponType.GARLIC, "level": 4},
+        {"weapon_id": WeaponType.KING_BIBLE, "level": 4},
+    ]
+    assert params["enable_passives"] is True
+    assert params["enable_evolutions"] is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 02 → 03: combination_smoke 遷移
+# ---------------------------------------------------------------------------
+
+def test_switch_to_combination_smoke_on_supervisor_request(tmp_path):
+    """supervisor が遷移を要求したら sampling_mode が combination_smoke に切り替わり、
+    候補セルが combination_smoke セルになる。"""
+    from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
+
+    hybrid_cb = make_mock_hybrid_cb(current_phase=2)
+    tcs = TaskCellSamplerStateModule(min_episodes_per_cell=1, weapon_unlock_order=WEAPON_UNLOCK_ORDER)
+    weapon_unlock = WeaponUnlockStateModule(
+        initial_stage_key="WU12",
+        weapon_unlock_min_steps=10**9,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+    weapon_bootstrap = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={"garlic": "maintenance"},
+    )
+
+    supervisor = MagicMock()
+    supervisor.post_bootstrap_transition_requested = True
+
+    callback = TaskCellSamplerCallback(
+        hybrid_cb=hybrid_cb,
+        task_cell_sampler=tcs,
+        weapon_unlock=weapon_unlock,
+        param_applier=MagicMock(),
+        log_dir=str(tmp_path),
+        weapon_bootstrap=weapon_bootstrap,
+        post_bootstrap_mode="combination_smoke",
+        supervisor_cb=supervisor,
+        combination_smoke_max_cells=16,
+        combination_smoke_seed=7,
+        combination_smoke_item_stage_key="IS1",
+    )
+    assert callback._sampling_mode == "bootstrap"
+
+    callback.num_timesteps = 10_000
+    callback.locals = {"infos": [{}]}
+    callback._score_tracker.process = MagicMock(return_value=[])
+
+    assert callback._on_step() is True
+    assert callback._sampling_mode == "combination_smoke"
+    combo_cells = [c for c in tcs._candidate_cells if c.task_kind == "combination_smoke"]
+    assert len(combo_cells) > 0
+    # item_stage が遷移設定に更新される
+    assert callback._item_stage_key == "IS1"
+
+
+def test_no_switch_when_supervisor_flag_not_set(tmp_path):
+    """supervisor フラグが立っていない場合は bootstrap のまま遷移しない。"""
+    from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
+
+    hybrid_cb = make_mock_hybrid_cb(current_phase=2)
+    tcs = TaskCellSamplerStateModule(min_episodes_per_cell=1, weapon_unlock_order=WEAPON_UNLOCK_ORDER)
+    weapon_unlock = WeaponUnlockStateModule(
+        initial_stage_key="WU12",
+        weapon_unlock_min_steps=10**9,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+    weapon_bootstrap = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={"garlic": "maintenance"},
+    )
+    supervisor = MagicMock()
+    supervisor.post_bootstrap_transition_requested = False
+
+    callback = TaskCellSamplerCallback(
+        hybrid_cb=hybrid_cb,
+        task_cell_sampler=tcs,
+        weapon_unlock=weapon_unlock,
+        param_applier=MagicMock(),
+        log_dir=str(tmp_path),
+        weapon_bootstrap=weapon_bootstrap,
+        post_bootstrap_mode="combination_smoke",
+        supervisor_cb=supervisor,
+    )
+    callback.num_timesteps = 10_000
+    callback.locals = {"infos": [{}]}
+    callback._score_tracker.process = MagicMock(return_value=[])
+    assert callback._on_step() is True
+    assert callback._sampling_mode == "bootstrap"
+
+
+# ---------------------------------------------------------------------------
 # 2-episode 擬似 VecEnv: 完了 episode を動かした cell/decision が JSONL に一致する
 # ---------------------------------------------------------------------------
 
