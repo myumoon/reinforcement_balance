@@ -109,6 +109,12 @@ class PerfLoggingCallback(BaseCallback):
         """ロールアウト終了（= PPO 更新開始）。t1 を記録するだけ。"""
         self._rollout_end_t = time.perf_counter()
 
+    def _on_training_end(self) -> None:
+        """訓練終了時。最終イテレーション（PPO 更新済み）のメトリクスを flush する。"""
+        if self._rollout_t0 is not None and self._rollout_end_t is not None:
+            t2 = time.perf_counter()
+            self._flush_iter_metrics(t0=self._rollout_t0, t1=self._rollout_end_t, t2=t2)
+
     def _on_step(self) -> bool:
         return True
 
@@ -178,7 +184,7 @@ class PerfLoggingCallback(BaseCallback):
             return
         try:
             if _wandb.run is not None:
-                _wandb.log({**metrics, "global_step": step})
+                _wandb.log(metrics, step=step)
         except Exception:
             pass  # W&B エラーで訓練を止めない
 
@@ -204,7 +210,7 @@ def _make_wandb_log_fn():
     def _log(metrics: dict[str, float], step: int) -> None:
         try:
             if _wandb.run is not None:
-                _wandb.log({**metrics, "global_step": step})
+                _wandb.log(metrics, step=step)
         except Exception:
             pass
 

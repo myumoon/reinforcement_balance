@@ -163,8 +163,10 @@ def test_moving_average_window():
         cb._on_rollout_end()
         cb._on_rollout_start()
 
-    # イテレーション2: 256 steps / 4.0s = 64 fps（移動平均 = (128+64)/2 = 96）
-    with patch("time.perf_counter", side_effect=[0.0, 2.0, 4.0]):
+    # イテレーション2: iter_time = (t2 - t0) = (6.0 - 2.0) = 4.0s → 256 / 4.0 = 64 fps
+    # 移動平均 window=[128, 64] → average=96
+    # t0=2.0 (前イテレーションの t2), t1=4.0, t2=6.0 (単調増加を保証)
+    with patch("time.perf_counter", side_effect=[4.0, 6.0]):
         cb.model.num_timesteps = 256
         cb._on_rollout_end()
         cb._on_rollout_start()
