@@ -433,6 +433,16 @@ class TaskCellSamplerCallback(BaseCallback):
             f"stage={stage_key}, phase={max_phase}, "
             f"cells={len(self._tcs._candidate_cells)}, item_stage={self._item_stage_key}"
         )
+        # 遷移直後の pending セルを combination_smoke セルで上書きする。
+        # VecEnv の auto-reset ラグにより pending セルが次 episode を制御するため、
+        # 上書きしないと bootstrap params のまま次 episode が開始される。
+        for env_idx in list(self._pending_cell_by_env.keys()):
+            cell, decision = self._sample_next_cell()
+            params = self._build_params_for_cell(cell)
+            self._pending_cell_by_env[env_idx] = cell
+            self._pending_params_by_env[env_idx] = params
+            self._pending_decision_by_env[env_idx] = decision
+            self._param_applier.apply(params, env_idx=env_idx)
 
     def _on_enemy_phase_changed(self, new_max_phase: int) -> None:
         """敵フェーズ変化時に候補セルを再構築する。"""
