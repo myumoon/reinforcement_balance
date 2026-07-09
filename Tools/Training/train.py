@@ -240,7 +240,10 @@ def validate_survivors_supervisor_args(args: argparse.Namespace) -> None:
         raise ValueError("--bootstrap-max-regression-count must be >= 0")
     if getattr(args, "bootstrap_stage_timeout_steps", 0) < 0:
         raise ValueError("--bootstrap-stage-timeout-steps must be >= 0 (use 0 to disable)")
-    from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER as _WUO
+    from games.survivors.survivors_weapon_table import (
+        WEAPON_UNLOCK_ORDER as _WUO,
+        get_unlocked_startable_weapon_ids as _get_startable,
+    )
     _valid_stage_keys = {e.unlock_stage_key for e in _WUO}
     _target = getattr(args, "bootstrap_target_stage_key", "WU12")
     if _target not in _valid_stage_keys:
@@ -248,6 +251,16 @@ def validate_survivors_supervisor_args(args: argparse.Namespace) -> None:
             f"--bootstrap-target-stage-key {_target!r} は不正です。"
             f"有効値: {sorted(_valid_stage_keys)}"
         )
+    if getattr(args, "post_bootstrap_mode", "stop") == "combination_smoke":
+        _max_cells = getattr(args, "combination_smoke_max_cells", 64)
+        _startable = _get_startable(_target, _WUO)
+        _coverage_min = len(_startable) - 1
+        if _coverage_min > 0 and _max_cells < _coverage_min:
+            raise ValueError(
+                f"--combination-smoke-max-cells={_max_cells} は {_target!r} の全武器カバレッジに"
+                f"必要な {_coverage_min} を下回ります。"
+                f" --combination-smoke-max-cells >= {_coverage_min} を指定してください。"
+            )
 
 
 def _parse_step_shorthand(s: str) -> int:

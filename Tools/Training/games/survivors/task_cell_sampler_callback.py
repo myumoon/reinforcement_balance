@@ -113,8 +113,10 @@ class TaskCellSamplerCallback(BaseCallback):
         self._score_tracker = EpisodeScoreTracker(frame_skip=frame_skip, alive_reward=alive_reward)
         self._active_cell_by_env: dict[int, TaskCell | None] = {}
         self._active_params_by_env: dict[int, dict | None] = {}
+        self._active_item_stage_key_by_env: dict[int, str] = {}
         self._pending_cell_by_env: dict[int, TaskCell | None] = {}
         self._pending_params_by_env: dict[int, dict | None] = {}
+        self._pending_item_stage_key_by_env: dict[int, str] = {}
         # selected lane logging: episode を動かした cell と同一 decision を保持する
         self._active_decision_by_env: dict[int, TaskCellSampleDecision | None] = {}
         self._pending_decision_by_env: dict[int, TaskCellSampleDecision | None] = {}
@@ -188,9 +190,11 @@ class TaskCellSamplerCallback(BaseCallback):
             self._active_cell_by_env[env_idx] = None
             self._active_params_by_env[env_idx] = None
             self._active_decision_by_env[env_idx] = None
+            self._active_item_stage_key_by_env[env_idx] = self._item_stage_key
             self._pending_cell_by_env[env_idx] = cell
             self._pending_params_by_env[env_idx] = params
             self._pending_decision_by_env[env_idx] = decision
+            self._pending_item_stage_key_by_env[env_idx] = self._item_stage_key
             self._param_applier.apply(params, env_idx=env_idx)
 
     def _on_step(self) -> bool:
@@ -224,14 +228,16 @@ class TaskCellSamplerCallback(BaseCallback):
                     terminated=terminated,
                     num_timesteps=self.num_timesteps,
                 )
-                if self._weapon_bootstrap is not None and self._sampling_mode == "bootstrap":
+                # active_cell.task_kind で判定: combination_smoke に遷移後も残存 bootstrap
+                # cell の完了は weapon_bootstrap に正しく反映する必要がある。
+                if self._weapon_bootstrap is not None and active_cell.task_kind != "combination_smoke":
                     status_changed = self._weapon_bootstrap.on_episode_end(
                         cell=active_cell,
                         stats_provider=self._tcs,
                         current_stage_key=self._weapon_unlock.current_stage_key,
                         num_timesteps=self.num_timesteps,
                     )
-                    # status 遷移が発生したら候補セルを再構築
+                    # status 遷移が発生したらイベントを記録し、bootstrap mode の場合のみ候補セルを再構築
                     if status_changed:
                         self._write_event(
                             "bootstrap_status_changed",
@@ -243,13 +249,15 @@ class TaskCellSamplerCallback(BaseCallback):
                                 "snapshot": self._weapon_bootstrap.get_weapon_snapshot(active_cell.first_weapon_id),
                             },
                         )
-                        min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
-                        self._tcs.rebuild_bootstrap_candidate_cells(
-                            stage_key=self._weapon_unlock.current_stage_key,
-                            max_unlocked_enemy_phase_idx=self._hybrid_cb.current_phase,
-                            min_episode_steps_by_phase=min_ep_steps,
-                            weapon_bootstrap=self._weapon_bootstrap,
-                        )
+                        # combination_smoke 遷移後は候補セルを上書きしない
+                        if self._sampling_mode == "bootstrap":
+                            min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
+                            self._tcs.rebuild_bootstrap_candidate_cells(
+                                stage_key=self._weapon_unlock.current_stage_key,
+                                max_unlocked_enemy_phase_idx=self._hybrid_cb.current_phase,
+                                min_episode_steps_by_phase=min_ep_steps,
+                                weapon_bootstrap=self._weapon_bootstrap,
+                            )
                 self._write_jsonl(
                     env_idx, active_cell, active_score, ep_len, terminated, ep_base,
                     active_params, active_decision,
@@ -259,6 +267,9 @@ class TaskCellSamplerCallback(BaseCallback):
             self._active_cell_by_env[env_idx] = self._pending_cell_by_env.get(env_idx)
             self._active_params_by_env[env_idx] = self._pending_params_by_env.get(env_idx)
             self._active_decision_by_env[env_idx] = self._pending_decision_by_env.get(env_idx)
+            self._active_item_stage_key_by_env[env_idx] = self._pending_item_stage_key_by_env.get(
+                env_idx, self._item_stage_key
+            )
 
             # 3-4. 武器アンロック判定
             # combination_smoke 中は stage 固定でアンロック判定・再構築を行わない。
@@ -306,6 +317,7 @@ class TaskCellSamplerCallback(BaseCallback):
             self._pending_decision_by_env[env_idx] = next_decision
             next_params = self._build_params_for_cell(next_cell)
             self._pending_params_by_env[env_idx] = next_params
+            self._pending_item_stage_key_by_env[env_idx] = self._item_stage_key
             self._param_applier.apply(next_params, env_idx=env_idx)
 
         # status JSON 定期保存
@@ -553,7 +565,7 @@ class TaskCellSamplerCallback(BaseCallback):
             "env_idx": env_idx,
             "weapon_unlock_stage_key": cell.weapon_unlock_stage_key,
             "weapon_pool_policy": self._pool_policy,
-            "weapon_item_stage_key": self._item_stage_key,
+            "weapon_item_stage_key": self._active_item_stage_key_by_env.get(env_idx, self._item_stage_key),
             "first_weapon_id": cell.first_weapon_id,
             "first_weapon_name": weapon_name,
             "enemy_phase_idx": cell.enemy_phase_idx,
