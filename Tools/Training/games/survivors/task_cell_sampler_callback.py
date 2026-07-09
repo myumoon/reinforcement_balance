@@ -379,23 +379,48 @@ class TaskCellSamplerCallback(BaseCallback):
         return True
 
     def _switch_to_combination_smoke(self) -> None:
-        """combination_smoke lane へ切り替え、候補セルを再構築する。"""
+        """combination_smoke lane へ切り替え、候補セルを再構築する。
+
+        候補セルが空の場合（解禁済み startable 武器が 2 未満など）は sampling_mode を
+        変更せず WARNING ログを出して bootstrap を継続する。
+        """
         min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
         max_phase = self._hybrid_cb.current_phase
-        self._item_stage_key = self._combination_smoke_item_stage_key
+        stage_key = self._weapon_unlock.current_stage_key
         self._tcs.rebuild_combination_smoke_candidate_cells(
-            stage_key=self._weapon_unlock.current_stage_key,
+            stage_key=stage_key,
             max_unlocked_enemy_phase_idx=max_phase,
             min_episode_steps_by_phase=min_ep_steps,
             max_cells=self._combination_smoke_max_cells,
             seed=self._combination_smoke_seed,
         )
+        # 候補セルが空の場合はフォールバック: bootstrap を継続する
+        if not self._tcs._candidate_cells:
+            import warnings
+            warnings.warn(
+                f"[TaskCellSampler] combination_smoke 候補セルが空です "
+                f"(stage={stage_key}, phase={max_phase}, max_cells={self._combination_smoke_max_cells}). "
+                "解禁済み startable 武器が 2 未満の可能性があります。bootstrap を継続します。",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._write_event(
+                "combination_smoke_transition_skipped",
+                {
+                    "stage_key": stage_key,
+                    "enemy_phase_idx": max_phase,
+                    "max_cells": self._combination_smoke_max_cells,
+                    "reason": "empty_candidate_cells",
+                },
+            )
+            return
+        self._item_stage_key = self._combination_smoke_item_stage_key
         # 以降は lane mix ではなく重み付き単純サンプルを使う
         self._sampling_mode = "combination_smoke"
         self._write_event(
             "combination_smoke_transition",
             {
-                "stage_key": self._weapon_unlock.current_stage_key,
+                "stage_key": stage_key,
                 "enemy_phase_idx": max_phase,
                 "max_cells": self._combination_smoke_max_cells,
                 "seed": self._combination_smoke_seed,
@@ -405,7 +430,7 @@ class TaskCellSamplerCallback(BaseCallback):
         )
         print(
             f"[TaskCellSampler] combination_smoke へ遷移: "
-            f"stage={self._weapon_unlock.current_stage_key}, phase={max_phase}, "
+            f"stage={stage_key}, phase={max_phase}, "
             f"cells={len(self._tcs._candidate_cells)}, item_stage={self._item_stage_key}"
         )
 

@@ -50,8 +50,10 @@ def build_combination_smoke_cells(
     # anchor ペア（カバレッジ保証）: (anchor, other) を全 other について作る
     pairs: list[tuple[int, int]] = [(anchor_id, other) for other in others]
 
-    # anchor ペアだけで max_cells を超える場合はシャッフルして先頭 max_cells 件を採用する
-    # （ただしカバレッジは崩れる可能性があるので、max_cells >= len(others) を推奨）
+    # anchor ペアだけで max_cells を超える場合はシャッフルして先頭 max_cells 件を採用する。
+    # 全武器カバレッジを保証するには max_cells >= len(others) = (startable_ids - 1) が必要。
+    # max_cells がこの値を下回る場合は一部の武器がどのセルにも含まれない可能性があるため、
+    # 呼び出し側は max_cells >= len(startable_ids) - 1 を満たすよう設定することを推奨する。
     if len(pairs) > max_cells:
         rng.shuffle(pairs)
         pairs = pairs[:max_cells]
