@@ -42,6 +42,7 @@ from base.base_ue5_env import UE5ConnectionError
 from common.utils import _linear_schedule
 from common.wandb_logger import WandbLogger
 from common.reward_analysis_logger import RewardAnalysisLogger, RewardAnalysisCallback, RewardAnalysisCheckpointCallback, SURVIVORS_OBS_SCHEMA
+from common.perf_callback import PerfLoggingCallback
 from curriculum_callback import CurriculumCallback
 from games.survivors.weapon_curriculum_callback import WeaponCurriculumCallback as _WeaponCurriculumCallback
 from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
@@ -2247,6 +2248,9 @@ def main() -> None:
         status_writer=_write_status_for_model,
     )
     callbacks.append(checkpoint_cb)
+
+    _perf_cb = PerfLoggingCallback(log_dir=log_dir, window_size=5)
+    callbacks.append(_perf_cb)
 
     _reward_logger = RewardAnalysisLogger(
         obs_schema=SURVIVORS_OBS_SCHEMA if args.game == "survivors" else {},
