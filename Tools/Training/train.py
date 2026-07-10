@@ -241,7 +241,10 @@ def validate_survivors_supervisor_args(args: argparse.Namespace) -> None:
         raise ValueError("--bootstrap-max-regression-count must be >= 0")
     if getattr(args, "bootstrap_stage_timeout_steps", 0) < 0:
         raise ValueError("--bootstrap-stage-timeout-steps must be >= 0 (use 0 to disable)")
-    from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER as _WUO
+    from games.survivors.survivors_weapon_table import (
+        WEAPON_UNLOCK_ORDER as _WUO,
+        get_unlocked_startable_weapon_ids as _get_startable,
+    )
     _valid_stage_keys = {e.unlock_stage_key for e in _WUO}
     _target = getattr(args, "bootstrap_target_stage_key", "WU12")
     if _target not in _valid_stage_keys:
@@ -249,6 +252,16 @@ def validate_survivors_supervisor_args(args: argparse.Namespace) -> None:
             f"--bootstrap-target-stage-key {_target!r} は不正です。"
             f"有効値: {sorted(_valid_stage_keys)}"
         )
+    if getattr(args, "post_bootstrap_mode", "stop") == "combination_smoke":
+        _max_cells = getattr(args, "combination_smoke_max_cells", 64)
+        _startable = _get_startable(_target, _WUO)
+        _coverage_min = len(_startable) - 1
+        if _coverage_min > 0 and _max_cells < _coverage_min:
+            raise ValueError(
+                f"--combination-smoke-max-cells={_max_cells} は {_target!r} の全武器カバレッジに"
+                f"必要な {_coverage_min} を下回ります。"
+                f" --combination-smoke-max-cells >= {_coverage_min} を指定してください。"
+            )
 
 
 def _parse_step_shorthand(s: str) -> int:
@@ -1122,6 +1135,13 @@ def parse_args() -> argparse.Namespace:
                    help="同一 bootstrap stage に滞留できる最大 step。0 で無効。")
     p.add_argument("--bootstrap-max-regression-count", type=int, default=3,
                    help="maintenance regression_count がこの値を超えたら停止する。")
+    p.add_argument("--combination-smoke-max-cells", type=int, default=64,
+                   help="combination_smoke へ遷移した際に生成する武器組み合わせセルの上限数。")
+    p.add_argument("--combination-smoke-seed", type=int, default=12345,
+                   help="combination_smoke セル生成のシード（決定論的生成用）。")
+    p.add_argument("--combination-smoke-item-stage", type=str, default="IS1",
+                   choices=["IS0", "IS1", "IS2"],
+                   help="combination_smoke 遷移後の item system stage（passive/evolution 有効化）。")
 
     # YAML があればデフォルトを差し込む（CLI が常に優先）
     if pre_args.config:
@@ -2070,36 +2090,9 @@ def main() -> None:
                 f"n_episodes={args.bootstrap_gate_eval_episodes})"
             )
 
-        if _hybrid_cb_ref is not None and _task_cell_sampler_module and _weapon_unlock_module:
-            from games.survivors.param_applier import ParamApplier as _ParamApplier
-            _alive_reward_tcs = getattr(args, "curriculum_alive_reward", 0.001)
-            _tcs_cb = TaskCellSamplerCallback(
-                hybrid_cb=_hybrid_cb_ref,
-                task_cell_sampler=_task_cell_sampler_module,
-                weapon_unlock=_weapon_unlock_module,
-                param_applier=_ParamApplier(_get_raw_env(env)),
-                frame_skip=args.frame_skip,
-                alive_reward=_alive_reward_tcs,
-                item_stage_key=getattr(args, "weapon_item_stage", "IS0"),
-                enemy_param_mode=getattr(args, "task_cell_enemy_param_mode", "phase_fixed"),
-                pool_policy=getattr(args, "weapon_pool_policy", "target_plus_anchor"),
-                wandb_logger=wandb_logger,
-                log_dir=log_dir,
-                weapon_unlock_table_name=getattr(args, "weapon_unlock_table", "default_v1"),
-                weapon_bootstrap=_weapon_bootstrap_module,
-                weapon_bootstrap_sample_mix=_sample_mix if _weapon_bootstrap_module else None,
-                event_logger=survivors_event_logger,
-            )
-            callbacks.append(_tcs_cb)
-            print(
-                f"[INFO] TaskCellSamplerCallback 有効 "
-                f"(item_stage={getattr(args, 'weapon_item_stage', 'IS0')}, "
-                f"pool_policy={getattr(args, 'weapon_pool_policy', 'target_plus_anchor')}, "
-                f"enemy_param_mode={getattr(args, 'task_cell_enemy_param_mode', 'phase_fixed')}, "
-                f"weapon_bootstrap_lanes={getattr(args, 'weapon_bootstrap_lanes', False)})"
-            )
-
         # SurvivorsRunSupervisorCallback の登録（長期 run の完走・停止監視）
+        # combination_smoke 遷移で TaskCellSamplerCallback が supervisor のフラグを参照するため、
+        # supervisor を TCS より先に構築し、callback 登録も supervisor → TCS の順にする。
         _survivors_supervisor_cb = None
         if (
             args.game == "survivors"
@@ -2128,8 +2121,43 @@ def main() -> None:
             if args.post_bootstrap_mode == "combination_smoke":
                 print(
                     "[INFO] post_bootstrap_mode=combination_smoke: "
-                    "Phase B 実装後に post_bootstrap_transition_requested フラグを確認してください。"
+                    "bootstrap 完了後に TaskCellSamplerCallback が combination_smoke へ遷移します。"
                 )
+
+        if _hybrid_cb_ref is not None and _task_cell_sampler_module and _weapon_unlock_module:
+            from games.survivors.param_applier import ParamApplier as _ParamApplier
+            _alive_reward_tcs = getattr(args, "curriculum_alive_reward", 0.001)
+            _tcs_cb = TaskCellSamplerCallback(
+                hybrid_cb=_hybrid_cb_ref,
+                task_cell_sampler=_task_cell_sampler_module,
+                weapon_unlock=_weapon_unlock_module,
+                param_applier=_ParamApplier(_get_raw_env(env)),
+                frame_skip=args.frame_skip,
+                alive_reward=_alive_reward_tcs,
+                item_stage_key=getattr(args, "weapon_item_stage", "IS0"),
+                enemy_param_mode=getattr(args, "task_cell_enemy_param_mode", "phase_fixed"),
+                pool_policy=getattr(args, "weapon_pool_policy", "target_plus_anchor"),
+                wandb_logger=wandb_logger,
+                log_dir=log_dir,
+                weapon_unlock_table_name=getattr(args, "weapon_unlock_table", "default_v1"),
+                weapon_bootstrap=_weapon_bootstrap_module,
+                weapon_bootstrap_sample_mix=_sample_mix if _weapon_bootstrap_module else None,
+                event_logger=survivors_event_logger,
+                post_bootstrap_mode=args.post_bootstrap_mode,
+                supervisor_cb=_survivors_supervisor_cb,
+                combination_smoke_max_cells=getattr(args, "combination_smoke_max_cells", 64),
+                combination_smoke_seed=getattr(args, "combination_smoke_seed", 12345),
+                combination_smoke_item_stage_key=getattr(args, "combination_smoke_item_stage", "IS1"),
+            )
+            callbacks.append(_tcs_cb)
+            print(
+                f"[INFO] TaskCellSamplerCallback 有効 "
+                f"(item_stage={getattr(args, 'weapon_item_stage', 'IS0')}, "
+                f"pool_policy={getattr(args, 'weapon_pool_policy', 'target_plus_anchor')}, "
+                f"enemy_param_mode={getattr(args, 'task_cell_enemy_param_mode', 'phase_fixed')}, "
+                f"weapon_bootstrap_lanes={getattr(args, 'weapon_bootstrap_lanes', False)}, "
+                f"post_bootstrap_mode={args.post_bootstrap_mode})"
+            )
 
     if args.until_curriculum_complete:
         if curriculum_cb is None:

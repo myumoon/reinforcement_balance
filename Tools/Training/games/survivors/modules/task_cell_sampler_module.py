@@ -25,8 +25,14 @@ class TaskCell:
     enemy_phase_idx: int
     task_kind: str = "wave_main"
     build_policy: str = ""
+    combo_key: str = ""
+    initial_weapon_slots: tuple[tuple[int, int], ...] = ()
+    initial_passive_slots: tuple[tuple[int, int], ...] = ()
+    allowed_weapon_ids: tuple[int, ...] = ()
 
     def key(self) -> str:
+        if self.combo_key:
+            return f"{self.task_kind}/{self.weapon_unlock_stage_key}/{self.combo_key}/{self.enemy_phase_idx}"
         return f"{self.task_kind}/{self.weapon_unlock_stage_key}/{self.first_weapon_id}/{self.enemy_phase_idx}"
 
 
@@ -436,6 +442,34 @@ class TaskCellSamplerStateModule(BaseStateModule):
 
         self._candidate_cells = new_cells
 
+    def rebuild_combination_smoke_candidate_cells(
+        self,
+        *,
+        stage_key: str,
+        max_unlocked_enemy_phase_idx: int,
+        min_episode_steps_by_phase: dict[int, int],
+        max_cells: int,
+        seed: int,
+    ) -> None:
+        """combination_smoke lane 用の候補セルリストを再構築する。既存 stats は保持する。"""
+        from games.survivors.combination_smoke_cells import build_combination_smoke_cells
+
+        self._current_stage_key = stage_key
+        self._max_unlocked_enemy_phase_idx = max_unlocked_enemy_phase_idx
+        self._min_episode_steps_by_phase = dict(min_episode_steps_by_phase)
+
+        cells = build_combination_smoke_cells(
+            stage_key=stage_key,
+            enemy_phase_idx=max_unlocked_enemy_phase_idx,
+            max_cells=max_cells,
+            seed=seed,
+            weapon_unlock_order=self._weapon_unlock_order,
+        )
+        for cell in cells:
+            if cell.key() not in self._stats:
+                self._stats[cell.key()] = TaskCellStats(cell=cell)
+        self._candidate_cells = cells
+
     def sample_cell_with_lane_mix(
         self,
         *,
@@ -577,12 +611,16 @@ class TaskCellSamplerStateModule(BaseStateModule):
         # セル別メトリクス
         for k, stats in self._stats.items():
             cell = stats.cell
-            # weapon_name: WeaponUnlockOrder から key を引く
-            weapon_name = next(
-                (e.key for e in self._weapon_unlock_order if e.weapon_id == cell.first_weapon_id),
-                str(cell.first_weapon_id),
-            )
-            prefix = f"task_cell/{cell.task_kind}/{cell.weapon_unlock_stage_key}/{weapon_name}/enemy_phase/{cell.enemy_phase_idx}"
+            # combination_smoke セルは combo_key をプレフィックスに使う
+            # (first_weapon_id ベースだと同じ anchor を持つ複数セルが同一キーに衝突するため)
+            if cell.combo_key:
+                cell_id = cell.combo_key
+            else:
+                cell_id = next(
+                    (e.key for e in self._weapon_unlock_order if e.weapon_id == cell.first_weapon_id),
+                    str(cell.first_weapon_id),
+                )
+            prefix = f"task_cell/{cell.task_kind}/{cell.weapon_unlock_stage_key}/{cell_id}/enemy_phase/{cell.enemy_phase_idx}"
             metrics[f"{prefix}/active_score_mean"] = stats.active_score_mean
             metrics[f"{prefix}/active_score_p10"] = stats.active_score_p10
             metrics[f"{prefix}/active_score_cv"] = stats.active_score_cv
@@ -605,6 +643,10 @@ class TaskCellSamplerStateModule(BaseStateModule):
                     "enemy_phase_idx": s.cell.enemy_phase_idx,
                     "task_kind": s.cell.task_kind,
                     "build_policy": s.cell.build_policy,
+                    "combo_key": s.cell.combo_key,
+                    "initial_weapon_slots": [list(x) for x in s.cell.initial_weapon_slots],
+                    "initial_passive_slots": [list(x) for x in s.cell.initial_passive_slots],
+                    "allowed_weapon_ids": list(s.cell.allowed_weapon_ids),
                 },
                 "episode_count": s.episode_count,
                 "recent_scores": list(s.recent_scores),
@@ -655,6 +697,10 @@ class TaskCellSamplerStateModule(BaseStateModule):
                 enemy_phase_idx=int(cell_data["enemy_phase_idx"]),
                 task_kind=task_kind,
                 build_policy=build_policy,
+                combo_key=cell_data.get("combo_key", ""),
+                initial_weapon_slots=tuple(tuple(x) for x in cell_data.get("initial_weapon_slots", [])),
+                initial_passive_slots=tuple(tuple(x) for x in cell_data.get("initial_passive_slots", [])),
+                allowed_weapon_ids=tuple(cell_data.get("allowed_weapon_ids", [])),
             )
             stats = TaskCellStats(cell=cell)
             stats.episode_count = int(s.get("episode_count", 0))
