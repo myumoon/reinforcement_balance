@@ -135,9 +135,11 @@ class BootstrapGateEvalCallback(BaseCallback):
         self._last_probe_step: int = 0
         self._id_to_key: dict[int, str] = {e.weapon_id: e.key for e in weapon_unlock_order}
         self._id_to_entry: dict[int, WeaponEntry] = {e.weapon_id: e for e in weapon_unlock_order}
-        # ゲート閾値（W&B ログ用に保持）- status 別の閾値
+        # ゲート閾値（W&B ログ用に保持）- global fallback（per-weapon policy がない場合のみ使用）
         self._solo_target_p10: float = weapon_bootstrap_module._solo_bootstrap_target_p10
         self._integration_target_p10: float = weapon_bootstrap_module._integration_target_p10
+        # per-weapon policy 参照（trait exposure gate 等の武器別閾値に対応）
+        self._gate_policies = weapon_bootstrap_module._gate_policies
 
         # 非同期 eval 用の内部状態
         self._probe_thread: threading.Thread | None = None
@@ -444,14 +446,11 @@ class BootstrapGateEvalCallback(BaseCallback):
         )
 
         self._log_wandb(
-            target.weapon_key, target.status, summary, result.n_episodes, step=log_step
+            target.weapon_key, target.weapon_id, target.status, summary, result.n_episodes, step=log_step
         )
 
-        threshold = (
-            self._solo_target_p10 if target.status == "solo_bootstrap"
-            else self._integration_target_p10 if target.status == "integration"
-            else -1
-        )
+        # per-weapon policy から閾値を取得してコンソールに表示する
+        threshold = self._get_threshold(target.weapon_id, target.status)
         threshold_str = f"{threshold:.1f}" if threshold >= 0 else "(regression-based)"
         print(
             f"[BootstrapGateEval] weapon={target.weapon_key}[{target.status}], det_p10={p10:.1f}, "
@@ -676,9 +675,19 @@ class BootstrapGateEvalCallback(BaseCallback):
             return
         self._wandb_logger.log({key: value}, step=self.num_timesteps)
 
+    def _get_threshold(self, weapon_id: int, status: str) -> float:
+        """武器別 gate policy から閾値を取得する。policy が未登録の場合は global fallback を使う。"""
+        policy = self._gate_policies.get(weapon_id) if self._gate_policies else None
+        if status == "solo_bootstrap":
+            return policy.solo_target_p10 if policy is not None else self._solo_target_p10
+        if status == "integration":
+            return policy.integration_target_p10 if policy is not None else self._integration_target_p10
+        return -1.0
+
     def _log_wandb(
         self,
         weapon_key: str,
+        weapon_id: int,
         status: str,
         summary: dict,
         n_episodes: int,
@@ -690,12 +699,14 @@ class BootstrapGateEvalCallback(BaseCallback):
 
         prefix = f"bootstrap_gate/{weapon_key}/{status}"
 
-        # score_passed は status 別の閾値で判定
+        # score_passed は per-weapon policy 閾値で判定
         # solo_bootstrap → solo 閾値、integration → integration 閾値、maintenance → -1（N/A）
         if status == "solo_bootstrap":
-            score_passed = float(summary["active_score_p10"] >= self._solo_target_p10)
+            threshold = self._get_threshold(weapon_id, "solo_bootstrap")
+            score_passed = float(summary["active_score_p10"] >= threshold)
         elif status == "integration":
-            score_passed = float(summary["active_score_p10"] >= self._integration_target_p10)
+            threshold = self._get_threshold(weapon_id, "integration")
+            score_passed = float(summary["active_score_p10"] >= threshold)
         else:
             # maintenance はスコアベース。-1 は N/A を意味する
             score_passed = -1.0
