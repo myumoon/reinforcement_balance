@@ -1137,7 +1137,12 @@ def test_get_completion_snapshot_contains_unfinished_weapons():
     assert snapshot["target_stage_key"] == "WU1"
     assert snapshot["complete"] is False
     assert snapshot["unfinished_weapons"] == [
-        {"weapon_key": "king_bible", "weapon_id": WeaponType.KING_BIBLE, "status": "integration"}
+        {
+            "weapon_key": "king_bible",
+            "weapon_id": WeaponType.KING_BIBLE,
+            "status": "integration",
+            "gate_goal": "score",
+        }
     ]
 
 
@@ -1158,3 +1163,103 @@ def test_get_regressed_weapons_filters_by_regression_count():
         "regression_count": 3,
         "regression_from_best": None,
     }]
+
+
+# ---------------------------------------------------------------------------
+# テスト: trait exposure gate（Peachone / Ebony Wings 武器別 gate policy）
+# ---------------------------------------------------------------------------
+
+def test_trait_bootstrap_weapon_can_pass_solo_gate_with_low_score_if_survival_is_stable():
+    """trait exposure gate: 低スコアでも生存品質が高ければ solo_bootstrap → integration に昇格する。"""
+    module = make_module(
+        initial_status={"peachone": "solo_bootstrap"},
+        trait_bootstrap_weapon_keys=("peachone", "ebony_wings"),
+        trait_bootstrap_target_p10=120.0,
+        trait_bootstrap_min_ep_len_p10=3000.0,
+        trait_bootstrap_max_short_episode_rate=0.05,
+    )
+    weapon_id = WeaponType.PEACHONE
+    provider = MockStatsProvider()
+    cell = make_cell(weapon_id, phase=2, task_kind="solo_bootstrap")
+    provider.set_stats(
+        cell,
+        episode_count=50,
+        active_score_p10=125.0,
+        episode_length_p10=4300.0,
+        short_episode_rate=0.0,
+    )
+    _set_det(
+        module,
+        weapon_id,
+        "solo_bootstrap",
+        p10=125.0,
+        ep_len=4300.0,
+        short_rate=0.0,
+    )
+
+    changed = module.on_episode_end(
+        cell=cell,
+        stats_provider=provider,
+        current_stage_key="WU11",
+        num_timesteps=10_000,
+    )
+
+    assert changed is True
+    assert module._states[weapon_id].status == "integration"
+    assert module._states[weapon_id].best_phase2_p10 == 125.0
+
+
+def test_score_bootstrap_weapon_uses_default_threshold():
+    """score gate 武器: trait gate の低閾値が適用されず、デフォルト閾値（300.0）で判定される。"""
+    module = make_module(
+        initial_status={"garlic": "solo_bootstrap"},
+        trait_bootstrap_weapon_keys=("peachone", "ebony_wings"),
+        trait_bootstrap_target_p10=120.0,
+        trait_bootstrap_min_ep_len_p10=3000.0,
+        trait_bootstrap_max_short_episode_rate=0.05,
+    )
+    weapon_id = WeaponType.GARLIC
+    provider = MockStatsProvider()
+    cell = make_cell(weapon_id, phase=2, task_kind="solo_bootstrap")
+    provider.set_stats(
+        cell,
+        episode_count=50,
+        active_score_p10=125.0,   # 300.0 未満なので score gate では開かない
+        episode_length_p10=4300.0,
+        short_episode_rate=0.0,
+    )
+    _set_det(
+        module,
+        weapon_id,
+        "solo_bootstrap",
+        p10=125.0,
+        ep_len=4300.0,
+        short_rate=0.0,
+    )
+
+    changed = module.on_episode_end(
+        cell=cell,
+        stats_provider=provider,
+        current_stage_key="WU0",
+        num_timesteps=10_000,
+    )
+
+    assert changed is False
+    assert module._states[weapon_id].status == "solo_bootstrap"
+
+
+def test_completion_snapshot_shows_trait_exposure_gate_goal():
+    """get_completion_snapshot が trait_exposure 武器の gate_goal を正しく返す。"""
+    module = make_module(
+        initial_status={"peachone": "solo_bootstrap"},
+        trait_bootstrap_weapon_keys=("peachone", "ebony_wings"),
+        trait_bootstrap_target_p10=120.0,
+        trait_bootstrap_min_ep_len_p10=3000.0,
+        trait_bootstrap_max_short_episode_rate=0.05,
+    )
+
+    snapshot = module.get_completion_snapshot("WU11")
+    unfinished = {w["weapon_key"]: w for w in snapshot["unfinished_weapons"]}
+
+    assert "peachone" in unfinished
+    assert unfinished["peachone"]["gate_goal"] == "trait_exposure"

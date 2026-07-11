@@ -438,3 +438,23 @@ def test_survivors_supervisor_negative_timeout_raises():
     )
     with pytest.raises(ValueError, match=">= 0"):
         validate_survivors_supervisor_args(args)
+
+
+def test_train_trait_bootstrap_args_parsed(monkeypatch):
+    """trait bootstrap CLI 引数が正しく parse される。"""
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train.py", "--game", "survivors",
+            "--trait-bootstrap-weapon-keys", "peachone,ebony_wings",
+            "--trait-bootstrap-target-p10", "120",
+            "--trait-bootstrap-min-ep-len-p10", "3000",
+            "--trait-bootstrap-max-short-episode-rate", "0.05",
+        ],
+    )
+    from train import parse_args
+    args = parse_args()
+    assert args.trait_bootstrap_weapon_keys == "peachone,ebony_wings"
+    assert args.trait_bootstrap_target_p10 == 120.0
+    assert args.trait_bootstrap_min_ep_len_p10 == 3000.0
+    assert args.trait_bootstrap_max_short_episode_rate == 0.05

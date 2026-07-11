@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from games.survivors.modules.state_modules import BaseStateModule
 from games.survivors.survivors_weapon_table import WeaponEntry, get_added_weapon_id, get_unlocked_weapon_ids, get_unlocked_startable_weapon_ids
 from games.survivors.survivors_weapon_curriculum import WeaponType
+from games.survivors.weapon_bootstrap_gate_policy import WeaponBootstrapGatePolicy, build_weapon_bootstrap_gate_policies
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -54,6 +55,10 @@ class WeaponBootstrapStateModule(BaseStateModule):
         maintenance_min_probe_episodes: int = 20,
         deterministic_gate_max_eval_age_steps: int = 0,  # 0 = 鮮度チェック無効（無期限）
         deterministic_gate_enemy_phase_idx: int = 2,    # gate が期待する enemy_phase_idx（現在は 2 固定）
+        trait_bootstrap_weapon_keys: str | tuple[str, ...] | list[str] = "",
+        trait_bootstrap_target_p10: float = 120.0,
+        trait_bootstrap_min_ep_len_p10: float = 3000.0,
+        trait_bootstrap_max_short_episode_rate: float = 0.05,
     ) -> None:
         self._weapon_unlock_order = weapon_unlock_order
         self._solo_bootstrap_target_p10 = solo_bootstrap_target_p10
@@ -67,6 +72,18 @@ class WeaponBootstrapStateModule(BaseStateModule):
         self._maintenance_min_probe_episodes = maintenance_min_probe_episodes
         self._deterministic_gate_max_eval_age_steps = deterministic_gate_max_eval_age_steps
         self._deterministic_gate_enemy_phase_idx = deterministic_gate_enemy_phase_idx
+
+        self._gate_policies: dict[int, WeaponBootstrapGatePolicy] = build_weapon_bootstrap_gate_policies(
+            weapon_unlock_order=weapon_unlock_order,
+            score_solo_target_p10=solo_bootstrap_target_p10,
+            score_solo_min_ep_len_p10=solo_bootstrap_min_ep_len_p10,
+            score_solo_max_short_episode_rate=solo_bootstrap_max_short_episode_rate,
+            integration_target_p10=integration_target_p10,
+            trait_weapon_keys=trait_bootstrap_weapon_keys,
+            trait_target_p10=trait_bootstrap_target_p10,
+            trait_min_ep_len_p10=trait_bootstrap_min_ep_len_p10,
+            trait_max_short_episode_rate=trait_bootstrap_max_short_episode_rate,
+        )
 
         self._states: dict[int, WeaponBootstrapState] = {}
         for entry in weapon_unlock_order:
@@ -187,12 +204,17 @@ class WeaponBootstrapStateModule(BaseStateModule):
             )
 
             # exposure 数のみ stochastic（生存品質は deterministic 側で判定）
+            # 武器別 gate policy を参照（trait exposure gate は低 p10 閾値 + 生存品質重視）
+            _policy = self._gate_policies.get(weapon_id)
+            _solo_p10 = _policy.solo_target_p10 if _policy is not None else self._solo_bootstrap_target_p10
+            _solo_ep_len = _policy.solo_min_ep_len_p10 if _policy is not None else self._solo_bootstrap_min_ep_len_p10
+            _solo_short = _policy.solo_max_short_episode_rate if _policy is not None else self._solo_bootstrap_max_short_episode_rate
             ready = (
                 stats.episode_count >= self._solo_bootstrap_min_episodes
                 and det_fresh
-                and det_p10 >= self._solo_bootstrap_target_p10
-                and det_ep_len >= self._solo_bootstrap_min_ep_len_p10
-                and det_short <= self._solo_bootstrap_max_short_episode_rate
+                and det_p10 >= _solo_p10
+                and det_ep_len >= _solo_ep_len
+                and det_short <= _solo_short
             )
             if ready:
                 state.status = "integration"
@@ -236,11 +258,13 @@ class WeaponBootstrapStateModule(BaseStateModule):
             else:
                 regression_from_solo = None
 
+            _int_policy = self._gate_policies.get(weapon_id)
+            _int_p10 = _int_policy.integration_target_p10 if _int_policy is not None else self._integration_target_p10
             ready = (
                 stats.episode_count >= self._integration_min_episodes
                 and det_fresh
                 and det_p10 is not None
-                and det_p10 >= self._integration_target_p10
+                and det_p10 >= _int_p10
                 and solo_best > 0
                 and regression_from_solo is not None
                 and regression_from_solo <= self._integration_max_regression_from_solo
@@ -315,10 +339,12 @@ class WeaponBootstrapStateModule(BaseStateModule):
             state = self._states.get(entry.weapon_id)
             if state is None:
                 continue
+            policy = self._gate_policies.get(entry.weapon_id)
             row = {
                 "weapon_key": entry.key,
                 "weapon_id": entry.weapon_id,
                 "status": state.status,
+                "gate_goal": policy.gate_goal if policy is not None else "score",
             }
             weapons.append(row)
             if state.status != "maintenance":

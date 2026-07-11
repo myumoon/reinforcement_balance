@@ -13,6 +13,7 @@ if str(_TRAINING_ROOT) not in sys.path:
 import pytest
 
 from games.survivors.combination_smoke_cells import build_combination_smoke_cells
+from games.survivors.survivors_weapon_curriculum import WeaponType
 from games.survivors.survivors_weapon_table import WEAPON_UNLOCK_ORDER, get_unlocked_startable_weapon_ids
 
 
@@ -53,3 +54,44 @@ def test_build_raises_when_max_cells_below_coverage_min():
     # max_cells=5 では全武器カバレッジ不能 -> ValueError
     with pytest.raises(ValueError, match="max_cells=5"):
         build_combination_smoke_cells("WU12", 2, 5, 1, WEAPON_UNLOCK_ORDER)
+
+
+def test_combination_smoke_cells_include_peachone_ebony_pair_when_wu12_unlocked():
+    """WU12 解禁時、max_cells=coverage_min でも Peachone+Ebony Wings pair が必ず含まれる。
+
+    seed や extra pair の偶然に依存せず、required pair guarantee が確実に機能することを確認する。
+    coverage_min = startable 武器数 - 1 = anchor pair 数 で、extra pair の追加余地がゼロになる
+    最も厳しい条件でテストする。
+    """
+    coverage_min = len(get_unlocked_startable_weapon_ids("WU12", WEAPON_UNLOCK_ORDER)) - 1
+    cells = build_combination_smoke_cells(
+        stage_key="WU12",
+        enemy_phase_idx=2,
+        max_cells=coverage_min,
+        seed=123,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+
+    pairs = {tuple(sorted(cell.allowed_weapon_ids)) for cell in cells}
+
+    assert (WeaponType.PEACHONE, WeaponType.EBONY_WINGS) in pairs
+
+
+def test_combination_smoke_cells_coverage_maintained_after_required_pair_insertion():
+    """required pair 挿入後も全武器カバレッジが維持される（max_cells=coverage_min）。"""
+    startable_ids = get_unlocked_startable_weapon_ids("WU12", WEAPON_UNLOCK_ORDER)
+    coverage_min = len(startable_ids) - 1
+    cells = build_combination_smoke_cells(
+        stage_key="WU12",
+        enemy_phase_idx=2,
+        max_cells=coverage_min,
+        seed=123,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+
+    covered = set()
+    for cell in cells:
+        covered.update(cell.allowed_weapon_ids)
+
+    assert set(startable_ids) <= covered
+    assert len(cells) <= coverage_min
