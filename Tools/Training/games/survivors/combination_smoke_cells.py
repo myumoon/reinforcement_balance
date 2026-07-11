@@ -9,6 +9,7 @@ from __future__ import annotations
 import random
 
 from games.survivors.modules.task_cell_sampler_module import TaskCell
+from games.survivors.survivors_weapon_curriculum import WeaponType
 from games.survivors.survivors_weapon_table import (
     WEAPON_UNLOCK_ORDER,
     WeaponEntry,
@@ -70,6 +71,29 @@ def build_combination_smoke_cells(
         remaining = max_cells - len(pairs)
         if remaining > 0:
             pairs.extend(extra[:remaining])
+
+    # Peachone+Ebony Wings の required pair を保証する。
+    # anchor pair で max_cells が埋まっている場合は anchor pair を 1 つ置き換えて pair を挿入する。
+    # coverage を崩さないよう、anchor_id を含み required pair 武器も含む anchor pair を選ぶ。
+    required_pairs = [
+        (WeaponType.PEACHONE, WeaponType.EBONY_WINGS),
+    ]
+    normalized_pairs_set = {(min(a, b), max(a, b)) for a, b in pairs}
+    for ra, rb in required_pairs:
+        if ra in startable_ids and rb in startable_ids:
+            required = (min(ra, rb), max(ra, rb))
+            if required not in normalized_pairs_set:
+                if len(pairs) >= max_cells:
+                    for idx, pair in enumerate(pairs):
+                        norm = (min(pair[0], pair[1]), max(pair[0], pair[1]))
+                        if anchor_id in norm and (ra in norm or rb in norm):
+                            pairs[idx] = required
+                            break
+                    else:
+                        pairs.append(required)
+                else:
+                    pairs.append(required)
+                normalized_pairs_set.add(required)
 
     # 重複除去（sorted タプルで一意化）しつつ順序を保つ
     seen: set[tuple[int, int]] = set()

@@ -1108,6 +1108,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--maintenance-min-probe-episodes", type=int, default=20,
                    help="maintenance regression判定に必要な最小エピソード数 (default: 20)")
 
+    # Trait exposure gate 関連（Peachone / Ebony Wings 等、単体高スコア達成が困難な武器向け）
+    p.add_argument("--trait-bootstrap-weapon-keys", type=str, default="peachone,ebony_wings",
+                   help="単体高スコアではなく trait exposure gate を使う武器 key のカンマ区切り。")
+    p.add_argument("--trait-bootstrap-target-p10", type=float, default=120.0,
+                   help="trait exposure weapon の solo bootstrap p10 閾値。")
+    p.add_argument("--trait-bootstrap-min-ep-len-p10", type=float, default=3000.0,
+                   help="trait exposure weapon の最低 episode_length_p10。")
+    p.add_argument("--trait-bootstrap-max-short-episode-rate", type=float, default=0.05,
+                   help="trait exposure weapon の最大 short_episode_rate。")
+
     # Bootstrap Gate Eval 関連
     p.add_argument("--bootstrap-gate-eval-port", type=int, default=None,
                    help="weapon bootstrap gate 専用の UE5 ポート。"
@@ -2047,6 +2057,10 @@ def main() -> None:
                 # eval_freq * 2 を鮮度上限に設定: 2 probe サイクル以内の結果だけを gate 判定に使う
                 # 0（無期限）だと set_params 失敗で古い結果が残り誤 gate 通過のリスクがある
                 deterministic_gate_max_eval_age_steps=get_effective_bootstrap_gate_eval_freq(args) * 2,
+                trait_bootstrap_weapon_keys=getattr(args, "trait_bootstrap_weapon_keys", "peachone,ebony_wings"),
+                trait_bootstrap_target_p10=getattr(args, "trait_bootstrap_target_p10", 120.0),
+                trait_bootstrap_min_ep_len_p10=getattr(args, "trait_bootstrap_min_ep_len_p10", 3000.0),
+                trait_bootstrap_max_short_episode_rate=getattr(args, "trait_bootstrap_max_short_episode_rate", 0.05),
             )
             if _resume_bootstrap_state is not None:
                 _weapon_bootstrap_module.import_state(_resume_bootstrap_state)

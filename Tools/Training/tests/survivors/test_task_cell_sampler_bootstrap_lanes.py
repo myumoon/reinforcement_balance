@@ -427,6 +427,16 @@ def test_on_episode_end_returns_true_on_status_change():
     stats.active_score_p10 = 350.0
     stats.episode_length_p10 = 1300.0
     stats.short_episode_rate = 0.05
+    # deterministic gate に必要な結果を注入（solo_bootstrap gate は deterministic 結果が必須）
+    bs.set_deterministic_result(
+        weapon_id=WeaponType.GARLIC,
+        task_kind="solo_bootstrap",
+        enemy_phase_idx=2,
+        p10=350.0,
+        episode_length_p10=1300.0,
+        short_episode_rate=0.05,
+        num_timesteps=1000,
+    )
 
     result = bs.on_episode_end(
         cell=cell,
