@@ -473,7 +473,16 @@ class TaskCellSamplerCallback(BaseCallback):
         """
         min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
         max_phase = self._hybrid_cb.current_phase
-        stage_key = self._weapon_unlock.current_stage_key
+        # bootstrap の target stage を基準にセルを生成する。current_stage_key は
+        # supervisor が完了を検知する前に target を超えて進んでいる場合があり、
+        # target 外の武器を IS1 セルに含めてしまう（train.py の max_cells 検証も
+        # target 基準のため ValueError になり得る）。supervisor があればその
+        # target_stage_key を優先し、無ければ current にフォールバックする。
+        stage_key = (
+            self._supervisor_cb.target_stage_key
+            if self._supervisor_cb is not None
+            else self._weapon_unlock.current_stage_key
+        )
         # rebuild 前に既存候補を保存し、空になった場合の復元に使う
         prev_candidates = self._tcs._candidate_cells
         self._tcs.rebuild_passive_item_stage_candidate_cells(

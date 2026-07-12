@@ -77,26 +77,32 @@ def build_passive_item_stage_cells(
             enemy_phase_idx=enemy_phase_idx,
             task_kind="passive_item_stage",
             build_policy="combination_slots",
-            combo_key="is1_w{}_p{}".format(wid, "_".join(str(pid) for pid in pids)),
+            combo_key="is1_w{}_p{}".format(
+                wid, "_".join(f"{pid}l{lvl}" for pid, lvl in passive_slots)
+            ),
             initial_weapon_slots=((wid, _DEFAULT_WEAPON_SLOT_LEVEL),),
             initial_passive_slots=passive_slots,
             allowed_weapon_ids=(wid,),
         ))
 
     # 2) passive の未カバー分を追加セルで補う（max_cells の範囲で）。
+    #    初期セルで既にカバー済みの passive は再追加せず、未カバー分のみ補う。
+    covered_passives = {pid for cell in cells for pid, _ in cell.initial_passive_slots}
+    uncovered = [pid for pid in passives if pid not in covered_passives]
     passive_index = 0
-    while len(cells) < max_cells and passive_index < len(passives):
+    while len(cells) < max_cells and passive_index < len(uncovered):
         wid = weapons[passive_index % len(weapons)]
-        pid = passives[passive_index]
+        pid = uncovered[passive_index]
+        slot = _passive_slot(pid, rng)
         cells.append(TaskCell(
             weapon_unlock_stage_key=stage_key,
             first_weapon_id=wid,
             enemy_phase_idx=enemy_phase_idx,
             task_kind="passive_item_stage",
             build_policy="combination_slots",
-            combo_key=f"is1_cover_w{wid}_p{pid}",
+            combo_key=f"is1_cover_w{wid}_p{slot[0]}l{slot[1]}",
             initial_weapon_slots=((wid, _DEFAULT_WEAPON_SLOT_LEVEL),),
-            initial_passive_slots=(_passive_slot(pid, rng),),
+            initial_passive_slots=(slot,),
             allowed_weapon_ids=(wid,),
         ))
         passive_index += 1

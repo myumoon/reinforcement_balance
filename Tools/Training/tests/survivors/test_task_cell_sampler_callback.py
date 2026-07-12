@@ -331,6 +331,7 @@ def test_switch_to_passive_item_stage_on_supervisor_request(tmp_path):
 
     supervisor = MagicMock()
     supervisor.post_bootstrap_transition_requested = True
+    supervisor.target_stage_key = "WU12"
 
     callback = TaskCellSamplerCallback(
         hybrid_cb=hybrid_cb,

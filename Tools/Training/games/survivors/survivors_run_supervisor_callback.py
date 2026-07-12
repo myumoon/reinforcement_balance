@@ -40,6 +40,10 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
     def post_bootstrap_transition_requested(self) -> bool:
         return self._post_bootstrap_transition_requested
 
+    @property
+    def target_stage_key(self) -> str:
+        return self._target_stage_key
+
     def _write_event(self, event: str, payload: dict) -> None:
         if self._event_logger is None:
             return
