@@ -262,6 +262,19 @@ def validate_survivors_supervisor_args(args: argparse.Namespace) -> None:
                 f"必要な {_coverage_min} を下回ります。"
                 f" --combination-smoke-max-cells >= {_coverage_min} を指定してください。"
             )
+    if getattr(args, "post_bootstrap_mode", "stop") == "passive_item_stage":
+        # passive_item_stage は各 startable 武器につき最低 1 セルを保証するため、
+        # max_cells が startable 武器数を下回ると bootstrap 完了後に
+        # build_passive_item_stage_cells() が ValueError で落ちる。CLI 起動時に検出する。
+        _max_cells = getattr(args, "passive_item_stage_max_cells", 96)
+        _startable = _get_startable(_target, _WUO)
+        _startable_count = len(_startable)
+        if _startable_count > 0 and _max_cells < _startable_count:
+            raise ValueError(
+                f"--passive-item-stage-max-cells={_max_cells} は {_target!r} の全武器カバレッジに"
+                f"必要な {_startable_count} を下回ります。"
+                f" --passive-item-stage-max-cells >= {_startable_count} を指定してください。"
+            )
 
 
 def _parse_step_shorthand(s: str) -> int:
