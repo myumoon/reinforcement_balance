@@ -2043,6 +2043,7 @@ def main() -> None:
                 )
             _weapon_bootstrap_module = _WeaponBootstrapStateModule(
                 weapon_unlock_order=_weapon_unlock_order,
+                item_stage_key=getattr(args, "weapon_item_stage", "IS0"),
                 initial_status=_initial_status,
                 initial_best_phase2_p10=_initial_best,
                 solo_bootstrap_target_p10=getattr(args, "solo_bootstrap_target_p10", 300.0),

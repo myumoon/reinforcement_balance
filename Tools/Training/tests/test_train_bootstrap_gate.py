@@ -458,3 +458,21 @@ def test_train_trait_bootstrap_args_parsed(monkeypatch):
     assert args.trait_bootstrap_target_p10 == 120.0
     assert args.trait_bootstrap_min_ep_len_p10 == 3000.0
     assert args.trait_bootstrap_max_short_episode_rate == 0.05
+
+
+def test_weapon_bootstrap_item_stage_is_available_in_args(monkeypatch):
+    """--weapon-item-stage が parse され args に反映される。"""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train.py",
+            "--game", "survivors",
+            "--task-cell-sampler",
+            "--weapon-bootstrap-lanes",
+            "--weapon-item-stage", "IS1",
+            "--bootstrap-gate-eval-port", "8768",
+        ],
+    )
+    args = parse_args()
+    assert args.weapon_item_stage == "IS1"
