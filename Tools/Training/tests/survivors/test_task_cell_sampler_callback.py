@@ -286,6 +286,79 @@ def test_switch_to_combination_smoke_on_supervisor_request(tmp_path):
     assert callback._item_stage_key == "IS1"
 
 
+def test_passive_item_stage_cell_uses_slots():
+    """passive_item_stage セルは fixed_subset + passive slot を IS1 で /params に反映する。"""
+    from games.survivors.modules.task_cell_sampler_module import TaskCell
+
+    cb = _make_simple_callback(item_stage_key="IS1")
+    cell = TaskCell(
+        weapon_unlock_stage_key="WU12",
+        first_weapon_id=WeaponType.GARLIC,
+        enemy_phase_idx=2,
+        task_kind="passive_item_stage",
+        build_policy="combination_slots",
+        combo_key="is1_w1_p10",
+        initial_weapon_slots=((WeaponType.GARLIC, 3),),
+        initial_passive_slots=((10, 2),),
+        allowed_weapon_ids=(WeaponType.GARLIC,),
+    )
+    params = cb._build_params_for_cell(cell)
+    assert params["weapon_pool_mode"] == "fixed_subset"
+    assert params["allowed_weapon_types"] == [WeaponType.GARLIC]
+    assert params["initial_weapon_slots"] == [{"weapon_id": WeaponType.GARLIC, "level": 3}]
+    assert params["initial_passive_slots"] == [{"passive_id": 10, "level": 2}]
+    assert params["enable_passives"] is True
+    assert params["enable_evolutions"] is False
+
+
+def test_switch_to_passive_item_stage_on_supervisor_request(tmp_path):
+    """post_bootstrap_mode=passive_item_stage で supervisor が遷移を要求したら
+    sampling_mode が passive_item_stage に切り替わり、候補セルが passive_item_stage
+    セルになり、item_stage が IS1 になる。"""
+    from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
+
+    hybrid_cb = make_mock_hybrid_cb(current_phase=2)
+    tcs = TaskCellSamplerStateModule(min_episodes_per_cell=1, weapon_unlock_order=WEAPON_UNLOCK_ORDER)
+    weapon_unlock = WeaponUnlockStateModule(
+        initial_stage_key="WU12",
+        weapon_unlock_min_steps=10**9,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+    weapon_bootstrap = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={"garlic": "maintenance"},
+    )
+
+    supervisor = MagicMock()
+    supervisor.post_bootstrap_transition_requested = True
+    supervisor.target_stage_key = "WU12"
+
+    callback = TaskCellSamplerCallback(
+        hybrid_cb=hybrid_cb,
+        task_cell_sampler=tcs,
+        weapon_unlock=weapon_unlock,
+        param_applier=MagicMock(),
+        log_dir=str(tmp_path),
+        weapon_bootstrap=weapon_bootstrap,
+        post_bootstrap_mode="passive_item_stage",
+        supervisor_cb=supervisor,
+        passive_item_stage_max_cells=96,
+        passive_item_stage_seed=7,
+        passive_item_stage_item_stage_key="IS1",
+    )
+    assert callback._sampling_mode == "bootstrap"
+
+    callback.num_timesteps = 10_000
+    callback.locals = {"infos": [{}]}
+    callback._score_tracker.process = MagicMock(return_value=[])
+
+    assert callback._on_step() is True
+    assert callback._sampling_mode == "passive_item_stage"
+    passive_cells = [c for c in tcs._candidate_cells if c.task_kind == "passive_item_stage"]
+    assert len(passive_cells) > 0
+    assert callback._item_stage_key == "IS1"
+
+
 def test_no_switch_when_supervisor_flag_not_set(tmp_path):
     """supervisor フラグが立っていない場合は bootstrap のまま遷移しない。"""
     from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback

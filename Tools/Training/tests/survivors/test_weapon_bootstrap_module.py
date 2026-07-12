@@ -1166,6 +1166,133 @@ def test_get_regressed_weapons_filters_by_regression_count():
 
 
 # ---------------------------------------------------------------------------
+# テスト: item stage scope（IS0/IS1 の bootstrap state 分離）
+# ---------------------------------------------------------------------------
+
+def test_import_state_ignores_mismatched_item_stage():
+    module = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        item_stage_key="IS1",
+        initial_status={"garlic": "solo_bootstrap"},
+    )
+    module.import_state({
+        "item_stage_key": "IS0",
+        "weapons": [
+            {
+                "weapon_id": WeaponType.GARLIC,
+                "weapon_key": "garlic",
+                "status": "maintenance",
+                "best_phase2_p10": 999.0,
+            }
+        ],
+    })
+    snapshot = module.get_weapon_snapshot(WeaponType.GARLIC)
+    assert snapshot["status"] == "solo_bootstrap"
+    assert snapshot["best_phase2_p10"] == 0.0
+
+
+def test_import_state_returns_false_on_item_stage_mismatch():
+    """item_stage mismatch では import_state が False を返し、initial_status が残る。
+
+    False を受けた呼び出し側はコンストラクタで適用済みの initial_status を
+    フォールバックとして使え、全 locked による候補セル空を防げる。
+    """
+    module = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        item_stage_key="IS1",
+        initial_status={"garlic": "solo_bootstrap"},
+    )
+    applied = module.import_state({
+        "item_stage_key": "IS0",
+        "weapons": [
+            {
+                "weapon_id": WeaponType.GARLIC,
+                "weapon_key": "garlic",
+                "status": "maintenance",
+                "best_phase2_p10": 999.0,
+            }
+        ],
+    })
+    assert applied is False
+    # initial_status がフォールバックとして保持され、全 locked にならない
+    assert module.get_weapon_snapshot(WeaponType.GARLIC)["status"] == "solo_bootstrap"
+
+
+def test_import_state_returns_true_on_matching_item_stage():
+    """item_stage 一致では import_state が True を返す。"""
+    module = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        item_stage_key="IS1",
+        initial_status={"garlic": "solo_bootstrap"},
+    )
+    applied = module.import_state({
+        "item_stage_key": "IS1",
+        "weapons": [
+            {
+                "weapon_id": WeaponType.GARLIC,
+                "weapon_key": "garlic",
+                "status": "maintenance",
+                "best_phase2_p10": 999.0,
+            }
+        ],
+    })
+    assert applied is True
+    assert module.get_weapon_snapshot(WeaponType.GARLIC)["status"] == "maintenance"
+
+
+def test_export_state_includes_item_stage_key():
+    module = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        item_stage_key="IS1",
+    )
+    assert module.export_state()["item_stage_key"] == "IS1"
+
+
+def test_import_state_accepts_matching_item_stage():
+    module = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        item_stage_key="IS1",
+        initial_status={"garlic": "solo_bootstrap"},
+    )
+    module.import_state({
+        "item_stage_key": "IS1",
+        "weapons": [
+            {
+                "weapon_id": WeaponType.GARLIC,
+                "weapon_key": "garlic",
+                "status": "maintenance",
+                "best_phase2_p10": 999.0,
+            }
+        ],
+    })
+    snapshot = module.get_weapon_snapshot(WeaponType.GARLIC)
+    assert snapshot["status"] == "maintenance"
+    assert snapshot["best_phase2_p10"] == 999.0
+
+
+def test_import_state_default_item_stage_is_is0():
+    """item_stage_key を指定しないモジュールは IS0 とみなし、旧 state を受け入れる。"""
+    module = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={"garlic": "solo_bootstrap"},
+    )
+    # item_stage_key キーなしの旧 state（デフォルト IS0 とみなす）
+    module.import_state({
+        "weapons": [
+            {
+                "weapon_id": WeaponType.GARLIC,
+                "weapon_key": "garlic",
+                "status": "maintenance",
+                "best_phase2_p10": 500.0,
+            }
+        ],
+    })
+    snapshot = module.get_weapon_snapshot(WeaponType.GARLIC)
+    assert snapshot["status"] == "maintenance"
+    assert snapshot["best_phase2_p10"] == 500.0
+
+
+# ---------------------------------------------------------------------------
 # テスト: trait exposure gate（Peachone / Ebony Wings 武器別 gate policy）
 # ---------------------------------------------------------------------------
 

@@ -42,6 +42,7 @@ class WeaponBootstrapStateModule(BaseStateModule):
         self,
         *,
         weapon_unlock_order: list[WeaponEntry],
+        item_stage_key: str = "IS0",
         initial_status: dict[str, str] | None = None,
         initial_best_phase2_p10: dict[str, float] | None = None,
         solo_bootstrap_target_p10: float = 300.0,
@@ -61,6 +62,7 @@ class WeaponBootstrapStateModule(BaseStateModule):
         trait_bootstrap_max_short_episode_rate: float = 0.05,
     ) -> None:
         self._weapon_unlock_order = weapon_unlock_order
+        self._item_stage_key = item_stage_key
         self._solo_bootstrap_target_p10 = solo_bootstrap_target_p10
         self._solo_bootstrap_min_ep_len_p10 = solo_bootstrap_min_ep_len_p10
         self._solo_bootstrap_max_short_episode_rate = solo_bootstrap_max_short_episode_rate
@@ -471,9 +473,25 @@ class WeaponBootstrapStateModule(BaseStateModule):
                 "deterministic_enemy_phase_idx": state.deterministic_enemy_phase_idx,
                 "last_regression_eval_step": state.last_regression_eval_step,
             })
-        return {"weapons": weapons}
+        return {"item_stage_key": self._item_stage_key, "weapons": weapons}
 
-    def import_state(self, state: dict) -> None:
+    def import_state(self, state: dict) -> bool:
+        """resume state を取り込む。
+
+        Returns:
+            bool: state が適用されたら True。item_stage_key mismatch で無視した
+            場合は False（呼び出し側はコンストラクタで適用済みの initial_status を
+            フォールバックとして利用でき、全 locked による候補セル空を防げる）。
+        """
+        # item stage が異なる state は流用しない（IS0 の完了状態を IS1 に持ち込まない）
+        saved_item_stage = state.get("item_stage_key", "IS0")
+        if saved_item_stage != self._item_stage_key:
+            print(
+                "[INFO] weapon_bootstrap state ignored because item_stage_key differs: "
+                f"saved={saved_item_stage}, current={self._item_stage_key}"
+            )
+            return False
+
         # weapon_key または weapon_id でマッピング
         key_to_id = {e.key: e.weapon_id for e in self._weapon_unlock_order}
         for w in state.get("weapons", []):
@@ -501,3 +519,4 @@ class WeaponBootstrapStateModule(BaseStateModule):
             s.deterministic_task_kind = w.get("deterministic_task_kind")  # None をデフォルト
             s.deterministic_enemy_phase_idx = w.get("deterministic_enemy_phase_idx")  # None をデフォルト
             s.last_regression_eval_step = int(w.get("last_regression_eval_step", -1))  # -1 = 未カウント
+        return True
