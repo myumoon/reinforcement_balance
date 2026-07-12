@@ -49,8 +49,17 @@ def test_passive_item_stage_cells_metadata():
 
 
 def test_passive_item_stage_cells_respect_max_cells():
-    cells = build_passive_item_stage_cells("WU12", 2, 5, 7, WEAPON_UNLOCK_ORDER)
+    # WU4 has 5 startable weapons; max_cells=5 satisfies the coverage requirement.
+    cells = build_passive_item_stage_cells("WU4", 2, 5, 7, WEAPON_UNLOCK_ORDER)
     assert len(cells) <= 5
+
+
+def test_passive_item_stage_cells_raises_when_max_cells_too_small():
+    """max_cells が startable 武器数を下回る場合は ValueError を送出すること。"""
+    import pytest
+    # WU12 has 13 startable weapons; max_cells=5 must raise.
+    with pytest.raises(ValueError, match="max_cells=5"):
+        build_passive_item_stage_cells("WU12", 2, 5, 7, WEAPON_UNLOCK_ORDER)
 
 
 def test_passive_item_stage_cells_passive_levels_in_range():

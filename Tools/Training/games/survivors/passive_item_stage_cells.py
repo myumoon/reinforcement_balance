@@ -49,6 +49,12 @@ def build_passive_item_stage_cells(
     if not weapons or not passives:
         return []
 
+    if max_cells < len(weapons):
+        raise ValueError(
+            f"max_cells={max_cells} is less than the number of startable weapons ({len(weapons)}). "
+            "All startable weapons must be covered."
+        )
+
     cells: list[TaskCell] = []
 
     # 1) 各 startable 武器について 1 セル（全武器カバレッジ保証）。
