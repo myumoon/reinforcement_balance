@@ -262,6 +262,19 @@ def validate_survivors_supervisor_args(args: argparse.Namespace) -> None:
                 f"必要な {_coverage_min} を下回ります。"
                 f" --combination-smoke-max-cells >= {_coverage_min} を指定してください。"
             )
+    if getattr(args, "post_bootstrap_mode", "stop") == "passive_item_stage":
+        # passive_item_stage は各 startable 武器につき最低 1 セルを保証するため、
+        # max_cells が startable 武器数を下回ると bootstrap 完了後に
+        # build_passive_item_stage_cells() が ValueError で落ちる。CLI 起動時に検出する。
+        _max_cells = getattr(args, "passive_item_stage_max_cells", 96)
+        _startable = _get_startable(_target, _WUO)
+        _startable_count = len(_startable)
+        if _startable_count > 0 and _max_cells < _startable_count:
+            raise ValueError(
+                f"--passive-item-stage-max-cells={_max_cells} は {_target!r} の全武器カバレッジに"
+                f"必要な {_startable_count} を下回ります。"
+                f" --passive-item-stage-max-cells >= {_startable_count} を指定してください。"
+            )
 
 
 def _parse_step_shorthand(s: str) -> int:
@@ -1137,8 +1150,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bootstrap-target-stage-key", type=str, default="WU12",
                    help="全武器 bootstrap 完走判定の target stage key。")
     p.add_argument("--post-bootstrap-mode", type=str, default="stop",
-                   choices=["stop", "combination_smoke"],
-                   help="bootstrap 完了後の動作。stop は停止、combination_smoke は B-smoke へ遷移要求。")
+                   choices=["stop", "combination_smoke", "passive_item_stage"],
+                   help="bootstrap 完了後の動作。stop は停止、combination_smoke は B-smoke、"
+                        "passive_item_stage は IS1 passive coverage へ遷移要求。")
     p.add_argument("--survivors-supervisor-check-freq", type=int, default=2048,
                    help="supervisor の判定間隔 step。")
     p.add_argument("--bootstrap-stage-timeout-steps", type=int, default=2_000_000,
@@ -1152,6 +1166,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--combination-smoke-item-stage", type=str, default="IS1",
                    choices=["IS0", "IS1", "IS2"],
                    help="combination_smoke 遷移後の item system stage（passive/evolution 有効化）。")
+    p.add_argument("--passive-item-stage-max-cells", type=int, default=96,
+                   help="passive_item_stage へ遷移した際に生成する武器×passive セルの上限数。")
+    p.add_argument("--passive-item-stage-seed", type=int, default=12345,
+                   help="passive_item_stage セル生成のシード（決定論的生成用）。")
 
     # YAML があればデフォルトを差し込む（CLI が常に優先）
     if pre_args.config:
@@ -2030,9 +2048,12 @@ def main() -> None:
                 if _train_status is not None
                 else None
             )
-            # When resuming older runs without weapon_bootstrap state, derive a
-            # usable default from the restored weapon_unlock stage.
-            if _initial_status is None and _resume_bootstrap_state is None:
+            # When no explicit initial_status is given, derive a usable default
+            # from the restored weapon_unlock stage. This applies even when a
+            # resume state is present: if that state is later ignored (e.g.
+            # item_stage_key mismatch), the constructor state acts as a fallback
+            # so bootstrap candidate cells are never left empty (all locked).
+            if _initial_status is None:
                 _initial_status = _default_weapon_bootstrap_initial_status(
                     _weapon_unlock_order,
                     _weapon_unlock_module.current_stage_key,
@@ -2043,6 +2064,7 @@ def main() -> None:
                 )
             _weapon_bootstrap_module = _WeaponBootstrapStateModule(
                 weapon_unlock_order=_weapon_unlock_order,
+                item_stage_key=getattr(args, "weapon_item_stage", "IS0"),
                 initial_status=_initial_status,
                 initial_best_phase2_p10=_initial_best,
                 solo_bootstrap_target_p10=getattr(args, "solo_bootstrap_target_p10", 300.0),
@@ -2063,8 +2085,17 @@ def main() -> None:
                 trait_bootstrap_max_short_episode_rate=getattr(args, "trait_bootstrap_max_short_episode_rate", 0.05),
             )
             if _resume_bootstrap_state is not None:
-                _weapon_bootstrap_module.import_state(_resume_bootstrap_state)
-                print("[INFO] weapon_bootstrap state を復元")
+                _imported = _weapon_bootstrap_module.import_state(_resume_bootstrap_state)
+                if _imported:
+                    print("[INFO] weapon_bootstrap state を復元")
+                else:
+                    # item_stage mismatch 等で resume state が無視された場合、
+                    # コンストラクタで適用済みの initial_status がそのまま残り、
+                    # 候補セルが空（全 locked）になることを防ぐ。
+                    print(
+                        "[INFO] weapon_bootstrap state を無視し、"
+                        f"initial_status={_initial_status} にフォールバック"
+                    )
             print(f"[INFO] WeaponBootstrapStateModule 有効 (initial_status={_initial_status})")
 
         # BootstrapGateEvalCallback の登録
@@ -2121,6 +2152,7 @@ def main() -> None:
                 weapon_unlock=_weapon_unlock_module,
                 weapon_bootstrap=_weapon_bootstrap_module,
                 target_stage_key=args.bootstrap_target_stage_key,
+                item_stage_key=getattr(args, "weapon_item_stage", "IS0"),
                 post_bootstrap_mode=args.post_bootstrap_mode,
                 check_freq=args.survivors_supervisor_check_freq,
                 stage_timeout_steps=args.bootstrap_stage_timeout_steps,
@@ -2136,6 +2168,11 @@ def main() -> None:
                 print(
                     "[INFO] post_bootstrap_mode=combination_smoke: "
                     "bootstrap 完了後に TaskCellSamplerCallback が combination_smoke へ遷移します。"
+                )
+            elif args.post_bootstrap_mode == "passive_item_stage":
+                print(
+                    "[INFO] post_bootstrap_mode=passive_item_stage: "
+                    "bootstrap 完了後に TaskCellSamplerCallback が IS1 passive coverage へ遷移します。"
                 )
 
         if _hybrid_cb_ref is not None and _task_cell_sampler_module and _weapon_unlock_module:
@@ -2162,6 +2199,9 @@ def main() -> None:
                 combination_smoke_max_cells=getattr(args, "combination_smoke_max_cells", 64),
                 combination_smoke_seed=getattr(args, "combination_smoke_seed", 12345),
                 combination_smoke_item_stage_key=getattr(args, "combination_smoke_item_stage", "IS1"),
+                passive_item_stage_max_cells=getattr(args, "passive_item_stage_max_cells", 96),
+                passive_item_stage_seed=getattr(args, "passive_item_stage_seed", 12345),
+                passive_item_stage_item_stage_key="IS1",
             )
             callbacks.append(_tcs_cb)
             print(

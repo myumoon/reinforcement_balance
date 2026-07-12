@@ -85,6 +85,9 @@ class TaskCellSamplerCallback(BaseCallback):
         combination_smoke_max_cells: int = 64,
         combination_smoke_seed: int = 12345,
         combination_smoke_item_stage_key: str = "IS1",
+        passive_item_stage_max_cells: int = 96,
+        passive_item_stage_seed: int = 12345,
+        passive_item_stage_item_stage_key: str = "IS1",
     ) -> None:
         super().__init__(verbose=0)
         self._hybrid_cb = hybrid_cb
@@ -132,6 +135,9 @@ class TaskCellSamplerCallback(BaseCallback):
         self._combination_smoke_max_cells = combination_smoke_max_cells
         self._combination_smoke_seed = combination_smoke_seed
         self._combination_smoke_item_stage_key = combination_smoke_item_stage_key
+        self._passive_item_stage_max_cells = passive_item_stage_max_cells
+        self._passive_item_stage_seed = passive_item_stage_seed
+        self._passive_item_stage_item_stage_key = passive_item_stage_item_stage_key
         # サンプリングモード: "bootstrap"（lane mix）または "wave_main"（重み付き単純サンプル）
         self._sampling_mode = "bootstrap" if weapon_bootstrap is not None else "wave_main"
 
@@ -201,13 +207,14 @@ class TaskCellSamplerCallback(BaseCallback):
         episode_results = self._score_tracker.process(self.locals["infos"])
         infos = self.locals["infos"]
 
-        # Phase 02 → 03 遷移要求を確認する（bootstrap 完了時に一度だけ切り替える）
-        self._maybe_switch_to_combination_smoke()
+        # Phase 02 → 03/04 遷移要求を確認する（bootstrap 完了時に一度だけ切り替える）
+        self._maybe_switch_post_bootstrap()
 
         # 敵フェーズ変化検出（probe 昇格・rollback を TCS に反映）
-        # combination_smoke 中は phase 固定で候補を再構築しない。
+        # post-bootstrap lane (combination_smoke / passive_item_stage) 中は
+        # phase 固定で候補を再構築しない。
         current_enemy_phase = self._hybrid_cb.current_phase
-        if (self._sampling_mode != "combination_smoke"
+        if (self._sampling_mode not in ("combination_smoke", "passive_item_stage")
                 and current_enemy_phase != self._tcs._max_unlocked_enemy_phase_idx):
             self._on_enemy_phase_changed(current_enemy_phase)
 
@@ -228,9 +235,11 @@ class TaskCellSamplerCallback(BaseCallback):
                     terminated=terminated,
                     num_timesteps=self.num_timesteps,
                 )
-                # active_cell.task_kind で判定: combination_smoke に遷移後も残存 bootstrap
+                # active_cell.task_kind で判定: post-bootstrap lane に遷移後も残存 bootstrap
                 # cell の完了は weapon_bootstrap に正しく反映する必要がある。
-                if self._weapon_bootstrap is not None and active_cell.task_kind != "combination_smoke":
+                if self._weapon_bootstrap is not None and active_cell.task_kind not in (
+                    "combination_smoke", "passive_item_stage"
+                ):
                     status_changed = self._weapon_bootstrap.on_episode_end(
                         cell=active_cell,
                         stats_provider=self._tcs,
@@ -272,9 +281,9 @@ class TaskCellSamplerCallback(BaseCallback):
             )
 
             # 3-4. 武器アンロック判定
-            # combination_smoke 中は stage 固定でアンロック判定・再構築を行わない。
+            # post-bootstrap lane 中は stage 固定でアンロック判定・再構築を行わない。
             max_phase = self._hybrid_cb.current_phase
-            if self._sampling_mode == "combination_smoke":
+            if self._sampling_mode in ("combination_smoke", "passive_item_stage"):
                 event = None
             elif self._weapon_bootstrap is None:
                 # target_phase: cap が候補セルに強制追加されているので min(max_phase, cap) を使える
@@ -372,22 +381,25 @@ class TaskCellSamplerCallback(BaseCallback):
             decision = None
         return cell, decision
 
-    def _maybe_switch_to_combination_smoke(self) -> bool:
-        """supervisor が bootstrap 完了 → combination_smoke 遷移を要求したら切り替える。
+    def _maybe_switch_post_bootstrap(self) -> bool:
+        """supervisor が bootstrap 完了 → post-bootstrap lane 遷移を要求したら切り替える。
 
-        遷移すると sampling_mode を "wave_main" に切り替え、combination_smoke の
-        候補セルを再構築する。二重遷移を防ぐため一度切り替えたら再要求は無視する。
+        post_bootstrap_mode に応じて combination_smoke または passive_item_stage の
+        候補セルへ切り替える。二重遷移を防ぐため一度切り替えたら再要求は無視する。
         戻り値: 遷移を実施したら True。
         """
-        if self._sampling_mode == "combination_smoke":
+        if self._sampling_mode in ("combination_smoke", "passive_item_stage"):
             return False
-        if self._post_bootstrap_mode != "combination_smoke":
+        if self._post_bootstrap_mode not in ("combination_smoke", "passive_item_stage"):
             return False
         if self._supervisor_cb is None:
             return False
         if not getattr(self._supervisor_cb, "post_bootstrap_transition_requested", False):
             return False
-        self._switch_to_combination_smoke()
+        if self._post_bootstrap_mode == "combination_smoke":
+            self._switch_to_combination_smoke()
+        else:
+            self._switch_to_passive_item_stage()
         return True
 
     def _switch_to_combination_smoke(self) -> None:
@@ -453,6 +465,76 @@ class TaskCellSamplerCallback(BaseCallback):
         # stats/JSONL の記録は active_cell 側のタイプで行われるため位相ずれは生じない。
         # 次の done 処理で _sample_next_cell() が combination_smoke セルを返す。
 
+    def _switch_to_passive_item_stage(self) -> None:
+        """passive_item_stage (IS1) lane へ切り替え、候補セルを再構築する。
+
+        候補セルが空の場合（解禁済み startable 武器・有効 passive が無いなど）は
+        sampling_mode を変更せず WARNING ログを出して bootstrap を継続する。
+        """
+        min_ep_steps = {i: PHASES[i].min_episode_steps for i in range(len(PHASES))}
+        max_phase = self._hybrid_cb.current_phase
+        # bootstrap の target stage を基準にセルを生成する。current_stage_key は
+        # supervisor が完了を検知する前に target を超えて進んでいる場合があり、
+        # target 外の武器を IS1 セルに含めてしまう（train.py の max_cells 検証も
+        # target 基準のため ValueError になり得る）。supervisor があればその
+        # target_stage_key を優先し、無ければ current にフォールバックする。
+        stage_key = (
+            self._supervisor_cb.target_stage_key
+            if self._supervisor_cb is not None
+            else self._weapon_unlock.current_stage_key
+        )
+        # rebuild 前に既存候補を保存し、空になった場合の復元に使う
+        prev_candidates = self._tcs._candidate_cells
+        self._tcs.rebuild_passive_item_stage_candidate_cells(
+            stage_key=stage_key,
+            max_unlocked_enemy_phase_idx=max_phase,
+            min_episode_steps_by_phase=min_ep_steps,
+            max_cells=self._passive_item_stage_max_cells,
+            seed=self._passive_item_stage_seed,
+        )
+        # 候補セルが空の場合はフォールバック: 既存候補を復元して bootstrap を継続する
+        if not self._tcs._candidate_cells:
+            import warnings
+            self._tcs._candidate_cells = prev_candidates
+            warnings.warn(
+                f"[TaskCellSampler] passive_item_stage 候補セルが空です "
+                f"(stage={stage_key}, phase={max_phase}, max_cells={self._passive_item_stage_max_cells}). "
+                "解禁済み startable 武器または有効 passive が無い可能性があります。bootstrap を継続します。",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._write_event(
+                "passive_item_stage_transition_skipped",
+                {
+                    "stage_key": stage_key,
+                    "enemy_phase_idx": max_phase,
+                    "max_cells": self._passive_item_stage_max_cells,
+                    "reason": "empty_candidate_cells",
+                },
+            )
+            return
+        self._item_stage_key = self._passive_item_stage_item_stage_key
+        # 以降は lane mix ではなく重み付き単純サンプルを使う
+        self._sampling_mode = "passive_item_stage"
+        self._write_event(
+            "passive_item_stage_transition",
+            {
+                "stage_key": stage_key,
+                "enemy_phase_idx": max_phase,
+                "max_cells": self._passive_item_stage_max_cells,
+                "seed": self._passive_item_stage_seed,
+                "item_stage_key": self._item_stage_key,
+                "candidate_cell_count": len(self._tcs._candidate_cells),
+            },
+        )
+        print(
+            f"[TaskCellSampler] passive_item_stage へ遷移: "
+            f"stage={stage_key}, phase={max_phase}, "
+            f"cells={len(self._tcs._candidate_cells)}, item_stage={self._item_stage_key}"
+        )
+        # pending セルは上書きしない（1 episode 遅延を明示的に許容する）。
+        # 次の done 処理で _sample_next_cell() が passive_item_stage セルを返す。
+
     def _on_enemy_phase_changed(self, new_max_phase: int) -> None:
         """敵フェーズ変化時に候補セルを再構築する。"""
         old_phase = self._tcs._max_unlocked_enemy_phase_idx
@@ -506,7 +588,7 @@ class TaskCellSamplerCallback(BaseCallback):
 
     def _build_params_for_cell(self, cell: TaskCell) -> dict:
         """セルから UE5 /params 送信用 dict を構築する。"""
-        if cell.task_kind == "combination_smoke":
+        if cell.task_kind in ("combination_smoke", "passive_item_stage"):
             enable_passives, enable_evolutions = {
                 "IS0": (False, False),
                 "IS1": (True, False),

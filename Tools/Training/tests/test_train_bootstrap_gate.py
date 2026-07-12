@@ -440,6 +440,53 @@ def test_survivors_supervisor_negative_timeout_raises():
         validate_survivors_supervisor_args(args)
 
 
+def test_survivors_supervisor_passive_item_stage_max_cells_too_small_raises():
+    """passive_item_stage で max_cells が startable 武器数未満なら CLI 起動時に ValueError。"""
+    import argparse
+    import pytest
+    from train import validate_survivors_supervisor_args
+    from games.survivors.survivors_weapon_table import (
+        WEAPON_UNLOCK_ORDER,
+        get_unlocked_startable_weapon_ids,
+    )
+    startable_count = len(get_unlocked_startable_weapon_ids("WU12", WEAPON_UNLOCK_ORDER))
+    args = argparse.Namespace(
+        survivors_supervisor=True,
+        weapon_bootstrap_lanes=True,
+        survivors_supervisor_check_freq=2048,
+        bootstrap_max_regression_count=3,
+        bootstrap_stage_timeout_steps=0,
+        bootstrap_target_stage_key="WU12",
+        post_bootstrap_mode="passive_item_stage",
+        passive_item_stage_max_cells=startable_count - 1,
+    )
+    with pytest.raises(ValueError, match="passive-item-stage-max-cells"):
+        validate_survivors_supervisor_args(args)
+
+
+def test_survivors_supervisor_passive_item_stage_max_cells_sufficient_ok():
+    """passive_item_stage で max_cells が startable 武器数以上なら例外を出さない。"""
+    import argparse
+    from train import validate_survivors_supervisor_args
+    from games.survivors.survivors_weapon_table import (
+        WEAPON_UNLOCK_ORDER,
+        get_unlocked_startable_weapon_ids,
+    )
+    startable_count = len(get_unlocked_startable_weapon_ids("WU12", WEAPON_UNLOCK_ORDER))
+    args = argparse.Namespace(
+        survivors_supervisor=True,
+        weapon_bootstrap_lanes=True,
+        survivors_supervisor_check_freq=2048,
+        bootstrap_max_regression_count=3,
+        bootstrap_stage_timeout_steps=0,
+        bootstrap_target_stage_key="WU12",
+        post_bootstrap_mode="passive_item_stage",
+        passive_item_stage_max_cells=startable_count,
+    )
+    # 例外を出さずに完了する
+    validate_survivors_supervisor_args(args)
+
+
 def test_train_trait_bootstrap_args_parsed(monkeypatch):
     """trait bootstrap CLI 引数が正しく parse される。"""
     monkeypatch.setattr(
@@ -458,3 +505,21 @@ def test_train_trait_bootstrap_args_parsed(monkeypatch):
     assert args.trait_bootstrap_target_p10 == 120.0
     assert args.trait_bootstrap_min_ep_len_p10 == 3000.0
     assert args.trait_bootstrap_max_short_episode_rate == 0.05
+
+
+def test_weapon_bootstrap_item_stage_is_available_in_args(monkeypatch):
+    """--weapon-item-stage が parse され args に反映される。"""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train.py",
+            "--game", "survivors",
+            "--task-cell-sampler",
+            "--weapon-bootstrap-lanes",
+            "--weapon-item-stage", "IS1",
+            "--bootstrap-gate-eval-port", "8768",
+        ],
+    )
+    args = parse_args()
+    assert args.weapon_item_stage == "IS1"
