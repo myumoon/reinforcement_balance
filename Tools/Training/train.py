@@ -2048,9 +2048,12 @@ def main() -> None:
                 if _train_status is not None
                 else None
             )
-            # When resuming older runs without weapon_bootstrap state, derive a
-            # usable default from the restored weapon_unlock stage.
-            if _initial_status is None and _resume_bootstrap_state is None:
+            # When no explicit initial_status is given, derive a usable default
+            # from the restored weapon_unlock stage. This applies even when a
+            # resume state is present: if that state is later ignored (e.g.
+            # item_stage_key mismatch), the constructor state acts as a fallback
+            # so bootstrap candidate cells are never left empty (all locked).
+            if _initial_status is None:
                 _initial_status = _default_weapon_bootstrap_initial_status(
                     _weapon_unlock_order,
                     _weapon_unlock_module.current_stage_key,
@@ -2082,8 +2085,17 @@ def main() -> None:
                 trait_bootstrap_max_short_episode_rate=getattr(args, "trait_bootstrap_max_short_episode_rate", 0.05),
             )
             if _resume_bootstrap_state is not None:
-                _weapon_bootstrap_module.import_state(_resume_bootstrap_state)
-                print("[INFO] weapon_bootstrap state を復元")
+                _imported = _weapon_bootstrap_module.import_state(_resume_bootstrap_state)
+                if _imported:
+                    print("[INFO] weapon_bootstrap state を復元")
+                else:
+                    # item_stage mismatch 等で resume state が無視された場合、
+                    # コンストラクタで適用済みの initial_status がそのまま残り、
+                    # 候補セルが空（全 locked）になることを防ぐ。
+                    print(
+                        "[INFO] weapon_bootstrap state を無視し、"
+                        f"initial_status={_initial_status} にフォールバック"
+                    )
             print(f"[INFO] WeaponBootstrapStateModule 有効 (initial_status={_initial_status})")
 
         # BootstrapGateEvalCallback の登録
