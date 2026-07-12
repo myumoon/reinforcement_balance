@@ -1,8 +1,12 @@
 """IS1 passive item stage セル生成。
 
 Phase 04 (Passive Item Stage) 用のタスクセルを構築する。IS1（passive 有効 /
-evolution 無効）で全 startable 武器 × 全 passive をカバーするよう決定論的に
-combination_slots セルを生成する。
+evolution 無効）で全 startable 武器をカバーし、max_cells の範囲で passive を
+best-effort にカバーするよう決定論的に combination_slots セルを生成する。
+
+注意: 全 startable 武器のカバレッジは保証するが、全 passive のカバレッジは
+max_cells に依存する best-effort であり保証されない。全 passive を確実に
+カバーするには max_cells >= len(weapons) + len(passives) を指定すること。
 """
 from __future__ import annotations
 
@@ -35,9 +39,12 @@ def build_passive_item_stage_cells(
 ) -> list[TaskCell]:
     """stage_key までに解禁された startable 武器 × passive の IS1 セルを生成する。
 
-    - 各 startable 武器につき 1 セルを作り、全武器をカバーする。
-    - 各セルには 1〜2 個の passive slot を割り当て、全 passive をカバーする。
-    - 全武器を割り当てた後、passive の未カバー分を追加セルで補う。
+    - 各 startable 武器につき 1 セルを作り、全武器をカバーする（保証）。
+    - 各セルには 1〜2 個の passive slot を割り当てる。
+    - 全武器を割り当てた後、未カバー passive を追加セルで補うが、これは
+      max_cells の残り枠に依存する best-effort であり全 passive カバレッジは
+      保証されない。全 passive を確実にカバーするには
+      max_cells >= len(weapons) + len(passives) を指定すること。
     - `random.Random(seed)` でシードを固定して決定論的にする。
 
     Returns:
@@ -58,7 +65,7 @@ def build_passive_item_stage_cells(
     cells: list[TaskCell] = []
 
     # 1) 各 startable 武器について 1 セル（全武器カバレッジ保証）。
-    #    各セルに 1〜2 個の passive を割り当て、全 passive を広くカバーする。
+    #    各セルに 1〜2 個の passive を割り当て、passive を広くカバーする（best-effort）。
     for idx, wid in enumerate(weapons):
         pids = [passives[idx % len(passives)]]
         if len(passives) > 1:

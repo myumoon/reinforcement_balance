@@ -1137,8 +1137,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bootstrap-target-stage-key", type=str, default="WU12",
                    help="全武器 bootstrap 完走判定の target stage key。")
     p.add_argument("--post-bootstrap-mode", type=str, default="stop",
-                   choices=["stop", "combination_smoke"],
-                   help="bootstrap 完了後の動作。stop は停止、combination_smoke は B-smoke へ遷移要求。")
+                   choices=["stop", "combination_smoke", "passive_item_stage"],
+                   help="bootstrap 完了後の動作。stop は停止、combination_smoke は B-smoke、"
+                        "passive_item_stage は IS1 passive coverage へ遷移要求。")
     p.add_argument("--survivors-supervisor-check-freq", type=int, default=2048,
                    help="supervisor の判定間隔 step。")
     p.add_argument("--bootstrap-stage-timeout-steps", type=int, default=2_000_000,
@@ -1152,6 +1153,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--combination-smoke-item-stage", type=str, default="IS1",
                    choices=["IS0", "IS1", "IS2"],
                    help="combination_smoke 遷移後の item system stage（passive/evolution 有効化）。")
+    p.add_argument("--passive-item-stage-max-cells", type=int, default=96,
+                   help="passive_item_stage へ遷移した際に生成する武器×passive セルの上限数。")
+    p.add_argument("--passive-item-stage-seed", type=int, default=12345,
+                   help="passive_item_stage セル生成のシード（決定論的生成用）。")
 
     # YAML があればデフォルトを差し込む（CLI が常に優先）
     if pre_args.config:
@@ -2139,6 +2144,11 @@ def main() -> None:
                     "[INFO] post_bootstrap_mode=combination_smoke: "
                     "bootstrap 完了後に TaskCellSamplerCallback が combination_smoke へ遷移します。"
                 )
+            elif args.post_bootstrap_mode == "passive_item_stage":
+                print(
+                    "[INFO] post_bootstrap_mode=passive_item_stage: "
+                    "bootstrap 完了後に TaskCellSamplerCallback が IS1 passive coverage へ遷移します。"
+                )
 
         if _hybrid_cb_ref is not None and _task_cell_sampler_module and _weapon_unlock_module:
             from games.survivors.param_applier import ParamApplier as _ParamApplier
@@ -2164,6 +2174,9 @@ def main() -> None:
                 combination_smoke_max_cells=getattr(args, "combination_smoke_max_cells", 64),
                 combination_smoke_seed=getattr(args, "combination_smoke_seed", 12345),
                 combination_smoke_item_stage_key=getattr(args, "combination_smoke_item_stage", "IS1"),
+                passive_item_stage_max_cells=getattr(args, "passive_item_stage_max_cells", 96),
+                passive_item_stage_seed=getattr(args, "passive_item_stage_seed", 12345),
+                passive_item_stage_item_stage_key="IS1",
             )
             callbacks.append(_tcs_cb)
             print(
