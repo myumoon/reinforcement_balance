@@ -12,6 +12,7 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
         weapon_unlock,
         weapon_bootstrap,
         target_stage_key: str = "WU12",
+        item_stage_key: str = "IS0",
         post_bootstrap_mode: str = "stop",
         check_freq: int = 2048,
         stage_timeout_steps: int = 2_000_000,
@@ -22,6 +23,7 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
         self._weapon_unlock = weapon_unlock
         self._weapon_bootstrap = weapon_bootstrap
         self._target_stage_key = target_stage_key
+        self._item_stage_key = item_stage_key
         self._post_bootstrap_mode = post_bootstrap_mode
         self._check_freq = max(int(check_freq), 1)
         self._stage_timeout_steps = int(stage_timeout_steps)
@@ -75,6 +77,7 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
         # completion を timeout より先に評価する（完走済みなら timeout は無視）
         snapshot = self._weapon_bootstrap.get_completion_snapshot(self._target_stage_key)
         if snapshot["complete"]:
+            snapshot["item_stage_key"] = self._item_stage_key
             self._bootstrap_complete = True
             self._write_event("bootstrap_complete", snapshot)
             if self._post_bootstrap_mode == "stop":
@@ -111,6 +114,7 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
     def export_state(self) -> dict:
         return {
             "target_stage_key": self._target_stage_key,
+            "item_stage_key": self._item_stage_key,
             "post_bootstrap_mode": self._post_bootstrap_mode,
             "last_stage_key": self._last_stage_key,
             "stage_entered_step": self._stage_entered_step,

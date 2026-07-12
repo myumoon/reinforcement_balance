@@ -2122,6 +2122,7 @@ def main() -> None:
                 weapon_unlock=_weapon_unlock_module,
                 weapon_bootstrap=_weapon_bootstrap_module,
                 target_stage_key=args.bootstrap_target_stage_key,
+                item_stage_key=getattr(args, "weapon_item_stage", "IS0"),
                 post_bootstrap_mode=args.post_bootstrap_mode,
                 check_freq=args.survivors_supervisor_check_freq,
                 stage_timeout_steps=args.bootstrap_stage_timeout_steps,

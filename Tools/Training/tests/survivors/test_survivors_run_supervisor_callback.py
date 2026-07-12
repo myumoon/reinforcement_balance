@@ -27,6 +27,60 @@ def _setup(cb: SurvivorsRunSupervisorCallback, step: int):
     return cb
 
 
+def make_supervisor_for_unit_tests(
+    *,
+    item_stage_key: str = "IS0",
+    target_stage_key: str = "WU12",
+    post_bootstrap_mode: str = "stop",
+    initial_status: dict | None = None,
+    event_logger: JsonlEventLogger | None = None,
+) -> SurvivorsRunSupervisorCallback:
+    """ユニットテスト用に SurvivorsRunSupervisorCallback を構築するヘルパー。"""
+    bootstrap = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        item_stage_key=item_stage_key,
+        initial_status=initial_status,
+    )
+    unlock = WeaponUnlockStateModule(
+        initial_stage_key="WU0",
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+    return SurvivorsRunSupervisorCallback(
+        weapon_unlock=unlock,
+        weapon_bootstrap=bootstrap,
+        target_stage_key=target_stage_key,
+        item_stage_key=item_stage_key,
+        post_bootstrap_mode=post_bootstrap_mode,
+        check_freq=1,
+        event_logger=event_logger,
+    )
+
+
+def test_supervisor_export_includes_item_stage_key():
+    cb = make_supervisor_for_unit_tests(item_stage_key="IS1")
+    state = cb.export_state()
+    assert state["item_stage_key"] == "IS1"
+
+
+def test_supervisor_bootstrap_complete_event_includes_item_stage_key(tmp_path):
+    """bootstrap_complete イベント payload に item_stage_key が含まれる。"""
+    cb = make_supervisor_for_unit_tests(
+        item_stage_key="IS1",
+        target_stage_key="WU1",
+        initial_status={"garlic": "maintenance", "king_bible": "maintenance"},
+        event_logger=JsonlEventLogger(tmp_path / "events.jsonl"),
+    )
+    _setup(cb, step=100)
+    cb._on_step()
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    complete = [e for e in events if e["event"].endswith("bootstrap_complete")]
+    assert complete
+    assert complete[-1]["payload"]["item_stage_key"] == "IS1"
+
+
 def test_supervisor_stops_when_bootstrap_complete(tmp_path):
     bootstrap = WeaponBootstrapStateModule(
         weapon_unlock_order=WEAPON_UNLOCK_ORDER,
