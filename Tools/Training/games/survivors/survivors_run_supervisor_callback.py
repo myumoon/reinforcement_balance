@@ -35,6 +35,42 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
         self._post_bootstrap_transition_requested = False
         self._exit_reason: str | None = None
         self._exit_payload: dict | None = None
+        # no-progress タイムアウト用トラッキング。
+        # 「同一 stage への滞在時間」ではなく「未完了武器に進捗がない時間」で判定する。
+        self._last_progress_step = 0
+        self._last_progress_signature: tuple | None = None
+        self._last_progress_snapshot: dict | None = None
+
+    def _build_progress_snapshot(self, current_stage: str) -> dict:
+        snapshot = self._weapon_bootstrap.get_unfinished_progress_snapshot(self._target_stage_key)
+        snapshot["current_stage_key"] = current_stage
+        return snapshot
+
+    def _progress_signature(self, snapshot: dict) -> tuple:
+        rows = []
+        for row in snapshot.get("unfinished_weapons", []):
+            rows.append((
+                int(row.get("weapon_id", -1)),
+                str(row.get("status", "")),
+                row.get("best_phase2_p10"),
+                row.get("deterministic_p10"),
+                row.get("deterministic_episode_length_p10"),
+                row.get("deterministic_short_episode_rate"),
+                int(row.get("deterministic_eval_step", 0) or 0),
+                row.get("deterministic_task_kind"),
+                row.get("deterministic_enemy_phase_idx"),
+            ))
+        return (
+            snapshot.get("target_stage_key"),
+            snapshot.get("current_stage_key"),
+            tuple(rows),
+        )
+
+    def _mark_progress(self, current_stage: str) -> None:
+        snapshot = self._build_progress_snapshot(current_stage)
+        self._last_progress_snapshot = snapshot
+        self._last_progress_signature = self._progress_signature(snapshot)
+        self._last_progress_step = self.num_timesteps
 
     @property
     def post_bootstrap_transition_requested(self) -> bool:
@@ -52,6 +88,7 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
     def _on_training_start(self) -> None:
         self._last_stage_key = self._weapon_unlock.current_stage_key
         self._stage_entered_step = self.num_timesteps
+        self._mark_progress(self._last_stage_key)
 
     def _on_step(self) -> bool:
         # n_calls は _on_step() 呼び出し回数のため VecEnv の n_envs 増分に依存しない
@@ -70,6 +107,8 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
             )
             self._last_stage_key = current_stage
             self._stage_entered_step = self.num_timesteps
+            # stage 変化は進捗の一種として扱い、no-progress タイマーをリセットする。
+            self._mark_progress(current_stage)
 
         regressed = self._weapon_bootstrap.get_regressed_weapons(self._max_regression_count)
         if regressed:
@@ -101,14 +140,37 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
                     )
                 return True
 
+        # 未完了武器の進捗スナップショットを取得し、前回から変化があれば進捗ありとみなす。
+        progress_snapshot = self._build_progress_snapshot(current_stage)
+        progress_signature = self._progress_signature(progress_snapshot)
+        if progress_signature != self._last_progress_signature:
+            previous_progress_step = self._last_progress_step
+            self._last_progress_snapshot = progress_snapshot
+            self._last_progress_signature = progress_signature
+            self._last_progress_step = self.num_timesteps
+            self._write_event(
+                "progress_observed",
+                {
+                    "stage_key": current_stage,
+                    "previous_progress_step": previous_progress_step,
+                    "last_progress_step": self._last_progress_step,
+                    "stage_age_steps": self.num_timesteps - self._stage_entered_step,
+                    "progress": progress_snapshot,
+                },
+            )
+
         stage_age = self.num_timesteps - self._stage_entered_step
-        if self._stage_timeout_steps > 0 and stage_age > self._stage_timeout_steps:
-            self._exit_reason = "bootstrap_stage_timeout"
+        no_progress_steps = self.num_timesteps - self._last_progress_step
+        if self._stage_timeout_steps > 0 and no_progress_steps > self._stage_timeout_steps:
+            self._exit_reason = "bootstrap_no_progress_timeout"
             self._exit_payload = {
                 "stage_key": current_stage,
                 "stage_age_steps": stage_age,
+                "last_progress_step": self._last_progress_step,
+                "no_progress_steps": no_progress_steps,
                 "timeout_steps": self._stage_timeout_steps,
                 "completion": snapshot,
+                "progress": progress_snapshot,
             }
             self._write_event("blocked", {"reason": self._exit_reason, **self._exit_payload})
             return False
@@ -127,4 +189,7 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
             "post_bootstrap_transition_requested": self._post_bootstrap_transition_requested,
             "exit_reason": self._exit_reason,
             "exit_payload": self._exit_payload,
+            "last_progress_step": self._last_progress_step,
+            "no_progress_steps": self.num_timesteps - self._last_progress_step,
+            "last_progress_snapshot": self._last_progress_snapshot,
         }

@@ -240,7 +240,7 @@ def validate_survivors_supervisor_args(args: argparse.Namespace) -> None:
     if getattr(args, "bootstrap_max_regression_count", -1) < 0:
         raise ValueError("--bootstrap-max-regression-count must be >= 0")
     if getattr(args, "bootstrap_stage_timeout_steps", 0) < 0:
-        raise ValueError("--bootstrap-stage-timeout-steps must be >= 0 (use 0 to disable)")
+        raise ValueError("--bootstrap-stage-timeout-steps must be >= 0 (use 0 to disable no-progress timeout)")
     from games.survivors.survivors_weapon_table import (
         WEAPON_UNLOCK_ORDER as _WUO,
         get_unlocked_startable_weapon_ids as _get_startable,
@@ -1156,7 +1156,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--survivors-supervisor-check-freq", type=int, default=2048,
                    help="supervisor の判定間隔 step。")
     p.add_argument("--bootstrap-stage-timeout-steps", type=int, default=2_000_000,
-                   help="同一 bootstrap stage に滞留できる最大 step。0 で無効。")
+                   help="bootstrap 未完了武器に進捗がないまま継続できる最大 step。0 で無効。")
     p.add_argument("--bootstrap-max-regression-count", type=int, default=3,
                    help="maintenance regression_count がこの値を超えたら停止する。")
     p.add_argument("--combination-smoke-max-cells", type=int, default=64,
