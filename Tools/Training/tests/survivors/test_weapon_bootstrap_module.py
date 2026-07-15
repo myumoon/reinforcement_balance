@@ -1390,3 +1390,71 @@ def test_completion_snapshot_shows_trait_exposure_gate_goal():
 
     assert "peachone" in unfinished
     assert unfinished["peachone"]["gate_goal"] == "trait_exposure"
+
+
+# ---------------------------------------------------------------------------
+# テスト: get_unfinished_progress_snapshot（未完了武器の進捗スナップショット）
+# ---------------------------------------------------------------------------
+
+def test_unfinished_progress_snapshot_includes_only_bootstrap_and_integration():
+    """solo_bootstrap / integration の武器のみ含み、locked / maintenance は除外する。"""
+    module = make_module(
+        initial_status={
+            "garlic": "maintenance",       # 除外
+            "king_bible": "solo_bootstrap",  # 含む
+            "magic_wand": "integration",     # 含む
+            # fire_wand 以降は locked（除外）
+        }
+    )
+    snapshot = module.get_unfinished_progress_snapshot("WU12")
+    keys = {w["weapon_key"] for w in snapshot["unfinished_weapons"]}
+    assert keys == {"king_bible", "magic_wand"}
+    assert snapshot["target_stage_key"] == "WU12"
+
+
+def test_unfinished_progress_snapshot_row_fields_are_json_serializable():
+    """各行のフィールドが揃っており JSON serializable であること。"""
+    import json
+
+    module = make_module(initial_status={"king_bible": "solo_bootstrap"})
+    _set_det(
+        module,
+        WeaponType.KING_BIBLE,
+        "solo_bootstrap",
+        p10=250.0,
+        ep_len=1300.0,
+        short_rate=0.05,
+        enemy_phase_idx=2,
+        num_timesteps=5000,
+    )
+    snapshot = module.get_unfinished_progress_snapshot("WU12")
+    # JSON シリアライズが例外を出さないこと（int/float/str/None のみ）
+    json.dumps(snapshot)
+
+    rows = {w["weapon_key"]: w for w in snapshot["unfinished_weapons"]}
+    row = rows["king_bible"]
+    assert row["weapon_id"] == WeaponType.KING_BIBLE
+    assert isinstance(row["weapon_id"], int)
+    assert row["status"] == "solo_bootstrap"
+    assert row["deterministic_p10"] == 250.0
+    assert row["deterministic_episode_length_p10"] == 1300.0
+    assert row["deterministic_short_episode_rate"] == 0.05
+    assert row["deterministic_eval_step"] == 5000
+    assert row["deterministic_task_kind"] == "solo_bootstrap"
+    assert row["deterministic_enemy_phase_idx"] == 2
+    # 追加キーの存在確認
+    for key in (
+        "best_phase2_p10",
+        "regression_from_best",
+        "regression_count",
+    ):
+        assert key in row
+
+
+def test_unfinished_progress_snapshot_empty_when_all_maintenance():
+    """全武器 maintenance のとき unfinished_weapons は空になる。"""
+    module = make_module(
+        initial_status={e.key: "maintenance" for e in WEAPON_UNLOCK_ORDER}
+    )
+    snapshot = module.get_unfinished_progress_snapshot("WU12")
+    assert snapshot["unfinished_weapons"] == []

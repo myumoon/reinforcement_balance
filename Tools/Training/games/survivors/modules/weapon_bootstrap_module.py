@@ -358,6 +358,39 @@ class WeaponBootstrapStateModule(BaseStateModule):
             "unfinished_weapons": unfinished,
         }
 
+    def get_unfinished_progress_snapshot(self, target_stage_key: str) -> dict:
+        """未完了武器（solo_bootstrap / integration）の進捗スナップショットを返す。
+
+        supervisor の no-progress タイムアウト判定に使用する。locked / maintenance の
+        武器は「進捗を追跡する対象ではない」ため除外する。各行は JSON serializable な
+        値のみで構成する（int / float / str / None）。
+        """
+        unfinished_weapons = []
+        for entry in self._weapon_unlock_order:
+            state = self._states.get(entry.weapon_id)
+            if state is None:
+                continue
+            if state.status not in ("solo_bootstrap", "integration"):
+                continue
+            unfinished_weapons.append({
+                "weapon_key": entry.key,
+                "weapon_id": int(state.weapon_id),
+                "status": state.status,
+                "best_phase2_p10": state.best_phase2_p10,
+                "regression_from_best": state.regression_from_best,
+                "regression_count": state.regression_count,
+                "deterministic_p10": state.deterministic_p10,
+                "deterministic_episode_length_p10": state.deterministic_episode_length_p10,
+                "deterministic_short_episode_rate": state.deterministic_short_episode_rate,
+                "deterministic_eval_step": state.deterministic_eval_step,
+                "deterministic_task_kind": state.deterministic_task_kind,
+                "deterministic_enemy_phase_idx": state.deterministic_enemy_phase_idx,
+            })
+        return {
+            "target_stage_key": target_stage_key,
+            "unfinished_weapons": unfinished_weapons,
+        }
+
     def get_regressed_weapons(self, max_regression_count: int) -> list[dict]:
         rows = []
         for entry in self._weapon_unlock_order:

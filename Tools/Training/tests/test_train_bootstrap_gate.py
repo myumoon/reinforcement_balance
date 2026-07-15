@@ -395,7 +395,7 @@ def test_survivors_supervisor_args_parse(monkeypatch):
             "--bootstrap-target-stage-key", "WU12",
             "--post-bootstrap-mode", "combination_smoke",
             "--survivors-supervisor-check-freq", "4096",
-            "--bootstrap-stage-timeout-steps", "2000000",
+            "--bootstrap-stage-timeout-steps", "5000000",
             "--bootstrap-max-regression-count", "4",
         ],
     )
@@ -404,8 +404,24 @@ def test_survivors_supervisor_args_parse(monkeypatch):
     assert args.bootstrap_target_stage_key == "WU12"
     assert args.post_bootstrap_mode == "combination_smoke"
     assert args.survivors_supervisor_check_freq == 4096
-    assert args.bootstrap_stage_timeout_steps == 2_000_000
+    assert args.bootstrap_stage_timeout_steps == 5_000_000
     assert args.bootstrap_max_regression_count == 4
+
+
+def test_survivors_supervisor_zero_no_progress_timeout_is_allowed():
+    """--bootstrap-stage-timeout-steps=0（no-progress タイムアウト無効）が許容される。"""
+    import argparse
+    from train import validate_survivors_supervisor_args
+    args = argparse.Namespace(
+        survivors_supervisor=True,
+        weapon_bootstrap_lanes=True,
+        survivors_supervisor_check_freq=2048,
+        bootstrap_max_regression_count=3,
+        bootstrap_stage_timeout_steps=0,
+        bootstrap_target_stage_key="WU12",
+    )
+    # 例外を出さずに完了する
+    validate_survivors_supervisor_args(args)
 
 
 def test_survivors_supervisor_invalid_stage_key_raises():
