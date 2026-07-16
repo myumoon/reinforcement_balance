@@ -588,7 +588,7 @@ class TaskCellSamplerCallback(BaseCallback):
 
     def _build_params_for_cell(self, cell: TaskCell) -> dict:
         """セルから UE5 /params 送信用 dict を構築する。"""
-        if cell.task_kind in ("combination_smoke", "passive_item_stage"):
+        if cell.task_kind in ("combination_smoke", "passive_item_stage", "evolution_stage"):
             enable_passives, enable_evolutions = {
                 "IS0": (False, False),
                 "IS1": (True, False),

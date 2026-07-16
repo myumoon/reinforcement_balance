@@ -311,6 +311,32 @@ def test_passive_item_stage_cell_uses_slots():
     assert params["enable_evolutions"] is False
 
 
+def test_evolution_stage_cell_uses_slots():
+    """evolution_stage セルは fixed_subset + passive slot を IS2 で /params に反映し、
+    passives / evolutions の両方を有効化する。"""
+    from games.survivors.modules.task_cell_sampler_module import TaskCell
+
+    cb = _make_simple_callback(item_stage_key="IS2")
+    cell = TaskCell(
+        weapon_unlock_stage_key="WU12",
+        first_weapon_id=WeaponType.KING_BIBLE,
+        enemy_phase_idx=2,
+        task_kind="evolution_stage",
+        build_policy="combination_slots",
+        combo_key="is2_w2_p8_to_evolved",
+        initial_weapon_slots=((WeaponType.KING_BIBLE, 8),),
+        initial_passive_slots=((8, 5),),
+        allowed_weapon_ids=(WeaponType.KING_BIBLE,),
+    )
+    params = cb._build_params_for_cell(cell)
+    assert params["weapon_pool_mode"] == "fixed_subset"
+    assert params["allowed_weapon_types"] == [WeaponType.KING_BIBLE]
+    assert params["initial_weapon_slots"] == [{"weapon_id": WeaponType.KING_BIBLE, "level": 8}]
+    assert params["initial_passive_slots"] == [{"passive_id": 8, "level": 5}]
+    assert params["enable_passives"] is True
+    assert params["enable_evolutions"] is True
+
+
 def test_switch_to_passive_item_stage_on_supervisor_request(tmp_path):
     """post_bootstrap_mode=passive_item_stage で supervisor が遷移を要求したら
     sampling_mode が passive_item_stage に切り替わり、候補セルが passive_item_stage
