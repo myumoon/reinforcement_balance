@@ -8,10 +8,13 @@ combination_slots セルを生成する。
 """
 from __future__ import annotations
 
-import random
-
 from games.survivors.modules.task_cell_sampler_module import TaskCell
-from games.survivors.survivors_vs_spec import EVOLUTION_TABLE, PASSIVE_MAX_LEVEL, PassiveItemType
+from games.survivors.survivors_vs_spec import (
+    EVOLUTION_TABLE,
+    PASSIVE_MAX_LEVEL,
+    WEAPON_MAX_LEVEL,
+    PassiveItemType,
+)
 from games.survivors.survivors_weapon_curriculum import WeaponType
 from games.survivors.survivors_weapon_table import WeaponEntry, get_unlocked_startable_weapon_ids
 
@@ -23,7 +26,7 @@ def build_evolution_stage_cells(
     seed: int,
     weapon_unlock_order: list[WeaponEntry],
 ) -> list[TaskCell]:
-    rng = random.Random(seed)
+    _ = seed  # 決定論 API 統一のため受け取るが、セル生成はすべて固定値で行う
     unlocked = set(get_unlocked_startable_weapon_ids(stage_key, weapon_unlock_order))
     cells: list[TaskCell] = []
 
@@ -60,7 +63,7 @@ def build_evolution_stage_cells(
                 break
             continue
         passive_level = int(PASSIVE_MAX_LEVEL[passive_id])
-        weapon_level = rng.randint(6, 8)
+        weapon_level = WEAPON_MAX_LEVEL
         cells.append(TaskCell(
             weapon_unlock_stage_key=stage_key,
             first_weapon_id=base_id,

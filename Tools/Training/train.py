@@ -275,6 +275,28 @@ def validate_survivors_supervisor_args(args: argparse.Namespace) -> None:
                 f"必要な {_startable_count} を下回ります。"
                 f" --passive-item-stage-max-cells >= {_startable_count} を指定してください。"
             )
+    if getattr(args, "post_bootstrap_mode", "stop") == "evolution_stage":
+        # evolution_stage は解禁済み base 武器から生成可能な進化 coverage セル数を
+        # 確実にカバーするため、max_cells がその数を下回ると build_evolution_stage_cells()
+        # が一部の進化を取りこぼす。CLI 起動時に検出する。
+        from games.survivors.survivors_vs_spec import EVOLUTION_TABLE as _EVO_TABLE
+        _max_cells = getattr(args, "evolution_stage_max_cells", 96)
+        _unlocked = set(_get_startable(_target, _WUO))
+        _evo_cover = 0
+        for _row in _EVO_TABLE:
+            if int(_row["base"]) not in _unlocked:
+                continue
+            if int(_row["passive"]) == 0:
+                _uw = _row.get("union_weapon")
+                if _uw is None or int(_uw) not in _unlocked:
+                    continue
+            _evo_cover += 1
+        if _evo_cover > 0 and _max_cells < _evo_cover:
+            raise ValueError(
+                f"--evolution-stage-max-cells={_max_cells} は {_target!r} の全進化カバレッジに"
+                f"必要な {_evo_cover} を下回ります。"
+                f" --evolution-stage-max-cells >= {_evo_cover} を指定してください。"
+            )
 
 
 def _parse_step_shorthand(s: str) -> int:
@@ -1150,9 +1172,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bootstrap-target-stage-key", type=str, default="WU12",
                    help="全武器 bootstrap 完走判定の target stage key。")
     p.add_argument("--post-bootstrap-mode", type=str, default="stop",
-                   choices=["stop", "combination_smoke", "passive_item_stage"],
+                   choices=["stop", "combination_smoke", "passive_item_stage", "evolution_stage"],
                    help="bootstrap 完了後の動作。stop は停止、combination_smoke は B-smoke、"
-                        "passive_item_stage は IS1 passive coverage へ遷移要求。")
+                        "passive_item_stage は IS1 passive coverage、evolution_stage は IS2 "
+                        "evolution coverage へ遷移要求。")
     p.add_argument("--survivors-supervisor-check-freq", type=int, default=2048,
                    help="supervisor の判定間隔 step。")
     p.add_argument("--bootstrap-stage-timeout-steps", type=int, default=2_000_000,
@@ -1170,6 +1193,13 @@ def parse_args() -> argparse.Namespace:
                    help="passive_item_stage へ遷移した際に生成する武器×passive セルの上限数。")
     p.add_argument("--passive-item-stage-seed", type=int, default=12345,
                    help="passive_item_stage セル生成のシード（決定論的生成用）。")
+    p.add_argument("--evolution-stage-max-cells", type=int, default=96,
+                   help="evolution_stage (IS2) へ遷移した際に生成する進化 coverage セルの上限数。")
+    p.add_argument("--evolution-stage-seed", type=int, default=12345,
+                   help="evolution_stage セル生成のシード（決定論的生成用）。")
+    p.add_argument("--evolution-stage-item-stage", type=str, default="IS2",
+                   choices=["IS0", "IS1", "IS2"],
+                   help="evolution_stage 遷移後の item system stage（passive/evolution 有効化）。")
 
     # YAML があればデフォルトを差し込む（CLI が常に優先）
     if pre_args.config:
@@ -2174,6 +2204,11 @@ def main() -> None:
                     "[INFO] post_bootstrap_mode=passive_item_stage: "
                     "bootstrap 完了後に TaskCellSamplerCallback が IS1 passive coverage へ遷移します。"
                 )
+            elif args.post_bootstrap_mode == "evolution_stage":
+                print(
+                    "[INFO] post_bootstrap_mode=evolution_stage: "
+                    "bootstrap 完了後に TaskCellSamplerCallback が IS2 evolution coverage へ遷移します。"
+                )
 
         if _hybrid_cb_ref is not None and _task_cell_sampler_module and _weapon_unlock_module:
             from games.survivors.param_applier import ParamApplier as _ParamApplier
@@ -2202,6 +2237,9 @@ def main() -> None:
                 passive_item_stage_max_cells=getattr(args, "passive_item_stage_max_cells", 96),
                 passive_item_stage_seed=getattr(args, "passive_item_stage_seed", 12345),
                 passive_item_stage_item_stage_key="IS1",
+                evolution_stage_max_cells=getattr(args, "evolution_stage_max_cells", 96),
+                evolution_stage_seed=getattr(args, "evolution_stage_seed", 12345),
+                evolution_stage_item_stage_key=getattr(args, "evolution_stage_item_stage", "IS2"),
             )
             callbacks.append(_tcs_cb)
             print(

@@ -385,6 +385,54 @@ def test_switch_to_passive_item_stage_on_supervisor_request(tmp_path):
     assert callback._item_stage_key == "IS1"
 
 
+def test_switch_to_evolution_stage_on_supervisor_request(tmp_path):
+    """post_bootstrap_mode=evolution_stage で supervisor が遷移を要求したら
+    sampling_mode が evolution_stage に切り替わり、候補セルが evolution_stage
+    セルになり、item_stage が IS2 になる。"""
+    from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
+
+    hybrid_cb = make_mock_hybrid_cb(current_phase=2)
+    tcs = TaskCellSamplerStateModule(min_episodes_per_cell=1, weapon_unlock_order=WEAPON_UNLOCK_ORDER)
+    weapon_unlock = WeaponUnlockStateModule(
+        initial_stage_key="WU12",
+        weapon_unlock_min_steps=10**9,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+    weapon_bootstrap = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={"garlic": "maintenance"},
+    )
+
+    supervisor = MagicMock()
+    supervisor.post_bootstrap_transition_requested = True
+    supervisor.target_stage_key = "WU12"
+
+    callback = TaskCellSamplerCallback(
+        hybrid_cb=hybrid_cb,
+        task_cell_sampler=tcs,
+        weapon_unlock=weapon_unlock,
+        param_applier=MagicMock(),
+        log_dir=str(tmp_path),
+        weapon_bootstrap=weapon_bootstrap,
+        post_bootstrap_mode="evolution_stage",
+        supervisor_cb=supervisor,
+        evolution_stage_max_cells=96,
+        evolution_stage_seed=7,
+        evolution_stage_item_stage_key="IS2",
+    )
+    assert callback._sampling_mode == "bootstrap"
+
+    callback.num_timesteps = 10_000
+    callback.locals = {"infos": [{}]}
+    callback._score_tracker.process = MagicMock(return_value=[])
+
+    assert callback._on_step() is True
+    assert callback._sampling_mode == "evolution_stage"
+    evo_cells = [c for c in tcs._candidate_cells if c.task_kind == "evolution_stage"]
+    assert len(evo_cells) > 0
+    assert callback._item_stage_key == "IS2"
+
+
 def test_no_switch_when_supervisor_flag_not_set(tmp_path):
     """supervisor フラグが立っていない場合は bootstrap のまま遷移しない。"""
     from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
