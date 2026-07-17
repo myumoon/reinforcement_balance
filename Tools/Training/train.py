@@ -1198,8 +1198,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--evolution-stage-seed", type=int, default=12345,
                    help="evolution_stage セル生成のシード（決定論的生成用）。")
     p.add_argument("--evolution-stage-item-stage", type=str, default="IS2",
-                   choices=["IS0", "IS1", "IS2"],
-                   help="evolution_stage 遷移後の item system stage（passive/evolution 有効化）。")
+                   choices=["IS2"],
+                   help="evolution_stage 遷移後の item system stage。現在は IS2 のみ有効（IS2: passive+evolution 有効化）。")
 
     # YAML があればデフォルトを差し込む（CLI が常に優先）
     if pre_args.config:
