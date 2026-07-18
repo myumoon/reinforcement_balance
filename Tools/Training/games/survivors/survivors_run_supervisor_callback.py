@@ -127,7 +127,9 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
                 self._exit_reason = "bootstrap_complete"
                 self._exit_payload = snapshot
                 return False
-            if self._post_bootstrap_mode in ("combination_smoke", "passive_item_stage"):
+            if self._post_bootstrap_mode in (
+                "combination_smoke", "passive_item_stage", "evolution_stage"
+            ):
                 # post-bootstrap lane モードでは training を停止せず、遷移フラグのみ立てる。
                 # 同一 iteration 内で TaskCellSamplerCallback が
                 # post_bootstrap_transition_requested を参照し当該 lane へ切り替える

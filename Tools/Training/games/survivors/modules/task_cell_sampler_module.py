@@ -498,6 +498,34 @@ class TaskCellSamplerStateModule(BaseStateModule):
                 self._stats[cell.key()] = TaskCellStats(cell=cell)
         self._candidate_cells = cells
 
+    def rebuild_evolution_stage_candidate_cells(
+        self,
+        *,
+        stage_key: str,
+        max_unlocked_enemy_phase_idx: int,
+        min_episode_steps_by_phase: dict[int, int],
+        max_cells: int,
+        seed: int,
+    ) -> None:
+        """evolution_stage (IS2) lane 用の候補セルを再構築する。既存 stats は保持する。"""
+        from games.survivors.evolution_stage_cells import build_evolution_stage_cells
+
+        self._current_stage_key = stage_key
+        self._max_unlocked_enemy_phase_idx = max_unlocked_enemy_phase_idx
+        self._min_episode_steps_by_phase = dict(min_episode_steps_by_phase)
+
+        cells = build_evolution_stage_cells(
+            stage_key=stage_key,
+            enemy_phase_idx=max_unlocked_enemy_phase_idx,
+            max_cells=max_cells,
+            seed=seed,
+            weapon_unlock_order=self._weapon_unlock_order,
+        )
+        for cell in cells:
+            if cell.key() not in self._stats:
+                self._stats[cell.key()] = TaskCellStats(cell=cell)
+        self._candidate_cells = cells
+
     def sample_cell_with_lane_mix(
         self,
         *,

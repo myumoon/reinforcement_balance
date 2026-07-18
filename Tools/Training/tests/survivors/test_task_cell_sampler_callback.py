@@ -311,6 +311,32 @@ def test_passive_item_stage_cell_uses_slots():
     assert params["enable_evolutions"] is False
 
 
+def test_evolution_stage_cell_uses_slots():
+    """evolution_stage セルは fixed_subset + passive slot を IS2 で /params に反映し、
+    passives / evolutions の両方を有効化する。"""
+    from games.survivors.modules.task_cell_sampler_module import TaskCell
+
+    cb = _make_simple_callback(item_stage_key="IS2")
+    cell = TaskCell(
+        weapon_unlock_stage_key="WU12",
+        first_weapon_id=WeaponType.KING_BIBLE,
+        enemy_phase_idx=2,
+        task_kind="evolution_stage",
+        build_policy="combination_slots",
+        combo_key="is2_w2_p8_to_evolved",
+        initial_weapon_slots=((WeaponType.KING_BIBLE, 8),),
+        initial_passive_slots=((8, 5),),
+        allowed_weapon_ids=(WeaponType.KING_BIBLE,),
+    )
+    params = cb._build_params_for_cell(cell)
+    assert params["weapon_pool_mode"] == "fixed_subset"
+    assert params["allowed_weapon_types"] == [WeaponType.KING_BIBLE]
+    assert params["initial_weapon_slots"] == [{"weapon_id": WeaponType.KING_BIBLE, "level": 8}]
+    assert params["initial_passive_slots"] == [{"passive_id": 8, "level": 5}]
+    assert params["enable_passives"] is True
+    assert params["enable_evolutions"] is True
+
+
 def test_switch_to_passive_item_stage_on_supervisor_request(tmp_path):
     """post_bootstrap_mode=passive_item_stage で supervisor が遷移を要求したら
     sampling_mode が passive_item_stage に切り替わり、候補セルが passive_item_stage
@@ -357,6 +383,54 @@ def test_switch_to_passive_item_stage_on_supervisor_request(tmp_path):
     passive_cells = [c for c in tcs._candidate_cells if c.task_kind == "passive_item_stage"]
     assert len(passive_cells) > 0
     assert callback._item_stage_key == "IS1"
+
+
+def test_switch_to_evolution_stage_on_supervisor_request(tmp_path):
+    """post_bootstrap_mode=evolution_stage で supervisor が遷移を要求したら
+    sampling_mode が evolution_stage に切り替わり、候補セルが evolution_stage
+    セルになり、item_stage が IS2 になる。"""
+    from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
+
+    hybrid_cb = make_mock_hybrid_cb(current_phase=2)
+    tcs = TaskCellSamplerStateModule(min_episodes_per_cell=1, weapon_unlock_order=WEAPON_UNLOCK_ORDER)
+    weapon_unlock = WeaponUnlockStateModule(
+        initial_stage_key="WU12",
+        weapon_unlock_min_steps=10**9,
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+    )
+    weapon_bootstrap = WeaponBootstrapStateModule(
+        weapon_unlock_order=WEAPON_UNLOCK_ORDER,
+        initial_status={"garlic": "maintenance"},
+    )
+
+    supervisor = MagicMock()
+    supervisor.post_bootstrap_transition_requested = True
+    supervisor.target_stage_key = "WU12"
+
+    callback = TaskCellSamplerCallback(
+        hybrid_cb=hybrid_cb,
+        task_cell_sampler=tcs,
+        weapon_unlock=weapon_unlock,
+        param_applier=MagicMock(),
+        log_dir=str(tmp_path),
+        weapon_bootstrap=weapon_bootstrap,
+        post_bootstrap_mode="evolution_stage",
+        supervisor_cb=supervisor,
+        evolution_stage_max_cells=96,
+        evolution_stage_seed=7,
+        evolution_stage_item_stage_key="IS2",
+    )
+    assert callback._sampling_mode == "bootstrap"
+
+    callback.num_timesteps = 10_000
+    callback.locals = {"infos": [{}]}
+    callback._score_tracker.process = MagicMock(return_value=[])
+
+    assert callback._on_step() is True
+    assert callback._sampling_mode == "evolution_stage"
+    evo_cells = [c for c in tcs._candidate_cells if c.task_kind == "evolution_stage"]
+    assert len(evo_cells) > 0
+    assert callback._item_stage_key == "IS2"
 
 
 def test_no_switch_when_supervisor_flag_not_set(tmp_path):
