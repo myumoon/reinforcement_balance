@@ -1,0 +1,12 @@
+# reinbalance-survivors-deployment — 固定された直接依存。
+#
+# Tools/Training とは独立。全行を完全に pin すること（name==version）。
+# shared-contract smoke テストが、未 pin／範囲指定を拒否する。
+#
+# 共有 contracts パッケージは Tools/Common から editable でインストールする：
+#   pip install -e Tools/Common
+# runtime の capture／推論依存（dxcam・opencv-python・onnxruntime・torch）は
+# 後続の deployment プラン（04-*/05-*）で pin する。この lock は contract の基盤を pin する。
+reinbalance-survivors-contracts==0.1.0
+numpy==1.26.4
+pytest==9.0.3
