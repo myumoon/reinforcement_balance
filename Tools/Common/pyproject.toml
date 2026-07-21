@@ -1,0 +1,28 @@
+[build-system]
+# setuptools 70.2.0 は bdist_wheel を内蔵するため、別途（未 pin の）wheel 依存を持たない。
+requires = ["setuptools==70.2.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reinbalance-survivors-contracts"
+version = "0.1.0"
+description = "Shared Survivors contract types, canonical JSON/hash, and non-model UI policy for Training and Deployment."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy==1.26.4",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest==9.0.3",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+reinbalance_survivors_contracts = ["schemas/*.json"]

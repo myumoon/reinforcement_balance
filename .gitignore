@@ -30,6 +30,16 @@ Tools/Training/__pycache__/
 Tools/Training/**/__pycache__/
 
 # ====================
+# Python 共通契約 / Deployment パッケージ生成物
+# ====================
+Tools/Common/**/__pycache__/
+Tools/Deployment/**/__pycache__/
+Tools/**/*.egg-info/
+Tools/**/.pytest_cache/
+Tools/Common/.venv/
+Tools/Deployment/.venv/
+
+# ====================
 # IDE / エディタ
 # ====================
 

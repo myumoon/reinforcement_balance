@@ -1,0 +1,26 @@
+[build-system]
+# setuptools 70.2.0 は bdist_wheel を内蔵するため、別途（未 pin の）wheel 依存を持たない。
+requires = ["setuptools==70.2.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reinbalance-survivors-deployment"
+version = "0.1.0"
+description = "Survivors deployment runtime (capture / perception / control). Consumes reinbalance-survivors-contracts."
+requires-python = ">=3.11"
+# 共有 contracts パッケージは、本パッケージより先に Tools/Common から editable で
+# インストールする：`pip install -e Tools/Common`。runtime の capture/推論依存
+# （dxcam・opencv・onnxruntime・torch）は後続の deployment プランで追加する。
+dependencies = [
+    "reinbalance-survivors-contracts==0.1.0",
+    "numpy==1.26.4",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest==9.0.3",
+]
+
+[tool.setuptools]
+# まだ import 可能な src は無い。ここは deployment のテストルート／scaffold。
+py-modules = []
