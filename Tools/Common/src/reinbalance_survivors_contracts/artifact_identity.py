@@ -66,6 +66,39 @@ _VOLATILE_IDENTITY_KEYS = frozenset(
     }
 )
 _HEX_DIGITS = frozenset("0123456789abcdef")
+_ARTIFACT_REF_WIRE_KEYS = frozenset(
+    {
+        "schema_version",
+        "logical_id",
+        "sha256",
+        "size_bytes",
+        "media_type",
+        "store_uri",
+    }
+)
+_ARTIFACT_NODE_REF_WIRE_KEYS = frozenset(
+    {"schema_version", "logical_id", "node_kind", "identity_hash"}
+)
+_ARTIFACT_DESCRIPTOR_WIRE_KEYS = frozenset(
+    {
+        "schema_version",
+        "identity_hash",
+        "identity",
+        "non_identity_metadata",
+    }
+)
+_ARTIFACT_DESCRIPTOR_IDENTITY_WIRE_KEYS = frozenset(
+    {
+        "schema_version",
+        "logical_id",
+        "node_kind",
+        "producer_id",
+        "producer_version",
+        "identity_metadata",
+        "parents",
+        "files",
+    }
+)
 
 __all__ = [
     "OBJECT_URI_PREFIX",
@@ -115,6 +148,17 @@ def parse_artifact_uri(uri: str) -> str:
 def _require_nonempty_str(value: Any, label: str) -> str:
     ensure(isinstance(value, str) and value != "", f"{label} must be a non-empty string")
     return value
+
+
+def _ensure_wire_keys(data: Any, allowed: frozenset[str], label: str) -> None:
+    ensure(isinstance(data, Mapping), f"{label} must be an object")
+    keys = set(data)
+    unknown = keys - allowed
+    if unknown:
+        raise ContractValidationError(f"unknown {label} fields: {sorted(unknown)}")
+    missing = allowed - keys
+    if missing:
+        raise ContractValidationError(f"missing {label} fields: {sorted(missing)}")
 
 
 def _validate_logical_id(value: str, label: str = "logical_id") -> None:
@@ -198,16 +242,8 @@ class ArtifactRef:
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> "ArtifactRef":
+        _ensure_wire_keys(data, _ARTIFACT_REF_WIRE_KEYS, "artifact ref")
         require_schema_version(data, ARTIFACT_REF_SCHEMA_VERSION, "artifact ref")
-        allowed = {
-            "schema_version",
-            "logical_id",
-            "sha256",
-            "size_bytes",
-            "media_type",
-            "store_uri",
-        }
-        ensure(set(data) == allowed, "artifact ref has unknown or missing fields")
         return cls(
             logical_id=data["logical_id"],
             sha256=data["sha256"],
@@ -247,9 +283,8 @@ class ArtifactNodeRef:
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> "ArtifactNodeRef":
+        _ensure_wire_keys(data, _ARTIFACT_NODE_REF_WIRE_KEYS, "artifact node ref")
         require_schema_version(data, ARTIFACT_NODE_REF_SCHEMA_VERSION, "artifact node ref")
-        allowed = {"schema_version", "logical_id", "node_kind", "identity_hash"}
-        ensure(set(data) == allowed, "artifact node ref has unknown or missing fields")
         return cls(
             logical_id=data["logical_id"],
             node_kind=data["node_kind"],
@@ -347,17 +382,15 @@ class ArtifactDescriptor:
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> "ArtifactDescriptor":
+        _ensure_wire_keys(data, _ARTIFACT_DESCRIPTOR_WIRE_KEYS, "artifact descriptor")
         require_schema_version(data, ARTIFACT_DESCRIPTOR_SCHEMA_VERSION, "artifact descriptor")
-        allowed = {
-            "schema_version",
-            "identity_hash",
-            "identity",
-            "non_identity_metadata",
-        }
-        ensure(set(data) == allowed, "artifact descriptor has unknown or missing fields")
         _require_sha256(data["identity_hash"], "artifact descriptor identity_hash")
         identity = data["identity"]
-        ensure(isinstance(identity, Mapping), "artifact descriptor identity must be an object")
+        _ensure_wire_keys(
+            identity,
+            _ARTIFACT_DESCRIPTOR_IDENTITY_WIRE_KEYS,
+            "artifact descriptor identity",
+        )
         require_schema_version(
             identity, ARTIFACT_DESCRIPTOR_SCHEMA_VERSION, "artifact descriptor identity"
         )

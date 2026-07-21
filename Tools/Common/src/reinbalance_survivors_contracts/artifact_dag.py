@@ -103,9 +103,14 @@ def validate_artifact_dag(
 
     for node in identity_to_node.values():
         allowed_parent_kinds = ALLOWED_PARENT_KINDS[node.node_kind]
-        if not allowed_parent_kinds and node.parents:
+        if node.node_kind == "source_descriptor":
+            if node.parents:
+                raise ArtifactDagValidationError(
+                    f"{node.node_kind} must not declare parent refs"
+                )
+        elif not node.parents:
             raise ArtifactDagValidationError(
-                f"{node.node_kind} must not declare parent refs"
+                f"{node.node_kind} must declare at least one parent ref"
             )
         for parent_ref in node.parents:
             if parent_ref.identity_hash == node.identity_hash:

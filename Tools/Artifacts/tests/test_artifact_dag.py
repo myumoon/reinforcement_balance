@@ -99,27 +99,51 @@ def test_source_to_verdict_to_dataset_to_model_to_bundle_to_campaign_dag_passes(
         parents=(shadow.node_ref(),),
         ch="2",
     )
-
-    report = validate_artifact_dag(
-        [campaign, shadow, bundle, model, dataset, verdict, source]
+    evidence = _node(
+        "goal-evidence",
+        "goal_evidence",
+        parents=(campaign.node_ref(),),
+        ch="3",
     )
 
-    assert report.node_count == 7
+    report = validate_artifact_dag(
+        [evidence, campaign, shadow, bundle, model, dataset, verdict, source]
+    )
+
+    assert report.node_count == 8
     assert report.topological_identity_hashes[0] == source.identity_hash
-    assert report.topological_identity_hashes[-1] == campaign.identity_hash
+    assert report.topological_identity_hashes[-1] == evidence.identity_hash
+
+
+def test_non_root_node_without_parent_is_rejected():
+    dataset = _node(
+        "choice-dataset",
+        "choice_dataset_release",
+        parents=(),
+        ch="c",
+    )
+
+    with pytest.raises(ArtifactDagValidationError, match="must declare at least one parent"):
+        validate_artifact_dag([dataset])
 
 
 def test_source_descriptor_must_not_reference_descendant_verdict():
-    verdict_like_parent = _node("teacher-verdict", "teacher_validation_verdict", ch="b")
+    source = _node("reference-source", "source_descriptor", ch="a")
+    verdict_like_parent = _node(
+        "teacher-verdict",
+        "teacher_validation_verdict",
+        parents=(source.node_ref(),),
+        ch="b",
+    )
     bad_source = _node(
         "phase5-source",
         "source_descriptor",
         parents=(verdict_like_parent.node_ref(),),
-        ch="a",
+        ch="c",
     )
 
     with pytest.raises(ArtifactDagValidationError):
-        validate_artifact_dag([verdict_like_parent, bad_source])
+        validate_artifact_dag([source, verdict_like_parent, bad_source])
 
 
 def test_missing_parent_rejected():

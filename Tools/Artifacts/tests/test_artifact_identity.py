@@ -130,3 +130,38 @@ def test_wire_identity_hash_mismatch_rejects_in_place_mutation():
 
     with pytest.raises(ContractValidationError):
         ArtifactDescriptor.from_wire(wire)
+
+
+def test_descriptor_from_wire_rejects_unknown_fields_inside_identity():
+    wire = _source_descriptor().to_wire()
+    wire["identity"]["created_at_utc"] = "2026-07-21T00:00:00Z"
+
+    with pytest.raises(
+        ContractValidationError,
+        match="unknown artifact descriptor identity fields",
+    ):
+        ArtifactDescriptor.from_wire(wire)
+
+
+def test_descriptor_from_wire_rejects_unknown_fields_inside_nested_refs():
+    source = _source_descriptor()
+    verdict = ValidationVerdict(
+        logical_id="phase5-source.teacher-gate",
+        verdict_kind="teacher_validation_verdict",
+        subject=source.node_ref(),
+        gate_version="teacher-gate.v1",
+        metrics={"win_rate": 1.0},
+        split_ids=("development",),
+        session_ids=("session-001",),
+        passed=True,
+        blocking_reasons=(),
+    ).to_descriptor()
+    parent_wire = verdict.to_wire()
+    parent_wire["identity"]["parents"][0]["absolute_path"] = "/private/source.onnx"
+    file_wire = _source_descriptor().to_wire()
+    file_wire["identity"]["files"][0]["local_path"] = "/private/model.onnx"
+
+    with pytest.raises(ContractValidationError, match="artifact node ref"):
+        ArtifactDescriptor.from_wire(parent_wire)
+    with pytest.raises(ContractValidationError, match="artifact ref"):
+        ArtifactDescriptor.from_wire(file_wire)

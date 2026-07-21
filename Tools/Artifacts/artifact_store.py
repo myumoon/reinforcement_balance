@@ -9,10 +9,16 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
-from reinbalance_survivors_contracts import canonical_json_bytes, sha256_hex
+from reinbalance_survivors_contracts import (
+    ContractValidationError,
+    canonical_hash,
+    canonical_json_bytes,
+    sha256_hex,
+)
 from reinbalance_survivors_contracts.artifact_identity import (
+    ArtifactDescriptor,
     ArtifactRef,
     artifact_uri,
     is_sha256_hex,
@@ -314,18 +320,17 @@ class ArtifactStore:
         *,
         now_utc: str | None = None,
     ) -> StoreAuditReport:
+        verify_manifest_hash(manifest)
+        validate_manifest_descriptor_object_refs(manifest)
         now = _parse_utc(now_utc) if now_utc is not None else datetime.now(timezone.utc)
         missing: list[str] = []
         corrupt: list[str] = []
         retention_due: list[str] = []
 
         for entry in iter_manifest_object_entries(manifest):
-            ref = ArtifactRef(
-                logical_id=entry["logical_id"],
-                sha256=entry["sha256"],
-                size_bytes=entry["size_bytes"],
-                media_type=entry["media_type"],
-                store_uri=entry["store_uri"],
+            ref = object_ref_from_manifest_entry(
+                entry,
+                label="manifest object entry",
             )
             verification = self.verify(ref)
             if verification.reason == "missing":
@@ -343,6 +348,20 @@ class ArtifactStore:
         )
 
 
+def manifest_core(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in manifest.items() if key != "manifest_hash"}
+
+
+def verify_manifest_hash(manifest: Mapping[str, Any]) -> str:
+    expected = manifest.get("manifest_hash")
+    if not isinstance(expected, str):
+        raise ArtifactStoreError("manifest_hash is required")
+    actual = canonical_hash(manifest_core(manifest))
+    if actual != expected:
+        raise ArtifactStoreError("manifest_hash does not match manifest content")
+    return expected
+
+
 def iter_manifest_object_entries(manifest: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
     objects = manifest.get("objects", ())
     if not isinstance(objects, list):
@@ -351,3 +370,77 @@ def iter_manifest_object_entries(manifest: Mapping[str, Any]) -> Iterable[Mappin
         if not isinstance(entry, Mapping):
             raise ArtifactStoreError("manifest object entry must be an object")
         yield entry
+
+
+def object_ref_from_manifest_entry(entry: Mapping[str, Any], *, label: str) -> ArtifactRef:
+    try:
+        return ArtifactRef(
+            logical_id=entry["logical_id"],
+            sha256=entry["sha256"],
+            size_bytes=entry["size_bytes"],
+            media_type=entry["media_type"],
+            store_uri=entry["store_uri"],
+            schema_version=entry["schema_version"],
+        )
+    except (KeyError, ContractValidationError) as exc:
+        raise ArtifactStoreError(f"{label} has invalid artifact ref metadata") from exc
+
+
+def manifest_object_refs_by_logical_id(
+    manifest: Mapping[str, Any],
+) -> dict[str, ArtifactRef]:
+    refs: dict[str, ArtifactRef] = {}
+    for index, entry in enumerate(iter_manifest_object_entries(manifest)):
+        ref = object_ref_from_manifest_entry(entry, label=f"manifest objects[{index}]")
+        existing = refs.get(ref.logical_id)
+        if existing is not None and existing.to_wire() != ref.to_wire():
+            raise ArtifactStoreError(
+                f"bundle logical id {ref.logical_id!r} has conflicting object metadata"
+            )
+        refs[ref.logical_id] = ref
+    return refs
+
+
+def manifest_descriptor_entries(manifest: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
+    descriptors = manifest.get("descriptors", ())
+    if not isinstance(descriptors, list):
+        raise ArtifactStoreError("manifest descriptors must be a list")
+    for descriptor in descriptors:
+        if not isinstance(descriptor, Mapping):
+            raise ArtifactStoreError("manifest descriptor entry must be an object")
+    return descriptors
+
+
+def validate_manifest_descriptor_object_refs(manifest: Mapping[str, Any]) -> None:
+    object_refs = manifest_object_refs_by_logical_id(manifest)
+    descriptor_file_refs: dict[str, ArtifactRef] = {}
+    for index, descriptor_entry in enumerate(manifest_descriptor_entries(manifest)):
+        try:
+            descriptor = ArtifactDescriptor.from_wire(descriptor_entry)
+        except ContractValidationError as exc:
+            raise ArtifactStoreError(
+                f"manifest descriptors[{index}] has invalid descriptor metadata"
+            ) from exc
+        for file_ref in descriptor.files:
+            existing_file_ref = descriptor_file_refs.get(file_ref.logical_id)
+            if (
+                existing_file_ref is not None
+                and existing_file_ref.to_wire() != file_ref.to_wire()
+            ):
+                raise ArtifactStoreError(
+                    f"descriptor file {file_ref.logical_id!r} has conflicting metadata"
+                )
+            descriptor_file_refs[file_ref.logical_id] = file_ref
+            object_ref = object_refs.get(file_ref.logical_id)
+            if object_ref is None:
+                raise ArtifactStoreError(
+                    f"descriptor file {file_ref.logical_id!r} is missing from bundle objects"
+                )
+            if object_ref.to_wire() != file_ref.to_wire():
+                raise ArtifactStoreError(
+                    f"descriptor file {file_ref.logical_id!r} metadata mismatch with bundle objects"
+                )
+    for logical_id in sorted(set(object_refs) - set(descriptor_file_refs)):
+        raise ArtifactStoreError(
+            f"manifest object {logical_id!r} is not referenced by descriptor files"
+        )
