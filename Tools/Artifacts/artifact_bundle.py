@@ -10,16 +10,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from reinbalance_survivors_contracts import canonical_hash, canonical_json_bytes, sha256_hex
+from reinbalance_survivors_contracts import (
+    ContractValidationError,
+    canonical_hash,
+    canonical_json_bytes,
+    sha256_hex,
+)
 from reinbalance_survivors_contracts.artifact_identity import (
     ArtifactDescriptor,
     ArtifactRef,
 )
 
 if __package__:
-    from .artifact_store import ArtifactStore, ArtifactStoreError
+    from .artifact_store import ArtifactStore, ArtifactStoreError, iter_manifest_object_entries
 else:
-    from artifact_store import ArtifactStore, ArtifactStoreError
+    from artifact_store import ArtifactStore, ArtifactStoreError, iter_manifest_object_entries
 
 BUNDLE_MANIFEST_SCHEMA_VERSION = "artifact_bundle_manifest.v1"
 _PRIVATE_CLASSES = frozenset({"private", "restricted", "secret"})
@@ -114,6 +119,66 @@ def _verify_manifest_hash(manifest: Mapping[str, Any]) -> str:
     return expected
 
 
+def _object_ref_from_entry(entry: Mapping[str, Any], *, label: str) -> ArtifactRef:
+    try:
+        return ArtifactRef(
+            logical_id=entry["logical_id"],
+            sha256=entry["sha256"],
+            size_bytes=entry["size_bytes"],
+            media_type=entry["media_type"],
+            store_uri=entry["store_uri"],
+            schema_version=entry["schema_version"],
+        )
+    except (KeyError, ContractValidationError) as exc:
+        raise ArtifactStoreError(f"{label} has invalid artifact ref metadata") from exc
+
+
+def _manifest_object_refs_by_logical_id(
+    manifest: Mapping[str, Any],
+) -> dict[str, ArtifactRef]:
+    refs: dict[str, ArtifactRef] = {}
+    for index, entry in enumerate(iter_manifest_object_entries(manifest)):
+        ref = _object_ref_from_entry(entry, label=f"manifest objects[{index}]")
+        existing = refs.get(ref.logical_id)
+        if existing is not None and existing.to_wire() != ref.to_wire():
+            raise ArtifactStoreError(
+                f"bundle logical id {ref.logical_id!r} has conflicting object metadata"
+            )
+        refs[ref.logical_id] = ref
+    return refs
+
+
+def _descriptor_entries(manifest: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
+    descriptors = manifest.get("descriptors", ())
+    if not isinstance(descriptors, list):
+        raise ArtifactStoreError("manifest descriptors must be a list")
+    for descriptor in descriptors:
+        if not isinstance(descriptor, Mapping):
+            raise ArtifactStoreError("manifest descriptor entry must be an object")
+    return descriptors
+
+
+def _validate_descriptor_object_refs(manifest: Mapping[str, Any]) -> None:
+    object_refs = _manifest_object_refs_by_logical_id(manifest)
+    for index, descriptor_entry in enumerate(_descriptor_entries(manifest)):
+        try:
+            descriptor = ArtifactDescriptor.from_wire(descriptor_entry)
+        except ContractValidationError as exc:
+            raise ArtifactStoreError(
+                f"manifest descriptors[{index}] has invalid descriptor metadata"
+            ) from exc
+        for file_ref in descriptor.files:
+            object_ref = object_refs.get(file_ref.logical_id)
+            if object_ref is None:
+                raise ArtifactStoreError(
+                    f"descriptor file {file_ref.logical_id!r} is missing from bundle objects"
+                )
+            if object_ref.to_wire() != file_ref.to_wire():
+                raise ArtifactStoreError(
+                    f"descriptor file {file_ref.logical_id!r} metadata mismatch with bundle objects"
+                )
+
+
 def create_bundle_manifest(
     *,
     descriptors: Sequence[ArtifactDescriptor | Mapping[str, Any]],
@@ -181,6 +246,7 @@ def _zip_info(name: str) -> zipfile.ZipInfo:
 
 def export_bundle(store: ArtifactStore, manifest: Mapping[str, Any], zip_path: str | Path) -> Path:
     _verify_manifest_hash(manifest)
+    _validate_descriptor_object_refs(manifest)
     path = Path(zip_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     seen_objects: set[str] = set()
@@ -223,6 +289,7 @@ def import_bundle(
     with zipfile.ZipFile(path) as zf:
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
         manifest_hash = _verify_manifest_hash(manifest)
+        _validate_descriptor_object_refs(manifest)
         pending_objects = _read_verified_bundle_objects(zf, manifest)
     _preflight_target_store_import(target_store, pending_objects)
     for pending in pending_objects:
@@ -251,16 +318,10 @@ def _read_verified_bundle_objects(
 ) -> list[_PendingImportObject]:
     pending: list[_PendingImportObject] = []
     logical_to_sha: dict[str, str] = {}
-    for entry in manifest.get("objects", []):
+    for entry in iter_manifest_object_entries(manifest):
         if entry.get("export_included") is False:
             continue
-        ref = ArtifactRef(
-            logical_id=entry["logical_id"],
-            sha256=entry["sha256"],
-            size_bytes=entry["size_bytes"],
-            media_type=entry["media_type"],
-            store_uri=entry["store_uri"],
-        )
+        ref = _object_ref_from_entry(entry, label="manifest object entry")
         existing_sha = logical_to_sha.get(ref.logical_id)
         if existing_sha is not None and existing_sha != ref.sha256:
             raise ArtifactStoreError(
@@ -309,7 +370,7 @@ def _entries_to_check(
 ) -> list[Mapping[str, Any]]:
     entries = [
         entry
-        for entry in manifest.get("objects", [])
+        for entry in iter_manifest_object_entries(manifest)
         if entry.get("export_included") is not False
     ]
     if verify_mode == "full":
@@ -332,6 +393,7 @@ def verify_bundle_objects(
     random_seed: int = 0,
 ) -> BundleVerifyReport:
     _verify_manifest_hash(manifest)
+    _validate_descriptor_object_refs(manifest)
     missing: list[str] = []
     corrupt: list[str] = []
     entries = _entries_to_check(
