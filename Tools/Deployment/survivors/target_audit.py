@@ -5,7 +5,7 @@ from typing import Any,Mapping
 import os, re, shutil, tempfile
 from datetime import datetime, timezone
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
-from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict, SaveVerdict
+from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict, SaveVerdict, _verify_audit_evidence, _verify_save_lifecycle
 from .target_profile import TargetProfile
 
 class AuditError(ValueError):pass
@@ -30,14 +30,14 @@ def _assert_resolved(profile:Mapping[str,Any])->None:
 
 @dataclass(frozen=True)
 class AuditEvidence:
-    executable_path:Path; save_path:Path; manual_attestation:Mapping[str,Any]
+    executable_path:Path; save_path:Path; manual_attestation:Mapping[str,Any]; manual_evidence_path:Path
 
 def _file_evidence(path:Path)->Mapping[str,Any]:
     if not path.is_file(): raise AuditError(f"evidence file does not exist: {path}")
     stat=path.stat()
     return {"path":str(path.resolve()),"size":stat.st_size,"mtime_ns":stat.st_mtime_ns,"content_hash":_file_hash(path)}
 
-def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:AuditEvidence)->AuditVerdict:
+def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:AuditEvidence,*,attempt_id:str)->AuditVerdict:
     # Both sides must first satisfy the closed schema/taxonomy contract.
     try: TargetProfile.from_wire(expected); TargetProfile.from_wire(actual)
     except (ValueError,KeyError,TypeError) as exc: raise AuditError(str(exc)) from exc
@@ -46,6 +46,7 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     required_attested={"build_id","executable_version","os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version"}
     if not required_attested<=set(evidence.manual_attestation["fields"]): raise AuditError("build/hardware attestation coverage incomplete")
     if expected["build"]["manual_attestation"]!=evidence.manual_attestation or actual["build"]["manual_attestation"]!=evidence.manual_attestation: raise AuditError("attestation is not bound to profile")
+    if not evidence.manual_evidence_path.is_file() or canonical_hash({"bytes_hex":evidence.manual_evidence_path.read_bytes().hex()})!=evidence.manual_attestation["evidence_hash"]: raise AuditError("manual attestation evidence bytes mismatch")
     executable=_file_evidence(evidence.executable_path); save=_file_evidence(evidence.save_path)
     if executable["content_hash"]!=actual["build"]["executable_hash"] or save["content_hash"]!=actual["progression"]["save_artifact_hash"]: raise AuditError("observed file identity mismatch")
     differences=[]
@@ -56,7 +57,9 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
             if observed!=value:differences.append(f"{section}.{field}")
     if differences:raise AuditError("target mismatch: "+", ".join(differences))
     observed_evidence={"executable":executable,"save":save,"attestation":dict(evidence.manual_attestation),"observed_profile_hash":canonical_hash(actual)}
-    return AuditVerdict._verified(canonical_hash(expected),canonical_hash(observed_evidence))
+    evidence_bytes=canonical_json_bytes(observed_evidence)
+    evidence_hash=canonical_hash({"bytes_hex":evidence_bytes.hex()})
+    return _verify_audit_evidence(attempt_id=attempt_id,target_identity_hash=canonical_hash(expected),evidence_bytes=evidence_bytes,expected_evidence_hash=evidence_hash)
 
 @dataclass(frozen=True)
 class PreflightResult:
@@ -93,11 +96,9 @@ class SaveLifecycle:
                 stream.write(canonical_json_bytes(record)+b"\n"); stream.flush(); os.fsync(stream.fileno())
     @property
     def lifecycle_hash(self): return canonical_hash(self.records)
-    def verified_verdict(self,attempt_id:str)->SaveVerdict:
-        required={"PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT"}
-        stages={r["stage"] for r in self.records if r["attempt_id"]==attempt_id and r["verdict"]=="PASS"}
-        if not required<=stages or self.record_path is None or not self.record_path.is_file(): raise AuditError("incomplete durable save lifecycle")
-        return SaveVerdict._verified(attempt_id,self.lifecycle_hash,self.canonical_save_hash)
+    def verified_verdict(self,attempt_id:str,target_identity_hash:str)->SaveVerdict:
+        try:return _verify_save_lifecycle(record_path=self.record_path,attempt_id=attempt_id,target_identity_hash=target_identity_hash,expected_pre_run_hash=self.canonical_save_hash)
+        except (TypeError,ValueError) as exc: raise AuditError(str(exc)) from exc
     def record_post_run(self,target:Path,attempt_id="run"):
         post=_file_hash(target); self._record(attempt_id,"POST_RUN",post,"PASS")
         return {"pre_run_hash":self.canonical_save_hash,"post_run_hash":post,"rng_control":"uncontrolled","lifecycle_hash":self.lifecycle_hash}

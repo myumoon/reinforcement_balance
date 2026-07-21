@@ -1,6 +1,6 @@
 """Fail-closed formal-run identity and durable launch transitions."""
 from __future__ import annotations
-import enum, os, re
+import enum, os, re, json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -22,55 +22,69 @@ class PlatformGate:
     def validate(self):
         failed=[n for n,v in self.__dict__.items() if v is not True]
         if failed: raise ValueError("formal launch platform gate failed: "+", ".join(failed))
-    def verified(self) -> "PlatformVerdict":
+    def verified(self, attempt_id:str, target_identity_hash:str) -> "PlatformVerdict":
         self.validate()
         evidence=dict(self.__dict__)
-        return PlatformVerdict(canonical_hash(evidence),_VERDICT_SEAL)
+        return PlatformVerdict(attempt_id,target_identity_hash,canonical_hash(evidence),_VERDICT_SEAL)
 
 @dataclass(frozen=True)
 class AuditVerdict:
-    target_hash:str; evidence_hash:str; canonical_hash:str; status:str="PASS"
+    attempt_id:str; target_identity_hash:str; evidence_hash:str; canonical_hash:str; status:str="PASS"
     _seal:object=None
     def __post_init__(self):
-        payload={"schema_version":"target_audit.v1","target_hash":self.target_hash,"evidence_hash":self.evidence_hash,"status":self.status}
-        if self._seal is not _VERDICT_SEAL or self.status!="PASS" or not all(isinstance(v,str) and _SHA256.fullmatch(v) for v in (self.target_hash,self.evidence_hash,self.canonical_hash)) or self.canonical_hash!=canonical_hash(payload):
+        payload={"schema_version":"target_audit.v1","attempt_id":self.attempt_id,"target_identity_hash":self.target_identity_hash,"evidence_hash":self.evidence_hash,"status":self.status}
+        if self._seal is not _VERDICT_SEAL or not self.attempt_id or self.status!="PASS" or not all(isinstance(v,str) and _SHA256.fullmatch(v) for v in (self.target_identity_hash,self.evidence_hash,self.canonical_hash)) or self.canonical_hash!=canonical_hash(payload):
             raise ValueError("unverified audit verdict")
-    @classmethod
-    def _verified(cls,target_hash:str,evidence_hash:str):
-        payload={"schema_version":"target_audit.v1","target_hash":target_hash,"evidence_hash":evidence_hash,"status":"PASS"}
-        return cls(target_hash,evidence_hash,canonical_hash(payload),"PASS",_VERDICT_SEAL)
     def to_wire(self):
-        return {"schema_version":"target_audit.v1","target_hash":self.target_hash,"evidence_hash":self.evidence_hash,"status":self.status,"canonical_hash":self.canonical_hash}
+        return {"schema_version":"target_audit.v1","attempt_id":self.attempt_id,"target_identity_hash":self.target_identity_hash,"evidence_hash":self.evidence_hash,"status":self.status,"canonical_hash":self.canonical_hash}
+
+def _verify_audit_evidence(*,attempt_id:str,target_identity_hash:str,evidence_bytes:bytes,expected_evidence_hash:str)->AuditVerdict:
+    if not isinstance(evidence_bytes,bytes): raise ValueError("audit evidence bytes required")
+    actual=canonical_hash({"bytes_hex":evidence_bytes.hex()})
+    if actual!=expected_evidence_hash: raise ValueError("audit evidence hash mismatch")
+    payload={"schema_version":"target_audit.v1","attempt_id":attempt_id,"target_identity_hash":target_identity_hash,"evidence_hash":actual,"status":"PASS"}
+    return AuditVerdict(attempt_id,target_identity_hash,actual,canonical_hash(payload),"PASS",_VERDICT_SEAL)
 
 @dataclass(frozen=True)
 class SaveVerdict:
-    attempt_id:str; lifecycle_hash:str; pre_run_hash:str; canonical_hash:str
+    attempt_id:str; target_identity_hash:str; lifecycle_attempt_id:str; lifecycle_hash:str; pre_run_hash:str; canonical_hash:str
     _seal:object=None
     def __post_init__(self):
-        payload={"schema_version":"save_lifecycle.v1","attempt_id":self.attempt_id,"lifecycle_hash":self.lifecycle_hash,"pre_run_hash":self.pre_run_hash,"status":"PASS"}
-        if self._seal is not _VERDICT_SEAL or not self.attempt_id or not all(isinstance(v,str) and _SHA256.fullmatch(v) for v in (self.lifecycle_hash,self.pre_run_hash,self.canonical_hash)) or self.canonical_hash!=canonical_hash(payload): raise ValueError("unverified save verdict")
-    @classmethod
-    def _verified(cls,attempt_id,lifecycle_hash,pre_run_hash):
-        payload={"schema_version":"save_lifecycle.v1","attempt_id":attempt_id,"lifecycle_hash":lifecycle_hash,"pre_run_hash":pre_run_hash,"status":"PASS"}
-        return cls(attempt_id,lifecycle_hash,pre_run_hash,canonical_hash(payload),_VERDICT_SEAL)
+        payload={"schema_version":"save_lifecycle.v1","attempt_id":self.attempt_id,"target_identity_hash":self.target_identity_hash,"lifecycle_attempt_id":self.lifecycle_attempt_id,"lifecycle_hash":self.lifecycle_hash,"pre_run_hash":self.pre_run_hash,"status":"PASS"}
+        if self._seal is not _VERDICT_SEAL or not self.attempt_id or self.lifecycle_attempt_id!=self.attempt_id or not all(isinstance(v,str) and _SHA256.fullmatch(v) for v in (self.target_identity_hash,self.lifecycle_hash,self.pre_run_hash,self.canonical_hash)) or self.canonical_hash!=canonical_hash(payload): raise ValueError("unverified save verdict")
+
+def _verify_save_lifecycle(*,record_path:Path,attempt_id:str,target_identity_hash:str,expected_pre_run_hash:str)->SaveVerdict:
+    if not isinstance(record_path,Path) or not record_path.is_file(): raise ValueError("durable lifecycle evidence required")
+    try:
+        records=[json.loads(line) for line in record_path.read_bytes().splitlines() if line]
+    except (OSError,UnicodeDecodeError,json.JSONDecodeError) as exc: raise ValueError("invalid durable lifecycle evidence") from exc
+    required={"PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT"}
+    bound=[r for r in records if isinstance(r,dict) and r.get("attempt_id")==attempt_id]
+    stages={r.get("stage") for r in bound if r.get("verdict")=="PASS"}
+    pre=[r for r in bound if r.get("stage")=="PRE_RUN_AUDIT" and r.get("verdict")=="PASS"]
+    if not required<=stages or not pre or pre[-1].get("hash")!=expected_pre_run_hash: raise ValueError("incomplete or mismatched durable lifecycle")
+    lifecycle_hash=canonical_hash(records)
+    payload={"schema_version":"save_lifecycle.v1","attempt_id":attempt_id,"target_identity_hash":target_identity_hash,"lifecycle_attempt_id":attempt_id,"lifecycle_hash":lifecycle_hash,"pre_run_hash":expected_pre_run_hash,"status":"PASS"}
+    return SaveVerdict(attempt_id,target_identity_hash,attempt_id,lifecycle_hash,expected_pre_run_hash,canonical_hash(payload),_VERDICT_SEAL)
 
 @dataclass(frozen=True)
 class PlatformVerdict:
-    canonical_hash:str; _seal:object=None
+    attempt_id:str; target_identity_hash:str; canonical_hash:str; _seal:object=None
     def __post_init__(self):
-        if self._seal is not _VERDICT_SEAL or not isinstance(self.canonical_hash,str) or not _SHA256.fullmatch(self.canonical_hash): raise ValueError("unverified platform verdict")
+        if self._seal is not _VERDICT_SEAL or not self.attempt_id or not all(isinstance(x,str) and _SHA256.fullmatch(x) for x in (self.target_identity_hash,self.canonical_hash)): raise ValueError("unverified platform verdict")
 
 @dataclass(frozen=True)
 class LaunchAuthorization:
-    audit_hash:str; save_gate_hash:str; platform_gate_hash:str
+    attempt_id:str; target_identity_hash:str; save_attempt_id:str; lifecycle_attempt_id:str; audit_hash:str; save_gate_hash:str; platform_gate_hash:str
     _seal:object=None
     def __post_init__(self):
-        if self._seal is not _AUTH_SEAL or not all(isinstance(v,str) and _SHA256.fullmatch(v) for v in (self.audit_hash,self.save_gate_hash,self.platform_gate_hash)):
+        if self._seal is not _AUTH_SEAL or self.save_attempt_id!=self.attempt_id or self.lifecycle_attempt_id!=self.attempt_id or not all(isinstance(v,str) and _SHA256.fullmatch(v) for v in (self.target_identity_hash,self.audit_hash,self.save_gate_hash,self.platform_gate_hash)):
             raise ValueError("launch authorization requires audited durable gates")
     @classmethod
     def issue(cls, audit:AuditVerdict, platform:PlatformVerdict, save:SaveVerdict):
         if not isinstance(audit,AuditVerdict) or not isinstance(platform,PlatformVerdict) or not isinstance(save,SaveVerdict): raise ValueError("verified typed verdicts required")
-        return cls(audit.canonical_hash,save.canonical_hash,platform.canonical_hash,_AUTH_SEAL)
+        if len({audit.attempt_id,platform.attempt_id,save.attempt_id,save.lifecycle_attempt_id})!=1 or len({audit.target_identity_hash,platform.target_identity_hash,save.target_identity_hash})!=1: raise ValueError("authorization identity binding mismatch")
+        return cls(audit.attempt_id,audit.target_identity_hash,save.attempt_id,save.lifecycle_attempt_id,audit.canonical_hash,save.canonical_hash,platform.canonical_hash,_AUTH_SEAL)
 
 @dataclass(frozen=True)
 class LaunchLifecycle:
@@ -101,14 +115,27 @@ class LaunchLifecycle:
     def reserve(self,run_id,gameplay_attempt_id,nonce,*,authorization:LaunchAuthorization,intent_log:Path):
         if self.state is not LaunchState.PREFLIGHT or not isinstance(authorization,LaunchAuthorization): raise ValueError("validated authorization required")
         if not isinstance(intent_log,Path): raise ValueError("durable launch intent log required")
-        auth_wire={"audit_hash":authorization.audit_hash,"save_gate_hash":authorization.save_gate_hash,"platform_gate_hash":authorization.platform_gate_hash}
+        if authorization.attempt_id!=self.attempt_id: raise ValueError("authorization attempt mismatch")
+        auth_wire={k:getattr(authorization,k) for k in ("attempt_id","target_identity_hash","save_attempt_id","lifecycle_attempt_id","audit_hash","save_gate_hash","platform_gate_hash")}
         reserved=replace(self,state=LaunchState.LAUNCH_INTENT,reserved_run_id=run_id,gameplay_attempt_id=gameplay_attempt_id,launch_nonce=nonce,authorization_hash=canonical_hash(auth_wire))
         intent_log.parent.mkdir(parents=True,exist_ok=True)
+        encoded=canonical_json_bytes(reserved.to_wire())+b"\n"
+        temp=intent_log.with_name(intent_log.name+".tmp")
         try:
-            with intent_log.open("ab") as stream:
-                stream.write(canonical_json_bytes(reserved.to_wire())+b"\n"); stream.flush(); os.fsync(stream.fileno())
+            previous=intent_log.read_bytes() if intent_log.exists() else b""
+            with temp.open("wb") as stream:
+                stream.write(previous+encoded); stream.flush(); os.fsync(stream.fileno())
+            os.replace(temp,intent_log)
+            if os.name!="nt":
+                dfd=os.open(intent_log.parent,os.O_RDONLY)
+                try: os.fsync(dfd)
+                finally: os.close(dfd)
+            lines=intent_log.read_bytes().splitlines()
+            if not lines or json.loads(lines[-1])!=reserved.to_wire(): raise ValueError("durable LAUNCH_INTENT revalidation failed")
         except OSError as exc:
             raise ValueError("durable LAUNCH_INTENT commit failed") from exc
+        finally:
+            if temp.exists(): temp.unlink()
         return reserved
     def activate(self,process_ref,*,source="observer"):
         if self.state is not LaunchState.LAUNCH_INTENT or source not in {"observer","reconciliation"} or not process_ref: raise ValueError("activation requires launch intent and process")

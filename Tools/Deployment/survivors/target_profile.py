@@ -30,9 +30,12 @@ class SuccessObservation:
     def from_telemetry(cls,run_id:str,path:Path):
         if not isinstance(run_id,str) or not run_id or not path.is_file(): raise ValueError("run-bound telemetry required")
         data=yaml.safe_load(path.read_text(encoding="utf-8"))
-        if not isinstance(data,Mapping) or set(data)!={"run_id","event","observed_at_seconds"} or data["run_id"]!=run_id: raise ValueError("telemetry run identity mismatch")
+        if not isinstance(data,Mapping) or set(data)!={"run_id","event","observed_at_seconds","evidence_hash"} or data["run_id"]!=run_id: raise ValueError("telemetry run identity mismatch")
         if data["event"] not in {"result_screen","death_transition"} or type(data["observed_at_seconds"]) not in (int,float): raise ValueError("invalid post-30 telemetry")
-        return cls(run_id,data["event"],float(data["observed_at_seconds"]),canonical_hash({"file_bytes_hex":path.read_bytes().hex()}))
+        evidence={k:data[k] for k in ("run_id","event","observed_at_seconds")}
+        actual=canonical_hash(evidence)
+        if data["evidence_hash"]!=actual: raise ValueError("post-30 event evidence hash mismatch")
+        return cls(run_id,data["event"],float(data["observed_at_seconds"]),actual)
 
 @dataclass(frozen=True)
 class TargetProfile:

@@ -5,7 +5,7 @@
     "operator": "deployment-target-calibration",
     "date": "2026-07-18",
     "run_id": "wasd-dry-run-v1",
-    "capture_evidence_hash": "8eddb1d650e53965fd804e3d86e230802f321eda653717a55f05848759986718"
+    "capture_evidence_hash": "1bbbd963eddd496f0112e4170afad764c0fe06be08a357da9d6a771bddc29660"
   },
   "samples": [
     {"index": 0, "sim_delta_sign": [0, 1], "screen_delta_sign": [0, -1], "keys": ["W"]},

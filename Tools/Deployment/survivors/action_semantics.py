@@ -65,3 +65,5 @@ def validate_golden_fixture(contract:ActionContract,path:Path)->None:
         x,y=row.sim_vector
         expected.append({"index":row.index,"sim_delta_sign":[x,y],"screen_delta_sign":[x,-y],"keys":list(row.wasd_chord)})
     if data["samples"]!=expected: raise ValueError("golden telemetry displacement/WASD mismatch")
+    evidence={"schema_version":data["schema_version"],"measurement":data["measurement"],"operator":att["operator"],"date":att["date"],"run_id":att["run_id"],"samples":data["samples"]}
+    if canonical_hash(evidence)!=att["capture_evidence_hash"]: raise ValueError("golden telemetry evidence bytes mismatch")
