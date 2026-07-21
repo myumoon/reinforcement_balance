@@ -71,6 +71,96 @@ def _verdict_descriptor(source):
     )
 
 
+def _release_evidence_lineage(*, include_restore_parent=True):
+    source = ArtifactDescriptor(
+        logical_id="phase5-source",
+        node_kind="source_descriptor",
+        producer_id="source-builder",
+        producer_version="v1",
+        identity_metadata={"source_config_hash": "0" * 64},
+        parents=(),
+        files=(),
+    )
+    verdict = ArtifactDescriptor(
+        logical_id="teacher-verdict",
+        node_kind="teacher_validation_verdict",
+        producer_id="validator",
+        producer_version="v1",
+        identity_metadata={"gate_version": "teacher-gate.v1", "passed": True},
+        parents=(source.node_ref(),),
+        files=(),
+    )
+    dataset = ArtifactDescriptor(
+        logical_id="choice-dataset",
+        node_kind="choice_dataset_release",
+        producer_id="dataset-builder",
+        producer_version="v1",
+        identity_metadata={"dataset_config_hash": "1" * 64},
+        parents=(verdict.node_ref(),),
+        files=(),
+    )
+    model = ArtifactDescriptor(
+        logical_id="item-selector",
+        node_kind="item_selector_release",
+        producer_id="model-builder",
+        producer_version="v1",
+        identity_metadata={"model_config_hash": "2" * 64},
+        parents=(dataset.node_ref(),),
+        files=(),
+    )
+    bundle = ArtifactDescriptor(
+        logical_id="runtime-bundle",
+        node_kind="runtime_bundle",
+        producer_id="bundle-builder",
+        producer_version="v1",
+        identity_metadata={"bundle_config_hash": "3" * 64},
+        parents=(model.node_ref(),),
+        files=(),
+    )
+    shadow = ArtifactDescriptor(
+        logical_id="shadow-verdict",
+        node_kind="replay_shadow_verdict",
+        producer_id="shadow-runner",
+        producer_version="v1",
+        identity_metadata={"gate_version": "shadow-gate.v1", "passed": True},
+        parents=(bundle.node_ref(),),
+        files=(),
+    )
+    campaign = ArtifactDescriptor(
+        logical_id="canary-campaign",
+        node_kind="canary_campaign",
+        producer_id="campaign-runner",
+        producer_version="v1",
+        identity_metadata={"campaign_id": "c0", "passed": True},
+        parents=(shadow.node_ref(),),
+        files=(),
+    )
+    restore = ArtifactDescriptor(
+        logical_id="restore-test",
+        node_kind="restore_test_verdict",
+        producer_id="artifact-restore-test",
+        producer_version="restore_test_verdict.v1",
+        identity_metadata={"manifest_hash": "4" * 64, "passed": True},
+        parents=(bundle.node_ref(),),
+        files=(),
+    )
+    evidence_parents = (
+        (campaign.node_ref(), restore.node_ref())
+        if include_restore_parent
+        else (campaign.node_ref(),)
+    )
+    evidence = ArtifactDescriptor(
+        logical_id="goal-evidence",
+        node_kind="goal_evidence",
+        producer_id="goal-evidence-builder",
+        producer_version="v1",
+        identity_metadata={"goal_id": "survivors-phase5", "passed": True},
+        parents=evidence_parents,
+        files=(),
+    )
+    return (source, verdict, dataset, model, bundle, shadow, campaign, restore, evidence)
+
+
 def _with_recomputed_manifest_hash(manifest):
     updated = deepcopy(manifest)
     updated["manifest_hash"] = canonical_hash(
@@ -332,6 +422,48 @@ def test_create_bundle_manifest_rejects_lineage_violation_for_non_root_descripto
             retention_until_utc="2027-07-21T00:00:00Z",
             include_private=True,
         )
+
+
+def test_create_bundle_manifest_rejects_goal_evidence_without_restore_test_verdict():
+    descriptors = _release_evidence_lineage(include_restore_parent=False)
+
+    with pytest.raises(ArtifactDagValidationError, match="restore_test_verdict"):
+        create_bundle_manifest(
+            descriptors=descriptors,
+            export_id="goal-evidence-without-restore-test",
+            retention_until_utc="2027-07-21T00:00:00Z",
+            include_private=True,
+        )
+
+
+def test_bundle_paths_reject_goal_evidence_without_restore_test_verdict(tmp_path):
+    primary = ArtifactStore(tmp_path / "primary")
+    target = ArtifactStore(tmp_path / "target")
+    manifest = create_bundle_manifest(
+        descriptors=_release_evidence_lineage(include_restore_parent=True),
+        export_id="goal-evidence-with-restore-test",
+        retention_until_utc="2027-07-21T00:00:00Z",
+        include_private=True,
+    )
+    manifest["descriptors"] = [
+        descriptor.to_wire()
+        for descriptor in sorted(
+            _release_evidence_lineage(include_restore_parent=False),
+            key=lambda value: value.identity_hash,
+        )
+    ]
+    manifest = _with_recomputed_manifest_hash(manifest)
+
+    with pytest.raises(ArtifactDagValidationError, match="restore_test_verdict"):
+        export_bundle(primary, manifest, tmp_path / "bad-goal-evidence-export.zip")
+
+    with pytest.raises(ArtifactDagValidationError, match="restore_test_verdict"):
+        verify_bundle_objects(primary, manifest, verify_mode="full")
+
+    zip_path = tmp_path / "bad-goal-evidence-import.zip"
+    _write_bundle(zip_path, manifest, ())
+    with pytest.raises(ArtifactDagValidationError, match="restore_test_verdict"):
+        import_bundle(zip_path, target, verify_mode="full")
 
 
 def test_export_and_import_reject_tampered_manifest_with_lineage_violation(tmp_path):

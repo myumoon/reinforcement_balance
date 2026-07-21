@@ -37,6 +37,11 @@ ALLOWED_PARENT_KINDS: dict[str, frozenset[str]] = {
 }
 
 
+_REQUIRED_PARENT_KINDS: dict[str, frozenset[str]] = {
+    "goal_evidence": frozenset({"restore_test_verdict"}),
+}
+
+
 _KIND_ORDER = {
     "source_descriptor": 0,
     "teacher_validation_verdict": 1,
@@ -103,6 +108,7 @@ def validate_artifact_dag(
 
     for node in identity_to_node.values():
         allowed_parent_kinds = ALLOWED_PARENT_KINDS[node.node_kind]
+        parent_node_kinds: set[str] = set()
         if node.node_kind == "source_descriptor":
             if node.parents:
                 raise ArtifactDagValidationError(
@@ -133,8 +139,17 @@ def validate_artifact_dag(
                 raise ArtifactDagValidationError(
                     f"{node.node_kind} cannot use {parent.node_kind} as a parent"
                 )
+            parent_node_kinds.add(parent.node_kind)
             children[parent.identity_hash].append(node.identity_hash)
             indegree[node.identity_hash] += 1
+        missing_required = (
+            _REQUIRED_PARENT_KINDS.get(node.node_kind, frozenset()) - parent_node_kinds
+        )
+        if missing_required:
+            required = ", ".join(sorted(missing_required))
+            raise ArtifactDagValidationError(
+                f"{node.node_kind} must declare at least one parent of kind {required}"
+            )
 
     ordered_zero_indegree = sorted(
         (identity_to_node[hash_] for hash_, degree in indegree.items() if degree == 0),

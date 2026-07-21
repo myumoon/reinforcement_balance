@@ -38,30 +38,7 @@ def _node(logical_id, node_kind, parents=(), ch="a"):
     )
 
 
-def test_child_verdict_parent_reference_is_valid_storage_direction():
-    source = _node("phase5-source", "source_descriptor", ch="a")
-    verdict = ValidationVerdict(
-        logical_id="phase5-source.teacher-verdict",
-        verdict_kind="teacher_validation_verdict",
-        subject=source.node_ref(),
-        gate_version="teacher-gate.v1",
-        metrics={"pass_rate": 1.0},
-        split_ids=("dev",),
-        session_ids=("s1",),
-        passed=True,
-        blocking_reasons=(),
-    ).to_descriptor()
-
-    report = validate_artifact_dag([source, verdict])
-
-    assert report.node_count == 2
-    assert report.topological_identity_hashes == (
-        source.identity_hash,
-        verdict.identity_hash,
-    )
-
-
-def test_source_to_verdict_to_dataset_to_model_to_bundle_to_campaign_dag_passes():
+def _campaign_lineage():
     source = _node("phase5-source", "source_descriptor", ch="a")
     verdict = _node(
         "teacher-verdict",
@@ -99,19 +76,91 @@ def test_source_to_verdict_to_dataset_to_model_to_bundle_to_campaign_dag_passes(
         parents=(shadow.node_ref(),),
         ch="2",
     )
+    return source, verdict, dataset, model, bundle, shadow, campaign
+
+
+def test_child_verdict_parent_reference_is_valid_storage_direction():
+    source = _node("phase5-source", "source_descriptor", ch="a")
+    verdict = ValidationVerdict(
+        logical_id="phase5-source.teacher-verdict",
+        verdict_kind="teacher_validation_verdict",
+        subject=source.node_ref(),
+        gate_version="teacher-gate.v1",
+        metrics={"pass_rate": 1.0},
+        split_ids=("dev",),
+        session_ids=("s1",),
+        passed=True,
+        blocking_reasons=(),
+    ).to_descriptor()
+
+    report = validate_artifact_dag([source, verdict])
+
+    assert report.node_count == 2
+    assert report.topological_identity_hashes == (
+        source.identity_hash,
+        verdict.identity_hash,
+    )
+
+
+def test_source_to_verdict_to_dataset_to_model_to_bundle_to_campaign_dag_passes():
+    source, verdict, dataset, model, bundle, shadow, campaign = _campaign_lineage()
+    restore = _node(
+        "restore-test",
+        "restore_test_verdict",
+        parents=(bundle.node_ref(),),
+        ch="4",
+    )
     evidence = _node(
         "goal-evidence",
         "goal_evidence",
-        parents=(campaign.node_ref(),),
+        parents=(campaign.node_ref(), restore.node_ref()),
         ch="3",
     )
 
     report = validate_artifact_dag(
-        [evidence, campaign, shadow, bundle, model, dataset, verdict, source]
+        [evidence, restore, campaign, shadow, bundle, model, dataset, verdict, source]
     )
 
-    assert report.node_count == 8
+    assert report.node_count == 9
     assert report.topological_identity_hashes[0] == source.identity_hash
+    assert report.topological_identity_hashes[-1] == evidence.identity_hash
+
+
+def test_goal_evidence_requires_restore_test_verdict_parent():
+    source, verdict, dataset, model, bundle, shadow, campaign = _campaign_lineage()
+    evidence = _node(
+        "goal-evidence",
+        "goal_evidence",
+        parents=(campaign.node_ref(),),
+        ch="d",
+    )
+
+    with pytest.raises(ArtifactDagValidationError, match="restore_test_verdict"):
+        validate_artifact_dag(
+            [source, verdict, dataset, model, bundle, shadow, campaign, evidence]
+        )
+
+
+def test_goal_evidence_with_campaign_and_restore_test_verdict_parent_passes():
+    source, verdict, dataset, model, bundle, shadow, campaign = _campaign_lineage()
+    restore = _node(
+        "restore-test",
+        "restore_test_verdict",
+        parents=(bundle.node_ref(),),
+        ch="d",
+    )
+    evidence = _node(
+        "goal-evidence",
+        "goal_evidence",
+        parents=(campaign.node_ref(), restore.node_ref()),
+        ch="e",
+    )
+
+    report = validate_artifact_dag(
+        [source, verdict, dataset, model, bundle, shadow, campaign, restore, evidence]
+    )
+
+    assert report.node_count == 9
     assert report.topological_identity_hashes[-1] == evidence.identity_hash
 
 
