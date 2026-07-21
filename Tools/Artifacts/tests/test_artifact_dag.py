@@ -141,6 +141,27 @@ def test_goal_evidence_requires_restore_test_verdict_parent():
         )
 
 
+def test_goal_evidence_requires_canary_campaign_parent():
+    source, verdict, dataset, model, bundle, shadow, campaign = _campaign_lineage()
+    restore = _node(
+        "restore-test",
+        "restore_test_verdict",
+        parents=(bundle.node_ref(),),
+        ch="d",
+    )
+    evidence = _node(
+        "goal-evidence",
+        "goal_evidence",
+        parents=(restore.node_ref(),),
+        ch="e",
+    )
+
+    with pytest.raises(ArtifactDagValidationError, match="canary_campaign"):
+        validate_artifact_dag(
+            [source, verdict, dataset, model, bundle, shadow, campaign, restore, evidence]
+        )
+
+
 def test_goal_evidence_with_campaign_and_restore_test_verdict_parent_passes():
     source, verdict, dataset, model, bundle, shadow, campaign = _campaign_lineage()
     restore = _node(

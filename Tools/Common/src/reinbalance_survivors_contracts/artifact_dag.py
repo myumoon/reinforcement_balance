@@ -38,7 +38,7 @@ ALLOWED_PARENT_KINDS: dict[str, frozenset[str]] = {
 
 
 _REQUIRED_PARENT_KINDS: dict[str, frozenset[str]] = {
-    "goal_evidence": frozenset({"restore_test_verdict"}),
+    "goal_evidence": frozenset({"canary_campaign", "restore_test_verdict"}),
 }
 
 
