@@ -65,5 +65,9 @@ def validate_golden_fixture(contract:ActionContract,path:Path)->None:
         x,y=row.sim_vector
         expected.append({"index":row.index,"sim_delta_sign":[x,y],"screen_delta_sign":[x,-y],"keys":list(row.wasd_chord)})
     if data["samples"]!=expected: raise ValueError("golden telemetry displacement/WASD mismatch")
-    evidence={"schema_version":data["schema_version"],"measurement":data["measurement"],"operator":att["operator"],"date":att["date"],"run_id":att["run_id"],"samples":data["samples"]}
-    if canonical_hash(evidence)!=att["capture_evidence_hash"]: raise ValueError("golden telemetry evidence bytes mismatch")
+    # Expected content is derived from the C++-validated action contract and fixed
+    # calibration identity, never from the fixture's own samples/hash declaration.
+    expected_evidence={"schema_version":"survivors_action_telemetry.v1","measurement":"simulator displacement sign cross-checked against target WASD dry-run screen displacement","operator":"deployment-target-calibration","date":"2026-07-18","run_id":"wasd-dry-run-v1","samples":expected}
+    if {"schema_version":data["schema_version"],"measurement":data["measurement"],"operator":att["operator"],"date":att["date"],"run_id":att["run_id"],"samples":data["samples"]}!=expected_evidence:
+        raise ValueError("golden telemetry differs from independently derived expected")
+    if att["capture_evidence_hash"]!=canonical_hash(expected_evidence): raise ValueError("golden telemetry declared hash mismatch")

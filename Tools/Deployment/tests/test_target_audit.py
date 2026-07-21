@@ -1,4 +1,5 @@
 import copy
+import yaml
 import pytest
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict
@@ -12,12 +13,13 @@ def file_hash(data:bytes): return canonical_hash({"bytes_hex":data.hex()})
 def resolved(tmp_path):
     exe=tmp_path/"game.exe"; exe.write_bytes(b"executable")
     save=tmp_path/"save.dat"; save.write_bytes(b"canonical-save")
-    manual=tmp_path/"manual-evidence.txt"; manual.write_bytes(b"measured build and hardware evidence")
-    attest={**ATTEST_BASE,"evidence_hash":file_hash(manual.read_bytes())}
     data=load_target_profile().to_wire()
-    data["build"].update(build_id="steam-1794680-measured",executable_version="measured-v1",executable_hash=file_hash(exe.read_bytes()),manual_attestation=attest)
+    data["build"].update(build_id="steam-1794680-measured",executable_version="measured-v1",executable_hash=file_hash(exe.read_bytes()))
     data["progression"].update(save_artifact_hash=file_hash(save.read_bytes()),save_format_version="measured-v1")
     data["hardware"].update(profile_id="reference-1",os_build="26100",gpu_name="reference-gpu",vram_mb=12288,driver_version="1",cuda_version="12.4",pytorch_version="2.5")
+    measurements={"build_id":data["build"]["build_id"],"executable_version":data["build"]["executable_version"],**{k:data["hardware"][k] for k in ("os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version")}}
+    manual=tmp_path/"manual-evidence.yaml"; manual.write_text(yaml.safe_dump({"schema_version":"survivors_manual_attestation.v1","measurements":measurements},sort_keys=True))
+    attest={**ATTEST_BASE,"evidence_hash":file_hash(manual.read_bytes())}; data["build"]["manual_attestation"]=attest
     return data,AuditEvidence(exe,save,attest,manual)
 
 @pytest.mark.parametrize("path", [("build","build_id"),("progression","save_artifact_hash"),("progression","purchased_power_ups"),("display","ui_scale"),("display","windows_dpi_scale"),("input","key_bindings"),("hardware","gpu_name"),("choice_taxonomy","candidate_vocabulary_hash")])
@@ -39,6 +41,14 @@ def test_placeholder_or_missing_attestation_never_passes(tmp_path):
     with pytest.raises(AuditError): audit_target(expected,copy.deepcopy(expected),AuditEvidence(evidence.executable_path,evidence.save_path,{},evidence.manual_evidence_path),attempt_id="attempt-1")
     evidence.manual_evidence_path.write_bytes(b"tampered")
     with pytest.raises(AuditError): audit_target(expected,copy.deepcopy(expected),evidence,attempt_id="attempt-1")
+
+def test_manual_evidence_must_contain_claimed_values(tmp_path):
+    expected,evidence=resolved(tmp_path)
+    evidence.manual_evidence_path.write_text(yaml.safe_dump({"schema_version":"survivors_manual_attestation.v1","measurements":{"gpu_name":"different"}}))
+    attest={**evidence.manual_attestation,"evidence_hash":file_hash(evidence.manual_evidence_path.read_bytes())}
+    expected["build"]["manual_attestation"]=attest
+    bad=AuditEvidence(evidence.executable_path,evidence.save_path,attest,evidence.manual_evidence_path)
+    with pytest.raises(AuditError): audit_target(expected,copy.deepcopy(expected),bad,attempt_id="attempt-1")
 
 @pytest.mark.parametrize("override", [{"game_stopped":False},{"launcher_stopped":False},{"cloud_sync_disabled":None},{"restore_conflict":True},{"canonical_hash_matches":False}])
 def test_save_preflight_failure_has_attempt_only(override):

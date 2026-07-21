@@ -1,6 +1,11 @@
 """Fail-closed formal-run identity and durable launch transitions."""
 from __future__ import annotations
 import enum, os, re, json
+try:
+    import fcntl
+except ImportError:  # Win64 support envelope
+    fcntl = None
+    import msvcrt
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -10,6 +15,11 @@ SCHEMA_VERSION = "launch_lifecycle.v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _AUTH_SEAL = object()
 _VERDICT_SEAL = object()
+
+def _lock(stream):
+    if fcntl is not None: fcntl.flock(stream.fileno(),fcntl.LOCK_EX)
+    else:
+        stream.seek(0); stream.write(b"\0"); stream.flush(); msvcrt.locking(stream.fileno(),msvcrt.LK_LOCK,1)
 
 class LaunchState(str, enum.Enum):
     PREFLIGHT="PREFLIGHT"; PREFLIGHT_FAILED="PREFLIGHT_FAILED"; LAUNCH_INTENT="LAUNCH_INTENT"
@@ -53,19 +63,32 @@ class SaveVerdict:
         payload={"schema_version":"save_lifecycle.v1","attempt_id":self.attempt_id,"target_identity_hash":self.target_identity_hash,"lifecycle_attempt_id":self.lifecycle_attempt_id,"lifecycle_hash":self.lifecycle_hash,"pre_run_hash":self.pre_run_hash,"status":"PASS"}
         if self._seal is not _VERDICT_SEAL or not self.attempt_id or self.lifecycle_attempt_id!=self.attempt_id or not all(isinstance(v,str) and _SHA256.fullmatch(v) for v in (self.target_identity_hash,self.lifecycle_hash,self.pre_run_hash,self.canonical_hash)) or self.canonical_hash!=canonical_hash(payload): raise ValueError("unverified save verdict")
 
-def _verify_save_lifecycle(*,record_path:Path,attempt_id:str,target_identity_hash:str,expected_pre_run_hash:str)->SaveVerdict:
-    if not isinstance(record_path,Path) or not record_path.is_file(): raise ValueError("durable lifecycle evidence required")
-    try:
-        records=[json.loads(line) for line in record_path.read_bytes().splitlines() if line]
-    except (OSError,UnicodeDecodeError,json.JSONDecodeError) as exc: raise ValueError("invalid durable lifecycle evidence") from exc
-    required={"PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT"}
-    bound=[r for r in records if isinstance(r,dict) and r.get("attempt_id")==attempt_id]
-    stages={r.get("stage") for r in bound if r.get("verdict")=="PASS"}
-    pre=[r for r in bound if r.get("stage")=="PRE_RUN_AUDIT" and r.get("verdict")=="PASS"]
-    if not required<=stages or not pre or pre[-1].get("hash")!=expected_pre_run_hash: raise ValueError("incomplete or mismatched durable lifecycle")
-    lifecycle_hash=canonical_hash(records)
+def _mint_save_verdict(*,records:tuple[Mapping[str,Any],...],attempt_id:str,target_identity_hash:str,expected_pre_run_hash:str,seal:object)->SaveVerdict:
+    """Mint only from the live save executor; persisted JSON is evidence, not authority."""
+    if seal is not _SAVE_EXECUTION_SEAL: raise ValueError("save lifecycle execution seal required")
+    required=("PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT")
+    stages=tuple(r.get("stage") for r in records)
+    cursor=0
+    for stage in stages:
+        if cursor<len(required) and stage==required[cursor]: cursor+=1
+    if cursor!=len(required): raise ValueError("incomplete save lifecycle")
+    previous=None
+    for record in records:
+        body={k:v for k,v in record.items() if k!="step_hash"}
+        if body.get("attempt_id")!=attempt_id or body.get("previous_step_hash")!=previous:
+            raise ValueError("save lifecycle chain identity mismatch")
+        if record.get("step_hash")!=canonical_hash(body): raise ValueError("save lifecycle step hash mismatch")
+        previous=record["step_hash"]
+    if records[-1].get("content_hash")!=expected_pre_run_hash: raise ValueError("pre-run hash mismatch")
+    lifecycle_hash=canonical_hash(list(records))
     payload={"schema_version":"save_lifecycle.v1","attempt_id":attempt_id,"target_identity_hash":target_identity_hash,"lifecycle_attempt_id":attempt_id,"lifecycle_hash":lifecycle_hash,"pre_run_hash":expected_pre_run_hash,"status":"PASS"}
     return SaveVerdict(attempt_id,target_identity_hash,attempt_id,lifecycle_hash,expected_pre_run_hash,canonical_hash(payload),_VERDICT_SEAL)
+
+_SAVE_EXECUTION_SEAL = object()
+
+def _mint_executed_save_verdict(*,records:tuple[Mapping[str,Any],...],attempt_id:str,target_identity_hash:str,expected_pre_run_hash:str,execution_seal:object)->SaveVerdict:
+    return _mint_save_verdict(records=records,attempt_id=attempt_id,target_identity_hash=target_identity_hash,expected_pre_run_hash=expected_pre_run_hash,seal=execution_seal)
+
 
 @dataclass(frozen=True)
 class PlatformVerdict:
@@ -121,17 +144,23 @@ class LaunchLifecycle:
         intent_log.parent.mkdir(parents=True,exist_ok=True)
         encoded=canonical_json_bytes(reserved.to_wire())+b"\n"
         temp=intent_log.with_name(intent_log.name+".tmp")
+        lock_path=intent_log.with_name(intent_log.name+".lock")
         try:
-            previous=intent_log.read_bytes() if intent_log.exists() else b""
-            with temp.open("wb") as stream:
-                stream.write(previous+encoded); stream.flush(); os.fsync(stream.fileno())
-            os.replace(temp,intent_log)
-            if os.name!="nt":
+            with lock_path.open("a+b") as lock:
+                _lock(lock)
+                previous=intent_log.read_bytes() if intent_log.exists() else b""
+                for line in previous.splitlines():
+                    prior=LaunchLifecycle.from_wire(json.loads(line))
+                    if prior.attempt_id==self.attempt_id or prior.reserved_run_id==run_id:
+                        raise ValueError("attempt/target identity already reserved")
+                with temp.open("wb") as stream:
+                    stream.write(previous+encoded); stream.flush(); os.fsync(stream.fileno())
+                os.replace(temp,intent_log)
                 dfd=os.open(intent_log.parent,os.O_RDONLY)
                 try: os.fsync(dfd)
                 finally: os.close(dfd)
-            lines=intent_log.read_bytes().splitlines()
-            if not lines or json.loads(lines[-1])!=reserved.to_wire(): raise ValueError("durable LAUNCH_INTENT revalidation failed")
+                lines=intent_log.read_bytes().splitlines()
+                if not lines or json.loads(lines[-1])!=reserved.to_wire(): raise ValueError("durable LAUNCH_INTENT revalidation failed")
         except OSError as exc:
             raise ValueError("durable LAUNCH_INTENT commit failed") from exc
         finally:

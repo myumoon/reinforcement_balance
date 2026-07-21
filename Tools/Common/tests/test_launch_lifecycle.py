@@ -6,16 +6,21 @@ from reinbalance_survivors_contracts.launch_lifecycle import (
     PlatformGate,
     LaunchAuthorization,
     AuditVerdict, SaveVerdict,
-    _verify_audit_evidence, _verify_save_lifecycle,
+    _verify_audit_evidence, _mint_executed_save_verdict, _SAVE_EXECUTION_SEAL,
 )
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
+
+def save_verdict(attempt,target):
+    records=[]; previous=None
+    for stage in ("PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT"):
+        body={"attempt_id":attempt,"stage":stage,"content_hash":"b"*64 if stage=="PRE_RUN_AUDIT" else None,"previous_step_hash":previous}
+        record={**body,"step_hash":canonical_hash(body)}; records.append(record); previous=record["step_hash"]
+    return _mint_executed_save_verdict(records=tuple(records),attempt_id=attempt,target_identity_hash=target,expected_pre_run_hash="b"*64,execution_seal=_SAVE_EXECUTION_SEAL)
 
 def auth(tmp_path,attempt="attempt"):
     target="a"*64; evidence=b"audited"; eh=canonical_hash({"bytes_hex":evidence.hex()})
     audit=_verify_audit_evidence(attempt_id=attempt,target_identity_hash=target,evidence_bytes=evidence,expected_evidence_hash=eh)
-    records=[{"attempt_id":attempt,"stage":s,"verdict":"PASS","hash":"b"*64 if s=="PRE_RUN_AUDIT" else None} for s in ("PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT")]
-    path=tmp_path/(attempt+".jsonl"); path.write_bytes(b"".join(canonical_json_bytes(r)+b"\n" for r in records))
-    save=_verify_save_lifecycle(record_path=path,attempt_id=attempt,target_identity_hash=target,expected_pre_run_hash="b"*64)
+    save=save_verdict(attempt,target)
     platform=PlatformGate(True,True,True,True,True,True,True)
     return LaunchAuthorization.issue(audit,platform.verified(attempt,target),save)
 
@@ -37,7 +42,12 @@ def test_evidence_and_identity_binding_are_fail_closed(tmp_path):
         LaunchAuthorization.issue(
             _verify_audit_evidence(attempt_id="a",target_identity_hash=a.target_identity_hash,evidence_bytes=b"x",expected_evidence_hash=canonical_hash({"bytes_hex":b"x".hex()})),
             PlatformGate(True,True,True,True,True,True,True).verified("b",b.target_identity_hash),
-            _verify_save_lifecycle(record_path=tmp_path/"b.jsonl",attempt_id="b",target_identity_hash=b.target_identity_hash,expected_pre_run_hash="b"*64))
+            save_verdict("b",b.target_identity_hash))
+
+def test_handwritten_save_jsonl_has_no_verdict_path(tmp_path):
+    path=tmp_path/"forged.jsonl"; path.write_text('{"attempt_id":"a","stage":"PRE_RUN_AUDIT","result":"PASS"}\n')
+    with pytest.raises(ValueError):
+        _mint_executed_save_verdict(records=tuple(),attempt_id="a",target_identity_hash="f"*64,expected_pre_run_hash="b"*64,execution_seal=object())
 
 
 def test_launch_intent_and_activation_cardinality(tmp_path):
@@ -47,6 +57,8 @@ def test_launch_intent_and_activation_cardinality(tmp_path):
     lifecycle = lifecycle.reserve("run-1", "gameplay-1", "nonce-1", authorization=auth(tmp_path,"attempt-1"),intent_log=tmp_path/"intent.jsonl")
     with pytest.raises(ValueError):
         lifecycle.reserve("run-2", "gameplay-2", "nonce-2", authorization=auth(tmp_path,"attempt-1"),intent_log=tmp_path/"intent.jsonl")
+    with pytest.raises(ValueError):
+        LaunchLifecycle.begin("attempt-1").reserve("run-other", "gameplay-other", "nonce-other", authorization=auth(tmp_path,"attempt-1"),intent_log=tmp_path/"intent.jsonl")
     lifecycle = lifecycle.activate("proc-1")
     assert lifecycle.state is LaunchState.FORMAL_RUN_ACTIVATED
     assert lifecycle.counts_toward_outcome_denominator

@@ -27,14 +27,17 @@ CLOSED_TAXONOMY={
 class SuccessObservation:
     run_id:str; event:str; observed_at_seconds:float; evidence_hash:str
     @classmethod
-    def from_telemetry(cls,run_id:str,path:Path):
-        if not isinstance(run_id,str) or not run_id or not path.is_file(): raise ValueError("run-bound telemetry required")
+    def from_telemetry(cls,run_id:str,path:Path,evidence_path:Path|None=None):
+        if not isinstance(run_id,str) or not run_id or not path.is_file() or evidence_path is None or not evidence_path.is_file(): raise ValueError("run-bound event record and evidence required")
         data=yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(data,Mapping) or set(data)!={"run_id","event","observed_at_seconds","evidence_hash"} or data["run_id"]!=run_id: raise ValueError("telemetry run identity mismatch")
         if data["event"] not in {"result_screen","death_transition"} or type(data["observed_at_seconds"]) not in (int,float): raise ValueError("invalid post-30 telemetry")
-        evidence={k:data[k] for k in ("run_id","event","observed_at_seconds")}
-        actual=canonical_hash(evidence)
-        if data["evidence_hash"]!=actual: raise ValueError("post-30 event evidence hash mismatch")
+        try:evidence=yaml.safe_load(evidence_path.read_text(encoding="utf-8"))
+        except (OSError,UnicodeDecodeError,yaml.YAMLError) as exc: raise ValueError("post-30 evidence is not parseable") from exc
+        expected={k:data[k] for k in ("run_id","event","observed_at_seconds")}
+        if evidence!=expected: raise ValueError("post-30 evidence content mismatch")
+        actual=canonical_hash({"bytes_hex":evidence_path.read_bytes().hex()})
+        if data["evidence_hash"]!=actual: raise ValueError("post-30 evidence bytes mismatch")
         return cls(run_id,data["event"],float(data["observed_at_seconds"]),actual)
 
 @dataclass(frozen=True)

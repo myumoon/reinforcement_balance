@@ -2,10 +2,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any,Mapping
-import os, re, shutil, tempfile
+import os, re, shutil, tempfile, yaml
 from datetime import datetime, timezone
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
-from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict, SaveVerdict, _verify_audit_evidence, _verify_save_lifecycle
+from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict, SaveVerdict, _verify_audit_evidence, _mint_executed_save_verdict, _SAVE_EXECUTION_SEAL
 from .target_profile import TargetProfile
 
 class AuditError(ValueError):pass
@@ -47,6 +47,14 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     if not required_attested<=set(evidence.manual_attestation["fields"]): raise AuditError("build/hardware attestation coverage incomplete")
     if expected["build"]["manual_attestation"]!=evidence.manual_attestation or actual["build"]["manual_attestation"]!=evidence.manual_attestation: raise AuditError("attestation is not bound to profile")
     if not evidence.manual_evidence_path.is_file() or canonical_hash({"bytes_hex":evidence.manual_evidence_path.read_bytes().hex()})!=evidence.manual_attestation["evidence_hash"]: raise AuditError("manual attestation evidence bytes mismatch")
+    try: manual_content=yaml.safe_load(evidence.manual_evidence_path.read_text(encoding="utf-8"))
+    except (OSError,UnicodeDecodeError,yaml.YAMLError) as exc: raise AuditError("manual evidence is not parseable") from exc
+    claimed={
+        "build_id":actual["build"]["build_id"], "executable_version":actual["build"]["executable_version"],
+        **{key:actual["hardware"][key] for key in ("os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version")},
+    }
+    if not isinstance(manual_content,Mapping) or set(manual_content)!={"schema_version","measurements"} or manual_content.get("schema_version")!="survivors_manual_attestation.v1" or manual_content.get("measurements")!=claimed:
+        raise AuditError("manual evidence content does not match attested build/hardware")
     executable=_file_evidence(evidence.executable_path); save=_file_evidence(evidence.save_path)
     if executable["content_hash"]!=actual["build"]["executable_hash"] or save["content_hash"]!=actual["progression"]["save_artifact_hash"]: raise AuditError("observed file identity mismatch")
     differences=[]
@@ -88,7 +96,9 @@ class SaveLifecycle:
         self._record(attempt_id,"PREFLIGHT",None,failed or "PASS")
         return PreflightResult(attempt_id,failed is None,failed)
     def _record(self,attempt_id,stage,content_hash,verdict):
-        record={"attempt_id":attempt_id,"timestamp":datetime.now(timezone.utc).isoformat(),"stage":stage,"hash":content_hash,"verdict":verdict}
+        previous=self.records[-1]["step_hash"] if self.records else None
+        body={"attempt_id":attempt_id,"timestamp":datetime.now(timezone.utc).isoformat(),"stage":stage,"content_hash":content_hash,"result":verdict,"previous_step_hash":previous}
+        record={**body,"step_hash":canonical_hash(body)}
         self.records.append(record)
         if self.record_path is not None:
             self.record_path.parent.mkdir(parents=True,exist_ok=True)
@@ -97,7 +107,10 @@ class SaveLifecycle:
     @property
     def lifecycle_hash(self): return canonical_hash(self.records)
     def verified_verdict(self,attempt_id:str,target_identity_hash:str)->SaveVerdict:
-        try:return _verify_save_lifecycle(record_path=self.record_path,attempt_id=attempt_id,target_identity_hash=target_identity_hash,expected_pre_run_hash=self.canonical_save_hash)
+        if self.record_path is None or not self.record_path.is_file(): raise AuditError("durable lifecycle evidence required")
+        expected=b"".join(canonical_json_bytes(r)+b"\n" for r in self.records)
+        if self.record_path.read_bytes()!=expected: raise AuditError("durable lifecycle chain mismatch")
+        try:return _mint_executed_save_verdict(records=tuple(self.records),attempt_id=attempt_id,target_identity_hash=target_identity_hash,expected_pre_run_hash=self.canonical_save_hash,execution_seal=_SAVE_EXECUTION_SEAL)
         except (TypeError,ValueError) as exc: raise AuditError(str(exc)) from exc
     def record_post_run(self,target:Path,attempt_id="run"):
         post=_file_hash(target); self._record(attempt_id,"POST_RUN",post,"PASS")
