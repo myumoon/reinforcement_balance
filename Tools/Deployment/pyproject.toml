@@ -14,6 +14,7 @@ requires-python = ">=3.11"
 dependencies = [
     "reinbalance-survivors-contracts==0.1.0",
     "numpy==1.26.4",
+    "PyYAML==6.0.2",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +22,6 @@ test = [
     "pytest==9.0.3",
 ]
 
-[tool.setuptools]
-# まだ import 可能な src は無い。ここは deployment のテストルート／scaffold。
-py-modules = []
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["survivors*"]

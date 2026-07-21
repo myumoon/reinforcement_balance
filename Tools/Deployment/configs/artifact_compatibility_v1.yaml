@@ -1,0 +1,20 @@
+schema_version: artifact_compatibility.v1
+required_parent: target_audit_hash
+classes:
+  ui_only:
+    changed_fields: [ui_revision, ui_scale, windows_dpi_scale]
+    invalidate: [parser, replay]
+    full_retrain: false
+  content_unlock:
+    changed_fields: [content_revision, save_artifact_hash, unlocked_characters, unlocked_items, collection_pool, purchased_power_ups, candidate_vocabulary_hash]
+    invalidate: [taxonomy, selector, fidelity]
+    full_retrain: false
+  physics_input:
+    changed_fields: [build_id, action_semantics_version, key_bindings, physics_hz, frame_skip, decision_hz]
+    invalidate: [fidelity, policy, canary]
+    full_retrain: true
+artifacts:
+  capture: {compatible_fields: [content_revision], retest_scope: [parser, replay]}
+  model: {compatible_fields: [ui_revision], retest_scope: [policy, canary]}
+  runtime: {compatible_fields: [], retest_scope: [fidelity, canary]}
+  campaign: {compatible_fields: [], retest_scope: [full_preflight]}

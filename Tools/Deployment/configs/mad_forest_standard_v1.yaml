@@ -1,0 +1,57 @@
+schema_version: survivors_target.v1
+base:
+  platform: windows_win64
+  window_mode: borderless
+  client_resolution: [1920, 1080]
+  ui_language: ja-JP
+  stage: mad_forest
+  character: antonio
+  modifiers: {hyper: false, hurry: false, inverse: false, arcana: false, limit_break: false, golden_eggs: false, dlc: false}
+  success_timer_seconds: 1800
+  post_timer_event_required: true
+build:
+  build_id: MANUAL_ATTESTATION_REQUIRED
+  executable_version: MANUAL_ATTESTATION_REQUIRED
+  executable_hash: MANUAL_ATTESTATION_REQUIRED
+  distribution: steam
+  app_id: '1794680'
+  content_revision: target-v1
+  ui_revision: ja-target-v1
+  manual_attestation: {operator: MANUAL_ATTESTATION_REQUIRED, date: MANUAL_ATTESTATION_REQUIRED, evidence_hash: MANUAL_ATTESTATION_REQUIRED}
+progression:
+  save_artifact_hash: MANUAL_CANONICAL_ARTIFACT_REQUIRED
+  save_format_version: MANUAL_ATTESTATION_REQUIRED
+  unlocked_characters: [antonio]
+  unlocked_items: [whip]
+  unlocked_stages: [mad_forest]
+  collection_pool: [whip]
+  purchased_power_ups: []
+  reroll_count: 0
+  skip_count: 0
+  banish_count: 0
+display: {ui_scale: 1.0, windows_dpi_scale: 1.0, monitor_output: primary}
+hardware:
+  profile_id: MANUAL_REFERENCE_PROFILE_REQUIRED
+  os_build: MANUAL_ATTESTATION_REQUIRED
+  gpu_name: MANUAL_ATTESTATION_REQUIRED
+  vram_mb: MANUAL_ATTESTATION_REQUIRED
+  driver_version: MANUAL_ATTESTATION_REQUIRED
+  cuda_version: MANUAL_ATTESTATION_REQUIRED
+  pytorch_version: MANUAL_ATTESTATION_REQUIRED
+  capture_backend: dxcam
+  cpu_live_fallback: false
+input:
+  key_bindings: {up: W, down: S, left: A, right: D}
+  action_semantics_version: survivors_action.v1
+  frame_skip: 4
+  physics_hz: 60
+  decision_hz: 15
+  key_hold_ms: 60
+  lease_ms: 200
+choice_taxonomy:
+  level_up_card_counts: [3, 4]
+  fallbacks: [gold, chicken]
+  capabilities: [reroll, skip, banish]
+  states: [gameplay, level_up, fallback, chest, result, post_30_transition]
+  candidate_vocabulary: [whip, gold, chicken]
+  candidate_vocabulary_hash: 0c50de9d06af9782ff49353cd43de91ddbaa53380ec75ff5d79dd9b262e7cc9f

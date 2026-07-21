@@ -55,6 +55,8 @@ class TargetProfileRef:
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> "TargetProfileRef":
+        if set(data) != {"schema_version", "build_id", "canonical_save_hash", "hardware_profile_id"}:
+            raise ValueError("unknown or missing TargetProfileRef fields")
         if data.get("schema_version") != TARGET_PROFILE_SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported TargetProfileRef schema_version "
@@ -105,6 +107,8 @@ class ActionSemantics:
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> "ActionSemantics":
+        if set(data) != {"schema_version", "actions"}:
+            raise ValueError("unknown or missing ActionSemantics fields")
         if data.get("schema_version") != ACTION_SEMANTICS_SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported ActionSemantics schema_version "

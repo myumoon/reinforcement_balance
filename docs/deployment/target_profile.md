@@ -1,0 +1,9 @@
+# Survivors deployment target v1
+
+正式 target は `mad_forest_standard_v1.yaml` に固定する。Windows Win64、1920×1080 borderless、日本語 UI、Mad Forest、Antonio、standard 30 分で、Hyper/Hurry/Inverse/Arcana/Limit Break/Golden Eggs/DLC は無効である。build、canonical save、progression、power-up、key binding、choice taxonomy、reference hardware の全フィールドが一致した audit report とその canonical hash がなければ capture/model/runtime/campaign manifest を開始できない。
+
+各 formal attempt は game/launcher 停止および cloud sync 明示無効を確認し、original backup を保持する。canonical save は temp copy、canonical hash 検証、atomic replace の順に復元し semantic attestation を再検証する。post-run hash は証跡としてのみ記録し次 run の親にはしない。終了後は operator 承認のもと original backup を同じ方法で復元する。save 内 RNG coupling は否定できないため `rng_control=uncontrolled` とし、統計的独立性は主張しない。
+
+preflight attempt は run identity ではない。成功時だけ process 生成前に durable `LAUNCH_INTENT` を commit し、observer または reconciliation で process identity が確認された時点で `FORMAL_RUN_ACTIVATED` になる。`CREATE_PROCESS_FAILED` は `LAUNCH_GATE_FAILED` で outcome 分母外、曖昧な launch は campaign を block する。正式 store の support envelope は local fixed NTFS、SQLite WAL、`synchronous=FULL`、integrity/flush 成功、Win32 broker/process attestation である。
+
+成功判定は timer 1800 到達だけでは確定せず `TARGET_REACHED_PENDING_TRANSITION` に入り、post-30 event を画面上で確認して確定する。off-screen entity、hidden HP/cooldown、global state count/density は release-observable ではない。
