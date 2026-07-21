@@ -4,23 +4,36 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
-if __package__:
-    from .artifact_bundle import (
-        assert_distinct_store_roots,
-        export_bundle,
-        import_bundle,
-    )
-    from .artifact_store import ArtifactStore
+_COMMON_INSTALL_MESSAGE = (
+    "reinbalance_survivors_contracts is required. "
+    "Install the shared contracts package first: pip install -e Tools/Common"
+)
+
+try:
+    if __package__:
+        from .artifact_bundle import (
+            assert_distinct_store_roots,
+            export_bundle,
+            import_bundle,
+        )
+        from .artifact_store import ArtifactStore
+    else:
+        from artifact_bundle import (
+            assert_distinct_store_roots,
+            export_bundle,
+            import_bundle,
+        )
+        from artifact_store import ArtifactStore
+except ModuleNotFoundError as exc:
+    if exc.name != "reinbalance_survivors_contracts":
+        raise
+    _COMMON_IMPORT_ERROR: ModuleNotFoundError | None = exc
 else:
-    from artifact_bundle import (
-        assert_distinct_store_roots,
-        export_bundle,
-        import_bundle,
-    )
-    from artifact_store import ArtifactStore
+    _COMMON_IMPORT_ERROR = None
 
 
 def _print_json(value: Any) -> None:
@@ -68,6 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if _COMMON_IMPORT_ERROR is not None:
+        print(_COMMON_INSTALL_MESSAGE, file=sys.stderr)
+        return 1
+
     args = build_parser().parse_args(argv)
     store = ArtifactStore(args.store_root)
 

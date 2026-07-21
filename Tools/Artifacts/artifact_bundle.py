@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from reinbalance_survivors_contracts import canonical_hash, canonical_json_bytes
+from reinbalance_survivors_contracts import canonical_hash, canonical_json_bytes, sha256_hex
 from reinbalance_survivors_contracts.artifact_identity import (
     ArtifactDescriptor,
     ArtifactRef,
@@ -48,6 +48,12 @@ class BundleImportResult:
     manifest: dict[str, Any]
     manifest_hash: str
     verification_report: BundleVerifyReport
+
+
+@dataclass(frozen=True)
+class _PendingImportObject:
+    ref: ArtifactRef
+    data: bytes
 
 
 def resolve_volume_identity(path: str | Path) -> VolumeIdentity:
@@ -217,17 +223,14 @@ def import_bundle(
     with zipfile.ZipFile(path) as zf:
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
         manifest_hash = _verify_manifest_hash(manifest)
-        for entry in manifest.get("objects", []):
-            if entry.get("export_included") is False:
-                continue
-            data = zf.read(f"objects/sha256/{entry['sha256']}")
-            ref = target_store.put_bytes(
-                logical_id=entry["logical_id"],
-                data=data,
-                media_type=entry["media_type"],
-            )
-            if ref.sha256 != entry["sha256"] or ref.size_bytes != entry["size_bytes"]:
-                raise ArtifactStoreError(f"imported object mismatch: {entry['store_uri']}")
+        pending_objects = _read_verified_bundle_objects(zf, manifest)
+    _preflight_target_store_import(target_store, pending_objects)
+    for pending in pending_objects:
+        target_store.put_bytes(
+            logical_id=pending.ref.logical_id,
+            data=pending.data,
+            media_type=pending.ref.media_type,
+        )
     report = verify_bundle_objects(
         target_store,
         manifest,
@@ -240,6 +243,61 @@ def import_bundle(
         manifest_hash=manifest_hash,
         verification_report=report,
     )
+
+
+def _read_verified_bundle_objects(
+    zf: zipfile.ZipFile,
+    manifest: Mapping[str, Any],
+) -> list[_PendingImportObject]:
+    pending: list[_PendingImportObject] = []
+    logical_to_sha: dict[str, str] = {}
+    for entry in manifest.get("objects", []):
+        if entry.get("export_included") is False:
+            continue
+        ref = ArtifactRef(
+            logical_id=entry["logical_id"],
+            sha256=entry["sha256"],
+            size_bytes=entry["size_bytes"],
+            media_type=entry["media_type"],
+            store_uri=entry["store_uri"],
+        )
+        existing_sha = logical_to_sha.get(ref.logical_id)
+        if existing_sha is not None and existing_sha != ref.sha256:
+            raise ArtifactStoreError(
+                f"bundle logical id {ref.logical_id!r} points to multiple hashes"
+            )
+        logical_to_sha[ref.logical_id] = ref.sha256
+        object_name = f"objects/sha256/{ref.sha256}"
+        try:
+            data = zf.read(object_name)
+        except KeyError as exc:
+            raise ArtifactStoreError(f"bundle object is missing: {object_name}") from exc
+        actual_sha = sha256_hex(data)
+        if actual_sha != ref.sha256:
+            raise ArtifactStoreError(
+                f"bundle object sha256 mismatch: {ref.store_uri}"
+            )
+        if len(data) != ref.size_bytes:
+            raise ArtifactStoreError(
+                f"bundle object size mismatch: {ref.store_uri}"
+            )
+        pending.append(_PendingImportObject(ref=ref, data=data))
+    return pending
+
+
+def _preflight_target_store_import(
+    target_store: ArtifactStore,
+    pending_objects: Sequence[_PendingImportObject],
+) -> None:
+    for pending in pending_objects:
+        target_store._ensure_logical_id_available(pending.ref)
+        verification = target_store.verify(pending.ref)
+        if verification.reason == "missing":
+            continue
+        if not verification.ok:
+            raise ArtifactStoreError(
+                f"existing target object {pending.ref.store_uri} is corrupt: {verification.reason}"
+            )
 
 
 def _entries_to_check(

@@ -30,6 +30,9 @@ dataset manifest は in-place 更新せず、変更が必要な場合は新し�
 
 - Object URI は `artifact://sha256/<64-hex>`。
 - primary store は CLI の `--store-root` で必ず明示する。workspace 内 fallback は持たない。
+- `Tools/Artifacts/manage_artifacts.py` は共有契約パッケージ
+  `reinbalance_survivors_contracts` を正当な依存として使う。CLI 実行前に
+  `pip install -e Tools/Common` で editable install しておく。
 - object は `objects/sha256/<prefix>/<hash>` に atomic temp write から rename する。
 - `logical_id` は絶対 path、drive separator、`..` を含めない。
 - 同一 `logical_id` と同一 hash の put は idempotent。異なる bytes への上書きは拒否する。

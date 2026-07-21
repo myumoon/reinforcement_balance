@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from reinbalance_survivors_contracts import canonical_json_bytes
 from reinbalance_survivors_contracts.artifact_identity import (
     ArtifactDescriptor,
     RestoreTestVerdict,
@@ -16,6 +17,16 @@ from Tools.Artifacts.artifact_bundle import (
     verify_bundle_objects,
 )
 from Tools.Artifacts.artifact_store import ArtifactStore
+from Tools.Artifacts.artifact_store import ArtifactStoreError
+
+
+def _store_snapshot(store: ArtifactStore):
+    object_hashes = tuple(record.sha256 for record in store.list_objects())
+    logical_index = {
+        path.name: path.read_bytes()
+        for path in sorted(store.logical_root.glob("*.json"))
+    }
+    return object_hashes, logical_index
 
 
 def _descriptor(ref):
@@ -61,6 +72,40 @@ def test_deterministic_export_import_and_full_verify(tmp_path):
     report = verify_bundle_objects(backup, imported.manifest, verify_mode="full")
     assert imported.manifest_hash == manifest["manifest_hash"]
     assert report.ok
+
+
+def test_import_corrupt_bundle_does_not_mutate_target_store(tmp_path):
+    primary = ArtifactStore(tmp_path / "primary")
+    target = ArtifactStore(tmp_path / "target")
+    existing = target.put_bytes(
+        logical_id="models/existing.onnx",
+        data=b"existing-model",
+        media_type="application/onnx",
+    )
+    ref = primary.put_bytes(
+        logical_id="bundles/runtime.zip",
+        data=b"runtime-bundle",
+        media_type="application/zip",
+    )
+    manifest = create_bundle_manifest(
+        descriptors=[_descriptor(ref)],
+        export_id="corrupt-runtime-bundle",
+        license_by_logical_id={ref.logical_id: "project-private"},
+        privacy_by_logical_id={ref.logical_id: "internal"},
+        retention_until_utc="2027-07-21T00:00:00Z",
+        include_private=True,
+    )
+    zip_path = tmp_path / "corrupt.zip"
+    with zipfile.ZipFile(zip_path, "w", allowZip64=True) as zf:
+        zf.writestr("manifest.json", canonical_json_bytes(manifest))
+        zf.writestr(f"objects/sha256/{ref.sha256}", b"corrupt-runtime-bundle")
+    before = _store_snapshot(target)
+
+    with pytest.raises(ArtifactStoreError, match="sha256 mismatch"):
+        import_bundle(zip_path, target, verify_mode="full")
+
+    assert _store_snapshot(target) == before
+    assert target.verify(existing).ok
 
 
 def test_public_export_excludes_private_video_objects_by_default(tmp_path):
