@@ -320,8 +320,6 @@ class ArtifactStore:
         retention_due: list[str] = []
 
         for entry in iter_manifest_object_entries(manifest):
-            if entry.get("export_included") is False:
-                continue
             ref = ArtifactRef(
                 logical_id=entry["logical_id"],
                 sha256=entry["sha256"],

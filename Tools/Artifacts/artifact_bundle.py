@@ -15,7 +15,11 @@ from reinbalance_survivors_contracts.artifact_identity import (
     ArtifactDescriptor,
     ArtifactRef,
 )
-from Tools.Artifacts.artifact_store import ArtifactStore, ArtifactStoreError
+
+if __package__:
+    from .artifact_store import ArtifactStore, ArtifactStoreError
+else:
+    from artifact_store import ArtifactStore, ArtifactStoreError
 
 BUNDLE_MANIFEST_SCHEMA_VERSION = "artifact_bundle_manifest.v1"
 _PRIVATE_CLASSES = frozenset({"private", "restricted", "secret"})

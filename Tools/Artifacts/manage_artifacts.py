@@ -7,12 +7,20 @@ import json
 from pathlib import Path
 from typing import Any
 
-from Tools.Artifacts.artifact_bundle import (
-    assert_distinct_store_roots,
-    export_bundle,
-    import_bundle,
-)
-from Tools.Artifacts.artifact_store import ArtifactStore
+if __package__:
+    from .artifact_bundle import (
+        assert_distinct_store_roots,
+        export_bundle,
+        import_bundle,
+    )
+    from .artifact_store import ArtifactStore
+else:
+    from artifact_bundle import (
+        assert_distinct_store_roots,
+        export_bundle,
+        import_bundle,
+    )
+    from artifact_store import ArtifactStore
 
 
 def _print_json(value: Any) -> None:

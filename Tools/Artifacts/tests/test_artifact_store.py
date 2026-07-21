@@ -89,3 +89,46 @@ def test_manifest_audit_reports_missing_corrupt_and_retention_due(tmp_path):
     assert ref.store_uri in report.corrupt_objects
     assert artifact_uri(missing_hash) in report.missing_objects
     assert ref.store_uri in report.retention_due_objects
+
+
+def test_manifest_audit_includes_private_objects_excluded_from_public_export(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    private_ref = store.put_bytes(
+        logical_id="evidence/private-frame.png",
+        data=b"private-frame-data",
+        media_type="image/png",
+    )
+    missing_hash = "8" * 64
+    manifest = {
+        "schema_version": "artifact_bundle_manifest.v1",
+        "objects": [
+            {
+                "logical_id": private_ref.logical_id,
+                "sha256": private_ref.sha256,
+                "size_bytes": private_ref.size_bytes,
+                "media_type": private_ref.media_type,
+                "store_uri": private_ref.store_uri,
+                "privacy_classification": "private",
+                "retention_until_utc": "2026-01-01T00:00:00Z",
+                "export_included": False,
+            },
+            {
+                "logical_id": "evidence/missing-private-video.mp4",
+                "sha256": missing_hash,
+                "size_bytes": 10,
+                "media_type": "video/mp4",
+                "store_uri": artifact_uri(missing_hash),
+                "privacy_classification": "private",
+                "retention_until_utc": "2026-01-01T00:00:00Z",
+                "export_included": False,
+            },
+        ],
+    }
+
+    store.object_path(private_ref.store_uri).write_bytes(b"corrupt-private-frame")
+    report = store.audit_manifest(manifest, now_utc="2026-07-21T00:00:00Z")
+
+    assert private_ref.store_uri in report.corrupt_objects
+    assert artifact_uri(missing_hash) in report.missing_objects
+    assert private_ref.store_uri in report.retention_due_objects
+    assert artifact_uri(missing_hash) in report.retention_due_objects
