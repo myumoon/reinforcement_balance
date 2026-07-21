@@ -7,6 +7,7 @@ import os
 import random
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -14,6 +15,7 @@ from reinbalance_survivors_contracts import (
     canonical_hash,
     canonical_json_bytes,
     sha256_hex,
+    validate_artifact_dag,
 )
 from reinbalance_survivors_contracts.artifact_identity import (
     ArtifactDescriptor,
@@ -41,7 +43,32 @@ else:
 
 BUNDLE_MANIFEST_SCHEMA_VERSION = "artifact_bundle_manifest.v1"
 _PRIVATE_CLASSES = frozenset({"private", "restricted", "secret"})
+_PRIVACY_CLASSES = frozenset({"public", "internal", *_PRIVATE_CLASSES})
 _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+_BUNDLE_MANIFEST_KEYS = frozenset(
+    {
+        "schema_version",
+        "export_id",
+        "include_private",
+        "descriptors",
+        "objects",
+        "manifest_hash",
+    }
+)
+_BUNDLE_OBJECT_KEYS = frozenset(
+    {
+        "schema_version",
+        "logical_id",
+        "sha256",
+        "size_bytes",
+        "media_type",
+        "store_uri",
+        "license",
+        "privacy_classification",
+        "retention_until_utc",
+        "export_included",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -118,6 +145,91 @@ def _sanitize_descriptor_wire(descriptor: ArtifactDescriptor) -> dict[str, Any]:
     return wire
 
 
+def _parse_retention_timestamp(value: str, *, label: str) -> None:
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ArtifactStoreError(f"{label} must be an ISO-8601 timestamp") from exc
+
+
+def _validate_bundle_manifest_shape(manifest: Mapping[str, Any]) -> None:
+    if not isinstance(manifest, Mapping):
+        raise ArtifactStoreError("bundle manifest must be an object")
+    keys = set(manifest)
+    unknown = keys - _BUNDLE_MANIFEST_KEYS
+    if unknown:
+        raise ArtifactStoreError(f"unknown bundle manifest fields: {sorted(unknown)}")
+    missing = _BUNDLE_MANIFEST_KEYS - keys
+    if missing:
+        raise ArtifactStoreError(f"missing bundle manifest fields: {sorted(missing)}")
+    if manifest["schema_version"] != BUNDLE_MANIFEST_SCHEMA_VERSION:
+        raise ArtifactStoreError("unsupported bundle manifest schema_version")
+    if not isinstance(manifest["export_id"], str) or not manifest["export_id"]:
+        raise ArtifactStoreError("bundle manifest export_id must be a non-empty string")
+    if not isinstance(manifest["include_private"], bool):
+        raise ArtifactStoreError("bundle manifest include_private must be bool")
+
+
+def _validate_bundle_object_entry(
+    entry: Mapping[str, Any],
+    *,
+    include_private: bool,
+    index: int,
+) -> None:
+    keys = set(entry)
+    unknown = keys - _BUNDLE_OBJECT_KEYS
+    if unknown:
+        raise ArtifactStoreError(
+            f"unknown bundle object fields at objects[{index}]: {sorted(unknown)}"
+        )
+    missing = _BUNDLE_OBJECT_KEYS - keys
+    if missing:
+        raise ArtifactStoreError(
+            f"missing bundle object fields at objects[{index}]: {sorted(missing)}"
+        )
+    if not isinstance(entry["license"], str) or not entry["license"]:
+        raise ArtifactStoreError(
+            f"bundle objects[{index}] license must be a non-empty string"
+        )
+    privacy = entry["privacy_classification"]
+    if not isinstance(privacy, str) or privacy not in _PRIVACY_CLASSES:
+        raise ArtifactStoreError(
+            f"bundle objects[{index}] privacy_classification is unsupported"
+        )
+    retention = entry["retention_until_utc"]
+    if not isinstance(retention, str) or not retention:
+        raise ArtifactStoreError(
+            f"bundle objects[{index}] retention_until_utc must be a non-empty string"
+        )
+    _parse_retention_timestamp(
+        retention,
+        label=f"bundle objects[{index}] retention_until_utc",
+    )
+    export_included = entry["export_included"]
+    if not isinstance(export_included, bool):
+        raise ArtifactStoreError(f"bundle objects[{index}] export_included must be bool")
+    expected_export_included = include_private or privacy not in _PRIVATE_CLASSES
+    if export_included == expected_export_included:
+        return
+    if not include_private and privacy in _PRIVATE_CLASSES:
+        raise ArtifactStoreError(
+            f"public bundle manifest includes private object {entry['logical_id']!r}"
+        )
+    raise ArtifactStoreError(
+        f"bundle objects[{index}] export_included does not match privacy_classification"
+    )
+
+
+def _validate_bundle_manifest(manifest: Mapping[str, Any]) -> None:
+    _validate_bundle_manifest_shape(manifest)
+    verify_manifest_hash(manifest)
+    validate_manifest_descriptor_object_refs(manifest)
+    validate_artifact_dag(manifest["descriptors"])
+    include_private = manifest["include_private"]
+    for index, entry in enumerate(iter_manifest_object_entries(manifest)):
+        _validate_bundle_object_entry(entry, include_private=include_private, index=index)
+
+
 def create_bundle_manifest(
     *,
     descriptors: Sequence[ArtifactDescriptor | Mapping[str, Any]],
@@ -130,6 +242,7 @@ def create_bundle_manifest(
     license_by_logical_id = dict(license_by_logical_id or {})
     privacy_by_logical_id = dict(privacy_by_logical_id or {})
     coerced = tuple(_coerce_descriptor(value) for value in descriptors)
+    validate_artifact_dag(coerced)
 
     object_entries: list[dict[str, Any]] = []
     logical_to_sha: dict[str, str] = {}
@@ -173,6 +286,7 @@ def create_bundle_manifest(
     }
     manifest = dict(core)
     manifest["manifest_hash"] = canonical_hash(core)
+    _validate_bundle_manifest(manifest)
     return manifest
 
 
@@ -184,8 +298,7 @@ def _zip_info(name: str) -> zipfile.ZipInfo:
 
 
 def export_bundle(store: ArtifactStore, manifest: Mapping[str, Any], zip_path: str | Path) -> Path:
-    verify_manifest_hash(manifest)
-    validate_manifest_descriptor_object_refs(manifest)
+    _validate_bundle_manifest(manifest)
     path = Path(zip_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     seen_objects: set[str] = set()
@@ -221,8 +334,8 @@ def import_bundle(
     path = Path(zip_path).expanduser().resolve()
     with zipfile.ZipFile(path) as zf:
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-        manifest_hash = verify_manifest_hash(manifest)
-        validate_manifest_descriptor_object_refs(manifest)
+        _validate_bundle_manifest(manifest)
+        manifest_hash = manifest["manifest_hash"]
         pending_objects = _read_verified_bundle_objects(zf, manifest)
     _preflight_target_store_import(target_store, pending_objects)
     for pending in pending_objects:
@@ -325,8 +438,7 @@ def verify_bundle_objects(
     sample_size: int | None = None,
     random_seed: int = 0,
 ) -> BundleVerifyReport:
-    verify_manifest_hash(manifest)
-    validate_manifest_descriptor_object_refs(manifest)
+    _validate_bundle_manifest(manifest)
     missing: list[str] = []
     corrupt: list[str] = []
     entries = _entries_to_check(

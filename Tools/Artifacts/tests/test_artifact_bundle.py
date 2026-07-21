@@ -9,6 +9,7 @@ from reinbalance_survivors_contracts.artifact_identity import (
     ArtifactDescriptor,
     RestoreTestVerdict,
 )
+from reinbalance_survivors_contracts.artifact_dag import ArtifactDagValidationError
 from Tools.Artifacts.artifact_bundle import (
     VolumeIdentity,
     assert_distinct_store_roots,
@@ -33,7 +34,7 @@ def _store_snapshot(store: ArtifactStore):
 def _descriptor(ref):
     return ArtifactDescriptor(
         logical_id="runtime-bundle",
-        node_kind="runtime_bundle",
+        node_kind="source_descriptor",
         producer_id="bundle-builder",
         producer_version="v1",
         identity_metadata={"bundle_config_hash": "1" * 64},
@@ -43,6 +44,30 @@ def _descriptor(ref):
             "created_at_utc": "2026-07-21T00:00:00Z",
             "local_path": "/private/absolute/path/runtime.zip",
         },
+    )
+
+
+def _source_descriptor(ref):
+    return ArtifactDescriptor(
+        logical_id="source/model",
+        node_kind="source_descriptor",
+        producer_id="source-builder",
+        producer_version="v1",
+        identity_metadata={"config_hash": "0" * 64},
+        parents=(),
+        files=(ref,),
+    )
+
+
+def _verdict_descriptor(source):
+    return ArtifactDescriptor(
+        logical_id="source/model.validation",
+        node_kind="teacher_validation_verdict",
+        producer_id="validator",
+        producer_version="v1",
+        identity_metadata={"gate_version": "v1", "passed": True},
+        parents=(source.node_ref(),),
+        files=(),
     )
 
 
@@ -260,6 +285,94 @@ def test_public_export_excludes_private_video_objects_by_default(tmp_path):
         assert f"objects/sha256/{video.sha256}" not in zf.namelist()
         exported_manifest = zf.read("manifest.json")
     assert b"/private/absolute/path" not in exported_manifest
+
+
+def test_public_export_rejects_private_object_even_if_export_included_is_tampered(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    video = store.put_bytes(
+        logical_id="evidence/c0-run.mp4",
+        data=b"video-bytes",
+        media_type="video/mp4",
+    )
+    manifest = create_bundle_manifest(
+        descriptors=[_descriptor(video)],
+        export_id="tampered-public-evidence",
+        license_by_logical_id={video.logical_id: "not-redistributable"},
+        privacy_by_logical_id={video.logical_id: "private"},
+        retention_until_utc="2027-07-21T00:00:00Z",
+    )
+    manifest["objects"][0]["export_included"] = True
+    manifest = _with_recomputed_manifest_hash(manifest)
+
+    with pytest.raises(ArtifactStoreError, match="private object"):
+        export_bundle(store, manifest, tmp_path / "tampered-public.zip")
+
+
+def test_create_bundle_manifest_rejects_lineage_violation_for_non_root_descriptor(tmp_path):
+    store = ArtifactStore(tmp_path / "store")
+    ref = store.put_bytes(
+        logical_id="datasets/choice.jsonl",
+        data=b"dataset",
+        media_type="application/jsonl",
+    )
+    dataset_without_parent = ArtifactDescriptor(
+        logical_id="datasets/choice",
+        node_kind="choice_dataset_release",
+        producer_id="dataset-builder",
+        producer_version="v1",
+        identity_metadata={"dataset_config_hash": "3" * 64},
+        parents=(),
+        files=(ref,),
+    )
+
+    with pytest.raises(ArtifactDagValidationError, match="must declare at least one parent"):
+        create_bundle_manifest(
+            descriptors=[dataset_without_parent],
+            export_id="bad-lineage",
+            retention_until_utc="2027-07-21T00:00:00Z",
+            include_private=True,
+        )
+
+
+def test_export_and_import_reject_tampered_manifest_with_lineage_violation(tmp_path):
+    primary = ArtifactStore(tmp_path / "primary")
+    target = ArtifactStore(tmp_path / "target")
+    ref = primary.put_bytes(
+        logical_id="models/source.onnx",
+        data=b"source-model",
+        media_type="application/onnx",
+    )
+    source = _source_descriptor(ref)
+    verdict = _verdict_descriptor(source)
+    manifest = create_bundle_manifest(
+        descriptors=[source, verdict],
+        export_id="tampered-lineage",
+        privacy_by_logical_id={ref.logical_id: "internal"},
+        retention_until_utc="2027-07-21T00:00:00Z",
+        include_private=True,
+    )
+    tampered_verdict = ArtifactDescriptor(
+        logical_id=verdict.logical_id,
+        node_kind=verdict.node_kind,
+        producer_id=verdict.producer_id,
+        producer_version=verdict.producer_version,
+        identity_metadata=verdict.identity_metadata,
+        parents=(),
+        files=verdict.files,
+    )
+    for index, entry in enumerate(manifest["descriptors"]):
+        if entry["identity"]["logical_id"] == verdict.logical_id:
+            manifest["descriptors"][index] = tampered_verdict.to_wire()
+            break
+    manifest = _with_recomputed_manifest_hash(manifest)
+
+    with pytest.raises(ArtifactDagValidationError, match="must declare at least one parent"):
+        export_bundle(primary, manifest, tmp_path / "tampered-lineage-export.zip")
+
+    zip_path = tmp_path / "tampered-lineage-import.zip"
+    _write_bundle(zip_path, manifest, ((ref, b"source-model"),))
+    with pytest.raises(ArtifactDagValidationError, match="must declare at least one parent"):
+        import_bundle(zip_path, target, verify_mode="full")
 
 
 def test_sample_verify_and_distinct_backup_volume_check(tmp_path):
