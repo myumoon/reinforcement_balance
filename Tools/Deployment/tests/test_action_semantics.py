@@ -1,6 +1,6 @@
 import pytest
 
-from survivors.action_semantics import ActionContract, load_action_contract
+from survivors.action_semantics import ActionContract, load_action_contract, validate_golden_fixture
 
 
 def test_canonical_nine_actions_and_cadence():
@@ -19,6 +19,14 @@ def test_cadence_and_golden_parity_are_blocking():
     data["decision_hz"] = 30
     with pytest.raises(ValueError):
         ActionContract.from_wire(data)
+    data = load_action_contract().to_wire(); data["source_descriptor"]["physics_dt"]="1/30"
+    with pytest.raises(ValueError): ActionContract.from_wire(data)
+
+def test_measured_fixture_east_west_drift_is_blocking(tmp_path):
+    import json
+    contract=load_action_contract(); fixture={"schema_version":"survivors_action_telemetry.v1","measurement":"dry run","samples":[]}
+    path=tmp_path/"fixture.json"; path.write_text(json.dumps(fixture))
+    with pytest.raises(ValueError):validate_golden_fixture(contract,path)
     data = load_action_contract().to_wire()
     data["rows"][2]["screen_direction"] = "left"
     with pytest.raises(ValueError):

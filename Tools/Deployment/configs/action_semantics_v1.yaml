@@ -3,6 +3,11 @@ physics_hz: 60
 frame_skip: 4
 decision_hz: 15
 golden_fixture: simulator_displacement_and_key_dry_run.v1
+source_descriptor:
+  path: ReinBalance/Source/ReinBalanceLogic/Private/Survivors/SurvivorsGameLogic.cpp
+  function: FSurvivorsGameLogic::ApplyAction
+  physics_dt: 1/60
+  telemetry: golden/action_displacement_wasd_v1.json
 rows:
   - {index: 0, name: N, sim_vector: [0, 1], screen_direction: up, wasd_chord: [W]}
   - {index: 1, name: NE, sim_vector: [1, 1], screen_direction: up_right, wasd_chord: [W, D]}
