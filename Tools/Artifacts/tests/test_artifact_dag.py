@@ -1,0 +1,160 @@
+import pytest
+
+from reinbalance_survivors_contracts.artifact_dag import (
+    ArtifactDagValidationError,
+    validate_artifact_dag,
+)
+from reinbalance_survivors_contracts.artifact_identity import (
+    ArtifactDescriptor,
+    ArtifactRef,
+    ValidationVerdict,
+    artifact_uri,
+)
+
+
+def _hash(ch):
+    return ch * 64
+
+
+def _file(logical_id, ch):
+    return ArtifactRef(
+        logical_id=logical_id,
+        sha256=_hash(ch),
+        size_bytes=16,
+        media_type="application/octet-stream",
+        store_uri=artifact_uri(_hash(ch)),
+    )
+
+
+def _node(logical_id, node_kind, parents=(), ch="a"):
+    return ArtifactDescriptor(
+        logical_id=logical_id,
+        node_kind=node_kind,
+        producer_id="test-producer",
+        producer_version="v1",
+        identity_metadata={"stable_config_hash": _hash("f")},
+        parents=parents,
+        files=(_file(f"{logical_id}.bin", ch),),
+    )
+
+
+def test_child_verdict_parent_reference_is_valid_storage_direction():
+    source = _node("phase5-source", "source_descriptor", ch="a")
+    verdict = ValidationVerdict(
+        logical_id="phase5-source.teacher-verdict",
+        verdict_kind="teacher_validation_verdict",
+        subject=source.node_ref(),
+        gate_version="teacher-gate.v1",
+        metrics={"pass_rate": 1.0},
+        split_ids=("dev",),
+        session_ids=("s1",),
+        passed=True,
+        blocking_reasons=(),
+    ).to_descriptor()
+
+    report = validate_artifact_dag([source, verdict])
+
+    assert report.node_count == 2
+    assert report.topological_identity_hashes == (
+        source.identity_hash,
+        verdict.identity_hash,
+    )
+
+
+def test_source_to_verdict_to_dataset_to_model_to_bundle_to_campaign_dag_passes():
+    source = _node("phase5-source", "source_descriptor", ch="a")
+    verdict = _node(
+        "teacher-verdict",
+        "teacher_validation_verdict",
+        parents=(source.node_ref(),),
+        ch="b",
+    )
+    dataset = _node(
+        "choice-dataset",
+        "choice_dataset_release",
+        parents=(verdict.node_ref(),),
+        ch="c",
+    )
+    model = _node(
+        "item-selector",
+        "item_selector_release",
+        parents=(dataset.node_ref(),),
+        ch="d",
+    )
+    bundle = _node(
+        "runtime-bundle",
+        "runtime_bundle",
+        parents=(model.node_ref(),),
+        ch="e",
+    )
+    shadow = _node(
+        "shadow-verdict",
+        "replay_shadow_verdict",
+        parents=(bundle.node_ref(),),
+        ch="1",
+    )
+    campaign = _node(
+        "canary-campaign",
+        "canary_campaign",
+        parents=(shadow.node_ref(),),
+        ch="2",
+    )
+
+    report = validate_artifact_dag(
+        [campaign, shadow, bundle, model, dataset, verdict, source]
+    )
+
+    assert report.node_count == 7
+    assert report.topological_identity_hashes[0] == source.identity_hash
+    assert report.topological_identity_hashes[-1] == campaign.identity_hash
+
+
+def test_source_descriptor_must_not_reference_descendant_verdict():
+    verdict_like_parent = _node("teacher-verdict", "teacher_validation_verdict", ch="b")
+    bad_source = _node(
+        "phase5-source",
+        "source_descriptor",
+        parents=(verdict_like_parent.node_ref(),),
+        ch="a",
+    )
+
+    with pytest.raises(ArtifactDagValidationError):
+        validate_artifact_dag([verdict_like_parent, bad_source])
+
+
+def test_missing_parent_rejected():
+    source = _node("phase5-source", "source_descriptor", ch="a")
+    dataset = _node(
+        "choice-dataset",
+        "choice_dataset_release",
+        parents=(source.node_ref(),),
+        ch="c",
+    )
+
+    with pytest.raises(ArtifactDagValidationError):
+        validate_artifact_dag([dataset])
+
+
+def test_same_logical_id_with_different_identity_hash_rejected():
+    first = _node("phase5-source", "source_descriptor", ch="a")
+    second = _node("phase5-source", "source_descriptor", ch="b")
+
+    with pytest.raises(ArtifactDagValidationError):
+        validate_artifact_dag([first, second])
+
+
+def test_in_place_identity_mutation_rejected():
+    wire = _node("phase5-source", "source_descriptor").to_wire()
+    wire["identity"]["identity_metadata"]["stable_config_hash"] = _hash("e")
+
+    with pytest.raises(ArtifactDagValidationError):
+        validate_artifact_dag([wire])
+
+
+def test_self_reference_or_mutual_reference_wire_is_rejected():
+    source = _node("phase5-source", "source_descriptor", ch="a")
+    wire = source.to_wire()
+    wire["identity"]["parents"] = [source.node_ref().to_wire()]
+
+    with pytest.raises(ArtifactDagValidationError):
+        validate_artifact_dag([wire])
