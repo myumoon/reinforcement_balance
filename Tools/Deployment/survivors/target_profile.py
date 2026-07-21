@@ -17,6 +17,22 @@ SECTIONS={
  "input":frozenset({"key_bindings","action_semantics_version","frame_skip","physics_hz","decision_hz","key_hold_ms","lease_ms"}),
  "choice_taxonomy":frozenset({"level_up_card_counts","fallbacks","capabilities","states","candidate_vocabulary","candidate_vocabulary_hash"}),
 }
+CLOSED_TAXONOMY={
+ "unlocked_characters":frozenset({"antonio"}), "unlocked_items":frozenset({"whip"}),
+ "unlocked_stages":frozenset({"mad_forest"}), "collection_pool":frozenset({"whip"}),
+ "purchased_power_ups":frozenset(), "candidate_vocabulary":frozenset({"whip","gold","chicken"}),
+}
+
+@dataclass(frozen=True)
+class SuccessObservation:
+    run_id:str; event:str; observed_at_seconds:float; evidence_hash:str
+    @classmethod
+    def from_telemetry(cls,run_id:str,path:Path):
+        if not isinstance(run_id,str) or not run_id or not path.is_file(): raise ValueError("run-bound telemetry required")
+        data=yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(data,Mapping) or set(data)!={"run_id","event","observed_at_seconds"} or data["run_id"]!=run_id: raise ValueError("telemetry run identity mismatch")
+        if data["event"] not in {"result_screen","death_transition"} or type(data["observed_at_seconds"]) not in (int,float): raise ValueError("invalid post-30 telemetry")
+        return cls(run_id,data["event"],float(data["observed_at_seconds"]),canonical_hash({"file_bytes_hex":path.read_bytes().hex()}))
 
 @dataclass(frozen=True)
 class TargetProfile:
@@ -32,8 +48,9 @@ class TargetProfile:
         if not isinstance(vocab,list) or not vocab or len(vocab)!=len(set(vocab)) or not all(isinstance(x,str) and x for x in vocab): raise ValueError("invalid candidate vocabulary")
         if tax["level_up_card_counts"] != [3,4] or tax["fallbacks"] != ["gold","chicken"] or tax["capabilities"] != ["reroll","skip","banish"] or tax["states"] != ["gameplay","level_up","fallback","chest","result","post_30_transition"]: raise ValueError("invalid closed choice taxonomy")
         p=self.sections["progression"]
-        for k in ("unlocked_characters","unlocked_items","unlocked_stages","collection_pool","purchased_power_ups"):
-            if not isinstance(p[k],list) or len(p[k])!=len(set(p[k])) or not all(isinstance(x,str) and x for x in p[k]): raise ValueError(f"invalid {k}")
+        for k,allowed in CLOSED_TAXONOMY.items():
+            values=vocab if k=="candidate_vocabulary" else p[k]
+            if not isinstance(values,list) or len(values)!=len(set(values)) or frozenset(values)!=allowed or not all(type(x) is str for x in values): raise ValueError(f"invalid closed taxonomy {k}")
         if not all(type(p[k]) is int and p[k]>=0 for k in ("reroll_count","skip_count","banish_count")): raise ValueError("invalid capability count")
         if not all(type(x) is int and x>0 for x in tax["level_up_card_counts"]): raise ValueError("invalid card count")
         if self.sections["choice_taxonomy"]["candidate_vocabulary_hash"]!=canonical_hash(vocab): raise ValueError("candidate vocabulary hash mismatch")
@@ -42,9 +59,9 @@ class TargetProfile:
     def to_wire(self): return {"schema_version":self.schema_version,**copy.deepcopy(dict(self.sections))}
     @property
     def target_hash(self): return canonical_hash(self.to_wire())
-    def success_state(self,timer_seconds:int,post_timer_event:Mapping[str,Any]|None)->str:
+    def success_state(self,timer_seconds:int,post_timer_event:SuccessObservation|None,run_id:str|None=None)->str:
         if timer_seconds<1800:return "RUNNING"
-        confirmed=isinstance(post_timer_event,Mapping) and set(post_timer_event)=={"event","observed_at_seconds"} and post_timer_event["event"] in {"result_screen","death_transition"} and type(post_timer_event["observed_at_seconds"]) in (int,float) and post_timer_event["observed_at_seconds"]>=1800
+        confirmed=isinstance(post_timer_event,SuccessObservation) and bool(run_id) and post_timer_event.run_id==run_id and post_timer_event.observed_at_seconds>=1800 and bool(_SHA256.fullmatch(post_timer_event.evidence_hash))
         return "TARGET_REACHED_CONFIRMED" if confirmed else "TARGET_REACHED_PENDING_TRANSITION"
     @classmethod
     def from_wire(cls,data:Mapping[str,Any]):

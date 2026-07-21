@@ -1,6 +1,12 @@
 {
   "schema_version": "survivors_action_telemetry.v1",
   "measurement": "simulator displacement sign cross-checked against target WASD dry-run screen displacement",
+  "attestation": {
+    "operator": "deployment-target-calibration",
+    "date": "2026-07-18",
+    "run_id": "wasd-dry-run-v1",
+    "capture_evidence_hash": "8eddb1d650e53965fd804e3d86e230802f321eda653717a55f05848759986718"
+  },
   "samples": [
     {"index": 0, "sim_delta_sign": [0, 1], "screen_delta_sign": [0, -1], "keys": ["W"]},
     {"index": 1, "sim_delta_sign": [1, 1], "screen_delta_sign": [1, -1], "keys": ["W", "D"]},

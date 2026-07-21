@@ -1,6 +1,6 @@
 import pytest
 
-from survivors.action_semantics import ActionContract, load_action_contract, validate_golden_fixture
+from survivors.action_semantics import ActionContract, load_action_contract, validate_cpp_source, validate_golden_fixture
 
 
 def test_canonical_nine_actions_and_cadence():
@@ -31,3 +31,13 @@ def test_measured_fixture_east_west_drift_is_blocking(tmp_path):
     data["rows"][2]["screen_direction"] = "left"
     with pytest.raises(ValueError):
         ActionContract.from_wire(data)
+
+def test_cpp_apply_action_is_parsed_and_drift_is_blocking(tmp_path):
+    contract=load_action_contract()
+    source=contract.to_wire()["source_descriptor"]["path"]
+    from pathlib import Path
+    real=Path(__file__).parents[3]/source
+    validate_cpp_source(contract,real)
+    drift=tmp_path/"SurvivorsGameLogic.cpp"
+    drift.write_text(real.read_text().replace("case 2: MoveDir=FVector2D(1.f,0.f)","case 2: MoveDir=FVector2D(-1.f,0.f)"))
+    with pytest.raises(ValueError): validate_cpp_source(contract,drift)

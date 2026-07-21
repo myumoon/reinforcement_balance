@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
-import json, yaml
+import json, re, yaml
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
 
 VERSION = "survivors_action.v1"
@@ -41,12 +41,25 @@ class ActionContract:
 
 def load_action_contract(path: Path=CONFIG):
     with path.open(encoding="utf-8") as f: contract=ActionContract.from_wire(yaml.safe_load(f))
+    validate_cpp_source(contract,Path(__file__).parents[3]/contract.to_wire()["source_descriptor"]["path"])
     validate_golden_fixture(contract, path.parent/"golden"/"action_displacement_wasd_v1.json")
     return contract
 
+def validate_cpp_source(contract:ActionContract,path:Path)->None:
+    if not path.is_file(): raise ValueError("ApplyAction source evidence missing")
+    source=path.read_text(encoding="utf-8")
+    match=re.search(r"void FSurvivorsGameLogic::ApplyAction\b.*?switch \(ActionIdx\)(.*?)\n\s*}\n\s*const float EffMS",source,re.S)
+    if not match: raise ValueError("ApplyAction switch not parseable")
+    number=r"-?\d+(?:\.\d*)?"
+    parsed={int(i):(int(float(x)),int(float(y))) for i,x,y in re.findall(rf"case\s+(\d+)\s*:\s*MoveDir\s*=\s*FVector2D\(({number})f,\s*({number})f\)",match.group(1))}
+    expected={row.index:row.sim_vector for row in contract.rows if row.index!=8}
+    if parsed!=expected: raise ValueError("C++ ApplyAction displacement drift")
+
 def validate_golden_fixture(contract:ActionContract,path:Path)->None:
     with path.open(encoding="utf-8") as f:data=json.load(f)
-    if set(data)!={"schema_version","measurement","samples"} or data["schema_version"]!="survivors_action_telemetry.v1" or not isinstance(data["measurement"],str): raise ValueError("invalid golden telemetry fixture")
+    if set(data)!={"schema_version","measurement","attestation","samples"} or data["schema_version"]!="survivors_action_telemetry.v1" or not isinstance(data["measurement"],str): raise ValueError("invalid golden telemetry fixture")
+    att=data["attestation"]
+    if not isinstance(att,Mapping) or set(att)!={"operator","date","run_id","capture_evidence_hash"} or not all(isinstance(att[k],str) and att[k] for k in ("operator","run_id")) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}",att["date"]) or not re.fullmatch(r"[0-9a-f]{64}",att["capture_evidence_hash"]): raise ValueError("measured WASD telemetry attestation required")
     expected=[]
     for row in contract.rows:
         x,y=row.sim_vector
