@@ -6,4 +6,6 @@
 
 preflight attempt は run identity ではない。成功時だけ process 生成前に durable `LAUNCH_INTENT` を commit し、observer または reconciliation で process identity が確認された時点で `FORMAL_RUN_ACTIVATED` になる。`CREATE_PROCESS_FAILED` は `LAUNCH_GATE_FAILED` で outcome 分母外、曖昧な launch は campaign を block する。正式 store の support envelope は local fixed NTFS、SQLite WAL、`synchronous=FULL`、integrity/flush 成功、Win32 broker/process attestation である。
 
+Win64 の intent 更新は temp file の flush 後に atomic replace し、置換後ファイルも flush する。Windows/Python では directory handle の `fsync` を提供できないため、directory entry の crash durability は local fixed NTFS journaling の保証範囲に依存し、電源断に対する絶対 durability は主張しない。UNC、removable、non-NTFS は commit 前に fail-closed とする。
+
 成功判定は timer 1800 到達だけでは確定せず `TARGET_REACHED_PENDING_TRANSITION` に入り、post-30 event を画面上で確認して確定する。off-screen entity、hidden HP/cooldown、global state count/density は release-observable ではない。

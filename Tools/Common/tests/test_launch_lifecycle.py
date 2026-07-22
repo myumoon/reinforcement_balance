@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import pytest
 import reinbalance_survivors_contracts.launch_lifecycle as launch_lifecycle
 
@@ -12,17 +13,34 @@ from reinbalance_survivors_contracts.launch_lifecycle import (
 )
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 
-def save_verdict(attempt,target):
+def save_verdict(tmp_path,attempt,target):
     records=[]; previous=None
     for stage in ("PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT"):
         body={"attempt_id":attempt,"stage":stage,"content_hash":"b"*64 if stage=="PRE_RUN_AUDIT" else None,"previous_step_hash":previous}
         record={**body,"step_hash":canonical_hash(body)}; records.append(record); previous=record["step_hash"]
-    return _finalize_save_execution(records=tuple(records),attempt_id=attempt,target_identity_hash=target,expected_pre_run_hash="b"*64)
+    evidence=tmp_path/"fixed-evidence"; evidence.mkdir(parents=True,exist_ok=True)
+    lifecycle_root=evidence/"lifecycles"; lifecycle_root.mkdir(exist_ok=True)
+    lifecycle=lifecycle_root/(attempt+".jsonl"); lifecycle.write_bytes(b"".join(canonical_json_bytes(r)+b"\n" for r in records))
+    canonical=evidence/"canonical.save"; canonical.write_bytes(b"")
+    backup=evidence/"backup.save"; backup.write_bytes(b"backup")
+    pre=canonical_hash({"bytes_hex":""})
+    backup_hash=canonical_hash({"bytes_hex":b"backup".hex()})
+    # Bind the chain to the actual files.
+    records=[]; previous=None
+    for stage in ("PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT"):
+        content=pre if stage in {"CANONICAL_RESTORE","PRE_RUN_AUDIT"} else backup_hash if stage=="ORIGINAL_BACKUP" else None
+        body={"attempt_id":attempt,"stage":stage,"content_hash":content,"previous_step_hash":previous}
+        record={**body,"step_hash":canonical_hash(body)}; records.append(record); previous=record["step_hash"]
+    lifecycle.write_bytes(b"".join(canonical_json_bytes(r)+b"\n" for r in records))
+    return _finalize_save_execution(records=tuple(records),attempt_id=attempt,target_identity_hash=target,expected_pre_run_hash=pre,lifecycle_record_path=lifecycle,canonical_save_path=canonical,original_backup_path=backup)
 
 def auth(tmp_path,attempt="attempt"):
     target="a"*64; evidence=b"audited"; eh=canonical_hash({"bytes_hex":evidence.hex()})
     audit=_verify_audit_evidence(attempt_id=attempt,target_identity_hash=target,evidence_bytes=evidence,expected_evidence_hash=eh)
-    save=save_verdict(attempt,target)
+    save=save_verdict(tmp_path,attempt,target)
+    config=tmp_path/"launch_gate.json"
+    config.write_text('{"schema_version":"launch_gate.v1","lifecycle_root":"'+str(Path(save.lifecycle_record_path).parent)+'","canonical_save_path":"'+save.canonical_save_path+'","original_backup_path":"'+save.original_backup_path+'"}')
+    launch_lifecycle.LAUNCH_GATE_CONFIG_PATH=config
     platform=PlatformGate(True,True,True,True,True,True,True)
     return LaunchAuthorization.issue(audit,platform.verified(attempt,target),save)
 
@@ -44,7 +62,7 @@ def test_evidence_and_identity_binding_are_fail_closed(tmp_path):
         LaunchAuthorization.issue(
             _verify_audit_evidence(attempt_id="a",target_identity_hash=a.target_identity_hash,evidence_bytes=b"x",expected_evidence_hash=canonical_hash({"bytes_hex":b"x".hex()})),
             PlatformGate(True,True,True,True,True,True,True).verified("b",b.target_identity_hash),
-            save_verdict("b",b.target_identity_hash))
+            save_verdict(tmp_path,"b",b.target_identity_hash))
 
 def test_handwritten_save_jsonl_has_no_verdict_path(tmp_path):
     path=tmp_path/"forged.jsonl"; path.write_text('{"attempt_id":"a","stage":"PRE_RUN_AUDIT","result":"PASS"}\n')
@@ -54,7 +72,10 @@ def test_handwritten_save_jsonl_has_no_verdict_path(tmp_path):
     assert not hasattr(launch_lifecycle, "_mint_executed_save_verdict")
 
 def store(tmp_path, campaign):
-    return LaunchIntentStore.for_campaign(campaign, tmp_path / campaign)
+    config=tmp_path/"launch_store.json"
+    config.write_text('{"schema_version":"launch_store.v1","root":"'+str(tmp_path/'fixed')+'","local_fixed_volume":true,"ntfs":true}')
+    launch_lifecycle.LAUNCH_STORE_CONFIG_PATH=config
+    return LaunchIntentStore.for_campaign(campaign)
 
 
 def test_launch_intent_and_activation_cardinality(tmp_path):
@@ -76,10 +97,27 @@ def test_launch_intent_and_activation_cardinality(tmp_path):
 def test_campaign_store_cannot_be_rebound_to_bypass_uniqueness(tmp_path):
     ledger=store(tmp_path,"campaign-fixed")
     LaunchLifecycle.begin("same").reserve("run","gameplay","nonce",authorization=auth(tmp_path,"same"),store=ledger)
-    with pytest.raises(ValueError, match="already bound"):
-        LaunchIntentStore.for_campaign("campaign-fixed", tmp_path/"alternate")
-    with pytest.raises(ValueError, match="canonical binding"):
-        LaunchIntentStore("campaign-fixed", tmp_path/"alternate")
+    second=LaunchIntentStore.for_campaign("campaign-fixed")
+    with pytest.raises(ValueError, match="commit failed"):
+        LaunchLifecycle.begin("same").reserve("other","gameplay","nonce",authorization=auth(tmp_path,"same"),store=second)
+
+def test_forged_chain_without_real_save_lifecycle_cannot_authorize(tmp_path):
+    valid=auth(tmp_path,"forged")
+    save=save_verdict(tmp_path,"forged","a"*64)
+    Path(save.canonical_save_path).write_bytes(b"tampered")
+    audit_bytes=b"audited"; evidence_hash=canonical_hash({"bytes_hex":audit_bytes.hex()})
+    audit=_verify_audit_evidence(attempt_id="forged",target_identity_hash="a"*64,evidence_bytes=audit_bytes,expected_evidence_hash=evidence_hash)
+    platform=PlatformGate(True,True,True,True,True,True,True).verified("forged","a"*64)
+    with pytest.raises(ValueError, match="evidence mismatch"):
+        LaunchAuthorization.issue(audit,platform,save)
+
+def test_non_supported_fixed_store_rejects_commit(tmp_path):
+    config=tmp_path/"launch_store.json"
+    config.write_text('{"schema_version":"launch_store.v1","root":"'+str(tmp_path/'fixed')+'","local_fixed_volume":true,"ntfs":false}')
+    launch_lifecycle.LAUNCH_STORE_CONFIG_PATH=config
+    ledger=LaunchIntentStore.for_campaign("unsupported")
+    with pytest.raises(ValueError, match="support envelope"):
+        LaunchLifecycle.begin("a").reserve("r","g","n",authorization=auth(tmp_path,"a"),store=ledger)
 
 
 def test_prelaunch_and_uncertain_failures_do_not_mix_with_outcomes(tmp_path):

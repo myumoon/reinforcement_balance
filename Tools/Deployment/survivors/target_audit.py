@@ -79,6 +79,8 @@ class SaveLifecycle:
     canonical_hash_matches:bool; semantic_attestation_valid:bool; original_backup_hash:str; canonical_save_hash:str
     records:list[Mapping[str,Any]]=field(default_factory=list,repr=False)
     record_path:Path|None=field(default=None,repr=False)
+    canonical_path:Path|None=field(default=None,repr=False)
+    backup_path:Path|None=field(default=None,repr=False)
     _KEYS=frozenset({"game_stopped","launcher_stopped","cloud_sync_disabled","restore_conflict","canonical_hash_matches","semantic_attestation_valid","original_backup_hash","canonical_save_hash"})
     @classmethod
     def valid(cls):return cls(True,True,True,False,True,True,"a"*64,"c"*64)
@@ -110,7 +112,8 @@ class SaveLifecycle:
         if self.record_path is None or not self.record_path.is_file(): raise AuditError("durable lifecycle evidence required")
         expected=b"".join(canonical_json_bytes(r)+b"\n" for r in self.records)
         if self.record_path.read_bytes()!=expected: raise AuditError("durable lifecycle chain mismatch")
-        try:return _finalize_save_execution(records=tuple(self.records),attempt_id=attempt_id,target_identity_hash=target_identity_hash,expected_pre_run_hash=self.canonical_save_hash)
+        if self.canonical_path is None or self.backup_path is None: raise AuditError("canonical save and original backup evidence required")
+        try:return _finalize_save_execution(records=tuple(self.records),attempt_id=attempt_id,target_identity_hash=target_identity_hash,expected_pre_run_hash=self.canonical_save_hash,lifecycle_record_path=self.record_path,canonical_save_path=self.canonical_path,original_backup_path=self.backup_path)
         except (TypeError,ValueError) as exc: raise AuditError(str(exc)) from exc
     def record_post_run(self,target:Path,attempt_id="run"):
         post=_file_hash(target); self._record(attempt_id,"POST_RUN",post,"PASS")
@@ -122,6 +125,7 @@ class SaveLifecycle:
         actual=_file_hash(backup)
         if actual!=self.original_backup_hash: raise AuditError("original backup identity mismatch")
         self._record(attempt_id,"ORIGINAL_BACKUP",actual,"PASS")
+        self.backup_path=backup.resolve()
         return actual
     def restore_original(self,backup:Path,target:Path,attempt_id="run")->None:
         if not self.preflight(attempt_id).can_reserve: raise AuditError("original restore gate failed")
@@ -135,6 +139,8 @@ class SaveLifecycle:
         self._atomic_copy(canonical,target,expected)
         self._record(attempt_id,"CANONICAL_RESTORE",expected,"PASS")
         self._record(attempt_id,"PRE_RUN_AUDIT",_file_hash(target),"PASS")
+        # Authorization re-reads the live canonical save location, not merely the source artifact.
+        self.canonical_path=target.resolve()
     @staticmethod
     def _atomic_copy(source:Path,target:Path,expected:str)->None:
         target.parent.mkdir(parents=True,exist_ok=True)

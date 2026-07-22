@@ -1,6 +1,6 @@
 """Fail-closed formal-run identity and durable launch transitions."""
 from __future__ import annotations
-import enum, os, re, json, threading
+import enum, os, re, json
 try:
     import fcntl
 except ImportError:  # Win64 support envelope
@@ -15,6 +15,8 @@ SCHEMA_VERSION = "launch_lifecycle.v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _AUTH_SEAL = object()
 _VERDICT_SEAL = object()
+LAUNCH_STORE_CONFIG_PATH = Path(r"C:\ProgramData\ReinBalance\launch_store.json")
+LAUNCH_GATE_CONFIG_PATH = Path(r"C:\ProgramData\ReinBalance\launch_gate.json")
 
 def _lock(stream):
     if fcntl is not None: fcntl.flock(stream.fileno(),fcntl.LOCK_EX)
@@ -58,12 +60,37 @@ def _verify_audit_evidence(*,attempt_id:str,target_identity_hash:str,evidence_by
 @dataclass(frozen=True)
 class SaveVerdict:
     attempt_id:str; target_identity_hash:str; lifecycle_attempt_id:str; lifecycle_hash:str; pre_run_hash:str; canonical_hash:str
+    lifecycle_record_path:str=""; canonical_save_path:str=""; original_backup_path:str=""
     _seal:object=None
     def __post_init__(self):
         payload={"schema_version":"save_lifecycle.v1","attempt_id":self.attempt_id,"target_identity_hash":self.target_identity_hash,"lifecycle_attempt_id":self.lifecycle_attempt_id,"lifecycle_hash":self.lifecycle_hash,"pre_run_hash":self.pre_run_hash,"status":"PASS"}
         if self._seal is not _VERDICT_SEAL or not self.attempt_id or self.lifecycle_attempt_id!=self.attempt_id or not all(isinstance(v,str) and _SHA256.fullmatch(v) for v in (self.target_identity_hash,self.lifecycle_hash,self.pre_run_hash,self.canonical_hash)) or self.canonical_hash!=canonical_hash(payload): raise ValueError("unverified save verdict")
 
-def _finalize_save_execution(*,records:tuple[Mapping[str,Any],...],attempt_id:str,target_identity_hash:str,expected_pre_run_hash:str)->SaveVerdict:
+def _read_and_verify_save_evidence(save:"SaveVerdict", *, require_fixed_paths:bool=False)->None:
+    paths=tuple(Path(value) for value in (save.lifecycle_record_path,save.canonical_save_path,save.original_backup_path))
+    if any(not value or not path.is_absolute() or not path.is_file() for value,path in zip((save.lifecycle_record_path,save.canonical_save_path,save.original_backup_path),paths)):
+        raise ValueError("complete on-disk save evidence required")
+    if require_fixed_paths:
+        try: config=json.loads(LAUNCH_GATE_CONFIG_PATH.read_text(encoding="utf-8"))
+        except (OSError,UnicodeDecodeError,json.JSONDecodeError) as exc: raise ValueError("fixed launch gate config unavailable") from exc
+        if not isinstance(config,dict) or set(config)!={"schema_version","lifecycle_root","canonical_save_path","original_backup_path"} or config["schema_version"]!="launch_gate.v1": raise ValueError("invalid fixed launch gate config")
+        expected=(Path(config["lifecycle_root"]).resolve()/(save.attempt_id+".jsonl"),Path(config["canonical_save_path"]).resolve(),Path(config["original_backup_path"]).resolve())
+        if paths!=expected: raise ValueError("save evidence is not at fixed gate paths")
+    try: records=tuple(json.loads(line) for line in paths[0].read_bytes().splitlines())
+    except (OSError,UnicodeDecodeError,json.JSONDecodeError) as exc: raise ValueError("invalid lifecycle evidence") from exc
+    previous=None
+    for record in records:
+        body={k:v for k,v in record.items() if k!="step_hash"}
+        if body.get("attempt_id")!=save.attempt_id or body.get("previous_step_hash")!=previous or record.get("step_hash")!=canonical_hash(body):
+            raise ValueError("on-disk lifecycle chain mismatch")
+        previous=record["step_hash"]
+    if canonical_hash(list(records))!=save.lifecycle_hash: raise ValueError("on-disk lifecycle hash mismatch")
+    if not records or records[-1].get("content_hash")!=save.pre_run_hash: raise ValueError("on-disk pre-run audit mismatch")
+    if canonical_hash({"bytes_hex":paths[1].read_bytes().hex()})!=save.pre_run_hash: raise ValueError("canonical save evidence mismatch")
+    backup_hash=next((r.get("content_hash") for r in records if r.get("stage")=="ORIGINAL_BACKUP"),None)
+    if backup_hash is None or canonical_hash({"bytes_hex":paths[2].read_bytes().hex()})!=backup_hash: raise ValueError("original backup evidence mismatch")
+
+def _finalize_save_execution(*,records:tuple[Mapping[str,Any],...],attempt_id:str,target_identity_hash:str,expected_pre_run_hash:str,lifecycle_record_path:Path,canonical_save_path:Path,original_backup_path:Path)->SaveVerdict:
     """Mint only from the live save executor; persisted JSON is evidence, not authority."""
     required=("PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT")
     stages=tuple(r.get("stage") for r in records)
@@ -81,7 +108,9 @@ def _finalize_save_execution(*,records:tuple[Mapping[str,Any],...],attempt_id:st
     if records[-1].get("content_hash")!=expected_pre_run_hash: raise ValueError("pre-run hash mismatch")
     lifecycle_hash=canonical_hash(list(records))
     payload={"schema_version":"save_lifecycle.v1","attempt_id":attempt_id,"target_identity_hash":target_identity_hash,"lifecycle_attempt_id":attempt_id,"lifecycle_hash":lifecycle_hash,"pre_run_hash":expected_pre_run_hash,"status":"PASS"}
-    return SaveVerdict(attempt_id,target_identity_hash,attempt_id,lifecycle_hash,expected_pre_run_hash,canonical_hash(payload),_VERDICT_SEAL)
+    verdict=SaveVerdict(attempt_id,target_identity_hash,attempt_id,lifecycle_hash,expected_pre_run_hash,canonical_hash(payload),str(lifecycle_record_path.resolve()),str(canonical_save_path.resolve()),str(original_backup_path.resolve()),_VERDICT_SEAL)
+    _read_and_verify_save_evidence(verdict)
+    return verdict
 
 
 @dataclass(frozen=True)
@@ -101,10 +130,11 @@ class LaunchAuthorization:
     def issue(cls, audit:AuditVerdict, platform:PlatformVerdict, save:SaveVerdict):
         if not isinstance(audit,AuditVerdict) or not isinstance(platform,PlatformVerdict) or not isinstance(save,SaveVerdict): raise ValueError("verified typed verdicts required")
         if len({audit.attempt_id,platform.attempt_id,save.attempt_id,save.lifecycle_attempt_id})!=1 or len({audit.target_identity_hash,platform.target_identity_hash,save.target_identity_hash})!=1: raise ValueError("authorization identity binding mismatch")
+        _read_and_verify_save_evidence(save,require_fixed_paths=True)
         return cls(audit.attempt_id,audit.target_identity_hash,save.attempt_id,save.lifecycle_attempt_id,audit.canonical_hash,save.canonical_hash,platform.canonical_hash,_AUTH_SEAL)
 
 def _sync_launch_intent(path:Path, *, platform:str|None=None)->None:
-    """Durably flush a replaced intent using the primitive supported by the host."""
+    """Flush a replaced intent; Win64 directory-entry durability relies on NTFS journaling."""
     platform=os.name if platform is None else platform
     if platform=="nt":
         with path.open("rb") as stream: os.fsync(stream.fileno())
@@ -116,28 +146,34 @@ def _sync_launch_intent(path:Path, *, platform:str|None=None)->None:
         return
     raise OSError(f"unsupported durability platform: {platform}")
 
+def _validate_store_volume(path:Path)->None:
+    text=str(path)
+    if text.startswith(("//", "\\\\")): raise ValueError("UNC launch store is unsupported")
+    if os.name!="nt": return  # Host-independent contract tests use the fixed config attestations.
+    import ctypes
+    root=Path(path.anchor)
+    drive_type=ctypes.windll.kernel32.GetDriveTypeW(str(root))
+    if drive_type!=3: raise ValueError("launch store must be on a local fixed volume")
+    fs_name=ctypes.create_unicode_buffer(32)
+    if not ctypes.windll.kernel32.GetVolumeInformationW(str(root),None,0,None,None,None,fs_name,len(fs_name)) or fs_name.value.upper()!="NTFS":
+        raise ValueError("launch store must be on NTFS")
+
 @dataclass(frozen=True)
 class LaunchIntentStore:
-    """The single canonical durable ledger bound to one campaign."""
+    """Canonical ledger resolved only from the deployment's fixed local-NTFS config."""
     campaign_id:str
     root:Path
-    _bindings={}
-    _bindings_lock=threading.Lock()
+    support_envelope:Mapping[str,Any]
     def __post_init__(self):
-        bound=type(self)._bindings.get(self.campaign_id)
-        if bound is None or bound!=self.root.resolve():
-            raise ValueError("campaign store must be obtained from canonical binding")
+        if not self.campaign_id or not self.root.is_absolute() or set(self.support_envelope)!={"local_fixed_volume","ntfs"}: raise ValueError("invalid canonical store config")
     @classmethod
-    def for_campaign(cls,campaign_id:str,root:Path)->"LaunchIntentStore":
-        if not isinstance(campaign_id,str) or not campaign_id or not isinstance(root,Path):
-            raise ValueError("campaign identity and canonical store root required")
-        resolved=root.resolve()
-        with cls._bindings_lock:
-            bound=cls._bindings.get(campaign_id)
-            if bound is not None and bound!=resolved:
-                raise ValueError("campaign store already bound")
-            cls._bindings[campaign_id]=resolved
-        return cls(campaign_id,resolved)
+    def for_campaign(cls,campaign_id:str)->"LaunchIntentStore":
+        if not isinstance(campaign_id,str) or not campaign_id: raise ValueError("campaign identity required")
+        try: config=json.loads(LAUNCH_STORE_CONFIG_PATH.read_text(encoding="utf-8"))
+        except (OSError,UnicodeDecodeError,json.JSONDecodeError) as exc: raise ValueError("fixed launch store config unavailable") from exc
+        if not isinstance(config,dict) or set(config)!={"schema_version","root","local_fixed_volume","ntfs"} or config["schema_version"]!="launch_store.v1": raise ValueError("invalid fixed launch store config")
+        root=Path(config["root"])
+        return cls(campaign_id,(root/campaign_id).resolve(),{"local_fixed_volume":config["local_fixed_volume"],"ntfs":config["ntfs"]})
     @property
     def intent_log(self)->Path: return self.root/"launch_intents.jsonl"
 
@@ -170,6 +206,10 @@ class LaunchLifecycle:
     def reserve(self,run_id,gameplay_attempt_id,nonce,*,authorization:LaunchAuthorization,store:LaunchIntentStore):
         if self.state is not LaunchState.PREFLIGHT or not isinstance(authorization,LaunchAuthorization): raise ValueError("validated authorization required")
         if not isinstance(store,LaunchIntentStore): raise ValueError("canonical launch intent store required")
+        configured=LaunchIntentStore.for_campaign(store.campaign_id)
+        if store.root!=configured.root or dict(store.support_envelope)!=dict(configured.support_envelope): raise ValueError("store does not match fixed config")
+        if any(value is not True for value in store.support_envelope.values()): raise ValueError("launch store is outside local fixed NTFS support envelope")
+        _validate_store_volume(store.root)
         intent_log=store.intent_log
         if authorization.attempt_id!=self.attempt_id: raise ValueError("authorization attempt mismatch")
         auth_wire={k:getattr(authorization,k) for k in ("attempt_id","target_identity_hash","save_attempt_id","lifecycle_attempt_id","audit_hash","save_gate_hash","platform_gate_hash")}
@@ -178,7 +218,12 @@ class LaunchLifecycle:
         encoded=canonical_json_bytes(reserved.to_wire())+b"\n"
         temp=intent_log.with_name(intent_log.name+".tmp")
         lock_path=intent_log.with_name(intent_log.name+".lock")
+        marker_dir=store.root/"reservations"; marker_dir.mkdir(parents=True,exist_ok=True)
+        marker_paths=(marker_dir/(canonical_hash({"kind":"attempt","identity":self.attempt_id})+".lock"),marker_dir/(canonical_hash({"kind":"run","identity":run_id})+".lock"))
+        created=[]
         try:
+            for marker in marker_paths:
+                fd=os.open(marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.close(fd); created.append(marker)
             with lock_path.open("a+b") as lock:
                 _lock(lock)
                 previous=intent_log.read_bytes() if intent_log.exists() else b""
@@ -193,6 +238,9 @@ class LaunchLifecycle:
                 lines=intent_log.read_bytes().splitlines()
                 if not lines or json.loads(lines[-1])!=reserved.to_wire(): raise ValueError("durable LAUNCH_INTENT revalidation failed")
         except OSError as exc:
+            for marker in created:
+                try: marker.unlink()
+                except OSError: pass
             raise ValueError("durable LAUNCH_INTENT commit failed") from exc
         finally:
             if temp.exists(): temp.unlink()
