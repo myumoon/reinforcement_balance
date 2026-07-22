@@ -232,16 +232,25 @@ class LaunchLifecycle:
         created=[]
         previous=b""
         ledger_replaced=False
-        try:
-            for marker in marker_paths:
-                fd=os.open(marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.close(fd); created.append(marker)
-            with lock_path.open("a+b") as lock:
-                _lock(lock)
+        with lock_path.open("a+b") as lock:
+            _lock(lock)
+            try:
                 previous=intent_log.read_bytes() if intent_log.exists() else b""
                 for line in previous.splitlines():
                     prior=LaunchLifecycle.from_wire(json.loads(line))
                     if prior.attempt_id==self.attempt_id or prior.reserved_run_id==run_id:
                         raise ValueError("attempt/target identity already reserved")
+                # The fsync'd ledger is authoritative.  A marker with no matching
+                # committed entry is residue from a process that stopped before
+                # its LAUNCH_INTENT commit and may be reclaimed while serialized
+                # by the ledger lock.
+                for marker in marker_paths:
+                    try:
+                        fd=os.open(marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+                    except FileExistsError:
+                        marker.unlink()
+                        fd=os.open(marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+                    os.close(fd); created.append(marker)
                 with temp.open("wb") as stream:
                     stream.write(previous+encoded); stream.flush(); os.fsync(stream.fileno())
                 os.replace(temp,intent_log)
@@ -249,32 +258,32 @@ class LaunchLifecycle:
                 _sync_launch_intent(intent_log)
                 lines=intent_log.read_bytes().splitlines()
                 if not lines or json.loads(lines[-1])!=reserved.to_wire(): raise ValueError("durable LAUNCH_INTENT revalidation failed")
-        except Exception as exc:
-            rollback_ok=True
-            try:
-                if ledger_replaced:
-                    if previous:
-                        with temp.open("wb") as stream:
-                            stream.write(previous); stream.flush(); os.fsync(stream.fileno())
-                        os.replace(temp,intent_log)
-                        _sync_launch_intent(intent_log)
-                    else:
-                        intent_log.unlink(missing_ok=True)
-                        if os.name=="posix":
-                            descriptor=os.open(intent_log.parent,os.O_RDONLY)
-                            try: os.fsync(descriptor)
-                            finally: os.close(descriptor)
-            except Exception:
-                rollback_ok=False
-            if rollback_ok:
-                for marker in created:
-                    try: marker.unlink()
-                    except OSError: rollback_ok=False
-            message="durable LAUNCH_INTENT commit failed"
-            if not rollback_ok: message += "; rollback failed and reservation remains blocked"
-            raise ValueError(message) from exc
-        finally:
-            if temp.exists(): temp.unlink()
+            except Exception as exc:
+                rollback_ok=True
+                try:
+                    if ledger_replaced:
+                        if previous:
+                            with temp.open("wb") as stream:
+                                stream.write(previous); stream.flush(); os.fsync(stream.fileno())
+                            os.replace(temp,intent_log)
+                            _sync_launch_intent(intent_log)
+                        else:
+                            intent_log.unlink(missing_ok=True)
+                            if os.name=="posix":
+                                descriptor=os.open(intent_log.parent,os.O_RDONLY)
+                                try: os.fsync(descriptor)
+                                finally: os.close(descriptor)
+                except Exception:
+                    rollback_ok=False
+                if rollback_ok:
+                    for marker in created:
+                        try: marker.unlink()
+                        except OSError: rollback_ok=False
+                message="durable LAUNCH_INTENT commit failed"
+                if not rollback_ok: message += "; rollback failed and reservation remains blocked"
+                raise ValueError(message) from exc
+            finally:
+                if temp.exists(): temp.unlink()
         return reserved
     def activate(self,process_ref,*,source="observer"):
         if self.state is not LaunchState.LAUNCH_INTENT or source not in {"observer","reconciliation"} or not process_ref: raise ValueError("activation requires launch intent and process")

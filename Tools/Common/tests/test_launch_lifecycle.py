@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import pytest
@@ -109,6 +110,28 @@ def test_failed_commit_after_marker_creation_rolls_back_for_retry(tmp_path, monk
     assert not tuple((ledger.root/"reservations").glob("*.lock"))
     reserved=lifecycle.reserve("run-rollback","gameplay-rollback","nonce-rollback",authorization=authorization,store=ledger)
     assert reserved.state is LaunchState.LAUNCH_INTENT
+
+
+def test_orphan_markers_without_committed_intent_are_reconciled(tmp_path):
+    ledger=store(tmp_path,"campaign-orphan")
+    marker_dir=ledger.root/"reservations"
+    marker_dir.mkdir(parents=True)
+    identities=(("attempt","attempt-orphan"),("run","run-orphan"))
+    markers=[]
+    for kind, identity in identities:
+        marker=marker_dir/(canonical_hash({"kind":kind,"identity":identity})+".lock")
+        marker.touch(exist_ok=False)
+        markers.append(marker)
+
+    reserved=LaunchLifecycle.begin("attempt-orphan").reserve(
+        "run-orphan","gameplay-orphan","nonce-orphan",
+        authorization=auth(tmp_path,"attempt-orphan"),store=ledger)
+
+    assert reserved.state is LaunchState.LAUNCH_INTENT
+    assert all(marker.exists() for marker in markers)
+    committed=[LaunchLifecycle.from_wire(json.loads(line))
+               for line in ledger.intent_log.read_bytes().splitlines()]
+    assert committed == [reserved]
 
 
 def test_launch_intent_and_activation_cardinality(tmp_path):
