@@ -1,5 +1,6 @@
 import json
 import os
+from types import SimpleNamespace
 from pathlib import Path
 import pytest
 import reinbalance_survivors_contracts.launch_lifecycle as launch_lifecycle
@@ -158,6 +159,20 @@ def test_activation_and_terminal_are_recoverable_from_durable_ledger(tmp_path):
     restarted=LaunchIntentStore.for_campaign("campaign-outcomes")
     assert restarted.outcome_summary()=={"activated_runs":1,"terminal_outcomes":{"run-1":"SUCCESS"}}
 
+def test_durable_ledger_rejects_reserved_run_id_shared_by_distinct_attempts(tmp_path):
+    ledger=store(tmp_path,"campaign-duplicate-run")
+    first=LaunchLifecycle.begin("attempt-1").reserve(
+        "run-shared","gameplay-1","nonce-1",authorization=auth(tmp_path,"attempt-1"),store=ledger)
+    duplicate=launch_lifecycle.replace(
+        first,attempt_id="attempt-2",gameplay_attempt_id="gameplay-2",launch_nonce="nonce-2")
+    with ledger.intent_log.open("ab") as stream:
+        stream.write(canonical_json_bytes(duplicate.to_wire())+b"\n")
+
+    with pytest.raises(ValueError,match="reserved_run_id"):
+        ledger.records()
+    with pytest.raises(ValueError,match="reserved_run_id"):
+        ledger.outcome_summary()
+
 @pytest.mark.parametrize(("field","value"), [
     ("attempt_id","different-attempt"),
     ("reserved_run_id","different-run"),
@@ -202,6 +217,51 @@ def test_forged_chain_without_real_save_lifecycle_cannot_authorize(tmp_path):
     platform=PlatformGate(True,True,True,True,True,True,True).verified("forged","a"*64)
     with pytest.raises(ValueError, match="evidence mismatch"):
         LaunchAuthorization.issue(audit,platform,save)
+
+@pytest.mark.parametrize("unsupported_index", range(3))
+def test_authorization_rejects_save_evidence_on_unsupported_volume(tmp_path,monkeypatch,unsupported_index):
+    attempt="unsupported-save-volume"
+    target="a"*64
+    save=save_verdict(tmp_path,attempt,target)
+    paths=(Path(save.lifecycle_record_path),Path(save.canonical_save_path),Path(save.original_backup_path))
+    audit_bytes=b"audited"
+    audit=_verify_audit_evidence(
+        attempt_id=attempt,target_identity_hash=target,evidence_bytes=audit_bytes,
+        expected_evidence_hash=canonical_hash({"bytes_hex":audit_bytes.hex()}))
+    platform=PlatformGate(True,True,True,True,True,True,True).verified(attempt,target)
+    config=tmp_path/"launch_gate.json"
+    config.write_text(json.dumps({
+        "schema_version":"launch_gate.v1","lifecycle_root":str(paths[0].parent),
+        "canonical_save_path":str(paths[1]),"original_backup_path":str(paths[2])}))
+    monkeypatch.setattr(launch_lifecycle,"LAUNCH_GATE_CONFIG_PATH",config)
+    checked=[]
+    def reject_unsupported(path):
+        checked.append(path)
+        if path==paths[unsupported_index]:
+            raise ValueError("save evidence must be on local fixed NTFS volume")
+    monkeypatch.setattr(launch_lifecycle,"_validate_store_volume",reject_unsupported)
+
+    with pytest.raises(ValueError,match="local fixed NTFS"):
+        LaunchAuthorization.issue(audit,platform,save)
+    assert paths[unsupported_index] in checked
+
+def test_lock_competes_for_a_fixed_region(tmp_path):
+    lock_path=tmp_path/"fixed.lock"
+    with lock_path.open("a+b") as first, lock_path.open("a+b") as second:
+        launch_lifecycle._lock(first)
+        with pytest.raises((BlockingIOError,OSError)):
+            launch_lifecycle._lock(second)
+
+def test_win64_lock_uses_nonblocking_byte_zero_region(tmp_path,monkeypatch):
+    calls=[]
+    fake=SimpleNamespace(LK_NBLCK=7,locking=lambda fd,mode,count:calls.append((fd,mode,count)))
+    monkeypatch.setattr(launch_lifecycle,"fcntl",None)
+    monkeypatch.setattr(launch_lifecycle,"msvcrt",fake,raising=False)
+    lock_path=tmp_path/"win64-fixed.lock"
+    with lock_path.open("a+b") as stream:
+        launch_lifecycle._lock(stream)
+        assert stream.tell()==0
+        assert calls==[(stream.fileno(),fake.LK_NBLCK,1)]
 
 def test_non_supported_fixed_store_rejects_commit(tmp_path):
     config=tmp_path/"launch_store.json"

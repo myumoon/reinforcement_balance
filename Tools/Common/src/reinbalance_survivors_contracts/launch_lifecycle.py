@@ -20,9 +20,16 @@ LAUNCH_STORE_CONFIG_PATH = Path(r"C:\ProgramData\ReinBalance\launch_store.json")
 LAUNCH_GATE_CONFIG_PATH = Path(r"C:\ProgramData\ReinBalance\launch_gate.json")
 
 def _lock(stream):
-    if fcntl is not None: fcntl.flock(stream.fileno(),fcntl.LOCK_EX)
+    if fcntl is not None:
+        fcntl.flock(stream.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
     else:
-        stream.seek(0); stream.write(b"\0"); stream.flush(); msvcrt.locking(stream.fileno(),msvcrt.LK_LOCK,1)
+        # The append-mode stream is used only for the dedicated lock file.  Its
+        # initial write advances the cursor, so seek back before locking the
+        # single region shared by every contender.
+        if os.fstat(stream.fileno()).st_size == 0:
+            stream.write(b"\0"); stream.flush(); os.fsync(stream.fileno())
+        stream.seek(0)
+        msvcrt.locking(stream.fileno(),msvcrt.LK_NBLCK,1)
 
 class LaunchState(str, enum.Enum):
     PREFLIGHT="PREFLIGHT"; PREFLIGHT_FAILED="PREFLIGHT_FAILED"; LAUNCH_INTENT="LAUNCH_INTENT"
@@ -77,6 +84,8 @@ def _read_and_verify_save_evidence(save:"SaveVerdict", *, require_fixed_paths:bo
         if not isinstance(config,dict) or set(config)!={"schema_version","lifecycle_root","canonical_save_path","original_backup_path"} or config["schema_version"]!="launch_gate.v1": raise ValueError("invalid fixed launch gate config")
         expected=(Path(config["lifecycle_root"]).resolve()/(save.attempt_id+".jsonl"),Path(config["canonical_save_path"]).resolve(),Path(config["original_backup_path"]).resolve())
         if paths!=expected: raise ValueError("save evidence is not at fixed gate paths")
+        for path in paths:
+            _validate_store_volume(path)
     try: records=tuple(json.loads(line) for line in paths[0].read_bytes().splitlines())
     except (OSError,UnicodeDecodeError,json.JSONDecodeError) as exc: raise ValueError("invalid lifecycle evidence") from exc
     previous=None
@@ -190,11 +199,15 @@ class LaunchIntentStore:
         try: records=tuple(LaunchLifecycle.from_wire(json.loads(line)) for line in self.intent_log.read_bytes().splitlines())
         except (OSError,UnicodeDecodeError,json.JSONDecodeError,ValueError) as exc: raise ValueError("invalid durable launch ledger") from exc
         latest={}
+        run_owners={}
         allowed={
             LaunchState.LAUNCH_INTENT:{LaunchState.FORMAL_RUN_ACTIVATED,LaunchState.LAUNCH_GATE_FAILED,LaunchState.LAUNCH_UNCERTAIN},
             LaunchState.FORMAL_RUN_ACTIVATED:{LaunchState.TERMINAL},
         }
         for record in records:
+            owner=run_owners.setdefault(record.reserved_run_id,record.attempt_id)
+            if owner!=record.attempt_id:
+                raise ValueError("reserved_run_id must be unique across attempts")
             prior=latest.get(record.attempt_id)
             if prior is None and record.state is not LaunchState.LAUNCH_INTENT: raise ValueError("durable lifecycle must begin with launch intent")
             if prior is not None and record.state not in allowed.get(prior.state,set()): raise ValueError("invalid durable launch transition")
@@ -223,9 +236,9 @@ class LaunchIntentStore:
                 if temp.exists(): temp.unlink()
     def outcome_summary(self)->Mapping[str,Any]:
         records=self.records()
-        activated={record.reserved_run_id for record in records if record.state is LaunchState.FORMAL_RUN_ACTIVATED}
-        terminal={record.reserved_run_id:record.failure_reason for record in records if record.state is LaunchState.TERMINAL}
-        return {"activated_runs":len(activated),"terminal_outcomes":terminal}
+        activated=[record for record in records if record.state is LaunchState.FORMAL_RUN_ACTIVATED]
+        terminal=[record for record in records if record.state is LaunchState.TERMINAL]
+        return {"activated_runs":len(activated),"terminal_outcomes":{record.reserved_run_id:record.failure_reason for record in terminal}}
 
 @dataclass(frozen=True)
 class LaunchLifecycle:
