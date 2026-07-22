@@ -196,10 +196,10 @@ class LaunchIntentStore:
         return cls(campaign_id,campaign_root,{"local_fixed_volume":config["local_fixed_volume"],"ntfs":config["ntfs"]})
     @property
     def intent_log(self)->Path: return self.root/"launch_intents.jsonl"
-    def records(self)->tuple["LaunchLifecycle",...]:
-        if not self.intent_log.exists(): return ()
-        try: records=tuple(LaunchLifecycle.from_wire(json.loads(line)) for line in self.intent_log.read_bytes().splitlines())
-        except (OSError,UnicodeDecodeError,json.JSONDecodeError,ValueError) as exc: raise ValueError("invalid durable launch ledger") from exc
+    @staticmethod
+    def _validated_records(content:bytes)->tuple["LaunchLifecycle",...]:
+        try: records=tuple(LaunchLifecycle.from_wire(json.loads(line)) for line in content.splitlines())
+        except (UnicodeDecodeError,json.JSONDecodeError,ValueError) as exc: raise ValueError("invalid durable launch ledger") from exc
         latest={}
         run_owners={}
         allowed={
@@ -216,6 +216,11 @@ class LaunchIntentStore:
             if prior is not None and record.reserved_identity != prior.reserved_identity: raise ValueError("reserved identity changed during durable transition")
             latest[record.attempt_id]=record
         return records
+    def records(self)->tuple["LaunchLifecycle",...]:
+        if not self.intent_log.exists(): return ()
+        try: content=self.intent_log.read_bytes()
+        except OSError as exc: raise ValueError("invalid durable launch ledger") from exc
+        return self._validated_records(content)
     def append_transition(self,previous:"LaunchLifecycle",current:"LaunchLifecycle")->None:
         configured=LaunchIntentStore.for_campaign(self.campaign_id)
         if self.root!=configured.root or dict(self.support_envelope)!=dict(configured.support_envelope): raise ValueError("store does not match fixed config")
@@ -225,15 +230,33 @@ class LaunchIntentStore:
         with lock_path.open("a+b") as lock:
             _lock(lock)
             before=intent_log.read_bytes() if intent_log.exists() else b""
-            records=tuple(LaunchLifecycle.from_wire(json.loads(line)) for line in before.splitlines())
+            records=self._validated_records(before)
             prior=next((record for record in reversed(records) if record.attempt_id==previous.attempt_id),None)
             if prior!=previous: raise ValueError("durable ledger predecessor mismatch")
             if current.reserved_identity != previous.reserved_identity: raise ValueError("reserved identity changed during durable transition")
+            candidate=before+canonical_json_bytes(current.to_wire())+b"\n"
+            validated=self._validated_records(candidate)
+            if not validated or validated[-1]!=current: raise ValueError("durable transition validation failed")
+            ledger_replaced=False
             try:
                 with temp.open("wb") as stream:
-                    stream.write(before+canonical_json_bytes(current.to_wire())+b"\n"); stream.flush(); os.fsync(stream.fileno())
-                os.replace(temp,intent_log); _sync_launch_intent(intent_log)
+                    stream.write(candidate); stream.flush(); os.fsync(stream.fileno())
+                os.replace(temp,intent_log); ledger_replaced=True
+                _sync_launch_intent(intent_log)
                 if self.records()[-1]!=current: raise ValueError("durable transition revalidation failed")
+            except Exception as exc:
+                rollback_ok=True
+                if ledger_replaced:
+                    try:
+                        with temp.open("wb") as stream:
+                            stream.write(before); stream.flush(); os.fsync(stream.fileno())
+                        os.replace(temp,intent_log); _sync_launch_intent(intent_log)
+                        if intent_log.read_bytes()!=before: raise ValueError("rollback revalidation failed")
+                    except Exception:
+                        rollback_ok=False
+                message="durable transition commit failed"
+                if not rollback_ok: message += "; rollback failed"
+                raise ValueError(message) from exc
             finally:
                 if temp.exists(): temp.unlink()
     def outcome_summary(self)->Mapping[str,Any]:

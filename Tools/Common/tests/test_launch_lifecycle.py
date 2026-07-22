@@ -177,6 +177,56 @@ def test_durable_ledger_rejects_reserved_run_id_shared_by_distinct_attempts(tmp_
     with pytest.raises(ValueError,match="reserved_run_id"):
         ledger.outcome_summary()
 
+@pytest.mark.parametrize("invalid_kind", ["unreserved_activation", "duplicate_run", "invalid_transition"])
+def test_invalid_transition_does_not_poison_ledger_or_later_outcomes(tmp_path,invalid_kind):
+    ledger=store(tmp_path,"campaign-atomic-"+invalid_kind)
+    intent=LaunchLifecycle.begin("attempt-1").reserve(
+        "run-1","gameplay-1","nonce-1",authorization=auth(tmp_path,"attempt-1"),store=ledger)
+    before=ledger.intent_log.read_bytes()
+    if invalid_kind=="unreserved_activation":
+        previous=LaunchLifecycle.begin("not-reserved")
+        current=launch_lifecycle.replace(
+            intent,attempt_id="not-reserved",reserved_run_id="run-2",gameplay_attempt_id="gameplay-2",
+            launch_nonce="nonce-2",state=LaunchState.FORMAL_RUN_ACTIVATED,
+            process_ref="proc-2",activation_source="observer")
+    elif invalid_kind=="duplicate_run":
+        previous=LaunchLifecycle.begin("attempt-2")
+        current=launch_lifecycle.replace(
+            intent,attempt_id="attempt-2",gameplay_attempt_id="gameplay-2",launch_nonce="nonce-2")
+    else:
+        previous=intent
+        current=intent
+
+    with pytest.raises(ValueError):
+        ledger.append_transition(previous,current)
+
+    assert ledger.intent_log.read_bytes()==before
+    activated=intent.activate("proc-1",store=ledger)
+    assert activated.state is LaunchState.FORMAL_RUN_ACTIVATED
+    assert ledger.outcome_summary()["activated_runs"]==1
+
+def test_post_commit_revalidation_failure_atomically_restores_ledger(tmp_path,monkeypatch):
+    ledger=store(tmp_path,"campaign-post-commit-rollback")
+    intent=LaunchLifecycle.begin("attempt-1").reserve(
+        "run-1","gameplay-1","nonce-1",authorization=auth(tmp_path,"attempt-1"),store=ledger)
+    before=ledger.intent_log.read_bytes()
+    original_records=LaunchIntentStore.records
+    calls=0
+    def fail_first_revalidation(self):
+        nonlocal calls
+        calls+=1
+        if calls==1: raise ValueError("injected post-commit verification failure")
+        return original_records(self)
+    monkeypatch.setattr(LaunchIntentStore,"records",fail_first_revalidation)
+
+    with pytest.raises(ValueError,match="commit failed"):
+        intent.activate("proc-failed",store=ledger)
+
+    assert ledger.intent_log.read_bytes()==before
+    activated=intent.activate("proc-ok",store=ledger)
+    assert activated.state is LaunchState.FORMAL_RUN_ACTIVATED
+    assert ledger.outcome_summary()["activated_runs"]==1
+
 @pytest.mark.parametrize(("field","value"), [
     ("attempt_id","different-attempt"),
     ("reserved_run_id","different-run"),
