@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict, SaveVerdict, _verify_audit_evidence, _finalize_save_execution
 from .target_profile import TargetProfile
+from .target_profile import load_target_profile
 
 class AuditError(ValueError):pass
 _SHA256=re.compile(r"[0-9a-f]{64}")
@@ -41,6 +42,20 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     # Both sides must first satisfy the closed schema/taxonomy contract.
     try: TargetProfile.from_wire(expected); TargetProfile.from_wire(actual)
     except (ValueError,KeyError,TypeError) as exc: raise AuditError(str(exc)) from exc
+    canonical=load_target_profile().to_wire()
+    measured={
+        ("build","build_id"),("build","executable_version"),("build","executable_hash"),("build","manual_attestation"),
+        ("progression","save_artifact_hash"),("progression","save_format_version"),
+        ("hardware","profile_id"),("hardware","os_build"),("hardware","gpu_name"),("hardware","vram_mb"),
+        ("hardware","driver_version"),("hardware","cuda_version"),("hardware","pytorch_version"),
+    }
+    for section in canonical:
+        if section=="schema_version":
+            if expected[section]!=canonical[section]: raise AuditError("expected is not the canonical target profile")
+            continue
+        for field,value in canonical[section].items():
+            if (section,field) not in measured and expected[section][field]!=value:
+                raise AuditError("expected is not the canonical target profile")
     _assert_resolved(expected); _assert_resolved(actual)
     if not isinstance(evidence,AuditEvidence) or not _valid_manual(evidence.manual_attestation): raise AuditError("operator/date/evidence-hash attestation required")
     required_attested={"build_id","executable_version","os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version"}
@@ -67,7 +82,7 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     observed_evidence={"executable":executable,"save":save,"attestation":dict(evidence.manual_attestation),"observed_profile_hash":canonical_hash(actual)}
     evidence_bytes=canonical_json_bytes(observed_evidence)
     evidence_hash=canonical_hash({"bytes_hex":evidence_bytes.hex()})
-    return _verify_audit_evidence(attempt_id=attempt_id,target_identity_hash=canonical_hash(expected),evidence_bytes=evidence_bytes,expected_evidence_hash=evidence_hash)
+    return _verify_audit_evidence(attempt_id=attempt_id,target_identity_hash=canonical_hash(canonical),evidence_bytes=evidence_bytes,expected_evidence_hash=evidence_hash)
 
 @dataclass(frozen=True)
 class PreflightResult:

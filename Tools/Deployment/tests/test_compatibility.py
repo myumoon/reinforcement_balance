@@ -2,6 +2,7 @@ import pytest
 from survivors.compatibility import invalidation_for,validate_manifest,load_matrix
 from reinbalance_survivors_contracts.launch_lifecycle import _verify_audit_evidence
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
+from survivors.target_profile import SECTIONS
 
 @pytest.mark.parametrize(("fields","expected"),[
  ({"ui_revision"},{"parser","replay"}),
@@ -23,3 +24,14 @@ def test_matrix_semantics_are_immutable(tmp_path):
     data=load_matrix(); data["classes"]["ui_only"]["invalidate"]=["policy"]
     path=tmp_path/"matrix.yaml"; path.write_text(yaml.safe_dump(data))
     with pytest.raises(ValueError): load_matrix(path)
+
+def test_every_target_profile_field_is_classified_fail_closed(tmp_path):
+    import yaml
+    data=load_matrix()
+    classified=[field for rule in data["classes"].values() for field in rule["changed_fields"]]
+    assert set(classified)=={"schema_version",*(field for fields in SECTIONS.values() for field in fields)}
+    assert len(classified)==len(set(classified))
+    data["classes"]["ui_only"]["changed_fields"].remove("ui_revision")
+    path=tmp_path/"matrix.yaml"; path.write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError,match="coverage"):
+        load_matrix(path)

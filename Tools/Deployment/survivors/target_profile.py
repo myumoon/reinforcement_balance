@@ -2,8 +2,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
-import copy, re, yaml
+import copy, math, re, yaml
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
+from reinbalance_survivors_contracts.ui_intent import is_strict_number
 
 VERSION="survivors_target.v1"
 _SHA256=re.compile(r"[0-9a-f]{64}")
@@ -26,12 +27,15 @@ CLOSED_TAXONOMY={
 @dataclass(frozen=True)
 class SuccessObservation:
     run_id:str; event:str; observed_at_seconds:float; evidence_hash:str
+    def __post_init__(self):
+        if not isinstance(self.run_id,str) or not self.run_id or self.event not in {"result_screen","death_transition"} or not is_strict_number(self.observed_at_seconds) or not math.isfinite(self.observed_at_seconds) or not isinstance(self.evidence_hash,str) or _SHA256.fullmatch(self.evidence_hash) is None:
+            raise ValueError("invalid post-30 telemetry")
     @classmethod
     def from_telemetry(cls,run_id:str,path:Path,evidence_path:Path|None=None):
         if not isinstance(run_id,str) or not run_id or not path.is_file() or evidence_path is None or not evidence_path.is_file(): raise ValueError("run-bound event record and evidence required")
         data=yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(data,Mapping) or set(data)!={"run_id","event","observed_at_seconds","evidence_hash"} or data["run_id"]!=run_id: raise ValueError("telemetry run identity mismatch")
-        if data["event"] not in {"result_screen","death_transition"} or type(data["observed_at_seconds"]) not in (int,float): raise ValueError("invalid post-30 telemetry")
+        if data["event"] not in {"result_screen","death_transition"} or not is_strict_number(data["observed_at_seconds"]) or not math.isfinite(data["observed_at_seconds"]): raise ValueError("invalid post-30 telemetry")
         try:evidence=yaml.safe_load(evidence_path.read_text(encoding="utf-8"))
         except (OSError,UnicodeDecodeError,yaml.YAMLError) as exc: raise ValueError("post-30 evidence is not parseable") from exc
         expected={k:data[k] for k in ("run_id","event","observed_at_seconds")}
@@ -66,6 +70,7 @@ class TargetProfile:
     @property
     def target_hash(self): return canonical_hash(self.to_wire())
     def success_state(self,timer_seconds:int,post_timer_event:SuccessObservation|None,run_id:str|None=None)->str:
+        if not is_strict_number(timer_seconds) or not math.isfinite(timer_seconds) or timer_seconds<0: raise ValueError("timer_seconds must be finite and non-negative")
         if timer_seconds<1800:return "RUNNING"
         confirmed=isinstance(post_timer_event,SuccessObservation) and bool(run_id) and post_timer_event.run_id==run_id and post_timer_event.observed_at_seconds>=1800 and bool(_SHA256.fullmatch(post_timer_event.evidence_hash))
         return "TARGET_REACHED_CONFIRMED" if confirmed else "TARGET_REACHED_PENDING_TRANSITION"

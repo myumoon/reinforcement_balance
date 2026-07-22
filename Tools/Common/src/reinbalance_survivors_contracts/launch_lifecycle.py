@@ -185,6 +185,45 @@ class LaunchIntentStore:
         return cls(campaign_id,campaign_root,{"local_fixed_volume":config["local_fixed_volume"],"ntfs":config["ntfs"]})
     @property
     def intent_log(self)->Path: return self.root/"launch_intents.jsonl"
+    def records(self)->tuple["LaunchLifecycle",...]:
+        if not self.intent_log.exists(): return ()
+        try: records=tuple(LaunchLifecycle.from_wire(json.loads(line)) for line in self.intent_log.read_bytes().splitlines())
+        except (OSError,UnicodeDecodeError,json.JSONDecodeError,ValueError) as exc: raise ValueError("invalid durable launch ledger") from exc
+        latest={}
+        allowed={
+            LaunchState.LAUNCH_INTENT:{LaunchState.FORMAL_RUN_ACTIVATED,LaunchState.LAUNCH_GATE_FAILED,LaunchState.LAUNCH_UNCERTAIN},
+            LaunchState.FORMAL_RUN_ACTIVATED:{LaunchState.TERMINAL},
+        }
+        for record in records:
+            prior=latest.get(record.attempt_id)
+            if prior is None and record.state is not LaunchState.LAUNCH_INTENT: raise ValueError("durable lifecycle must begin with launch intent")
+            if prior is not None and record.state not in allowed.get(prior.state,set()): raise ValueError("invalid durable launch transition")
+            latest[record.attempt_id]=record
+        return records
+    def append_transition(self,previous:"LaunchLifecycle",current:"LaunchLifecycle")->None:
+        configured=LaunchIntentStore.for_campaign(self.campaign_id)
+        if self.root!=configured.root or dict(self.support_envelope)!=dict(configured.support_envelope): raise ValueError("store does not match fixed config")
+        if any(value is not True for value in self.support_envelope.values()): raise ValueError("launch store is outside local fixed NTFS support envelope")
+        _validate_store_volume(self.root)
+        intent_log=self.intent_log; temp=intent_log.with_name(intent_log.name+".tmp"); lock_path=intent_log.with_name(intent_log.name+".lock")
+        with lock_path.open("a+b") as lock:
+            _lock(lock)
+            before=intent_log.read_bytes() if intent_log.exists() else b""
+            records=tuple(LaunchLifecycle.from_wire(json.loads(line)) for line in before.splitlines())
+            prior=next((record for record in reversed(records) if record.attempt_id==previous.attempt_id),None)
+            if prior!=previous: raise ValueError("durable ledger predecessor mismatch")
+            try:
+                with temp.open("wb") as stream:
+                    stream.write(before+canonical_json_bytes(current.to_wire())+b"\n"); stream.flush(); os.fsync(stream.fileno())
+                os.replace(temp,intent_log); _sync_launch_intent(intent_log)
+                if self.records()[-1]!=current: raise ValueError("durable transition revalidation failed")
+            finally:
+                if temp.exists(): temp.unlink()
+    def outcome_summary(self)->Mapping[str,Any]:
+        records=self.records()
+        activated={record.reserved_run_id for record in records if record.state is LaunchState.FORMAL_RUN_ACTIVATED}
+        terminal={record.reserved_run_id:record.failure_reason for record in records if record.state is LaunchState.TERMINAL}
+        return {"activated_runs":len(activated),"terminal_outcomes":terminal}
 
 @dataclass(frozen=True)
 class LaunchLifecycle:
@@ -285,18 +324,26 @@ class LaunchLifecycle:
             finally:
                 if temp.exists(): temp.unlink()
         return reserved
-    def activate(self,process_ref,*,source="observer"):
+    def activate(self,process_ref,*,source="observer",store:LaunchIntentStore|None=None):
         if self.state is not LaunchState.LAUNCH_INTENT or source not in {"observer","reconciliation"} or not process_ref: raise ValueError("activation requires launch intent and process")
-        return replace(self,state=LaunchState.FORMAL_RUN_ACTIVATED,process_ref=process_ref,activation_source=source)
-    def create_process_failed(self):
+        if not isinstance(store,LaunchIntentStore): raise ValueError("canonical store required for durable activation")
+        activated=replace(self,state=LaunchState.FORMAL_RUN_ACTIVATED,process_ref=process_ref,activation_source=source)
+        store.append_transition(self,activated); return activated
+    def create_process_failed(self,*,store:LaunchIntentStore|None=None):
         if self.state is not LaunchState.LAUNCH_INTENT: raise ValueError("no launch intent")
-        return replace(self,state=LaunchState.LAUNCH_GATE_FAILED,failure_reason="CREATE_PROCESS_FAILED")
-    def launch_uncertain(self):
+        if not isinstance(store,LaunchIntentStore): raise ValueError("canonical store required for durable failure")
+        failed=replace(self,state=LaunchState.LAUNCH_GATE_FAILED,failure_reason="CREATE_PROCESS_FAILED")
+        store.append_transition(self,failed); return failed
+    def launch_uncertain(self,*,store:LaunchIntentStore|None=None):
         if self.state is not LaunchState.LAUNCH_INTENT: raise ValueError("no launch intent")
-        return replace(self,state=LaunchState.LAUNCH_UNCERTAIN,failure_reason="PROCESS_IDENTITY_UNCERTAIN")
-    def terminal(self,reason):
+        if not isinstance(store,LaunchIntentStore): raise ValueError("canonical store required for durable failure")
+        failed=replace(self,state=LaunchState.LAUNCH_UNCERTAIN,failure_reason="PROCESS_IDENTITY_UNCERTAIN")
+        store.append_transition(self,failed); return failed
+    def terminal(self,reason,*,store:LaunchIntentStore|None=None):
         if self.state is not LaunchState.FORMAL_RUN_ACTIVATED or not reason: raise ValueError("terminal requires activation")
-        return replace(self,state=LaunchState.TERMINAL,failure_reason=reason)
+        if not isinstance(store,LaunchIntentStore): raise ValueError("canonical store required for durable terminal")
+        terminal=replace(self,state=LaunchState.TERMINAL,failure_reason=reason)
+        store.append_transition(self,terminal); return terminal
     @property
     def counts_toward_outcome_denominator(self): return self.state in {LaunchState.FORMAL_RUN_ACTIVATED,LaunchState.TERMINAL}
     @property

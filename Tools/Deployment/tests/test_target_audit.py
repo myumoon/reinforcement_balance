@@ -34,6 +34,12 @@ def test_audit_is_typed_and_bound_to_real_file_bytes(tmp_path):
     evidence.executable_path.write_bytes(b"tampered")
     with pytest.raises(AuditError): audit_target(expected,copy.deepcopy(expected),evidence,attempt_id="attempt-1")
 
+def test_audit_rejects_noncanonical_expected_even_when_actual_matches(tmp_path):
+    expected,evidence=resolved(tmp_path)
+    expected["base"]["stage"]="different_stage"
+    with pytest.raises(AuditError,match="canonical target profile"):
+        audit_target(expected,copy.deepcopy(expected),evidence,attempt_id="attempt-1")
+
 def test_placeholder_or_missing_attestation_never_passes(tmp_path):
     template=load_target_profile().to_wire(); _,evidence=resolved(tmp_path)
     with pytest.raises(AuditError): audit_target(template,template,evidence,attempt_id="attempt-1")

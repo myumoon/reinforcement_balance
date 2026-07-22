@@ -144,11 +144,26 @@ def test_launch_intent_and_activation_cardinality(tmp_path):
         lifecycle.reserve("run-2", "gameplay-2", "nonce-2", authorization=auth(tmp_path,"attempt-1"),store=ledger)
     with pytest.raises(ValueError):
         LaunchLifecycle.begin("attempt-1").reserve("run-other", "gameplay-other", "nonce-other", authorization=auth(tmp_path,"attempt-1"),store=ledger)
-    lifecycle = lifecycle.activate("proc-1")
+    lifecycle = lifecycle.activate("proc-1",store=ledger)
     assert lifecycle.state is LaunchState.FORMAL_RUN_ACTIVATED
     assert lifecycle.counts_toward_outcome_denominator
     with pytest.raises(ValueError):
-        lifecycle.activate("proc-2")
+        lifecycle.activate("proc-2",store=ledger)
+
+def test_activation_and_terminal_are_recoverable_from_durable_ledger(tmp_path):
+    ledger=store(tmp_path,"campaign-outcomes")
+    lifecycle=LaunchLifecycle.begin("attempt-1").reserve("run-1","gameplay-1","nonce-1",authorization=auth(tmp_path,"attempt-1"),store=ledger)
+    lifecycle=lifecycle.activate("proc-1",store=ledger)
+    lifecycle=lifecycle.terminal("SUCCESS",store=ledger)
+    restarted=LaunchIntentStore.for_campaign("campaign-outcomes")
+    assert restarted.outcome_summary()=={"activated_runs":1,"terminal_outcomes":{"run-1":"SUCCESS"}}
+
+def test_in_memory_activation_cannot_affect_durable_denominator(tmp_path):
+    ledger=store(tmp_path,"campaign-memory")
+    intent=LaunchLifecycle.begin("attempt-1").reserve("run-1","gameplay-1","nonce-1",authorization=auth(tmp_path,"attempt-1"),store=ledger)
+    with pytest.raises(ValueError,match="store"):
+        intent.activate("proc-1")
+    assert LaunchIntentStore.for_campaign("campaign-memory").outcome_summary()["activated_runs"]==0
 
 def test_campaign_store_cannot_be_rebound_to_bypass_uniqueness(tmp_path):
     ledger=store(tmp_path,"campaign-fixed")
@@ -181,11 +196,11 @@ def test_prelaunch_and_uncertain_failures_do_not_mix_with_outcomes(tmp_path):
     assert failed.reserved_run_id is None and failed.process_ref is None
     ledger=store(tmp_path,"campaign-failures")
     gate = LaunchLifecycle.begin("b").reserve("r", "g", "n", authorization=auth(tmp_path,"b"),store=ledger)
-    gate = gate.create_process_failed()
+    gate = gate.create_process_failed(store=ledger)
     assert gate.state is LaunchState.LAUNCH_GATE_FAILED
     assert not gate.counts_toward_outcome_denominator
     uncertain = LaunchLifecycle.begin("c").reserve("r2", "g2", "n2", authorization=auth(tmp_path,"c"),store=ledger)
-    uncertain = uncertain.launch_uncertain()
+    uncertain = uncertain.launch_uncertain(store=ledger)
     assert uncertain.campaign_blocked and not uncertain.replacement_allowed
 
 

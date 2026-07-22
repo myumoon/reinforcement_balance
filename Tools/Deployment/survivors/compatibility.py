@@ -10,9 +10,9 @@ RULE_KEYS=frozenset({"changed_fields","invalidate","full_retrain"})
 ARTIFACT_KEYS=frozenset({"compatible_fields","retest_scope"})
 MANIFEST_KEYS=frozenset({"schema_version","artifact_kind","target_audit_hash","target_audit_verdict"})
 REQUIRED_CLASSES={
- "ui_only":{"changed_fields":["ui_revision","ui_scale","windows_dpi_scale"],"invalidate":["parser","replay"],"full_retrain":False},
- "content_unlock":{"changed_fields":["content_revision","save_artifact_hash","unlocked_characters","unlocked_items","collection_pool","purchased_power_ups","candidate_vocabulary_hash"],"invalidate":["taxonomy","selector","fidelity"],"full_retrain":False},
- "physics_input":{"changed_fields":["build_id","action_semantics_version","key_bindings","physics_hz","frame_skip","decision_hz"],"invalidate":["fidelity","policy","canary"],"full_retrain":True},
+ "ui_only":{"changed_fields":["window_mode","client_resolution","ui_language","ui_revision","ui_scale","windows_dpi_scale","monitor_output","capture_backend"],"invalidate":["parser","replay"],"full_retrain":False},
+ "content_unlock":{"changed_fields":["stage","character","modifiers","success_timer_seconds","post_timer_event_required","distribution","app_id","content_revision","manual_attestation","save_artifact_hash","save_format_version","unlocked_characters","unlocked_items","unlocked_stages","collection_pool","purchased_power_ups","reroll_count","skip_count","banish_count","level_up_card_counts","fallbacks","capabilities","states","candidate_vocabulary","candidate_vocabulary_hash"],"invalidate":["taxonomy","selector","fidelity"],"full_retrain":False},
+ "physics_input":{"changed_fields":["schema_version","platform","build_id","executable_version","executable_hash","profile_id","os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version","cpu_live_fallback","key_bindings","action_semantics_version","frame_skip","physics_hz","decision_hz","key_hold_ms","lease_ms"],"invalidate":["fidelity","policy","canary"],"full_retrain":True},
 }
 REQUIRED_ARTIFACTS={
  "capture":{"compatible_fields":["content_revision"],"retest_scope":["parser","replay"]},
@@ -27,6 +27,10 @@ def load_matrix(path:Path=CONFIG):
     if set(data["classes"])!={"ui_only","content_unlock","physics_input"} or set(data["artifacts"])!={"capture","model","runtime","campaign"}: raise ValueError("invalid compatibility taxonomy")
     if any(set(v)!=RULE_KEYS or type(v["full_retrain"]) is not bool or not all(isinstance(x,list) and all(isinstance(i,str) for i in x) for x in (v["changed_fields"],v["invalidate"])) for v in data["classes"].values()): raise ValueError("invalid compatibility rule")
     if any(set(v)!=ARTIFACT_KEYS or not all(isinstance(x,list) and all(isinstance(i,str) for i in x) for x in (v["compatible_fields"],v["retest_scope"])) for v in data["artifacts"].values()): raise ValueError("invalid artifact rule")
+    from .target_profile import SECTIONS
+    classified=[field for rule in data["classes"].values() for field in rule["changed_fields"]]
+    expected={"schema_version",*(field for fields in SECTIONS.values() for field in fields)}
+    if set(classified)!=expected or len(classified)!=len(set(classified)): raise ValueError("target profile matrix coverage mismatch")
     if data["classes"]!=REQUIRED_CLASSES or data["artifacts"]!=REQUIRED_ARTIFACTS: raise ValueError("compatibility semantics changed")
     return data
 

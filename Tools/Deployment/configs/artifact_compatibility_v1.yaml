@@ -2,15 +2,15 @@ schema_version: artifact_compatibility.v1
 required_parent: target_audit_hash
 classes:
   ui_only:
-    changed_fields: [ui_revision, ui_scale, windows_dpi_scale]
+    changed_fields: [window_mode, client_resolution, ui_language, ui_revision, ui_scale, windows_dpi_scale, monitor_output, capture_backend]
     invalidate: [parser, replay]
     full_retrain: false
   content_unlock:
-    changed_fields: [content_revision, save_artifact_hash, unlocked_characters, unlocked_items, collection_pool, purchased_power_ups, candidate_vocabulary_hash]
+    changed_fields: [stage, character, modifiers, success_timer_seconds, post_timer_event_required, distribution, app_id, content_revision, manual_attestation, save_artifact_hash, save_format_version, unlocked_characters, unlocked_items, unlocked_stages, collection_pool, purchased_power_ups, reroll_count, skip_count, banish_count, level_up_card_counts, fallbacks, capabilities, states, candidate_vocabulary, candidate_vocabulary_hash]
     invalidate: [taxonomy, selector, fidelity]
     full_retrain: false
   physics_input:
-    changed_fields: [build_id, action_semantics_version, key_bindings, physics_hz, frame_skip, decision_hz]
+    changed_fields: [schema_version, platform, build_id, executable_version, executable_hash, profile_id, os_build, gpu_name, vram_mb, driver_version, cuda_version, pytorch_version, cpu_live_fallback, key_bindings, action_semantics_version, frame_skip, physics_hz, decision_hz, key_hold_ms, lease_ms]
     invalidate: [fidelity, policy, canary]
     full_retrain: true
 artifacts:
