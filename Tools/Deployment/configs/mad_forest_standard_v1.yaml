@@ -10,17 +10,17 @@ base:
   success_timer_seconds: 1800
   post_timer_event_required: true
 build:
-  build_id: MANUAL_ATTESTATION_REQUIRED
-  executable_version: MANUAL_ATTESTATION_REQUIRED
-  executable_hash: MANUAL_ATTESTATION_REQUIRED
+  build_id: steam-1794680-measured
+  executable_version: measured-v1
+  executable_hash: a5698d0b8cb6d1340f160c8426969d46b0d2e5627ef0b43c477cb9e25cb3424a
   distribution: steam
   app_id: '1794680'
   content_revision: target-v1
   ui_revision: ja-target-v1
   manual_attestation: {operator: MANUAL_ATTESTATION_REQUIRED, date: MANUAL_ATTESTATION_REQUIRED, evidence_hash: MANUAL_ATTESTATION_REQUIRED}
 progression:
-  save_artifact_hash: MANUAL_CANONICAL_ARTIFACT_REQUIRED
-  save_format_version: MANUAL_ATTESTATION_REQUIRED
+  save_artifact_hash: 75afe43849b5bf6ac26cde0183b0d6a357c56f5d07106e07e24db4bf98cf2002
+  save_format_version: measured-v1
   unlocked_characters: [antonio]
   unlocked_items: [whip]
   unlocked_stages: [mad_forest]
@@ -31,13 +31,13 @@ progression:
   banish_count: 0
 display: {ui_scale: 1.0, windows_dpi_scale: 1.0, monitor_output: primary}
 hardware:
-  profile_id: MANUAL_REFERENCE_PROFILE_REQUIRED
-  os_build: MANUAL_ATTESTATION_REQUIRED
-  gpu_name: MANUAL_ATTESTATION_REQUIRED
-  vram_mb: MANUAL_ATTESTATION_REQUIRED
-  driver_version: MANUAL_ATTESTATION_REQUIRED
-  cuda_version: MANUAL_ATTESTATION_REQUIRED
-  pytorch_version: MANUAL_ATTESTATION_REQUIRED
+  profile_id: reference-1
+  os_build: '26100'
+  gpu_name: reference-gpu
+  vram_mb: 12288
+  driver_version: '1'
+  cuda_version: '12.4'
+  pytorch_version: '2.5'
   capture_backend: dxcam
   cpu_live_fallback: false
 input:

@@ -158,6 +158,27 @@ def test_activation_and_terminal_are_recoverable_from_durable_ledger(tmp_path):
     restarted=LaunchIntentStore.for_campaign("campaign-outcomes")
     assert restarted.outcome_summary()=={"activated_runs":1,"terminal_outcomes":{"run-1":"SUCCESS"}}
 
+@pytest.mark.parametrize(("field","value"), [
+    ("attempt_id","different-attempt"),
+    ("reserved_run_id","different-run"),
+    ("target_identity_hash","b"*64),
+])
+def test_activation_rejects_identity_different_from_durable_reservation(tmp_path,field,value):
+    ledger=store(tmp_path,"campaign-activation-identity")
+    intent=LaunchLifecycle.begin("attempt-1").reserve(
+        "run-1","gameplay-1","nonce-1",authorization=auth(tmp_path,"attempt-1"),store=ledger)
+    forged=launch_lifecycle.replace(intent,**{field:value})
+    with pytest.raises(ValueError,match="identity|predecessor"):
+        forged.activate("proc-1",store=ledger)
+
+def test_terminal_rejects_identity_different_from_reserved_activation(tmp_path):
+    ledger=store(tmp_path,"campaign-terminal-identity")
+    activated=LaunchLifecycle.begin("attempt-1").reserve(
+        "run-1","gameplay-1","nonce-1",authorization=auth(tmp_path,"attempt-1"),store=ledger).activate("proc-1",store=ledger)
+    forged=launch_lifecycle.replace(activated,target_identity_hash="b"*64)
+    with pytest.raises(ValueError,match="identity|predecessor"):
+        forged.terminal("SUCCESS",store=ledger)
+
 def test_in_memory_activation_cannot_affect_durable_denominator(tmp_path):
     ledger=store(tmp_path,"campaign-memory")
     intent=LaunchLifecycle.begin("attempt-1").reserve("run-1","gameplay-1","nonce-1",authorization=auth(tmp_path,"attempt-1"),store=ledger)

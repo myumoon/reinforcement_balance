@@ -40,6 +40,18 @@ def test_audit_rejects_noncanonical_expected_even_when_actual_matches(tmp_path):
     with pytest.raises(AuditError,match="canonical target profile"):
         audit_target(expected,copy.deepcopy(expected),evidence,attempt_id="attempt-1")
 
+@pytest.mark.parametrize(("section","field","value"), [
+    ("build","build_id","different-build"),
+    ("progression","save_artifact_hash","f"*64),
+    ("hardware","profile_id","different-hardware"),
+])
+def test_measured_identity_is_bound_to_canonical_profile(tmp_path,section,field,value):
+    expected,evidence=resolved(tmp_path)
+    expected[section][field]=value
+    actual=copy.deepcopy(expected)
+    with pytest.raises(AuditError,match="canonical target profile"):
+        audit_target(expected,actual,evidence,attempt_id="attempt-1")
+
 def test_placeholder_or_missing_attestation_never_passes(tmp_path):
     template=load_target_profile().to_wire(); _,evidence=resolved(tmp_path)
     with pytest.raises(AuditError): audit_target(template,template,evidence,attempt_id="attempt-1")

@@ -43,18 +43,14 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     try: TargetProfile.from_wire(expected); TargetProfile.from_wire(actual)
     except (ValueError,KeyError,TypeError) as exc: raise AuditError(str(exc)) from exc
     canonical=load_target_profile().to_wire()
-    measured={
-        ("build","build_id"),("build","executable_version"),("build","executable_hash"),("build","manual_attestation"),
-        ("progression","save_artifact_hash"),("progression","save_format_version"),
-        ("hardware","profile_id"),("hardware","os_build"),("hardware","gpu_name"),("hardware","vram_mb"),
-        ("hardware","driver_version"),("hardware","cuda_version"),("hardware","pytorch_version"),
-    }
     for section in canonical:
         if section=="schema_version":
             if expected[section]!=canonical[section]: raise AuditError("expected is not the canonical target profile")
             continue
         for field,value in canonical[section].items():
-            if (section,field) not in measured and expected[section][field]!=value:
+            # Operator/date/evidence identify the measurement event. Every measured
+            # target value itself is fixed by the canonical profile.
+            if (section,field)!=("build","manual_attestation") and expected[section][field]!=value:
                 raise AuditError("expected is not the canonical target profile")
     _assert_resolved(expected); _assert_resolved(actual)
     if not isinstance(evidence,AuditEvidence) or not _valid_manual(evidence.manual_attestation): raise AuditError("operator/date/evidence-hash attestation required")

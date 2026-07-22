@@ -198,6 +198,7 @@ class LaunchIntentStore:
             prior=latest.get(record.attempt_id)
             if prior is None and record.state is not LaunchState.LAUNCH_INTENT: raise ValueError("durable lifecycle must begin with launch intent")
             if prior is not None and record.state not in allowed.get(prior.state,set()): raise ValueError("invalid durable launch transition")
+            if prior is not None and record.reserved_identity != prior.reserved_identity: raise ValueError("reserved identity changed during durable transition")
             latest[record.attempt_id]=record
         return records
     def append_transition(self,previous:"LaunchLifecycle",current:"LaunchLifecycle")->None:
@@ -212,6 +213,7 @@ class LaunchIntentStore:
             records=tuple(LaunchLifecycle.from_wire(json.loads(line)) for line in before.splitlines())
             prior=next((record for record in reversed(records) if record.attempt_id==previous.attempt_id),None)
             if prior!=previous: raise ValueError("durable ledger predecessor mismatch")
+            if current.reserved_identity != previous.reserved_identity: raise ValueError("reserved identity changed during durable transition")
             try:
                 with temp.open("wb") as stream:
                     stream.write(before+canonical_json_bytes(current.to_wire())+b"\n"); stream.flush(); os.fsync(stream.fileno())
@@ -230,13 +232,14 @@ class LaunchLifecycle:
     attempt_id:str; state:LaunchState=LaunchState.PREFLIGHT; reserved_run_id:str|None=None
     gameplay_attempt_id:str|None=None; launch_nonce:str|None=None; process_ref:str|None=None
     activation_source:str|None=None; failure_reason:str|None=None; authorization_hash:str|None=None
+    target_identity_hash:str|None=None
     schema_version:str=SCHEMA_VERSION
-    _KEYS=frozenset({"schema_version","attempt_id","state","reserved_run_id","gameplay_attempt_id","launch_nonce","process_ref","activation_source","failure_reason","authorization_hash"})
+    _KEYS=frozenset({"schema_version","attempt_id","state","reserved_run_id","gameplay_attempt_id","launch_nonce","process_ref","activation_source","failure_reason","authorization_hash","target_identity_hash"})
     def __post_init__(self):
         if self.schema_version!=SCHEMA_VERSION or not isinstance(self.attempt_id,str) or not self.attempt_id: raise ValueError("invalid identity/version")
         present=lambda x:isinstance(x,str) and bool(x)
-        reserved=all(present(x) for x in (self.reserved_run_id,self.gameplay_attempt_id,self.launch_nonce,self.authorization_hash))
-        none=all(x is None for x in (self.reserved_run_id,self.gameplay_attempt_id,self.launch_nonce,self.authorization_hash))
+        reserved=all(present(x) for x in (self.reserved_run_id,self.gameplay_attempt_id,self.launch_nonce,self.authorization_hash,self.target_identity_hash))
+        none=all(x is None for x in (self.reserved_run_id,self.gameplay_attempt_id,self.launch_nonce,self.authorization_hash,self.target_identity_hash))
         if not (reserved or none): raise ValueError("reserved fields must be all present or absent")
         rules={
           LaunchState.PREFLIGHT:(False,False,False), LaunchState.PREFLIGHT_FAILED:(False,False,True),
@@ -261,7 +264,7 @@ class LaunchLifecycle:
         intent_log=store.intent_log
         if authorization.attempt_id!=self.attempt_id: raise ValueError("authorization attempt mismatch")
         auth_wire={k:getattr(authorization,k) for k in ("attempt_id","target_identity_hash","save_attempt_id","lifecycle_attempt_id","audit_hash","save_gate_hash","platform_gate_hash")}
-        reserved=replace(self,state=LaunchState.LAUNCH_INTENT,reserved_run_id=run_id,gameplay_attempt_id=gameplay_attempt_id,launch_nonce=nonce,authorization_hash=canonical_hash(auth_wire))
+        reserved=replace(self,state=LaunchState.LAUNCH_INTENT,reserved_run_id=run_id,gameplay_attempt_id=gameplay_attempt_id,launch_nonce=nonce,authorization_hash=canonical_hash(auth_wire),target_identity_hash=authorization.target_identity_hash)
         intent_log.parent.mkdir(parents=True,exist_ok=True)
         encoded=canonical_json_bytes(reserved.to_wire())+b"\n"
         temp=intent_log.with_name(intent_log.name+".tmp")
@@ -346,6 +349,9 @@ class LaunchLifecycle:
         store.append_transition(self,terminal); return terminal
     @property
     def counts_toward_outcome_denominator(self): return self.state in {LaunchState.FORMAL_RUN_ACTIVATED,LaunchState.TERMINAL}
+    @property
+    def reserved_identity(self):
+        return (self.attempt_id,self.reserved_run_id,self.gameplay_attempt_id,self.launch_nonce,self.authorization_hash,self.target_identity_hash)
     @property
     def campaign_blocked(self): return self.state is LaunchState.LAUNCH_UNCERTAIN
     @property
