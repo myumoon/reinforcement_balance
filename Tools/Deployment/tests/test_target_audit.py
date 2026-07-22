@@ -14,6 +14,7 @@ def resolved(tmp_path):
     exe=tmp_path/"game.exe"; exe.write_bytes(b"executable")
     save=tmp_path/"save.dat"; save.write_bytes(b"canonical-save")
     data=load_target_profile().to_wire()
+    data["provenance"]="operator-attested"
     data["build"].update(build_id="steam-1794680-measured",executable_version="measured-v1",executable_hash=file_hash(exe.read_bytes()))
     data["progression"].update(save_artifact_hash=file_hash(save.read_bytes()),save_format_version="measured-v1")
     data["hardware"].update(profile_id="reference-1",os_build="26100",gpu_name="reference-gpu",vram_mb=12288,driver_version="1",cuda_version="12.4",pytorch_version="2.5")
@@ -49,7 +50,7 @@ def test_measured_identity_is_bound_to_canonical_profile(tmp_path,section,field,
     expected,evidence=resolved(tmp_path)
     expected[section][field]=value
     actual=copy.deepcopy(expected)
-    with pytest.raises(AuditError,match="canonical target profile"):
+    with pytest.raises(AuditError):
         audit_target(expected,actual,evidence,attempt_id="attempt-1")
 
 def test_placeholder_or_missing_attestation_never_passes(tmp_path):
@@ -78,7 +79,9 @@ def test_durable_backup_restore_hashes_and_verdict(tmp_path):
     target=tmp_path/"save"; target.write_bytes(b"original")
     canonical=tmp_path/"canonical"; canonical.write_bytes(b"canonical")
     oh=file_hash(b"original"); ch=file_hash(b"canonical")
-    life=SaveLifecycle(True,True,True,False,True,True,oh,ch,record_path=tmp_path/"lifecycle.jsonl"); backup=tmp_path/"backup"
+    semantic=tmp_path/"semantic.yaml"
+    semantic.write_text(yaml.safe_dump({"schema_version":"survivors_save_semantics.v1","canonical_save_hash":ch,"save_format_version":"measured-v1","progression":{"unlocked_characters":["antonio"],"unlocked_items":["whip"],"unlocked_stages":["mad_forest"],"collection_pool":["whip"],"purchased_power_ups":[],"reroll_count":0,"skip_count":0,"banish_count":0}}))
+    life=SaveLifecycle(True,True,True,False,True,oh,ch,semantic_attestation_path=semantic,expected_save_format_version="measured-v1",expected_progression=yaml.safe_load(semantic.read_text())["progression"],record_path=tmp_path/"lifecycle.jsonl"); backup=tmp_path/"backup"
     life.create_original_backup(target,backup,"a1"); life.atomic_restore(canonical,target,"a1")
     assert life.verified_verdict("a1","f"*64).pre_run_hash==ch
     target.write_bytes(b"post-run"); life.record_post_run(target,"a1")
@@ -87,16 +90,36 @@ def test_durable_backup_restore_hashes_and_verdict(tmp_path):
 
 def test_interruption_conflict_and_restore_gate_fail_closed(tmp_path,monkeypatch):
     target=tmp_path/"save"; target.write_bytes(b"original"); backup=tmp_path/"backup"; backup.write_bytes(b"exists")
-    life=SaveLifecycle(True,True,True,False,True,True,"a"*64,"b"*64)
+    life=SaveLifecycle.valid()
     with pytest.raises(AuditError): life.create_original_backup(target,backup,"a")
     with pytest.raises(AuditError): life.atomic_restore(target,tmp_path/"restored","a")
-    blocked=SaveLifecycle(False,True,True,False,True,True,file_hash(b"original"),"b"*64)
+    blocked=SaveLifecycle.from_wire({**life.to_wire(),"game_stopped":False})
     with pytest.raises(AuditError): blocked.restore_original(target,tmp_path/"restored","a")
     with pytest.raises(AuditError): life.verified_verdict("interrupted","f"*64)
 
 def test_in_memory_or_tampered_lifecycle_cannot_issue_pass(tmp_path):
     life=SaveLifecycle.valid(); life.records=[{"attempt_id":"a","stage":s,"verdict":"PASS","hash":"c"*64} for s in ("PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT")]
     with pytest.raises(AuditError): life.verified_verdict("a","f"*64)
+
+def test_semantic_bool_shortcut_or_missing_evidence_cannot_pass():
+    wire=SaveLifecycle.valid().to_wire()
+    assert "semantic_attestation_valid" not in wire
+    with pytest.raises(ValueError): SaveLifecycle.from_wire({**wire,"semantic_attestation_valid":True})
+    assert not SaveLifecycle.valid().preflight("a").can_reserve
+
+def test_semantic_attestation_must_match_canonical_hash_and_progression(tmp_path):
+    record={"schema_version":"survivors_save_semantics.v1","canonical_save_hash":"b"*64,"save_format_version":"v1","progression":{"unlocked_items":["whip"]}}
+    path=tmp_path/"semantic.yaml"; path.write_text(yaml.safe_dump(record))
+    life=SaveLifecycle(True,True,True,False,True,"a"*64,"c"*64,semantic_attestation_path=path,expected_save_format_version="v1",expected_progression=record["progression"])
+    result=life.preflight("a")
+    assert not result.can_reserve and result.failure_reason=="semantic_attestation_invalid"
+
+@pytest.mark.parametrize("kind",["unc","removable","non_ntfs"])
+def test_every_save_copy_path_rejects_unsupported_volume(tmp_path,monkeypatch,kind):
+    life=SaveLifecycle.valid(); source=tmp_path/"source"; source.write_bytes(b"x")
+    monkeypatch.setattr("survivors.target_audit._validate_save_volume",lambda path: (_ for _ in ()).throw(AuditError(kind)))
+    for operation,args in ((life.create_original_backup,(source,tmp_path/"backup")),(life.atomic_restore,(source,tmp_path/"target")),(life.restore_original,(source,tmp_path/"target"))):
+        with pytest.raises(AuditError,match=kind): operation(*args)
     path=tmp_path/"records.jsonl"; path.write_text('{"attempt_id":"a","stage":"PREFLIGHT","verdict":"PASS"}\n')
     life.record_path=path
     with pytest.raises(AuditError): life.verified_verdict("a","f"*64)

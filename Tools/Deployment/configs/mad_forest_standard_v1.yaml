@@ -1,4 +1,5 @@
 schema_version: survivors_target.v1
+provenance: test-fixture
 base:
   platform: windows_win64
   window_mode: borderless
@@ -10,8 +11,8 @@ base:
   success_timer_seconds: 1800
   post_timer_event_required: true
 build:
-  build_id: steam-1794680-measured
-  executable_version: measured-v1
+  build_id: TEST_FIXTURE_ONLY
+  executable_version: TEST_FIXTURE_ONLY
   executable_hash: a5698d0b8cb6d1340f160c8426969d46b0d2e5627ef0b43c477cb9e25cb3424a
   distribution: steam
   app_id: '1794680'
@@ -20,7 +21,7 @@ build:
   manual_attestation: {operator: MANUAL_ATTESTATION_REQUIRED, date: MANUAL_ATTESTATION_REQUIRED, evidence_hash: MANUAL_ATTESTATION_REQUIRED}
 progression:
   save_artifact_hash: 75afe43849b5bf6ac26cde0183b0d6a357c56f5d07106e07e24db4bf98cf2002
-  save_format_version: measured-v1
+  save_format_version: TEST_FIXTURE_ONLY
   unlocked_characters: [antonio]
   unlocked_items: [whip]
   unlocked_stages: [mad_forest]

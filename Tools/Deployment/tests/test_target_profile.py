@@ -8,6 +8,7 @@ from reinbalance_survivors_contracts.canonical_json import canonical_hash
 
 def test_profile_identity_and_unknown_fields():
     profile = load_target_profile()
+    assert profile.provenance == "test-fixture"
     assert profile.target_hash == TargetProfile.from_wire(profile.to_wire()).target_hash
     data = profile.to_wire(); data["unknown"] = 1
     with pytest.raises(ValueError): TargetProfile.from_wire(data)

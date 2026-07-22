@@ -46,9 +46,9 @@ class SuccessObservation:
 
 @dataclass(frozen=True)
 class TargetProfile:
-    sections: Mapping[str,Mapping[str,Any]]; schema_version:str=VERSION
+    sections: Mapping[str,Mapping[str,Any]]; schema_version:str=VERSION; provenance:str="test-fixture"
     def __post_init__(self):
-        if self.schema_version!=VERSION or set(self.sections)!=set(SECTIONS): raise ValueError("unknown/missing target profile section")
+        if self.schema_version!=VERSION or self.provenance not in {"test-fixture","operator-attested"} or set(self.sections)!=set(SECTIONS): raise ValueError("unknown/missing target profile section")
         for name,keys in SECTIONS.items():
             if set(self.sections[name])!=keys: raise ValueError(f"unknown/missing {name} fields")
         base=self.sections["base"]
@@ -66,7 +66,7 @@ class TargetProfile:
         if self.sections["choice_taxonomy"]["candidate_vocabulary_hash"]!=canonical_hash(vocab): raise ValueError("candidate vocabulary hash mismatch")
         inp=self.sections["input"]
         if inp["key_bindings"]!={"up":"W","down":"S","left":"A","right":"D"} or (inp["physics_hz"],inp["frame_skip"],inp["decision_hz"])!=(60,4,15): raise ValueError("invalid input contract")
-    def to_wire(self): return {"schema_version":self.schema_version,**copy.deepcopy(dict(self.sections))}
+    def to_wire(self): return {"schema_version":self.schema_version,"provenance":self.provenance,**copy.deepcopy(dict(self.sections))}
     @property
     def target_hash(self): return canonical_hash(self.to_wire())
     def success_state(self,timer_seconds:int,post_timer_event:SuccessObservation|None,run_id:str|None=None)->str:
@@ -76,8 +76,8 @@ class TargetProfile:
         return "TARGET_REACHED_CONFIRMED" if confirmed else "TARGET_REACHED_PENDING_TRANSITION"
     @classmethod
     def from_wire(cls,data:Mapping[str,Any]):
-        if set(data)!={"schema_version",*SECTIONS}: raise ValueError("unknown/missing target fields")
-        return cls({k:copy.deepcopy(data[k]) for k in SECTIONS},data["schema_version"])
+        if set(data)!={"schema_version","provenance",*SECTIONS}: raise ValueError("unknown/missing target fields")
+        return cls({k:copy.deepcopy(data[k]) for k in SECTIONS},data["schema_version"],data["provenance"])
 
 def load_target_profile(path:Path=CONFIG):
     with path.open(encoding="utf-8") as f:return TargetProfile.from_wire(yaml.safe_load(f))

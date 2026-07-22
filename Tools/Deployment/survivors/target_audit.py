@@ -5,7 +5,7 @@ from typing import Any,Mapping
 import os, re, shutil, tempfile, yaml
 from datetime import datetime, timezone
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
-from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict, SaveVerdict, _verify_audit_evidence, _finalize_save_execution
+from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict, SaveVerdict, _verify_audit_evidence, _finalize_save_execution, _validate_store_volume
 from .target_profile import TargetProfile
 from .target_profile import load_target_profile
 
@@ -43,14 +43,16 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     try: TargetProfile.from_wire(expected); TargetProfile.from_wire(actual)
     except (ValueError,KeyError,TypeError) as exc: raise AuditError(str(exc)) from exc
     canonical=load_target_profile().to_wire()
+    if expected["provenance"]!="operator-attested" or actual["provenance"]!="operator-attested": raise AuditError("real target requires an operator-attested canonical profile")
     for section in canonical:
-        if section=="schema_version":
-            if expected[section]!=canonical[section]: raise AuditError("expected is not the canonical target profile")
+        if section in {"schema_version","provenance"}:
+            if section=="schema_version" and expected[section]!=canonical[section]: raise AuditError("expected is not the canonical target profile")
             continue
         for field,value in canonical[section].items():
             # Operator/date/evidence identify the measurement event. Every measured
             # target value itself is fixed by the canonical profile.
-            if (section,field)!=("build","manual_attestation") and expected[section][field]!=value:
+            measured={("build","build_id"),("build","executable_version"),("build","executable_hash"),("build","manual_attestation"),("progression","save_artifact_hash"),("progression","save_format_version"),*(('hardware',k) for k in ("os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version"))}
+            if (section,field) not in measured and expected[section][field]!=value:
                 raise AuditError("expected is not the canonical target profile")
     _assert_resolved(expected); _assert_resolved(actual)
     if not isinstance(evidence,AuditEvidence) or not _valid_manual(evidence.manual_attestation): raise AuditError("operator/date/evidence-hash attestation required")
@@ -70,7 +72,7 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     if executable["content_hash"]!=actual["build"]["executable_hash"] or save["content_hash"]!=actual["progression"]["save_artifact_hash"]: raise AuditError("observed file identity mismatch")
     differences=[]
     for section in expected:
-        if section=="schema_version":continue
+        if section in {"schema_version","provenance"}:continue
         for field,value in expected[section].items():
             observed=actual[section][field]
             if observed!=value:differences.append(f"{section}.{field}")
@@ -78,7 +80,7 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     observed_evidence={"executable":executable,"save":save,"attestation":dict(evidence.manual_attestation),"observed_profile_hash":canonical_hash(actual)}
     evidence_bytes=canonical_json_bytes(observed_evidence)
     evidence_hash=canonical_hash({"bytes_hex":evidence_bytes.hex()})
-    return _verify_audit_evidence(attempt_id=attempt_id,target_identity_hash=canonical_hash(canonical),evidence_bytes=evidence_bytes,expected_evidence_hash=evidence_hash)
+    return _verify_audit_evidence(attempt_id=attempt_id,target_identity_hash=canonical_hash(expected),evidence_bytes=evidence_bytes,expected_evidence_hash=evidence_hash)
 
 @dataclass(frozen=True)
 class PreflightResult:
@@ -87,27 +89,35 @@ class PreflightResult:
 @dataclass
 class SaveLifecycle:
     game_stopped:bool; launcher_stopped:bool; cloud_sync_disabled:bool|None; restore_conflict:bool
-    canonical_hash_matches:bool; semantic_attestation_valid:bool; original_backup_hash:str; canonical_save_hash:str
+    canonical_hash_matches:bool; original_backup_hash:str; canonical_save_hash:str
+    semantic_attestation_path:Path|None=None; expected_save_format_version:str=""; expected_progression:Mapping[str,Any]=field(default_factory=dict)
     records:list[Mapping[str,Any]]=field(default_factory=list,repr=False)
     record_path:Path|None=field(default=None,repr=False)
     canonical_path:Path|None=field(default=None,repr=False)
     backup_path:Path|None=field(default=None,repr=False)
-    _KEYS=frozenset({"game_stopped","launcher_stopped","cloud_sync_disabled","restore_conflict","canonical_hash_matches","semantic_attestation_valid","original_backup_hash","canonical_save_hash"})
+    _KEYS=frozenset({"game_stopped","launcher_stopped","cloud_sync_disabled","restore_conflict","canonical_hash_matches","original_backup_hash","canonical_save_hash","semantic_attestation_path","expected_save_format_version","expected_progression"})
     @classmethod
-    def valid(cls):return cls(True,True,True,False,True,True,"a"*64,"c"*64)
-    def to_wire(self):return {k:getattr(self,k) for k in self._KEYS}
+    def valid(cls):return cls(True,True,True,False,True,"a"*64,"c"*64)
+    def to_wire(self):return {k:(str(getattr(self,k)) if k=="semantic_attestation_path" and getattr(self,k) is not None else getattr(self,k)) for k in self._KEYS}
     @classmethod
     def from_wire(cls,data:Mapping[str,Any]):
         if not isinstance(data,Mapping) or set(data)!=cls._KEYS:raise ValueError("unknown/missing save lifecycle field")
-        obj=cls(**data)
-        if any(type(getattr(obj,k)) is not bool for k in ("game_stopped","launcher_stopped","restore_conflict","canonical_hash_matches","semantic_attestation_valid")) or obj.cloud_sync_disabled is not None and type(obj.cloud_sync_disabled) is not bool: raise ValueError("invalid save gate type")
+        values=dict(data); values["semantic_attestation_path"]=Path(values["semantic_attestation_path"]) if values["semantic_attestation_path"] is not None else None
+        obj=cls(**values)
+        if any(type(getattr(obj,k)) is not bool for k in ("game_stopped","launcher_stopped","restore_conflict","canonical_hash_matches")) or obj.cloud_sync_disabled is not None and type(obj.cloud_sync_disabled) is not bool: raise ValueError("invalid save gate type")
         if not all(isinstance(getattr(obj,k),str) and _SHA256.fullmatch(getattr(obj,k)) for k in ("original_backup_hash","canonical_save_hash")): raise ValueError("invalid save hash")
         return obj
     def preflight(self,attempt_id:str)->PreflightResult:
-        checks={"game_process_running":self.game_stopped is not True,"launcher_running":self.launcher_stopped is not True,"cloud_sync_unknown_or_enabled":self.cloud_sync_disabled is not True,"restore_conflict":self.restore_conflict is not False,"canonical_hash_mismatch":self.canonical_hash_matches is not True,"semantic_attestation_invalid":self.semantic_attestation_valid is not True}
+        checks={"game_process_running":self.game_stopped is not True,"launcher_running":self.launcher_stopped is not True,"cloud_sync_unknown_or_enabled":self.cloud_sync_disabled is not True,"restore_conflict":self.restore_conflict is not False,"canonical_hash_mismatch":self.canonical_hash_matches is not True,"semantic_attestation_invalid":not self._semantic_evidence_valid()}
         failed=next((k for k,v in checks.items() if v),None)
         self._record(attempt_id,"PREFLIGHT",None,failed or "PASS")
         return PreflightResult(attempt_id,failed is None,failed)
+    def _semantic_evidence_valid(self)->bool:
+        try:
+            if self.semantic_attestation_path is None or not self.semantic_attestation_path.is_file(): return False
+            record=yaml.safe_load(self.semantic_attestation_path.read_text(encoding="utf-8"))
+            return isinstance(record,Mapping) and set(record)=={"schema_version","canonical_save_hash","save_format_version","progression"} and record["schema_version"]=="survivors_save_semantics.v1" and record["canonical_save_hash"]==self.canonical_save_hash and record["save_format_version"]==self.expected_save_format_version and record["progression"]==self.expected_progression
+        except (OSError,UnicodeDecodeError,yaml.YAMLError): return False
     def _record(self,attempt_id,stage,content_hash,verdict):
         previous=self.records[-1]["step_hash"] if self.records else None
         body={"attempt_id":attempt_id,"timestamp":datetime.now(timezone.utc).isoformat(),"stage":stage,"content_hash":content_hash,"result":verdict,"previous_step_hash":previous}
@@ -130,6 +140,7 @@ class SaveLifecycle:
         post=_file_hash(target); self._record(attempt_id,"POST_RUN",post,"PASS")
         return {"pre_run_hash":self.canonical_save_hash,"post_run_hash":post,"rng_control":"uncontrolled","lifecycle_hash":self.lifecycle_hash}
     def create_original_backup(self,target:Path,backup:Path,attempt_id="run")->str:
+        _validate_save_volume(target); _validate_save_volume(backup)
         if not self.preflight(attempt_id).can_reserve: raise AuditError("backup gate failed")
         if backup.exists(): raise AuditError("original backup already exists")
         self._atomic_copy(target,backup,_file_hash(target))
@@ -139,11 +150,13 @@ class SaveLifecycle:
         self.backup_path=backup.resolve()
         return actual
     def restore_original(self,backup:Path,target:Path,attempt_id="run")->None:
+        _validate_save_volume(backup); _validate_save_volume(target)
         if not self.preflight(attempt_id).can_reserve: raise AuditError("original restore gate failed")
         self._atomic_copy(backup,target,self.original_backup_hash)
         if _file_hash(target)!=self.original_backup_hash: raise AuditError("original restore verification failed")
         self._record(attempt_id,"ORIGINAL_RESTORE",self.original_backup_hash,"PASS")
     def atomic_restore(self,canonical:Path,target:Path,attempt_id="run")->None:
+        _validate_save_volume(canonical); _validate_save_volume(target)
         if not self.preflight(attempt_id).can_reserve:raise AuditError("restore gate failed")
         expected=_file_hash(canonical)
         if expected!=self.canonical_save_hash:raise AuditError("canonical bytes hash mismatch")
@@ -170,3 +183,7 @@ class SaveLifecycle:
                 finally:os.close(dfd)
         finally:
             if temp.exists():temp.unlink()
+
+def _validate_save_volume(path:Path)->None:
+    try:_validate_store_volume(path.resolve() if not str(path).startswith(("//","\\\\")) else path)
+    except ValueError as exc: raise AuditError(str(exc)) from exc
