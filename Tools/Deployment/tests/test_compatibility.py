@@ -14,7 +14,7 @@ def test_invalidation_matrix(fields,expected):assert set(invalidation_for(fields
 def test_unknown_difference_and_missing_audit_parent_fail_closed():
     with pytest.raises(ValueError):invalidation_for({"future_field"})
     with pytest.raises(ValueError):validate_manifest({})
-    evidence=b"audit"; verdict=_verify_audit_evidence(attempt_id="a",target_identity_hash="a"*64,evidence_bytes=evidence,expected_evidence_hash=canonical_hash({"bytes_hex":evidence.hex()}))
+    evidence=b"audit"; verdict=_verify_audit_evidence(attempt_id="a",target_identity_hash="a"*64,canonical_save_hash="b"*64,save_semantics_hash="c"*64,evidence_bytes=evidence,expected_evidence_hash=canonical_hash({"bytes_hex":evidence.hex()}))
     validate_manifest({"schema_version":"artifact_manifest.v1","artifact_kind":"capture","target_audit_hash":verdict.canonical_hash,"target_audit_verdict":verdict})
     with pytest.raises(ValueError): validate_manifest({"schema_version":"artifact_manifest.v1","artifact_kind":"capture","target_audit_hash":"a"*64,"target_audit_verdict":verdict})
     with pytest.raises(ValueError): validate_manifest({"schema_version":"artifact_manifest.v1","artifact_kind":"capture","target_audit_hash":"a"*64,"target_audit_verdict":{"status":"PASS"}})

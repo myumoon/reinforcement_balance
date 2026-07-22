@@ -49,43 +49,43 @@ class PlatformGate:
 
 @dataclass(frozen=True)
 class AuditVerdict:
-    attempt_id:str; target_identity_hash:str; evidence_hash:str; canonical_hash:str; status:str="PASS"
+    attempt_id:str; target_identity_hash:str; canonical_save_hash:str; save_semantics_hash:str; evidence_hash:str; canonical_hash:str; status:str="PASS"
     _seal:object=None
     def __post_init__(self):
-        payload={"schema_version":"target_audit.v1","attempt_id":self.attempt_id,"target_identity_hash":self.target_identity_hash,"evidence_hash":self.evidence_hash,"status":self.status}
-        if self._seal is not _VERDICT_SEAL or not self.attempt_id or self.status!="PASS" or not all(isinstance(v,str) and _SHA256.fullmatch(v) for v in (self.target_identity_hash,self.evidence_hash,self.canonical_hash)) or self.canonical_hash!=canonical_hash(payload):
+        payload={"schema_version":"target_audit.v1","attempt_id":self.attempt_id,"target_identity_hash":self.target_identity_hash,"canonical_save_hash":self.canonical_save_hash,"save_semantics_hash":self.save_semantics_hash,"evidence_hash":self.evidence_hash,"status":self.status}
+        if self._seal is not _VERDICT_SEAL or not self.attempt_id or self.status!="PASS" or not all(isinstance(v,str) and _SHA256.fullmatch(v) for v in (self.target_identity_hash,self.canonical_save_hash,self.save_semantics_hash,self.evidence_hash,self.canonical_hash)) or self.canonical_hash!=canonical_hash(payload):
             raise ValueError("unverified audit verdict")
     def to_wire(self):
         return {"schema_version":"target_audit.v1","attempt_id":self.attempt_id,"target_identity_hash":self.target_identity_hash,"evidence_hash":self.evidence_hash,"status":self.status,"canonical_hash":self.canonical_hash}
 
-def _verify_audit_evidence(*,attempt_id:str,target_identity_hash:str,evidence_bytes:bytes,expected_evidence_hash:str)->AuditVerdict:
+def _verify_audit_evidence(*,attempt_id:str,target_identity_hash:str,canonical_save_hash:str,save_semantics_hash:str,evidence_bytes:bytes,expected_evidence_hash:str)->AuditVerdict:
     if not isinstance(evidence_bytes,bytes): raise ValueError("audit evidence bytes required")
     actual=canonical_hash({"bytes_hex":evidence_bytes.hex()})
     if actual!=expected_evidence_hash: raise ValueError("audit evidence hash mismatch")
-    payload={"schema_version":"target_audit.v1","attempt_id":attempt_id,"target_identity_hash":target_identity_hash,"evidence_hash":actual,"status":"PASS"}
-    return AuditVerdict(attempt_id,target_identity_hash,actual,canonical_hash(payload),"PASS",_VERDICT_SEAL)
+    payload={"schema_version":"target_audit.v1","attempt_id":attempt_id,"target_identity_hash":target_identity_hash,"canonical_save_hash":canonical_save_hash,"save_semantics_hash":save_semantics_hash,"evidence_hash":actual,"status":"PASS"}
+    return AuditVerdict(attempt_id,target_identity_hash,canonical_save_hash,save_semantics_hash,actual,canonical_hash(payload),"PASS",_VERDICT_SEAL)
 
 @dataclass(frozen=True)
 class SaveVerdict:
-    attempt_id:str; target_identity_hash:str; lifecycle_attempt_id:str; lifecycle_hash:str; pre_run_hash:str; canonical_hash:str
+    attempt_id:str; target_identity_hash:str; save_semantics_hash:str; lifecycle_attempt_id:str; lifecycle_hash:str; pre_run_hash:str; canonical_hash:str
     lifecycle_record_path:str=""; canonical_save_path:str=""; original_backup_path:str=""
     _seal:object=None
     def __post_init__(self):
-        payload={"schema_version":"save_lifecycle.v1","attempt_id":self.attempt_id,"target_identity_hash":self.target_identity_hash,"lifecycle_attempt_id":self.lifecycle_attempt_id,"lifecycle_hash":self.lifecycle_hash,"pre_run_hash":self.pre_run_hash,"status":"PASS"}
-        if self._seal is not _VERDICT_SEAL or not self.attempt_id or self.lifecycle_attempt_id!=self.attempt_id or not all(isinstance(v,str) and _SHA256.fullmatch(v) for v in (self.target_identity_hash,self.lifecycle_hash,self.pre_run_hash,self.canonical_hash)) or self.canonical_hash!=canonical_hash(payload): raise ValueError("unverified save verdict")
+        payload={"schema_version":"save_lifecycle.v1","attempt_id":self.attempt_id,"target_identity_hash":self.target_identity_hash,"save_semantics_hash":self.save_semantics_hash,"lifecycle_attempt_id":self.lifecycle_attempt_id,"lifecycle_hash":self.lifecycle_hash,"pre_run_hash":self.pre_run_hash,"status":"PASS"}
+        if self._seal is not _VERDICT_SEAL or not self.attempt_id or self.lifecycle_attempt_id!=self.attempt_id or not all(isinstance(v,str) and _SHA256.fullmatch(v) for v in (self.target_identity_hash,self.save_semantics_hash,self.lifecycle_hash,self.pre_run_hash,self.canonical_hash)) or self.canonical_hash!=canonical_hash(payload): raise ValueError("unverified save verdict")
 
 def _read_and_verify_save_evidence(save:"SaveVerdict", *, require_fixed_paths:bool=False)->None:
     paths=tuple(Path(value) for value in (save.lifecycle_record_path,save.canonical_save_path,save.original_backup_path))
     if any(not value or not path.is_absolute() or not path.is_file() for value,path in zip((save.lifecycle_record_path,save.canonical_save_path,save.original_backup_path),paths)):
         raise ValueError("complete on-disk save evidence required")
+    for path in paths:
+        _validate_store_volume(path)
     if require_fixed_paths:
         try: config=json.loads(LAUNCH_GATE_CONFIG_PATH.read_text(encoding="utf-8"))
         except (OSError,UnicodeDecodeError,json.JSONDecodeError) as exc: raise ValueError("fixed launch gate config unavailable") from exc
         if not isinstance(config,dict) or set(config)!={"schema_version","lifecycle_root","canonical_save_path","original_backup_path"} or config["schema_version"]!="launch_gate.v1": raise ValueError("invalid fixed launch gate config")
         expected=(Path(config["lifecycle_root"]).resolve()/(save.attempt_id+".jsonl"),Path(config["canonical_save_path"]).resolve(),Path(config["original_backup_path"]).resolve())
         if paths!=expected: raise ValueError("save evidence is not at fixed gate paths")
-        for path in paths:
-            _validate_store_volume(path)
     try: records=tuple(json.loads(line) for line in paths[0].read_bytes().splitlines())
     except (OSError,UnicodeDecodeError,json.JSONDecodeError) as exc: raise ValueError("invalid lifecycle evidence") from exc
     previous=None
@@ -100,8 +100,10 @@ def _read_and_verify_save_evidence(save:"SaveVerdict", *, require_fixed_paths:bo
     backup_hash=next((r.get("content_hash") for r in records if r.get("stage")=="ORIGINAL_BACKUP"),None)
     if backup_hash is None or canonical_hash({"bytes_hex":paths[2].read_bytes().hex()})!=backup_hash: raise ValueError("original backup evidence mismatch")
 
-def _finalize_save_execution(*,records:tuple[Mapping[str,Any],...],attempt_id:str,target_identity_hash:str,expected_pre_run_hash:str,lifecycle_record_path:Path,canonical_save_path:Path,original_backup_path:Path)->SaveVerdict:
+def _finalize_save_execution(*,records:tuple[Mapping[str,Any],...],audit:AuditVerdict,expected_pre_run_hash:str,save_semantics_hash:str,lifecycle_record_path:Path,canonical_save_path:Path,original_backup_path:Path)->SaveVerdict:
     """Mint only from the live save executor; persisted JSON is evidence, not authority."""
+    if not isinstance(audit,AuditVerdict) or expected_pre_run_hash!=audit.canonical_save_hash or save_semantics_hash!=audit.save_semantics_hash: raise ValueError("save lifecycle is not bound to audited canonical profile")
+    attempt_id=audit.attempt_id
     required=("PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT")
     stages=tuple(r.get("stage") for r in records)
     cursor=0
@@ -117,8 +119,8 @@ def _finalize_save_execution(*,records:tuple[Mapping[str,Any],...],attempt_id:st
         previous=record["step_hash"]
     if records[-1].get("content_hash")!=expected_pre_run_hash: raise ValueError("pre-run hash mismatch")
     lifecycle_hash=canonical_hash(list(records))
-    payload={"schema_version":"save_lifecycle.v1","attempt_id":attempt_id,"target_identity_hash":target_identity_hash,"lifecycle_attempt_id":attempt_id,"lifecycle_hash":lifecycle_hash,"pre_run_hash":expected_pre_run_hash,"status":"PASS"}
-    verdict=SaveVerdict(attempt_id,target_identity_hash,attempt_id,lifecycle_hash,expected_pre_run_hash,canonical_hash(payload),str(lifecycle_record_path.resolve()),str(canonical_save_path.resolve()),str(original_backup_path.resolve()),_VERDICT_SEAL)
+    payload={"schema_version":"save_lifecycle.v1","attempt_id":attempt_id,"target_identity_hash":audit.target_identity_hash,"save_semantics_hash":save_semantics_hash,"lifecycle_attempt_id":attempt_id,"lifecycle_hash":lifecycle_hash,"pre_run_hash":expected_pre_run_hash,"status":"PASS"}
+    verdict=SaveVerdict(attempt_id,audit.target_identity_hash,save_semantics_hash,attempt_id,lifecycle_hash,expected_pre_run_hash,canonical_hash(payload),str(lifecycle_record_path.resolve()),str(canonical_save_path.resolve()),str(original_backup_path.resolve()),_VERDICT_SEAL)
     _read_and_verify_save_evidence(verdict)
     return verdict
 
@@ -139,7 +141,7 @@ class LaunchAuthorization:
     @classmethod
     def issue(cls, audit:AuditVerdict, platform:PlatformVerdict, save:SaveVerdict):
         if not isinstance(audit,AuditVerdict) or not isinstance(platform,PlatformVerdict) or not isinstance(save,SaveVerdict): raise ValueError("verified typed verdicts required")
-        if len({audit.attempt_id,platform.attempt_id,save.attempt_id,save.lifecycle_attempt_id})!=1 or len({audit.target_identity_hash,platform.target_identity_hash,save.target_identity_hash})!=1: raise ValueError("authorization identity binding mismatch")
+        if len({audit.attempt_id,platform.attempt_id,save.attempt_id,save.lifecycle_attempt_id})!=1 or len({audit.target_identity_hash,platform.target_identity_hash,save.target_identity_hash})!=1 or save.pre_run_hash!=audit.canonical_save_hash or save.save_semantics_hash!=audit.save_semantics_hash: raise ValueError("authorization identity binding mismatch")
         _read_and_verify_save_evidence(save,require_fixed_paths=True)
         return cls(audit.attempt_id,audit.target_identity_hash,save.attempt_id,save.lifecycle_attempt_id,audit.canonical_hash,save.canonical_hash,platform.canonical_hash,_AUTH_SEAL)
 

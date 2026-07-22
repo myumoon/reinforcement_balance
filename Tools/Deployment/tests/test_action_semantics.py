@@ -45,3 +45,5 @@ def test_cpp_apply_action_is_parsed_and_drift_is_blocking(tmp_path):
     drift=tmp_path/"SurvivorsGameLogic.cpp"
     drift.write_text(real.read_text().replace("case 2: MoveDir=FVector2D(1.f,0.f)","case 2: MoveDir=FVector2D(-1.f,0.f)"))
     with pytest.raises(ValueError): validate_cpp_source(contract,drift)
+    drift.write_text(real.read_text().replace("case 2: MoveDir=FVector2D(1.f,0.f)","case 2: MoveDir=FVector2D(1.5f,0.f)"))
+    with pytest.raises(ValueError): validate_cpp_source(contract,drift)

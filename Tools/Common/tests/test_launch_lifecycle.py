@@ -15,6 +15,10 @@ from reinbalance_survivors_contracts.launch_lifecycle import (
 )
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 
+def audit_verdict(attempt,target,save_hash):
+    evidence=b"audited"; eh=canonical_hash({"bytes_hex":evidence.hex()})
+    return _verify_audit_evidence(attempt_id=attempt,target_identity_hash=target,canonical_save_hash=save_hash,save_semantics_hash="c"*64,evidence_bytes=evidence,expected_evidence_hash=eh)
+
 def save_verdict(tmp_path,attempt,target):
     records=[]; previous=None
     for stage in ("PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT"):
@@ -34,12 +38,12 @@ def save_verdict(tmp_path,attempt,target):
         body={"attempt_id":attempt,"stage":stage,"content_hash":content,"previous_step_hash":previous}
         record={**body,"step_hash":canonical_hash(body)}; records.append(record); previous=record["step_hash"]
     lifecycle.write_bytes(b"".join(canonical_json_bytes(r)+b"\n" for r in records))
-    return _finalize_save_execution(records=tuple(records),attempt_id=attempt,target_identity_hash=target,expected_pre_run_hash=pre,lifecycle_record_path=lifecycle,canonical_save_path=canonical,original_backup_path=backup)
+    return _finalize_save_execution(records=tuple(records),audit=audit_verdict(attempt,target,pre),expected_pre_run_hash=pre,save_semantics_hash="c"*64,lifecycle_record_path=lifecycle,canonical_save_path=canonical,original_backup_path=backup)
 
 def auth(tmp_path,attempt="attempt"):
     target="a"*64; evidence=b"audited"; eh=canonical_hash({"bytes_hex":evidence.hex()})
-    audit=_verify_audit_evidence(attempt_id=attempt,target_identity_hash=target,evidence_bytes=evidence,expected_evidence_hash=eh)
     save=save_verdict(tmp_path,attempt,target)
+    audit=audit_verdict(attempt,target,save.pre_run_hash)
     config=tmp_path/"launch_gate.json"
     config.write_text('{"schema_version":"launch_gate.v1","lifecycle_root":"'+str(Path(save.lifecycle_record_path).parent)+'","canonical_save_path":"'+save.canonical_save_path+'","original_backup_path":"'+save.original_backup_path+'"}')
     launch_lifecycle.LAUNCH_GATE_CONFIG_PATH=config
@@ -57,18 +61,18 @@ def test_forged_pass_mappings_and_durable_bool_cannot_authorize():
         LaunchAuthorization.issue(fake,PlatformGate(True,True,True,True,True,True,True),{"status":"PASS"},durable_commit=True)
 
 def test_evidence_and_identity_binding_are_fail_closed(tmp_path):
-    with pytest.raises(ValueError): _verify_audit_evidence(attempt_id="a",target_identity_hash="1"*64,evidence_bytes=b"actual",expected_evidence_hash="2"*64)
+    with pytest.raises(ValueError): _verify_audit_evidence(attempt_id="a",target_identity_hash="1"*64,canonical_save_hash="b"*64,save_semantics_hash="c"*64,evidence_bytes=b"actual",expected_evidence_hash="2"*64)
     a=auth(tmp_path,"a")
     b=auth(tmp_path,"b")
     with pytest.raises(ValueError):
         LaunchAuthorization.issue(
-            _verify_audit_evidence(attempt_id="a",target_identity_hash=a.target_identity_hash,evidence_bytes=b"x",expected_evidence_hash=canonical_hash({"bytes_hex":b"x".hex()})),
+            _verify_audit_evidence(attempt_id="a",target_identity_hash=a.target_identity_hash,canonical_save_hash="b"*64,save_semantics_hash="c"*64,evidence_bytes=b"x",expected_evidence_hash=canonical_hash({"bytes_hex":b"x".hex()})),
             PlatformGate(True,True,True,True,True,True,True).verified("b",b.target_identity_hash),
             save_verdict(tmp_path,"b",b.target_identity_hash))
 
 def test_handwritten_save_jsonl_has_no_verdict_path(tmp_path):
     path=tmp_path/"forged.jsonl"; path.write_text('{"attempt_id":"a","stage":"PRE_RUN_AUDIT","result":"PASS"}\n')
-    with pytest.raises(ValueError):
+    with pytest.raises((TypeError,ValueError)):
         SaveVerdict("a","f"*64,"a","c"*64,"b"*64,"d"*64)
     assert not hasattr(launch_lifecycle, "_SAVE_EXECUTION_SEAL")
     assert not hasattr(launch_lifecycle, "_mint_executed_save_verdict")
@@ -213,7 +217,7 @@ def test_forged_chain_without_real_save_lifecycle_cannot_authorize(tmp_path):
     save=save_verdict(tmp_path,"forged","a"*64)
     Path(save.canonical_save_path).write_bytes(b"tampered")
     audit_bytes=b"audited"; evidence_hash=canonical_hash({"bytes_hex":audit_bytes.hex()})
-    audit=_verify_audit_evidence(attempt_id="forged",target_identity_hash="a"*64,evidence_bytes=audit_bytes,expected_evidence_hash=evidence_hash)
+    audit=_verify_audit_evidence(attempt_id="forged",target_identity_hash="a"*64,canonical_save_hash=save.pre_run_hash,save_semantics_hash=save.save_semantics_hash,evidence_bytes=audit_bytes,expected_evidence_hash=evidence_hash)
     platform=PlatformGate(True,True,True,True,True,True,True).verified("forged","a"*64)
     with pytest.raises(ValueError, match="evidence mismatch"):
         LaunchAuthorization.issue(audit,platform,save)
@@ -226,7 +230,7 @@ def test_authorization_rejects_save_evidence_on_unsupported_volume(tmp_path,monk
     paths=(Path(save.lifecycle_record_path),Path(save.canonical_save_path),Path(save.original_backup_path))
     audit_bytes=b"audited"
     audit=_verify_audit_evidence(
-        attempt_id=attempt,target_identity_hash=target,evidence_bytes=audit_bytes,
+        attempt_id=attempt,target_identity_hash=target,canonical_save_hash=save.pre_run_hash,save_semantics_hash=save.save_semantics_hash,evidence_bytes=audit_bytes,
         expected_evidence_hash=canonical_hash({"bytes_hex":audit_bytes.hex()}))
     platform=PlatformGate(True,True,True,True,True,True,True).verified(attempt,target)
     config=tmp_path/"launch_gate.json"

@@ -51,8 +51,8 @@ def validate_cpp_source(contract:ActionContract,path:Path)->None:
     match=re.search(r"void FSurvivorsGameLogic::ApplyAction\b.*?switch \(ActionIdx\)(.*?)\n\s*}\n\s*const float EffMS",source,re.S)
     if not match: raise ValueError("ApplyAction switch not parseable")
     number=r"-?\d+(?:\.\d*)?"
-    parsed={int(i):(int(float(x)),int(float(y))) for i,x,y in re.findall(rf"case\s+(\d+)\s*:\s*MoveDir\s*=\s*FVector2D\(({number})f,\s*({number})f\)",match.group(1))}
-    expected={row.index:row.sim_vector for row in contract.rows if row.index!=8}
+    parsed={int(i):(float(x),float(y)) for i,x,y in re.findall(rf"case\s+(\d+)\s*:\s*MoveDir\s*=\s*FVector2D\(({number})f,\s*({number})f\)",match.group(1))}
+    expected={row.index:(float(row.sim_vector[0]),float(row.sim_vector[1])) for row in contract.rows if row.index!=8}
     if parsed!=expected: raise ValueError("C++ ApplyAction displacement drift")
 
 def validate_golden_fixture(contract:ActionContract,path:Path)->None:

@@ -68,6 +68,7 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     }
     if not isinstance(manual_content,Mapping) or set(manual_content)!={"schema_version","measurements"} or manual_content.get("schema_version")!="survivors_manual_attestation.v1" or manual_content.get("measurements")!=claimed:
         raise AuditError("manual evidence content does not match attested build/hardware")
+    _validate_save_volume(evidence.save_path)
     executable=_file_evidence(evidence.executable_path); save=_file_evidence(evidence.save_path)
     if executable["content_hash"]!=actual["build"]["executable_hash"] or save["content_hash"]!=actual["progression"]["save_artifact_hash"]: raise AuditError("observed file identity mismatch")
     differences=[]
@@ -80,7 +81,8 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     observed_evidence={"executable":executable,"save":save,"attestation":dict(evidence.manual_attestation),"observed_profile_hash":canonical_hash(actual)}
     evidence_bytes=canonical_json_bytes(observed_evidence)
     evidence_hash=canonical_hash({"bytes_hex":evidence_bytes.hex()})
-    return _verify_audit_evidence(attempt_id=attempt_id,target_identity_hash=canonical_hash(expected),evidence_bytes=evidence_bytes,expected_evidence_hash=evidence_hash)
+    semantics={"canonical_save_hash":expected["progression"]["save_artifact_hash"],"save_format_version":expected["progression"]["save_format_version"],"progression":{k:v for k,v in expected["progression"].items() if k not in {"save_artifact_hash","save_format_version"}}}
+    return _verify_audit_evidence(attempt_id=attempt_id,target_identity_hash=canonical_hash(expected),canonical_save_hash=expected["progression"]["save_artifact_hash"],save_semantics_hash=canonical_hash(semantics),evidence_bytes=evidence_bytes,expected_evidence_hash=evidence_hash)
 
 @dataclass(frozen=True)
 class PreflightResult:
@@ -129,14 +131,16 @@ class SaveLifecycle:
                 stream.write(canonical_json_bytes(record)+b"\n"); stream.flush(); os.fsync(stream.fileno())
     @property
     def lifecycle_hash(self): return canonical_hash(self.records)
-    def verified_verdict(self,attempt_id:str,target_identity_hash:str)->SaveVerdict:
+    def verified_verdict(self,audit:AuditVerdict)->SaveVerdict:
         if self.record_path is None or not self.record_path.is_file(): raise AuditError("durable lifecycle evidence required")
         expected=b"".join(canonical_json_bytes(r)+b"\n" for r in self.records)
         if self.record_path.read_bytes()!=expected: raise AuditError("durable lifecycle chain mismatch")
         if self.canonical_path is None or self.backup_path is None: raise AuditError("canonical save and original backup evidence required")
-        try:return _finalize_save_execution(records=tuple(self.records),attempt_id=attempt_id,target_identity_hash=target_identity_hash,expected_pre_run_hash=self.canonical_save_hash,lifecycle_record_path=self.record_path,canonical_save_path=self.canonical_path,original_backup_path=self.backup_path)
+        semantics={"canonical_save_hash":self.canonical_save_hash,"save_format_version":self.expected_save_format_version,"progression":dict(self.expected_progression)}
+        try:return _finalize_save_execution(records=tuple(self.records),audit=audit,expected_pre_run_hash=self.canonical_save_hash,save_semantics_hash=canonical_hash(semantics),lifecycle_record_path=self.record_path,canonical_save_path=self.canonical_path,original_backup_path=self.backup_path)
         except (TypeError,ValueError) as exc: raise AuditError(str(exc)) from exc
     def record_post_run(self,target:Path,attempt_id="run"):
+        _validate_save_volume(target)
         post=_file_hash(target); self._record(attempt_id,"POST_RUN",post,"PASS")
         return {"pre_run_hash":self.canonical_save_hash,"post_run_hash":post,"rng_control":"uncontrolled","lifecycle_hash":self.lifecycle_hash}
     def create_original_backup(self,target:Path,backup:Path,attempt_id="run")->str:
