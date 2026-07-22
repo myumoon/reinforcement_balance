@@ -12,6 +12,13 @@ from .target_profile import load_target_profile
 class AuditError(ValueError):pass
 _SHA256=re.compile(r"[0-9a-f]{64}")
 _PLACEHOLDER=re.compile(r"(MANUAL|REQUIRED|PLACEHOLDER)")
+_ATTESTED_PROFILE_FIELDS=frozenset({
+    ("build","build_id"), ("build","executable_version"),
+    ("progression","save_format_version"),
+    *(("hardware",key) for key in ("os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version")),
+})
+_FILE_DERIVED_PROFILE_FIELDS=frozenset({("build","executable_hash"),("progression","save_artifact_hash")})
+_CANONICAL_EXEMPT_FIELDS=_ATTESTED_PROFILE_FIELDS|_FILE_DERIVED_PROFILE_FIELDS|frozenset({("build","manual_attestation")})
 
 def _file_hash(path:Path)->str:return canonical_hash({"bytes_hex":path.read_bytes().hex()})
 
@@ -51,23 +58,23 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
         for field,value in canonical[section].items():
             # Operator/date/evidence identify the measurement event. Every measured
             # target value itself is fixed by the canonical profile.
-            measured={("build","build_id"),("build","executable_version"),("build","executable_hash"),("build","manual_attestation"),("progression","save_artifact_hash"),("progression","save_format_version"),*(('hardware',k) for k in ("os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version"))}
-            if (section,field) not in measured and expected[section][field]!=value:
+            if (section,field) not in _CANONICAL_EXEMPT_FIELDS and expected[section][field]!=value:
                 raise AuditError("expected is not the canonical target profile")
     _assert_resolved(expected); _assert_resolved(actual)
     if not isinstance(evidence,AuditEvidence) or not _valid_manual(evidence.manual_attestation): raise AuditError("operator/date/evidence-hash attestation required")
-    required_attested={"build_id","executable_version","os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version"}
-    if not required_attested<=set(evidence.manual_attestation["fields"]): raise AuditError("build/hardware attestation coverage incomplete")
+    required_attested={field for _,field in _ATTESTED_PROFILE_FIELDS}
+    if not required_attested<=set(evidence.manual_attestation["fields"]): raise AuditError("build/hardware/save format attestation coverage incomplete")
     if expected["build"]["manual_attestation"]!=evidence.manual_attestation or actual["build"]["manual_attestation"]!=evidence.manual_attestation: raise AuditError("attestation is not bound to profile")
     if not evidence.manual_evidence_path.is_file() or canonical_hash({"bytes_hex":evidence.manual_evidence_path.read_bytes().hex()})!=evidence.manual_attestation["evidence_hash"]: raise AuditError("manual attestation evidence bytes mismatch")
     try: manual_content=yaml.safe_load(evidence.manual_evidence_path.read_text(encoding="utf-8"))
     except (OSError,UnicodeDecodeError,yaml.YAMLError) as exc: raise AuditError("manual evidence is not parseable") from exc
     claimed={
         "build_id":actual["build"]["build_id"], "executable_version":actual["build"]["executable_version"],
+        "save_format_version":actual["progression"]["save_format_version"],
         **{key:actual["hardware"][key] for key in ("os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version")},
     }
     if not isinstance(manual_content,Mapping) or set(manual_content)!={"schema_version","measurements"} or manual_content.get("schema_version")!="survivors_manual_attestation.v1" or manual_content.get("measurements")!=claimed:
-        raise AuditError("manual evidence content does not match attested build/hardware")
+        raise AuditError("manual evidence content does not match attested build/hardware/save format")
     _validate_save_volume(evidence.save_path)
     executable=_file_evidence(evidence.executable_path); save=_file_evidence(evidence.save_path)
     if executable["content_hash"]!=actual["build"]["executable_hash"] or save["content_hash"]!=actual["progression"]["save_artifact_hash"]: raise AuditError("observed file identity mismatch")

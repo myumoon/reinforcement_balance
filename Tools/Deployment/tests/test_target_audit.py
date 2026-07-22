@@ -6,7 +6,7 @@ from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict, _veri
 from survivors.target_audit import AuditError, AuditEvidence, SaveLifecycle, audit_target
 from survivors.target_profile import load_target_profile
 
-ATTEST_BASE={"operator":"op","date":"2026-07-22","fields":["build_id","executable_version","os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version"],"unavailable_reason":"store and driver APIs unavailable"}
+ATTEST_BASE={"operator":"op","date":"2026-07-22","fields":["build_id","executable_version","save_format_version","os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version"],"unavailable_reason":"store and driver APIs unavailable"}
 
 def file_hash(data:bytes): return canonical_hash({"bytes_hex":data.hex()})
 
@@ -23,7 +23,7 @@ def resolved(tmp_path):
     data["build"].update(build_id="steam-1794680-measured",executable_version="measured-v1",executable_hash=file_hash(exe.read_bytes()))
     data["progression"].update(save_artifact_hash=file_hash(save.read_bytes()),save_format_version="measured-v1")
     data["hardware"].update(profile_id="reference-1",os_build="26100",gpu_name="reference-gpu",vram_mb=12288,driver_version="1",cuda_version="12.4",pytorch_version="2.5")
-    measurements={"build_id":data["build"]["build_id"],"executable_version":data["build"]["executable_version"],**{k:data["hardware"][k] for k in ("os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version")}}
+    measurements={"build_id":data["build"]["build_id"],"executable_version":data["build"]["executable_version"],"save_format_version":data["progression"]["save_format_version"],**{k:data["hardware"][k] for k in ("os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version")}}
     manual=tmp_path/"manual-evidence.yaml"; manual.write_text(yaml.safe_dump({"schema_version":"survivors_manual_attestation.v1","measurements":measurements},sort_keys=True))
     attest={**ATTEST_BASE,"evidence_hash":file_hash(manual.read_bytes())}; data["build"]["manual_attestation"]=attest
     return data,AuditEvidence(exe,save,attest,manual)
@@ -73,6 +73,20 @@ def test_manual_evidence_must_contain_claimed_values(tmp_path):
     expected["build"]["manual_attestation"]=attest
     bad=AuditEvidence(evidence.executable_path,evidence.save_path,attest,evidence.manual_evidence_path)
     with pytest.raises(AuditError): audit_target(expected,copy.deepcopy(expected),bad,attempt_id="attempt-1")
+
+def test_save_format_version_must_match_attested_canonical_value(tmp_path):
+    expected,evidence=resolved(tmp_path)
+    expected["progression"]["save_format_version"]="caller-forged-v2"
+    with pytest.raises(AuditError,match="attested build/hardware/save format"):
+        audit_target(expected,copy.deepcopy(expected),evidence,attempt_id="attempt-1")
+
+def test_save_format_version_must_be_covered_by_attestation(tmp_path):
+    expected,evidence=resolved(tmp_path)
+    attest={**evidence.manual_attestation,"fields":[field for field in evidence.manual_attestation["fields"] if field!="save_format_version"]}
+    expected["build"]["manual_attestation"]=attest
+    bad=AuditEvidence(evidence.executable_path,evidence.save_path,attest,evidence.manual_evidence_path)
+    with pytest.raises(AuditError,match="attestation coverage incomplete"):
+        audit_target(expected,copy.deepcopy(expected),bad,attempt_id="attempt-1")
 
 @pytest.mark.parametrize("override", [{"game_stopped":False},{"launcher_stopped":False},{"cloud_sync_disabled":None},{"restore_conflict":True},{"canonical_hash_matches":False}])
 def test_save_preflight_failure_has_attempt_only(override):
