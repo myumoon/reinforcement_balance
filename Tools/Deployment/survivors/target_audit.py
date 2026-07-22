@@ -5,7 +5,7 @@ from typing import Any,Mapping
 import os, re, shutil, tempfile, yaml
 from datetime import datetime, timezone
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
-from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict, SaveVerdict, _verify_audit_evidence, _mint_executed_save_verdict, _SAVE_EXECUTION_SEAL
+from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict, SaveVerdict, _verify_audit_evidence, _finalize_save_execution
 from .target_profile import TargetProfile
 
 class AuditError(ValueError):pass
@@ -110,7 +110,7 @@ class SaveLifecycle:
         if self.record_path is None or not self.record_path.is_file(): raise AuditError("durable lifecycle evidence required")
         expected=b"".join(canonical_json_bytes(r)+b"\n" for r in self.records)
         if self.record_path.read_bytes()!=expected: raise AuditError("durable lifecycle chain mismatch")
-        try:return _mint_executed_save_verdict(records=tuple(self.records),attempt_id=attempt_id,target_identity_hash=target_identity_hash,expected_pre_run_hash=self.canonical_save_hash,execution_seal=_SAVE_EXECUTION_SEAL)
+        try:return _finalize_save_execution(records=tuple(self.records),attempt_id=attempt_id,target_identity_hash=target_identity_hash,expected_pre_run_hash=self.canonical_save_hash)
         except (TypeError,ValueError) as exc: raise AuditError(str(exc)) from exc
     def record_post_run(self,target:Path,attempt_id="run"):
         post=_file_hash(target); self._record(attempt_id,"POST_RUN",post,"PASS")

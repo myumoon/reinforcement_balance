@@ -1,12 +1,14 @@
+import os
 import pytest
+import reinbalance_survivors_contracts.launch_lifecycle as launch_lifecycle
 
 from reinbalance_survivors_contracts.launch_lifecycle import (
     LaunchLifecycle,
     LaunchState,
     PlatformGate,
     LaunchAuthorization,
-    AuditVerdict, SaveVerdict,
-    _verify_audit_evidence, _mint_executed_save_verdict, _SAVE_EXECUTION_SEAL,
+    AuditVerdict, SaveVerdict, LaunchIntentStore,
+    _verify_audit_evidence, _finalize_save_execution, _sync_launch_intent,
 )
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 
@@ -15,7 +17,7 @@ def save_verdict(attempt,target):
     for stage in ("PREFLIGHT","ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT"):
         body={"attempt_id":attempt,"stage":stage,"content_hash":"b"*64 if stage=="PRE_RUN_AUDIT" else None,"previous_step_hash":previous}
         record={**body,"step_hash":canonical_hash(body)}; records.append(record); previous=record["step_hash"]
-    return _mint_executed_save_verdict(records=tuple(records),attempt_id=attempt,target_identity_hash=target,expected_pre_run_hash="b"*64,execution_seal=_SAVE_EXECUTION_SEAL)
+    return _finalize_save_execution(records=tuple(records),attempt_id=attempt,target_identity_hash=target,expected_pre_run_hash="b"*64)
 
 def auth(tmp_path,attempt="attempt"):
     target="a"*64; evidence=b"audited"; eh=canonical_hash({"bytes_hex":evidence.hex()})
@@ -47,33 +49,48 @@ def test_evidence_and_identity_binding_are_fail_closed(tmp_path):
 def test_handwritten_save_jsonl_has_no_verdict_path(tmp_path):
     path=tmp_path/"forged.jsonl"; path.write_text('{"attempt_id":"a","stage":"PRE_RUN_AUDIT","result":"PASS"}\n')
     with pytest.raises(ValueError):
-        _mint_executed_save_verdict(records=tuple(),attempt_id="a",target_identity_hash="f"*64,expected_pre_run_hash="b"*64,execution_seal=object())
+        SaveVerdict("a","f"*64,"a","c"*64,"b"*64,"d"*64)
+    assert not hasattr(launch_lifecycle, "_SAVE_EXECUTION_SEAL")
+    assert not hasattr(launch_lifecycle, "_mint_executed_save_verdict")
+
+def store(tmp_path, campaign):
+    return LaunchIntentStore.for_campaign(campaign, tmp_path / campaign)
 
 
 def test_launch_intent_and_activation_cardinality(tmp_path):
     lifecycle = LaunchLifecycle.begin("attempt-1")
     with pytest.raises(ValueError):
         lifecycle.activate("proc-1")
-    lifecycle = lifecycle.reserve("run-1", "gameplay-1", "nonce-1", authorization=auth(tmp_path,"attempt-1"),intent_log=tmp_path/"intent.jsonl")
+    ledger=store(tmp_path,"campaign-cardinality")
+    lifecycle = lifecycle.reserve("run-1", "gameplay-1", "nonce-1", authorization=auth(tmp_path,"attempt-1"),store=ledger)
     with pytest.raises(ValueError):
-        lifecycle.reserve("run-2", "gameplay-2", "nonce-2", authorization=auth(tmp_path,"attempt-1"),intent_log=tmp_path/"intent.jsonl")
+        lifecycle.reserve("run-2", "gameplay-2", "nonce-2", authorization=auth(tmp_path,"attempt-1"),store=ledger)
     with pytest.raises(ValueError):
-        LaunchLifecycle.begin("attempt-1").reserve("run-other", "gameplay-other", "nonce-other", authorization=auth(tmp_path,"attempt-1"),intent_log=tmp_path/"intent.jsonl")
+        LaunchLifecycle.begin("attempt-1").reserve("run-other", "gameplay-other", "nonce-other", authorization=auth(tmp_path,"attempt-1"),store=ledger)
     lifecycle = lifecycle.activate("proc-1")
     assert lifecycle.state is LaunchState.FORMAL_RUN_ACTIVATED
     assert lifecycle.counts_toward_outcome_denominator
     with pytest.raises(ValueError):
         lifecycle.activate("proc-2")
 
+def test_campaign_store_cannot_be_rebound_to_bypass_uniqueness(tmp_path):
+    ledger=store(tmp_path,"campaign-fixed")
+    LaunchLifecycle.begin("same").reserve("run","gameplay","nonce",authorization=auth(tmp_path,"same"),store=ledger)
+    with pytest.raises(ValueError, match="already bound"):
+        LaunchIntentStore.for_campaign("campaign-fixed", tmp_path/"alternate")
+    with pytest.raises(ValueError, match="canonical binding"):
+        LaunchIntentStore("campaign-fixed", tmp_path/"alternate")
+
 
 def test_prelaunch_and_uncertain_failures_do_not_mix_with_outcomes(tmp_path):
     failed = LaunchLifecycle.begin("a").preflight_failure("cloud_sync_unknown")
     assert failed.reserved_run_id is None and failed.process_ref is None
-    gate = LaunchLifecycle.begin("b").reserve("r", "g", "n", authorization=auth(tmp_path,"b"),intent_log=tmp_path/"intent.jsonl")
+    ledger=store(tmp_path,"campaign-failures")
+    gate = LaunchLifecycle.begin("b").reserve("r", "g", "n", authorization=auth(tmp_path,"b"),store=ledger)
     gate = gate.create_process_failed()
     assert gate.state is LaunchState.LAUNCH_GATE_FAILED
     assert not gate.counts_toward_outcome_denominator
-    uncertain = LaunchLifecycle.begin("c").reserve("r2", "g2", "n2", authorization=auth(tmp_path,"c"),intent_log=tmp_path/"intent.jsonl")
+    uncertain = LaunchLifecycle.begin("c").reserve("r2", "g2", "n2", authorization=auth(tmp_path,"c"),store=ledger)
     uncertain = uncertain.launch_uncertain()
     assert uncertain.campaign_blocked and not uncertain.replacement_allowed
 
@@ -99,7 +116,16 @@ def test_malformed_activation_is_rejected():
 
 def test_launch_intent_requires_successful_durable_commit(tmp_path):
     with pytest.raises(ValueError):
-        LaunchLifecycle.begin("a").reserve("r","g","n",authorization=auth(tmp_path,"a"),intent_log=None)
-    directory=tmp_path/"directory"; directory.mkdir()
-    with pytest.raises(ValueError):
-        LaunchLifecycle.begin("a").reserve("r","g","n",authorization=auth(tmp_path,"a"),intent_log=directory)
+        LaunchLifecycle.begin("a").reserve("r","g","n",authorization=auth(tmp_path,"a"),store=None)
+
+@pytest.mark.parametrize(("platform","expected"), [("nt", True), ("posix", True), ("unsupported", False)])
+def test_launch_intent_durability_platform_contract(tmp_path, monkeypatch, platform, expected):
+    path=tmp_path/f"{platform}.jsonl"; path.write_bytes(b"intent")
+    calls=[]
+    monkeypatch.setattr(os,"fsync",lambda fd:calls.append(fd))
+    if expected:
+        _sync_launch_intent(path, platform=platform)
+        assert calls
+    else:
+        with pytest.raises(OSError, match="unsupported"):
+            _sync_launch_intent(path, platform=platform)
