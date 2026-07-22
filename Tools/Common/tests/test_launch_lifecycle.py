@@ -78,6 +78,39 @@ def store(tmp_path, campaign):
     return LaunchIntentStore.for_campaign(campaign)
 
 
+@pytest.mark.parametrize("campaign_id", ["..", "../escape", "/absolute", r"C:\\escape", "has/slash", r"has\\slash"])
+def test_campaign_identity_cannot_escape_fixed_store_root(tmp_path, campaign_id):
+    config=tmp_path/"launch_store.json"
+    config.write_text('{"schema_version":"launch_store.v1","root":"'+str(tmp_path/'fixed')+'","local_fixed_volume":true,"ntfs":true}')
+    launch_lifecycle.LAUNCH_STORE_CONFIG_PATH=config
+    with pytest.raises(ValueError, match="campaign identity"):
+        LaunchIntentStore.for_campaign(campaign_id)
+
+
+def test_failed_commit_after_marker_creation_rolls_back_for_retry(tmp_path, monkeypatch):
+    ledger=store(tmp_path,"campaign-rollback")
+    authorization=auth(tmp_path,"attempt-rollback")
+    original_sync=launch_lifecycle._sync_launch_intent
+    calls=0
+
+    def fail_first_sync(path, *, platform=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("injected post-replace failure")
+        return original_sync(path, platform=platform)
+
+    monkeypatch.setattr(launch_lifecycle,"_sync_launch_intent",fail_first_sync)
+    lifecycle=LaunchLifecycle.begin("attempt-rollback")
+    with pytest.raises(ValueError, match="commit failed"):
+        lifecycle.reserve("run-rollback","gameplay-rollback","nonce-rollback",authorization=authorization,store=ledger)
+
+    assert not ledger.intent_log.exists()
+    assert not tuple((ledger.root/"reservations").glob("*.lock"))
+    reserved=lifecycle.reserve("run-rollback","gameplay-rollback","nonce-rollback",authorization=authorization,store=ledger)
+    assert reserved.state is LaunchState.LAUNCH_INTENT
+
+
 def test_launch_intent_and_activation_cardinality(tmp_path):
     lifecycle = LaunchLifecycle.begin("attempt-1")
     with pytest.raises(ValueError):

@@ -13,6 +13,7 @@ from .canonical_json import canonical_hash, canonical_json_bytes
 
 SCHEMA_VERSION = "launch_lifecycle.v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_CAMPAIGN_ID = re.compile(r"[A-Za-z0-9_-]+")
 _AUTH_SEAL = object()
 _VERDICT_SEAL = object()
 LAUNCH_STORE_CONFIG_PATH = Path(r"C:\ProgramData\ReinBalance\launch_store.json")
@@ -168,12 +169,20 @@ class LaunchIntentStore:
         if not self.campaign_id or not self.root.is_absolute() or set(self.support_envelope)!={"local_fixed_volume","ntfs"}: raise ValueError("invalid canonical store config")
     @classmethod
     def for_campaign(cls,campaign_id:str)->"LaunchIntentStore":
-        if not isinstance(campaign_id,str) or not campaign_id: raise ValueError("campaign identity required")
+        if not isinstance(campaign_id,str) or _CAMPAIGN_ID.fullmatch(campaign_id) is None:
+            raise ValueError("campaign identity must use only ASCII letters, digits, '_' or '-'")
         try: config=json.loads(LAUNCH_STORE_CONFIG_PATH.read_text(encoding="utf-8"))
         except (OSError,UnicodeDecodeError,json.JSONDecodeError) as exc: raise ValueError("fixed launch store config unavailable") from exc
         if not isinstance(config,dict) or set(config)!={"schema_version","root","local_fixed_volume","ntfs"} or config["schema_version"]!="launch_store.v1": raise ValueError("invalid fixed launch store config")
         root=Path(config["root"])
-        return cls(campaign_id,(root/campaign_id).resolve(),{"local_fixed_volume":config["local_fixed_volume"],"ntfs":config["ntfs"]})
+        if not root.is_absolute(): raise ValueError("canonical store root must be absolute")
+        canonical_root=Path(os.path.realpath(root))
+        campaign_root=Path(os.path.realpath(root/campaign_id))
+        try: contained=os.path.commonpath((canonical_root,campaign_root))==str(canonical_root)
+        except ValueError: contained=False  # Different Win32 drives, for example.
+        if not contained or campaign_root==canonical_root:
+            raise ValueError("campaign identity escapes canonical store root")
+        return cls(campaign_id,campaign_root,{"local_fixed_volume":config["local_fixed_volume"],"ntfs":config["ntfs"]})
     @property
     def intent_log(self)->Path: return self.root/"launch_intents.jsonl"
 
@@ -221,6 +230,8 @@ class LaunchLifecycle:
         marker_dir=store.root/"reservations"; marker_dir.mkdir(parents=True,exist_ok=True)
         marker_paths=(marker_dir/(canonical_hash({"kind":"attempt","identity":self.attempt_id})+".lock"),marker_dir/(canonical_hash({"kind":"run","identity":run_id})+".lock"))
         created=[]
+        previous=b""
+        ledger_replaced=False
         try:
             for marker in marker_paths:
                 fd=os.open(marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.close(fd); created.append(marker)
@@ -234,14 +245,34 @@ class LaunchLifecycle:
                 with temp.open("wb") as stream:
                     stream.write(previous+encoded); stream.flush(); os.fsync(stream.fileno())
                 os.replace(temp,intent_log)
+                ledger_replaced=True
                 _sync_launch_intent(intent_log)
                 lines=intent_log.read_bytes().splitlines()
                 if not lines or json.loads(lines[-1])!=reserved.to_wire(): raise ValueError("durable LAUNCH_INTENT revalidation failed")
-        except OSError as exc:
-            for marker in created:
-                try: marker.unlink()
-                except OSError: pass
-            raise ValueError("durable LAUNCH_INTENT commit failed") from exc
+        except Exception as exc:
+            rollback_ok=True
+            try:
+                if ledger_replaced:
+                    if previous:
+                        with temp.open("wb") as stream:
+                            stream.write(previous); stream.flush(); os.fsync(stream.fileno())
+                        os.replace(temp,intent_log)
+                        _sync_launch_intent(intent_log)
+                    else:
+                        intent_log.unlink(missing_ok=True)
+                        if os.name=="posix":
+                            descriptor=os.open(intent_log.parent,os.O_RDONLY)
+                            try: os.fsync(descriptor)
+                            finally: os.close(descriptor)
+            except Exception:
+                rollback_ok=False
+            if rollback_ok:
+                for marker in created:
+                    try: marker.unlink()
+                    except OSError: rollback_ok=False
+            message="durable LAUNCH_INTENT commit failed"
+            if not rollback_ok: message += "; rollback failed and reservation remains blocked"
+            raise ValueError(message) from exc
         finally:
             if temp.exists(): temp.unlink()
         return reserved
