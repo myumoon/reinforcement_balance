@@ -31,6 +31,11 @@ def test_success_requires_run_bound_post_30_observation(tmp_path):
     with pytest.raises(ValueError): SuccessObservation.from_telemetry("run-1",telemetry,evidence)
     with pytest.raises(ValueError): SuccessObservation.from_telemetry("run-1",telemetry)
 
+def test_direct_success_observation_is_pending_even_with_plausible_fields():
+    profile=load_target_profile()
+    direct=SuccessObservation("run-1","result_screen",1801,"a"*64)
+    assert profile.success_state(1800,direct,"run-1")=="TARGET_REACHED_PENDING_TRANSITION"
+
 @pytest.mark.parametrize("value",[math.nan,math.inf,-math.inf])
 def test_success_observation_rejects_nonfinite_time(tmp_path,value):
     evidence=tmp_path/"evidence.yaml"

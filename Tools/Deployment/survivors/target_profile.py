@@ -9,6 +9,7 @@ from reinbalance_survivors_contracts.ui_intent import is_strict_number
 VERSION="survivors_target.v1"
 _SHA256=re.compile(r"[0-9a-f]{64}")
 CONFIG=Path(__file__).parents[1]/"configs"/"mad_forest_standard_v1.yaml"
+_SUCCESS_SEAL=object()
 SECTIONS={
  "base":frozenset({"platform","window_mode","client_resolution","ui_language","stage","character","modifiers","success_timer_seconds","post_timer_event_required"}),
  "build":frozenset({"build_id","executable_version","executable_hash","distribution","app_id","content_revision","ui_revision","manual_attestation"}),
@@ -27,6 +28,7 @@ CLOSED_TAXONOMY={
 @dataclass(frozen=True)
 class SuccessObservation:
     run_id:str; event:str; observed_at_seconds:float; evidence_hash:str
+    _seal:object=None
     def __post_init__(self):
         if not isinstance(self.run_id,str) or not self.run_id or self.event not in {"result_screen","death_transition"} or not is_strict_number(self.observed_at_seconds) or not math.isfinite(self.observed_at_seconds) or not isinstance(self.evidence_hash,str) or _SHA256.fullmatch(self.evidence_hash) is None:
             raise ValueError("invalid post-30 telemetry")
@@ -42,7 +44,11 @@ class SuccessObservation:
         if evidence!=expected: raise ValueError("post-30 evidence content mismatch")
         actual=canonical_hash({"bytes_hex":evidence_path.read_bytes().hex()})
         if data["evidence_hash"]!=actual: raise ValueError("post-30 evidence bytes mismatch")
-        return cls(run_id,data["event"],float(data["observed_at_seconds"]),actual)
+        return cls(run_id,data["event"],float(data["observed_at_seconds"]),actual,_SUCCESS_SEAL)
+
+    @property
+    def confirmed(self)->bool:
+        return self._seal is _SUCCESS_SEAL
 
 @dataclass(frozen=True)
 class TargetProfile:
@@ -72,7 +78,7 @@ class TargetProfile:
     def success_state(self,timer_seconds:int,post_timer_event:SuccessObservation|None,run_id:str|None=None)->str:
         if not is_strict_number(timer_seconds) or not math.isfinite(timer_seconds) or timer_seconds<0: raise ValueError("timer_seconds must be finite and non-negative")
         if timer_seconds<1800:return "RUNNING"
-        confirmed=isinstance(post_timer_event,SuccessObservation) and bool(run_id) and post_timer_event.run_id==run_id and post_timer_event.observed_at_seconds>=1800 and bool(_SHA256.fullmatch(post_timer_event.evidence_hash))
+        confirmed=isinstance(post_timer_event,SuccessObservation) and post_timer_event.confirmed and bool(run_id) and post_timer_event.run_id==run_id and post_timer_event.observed_at_seconds>=1800 and bool(_SHA256.fullmatch(post_timer_event.evidence_hash))
         return "TARGET_REACHED_CONFIRMED" if confirmed else "TARGET_REACHED_PENDING_TRANSITION"
     @classmethod
     def from_wire(cls,data:Mapping[str,Any]):

@@ -16,6 +16,9 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _CAMPAIGN_ID = re.compile(r"[A-Za-z0-9_-]+")
 _AUTH_SEAL = object()
 _VERDICT_SEAL = object()
+_RECORD_SEALS = {state: object() for state in (
+    "LAUNCH_INTENT", "FORMAL_RUN_ACTIVATED", "LAUNCH_GATE_FAILED",
+    "LAUNCH_UNCERTAIN", "TERMINAL")}
 LAUNCH_STORE_CONFIG_PATH = Path(r"C:\ProgramData\ReinBalance\launch_store.json")
 LAUNCH_GATE_CONFIG_PATH = Path(r"C:\ProgramData\ReinBalance\launch_gate.json")
 
@@ -198,7 +201,7 @@ class LaunchIntentStore:
     def intent_log(self)->Path: return self.root/"launch_intents.jsonl"
     @staticmethod
     def _validated_records(content:bytes)->tuple["LaunchLifecycle",...]:
-        try: records=tuple(LaunchLifecycle.from_wire(json.loads(line)) for line in content.splitlines())
+        try: records=tuple(LaunchLifecycle._from_durable_wire(json.loads(line)) for line in content.splitlines())
         except (UnicodeDecodeError,json.JSONDecodeError,ValueError) as exc: raise ValueError("invalid durable launch ledger") from exc
         latest={}
         run_owners={}
@@ -272,6 +275,7 @@ class LaunchLifecycle:
     activation_source:str|None=None; failure_reason:str|None=None; authorization_hash:str|None=None
     target_identity_hash:str|None=None
     schema_version:str=SCHEMA_VERSION
+    _seal:object=None
     _KEYS=frozenset({"schema_version","attempt_id","state","reserved_run_id","gameplay_attempt_id","launch_nonce","process_ref","activation_source","failure_reason","authorization_hash","target_identity_hash"})
     def __post_init__(self):
         if self.schema_version!=SCHEMA_VERSION or not isinstance(self.attempt_id,str) or not self.attempt_id: raise ValueError("invalid identity/version")
@@ -287,11 +291,25 @@ class LaunchLifecycle:
         want_reserved,want_process,want_failure=rules[self.state]
         if reserved!=want_reserved or present(self.process_ref)!=want_process or present(self.failure_reason)!=want_failure: raise ValueError("fields invalid for launch state")
         if (self.activation_source is not None) != want_process or (want_process and self.activation_source not in {"observer","reconciliation"}): raise ValueError("invalid activation source")
+        seal_token=_RECORD_SEALS.get(self.state.value)
+        wire={k:v for k,v in self.__dict__.items() if k!="_seal"}
+        wire["state"]=self.state.value
+        expected_seal=None if seal_token is None else (seal_token,canonical_hash(wire))
+        if seal_token is not None and self._seal!=expected_seal:
+            raise ValueError("confirmed record requires validated durable pipeline")
+        if seal_token is None and self._seal is not None:
+            raise ValueError("invalid durable record seal")
     @classmethod
     def begin(cls,attempt_id): return cls(attempt_id)
     def preflight_failure(self,reason):
         if self.state is not LaunchState.PREFLIGHT or not reason: raise ValueError("invalid preflight failure")
         return replace(self,state=LaunchState.PREFLIGHT_FAILED,failure_reason=reason)
+    def _validated_transition(self,**changes):
+        values={k:v for k,v in self.__dict__.items() if k!="_seal"}
+        values.update(changes)
+        state=values["state"]
+        wire={**values,"state":state.value}
+        return replace(self,**changes,_seal=(_RECORD_SEALS[state.value],canonical_hash(wire)))
     def reserve(self,run_id,gameplay_attempt_id,nonce,*,authorization:LaunchAuthorization,store:LaunchIntentStore):
         if self.state is not LaunchState.PREFLIGHT or not isinstance(authorization,LaunchAuthorization): raise ValueError("validated authorization required")
         if not isinstance(store,LaunchIntentStore): raise ValueError("canonical launch intent store required")
@@ -302,7 +320,7 @@ class LaunchLifecycle:
         intent_log=store.intent_log
         if authorization.attempt_id!=self.attempt_id: raise ValueError("authorization attempt mismatch")
         auth_wire={k:getattr(authorization,k) for k in ("attempt_id","target_identity_hash","save_attempt_id","lifecycle_attempt_id","audit_hash","save_gate_hash","platform_gate_hash")}
-        reserved=replace(self,state=LaunchState.LAUNCH_INTENT,reserved_run_id=run_id,gameplay_attempt_id=gameplay_attempt_id,launch_nonce=nonce,authorization_hash=canonical_hash(auth_wire),target_identity_hash=authorization.target_identity_hash)
+        reserved=self._validated_transition(state=LaunchState.LAUNCH_INTENT,reserved_run_id=run_id,gameplay_attempt_id=gameplay_attempt_id,launch_nonce=nonce,authorization_hash=canonical_hash(auth_wire),target_identity_hash=authorization.target_identity_hash)
         intent_log.parent.mkdir(parents=True,exist_ok=True)
         encoded=canonical_json_bytes(reserved.to_wire())+b"\n"
         temp=intent_log.with_name(intent_log.name+".tmp")
@@ -316,8 +334,8 @@ class LaunchLifecycle:
             _lock(lock)
             try:
                 previous=intent_log.read_bytes() if intent_log.exists() else b""
-                for line in previous.splitlines():
-                    prior=LaunchLifecycle.from_wire(json.loads(line))
+                records=store._validated_records(previous)
+                for prior in records:
                     if prior.attempt_id==self.attempt_id or prior.reserved_run_id==run_id:
                         raise ValueError("attempt/target identity already reserved")
                 # The fsync'd ledger is authoritative.  A marker with no matching
@@ -336,8 +354,8 @@ class LaunchLifecycle:
                 os.replace(temp,intent_log)
                 ledger_replaced=True
                 _sync_launch_intent(intent_log)
-                lines=intent_log.read_bytes().splitlines()
-                if not lines or json.loads(lines[-1])!=reserved.to_wire(): raise ValueError("durable LAUNCH_INTENT revalidation failed")
+                committed=store._validated_records(intent_log.read_bytes())
+                if not committed or committed[-1]!=reserved: raise ValueError("durable LAUNCH_INTENT revalidation failed")
             except Exception as exc:
                 rollback_ok=True
                 try:
@@ -368,22 +386,22 @@ class LaunchLifecycle:
     def activate(self,process_ref,*,source="observer",store:LaunchIntentStore|None=None):
         if self.state is not LaunchState.LAUNCH_INTENT or source not in {"observer","reconciliation"} or not process_ref: raise ValueError("activation requires launch intent and process")
         if not isinstance(store,LaunchIntentStore): raise ValueError("canonical store required for durable activation")
-        activated=replace(self,state=LaunchState.FORMAL_RUN_ACTIVATED,process_ref=process_ref,activation_source=source)
+        activated=self._validated_transition(state=LaunchState.FORMAL_RUN_ACTIVATED,process_ref=process_ref,activation_source=source)
         store.append_transition(self,activated); return activated
     def create_process_failed(self,*,store:LaunchIntentStore|None=None):
         if self.state is not LaunchState.LAUNCH_INTENT: raise ValueError("no launch intent")
         if not isinstance(store,LaunchIntentStore): raise ValueError("canonical store required for durable failure")
-        failed=replace(self,state=LaunchState.LAUNCH_GATE_FAILED,failure_reason="CREATE_PROCESS_FAILED")
+        failed=self._validated_transition(state=LaunchState.LAUNCH_GATE_FAILED,failure_reason="CREATE_PROCESS_FAILED")
         store.append_transition(self,failed); return failed
     def launch_uncertain(self,*,store:LaunchIntentStore|None=None):
         if self.state is not LaunchState.LAUNCH_INTENT: raise ValueError("no launch intent")
         if not isinstance(store,LaunchIntentStore): raise ValueError("canonical store required for durable failure")
-        failed=replace(self,state=LaunchState.LAUNCH_UNCERTAIN,failure_reason="PROCESS_IDENTITY_UNCERTAIN")
+        failed=self._validated_transition(state=LaunchState.LAUNCH_UNCERTAIN,failure_reason="PROCESS_IDENTITY_UNCERTAIN")
         store.append_transition(self,failed); return failed
     def terminal(self,reason,*,store:LaunchIntentStore|None=None):
         if self.state is not LaunchState.FORMAL_RUN_ACTIVATED or not reason: raise ValueError("terminal requires activation")
         if not isinstance(store,LaunchIntentStore): raise ValueError("canonical store required for durable terminal")
-        terminal=replace(self,state=LaunchState.TERMINAL,failure_reason=reason)
+        terminal=self._validated_transition(state=LaunchState.TERMINAL,failure_reason=reason)
         store.append_transition(self,terminal); return terminal
     @property
     def counts_toward_outcome_denominator(self): return self.state in {LaunchState.FORMAL_RUN_ACTIVATED,LaunchState.TERMINAL}
@@ -395,11 +413,21 @@ class LaunchLifecycle:
     @property
     def replacement_allowed(self): return False
     def to_wire(self):
-        d=dict(self.__dict__); d["state"]=self.state.value; return d
+        d={k:v for k,v in self.__dict__.items() if k!="_seal"}; d["state"]=self.state.value; return d
     @property
     def record_hash(self): return canonical_hash(self.to_wire())
     @classmethod
     def from_wire(cls,data:Mapping[str,Any]):
         if not isinstance(data,Mapping) or set(data)!=cls._KEYS: raise ValueError("unknown/missing fields")
-        try: return cls(**{**data,"state":LaunchState(data["state"])})
+        try:
+            state=LaunchState(data["state"])
+            if state.value in _RECORD_SEALS: raise ValueError("durable record requires ledger validation")
+            return cls(**{**data,"state":state})
         except (TypeError,ValueError) as e: raise ValueError("invalid launch record") from e
+    @classmethod
+    def _from_durable_wire(cls,data:Mapping[str,Any]):
+        if not isinstance(data,Mapping) or set(data)!=cls._KEYS: raise ValueError("unknown/missing fields")
+        state=LaunchState(data["state"])
+        if state.value not in _RECORD_SEALS: raise ValueError("durable state required")
+        seal=(_RECORD_SEALS[state.value],canonical_hash(dict(data)))
+        return cls(**{**data,"state":state,"_seal":seal})

@@ -134,8 +134,7 @@ def test_orphan_markers_without_committed_intent_are_reconciled(tmp_path):
 
     assert reserved.state is LaunchState.LAUNCH_INTENT
     assert all(marker.exists() for marker in markers)
-    committed=[LaunchLifecycle.from_wire(json.loads(line))
-               for line in ledger.intent_log.read_bytes().splitlines()]
+    committed=list(ledger.records())
     assert committed == [reserved]
 
 
@@ -167,8 +166,8 @@ def test_durable_ledger_rejects_reserved_run_id_shared_by_distinct_attempts(tmp_
     ledger=store(tmp_path,"campaign-duplicate-run")
     first=LaunchLifecycle.begin("attempt-1").reserve(
         "run-shared","gameplay-1","nonce-1",authorization=auth(tmp_path,"attempt-1"),store=ledger)
-    duplicate=launch_lifecycle.replace(
-        first,attempt_id="attempt-2",gameplay_attempt_id="gameplay-2",launch_nonce="nonce-2")
+    duplicate=LaunchLifecycle._from_durable_wire({**first.to_wire(),
+        "attempt_id":"attempt-2","gameplay_attempt_id":"gameplay-2","launch_nonce":"nonce-2"})
     with ledger.intent_log.open("ab") as stream:
         stream.write(canonical_json_bytes(duplicate.to_wire())+b"\n")
 
@@ -185,14 +184,15 @@ def test_invalid_transition_does_not_poison_ledger_or_later_outcomes(tmp_path,in
     before=ledger.intent_log.read_bytes()
     if invalid_kind=="unreserved_activation":
         previous=LaunchLifecycle.begin("not-reserved")
-        current=launch_lifecycle.replace(
-            intent,attempt_id="not-reserved",reserved_run_id="run-2",gameplay_attempt_id="gameplay-2",
-            launch_nonce="nonce-2",state=LaunchState.FORMAL_RUN_ACTIVATED,
-            process_ref="proc-2",activation_source="observer")
+        wire={**intent.to_wire(),"attempt_id":"not-reserved","reserved_run_id":"run-2",
+            "gameplay_attempt_id":"gameplay-2","launch_nonce":"nonce-2",
+            "state":LaunchState.FORMAL_RUN_ACTIVATED.value,"process_ref":"proc-2",
+            "activation_source":"observer"}
+        current=LaunchLifecycle._from_durable_wire(wire)
     elif invalid_kind=="duplicate_run":
         previous=LaunchLifecycle.begin("attempt-2")
-        current=launch_lifecycle.replace(
-            intent,attempt_id="attempt-2",gameplay_attempt_id="gameplay-2",launch_nonce="nonce-2")
+        current=LaunchLifecycle._from_durable_wire({**intent.to_wire(),
+            "attempt_id":"attempt-2","gameplay_attempt_id":"gameplay-2","launch_nonce":"nonce-2"})
     else:
         previous=intent
         current=intent
@@ -236,16 +236,16 @@ def test_activation_rejects_identity_different_from_durable_reservation(tmp_path
     ledger=store(tmp_path,"campaign-activation-identity")
     intent=LaunchLifecycle.begin("attempt-1").reserve(
         "run-1","gameplay-1","nonce-1",authorization=auth(tmp_path,"attempt-1"),store=ledger)
-    forged=launch_lifecycle.replace(intent,**{field:value})
-    with pytest.raises(ValueError,match="identity|predecessor"):
+    with pytest.raises(ValueError,match="identity|predecessor|validated durable pipeline"):
+        forged=launch_lifecycle.replace(intent,**{field:value})
         forged.activate("proc-1",store=ledger)
 
 def test_terminal_rejects_identity_different_from_reserved_activation(tmp_path):
     ledger=store(tmp_path,"campaign-terminal-identity")
     activated=LaunchLifecycle.begin("attempt-1").reserve(
         "run-1","gameplay-1","nonce-1",authorization=auth(tmp_path,"attempt-1"),store=ledger).activate("proc-1",store=ledger)
-    forged=launch_lifecycle.replace(activated,target_identity_hash="b"*64)
-    with pytest.raises(ValueError,match="identity|predecessor"):
+    with pytest.raises(ValueError,match="identity|predecessor|validated durable pipeline"):
+        forged=launch_lifecycle.replace(activated,target_identity_hash="b"*64)
         forged.terminal("SUCCESS",store=ledger)
 
 def test_in_memory_activation_cannot_affect_durable_denominator(tmp_path):
@@ -254,6 +254,29 @@ def test_in_memory_activation_cannot_affect_durable_denominator(tmp_path):
     with pytest.raises(ValueError,match="store"):
         intent.activate("proc-1")
     assert LaunchIntentStore.for_campaign("campaign-memory").outcome_summary()["activated_runs"]==0
+
+def test_reserve_rejects_corrupt_existing_ledger(tmp_path):
+    ledger=store(tmp_path,"campaign-corrupt-reserve")
+    first=LaunchLifecycle.begin("attempt-1").reserve(
+        "run-1","gameplay-1","nonce-1",authorization=auth(tmp_path,"attempt-1"),store=ledger)
+    invalid=first.activate("proc-1",store=ledger)
+    with ledger.intent_log.open("ab") as stream:
+        stream.write(canonical_json_bytes(invalid.to_wire())+b"\n")
+    before=ledger.intent_log.read_bytes()
+    with pytest.raises(ValueError,match="durable launch ledger|commit failed"):
+        LaunchLifecycle.begin("attempt-2").reserve(
+            "run-2","gameplay-2","nonce-2",authorization=auth(tmp_path,"attempt-2"),store=ledger)
+    assert ledger.intent_log.read_bytes()==before
+
+def test_confirmed_durable_records_cannot_be_publicly_constructed_or_replaced(tmp_path):
+    with pytest.raises(ValueError,match="validated durable pipeline"):
+        LaunchLifecycle("attempt",LaunchState.FORMAL_RUN_ACTIVATED,"run","gameplay","nonce","proc","observer",None,"a"*64,"b"*64)
+    ledger=store(tmp_path,"campaign-sealed-record")
+    intent=LaunchLifecycle.begin("attempt").reserve(
+        "run","gameplay","nonce",authorization=auth(tmp_path,"attempt"),store=ledger)
+    with pytest.raises(ValueError,match="validated durable pipeline"):
+        launch_lifecycle.replace(intent,state=LaunchState.FORMAL_RUN_ACTIVATED,
+            process_ref="proc",activation_source="observer")
 
 def test_campaign_store_cannot_be_rebound_to_bypass_uniqueness(tmp_path):
     ledger=store(tmp_path,"campaign-fixed")
