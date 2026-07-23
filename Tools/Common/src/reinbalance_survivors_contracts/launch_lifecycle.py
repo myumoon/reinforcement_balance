@@ -1,4 +1,4 @@
-"""正式ラン(formal run)の起動 identity を fail-closed に確定し、reserved→activated 遷移を耐障害的(durable)な台帳で一意管理する契約。
+"""正式ラン(formal run)の起動 identity を fail-closed に確定し、reserved→activated 遷移を耐障害的(durable)な台帳で一意管理する仕様。
 
 AI をゲームに『本番として起動した』記録を、改ざんや二重起動が起きないように厳格に台帳へ書き残す仕組みです。
 ゲームやランチャーが止まっている等の前提が揃わない限り起動を認めず、途中で失敗しても矛盾した記録が残らないようにしています。
