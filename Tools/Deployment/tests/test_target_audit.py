@@ -15,7 +15,8 @@ def finalized_canonical(monkeypatch):
     data=load_target_profile().to_wire()
     data["provenance"]="operator-attested"
     data["build"].update(build_id="steam-1794680-measured",executable_version="measured-v1")
-    data["progression"]["save_format_version"]="measured-v1"
+    data["build"]["executable_hash"]=file_hash(b"executable")
+    data["progression"].update(save_artifact_hash=file_hash(b"canonical-save"),save_format_version="measured-v1")
     data["hardware"].update(os_build="26100",gpu_name="reference-gpu",vram_mb=12288,driver_version="1",cuda_version="12.4",pytorch_version="2.5")
     profile=TargetProfile.from_wire(data)
     monkeypatch.setattr("survivors.target_audit.load_target_profile",lambda:profile)
@@ -50,6 +51,31 @@ def test_audit_is_typed_and_bound_to_real_file_bytes(tmp_path):
     assert isinstance(verdict,AuditVerdict) and verdict.status=="PASS"
     evidence.executable_path.write_bytes(b"tampered")
     with pytest.raises(AuditError): audit_target(expected,copy.deepcopy(expected),evidence,attempt_id="attempt-1")
+
+@pytest.mark.parametrize(("section","field","contents"), [
+    ("build","executable_hash",b"different-executable"),
+    ("progression","save_artifact_hash",b"different-save"),
+])
+def test_file_hash_self_declaration_cannot_bypass_canonical_identity(tmp_path,section,field,contents):
+    expected,evidence=resolved(tmp_path)
+    path=evidence.executable_path if section=="build" else evidence.save_path
+    path.write_bytes(contents)
+    expected[section][field]=file_hash(contents)
+    with pytest.raises(AuditError,match="canonical target profile"):
+        audit_target(expected,copy.deepcopy(expected),evidence,attempt_id="attempt-1")
+
+def test_target_identity_excludes_manual_attestation_event_metadata(tmp_path):
+    expected,evidence=resolved(tmp_path)
+    first=audit_target(expected,copy.deepcopy(expected),evidence,attempt_id="attempt-1")
+    attest={**evidence.manual_attestation,"date":"2026-07-23"}
+    expected["build"]["manual_attestation"]=attest
+    second=audit_target(
+        expected,
+        copy.deepcopy(expected),
+        AuditEvidence(evidence.executable_path,evidence.save_path,attest,evidence.manual_evidence_path),
+        attempt_id="attempt-2",
+    )
+    assert first.target_identity_hash==second.target_identity_hash
 
 def test_audit_rejects_noncanonical_expected_even_when_actual_matches(tmp_path):
     expected,evidence=resolved(tmp_path)

@@ -8,6 +8,8 @@ semantic attestation は caller の真偽値ではない。versioned record に�
 
 repository の `mad_forest_standard_v1.yaml` は `provenance: test-fixture` であり real target の canonical 実測値を表さない。real-target audit は operator/date/evidence-hash を持つ `provenance: operator-attested` profile の expected 値へ observed metadata を束縛し、test fixture または未 attested profile を fail-closed にする。実 VS の値の採取・供給は real-target setup の deferred 作業である。
 
+canonical profile が pin する全値は expected/actual の双方へ束縛する。特に executable/save hash は canonical 値との一致に加えて実ファイル bytes と一致しなければならず、save bytes に含まれる progression、unlock、購入済み power-up、reroll/skip/banish count もこの束縛で被覆する。`target_identity_hash` は同一 target で安定させるため operator/date/evidence-hash 等の audit-event `manual_attestation` を含めない。key binding、choice support、display の runtime 反映、実行中 character/stage 選択など非ファイル由来 runtime state の独立 observation 証跡は perception/runtime harness を必要とするため 05/06 へ deferred とする。
+
 preflight attempt は run identity ではない。成功時だけ process 生成前に durable `LAUNCH_INTENT` を commit し、observer または reconciliation で process identity が確認された時点で `FORMAL_RUN_ACTIVATED` になる。`CREATE_PROCESS_FAILED` は `LAUNCH_GATE_FAILED` で outcome 分母外、曖昧な launch は campaign を block する。正式 store の support envelope は local fixed NTFS、SQLite WAL、`synchronous=FULL`、integrity/flush 成功、Win32 broker/process attestation である。
 
 Win64 の intent 更新は temp file の flush 後に atomic replace し、置換後ファイルも flush する。Windows/Python では directory handle の `fsync` を提供できないため、directory entry の crash durability は local fixed NTFS journaling の保証範囲に依存し、電源断に対する絶対 durability は主張しない。UNC、removable、non-NTFS は commit 前に fail-closed とする。

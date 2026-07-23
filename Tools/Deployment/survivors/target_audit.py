@@ -18,7 +18,7 @@ _ATTESTED_PROFILE_FIELDS=frozenset({
     *(("hardware",key) for key in ("os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version")),
 })
 _FILE_DERIVED_PROFILE_FIELDS=frozenset({("build","executable_hash"),("progression","save_artifact_hash")})
-_CANONICAL_EXEMPT_FIELDS=_FILE_DERIVED_PROFILE_FIELDS|frozenset({("build","manual_attestation")})
+_CANONICAL_EXEMPT_FIELDS=frozenset({("build","manual_attestation")})
 
 def _file_hash(path:Path)->str:return canonical_hash({"bytes_hex":path.read_bytes().hex()})
 
@@ -65,8 +65,9 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
             if section=="schema_version" and expected[section]!=canonical[section]: raise AuditError("expected is not the canonical target profile")
             continue
         for field,value in canonical[section].items():
-            # Operator/date/evidence identify only the measurement event. Attested
-            # values are pinned here and cannot be selected by the audit caller.
+            # Operator/date/evidence identify only the measurement event. Every
+            # canonical identity value, including both file-derived hashes, is
+            # pinned here and cannot be selected by the audit caller.
             if (section,field) not in _CANONICAL_EXEMPT_FIELDS and expected[section][field]!=value:
                 raise AuditError("expected is not the canonical target profile")
     _assert_resolved(expected); _assert_resolved(actual)
@@ -86,6 +87,9 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
         raise AuditError("manual evidence content does not match attested build/hardware/save format")
     _validate_save_volume(evidence.save_path)
     executable=_file_evidence(evidence.executable_path); save=_file_evidence(evidence.save_path)
+    # The executable/save hashes bind canonical identity to observed bytes. Save
+    # bytes cover progression, unlock and purchased-power-up state. Independent
+    # observation of non-file-derived runtime state belongs to phases 05/06.
     if executable["content_hash"]!=actual["build"]["executable_hash"] or save["content_hash"]!=actual["progression"]["save_artifact_hash"]: raise AuditError("observed file identity mismatch")
     differences=[]
     for section in expected:
@@ -98,7 +102,9 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     evidence_bytes=canonical_json_bytes(observed_evidence)
     evidence_hash=canonical_hash({"bytes_hex":evidence_bytes.hex()})
     semantics={"canonical_save_hash":expected["progression"]["save_artifact_hash"],"save_format_version":expected["progression"]["save_format_version"],"progression":{k:v for k,v in expected["progression"].items() if k not in {"save_artifact_hash","save_format_version"}}}
-    return _verify_audit_evidence(attempt_id=attempt_id,target_identity_hash=canonical_hash(expected),canonical_save_hash=expected["progression"]["save_artifact_hash"],save_semantics_hash=canonical_hash(semantics),evidence_bytes=evidence_bytes,expected_evidence_hash=evidence_hash)
+    identity_profile={key:(dict(value) if isinstance(value,Mapping) else value) for key,value in expected.items()}
+    identity_profile["build"].pop("manual_attestation")
+    return _verify_audit_evidence(attempt_id=attempt_id,target_identity_hash=canonical_hash(identity_profile),canonical_save_hash=expected["progression"]["save_artifact_hash"],save_semantics_hash=canonical_hash(semantics),evidence_bytes=evidence_bytes,expected_evidence_hash=evidence_hash)
 
 @dataclass(frozen=True)
 class PreflightResult:
