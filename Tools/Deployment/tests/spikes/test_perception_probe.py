@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,7 @@ from reinbalance_survivors_contracts.ui_intent import ContractValidationError
 from spikes.perception_probe import (
     Box,
     CoordinateTransform,
+    FeasibilityConfig,
     decode_frame,
     encode_near_lossless,
     encode_png,
@@ -145,6 +147,29 @@ def test_config_rejects_invalid_numeric_fields(section, key, value):
     data[section][key] = value
     with pytest.raises(ContractValidationError):
         load_feasibility_config(data)
+
+
+@pytest.mark.parametrize("section", ["pilot", "thresholds", "budget"])
+def test_config_internal_mappings_are_immutable(section):
+    source = load_feasibility_config().to_wire()
+    config = load_feasibility_config(source)
+    source[section][next(iter(source[section]))] = float("nan")
+    assert math.isfinite(next(v for v in getattr(config, section).values()
+                              if isinstance(v, (int, float))))
+    with pytest.raises(TypeError):
+        getattr(config, section)[next(iter(getattr(config, section)))] = float("nan")
+
+
+def test_verdict_revalidates_directly_constructed_config():
+    valid = load_feasibility_config()
+    invalid = FeasibilityConfig(
+        valid.pilot,
+        {**valid.thresholds, "oracle_recall": float("nan")},
+        valid.architectures,
+        valid.budget,
+    )
+    with pytest.raises(ContractValidationError):
+        issue_verdict(GateEvidence.valid_fixture(), invalid)
 
 
 def test_action_replay_keeps_proposal_and_measurement_distinct():

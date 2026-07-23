@@ -251,6 +251,7 @@ def _gate_failures(e: GateEvidence, c: FeasibilityConfig) -> list[str]:
 def issue_verdict(evidence: GateEvidence, config: FeasibilityConfig) -> dict[str, Any]:
     ensure(isinstance(evidence, GateEvidence), "validated gate evidence is required")
     ensure(isinstance(config, FeasibilityConfig), "validated feasibility config is required")
+    config.validate()
     evidence.validate(config)
     failures = _gate_failures(evidence, config)
     t = config.thresholds
@@ -313,6 +314,8 @@ spike never sends live input.
 
 
 def default_budget(config: FeasibilityConfig) -> dict[str, Any]:
+    ensure(isinstance(config, FeasibilityConfig), "validated feasibility config is required")
+    config.validate()
     splits = (
         DatasetSplitRequest("development", 3, 1800, 36000, 240),
         DatasetSplitRequest("calibration", 2, 900, 18000, 120),

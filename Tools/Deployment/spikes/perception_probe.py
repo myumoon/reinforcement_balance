@@ -10,6 +10,7 @@ import binascii
 import math
 from pathlib import Path
 import struct
+from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 import zlib
 
@@ -47,6 +48,17 @@ class FeasibilityConfig:
     architectures: tuple[str, ...]
     budget: Mapping[str, float]
     schema_version: str = CONFIG_VERSION
+
+    def __post_init__(self) -> None:
+        # A frozen dataclass does not freeze dictionaries held by its fields.
+        # Copy before wrapping so callers cannot retain an alias to mutable state.
+        pilot = dict(self.pilot)
+        if "required_slices" in pilot:
+            pilot["required_slices"] = tuple(pilot["required_slices"])
+        object.__setattr__(self, "pilot", MappingProxyType(pilot))
+        object.__setattr__(self, "thresholds", MappingProxyType(dict(self.thresholds)))
+        object.__setattr__(self, "architectures", tuple(self.architectures))
+        object.__setattr__(self, "budget", MappingProxyType(dict(self.budget)))
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> "FeasibilityConfig":
@@ -89,8 +101,15 @@ class FeasibilityConfig:
         return cls(dict(data["pilot"]), dict(data["thresholds"]),
                    tuple(data["architectures"]), dict(data["budget"]))
 
+    def validate(self) -> None:
+        # Re-enter the closed, finite-number wire validator at every trust boundary.
+        self.from_wire(self.to_wire())
+
     def to_wire(self) -> dict[str, Any]:
-        return {"schema_version": self.schema_version, "pilot": dict(self.pilot),
+        pilot = dict(self.pilot)
+        if "required_slices" in pilot:
+            pilot["required_slices"] = list(pilot["required_slices"])
+        return {"schema_version": self.schema_version, "pilot": pilot,
                 "thresholds": dict(self.thresholds), "architectures": list(self.architectures),
                 "budget": dict(self.budget)}
 
