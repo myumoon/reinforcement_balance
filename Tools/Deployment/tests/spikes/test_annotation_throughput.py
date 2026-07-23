@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from reinbalance_survivors_contracts.ui_intent import ContractValidationError
 from spikes.annotation_throughput import (
     AnnotationEvent,
     DatasetSplitRequest,
@@ -50,3 +51,60 @@ def test_synthetic_fixture_contains_timer_icon_entity_and_annotation_data():
     samples = make_synthetic_fixture(seed=5)
     assert {sample.kind for sample in samples} >= {"timer", "icon", "entity"}
     assert all(sample.annotation_seconds > 0 for sample in samples)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("entity", -1, 1.0),
+        ("entity", 1, float("nan")),
+        ("entity", 1, 1.0, -1),
+        ("", 1, 1.0),
+        ("entity", True, 1.0),
+    ],
+)
+def test_annotation_event_rejects_invalid_fields_at_construction(args):
+    with pytest.raises(ContractValidationError):
+        AnnotationEvent(*args)
+
+
+@pytest.mark.parametrize("qa", [[-0.1], [1.1], [float("inf")], [True]])
+def test_annotation_summary_rejects_invalid_qa_inputs(qa):
+    with pytest.raises(ContractValidationError):
+        summarize_annotation([AnnotationEvent("entity", 1, 1.0)], qa_ious=qa)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("", 1, 1, 1, 1),
+        ("dev", -1, 1, 1, 1),
+        ("dev", 1, True, 1, 1),
+    ],
+)
+def test_dataset_split_rejects_invalid_fields_at_construction(args):
+    with pytest.raises(ContractValidationError):
+        DatasetSplitRequest(*args)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"entities_per_hour": float("nan")},
+        {"ui_events_per_hour": float("inf")},
+        {"frame_storage_bytes": -1},
+        {"gpu_seconds_per_frame": -0.1},
+        {"parallel_worker_limit": 1.5},
+    ],
+)
+def test_budget_rejects_invalid_rates_and_resources(override):
+    kwargs = {
+        "entities_per_hour": 400,
+        "ui_events_per_hour": 120,
+        "frame_storage_bytes": 100,
+        "gpu_seconds_per_frame": 0.05,
+        "parallel_worker_limit": 2,
+    }
+    kwargs.update(override)
+    with pytest.raises(ContractValidationError):
+        estimate_dataset_budget([DatasetSplitRequest("dev", 1, 1, 1, 1)], **kwargs)

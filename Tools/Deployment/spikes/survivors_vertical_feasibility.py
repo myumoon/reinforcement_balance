@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import json
 import math
+import os
 from pathlib import Path
 import time
+from types import MappingProxyType
 from typing import Any, Callable, Mapping
+import uuid
 
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 from reinbalance_survivors_contracts.ui_intent import (
@@ -46,6 +49,19 @@ class GateEvidence:
     architecture_metrics: Mapping[str, Mapping[str, float]]
     unresolved_risks: tuple[str, ...] = ()
     schema_version: str = EVIDENCE_VERSION
+
+    def __post_init__(self) -> None:
+        for name in ("session_ids", "build_ids", "profile_ids",
+                     "independent_annotators", "unresolved_risks"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        object.__setattr__(self, "session_minutes",
+                           MappingProxyType(dict(self.session_minutes)))
+        object.__setattr__(self, "slice_counts", MappingProxyType(dict(self.slice_counts)))
+        object.__setattr__(
+            self, "architecture_metrics",
+            MappingProxyType({key: MappingProxyType(dict(value))
+                              for key, value in self.architecture_metrics.items()}))
+        self.validate()
 
     def replace(self, **changes: Any) -> "GateEvidence":
         return replace(self, **changes)
@@ -159,6 +175,26 @@ class ActionReplayRecord:
     proposal_cadence_hz: float
     live_input_sent: bool = False
 
+    def __post_init__(self) -> None:
+        ensure(type(self.index) is int and self.index >= 0, "action index must be non-negative")
+        for label, vector in (("proposal", self.proposal_vector),
+                              ("measured displacement", self.measured_screen_displacement)):
+            ensure(isinstance(vector, tuple) and len(vector) == 2 and
+                   all(is_strict_number(v) and math.isfinite(v) for v in vector),
+                   f"{label} vector must contain two finite numbers")
+        ensure(isinstance(self.source_parent_hash, str) and len(self.source_parent_hash) == 64 and
+               all(character in "0123456789abcdef" for character in self.source_parent_hash),
+               "source parent hash must be SHA-256 text")
+        ensure(is_strict_number(self.capture_to_observation_latency_ms) and
+               math.isfinite(self.capture_to_observation_latency_ms) and
+               self.capture_to_observation_latency_ms >= 0,
+               "capture latency must be finite and non-negative")
+        ensure(is_strict_number(self.proposal_cadence_hz) and
+               math.isfinite(self.proposal_cadence_hz) and self.proposal_cadence_hz > 0,
+               "proposal cadence must be positive and finite")
+        ensure(type(self.live_input_sent) is bool and not self.live_input_sent,
+               "spike action replay cannot send live input")
+
 
 def replay_action_displacement(path: Path, *, latency_ms: float = 0.0,
                                proposal_cadence_hz: float = 15.0) -> tuple[ActionReplayRecord, ...]:
@@ -193,11 +229,23 @@ class FrameMetadata:
     duplicate: bool
     encoded_bytes: int
 
+    def __post_init__(self) -> None:
+        for label in ("sequence", "captured_monotonic_ns", "dropped_since_previous",
+                      "encoded_bytes"):
+            ensure(type(getattr(self, label)) is int and getattr(self, label) >= 0,
+                   f"frame {label} must be a non-negative integer")
+        ensure(type(self.width) is int and self.width > 0 and
+               type(self.height) is int and self.height > 0,
+               "frame dimensions must be positive integers")
+        ensure(type(self.duplicate) is bool, "frame duplicate must be boolean")
+
 
 class LatestFrameSampler:
     """Backend-neutral 30 FPS latest-frame sampler with drop/duplicate accounting."""
     def __init__(self, getter: Callable[[], Any], fps: float = 30.0):
-        ensure(fps > 0, "fps must be positive")
+        ensure(callable(getter), "frame getter must be callable")
+        ensure(is_strict_number(fps) and math.isfinite(fps) and fps > 0,
+               "fps must be positive and finite")
         self.getter, self.period_ns, self.sequence = getter, int(1e9/fps), 0
         self._last_hash: str | None = None
         self._last_capture_ns: int | None = None
@@ -333,6 +381,44 @@ def write_verdict(evidence: GateEvidence, json_path: Path, markdown_path: Path,
     config = config or load_feasibility_config()
     verdict, budget = issue_verdict(evidence, config), default_budget(config)
     output = {**verdict, "budget": budget}
-    json_path.write_bytes(canonical_json_bytes(output) + b"\n")
-    markdown_path.write_text(render_verdict_markdown(verdict, budget), encoding="utf-8")
+    json_path, markdown_path = Path(json_path), Path(markdown_path)
+    ensure(json_path != markdown_path, "JSON and Markdown verdict paths must differ")
+    token = uuid.uuid4().hex
+    json_temp = json_path.with_name(f".{json_path.name}.{token}.tmp")
+    markdown_temp = markdown_path.with_name(f".{markdown_path.name}.{token}.tmp")
+    paths = ((json_path, json_temp), (markdown_path, markdown_temp))
+    backups: list[tuple[Path, Path]] = []
+    installed: list[Path] = []
+    try:
+        json_temp.write_bytes(canonical_json_bytes(output) + b"\n")
+        markdown_temp.write_text(render_verdict_markdown(verdict, budget), encoding="utf-8")
+        for final, _ in paths:
+            if final.exists():
+                backup = final.with_name(f".{final.name}.{token}.bak")
+                os.replace(final, backup)
+                backups.append((final, backup))
+        for final, temporary in paths:
+            os.replace(temporary, final)
+            installed.append(final)
+    except BaseException:
+        for final in installed:
+            try:
+                final.unlink()
+            except FileNotFoundError:
+                pass
+        for final, backup in reversed(backups):
+            if backup.exists():
+                os.replace(backup, final)
+        raise
+    finally:
+        for _, temporary in paths:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        for _, backup in backups:
+            try:
+                backup.unlink()
+            except FileNotFoundError:
+                pass
     return output

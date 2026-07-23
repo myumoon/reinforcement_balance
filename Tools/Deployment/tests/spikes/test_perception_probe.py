@@ -24,6 +24,7 @@ from spikes.survivors_vertical_feasibility import (
     GateEvidence,
     issue_verdict,
     replay_action_displacement,
+    write_verdict,
 )
 
 
@@ -162,14 +163,13 @@ def test_config_internal_mappings_are_immutable(section):
 
 def test_verdict_revalidates_directly_constructed_config():
     valid = load_feasibility_config()
-    invalid = FeasibilityConfig(
-        valid.pilot,
-        {**valid.thresholds, "oracle_recall": float("nan")},
-        valid.architectures,
-        valid.budget,
-    )
     with pytest.raises(ContractValidationError):
-        issue_verdict(GateEvidence.valid_fixture(), invalid)
+        FeasibilityConfig(
+            valid.pilot,
+            {**valid.thresholds, "oracle_recall": float("nan")},
+            valid.architectures,
+            valid.budget,
+        )
 
 
 def test_action_replay_keeps_proposal_and_measurement_distinct():
@@ -195,3 +195,21 @@ def test_action_replay_requires_validated_golden_parent(tmp_path, mutation):
     forged.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError):
         replay_action_displacement(forged)
+
+
+def test_verdict_artifacts_are_all_or_nothing_when_markdown_staging_fails(
+        tmp_path, monkeypatch):
+    json_path = tmp_path / "verdict.json"
+    markdown_path = tmp_path / "verdict.md"
+    original = Path.write_text
+
+    def fail_markdown_temp(self, *args, **kwargs):
+        if self.name.startswith(f".{markdown_path.name}."):
+            raise OSError("injected markdown failure")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_markdown_temp)
+    with pytest.raises(OSError, match="injected markdown failure"):
+        write_verdict(GateEvidence.valid_fixture(), json_path, markdown_path)
+    assert not json_path.exists()
+    assert not markdown_path.exists()

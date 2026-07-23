@@ -59,6 +59,35 @@ class FeasibilityConfig:
         object.__setattr__(self, "thresholds", MappingProxyType(dict(self.thresholds)))
         object.__setattr__(self, "architectures", tuple(self.architectures))
         object.__setattr__(self, "budget", MappingProxyType(dict(self.budget)))
+        ensure(self.schema_version == CONFIG_VERSION, "feasibility config schema mismatch")
+        _closed(self.pilot, _PILOT_KEYS, "pilot")
+        _closed(self.thresholds, _THRESHOLD_KEYS, "thresholds")
+        _closed(self.budget, _BUDGET_KEYS, "budget")
+        ensure(set(self.architectures) == _ARCH_KEYS and
+               len(self.architectures) == len(set(self.architectures)),
+               "architecture matrix must be complete and unique")
+        ensure(all(type(self.pilot[k]) is int and self.pilot[k] > 0 for k in
+                   ("min_sessions", "max_sessions", "min_minutes_per_session",
+                    "min_frames", "min_sessions_per_slice")) and
+               self.pilot["min_sessions"] <= self.pilot["max_sessions"],
+               "pilot counts/durations must be positive with a valid session range")
+        ensure(isinstance(self.pilot["required_slices"], tuple) and
+               all(isinstance(v, str) and v for v in self.pilot["required_slices"]) and
+               len(self.pilot["required_slices"]) == len(set(self.pilot["required_slices"])),
+               "required slices must be unique non-empty strings")
+        ensure(all(is_strict_number(v) and math.isfinite(v) and v > 0
+                   for v in self.thresholds.values()) and
+               all(self.thresholds[k] <= 1 for k in
+                   ("oracle_recall", "bbox_qa_iou", "class_agreement")),
+               "thresholds must be finite, positive, and bounded where applicable")
+        ensure(type(self.budget["parallel_worker_limit"]) is int and
+               self.budget["parallel_worker_limit"] > 0 and
+               type(self.budget["frame_storage_bytes"]) is int and
+               self.budget["frame_storage_bytes"] > 0 and
+               is_strict_number(self.budget["gpu_seconds_per_frame"]) and
+               math.isfinite(self.budget["gpu_seconds_per_frame"]) and
+               self.budget["gpu_seconds_per_frame"] > 0,
+               "budget resources must be positive finite values of the required type")
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> "FeasibilityConfig":
@@ -126,7 +155,17 @@ def load_feasibility_config(source: Path | Mapping[str, Any] = CONFIG) -> Feasib
 @dataclass(frozen=True)
 class Box:
     x1: float; y1: float; x2: float; y2: float
+    def __post_init__(self) -> None:
+        ensure(all(is_strict_number(v) and math.isfinite(v)
+                   for v in (self.x1, self.y1, self.x2, self.y2)),
+               "box coordinates must be finite numbers")
+        ensure(self.x2 >= self.x1 and self.y2 >= self.y1,
+               "box coordinates must be ordered")
+
     def almost_equals(self, other: "Box", tolerance: float = 1e-6) -> bool:
+        ensure(isinstance(other, Box), "comparison target must be a box")
+        ensure(is_strict_number(tolerance) and math.isfinite(tolerance) and tolerance >= 0,
+               "box tolerance must be finite and non-negative")
         return bool(np.allclose((self.x1, self.y1, self.x2, self.y2),
                                 (other.x1, other.y1, other.x2, other.y2),
                                 atol=tolerance, rtol=0))
@@ -137,6 +176,9 @@ class CoordinateTransform:
     scale_x: float; scale_y: float; offset_x: float; offset_y: float
 
     def __post_init__(self) -> None:
+        ensure(all(is_strict_number(v) and math.isfinite(v)
+                   for v in (self.scale_x, self.scale_y, self.offset_x, self.offset_y)),
+               "transform values must be finite numbers")
         ensure(self.scale_x > 0 and self.scale_y > 0, "transform scale must be positive")
 
     @classmethod
@@ -145,10 +187,14 @@ class CoordinateTransform:
 
     @classmethod
     def resize(cls, source: tuple[int, int], target: tuple[int, int]) -> "CoordinateTransform":
+        _validate_dimensions(source, "source")
+        _validate_dimensions(target, "target")
         return cls(target[0] / source[0], target[1] / source[1], 0, 0)
 
     @classmethod
     def letterbox(cls, source: tuple[int, int], target: tuple[int, int]) -> "CoordinateTransform":
+        _validate_dimensions(source, "source")
+        _validate_dimensions(target, "target")
         scale = min(target[0] / source[0], target[1] / source[1])
         return cls(scale, scale, (target[0] - source[0] * scale) / 2,
                    (target[1] - source[1] * scale) / 2)
@@ -156,6 +202,9 @@ class CoordinateTransform:
     @classmethod
     def tile(cls, column: int, row: int, *, tile_width: int,
              tile_height: int) -> "CoordinateTransform":
+        ensure(type(column) is int and column >= 0 and type(row) is int and row >= 0,
+               "tile indices must be non-negative integers")
+        _validate_dimensions((tile_width, tile_height), "tile")
         return cls(1, 1, -column * tile_width, -row * tile_height)
 
     def forward_box(self, box: Box) -> Box:
@@ -170,6 +219,12 @@ class CoordinateTransform:
 def _chunk(kind: bytes, payload: bytes) -> bytes:
     return struct.pack(">I", len(payload)) + kind + payload + struct.pack(
         ">I", binascii.crc32(kind + payload) & 0xffffffff)
+
+
+def _validate_dimensions(value: Any, label: str) -> None:
+    ensure(isinstance(value, tuple) and len(value) == 2 and
+           all(type(v) is int and v > 0 for v in value),
+           f"{label} dimensions must be two positive integers")
 
 
 def encode_png(frame: np.ndarray) -> bytes:
@@ -227,8 +282,11 @@ def _validate_frame(frame: np.ndarray) -> None:
 
 def decode_frame(payload: bytes, encoding: str, *, width: int | None = None,
                  height: int | None = None) -> np.ndarray:
+    ensure(isinstance(payload, bytes), "encoded frame payload must be bytes")
+    ensure(isinstance(encoding, str), "frame encoding must be text")
     if encoding == "raw_bgra":
-        ensure(width and height and len(payload) == width * height * 4,
+        ensure(type(width) is int and width > 0 and type(height) is int and height > 0 and
+               len(payload) == width * height * 4,
                "raw BGRA dimensions mismatch")
         return np.frombuffer(payload, dtype=np.uint8).reshape(height, width, 4).copy()
     if encoding == "png":
@@ -251,6 +309,34 @@ class ProbeSample:
     annotation_seconds: float
     architecture_detectable: Mapping[str, bool] | None = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "slices", tuple(self.slices))
+        object.__setattr__(self, "architecture_latency_ms",
+                           MappingProxyType(dict(self.architecture_latency_ms)))
+        if self.architecture_detectable is not None:
+            object.__setattr__(self, "architecture_detectable",
+                               MappingProxyType(dict(self.architecture_detectable)))
+        self.validate()
+
+    def validate(self) -> None:
+        ensure(isinstance(self.kind, str) and self.kind, "probe kind must be non-empty")
+        ensure(is_strict_number(self.short_side_px) and math.isfinite(self.short_side_px) and
+               self.short_side_px >= 0, "probe short side must be finite and non-negative")
+        ensure(self.slices and all(isinstance(v, str) and v for v in self.slices),
+               "probe slices must be non-empty strings")
+        ensure(type(self.oracle_detectable) is bool, "oracle detectable must be boolean")
+        ensure(set(self.architecture_latency_ms) == _ARCH_KEYS and
+               all(is_strict_number(v) and math.isfinite(v) and v > 0
+                   for v in self.architecture_latency_ms.values()),
+               "architecture latency matrix must contain positive finite values")
+        ensure(is_strict_number(self.annotation_seconds) and
+               math.isfinite(self.annotation_seconds) and self.annotation_seconds >= 0,
+               "annotation seconds must be finite and non-negative")
+        ensure(self.architecture_detectable is None or
+               (set(self.architecture_detectable) == _ARCH_KEYS and
+                all(type(v) is bool for v in self.architecture_detectable.values())),
+               "architecture detection matrix is incomplete")
+
 
 def make_synthetic_fixture(seed: int = 0) -> tuple[ProbeSample, ...]:
     rng = np.random.default_rng(seed)
@@ -272,7 +358,10 @@ def make_synthetic_fixture(seed: int = 0) -> tuple[ProbeSample, ...]:
 
 def evaluate_probe(samples: Iterable[ProbeSample]) -> dict[str, Any]:
     values = tuple(samples)
-    ensure(values, "at least one probe sample is required")
+    ensure(values and all(isinstance(v, ProbeSample) for v in values),
+           "at least one probe sample is required")
+    for value in values:
+        value.validate()
     ensure(all(isinstance(v.kind, str) and v.kind and
                is_strict_number(v.short_side_px) and math.isfinite(v.short_side_px) and
                v.short_side_px >= 0 and
@@ -334,12 +423,20 @@ def evaluate_probe(samples: Iterable[ProbeSample]) -> dict[str, Any]:
 
 def normalized_displacement(start_xy: tuple[float, float], end_xy: tuple[float, float],
                             viewport_wh: tuple[int, int]) -> tuple[float, float]:
+    ensure(all(isinstance(v, tuple) and len(v) == 2 for v in (start_xy, end_xy)),
+           "screen points must contain two coordinates")
+    ensure(all(is_strict_number(x) and math.isfinite(x) for v in (start_xy, end_xy) for x in v),
+           "screen coordinates must be finite numbers")
+    _validate_dimensions(viewport_wh, "viewport")
     return ((end_xy[0]-start_xy[0])/viewport_wh[0],
             (end_xy[1]-start_xy[1])/viewport_wh[1])
 
 
 def template_score(image: np.ndarray, template: np.ndarray) -> float:
     """Small HUD digit/icon baseline without OpenCV."""
-    ensure(image.shape == template.shape and image.size > 0, "template shape mismatch")
+    ensure(isinstance(image, np.ndarray) and isinstance(template, np.ndarray) and
+           image.shape == template.shape and image.size > 0 and
+           image.dtype == np.uint8 and template.dtype == np.uint8,
+           "template inputs must be matching non-empty uint8 arrays")
     delta = np.abs(image.astype(np.float32) - template.astype(np.float32))
     return float(1.0 - np.mean(delta) / 255.0)
