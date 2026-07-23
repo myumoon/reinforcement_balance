@@ -12,6 +12,6 @@ preflight attempt は run identity ではない。成功時だけ process 生成
 
 Win64 の intent 更新は temp file の flush 後に atomic replace し、置換後ファイルも flush する。Windows/Python では directory handle の `fsync` を提供できないため、directory entry の crash durability は local fixed NTFS journaling の保証範囲に依存し、電源断に対する絶対 durability は主張しない。UNC、removable、non-NTFS は commit 前に fail-closed とする。
 
-ローカル campaign 実行 operator 自身に対する on-disk evidence の tamper-proofing は、この pure Python 契約の脅威モデル外である。暗号 secret や OS/hardware trust anchor なしには、整合する hash chain と save bytes の手書き偽造を原理的に区別できない。gate は固定 path 上の lifecycle chain、live canonical save、original backup を再検証するが、operator に対する完全性保証は 05/06 の Win32 broker、kernel process/job attestation で扱う。
+ローカル campaign 実行 operator 自身に対する on-disk evidence の tamper-proofing は、この pure Python 契約の脅威モデル外である。暗号 secret や OS/hardware trust anchor なしには、整合する hash chain と save bytes の手書き偽造、および偽の pinned canonical 値と整合 evidence の組み合わせを原理的に区別できない。gate は固定 path 上の lifecycle chain、live canonical save、original backup を再検証するが、operator に対する完全性保証は 05/06 の Win32 broker、kernel process/job attestation で扱う。
 
 成功判定は timer 1800 到達だけでは確定せず `TARGET_REACHED_PENDING_TRANSITION` に入り、post-30 event を画面上で確認して確定する。off-screen entity、hidden HP/cooldown、global state count/density は release-observable ではない。

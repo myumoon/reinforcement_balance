@@ -11,14 +11,14 @@ from .target_profile import load_target_profile
 
 class AuditError(ValueError):pass
 _SHA256=re.compile(r"[0-9a-f]{64}")
-_PLACEHOLDER=re.compile(r"(MANUAL|REQUIRED|PLACEHOLDER)")
+_PLACEHOLDER=re.compile(r"(TEST_FIXTURE|FIXTURE|MANUAL|REQUIRED|PLACEHOLDER)",re.IGNORECASE)
 _ATTESTED_PROFILE_FIELDS=frozenset({
     ("build","build_id"), ("build","executable_version"),
     ("progression","save_format_version"),
     *(("hardware",key) for key in ("os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version")),
 })
 _FILE_DERIVED_PROFILE_FIELDS=frozenset({("build","executable_hash"),("progression","save_artifact_hash")})
-_CANONICAL_EXEMPT_FIELDS=_ATTESTED_PROFILE_FIELDS|_FILE_DERIVED_PROFILE_FIELDS|frozenset({("build","manual_attestation")})
+_CANONICAL_EXEMPT_FIELDS=_FILE_DERIVED_PROFILE_FIELDS|frozenset({("build","manual_attestation")})
 
 def _file_hash(path:Path)->str:return canonical_hash({"bytes_hex":path.read_bytes().hex()})
 
@@ -36,6 +36,14 @@ def _assert_resolved(profile:Mapping[str,Any])->None:
     for section,field in (("build","executable_hash"),("progression","save_artifact_hash")):
         if not isinstance(profile[section][field],str) or not _SHA256.fullmatch(profile[section][field]): raise AuditError(f"invalid measured {section}.{field}")
 
+def _assert_canonical_identity_finalized(canonical:Mapping[str,Any])->None:
+    if canonical.get("provenance")!="operator-attested":
+        raise AuditError("canonical target identity not finalized; cannot issue operator-attested audit verdict")
+    for section,field in _ATTESTED_PROFILE_FIELDS:
+        value=canonical[section][field]
+        if value is None or isinstance(value,str) and (not value.strip() or _PLACEHOLDER.search(value)):
+            raise AuditError("canonical target identity not finalized; cannot issue operator-attested audit verdict")
+
 @dataclass(frozen=True)
 class AuditEvidence:
     executable_path:Path; save_path:Path; manual_attestation:Mapping[str,Any]; manual_evidence_path:Path
@@ -50,14 +58,15 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     try: TargetProfile.from_wire(expected); TargetProfile.from_wire(actual)
     except (ValueError,KeyError,TypeError) as exc: raise AuditError(str(exc)) from exc
     canonical=load_target_profile().to_wire()
+    _assert_canonical_identity_finalized(canonical)
     if expected["provenance"]!="operator-attested" or actual["provenance"]!="operator-attested": raise AuditError("real target requires an operator-attested canonical profile")
     for section in canonical:
         if section in {"schema_version","provenance"}:
             if section=="schema_version" and expected[section]!=canonical[section]: raise AuditError("expected is not the canonical target profile")
             continue
         for field,value in canonical[section].items():
-            # Operator/date/evidence identify the measurement event. Every measured
-            # target value itself is fixed by the canonical profile.
+            # Operator/date/evidence identify only the measurement event. Attested
+            # values are pinned here and cannot be selected by the audit caller.
             if (section,field) not in _CANONICAL_EXEMPT_FIELDS and expected[section][field]!=value:
                 raise AuditError("expected is not the canonical target profile")
     _assert_resolved(expected); _assert_resolved(actual)

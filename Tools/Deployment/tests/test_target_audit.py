@@ -4,11 +4,22 @@ import pytest
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict, _verify_audit_evidence
 from survivors.target_audit import AuditError, AuditEvidence, SaveLifecycle, audit_target
-from survivors.target_profile import load_target_profile
+from survivors.target_profile import TargetProfile, load_target_profile
 
 ATTEST_BASE={"operator":"op","date":"2026-07-22","fields":["build_id","executable_version","save_format_version","os_build","gpu_name","vram_mb","driver_version","cuda_version","pytorch_version"],"unavailable_reason":"store and driver APIs unavailable"}
 
 def file_hash(data:bytes): return canonical_hash({"bytes_hex":data.hex()})
+
+@pytest.fixture(autouse=True)
+def finalized_canonical(monkeypatch):
+    data=load_target_profile().to_wire()
+    data["provenance"]="operator-attested"
+    data["build"].update(build_id="steam-1794680-measured",executable_version="measured-v1")
+    data["progression"]["save_format_version"]="measured-v1"
+    data["hardware"].update(os_build="26100",gpu_name="reference-gpu",vram_mb=12288,driver_version="1",cuda_version="12.4",pytorch_version="2.5")
+    profile=TargetProfile.from_wire(data)
+    monkeypatch.setattr("survivors.target_audit.load_target_profile",lambda:profile)
+    return profile
 
 def lifecycle_audit(attempt,life):
     evidence=b"audit"
@@ -48,8 +59,16 @@ def test_audit_rejects_noncanonical_expected_even_when_actual_matches(tmp_path):
 
 @pytest.mark.parametrize(("section","field","value"), [
     ("build","build_id","different-build"),
+    ("build","executable_version","different-version"),
+    ("progression","save_format_version","different-format"),
     ("progression","save_artifact_hash","f"*64),
     ("hardware","profile_id","different-hardware"),
+    ("hardware","os_build","different-os"),
+    ("hardware","gpu_name","different-gpu"),
+    ("hardware","vram_mb",1),
+    ("hardware","driver_version","different-driver"),
+    ("hardware","cuda_version","different-cuda"),
+    ("hardware","pytorch_version","different-pytorch"),
 ])
 def test_measured_identity_is_bound_to_canonical_profile(tmp_path,section,field,value):
     expected,evidence=resolved(tmp_path)
@@ -66,6 +85,21 @@ def test_placeholder_or_missing_attestation_never_passes(tmp_path):
     evidence.manual_evidence_path.write_bytes(b"tampered")
     with pytest.raises(AuditError): audit_target(expected,copy.deepcopy(expected),evidence,attempt_id="attempt-1")
 
+@pytest.mark.parametrize("canonical_override", [
+    ("provenance",None,"test-fixture"),
+    ("build","build_id","TEST_FIXTURE_ONLY"),
+    ("hardware","gpu_name","MANUAL_ATTESTATION_REQUIRED"),
+])
+def test_unfinalized_canonical_identity_fails_closed(tmp_path,monkeypatch,finalized_canonical,canonical_override):
+    expected,evidence=resolved(tmp_path)
+    canonical=finalized_canonical.to_wire()
+    section,field,value=canonical_override
+    if field is None: canonical[section]=value
+    else: canonical[section][field]=value
+    monkeypatch.setattr("survivors.target_audit.load_target_profile",lambda:TargetProfile.from_wire(canonical))
+    with pytest.raises(AuditError,match="canonical target identity not finalized"):
+        audit_target(expected,copy.deepcopy(expected),evidence,attempt_id="attempt-1")
+
 def test_manual_evidence_must_contain_claimed_values(tmp_path):
     expected,evidence=resolved(tmp_path)
     evidence.manual_evidence_path.write_text(yaml.safe_dump({"schema_version":"survivors_manual_attestation.v1","measurements":{"gpu_name":"different"}}))
@@ -77,8 +111,25 @@ def test_manual_evidence_must_contain_claimed_values(tmp_path):
 def test_save_format_version_must_match_attested_canonical_value(tmp_path):
     expected,evidence=resolved(tmp_path)
     expected["progression"]["save_format_version"]="caller-forged-v2"
-    with pytest.raises(AuditError,match="attested build/hardware/save format"):
+    with pytest.raises(AuditError,match="canonical target profile"):
         audit_target(expected,copy.deepcopy(expected),evidence,attempt_id="attempt-1")
+
+@pytest.mark.parametrize(("section","field","value"), [
+    ("build","build_id","EVIL"),
+    ("progression","save_format_version","EVIL"),
+    ("hardware","gpu_name","EVIL"),
+])
+def test_caller_cannot_forge_attested_value_across_expected_actual_and_evidence(tmp_path,section,field,value):
+    expected,evidence=resolved(tmp_path)
+    expected[section][field]=value
+    measurements=yaml.safe_load(evidence.manual_evidence_path.read_text())["measurements"]
+    measurements[field]=value
+    evidence.manual_evidence_path.write_text(yaml.safe_dump({"schema_version":"survivors_manual_attestation.v1","measurements":measurements},sort_keys=True))
+    attest={**evidence.manual_attestation,"evidence_hash":file_hash(evidence.manual_evidence_path.read_bytes())}
+    expected["build"]["manual_attestation"]=attest
+    forged=AuditEvidence(evidence.executable_path,evidence.save_path,attest,evidence.manual_evidence_path)
+    with pytest.raises(AuditError,match="canonical target profile"):
+        audit_target(expected,copy.deepcopy(expected),forged,attempt_id="attempt-1")
 
 def test_save_format_version_must_be_covered_by_attestation(tmp_path):
     expected,evidence=resolved(tmp_path)
