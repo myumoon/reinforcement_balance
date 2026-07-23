@@ -1,7 +1,7 @@
-"""target profile 参照と action semantics の契約（scaffold, v1）。
+"""target profile 参照と action semantics の仕様（scaffold, v1）。
 
 - ``TargetProfileRef`` は正確な target（game build・canonical save・hardware
-  profile）への不変 identity 参照。正式な target / save / build / hardware 契約は
+  profile）への不変 identity 参照。正式な target / save / build / hardware 仕様は
   プラン 00-03 で確定する。本型は identity を保持し、子プランが束縛できるようにする。
 - ``ActionSemantics`` は離散アクション semantic の共有された順序付きリスト。9-action の
   golden parity はプラン 00-03 が確定する。ここでは ``default_v1`` が曖昧さのない
@@ -55,6 +55,8 @@ class TargetProfileRef:
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> "TargetProfileRef":
+        if set(data) != {"schema_version", "build_id", "canonical_save_hash", "hardware_profile_id"}:
+            raise ValueError("unknown or missing TargetProfileRef fields")
         if data.get("schema_version") != TARGET_PROFILE_SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported TargetProfileRef schema_version "
@@ -105,6 +107,8 @@ class ActionSemantics:
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> "ActionSemantics":
+        if set(data) != {"schema_version", "actions"}:
+            raise ValueError("unknown or missing ActionSemantics fields")
         if data.get("schema_version") != ACTION_SEMANTICS_SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported ActionSemantics schema_version "

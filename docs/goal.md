@@ -109,3 +109,6 @@ Step 3 の obs を使って Step 1・Step 2 のモデルを動かし、本家 VS
 **前提条件:** Step 1〜3 がすべて完成していること。
 特に Step 3 の obs 変換精度が低いと Step 1・Step 2 の判断品質が直接劣化するため、
 Step 3 の品質保証を優先する。
+# Deployment target contract
+
+Survivors の「本家 VS をクリア」は [deployment target v1](deployment/target_profile.md) の exact build/save/UI/hardware/action/success 条件を満たし、activation 済み formal run のみを outcome 分母に含める。

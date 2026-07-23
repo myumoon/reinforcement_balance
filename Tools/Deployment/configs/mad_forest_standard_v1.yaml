@@ -1,0 +1,62 @@
+# canonical target profile(Mad Forest/Antonio/30 分/日本語 UI 等)の正準値。build_id 等は test-fixture のプレースホルダ。
+#
+# 『これが正解ターゲット』という基準環境を固定した設定ファイルです。実機固有の値(build_id 等)は本番設定時に差し替える前提の仮値です。
+
+schema_version: survivors_target.v1
+provenance: test-fixture
+base:
+  platform: windows_win64
+  window_mode: borderless
+  client_resolution: [1920, 1080]
+  ui_language: ja-JP
+  stage: mad_forest
+  character: antonio
+  modifiers: {hyper: false, hurry: false, inverse: false, arcana: false, limit_break: false, golden_eggs: false, dlc: false}
+  success_timer_seconds: 1800
+  post_timer_event_required: true
+build:
+  build_id: TEST_FIXTURE_ONLY
+  executable_version: TEST_FIXTURE_ONLY
+  executable_hash: a5698d0b8cb6d1340f160c8426969d46b0d2e5627ef0b43c477cb9e25cb3424a
+  distribution: steam
+  app_id: '1794680'
+  content_revision: target-v1
+  ui_revision: ja-target-v1
+  manual_attestation: {operator: MANUAL_ATTESTATION_REQUIRED, date: MANUAL_ATTESTATION_REQUIRED, evidence_hash: MANUAL_ATTESTATION_REQUIRED}
+progression:
+  save_artifact_hash: 75afe43849b5bf6ac26cde0183b0d6a357c56f5d07106e07e24db4bf98cf2002
+  save_format_version: TEST_FIXTURE_ONLY
+  unlocked_characters: [antonio]
+  unlocked_items: [whip]
+  unlocked_stages: [mad_forest]
+  collection_pool: [whip]
+  purchased_power_ups: []
+  reroll_count: 0
+  skip_count: 0
+  banish_count: 0
+display: {ui_scale: 1.0, windows_dpi_scale: 1.0, monitor_output: primary}
+hardware:
+  profile_id: reference-1
+  os_build: '26100'
+  gpu_name: reference-gpu
+  vram_mb: 12288
+  driver_version: '1'
+  cuda_version: '12.4'
+  pytorch_version: '2.5'
+  capture_backend: dxcam
+  cpu_live_fallback: false
+input:
+  key_bindings: {up: W, down: S, left: A, right: D}
+  action_semantics_version: survivors_action.v1
+  frame_skip: 4
+  physics_hz: 60
+  decision_hz: 15
+  key_hold_ms: 60
+  lease_ms: 200
+choice_taxonomy:
+  level_up_card_counts: [3, 4]
+  fallbacks: [gold, chicken]
+  capabilities: [reroll, skip, banish]
+  states: [gameplay, level_up, fallback, chest, result, post_30_transition]
+  candidate_vocabulary: [whip, gold, chicken]
+  candidate_vocabulary_hash: 0c50de9d06af9782ff49353cd43de91ddbaa53380ec75ff5d79dd9b262e7cc9f
