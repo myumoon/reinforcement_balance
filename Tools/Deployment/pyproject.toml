@@ -1,3 +1,7 @@
+# reinbalance-survivors-deployment パッケージのビルド設定(setuptools・依存・pytest 設定)。
+#
+# この Deployment ツール群を Python パッケージとして組み立てる方法を定義するファイルです。
+
 [build-system]
 # setuptools 70.2.0 は bdist_wheel を内蔵するため、別途（未 pin の）wheel 依存を持たない。
 requires = ["setuptools==70.2.0"]

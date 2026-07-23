@@ -1,3 +1,8 @@
+"""互換性／無効化マトリクスと manifest 親 lineage 検証の検証テスト。
+
+『何が変わると作り直しか』の判定と、成果物が正しい前提から作られているかの確認を自動テストで検証します。
+"""
+
 import pytest
 from survivors.compatibility import invalidation_for,validate_manifest,load_matrix
 from reinbalance_survivors_contracts.launch_lifecycle import _verify_audit_evidence

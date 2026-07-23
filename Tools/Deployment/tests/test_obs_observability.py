@@ -1,3 +1,8 @@
+"""/obs_schema の排他分類・release observable 検証・exact set drift 検出の検証テスト。
+
+観測値の仕分けが正しく、見えないはずの内部情報を弾けるかを自動テストで確認します。
+"""
+
 import pytest
 
 from survivors.obs_observability import OBS_SEGMENTS, classify_segments, validate_release_observable, validate_exact_schema

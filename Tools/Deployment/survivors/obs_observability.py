@@ -1,8 +1,9 @@
-"""Release observability classification for the exact UE /obs_schema.
+"""実 UE の /obs_schema の全 segment を release-observable か否かで排他分類し、exact set からの drift を検出する。
 
-The names below are copied from SurvivorsObservationComponent.cpp.  Keeping the
-partition explicit makes additions to the simulator schema a blocking review.
+AI がゲームから受け取る観測値のうち『画面から実際に見える情報だけ』を使うよう仕分けします。
+本来見えないはずの内部情報が混ざっていないかを検査します。
 """
+
 DIRECT_HUD = frozenset({"player_hp", "elapsed_time", "xp_progress", "player_level"})
 INVENTORY_DERIVED = frozenset({"shield_active", "revival_remaining_norm", "armor_flat_norm", "regen_per_sec_norm", "passive_effect_summary", "weapon_slots", "passive_slots", "gem_pickup_radius", "weapon_attack_range_norm", "weapon_is_directional", "weapon_category_onehot"})
 SCREEN_WORLD_OBSERVED = frozenset({"player_pos", "wall_rays", "red_gem_rel_pos", "green_gem_rel_pos", "blue_gem_rel_pos", "enemy_rel_pos", "enemy_type", "enemy_frozen", "enemy_nearest_dist_16dir", "projectiles", "floor_pickups", "special_pickups", "destructibles"})

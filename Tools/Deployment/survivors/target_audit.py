@@ -1,3 +1,9 @@
+"""実行環境の実測 profile を canonical target profile へ対称束縛して照合し、caller の自己申告では PASS を出さない fail-closed な exact target 監査。
+
+目の前の環境が『正解ターゲットと本当に同一か』を厳しく検査します。
+呼び出し側が都合よく値を宣言しても通らず、固定した基準値・実ファイルのハッシュ・operator の証明書がすべて一致した時だけ合格を出します。
+"""
+
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path

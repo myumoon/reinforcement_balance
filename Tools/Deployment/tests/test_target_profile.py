@@ -1,3 +1,8 @@
+"""target profile schema と成功判定 state machine の検証テスト。
+
+正解ターゲットの型定義と『30 分生存＝成功』の判定ロジックが正しいかを自動テストで確認します。
+"""
+
 import math
 import pytest
 import yaml

@@ -1,3 +1,7 @@
+# 9 アクションの physics_hz/frame_skip/decision 周期と WASD 変位の正準定義(config)。
+#
+# 操作の種類とタイミング、方向ごとの動き方を固定した設定ファイルです。
+
 schema_version: survivors_action.v1
 physics_hz: 60
 frame_skip: 4

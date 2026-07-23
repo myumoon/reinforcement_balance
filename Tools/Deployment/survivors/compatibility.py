@@ -1,3 +1,9 @@
+"""artifact 互換性／無効化マトリクスを検証し、manifest の親 lineage(target_audit_hash 等)を確認する契約。
+
+生成物(モデルやデータ)が『どの条件が変わると作り直しになるか』の一覧を管理します。
+各成果物が正しい前提(＝正解ターゲットの監査結果)から作られたかも確認します。
+"""
+
 from pathlib import Path
 from typing import Mapping,Any
 import yaml

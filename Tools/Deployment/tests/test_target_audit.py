@@ -1,3 +1,8 @@
+"""exact target 監査(canonical 束縛・fail-closed・自己申告/偽造の拒否)の検証テスト。
+
+環境が正解ターゲットと同一かの検査が、ごまかしを通さず一致時だけ合格するかを自動テストで確認します。
+"""
+
 import copy
 import yaml
 import pytest

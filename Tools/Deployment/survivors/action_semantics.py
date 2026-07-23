@@ -1,3 +1,9 @@
+"""9 アクション(8 方向＋idle)の変位マッピングを C++ の ApplyAction を source of truth として独立照合し、drift を検出する action 契約。
+
+AI が出す『上下左右・斜め・停止』の 9 種類の操作が、ゲーム本体のコードと食い違っていないかを検査します。
+値がズレたら気づけるよう、正解表(golden)と独立に突き合わせます。
+"""
+
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path

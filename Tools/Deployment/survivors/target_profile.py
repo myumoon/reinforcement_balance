@@ -1,3 +1,9 @@
+"""正確な deployment target(build/save/hardware/progression 等)の閉じた schema と、1800 秒到達後の post-30 event で確定する成功判定 state machine を定義する。
+
+『どの本家ゲーム環境を正解ターゲットとするか』を型でかっちり定義し、未知の項目が来たら弾きます。
+さらに『30 分生存＝成功』を、タイマー到達だけでなく画面イベントの証拠で確定する判定ロジックを持ちます。
+"""
+
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path

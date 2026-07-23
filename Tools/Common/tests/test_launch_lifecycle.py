@@ -1,3 +1,8 @@
+"""launch_lifecycle 契約(起動 identity・耐障害台帳・reserved→activated cardinality・成功判定)の検証テスト。
+
+起動記録の仕組みが、二重起動や改ざん・途中失敗に対して正しく振る舞うかを自動テストで確認します。
+"""
+
 import json
 import os
 from types import SimpleNamespace

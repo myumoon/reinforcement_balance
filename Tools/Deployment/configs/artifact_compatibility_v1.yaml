@@ -1,3 +1,7 @@
+# artifact 互換性クラス・無効化条件・必須親 lineage(required_parent)の定義(config)。
+#
+# 『どの条件が変わると成果物を作り直すか』と、成果物が持つべき前提を決めた設定ファイルです。
+
 schema_version: artifact_compatibility.v1
 required_parent: target_audit_hash
 classes:

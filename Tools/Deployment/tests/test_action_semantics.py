@@ -1,3 +1,8 @@
+"""action 契約(9 アクション変位・C++ 照合・golden fixture)の検証テスト。
+
+9 種類の操作の向き・大きさがゲーム本体と一致し、正解表とズレないかを自動テストで確認します。
+"""
+
 import pytest
 
 from survivors.action_semantics import ActionContract, load_action_contract, validate_cpp_source, validate_golden_fixture
