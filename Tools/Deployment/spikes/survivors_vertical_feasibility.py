@@ -2,16 +2,18 @@
 from __future__ import annotations
 from dataclasses import dataclass, replace
 import json
+import math
 from pathlib import Path
 import time
 from typing import Any, Callable, Mapping
 
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 from reinbalance_survivors_contracts.ui_intent import (
-    ContractValidationError, ensure, require_schema_version,
+    ContractValidationError, ensure, is_strict_number, require_schema_version,
 )
 from .annotation_throughput import DatasetSplitRequest, estimate_dataset_budget
 from .perception_probe import FeasibilityConfig, load_feasibility_config
+from survivors.action_semantics import load_action_contract, validate_golden_fixture
 
 EVIDENCE_VERSION = "perception_gate_evidence.v1"
 _EVIDENCE_KEYS = frozenset({
@@ -47,6 +49,54 @@ class GateEvidence:
 
     def replace(self, **changes: Any) -> "GateEvidence":
         return replace(self, **changes)
+
+    def validate(self, config: FeasibilityConfig | None = None) -> None:
+        ensure(self.schema_version == EVIDENCE_VERSION, "gate evidence schema mismatch")
+        ensure(type(self.target_audit_pass) is bool, "target audit pass must be boolean")
+        ensure(all(isinstance(v, str) and v for group in
+                   (self.session_ids, self.build_ids, self.profile_ids,
+                    self.independent_annotators, self.unresolved_risks) for v in group),
+               "evidence identifiers/risks must be non-empty strings")
+        ensure(len(self.session_ids) == len(set(self.session_ids)),
+               "session identifiers must be unique")
+        ensure(set(self.session_minutes) == set(self.session_ids),
+               "session duration identities must exactly match sessions")
+        ensure(all(isinstance(k, str) and is_strict_number(v) and math.isfinite(v) and v >= 0
+                   for k, v in self.session_minutes.items()),
+               "session durations must be finite and non-negative")
+        ensure(set(self.slice_counts) <= set(_REQUIRED_SLICES) and
+               all(type(v) is int and v >= 0 for v in self.slice_counts.values()),
+               "slice counts must be known non-negative integers")
+        ensure(type(self.representative_frames) is int and self.representative_frames >= 0,
+               "representative frames must be a non-negative integer")
+        for name, value in {
+            "p10 short side": self.p10_short_side_px,
+            "single pass latency": self.single_pass_p95_ms,
+            "dense entities/hour": self.dense_entities_per_hour,
+        }.items():
+            ensure(is_strict_number(value) and math.isfinite(value) and value >= 0,
+                   f"{name} must be finite and non-negative")
+        for name, value in {
+            "late recall": self.late_recall, "heavy recall": self.heavy_recall,
+            "bbox QA IoU": self.bbox_qa_iou, "class agreement": self.class_agreement,
+        }.items():
+            ensure(is_strict_number(value) and math.isfinite(value) and 0 <= value <= 1,
+                   f"{name} must be finite and between zero and one")
+        expected_architectures = set(config.architectures) if config else {
+            "ssdlite320", "ssdlite640_multiscale", "tile_2x2", "coarse_density"}
+        ensure(set(self.architecture_metrics) == expected_architectures,
+               "unknown/missing architecture metrics")
+        for metrics in self.architecture_metrics.values():
+            ensure(isinstance(metrics, Mapping) and
+                   set(metrics) == {"utility", "latency_p95_ms"},
+                   "unknown/missing architecture metric fields")
+            ensure(is_strict_number(metrics["utility"]) and
+                   math.isfinite(metrics["utility"]) and 0 <= metrics["utility"] <= 1,
+                   "architecture utility must be finite and between zero and one")
+            ensure(is_strict_number(metrics["latency_p95_ms"]) and
+                   math.isfinite(metrics["latency_p95_ms"]) and
+                   metrics["latency_p95_ms"] > 0,
+                   "architecture latency must be positive and finite")
 
     @classmethod
     def valid_fixture(cls) -> "GateEvidence":
@@ -86,13 +136,7 @@ class GateEvidence:
         require_schema_version(data, EVIDENCE_VERSION, "gate evidence")
         ensure(set(data["slice_counts"]) == set(_REQUIRED_SLICES),
                "unknown/missing slice count fields")
-        ensure(set(data["architecture_metrics"]) ==
-               {"ssdlite320", "ssdlite640_multiscale", "tile_2x2", "coarse_density"},
-               "unknown/missing architecture metrics")
-        for metrics in data["architecture_metrics"].values():
-            ensure(set(metrics) == {"utility", "latency_p95_ms"},
-                   "unknown/missing architecture metric fields")
-        return cls(tuple(data["session_ids"]), tuple(data["build_ids"]), tuple(data["profile_ids"]),
+        result = cls(tuple(data["session_ids"]), tuple(data["build_ids"]), tuple(data["profile_ids"]),
                    data["target_audit_pass"], dict(data["session_minutes"]),
                    dict(data["slice_counts"]), data["representative_frames"],
                    tuple(data["independent_annotators"]), data["p10_short_side_px"],
@@ -101,6 +145,8 @@ class GateEvidence:
                    data["dense_entities_per_hour"],
                    {k: dict(v) for k, v in data["architecture_metrics"].items()},
                    tuple(data["unresolved_risks"]))
+        result.validate()
+        return result
 
 
 @dataclass(frozen=True)
@@ -117,11 +163,14 @@ class ActionReplayRecord:
 def replay_action_displacement(path: Path, *, latency_ms: float = 0.0,
                                proposal_cadence_hz: float = 15.0) -> tuple[ActionReplayRecord, ...]:
     """Read 00-03 telemetry only. This function has no input-driver dependency."""
+    ensure(is_strict_number(latency_ms) and math.isfinite(latency_ms) and latency_ms >= 0,
+           "latency must be finite and non-negative")
+    ensure(is_strict_number(proposal_cadence_hz) and math.isfinite(proposal_cadence_hz) and
+           proposal_cadence_hz > 0, "proposal cadence must be positive and finite")
+    contract = load_action_contract()
+    validate_golden_fixture(contract, path)
     payload = path.read_bytes()
     data = json.loads(payload)
-    ensure(set(data) == {"schema_version", "measurement", "attestation", "samples"},
-           "unknown/missing action telemetry fields")
-    ensure(data["schema_version"] == "survivors_action_telemetry.v1", "action schema mismatch")
     parent_hash = canonical_hash(data)
     records = []
     for sample in data["samples"]:
@@ -200,6 +249,9 @@ def _gate_failures(e: GateEvidence, c: FeasibilityConfig) -> list[str]:
 
 
 def issue_verdict(evidence: GateEvidence, config: FeasibilityConfig) -> dict[str, Any]:
+    ensure(isinstance(evidence, GateEvidence), "validated gate evidence is required")
+    ensure(isinstance(config, FeasibilityConfig), "validated feasibility config is required")
+    evidence.validate(config)
     failures = _gate_failures(evidence, config)
     t = config.thresholds
     reject_320 = (evidence.p10_short_side_px < t["ssdlite320_p10_short_side_px"] or

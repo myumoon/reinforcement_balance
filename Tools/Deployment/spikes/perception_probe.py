@@ -58,8 +58,34 @@ class FeasibilityConfig:
         ensure(set(data["architectures"]) == _ARCH_KEYS, "architecture matrix is incomplete")
         ensure(len(data["architectures"]) == len(set(data["architectures"])),
                "architectures must be unique")
+        pilot = data["pilot"]
+        ensure(all(type(pilot[k]) is int and pilot[k] > 0 for k in
+                   ("min_sessions", "max_sessions", "min_minutes_per_session",
+                    "min_frames", "min_sessions_per_slice")),
+               "pilot counts/durations must be positive integers")
+        ensure(pilot["min_sessions"] <= pilot["max_sessions"],
+               "pilot session range is invalid")
+        ensure(isinstance(pilot["required_slices"], list) and
+               all(isinstance(v, str) and v for v in pilot["required_slices"]) and
+               len(pilot["required_slices"]) == len(set(pilot["required_slices"])),
+               "required slices must be unique non-empty strings")
+        thresholds = data["thresholds"]
         ensure(all(is_strict_number(v) and math.isfinite(v) and v > 0
-                   for v in data["thresholds"].values()), "thresholds must be positive finite numbers")
+                   for v in thresholds.values()), "thresholds must be positive finite numbers")
+        ensure(all(thresholds[k] <= 1 for k in
+                   ("oracle_recall", "bbox_qa_iou", "class_agreement")),
+               "recall/agreement thresholds must be at most one")
+        budget = data["budget"]
+        ensure(type(budget["parallel_worker_limit"]) is int and
+               budget["parallel_worker_limit"] > 0,
+               "parallel worker limit must be a positive integer")
+        ensure(type(budget["frame_storage_bytes"]) is int and
+               budget["frame_storage_bytes"] > 0,
+               "frame storage bytes must be a positive integer")
+        ensure(is_strict_number(budget["gpu_seconds_per_frame"]) and
+               math.isfinite(budget["gpu_seconds_per_frame"]) and
+               budget["gpu_seconds_per_frame"] > 0,
+               "GPU seconds per frame must be a positive finite number")
         return cls(dict(data["pilot"]), dict(data["thresholds"]),
                    tuple(data["architectures"]), dict(data["budget"]))
 
@@ -204,6 +230,7 @@ class ProbeSample:
     oracle_detectable: bool
     architecture_latency_ms: Mapping[str, float]
     annotation_seconds: float
+    architecture_detectable: Mapping[str, bool] | None = None
 
 
 def make_synthetic_fixture(seed: int = 0) -> tuple[ProbeSample, ...]:
@@ -218,13 +245,28 @@ def make_synthetic_fixture(seed: int = 0) -> tuple[ProbeSample, ...]:
             kinds[index % 3], float(rng.integers(3, 25)),
             (slices[index % len(slices)],), bool(index % 7),
             {key: value + float(rng.uniform(0, 2)) for key, value in lat.items()},
-            float(rng.uniform(1, 5))))
+            float(rng.uniform(1, 5)),
+            {name: bool((index + offset) % 7)
+             for offset, name in enumerate(sorted(_ARCH_KEYS))}))
     return tuple(result)
 
 
 def evaluate_probe(samples: Iterable[ProbeSample]) -> dict[str, Any]:
     values = tuple(samples)
     ensure(values, "at least one probe sample is required")
+    ensure(all(isinstance(v.kind, str) and v.kind and
+               is_strict_number(v.short_side_px) and math.isfinite(v.short_side_px) and
+               v.short_side_px >= 0 and
+               is_strict_number(v.annotation_seconds) and
+               math.isfinite(v.annotation_seconds) and v.annotation_seconds >= 0 and
+               type(v.oracle_detectable) is bool and
+               all(isinstance(s, str) and s for s in v.slices)
+               for v in values), "probe sample metrics must be finite and non-negative")
+    ensure(all(v.architecture_detectable is None or
+               (set(v.architecture_detectable) == _ARCH_KEYS and
+                all(type(detected) is bool
+                    for detected in v.architecture_detectable.values()))
+               for v in values), "architecture detection matrix is incomplete")
     short = np.array([v.short_side_px for v in values])
     slice_names = ("small", "occluded", "late", "heavy", "boss", "gem")
     recall = {}
@@ -234,10 +276,32 @@ def evaluate_probe(samples: Iterable[ProbeSample]) -> dict[str, Any]:
     architectures = {}
     all_latency = []
     for name in _ARCH_KEYS:
+        ensure(all(set(v.architecture_latency_ms) == _ARCH_KEYS for v in values),
+               "architecture latency matrix is incomplete")
         latency = np.array([v.architecture_latency_ms[name] for v in values])
+        ensure(all(is_strict_number(x) and math.isfinite(x) and x > 0 for x in latency),
+               "architecture latency must be positive and finite")
+        slice_recall = {}
+        slice_metrics = {}
+        for slice_name in slice_names:
+            subset = [v for v in values if slice_name in v.slices]
+            detected = [
+                (v.architecture_detectable[name] if v.architecture_detectable is not None
+                 else v.oracle_detectable)
+                for v in subset
+            ]
+            slice_recall[slice_name] = float(sum(detected) / len(detected)) if detected else 0.0
+            slice_metrics[slice_name] = {
+                "recall_upper_bound": slice_recall[slice_name],
+                "latency_p95_ms": float(np.percentile(
+                    [v.architecture_latency_ms[name] for v in subset], 95
+                )) if subset else None,
+            }
         architectures[name] = {"latency_p95_ms": float(np.percentile(latency, 95)),
                                "utility_per_latency": float(np.mean([v.oracle_detectable for v in values])
-                                                            / np.percentile(latency, 95))}
+                                                            / np.percentile(latency, 95)),
+                               "recall_upper_bound": slice_recall,
+                               "slice_metrics": slice_metrics}
         all_latency.extend(latency)
     latency_array = np.array(all_latency)
     return {"pixel_size": {"p10_short_side": float(np.percentile(short, 10)),
