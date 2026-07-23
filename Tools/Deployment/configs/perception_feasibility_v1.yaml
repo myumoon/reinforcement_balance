@@ -1,0 +1,24 @@
+schema_version: perception_feasibility.v1
+pilot:
+  min_sessions: 3
+  max_sessions: 5
+  min_minutes_per_session: 10
+  min_frames: 300
+  required_slices: [early, mid, late, heavy, level_up, chest, death_result]
+  min_sessions_per_slice: 2
+thresholds:
+  ssdlite320_p10_short_side_px: 4.0
+  oracle_recall: 0.85
+  single_pass_p95_ms: 25.0
+  bbox_qa_iou: 0.80
+  class_agreement: 0.95
+  dense_entities_per_hour: 300.0
+architectures:
+  - ssdlite320
+  - ssdlite640_multiscale
+  - tile_2x2
+  - coarse_density
+budget:
+  parallel_worker_limit: 4
+  frame_storage_bytes: 8294400
+  gpu_seconds_per_frame: 0.05

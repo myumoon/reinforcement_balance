@@ -28,4 +28,4 @@ test = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["survivors*"]
+include = ["survivors*", "spikes*"]
