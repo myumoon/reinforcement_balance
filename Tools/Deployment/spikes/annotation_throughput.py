@@ -1,4 +1,8 @@
-"""Annotation throughput and downstream dataset budget calculations."""
+"""アノテーション処理量とデータセット予算を算出するモジュール。
+
+画像への正解付けにかかる時間や品質を集計し、後続のデータ作成に必要な
+作業時間・GPU時間・保存容量の見積もりを分割単位で作ります。
+"""
 from __future__ import annotations
 from dataclasses import dataclass
 import math
@@ -8,10 +12,18 @@ from reinbalance_survivors_contracts.ui_intent import ensure, is_strict_number
 
 
 def _non_negative_int(value: Any, label: str) -> None:
+    """値が非負の整数であることを検証する。
+
+    件数や枚数として使う値に、負数や小数、真偽値が紛れ込むのを防ぎます。
+    """
     ensure(type(value) is int and value >= 0, f"{label} must be a non-negative integer")
 
 
 def _finite(value: Any, label: str, *, positive: bool = False) -> None:
+    """値が有限の非負数または正数であることを検証する。
+
+    時間や処理速度の計算を壊す NaN・無限大・不適切な負数を早めに拒否します。
+    """
     ensure(is_strict_number(value) and math.isfinite(value) and
            (value > 0 if positive else value >= 0),
            f"{label} must be {'positive' if positive else 'non-negative'} and finite")
@@ -19,6 +31,10 @@ def _finite(value: Any, label: str, *, positive: bool = False) -> None:
 
 @dataclass(frozen=True)
 class AnnotationEvent:
+    """ひとまとまりのアノテーション作業実績を表す。
+
+    作業種別、処理数、所要時間、手直し数、密集フレームかどうかを保持します。
+    """
     kind: str
     units: int
     elapsed_seconds: float
@@ -26,9 +42,17 @@ class AnnotationEvent:
     dense_frame: bool = False
 
     def __post_init__(self) -> None:
+        """生成直後に全フィールドを検証する。
+
+        不正な作業実績が集計処理へ渡らないよう、作成時点で確認します。
+        """
         self.validate()
 
     def validate(self) -> None:
+        """アノテーション実績の型と値の範囲を検証する。
+
+        作業種別が空でないことや、手直し数が処理数を超えないことを確かめます。
+        """
         ensure(isinstance(self.kind, str) and self.kind, "annotation kind must be non-empty")
         _non_negative_int(self.units, "annotation units")
         _finite(self.elapsed_seconds, "annotation elapsed seconds")
@@ -39,6 +63,11 @@ class AnnotationEvent:
 
 def summarize_annotation(events: Iterable[AnnotationEvent], *, qa_ious=(),
                          class_matches=()) -> dict[str, float]:
+    """アノテーション速度と品質指標を集計する。
+
+    複数の作業実績から毎時処理数、手直し率、矩形一致度、クラス一致率、
+    合計作業時間を再現可能な形で求めます。
+    """
     values = tuple(events)
     ensure(values and all(isinstance(v, AnnotationEvent) for v in values),
            "annotation events required")
@@ -66,6 +95,11 @@ def summarize_annotation(events: Iterable[AnnotationEvent], *, qa_ious=(),
 
 @dataclass(frozen=True)
 class DatasetSplitRequest:
+    """データセット分割ごとの作成量を表す。
+
+    開発用や最終評価用などの区分ごとに、セッション・画像・物体・UIイベントの
+    必要数をまとめます。
+    """
     name: str
     sessions: int
     frames: int
@@ -73,9 +107,17 @@ class DatasetSplitRequest:
     ui_events: int
 
     def __post_init__(self) -> None:
+        """生成直後に分割要求を検証する。
+
+        不正な名前や負の件数を持つ要求を、予算計算の前に拒否します。
+        """
         self.validate()
 
     def validate(self) -> None:
+        """分割名と各必要数を検証する。
+
+        名前が空でなく、すべての数量が非負の整数であることを確かめます。
+        """
         ensure(isinstance(self.name, str) and self.name, "split name must be non-empty")
         for label in ("sessions", "frames", "entities", "ui_events"):
             _non_negative_int(getattr(self, label), f"split {label}")
@@ -85,6 +127,11 @@ def estimate_dataset_budget(requests: Iterable[DatasetSplitRequest], *,
                             entities_per_hour: float, ui_events_per_hour: float,
                             frame_storage_bytes: int, gpu_seconds_per_frame: float,
                             parallel_worker_limit: int) -> dict:
+    """データセット作成に必要な資源と時間を見積もる。
+
+    各分割の数量と処理速度から、アノテーション時間、GPU時間、保存容量、
+    並列作業を考慮した経過時間を分割別・合計で算出します。
+    """
     values = tuple(requests)
     ensure(values and all(isinstance(v, DatasetSplitRequest) for v in values),
            "dataset split requests required")

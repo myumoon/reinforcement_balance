@@ -1,1 +1,5 @@
-"""Survivors deployment feasibility probes (production runtime ではない)."""
+"""Survivors 配備可否を調べる実現性スパイク群。
+
+本番ランタイムではなく、知覚・収録・アノテーションなどの方式が
+成立するかを小規模に検証するためのパッケージです。
+"""

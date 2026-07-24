@@ -1,7 +1,7 @@
-"""NumPy-only perception feasibility core.
+"""NumPy だけで動作する知覚方式の実現性検証コア。
 
-Capture/detector backends are intentionally optional; codecs, transforms and
-probe aggregation remain testable in the minimal Deployment environment.
+収録や検出器のバックエンドは任意とし、最小限の配備環境でも
+画像・座標変換と検証結果の集計をテストできます。
 """
 from __future__ import annotations
 
@@ -35,6 +35,10 @@ _BUDGET_KEYS = frozenset({"parallel_worker_limit", "frame_storage_bytes",
 
 
 def _closed(data: Mapping[str, Any], keys: frozenset[str], label: str) -> None:
+    """マッピングのキー集合を厳密に検証する。
+
+    未知の項目と必須項目の欠落を拒否します。
+    """
     ensure(isinstance(data, Mapping), f"{label} must be a mapping")
     unknown, missing = set(data) - keys, keys - set(data)
     ensure(not unknown, f"unknown {label} fields: {sorted(unknown)}")
@@ -43,6 +47,10 @@ def _closed(data: Mapping[str, Any], keys: frozenset[str], label: str) -> None:
 
 @dataclass(frozen=True)
 class FeasibilityConfig:
+    """知覚方式の実現性判定設定を保持する。
+
+    パイロット条件、しきい値、比較方式、資源予算を不変な形でまとめます。
+    """
     pilot: Mapping[str, Any]
     thresholds: Mapping[str, float]
     architectures: tuple[str, ...]
@@ -50,6 +58,10 @@ class FeasibilityConfig:
     schema_version: str = CONFIG_VERSION
 
     def __post_init__(self) -> None:
+        """設定を不変化して整合性を検証する。
+
+        呼び出し元の変更が波及しないようコピーし、型や値域も確認します。
+        """
         # A frozen dataclass does not freeze dictionaries held by its fields.
         # Copy before wrapping so callers cannot retain an alias to mutable state.
         pilot = dict(self.pilot)
@@ -91,6 +103,10 @@ class FeasibilityConfig:
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> "FeasibilityConfig":
+        """外部表現から検証済み設定を生成する。
+
+        YAML などから読んだ辞書の版、キー、型、値域を確認します。
+        """
         _closed(data, _CONFIG_KEYS, "feasibility config")
         require_schema_version(data, CONFIG_VERSION, "feasibility config")
         _closed(data["pilot"], _PILOT_KEYS, "pilot")
@@ -131,10 +147,18 @@ class FeasibilityConfig:
                    tuple(data["architectures"]), dict(data["budget"]))
 
     def validate(self) -> None:
+        """現在の設定を厳密に再検証する。
+
+        外部表現へ戻して、信頼境界と同じ条件を確かめ直します。
+        """
         # Re-enter the closed, finite-number wire validator at every trust boundary.
         self.from_wire(self.to_wire())
 
     def to_wire(self) -> dict[str, Any]:
+        """設定を保存可能な辞書へ変換する。
+
+        読み取り専用の内部値をリストと辞書へ戻します。
+        """
         pilot = dict(self.pilot)
         if "required_slices" in pilot:
             pilot["required_slices"] = list(pilot["required_slices"])
@@ -144,6 +168,10 @@ class FeasibilityConfig:
 
 
 def load_feasibility_config(source: Path | Mapping[str, Any] = CONFIG) -> FeasibilityConfig:
+    """ファイルまたは辞書から実現性設定を読み込む。
+
+    どちらの入力でも検証済み設定を返します。
+    """
     if isinstance(source, Mapping):
         data = source
     else:
@@ -154,8 +182,16 @@ def load_feasibility_config(source: Path | Mapping[str, Any] = CONFIG) -> Feasib
 
 @dataclass(frozen=True)
 class Box:
+    """画像上の軸平行な矩形を表す。
+
+    左上と右下の有限な座標を保持します。
+    """
     x1: float; y1: float; x2: float; y2: float
     def __post_init__(self) -> None:
+        """矩形座標の有限性と順序を検証する。
+
+        反転した辺や NaN を含む矩形を拒否します。
+        """
         ensure(all(is_strict_number(v) and math.isfinite(v)
                    for v in (self.x1, self.y1, self.x2, self.y2)),
                "box coordinates must be finite numbers")
@@ -163,6 +199,10 @@ class Box:
                "box coordinates must be ordered")
 
     def almost_equals(self, other: "Box", tolerance: float = 1e-6) -> bool:
+        """二つの矩形を許容誤差付きで比較する。
+
+        座標変換の往復で生じる小さな計算誤差を考慮します。
+        """
         ensure(isinstance(other, Box), "comparison target must be a box")
         ensure(is_strict_number(tolerance) and math.isfinite(tolerance) and tolerance >= 0,
                "box tolerance must be finite and non-negative")
@@ -173,9 +213,17 @@ class Box:
 
 @dataclass(frozen=True)
 class CoordinateTransform:
+    """拡大縮小と平行移動による座標変換を表す。
+
+    ROI、リサイズ、余白付加、タイル処理の座標を相互変換します。
+    """
     scale_x: float; scale_y: float; offset_x: float; offset_y: float
 
     def __post_init__(self) -> None:
+        """変換係数が有限で倍率が正かを検証する。
+
+        ゼロ除算などを招く不正な変換を拒否します。
+        """
         ensure(all(is_strict_number(v) and math.isfinite(v)
                    for v in (self.scale_x, self.scale_y, self.offset_x, self.offset_y)),
                "transform values must be finite numbers")
@@ -183,16 +231,28 @@ class CoordinateTransform:
 
     @classmethod
     def roi(cls, x: float, y: float) -> "CoordinateTransform":
+        """ROI の左上を原点にする変換を作る。
+
+        切り出し開始位置をローカル座標のゼロへ移します。
+        """
         return cls(1, 1, -x, -y)
 
     @classmethod
     def resize(cls, source: tuple[int, int], target: tuple[int, int]) -> "CoordinateTransform":
+        """指定寸法へのリサイズ変換を作る。
+
+        元と先の幅・高さから各方向の倍率を求めます。
+        """
         _validate_dimensions(source, "source")
         _validate_dimensions(target, "target")
         return cls(target[0] / source[0], target[1] / source[1], 0, 0)
 
     @classmethod
     def letterbox(cls, source: tuple[int, int], target: tuple[int, int]) -> "CoordinateTransform":
+        """縦横比を保つレターボックス変換を作る。
+
+        共通倍率と中央配置の余白を求めます。
+        """
         _validate_dimensions(source, "source")
         _validate_dimensions(target, "target")
         scale = min(target[0] / source[0], target[1] / source[1])
@@ -202,33 +262,56 @@ class CoordinateTransform:
     @classmethod
     def tile(cls, column: int, row: int, *, tile_width: int,
              tile_height: int) -> "CoordinateTransform":
+        """指定タイルのローカル座標変換を作る。
+
+        列・行と寸法からタイル左上への移動量を求めます。
+        """
         ensure(type(column) is int and column >= 0 and type(row) is int and row >= 0,
                "tile indices must be non-negative integers")
         _validate_dimensions((tile_width, tile_height), "tile")
         return cls(1, 1, -column * tile_width, -row * tile_height)
 
     def forward_box(self, box: Box) -> Box:
+        """矩形を変換先の座標系へ写す。
+
+        各座標へ倍率とオフセットを適用します。
+        """
         return Box(box.x1*self.scale_x+self.offset_x, box.y1*self.scale_y+self.offset_y,
                    box.x2*self.scale_x+self.offset_x, box.y2*self.scale_y+self.offset_y)
 
     def inverse_box(self, box: Box) -> Box:
+        """矩形を変換元の座標系へ戻す。
+
+        オフセットと倍率を逆に適用します。
+        """
         return Box((box.x1-self.offset_x)/self.scale_x, (box.y1-self.offset_y)/self.scale_y,
                    (box.x2-self.offset_x)/self.scale_x, (box.y2-self.offset_y)/self.scale_y)
 
 
 def _chunk(kind: bytes, payload: bytes) -> bytes:
+    """PNG チャンクを組み立てる。
+
+    種別と内容へ長さと CRC 検査値を付けます。
+    """
     return struct.pack(">I", len(payload)) + kind + payload + struct.pack(
         ">I", binascii.crc32(kind + payload) & 0xffffffff)
 
 
 def _validate_dimensions(value: Any, label: str) -> None:
+    """画像寸法が二つの正整数か検証する。
+
+    幅と高さの欠落や不正値を拒否します。
+    """
     ensure(isinstance(value, tuple) and len(value) == 2 and
            all(type(v) is int and v > 0 for v in value),
            f"{label} dimensions must be two positive integers")
 
 
 def encode_png(frame: np.ndarray) -> bytes:
-    """Encode uint8 BGRA as a standards-compliant, filter-0 RGBA PNG."""
+    """uint8 BGRA 画像を規格準拠の RGBA PNG に符号化する。
+
+    チャンネル順を変え、フィルター 0 の可逆 PNG を作ります。
+    """
     _validate_frame(frame)
     rgba = frame[..., [2, 1, 0, 3]]
     scanlines = b"".join(b"\0" + row.tobytes() for row in rgba)
@@ -238,6 +321,10 @@ def encode_png(frame: np.ndarray) -> bytes:
 
 
 def _decode_png(payload: bytes) -> np.ndarray:
+    """PNG を BGRA 配列へ復号する。
+
+    構造と検査値を確認して元の画像配列へ戻します。
+    """
     ensure(payload.startswith(b"\x89PNG\r\n\x1a\n"), "invalid PNG signature")
     offset, width, height, compressed = 8, None, None, bytearray()
     while offset < len(payload):
@@ -269,19 +356,30 @@ def _decode_png(payload: bytes) -> np.ndarray:
 
 
 def encode_near_lossless(frame: np.ndarray) -> bytes:
-    """Reversible spike codec; production codecs remain an optional runtime concern."""
+    """検証用の可逆形式へ画像を符号化する。
+
+    本番コーデックに依存せず、寸法と BGRA データを圧縮して保持します。
+    """
     _validate_frame(frame)
     header = struct.pack(">4sII", b"NLS1", frame.shape[1], frame.shape[0])
     return header + zlib.compress(frame.tobytes(), 6)
 
 
 def _validate_frame(frame: np.ndarray) -> None:
+    """入力が uint8 BGRA 配列か検証する。
+
+    符号化処理が期待する形とデータ型を確認します。
+    """
     ensure(isinstance(frame, np.ndarray) and frame.dtype == np.uint8 and
            frame.ndim == 3 and frame.shape[2] == 4, "frame must be uint8 BGRA")
 
 
 def decode_frame(payload: bytes, encoding: str, *, width: int | None = None,
                  height: int | None = None) -> np.ndarray:
+    """指定形式の画像を BGRA 配列へ復号する。
+
+    raw、PNG、検証用可逆形式を共通の入口で扱います。
+    """
     ensure(isinstance(payload, bytes), "encoded frame payload must be bytes")
     ensure(isinstance(encoding, str), "frame encoding must be text")
     if encoding == "raw_bgra":
@@ -301,6 +399,10 @@ def decode_frame(payload: bytes, encoding: str, *, width: int | None = None,
 
 @dataclass(frozen=True)
 class ProbeSample:
+    """知覚方式の評価に使う一観測を表す。
+
+    対象種別、サイズ、場面、検出可否、遅延、注釈時間を保持します。
+    """
     kind: str
     short_side_px: float
     slices: tuple[str, ...]
@@ -310,6 +412,10 @@ class ProbeSample:
     architecture_detectable: Mapping[str, bool] | None = None
 
     def __post_init__(self) -> None:
+        """観測値を不変化して検証する。
+
+        辞書やリストの外部変更を防ぎ、不正値を作成時に拒否します。
+        """
         object.__setattr__(self, "slices", tuple(self.slices))
         object.__setattr__(self, "architecture_latency_ms",
                            MappingProxyType(dict(self.architecture_latency_ms)))
@@ -319,6 +425,10 @@ class ProbeSample:
         self.validate()
 
     def validate(self) -> None:
+        """観測値の型、値域、方式一覧を検証する。
+
+        集計に必要な有限値と完全な方式別データを確認します。
+        """
         ensure(isinstance(self.kind, str) and self.kind, "probe kind must be non-empty")
         ensure(is_strict_number(self.short_side_px) and math.isfinite(self.short_side_px) and
                self.short_side_px >= 0, "probe short side must be finite and non-negative")
@@ -339,6 +449,10 @@ class ProbeSample:
 
 
 def make_synthetic_fixture(seed: int = 0) -> tuple[ProbeSample, ...]:
+    """再現可能な合成観測サンプルを作る。
+
+    小物体、遮蔽、終盤、密集などの重要場面を含めます。
+    """
     rng = np.random.default_rng(seed)
     slices = ("small", "occluded", "late", "heavy", "boss", "gem")
     kinds = ("timer", "icon", "entity")
@@ -357,6 +471,10 @@ def make_synthetic_fixture(seed: int = 0) -> tuple[ProbeSample, ...]:
 
 
 def evaluate_probe(samples: Iterable[ProbeSample]) -> dict[str, Any]:
+    """観測群から知覚方式の実現性指標を集計する。
+
+    サイズ、再現率上限、遅延、方式別・場面別の結果をまとめます。
+    """
     values = tuple(samples)
     ensure(values and all(isinstance(v, ProbeSample) for v in values),
            "at least one probe sample is required")
@@ -423,6 +541,10 @@ def evaluate_probe(samples: Iterable[ProbeSample]) -> dict[str, Any]:
 
 def normalized_displacement(start_xy: tuple[float, float], end_xy: tuple[float, float],
                             viewport_wh: tuple[int, int]) -> tuple[float, float]:
+    """画面上の移動量を表示領域の寸法で正規化する。
+
+    解像度に依存せず比較できる横・縦の変位へ変換します。
+    """
     ensure(all(isinstance(v, tuple) and len(v) == 2 for v in (start_xy, end_xy)),
            "screen points must contain two coordinates")
     ensure(all(is_strict_number(x) and math.isfinite(x) for v in (start_xy, end_xy) for x in v),
@@ -433,7 +555,10 @@ def normalized_displacement(start_xy: tuple[float, float], end_xy: tuple[float, 
 
 
 def template_score(image: np.ndarray, template: np.ndarray) -> float:
-    """Small HUD digit/icon baseline without OpenCV."""
+    """OpenCV を使わず HUD テンプレート類似度を求める。
+
+    同じ形の画像同士の画素差を 0 から 1 の一致度へ変換します。
+    """
     ensure(isinstance(image, np.ndarray) and isinstance(template, np.ndarray) and
            image.shape == template.shape and image.size > 0 and
            image.dtype == np.uint8 and template.dtype == np.uint8,

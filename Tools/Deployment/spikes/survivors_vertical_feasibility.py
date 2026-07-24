@@ -1,4 +1,8 @@
-"""Capture → perception → read-only action replay feasibility harness."""
+"""収録・知覚・読み取り専用操作再生の垂直実現性ハーネス。
+
+収録から判定までの証拠を検証し、実操作を送らずに次工程へ進めるかを
+一貫した基準で判定して成果物へ出力します。
+"""
 from __future__ import annotations
 from dataclasses import dataclass, replace
 import json
@@ -31,6 +35,10 @@ _REQUIRED_SLICES = ("early", "mid", "late", "heavy", "level_up", "chest", "death
 
 @dataclass(frozen=True)
 class GateEvidence:
+    """実現性ゲートの判定証拠を保持する。
+
+    収録範囲、知覚品質、速度、方式比較、未解決リスクを不変な形でまとめます。
+    """
     session_ids: tuple[str, ...]
     build_ids: tuple[str, ...]
     profile_ids: tuple[str, ...]
@@ -51,6 +59,10 @@ class GateEvidence:
     schema_version: str = EVIDENCE_VERSION
 
     def __post_init__(self) -> None:
+        """証拠の可変値を固定し、全内容を検証する。
+
+        呼び出し元の変更が波及しないようコピーしてから妥当性を確かめます。
+        """
         for name in ("session_ids", "build_ids", "profile_ids",
                      "independent_annotators", "unresolved_risks"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
@@ -64,9 +76,17 @@ class GateEvidence:
         self.validate()
 
     def replace(self, **changes: Any) -> "GateEvidence":
+        """指定項目だけを置き換えた証拠を作る。
+
+        元の不変オブジェクトを保ったまま、試験用の派生値を生成します。
+        """
         return replace(self, **changes)
 
     def validate(self, config: FeasibilityConfig | None = None) -> None:
+        """証拠の型、範囲、識別子、方式一覧を検証する。
+
+        判定に使う数値が有限で、収録や方式の情報が矛盾しないことを確認します。
+        """
         ensure(self.schema_version == EVIDENCE_VERSION, "gate evidence schema mismatch")
         ensure(type(self.target_audit_pass) is bool, "target audit pass must be boolean")
         ensure(all(isinstance(v, str) and v for group in
@@ -116,6 +136,10 @@ class GateEvidence:
 
     @classmethod
     def valid_fixture(cls) -> "GateEvidence":
+        """すべての基準を満たす標準証拠を生成する。
+
+        正常系テストで使える、完全な場面数と方式別指標を備えた値を返します。
+        """
         sessions = ("s1", "s2", "s3")
         slices = {name: 2 for name in _REQUIRED_SLICES}
         metrics = {
@@ -129,6 +153,10 @@ class GateEvidence:
                    6.0, .90, .88, 24.0, .85, .97, 400.0, metrics)
 
     def to_wire(self) -> dict[str, Any]:
+        """証拠を JSON 保存可能な辞書へ変換する。
+
+        タプルや読み取り専用辞書をリストと通常の辞書へ戻します。
+        """
         return {
             "schema_version": self.schema_version, "session_ids": list(self.session_ids),
             "build_ids": list(self.build_ids), "profile_ids": list(self.profile_ids),
@@ -146,6 +174,10 @@ class GateEvidence:
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> "GateEvidence":
+        """外部表現から検証済み証拠を生成する。
+
+        スキーマ版と全キーを厳密に確認して取り込みます。
+        """
         ensure(isinstance(data, Mapping), "gate evidence must be a mapping")
         ensure(set(data) == _EVIDENCE_KEYS,
                f"unknown/missing gate evidence fields: {sorted(set(data) ^ _EVIDENCE_KEYS)}")
@@ -167,6 +199,10 @@ class GateEvidence:
 
 @dataclass(frozen=True)
 class ActionReplayRecord:
+    """読み取り専用操作再生の一記録を表す。
+
+    提案操作と観測変位を分離し、元証拠、遅延、周期、実入力の有無を保持します。
+    """
     index: int
     proposal_vector: tuple[float, float]
     measured_screen_displacement: tuple[float, float]
@@ -176,6 +212,10 @@ class ActionReplayRecord:
     live_input_sent: bool = False
 
     def __post_init__(self) -> None:
+        """操作再生記録の安全性と値域を検証する。
+
+        元証拠のハッシュや有限値を確認し、実入力が送られていないことを保証します。
+        """
         ensure(type(self.index) is int and self.index >= 0, "action index must be non-negative")
         for label, vector in (("proposal", self.proposal_vector),
                               ("measured displacement", self.measured_screen_displacement)):
@@ -198,7 +238,10 @@ class ActionReplayRecord:
 
 def replay_action_displacement(path: Path, *, latency_ms: float = 0.0,
                                proposal_cadence_hz: float = 15.0) -> tuple[ActionReplayRecord, ...]:
-    """Read 00-03 telemetry only. This function has no input-driver dependency."""
+    """00-03 の遠隔測定を読み取り専用で再生する。
+
+    入力ドライバーには依存せず、検証済み記録から提案操作と画面変位を組み立てます。
+    """
     ensure(is_strict_number(latency_ms) and math.isfinite(latency_ms) and latency_ms >= 0,
            "latency must be finite and non-negative")
     ensure(is_strict_number(proposal_cadence_hz) and math.isfinite(proposal_cadence_hz) and
@@ -221,6 +264,10 @@ def replay_action_displacement(path: Path, *, latency_ms: float = 0.0,
 
 @dataclass(frozen=True)
 class FrameMetadata:
+    """収録フレームに付随する運用情報を表す。
+
+    順序、時刻、寸法、欠落・重複、データ量を保持します。
+    """
     sequence: int
     captured_monotonic_ns: int
     width: int
@@ -230,6 +277,10 @@ class FrameMetadata:
     encoded_bytes: int
 
     def __post_init__(self) -> None:
+        """フレーム情報の型と値域を検証する。
+
+        件数や寸法が不正な収録結果を早い段階で拒否します。
+        """
         for label in ("sequence", "captured_monotonic_ns", "dropped_since_previous",
                       "encoded_bytes"):
             ensure(type(getattr(self, label)) is int and getattr(self, label) >= 0,
@@ -241,8 +292,15 @@ class FrameMetadata:
 
 
 class LatestFrameSampler:
-    """Backend-neutral 30 FPS latest-frame sampler with drop/duplicate accounting."""
+    """バックエンド非依存の最新フレーム採取器。
+
+    指定周期で取得した画像へ、欠落数と重複の情報を付けます。
+    """
     def __init__(self, getter: Callable[[], Any], fps: float = 30.0):
+        """画像取得関数と目標 FPS で採取器を初期化する。
+
+        呼び出し可能な取得元と正の有限な周期だけを受け付けます。
+        """
         ensure(callable(getter), "frame getter must be callable")
         ensure(is_strict_number(fps) and math.isfinite(fps) and fps > 0,
                "fps must be positive and finite")
@@ -251,6 +309,10 @@ class LatestFrameSampler:
         self._last_capture_ns: int | None = None
 
     def capture(self) -> tuple[Any, FrameMetadata]:
+        """最新フレームを取得してメタデータを付ける。
+
+        経過時間から欠落数を、内容のハッシュから重複を判定します。
+        """
         frame = self.getter()
         ensure(frame is not None and getattr(frame, "ndim", None) == 3, "capture returned no frame")
         now = time.monotonic_ns()
@@ -265,6 +327,10 @@ class LatestFrameSampler:
 
     @classmethod
     def from_dxcam(cls, fps: float = 30.0) -> "LatestFrameSampler":
+        """DXcam を使う Windows 向け採取器を生成する。
+
+        任意依存を利用できる場合だけライブ収録を開始します。
+        """
         try:
             import dxcam  # type: ignore
         except ImportError as exc:
@@ -275,6 +341,10 @@ class LatestFrameSampler:
 
 
 def _gate_failures(e: GateEvidence, c: FeasibilityConfig) -> list[str]:
+    """証拠が満たさないゲート条件を列挙する。
+
+    収録量、場面網羅、品質、速度、作業効率を基準と照合します。
+    """
     p, t = c.pilot, c.thresholds
     failures = []
     if not e.target_audit_pass or len(set(e.build_ids)) != 1 or len(set(e.profile_ids)) != 1:
@@ -297,6 +367,10 @@ def _gate_failures(e: GateEvidence, c: FeasibilityConfig) -> list[str]:
 
 
 def issue_verdict(evidence: GateEvidence, config: FeasibilityConfig) -> dict[str, Any]:
+    """証拠と設定から fail-closed な判定を発行する。
+
+    一つでも不足や未解決リスクがあれば失敗とし、後続工程の許可も閉じます。
+    """
     ensure(isinstance(evidence, GateEvidence), "validated gate evidence is required")
     ensure(isinstance(config, FeasibilityConfig), "validated feasibility config is required")
     config.validate()
@@ -337,6 +411,10 @@ def issue_verdict(evidence: GateEvidence, config: FeasibilityConfig) -> dict[str
 
 
 def render_verdict_markdown(verdict: Mapping[str, Any], budget: Mapping[str, Any]) -> str:
+    """判定と予算を人が読める Markdown に整形する。
+
+    状態、失敗理由、方式比較、後続許可、資源見積もりを一覧化します。
+    """
     rejected = ", ".join(verdict["rejected_alternatives"])
     risks = ", ".join(verdict["unresolved_risks"]) or "none recorded"
     return f"""# Survivors perception feasibility gate
@@ -362,6 +440,10 @@ spike never sends live input.
 
 
 def default_budget(config: FeasibilityConfig) -> dict[str, Any]:
+    """設定から既定のデータセット予算を見積もる。
+
+    開発・調整・最終評価の分割へ標準量を割り当てて資源を算出します。
+    """
     ensure(isinstance(config, FeasibilityConfig), "validated feasibility config is required")
     config.validate()
     splits = (
@@ -378,6 +460,10 @@ def default_budget(config: FeasibilityConfig) -> dict[str, Any]:
 
 def write_verdict(evidence: GateEvidence, json_path: Path, markdown_path: Path,
                   config: FeasibilityConfig | None = None) -> dict[str, Any]:
+    """判定結果を JSON と Markdown へ一括保存する。
+
+    両方を一時ファイルへ用意し、片方だけ残らないようまとめて確定します。
+    """
     config = config or load_feasibility_config()
     verdict, budget = issue_verdict(evidence, config), default_budget(config)
     output = {**verdict, "budget": budget}
