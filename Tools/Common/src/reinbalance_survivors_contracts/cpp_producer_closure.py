@@ -63,6 +63,19 @@ def _classify(path: str) -> str:
     return "helper"
 
 
+def _matches_compiled_glob(path: str, pattern: str) -> bool:
+    """`**/` のゼロ階層を含めて compiled TU glob を評価する。
+
+    Python fnmatch の実装差で Private 直下の TU が未分類扱いにならないよう、再帰 glob の
+    ゼロ directory 形も同じ規則として照合します。
+    """
+    candidates = {pattern}
+    while "/**/" in pattern:
+        pattern = pattern.replace("/**/", "/", 1)
+        candidates.add(pattern)
+    return any(fnmatch.fnmatch(path, candidate) for candidate in candidates)
+
+
 def resolve_cpp_producer_closure(
     repo_root: Path,
     spec: Mapping[str, Any],
@@ -100,7 +113,7 @@ def resolve_cpp_producer_closure(
         ensure(root_path.is_dir(), f"missing private source root: {root}")
         for path in sorted(root_path.rglob("*.cpp")):
             relative = path.relative_to(repo_root).as_posix()
-            ensure(fnmatch.fnmatch(relative, glob_pattern) or root != roots[0], f"unclassified behavior TU: {relative}")
+            ensure(_matches_compiled_glob(relative, glob_pattern) or root != roots[0], f"unclassified behavior TU: {relative}")
             classification = _classify(relative) if root == roots[0] else "module_dependency"
             resolved.append(ResolvedCppSource(relative, classification))
     actual = tuple(x.path for x in resolved)

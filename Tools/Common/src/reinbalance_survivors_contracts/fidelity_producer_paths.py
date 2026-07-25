@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from .canonical_json import canonical_hash, sha256_hex
+from .cpp_producer_closure import resolve_cpp_producer_closure
 from .fidelity_verdict import GATING_KEYS, PRODUCER_ALLOWLIST_VERSION
 from .ui_intent import ContractValidationError, ensure
 
@@ -123,5 +124,20 @@ def resolve_gating_producer_hashes(repo_root: Path, manifest: ProducerPathManife
         for name in entry["generated_inputs"]:
             ensure(name in generated_inputs, f"missing generated input: {name}")
             generated[name] = generated_inputs[name]
-        result[key] = canonical_hash({"manifest_hash": manifest.manifest_hash, "key": key, "files": records, "generated_inputs": generated})
+        closure_identity = None
+        if entry["transitive_dependency_mode"] == "compiled_module_closure":
+            closure = resolve_cpp_producer_closure(repo_root, entry["compiled_module_closure"])
+            closure_identity = closure.identity_hash
+            known_paths = {record["path"] for record in records}
+            for relative in (*closure.build_files, *(source.path for source in closure.sources)):
+                if relative not in known_paths:
+                    records.append({"path": relative, "sha256": sha256_hex((repo_root / relative).read_bytes())})
+                    known_paths.add(relative)
+        result[key] = canonical_hash({
+            "manifest_hash": manifest.manifest_hash,
+            "key": key,
+            "files": records,
+            "generated_inputs": generated,
+            "compiled_closure_hash": closure_identity,
+        })
     return result

@@ -5,11 +5,13 @@ fixture で固定します。
 """
 
 from dataclasses import replace
+import os
 
 import pytest
 
 from reinbalance_survivors_contracts.fidelity_verdict import (
     BlockingReason, FidelityVerdict, GATING_KEYS, verify_current_fidelity,
+    write_verdict_pair_atomic,
 )
 from reinbalance_survivors_contracts.ui_intent import ContractValidationError
 
@@ -32,6 +34,8 @@ def _verdict(stage: str = "integration", *, blocked: bool = False) -> FidelityVe
     if stage == "baseline":
         hashes["deploy_obs_schema"] = hashes["deploy_release_adapter"] = "absent"
         rows = tuple(BlockingReason(x, "baseline gate") for x in ("action", "offer", "terminal"))
+    else:
+        rows = (BlockingReason("deploy_obs_visibility", "visibility gate"),)
     subject = {
         "target_profile_hash": "1" * 64,
         "target_build_attestation_hash": "2" * 64,
@@ -59,6 +63,19 @@ def test_baseline_requires_absent_and_blocking_rows() -> None:
         verify_current_fidelity(verdict, verdict.gating_producer_hashes, "integration")
 
 
+@pytest.mark.parametrize("stage", ["integration", "post_curriculum"])
+def test_promoted_stages_require_visibility_blocking_row(stage: str) -> None:
+    """昇格 stage に DeployObs visibility gate を必須化する。
+
+    blocking 行を省いた verdict を構築経路と wire 経路の両方で拒否します。
+    """
+    verdict = _verdict(stage)
+    wire = verdict.to_wire()
+    wire["blocking_reasons"] = []
+    with pytest.raises(ContractValidationError):
+        FidelityVerdict.from_wire(wire)
+
+
 def test_unknown_missing_and_nonfinite_are_rejected() -> None:
     """全 wire 境界で未知・欠落 key と非 finite metric を拒否する。
 
@@ -83,7 +100,8 @@ def test_verify_ignores_provenance_but_rejects_hash_and_stage() -> None:
     wire = verdict.to_wire()
     wire["provenance"]["git_commit"] = "two"
     current = dict(verdict.gating_producer_hashes)
-    assert verify_current_fidelity(wire, current, "integration").verdict_stage == "integration"
+    with pytest.raises(ContractValidationError):
+        verify_current_fidelity(wire, current, "integration")
     current["logic_private"] = "b" * 64
     with pytest.raises(ContractValidationError):
         verify_current_fidelity(wire, current, "integration")
@@ -100,3 +118,33 @@ def test_consumer_fixture_rejects_stale_verdict(consumer: str) -> None:
     stale["logic_public"] = "f" * 64
     with pytest.raises(ContractValidationError):
         verify_current_fidelity(verdict, stale, "integration")
+
+
+def test_artifact_pair_rolls_back_second_replace_failure(tmp_path, monkeypatch) -> None:
+    """二つ目の artifact 置換失敗時に旧世代 pair を復元する。
+
+    新 JSON と旧 Markdown の混在や、片側だけの削除を残さないことを固定します。
+    """
+    json_path = tmp_path / "verdict.json"
+    report_path = tmp_path / "verdict.md"
+    json_path.write_text("old-json", encoding="utf-8")
+    report_path.write_text("old-report", encoding="utf-8")
+    real_replace = os.replace
+    calls = 0
+
+    def failing_replace(source, destination):
+        """四回目の rename だけを失敗させる fault injector。
+
+        backup 二件と JSON 反映後の Markdown 反映を crash 相当として模擬します。
+        """
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            raise OSError("injected second artifact failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(OSError):
+        write_verdict_pair_atomic(_verdict("baseline"), json_path, report_path, "new-report")
+    assert json_path.read_text(encoding="utf-8") == "old-json"
+    assert report_path.read_text(encoding="utf-8") == "old-report"

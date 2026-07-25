@@ -7,7 +7,10 @@ import json
 
 import pytest
 
-from reinbalance_survivors_contracts.fidelity_producer_paths import load_producer_path_manifest
+from reinbalance_survivors_contracts.fidelity_producer_paths import (
+    load_producer_path_manifest,
+    resolve_gating_producer_hashes,
+)
 from reinbalance_survivors_contracts.fidelity_verdict import GATING_KEYS
 from reinbalance_survivors_contracts.ui_intent import ContractValidationError
 
@@ -34,3 +37,45 @@ def test_unknown_or_missing_producer_is_rejected(tmp_path) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ContractValidationError):
         load_producer_path_manifest(path)
+
+
+def test_compiled_closure_bytes_are_bound_to_gating_hash(tmp_path) -> None:
+    """compiled closure の TU 追加・変更・削除を gating hash へ接続する。
+
+    exact path が不変でも Private 配下の weapon 実装差で stale 判定できることを固定します。
+    """
+    build = tmp_path / "Module/Module.Build.cs"
+    private = tmp_path / "Module/Private/Survivors/Weapons"
+    private.mkdir(parents=True)
+    build.write_text("module", encoding="utf-8")
+    weapon = private / "Weapon.cpp"
+    weapon.write_text("one", encoding="utf-8")
+    producers = {}
+    for key in GATING_KEYS:
+        producers[key] = {
+            "ordered_exact_paths": [],
+            "recursive_roots": [],
+            "explicit_excludes": [],
+            "generated_inputs": [],
+            "transitive_dependency_mode": "none",
+        }
+    producers["logic_private"]["transitive_dependency_mode"] = "compiled_module_closure"
+    producers["logic_private"]["compiled_module_closure"] = {
+        "module_name": "Module",
+        "build_cs": "Module/Module.Build.cs",
+        "private_source_roots": ["Module/Private"],
+        "compiled_tu_include_glob": "Module/Private/**/*.cpp",
+        "repo_local_module_dependency_edges": [],
+        "allowed_non_behavior_excludes": [],
+    }
+    manifest = type(load_producer_path_manifest())("v", producers, "f" * 64)
+    first = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    weapon.write_text("two", encoding="utf-8")
+    second = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    assert first["logic_private"] != second["logic_private"]
+    (private / "NewWeapon.cpp").write_text("new", encoding="utf-8")
+    third = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    assert second["logic_private"] != third["logic_private"]
+    weapon.unlink()
+    fourth = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    assert third["logic_private"] != fourth["logic_private"]

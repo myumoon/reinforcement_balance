@@ -8,9 +8,36 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
+
+_VIDEO_FIELDS = frozenset({"direction_x", "direction_y", "speed_px", "viewport_width", "enemy_density", "chest_visible"})
+_TELEMETRY_FIELDS = frozenset({"cadence_hz", "timer_seconds", "level", "offer_count", "terminal_event"})
+
+
+@dataclass(frozen=True)
+class AuditRunProfile:
+    """simulator 再実行を拘束する target profile/time band。
+
+    runner が別 profile や別時間帯を暗黙に選べないよう、比較条件を一つの不変値で渡します。
+    """
+    profile_hash: str
+    time_band_start: float
+    time_band_end: float
+
+    def __post_init__(self) -> None:
+        """profile identity と時間帯を fail-closed 検証する。
+
+        空 profile、非有限値、逆転した区間を simulator 起動前に拒否します。
+        """
+        if not isinstance(self.profile_hash, str) or not self.profile_hash:
+            raise ValueError("profile_hash must be non-empty")
+        values = (self.time_band_start, self.time_band_end)
+        if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in values):
+            raise ValueError("time band must be finite numeric")
+        if self.time_band_start < 0 or self.time_band_end <= self.time_band_start:
+            raise ValueError("invalid time band")
 
 
 @dataclass(frozen=True)
@@ -71,6 +98,19 @@ class MetricDifference:
     ci_high: float
     session_count: int
 
+    def __post_init__(self) -> None:
+        """差分と CI の集計結果を構築時に検証する。
+
+        非有限な統計値や空 session 集計を verdict へ流しません。
+        """
+        if not isinstance(self.metric, str) or not self.metric:
+            raise ValueError("metric must be non-empty")
+        if any(not isinstance(x, (int, float)) or isinstance(x, bool) or not math.isfinite(x)
+               for x in (self.mean_difference, self.ci_low, self.ci_high)):
+            raise ValueError("difference statistics must be finite")
+        if type(self.session_count) is not int or self.session_count <= 0:
+            raise ValueError("session_count must be positive")
+
 
 def extract_action_telemetry(frames: Sequence[Mapping[str, Any]]) -> tuple[TelemetrySample, ...]:
     """抽出済み video/telemetry frame から監査 sample を生成する。
@@ -80,6 +120,83 @@ def extract_action_telemetry(frames: Sequence[Mapping[str, Any]]) -> tuple[Telem
     if not isinstance(frames, Sequence) or isinstance(frames, (str, bytes)):
         raise ValueError("frames must be an array")
     return tuple(TelemetrySample.from_wire(frame) for frame in frames)
+
+
+def _extract_source_rows(rows: Sequence[Mapping[str, Any]], required: frozenset[str], label: str) -> dict[tuple[str, float], dict[str, float | None]]:
+    """video/telemetry source の必須 field を session/time ごとに抽出する。
+
+    未計測値は null のまま保持し、欠落 field や未知 field は source schema 違反として拒否します。
+    """
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or not rows:
+        raise ValueError(f"{label} rows must be a non-empty array")
+    output: dict[tuple[str, float], dict[str, float | None]] = {}
+    allowed = required | {"session_id", "time_seconds", "uncertainties"}
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) - allowed or not required <= set(row):
+            raise ValueError(f"{label} row keys mismatch")
+        sample = TelemetrySample.from_wire({
+            "session_id": row.get("session_id"),
+            "time_seconds": row.get("time_seconds"),
+            "metrics": {name: row[name] for name in required},
+            "uncertainties": dict(row.get("uncertainties", {})),
+        })
+        key = (sample.session_id, float(sample.time_seconds))
+        if key in output:
+            raise ValueError(f"duplicate {label} session/time row")
+        output[key] = dict(sample.metrics)
+    return output
+
+
+def extract_target_session(
+    video_frames: Sequence[Mapping[str, Any]],
+    telemetry_rows: Sequence[Mapping[str, Any]],
+) -> tuple[TelemetrySample, ...]:
+    """target video と telemetry から必須監査 metric を結合する。
+
+    direction/speed/density/chest は画面、cadence/timer/level/offer/terminal は telemetry 由来とし、
+    同じ session/time に揃わない入力を比較対象へ混ぜません。
+    """
+    video = _extract_source_rows(video_frames, _VIDEO_FIELDS, "video")
+    telemetry = _extract_source_rows(telemetry_rows, _TELEMETRY_FIELDS, "telemetry")
+    if set(video) != set(telemetry):
+        raise ValueError("video/telemetry session-time keys differ")
+    result = []
+    for session_id, time_seconds in sorted(video):
+        metrics = {**video[(session_id, time_seconds)], **telemetry[(session_id, time_seconds)]}
+        uncertainties = {}
+        for source in (*video_frames, *telemetry_rows):
+            if source.get("session_id") == session_id and float(source.get("time_seconds")) == time_seconds:
+                uncertainties.update(source.get("uncertainties", {}))
+        result.append(TelemetrySample(session_id, time_seconds, metrics, uncertainties))
+    return tuple(result)
+
+
+def run_fidelity_audit(
+    target: Sequence[TelemetrySample],
+    profile: AuditRunProfile,
+    simulator_runner: Callable[[AuditRunProfile], Sequence[TelemetrySample]],
+) -> tuple[MetricDifference, ...]:
+    """同一 profile/time band で simulator を実行して target 差を返す。
+
+    runner を注入可能にして、実 UE5 がない環境でも fixture で抽出・実行・比較を検証できます。
+    """
+    if not isinstance(profile, AuditRunProfile) or not callable(simulator_runner):
+        raise ValueError("validated profile and callable simulator_runner required")
+    checked_target = tuple(TelemetrySample.from_wire({
+        "session_id": row.session_id, "time_seconds": row.time_seconds,
+        "metrics": dict(row.metrics), "uncertainties": dict(row.uncertainties),
+    }) for row in target)
+    simulator = simulator_runner(profile)
+    if not isinstance(simulator, Sequence) or isinstance(simulator, (str, bytes)):
+        raise ValueError("simulator runner must return samples")
+    checked_simulator = tuple(TelemetrySample.from_wire({
+        "session_id": row.session_id, "time_seconds": row.time_seconds,
+        "metrics": dict(row.metrics), "uncertainties": dict(row.uncertainties),
+    }) for row in simulator)
+    for row in (*checked_target, *checked_simulator):
+        if not profile.time_band_start <= row.time_seconds <= profile.time_band_end:
+            raise ValueError("sample outside requested time band")
+    return align_and_compare(checked_target, checked_simulator)
 
 
 def align_and_compare(target: Sequence[TelemetrySample], simulator: Sequence[TelemetrySample], *, time_tolerance: float = 0.1) -> tuple[MetricDifference, ...]:

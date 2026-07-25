@@ -11,6 +11,7 @@ import json
 import math
 import os
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping
@@ -217,6 +218,8 @@ class FidelityVerdict:
         if self.verdict_stage == "baseline":
             ensure(hashes["deploy_obs_schema"] == hashes["deploy_release_adapter"] == "absent", "baseline DeployObs hashes must be absent")
             ensure({"action", "offer", "terminal"} <= categories, "baseline requires action/offer/terminal blocking rows")
+        else:
+            ensure("deploy_obs_visibility" in categories, "integration/post_curriculum requires DeployObs visibility blocking row")
 
     @classmethod
     def from_wire(cls, value: Any) -> "FidelityVerdict":
@@ -275,14 +278,19 @@ def verify_current_fidelity(verdict: FidelityVerdict | Mapping[str, Any], curren
 
 
 def write_verdict_pair_atomic(verdict: FidelityVerdict, json_path: Path, report_path: Path, report_markdown: str) -> None:
-    """JSON と Markdown を同一 directory 内の temp から原子的に確定する。
+    """JSON と Markdown を rollback 可能な同一世代として確定する。
 
-    両 temp の fsync 成功後に rename し、準備失敗時には最終 artifact を一つも残しません。
+    既存 pair を backup してから両方を反映し、片側の置換失敗時は旧 pair を完全復元します。
     """
     checked = FidelityVerdict.from_wire(verdict.to_wire())
     ensure(json_path.parent == report_path.parent, "artifact pair must share a directory")
     json_path.parent.mkdir(parents=True, exist_ok=True)
     temps: list[str] = []
+    token = uuid.uuid4().hex
+    backups = (json_path.with_name(f".{json_path.name}.{token}.bak"), report_path.with_name(f".{report_path.name}.{token}.bak"))
+    existed = (json_path.exists(), report_path.exists())
+    ensure(existed[0] == existed[1], "existing artifact generation must be a complete pair")
+    backed_up = 0
     try:
         for target, payload in ((json_path, canonical_json_bytes(checked.to_wire())), (report_path, report_markdown.encode("utf-8"))):
             fd, temp = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
@@ -291,13 +299,31 @@ def write_verdict_pair_atomic(verdict: FidelityVerdict, json_path: Path, report_
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
-        os.replace(temps[0], json_path)
+        if existed[0]:
+            os.replace(json_path, backups[0])
+            backed_up = 1
+            os.replace(report_path, backups[1])
+            backed_up = 2
         try:
+            os.replace(temps[0], json_path)
             os.replace(temps[1], report_path)
+            temps.clear()
         except OSError:
             json_path.unlink(missing_ok=True)
+            report_path.unlink(missing_ok=True)
+            if existed[0]:
+                os.replace(backups[0], json_path)
+                os.replace(backups[1], report_path)
+                backed_up = 0
             raise
-        temps.clear()
+        for backup in backups:
+            backup.unlink(missing_ok=True)
+        backed_up = 0
+    except OSError:
+        if backed_up == 1:
+            os.replace(backups[0], json_path)
+            backed_up = 0
+        raise
     finally:
         for temp in temps:
             try:
