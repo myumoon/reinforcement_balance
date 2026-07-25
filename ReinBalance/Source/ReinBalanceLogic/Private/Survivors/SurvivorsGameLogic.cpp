@@ -385,10 +385,10 @@ FString FSurvivorsGameLogic::GetContentSchema() const
 			static_cast<int32>(Rule.RequiredPassive), static_cast<int32>(Rule.UnionPartner));
 	}
 	return FString::Printf(
-		TEXT("{\"weapons\":[%s],\"passives\":[%s],\"gems\":[%s],")
+		TEXT("{\"max_level\":%d,\"weapons\":[%s],\"passives\":[%s],\"gems\":[%s],")
 		TEXT("\"xp_curve\":[%s],\"level_cadence\":\"xp_threshold\",\"offer\":{\"count\":%d,\"fallback\":\"none_when_pool_empty\"},")
 		TEXT("\"slots\":{\"weapon\":%d,\"passive\":%d},\"evolutions\":[%s],\"chest\":{\"boss_drop\":true,\"evolution_enabled_by_config\":%s}}"),
-		*Weapons, *Passives, *Gems, *XP, MaxLevelUpOfferCount, MaxWeaponSlots, MaxPassiveSlots, *Evolutions,
+		MaxPlayerLevel, *Weapons, *Passives, *Gems, *XP, MaxLevelUpOfferCount, MaxWeaponSlots, MaxPassiveSlots, *Evolutions,
 		CurrentConfig.bEnableEvolutions ? TEXT("true") : TEXT("false"));
 }
 
