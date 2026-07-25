@@ -278,36 +278,68 @@ def run_fidelity_audit(
 
 
 def _maximum_unique_pairs(candidates: Sequence[tuple[Any, Any, Any]]) -> tuple[tuple[Any, Any], ...]:
-    """候補辺から再利用のない最大二部 matching を作る。
+    """候補辺から最大 cardinality・最小コストの二部 matching を作る。
 
-    距離の近い候補を各左 node の優先順にしつつ、augmenting path で標本数を最大化します。
-    これにより単純 greedy が独立 sample を不必要に捨てることも防ぎます。
+    最短 augmenting path を反復し、sample 再利用を防いだまま対応数を最大化します。
+    さらに同じ対応数では総時間差を最小化するため、交差対応による CI の歪みも防ぎます。
     """
-    adjacency: dict[Any, list[tuple[Any, Any]]] = {}
-    for distance, left, right in candidates:
-        adjacency.setdefault(left, []).append((distance, right))
-    for edges in adjacency.values():
-        edges.sort(key=lambda edge: (edge[0], str(edge[1])))
-    right_owner: dict[Any, Any] = {}
+    left_nodes = tuple(sorted({left for _, left, _ in candidates}, key=str))
+    right_nodes = tuple(sorted({right for _, _, right in candidates}, key=str))
+    source, sink = ("source",), ("sink",)
+    graph: dict[Any, list[list[Any]]] = {}
 
-    def assign(left: Any, visited: set[Any]) -> bool:
-        """一つの左 node を未使用または再配置可能な右 node へ割り当てる。
+    def add_edge(start: Any, end: Any, capacity: int, cost: float) -> None:
+        """残余グラフへ正方向と逆方向の辺を対で追加する。
 
-        同じ右 node を一回の探索で巡回せず、既存割当を押し出せる場合だけ更新します。
+        逆辺により、後続の経路が以前の対応を取り消して総コストを改善できます。
         """
-        for _, right in adjacency[left]:
-            if right in visited:
-                continue
-            visited.add(right)
-            owner = right_owner.get(right)
-            if owner is None or assign(owner, visited):
-                right_owner[right] = left
-                return True
-        return False
+        forward = [end, capacity, cost, None]
+        reverse = [start, 0, -cost, forward]
+        forward[3] = reverse
+        graph.setdefault(start, []).append(forward)
+        graph.setdefault(end, []).append(reverse)
 
-    for left in sorted(adjacency, key=lambda item: (len(adjacency[item]), str(item))):
-        assign(left, set())
-    return tuple(sorted(((left, right) for right, left in right_owner.items()), key=lambda pair: str(pair)))
+    for left in left_nodes:
+        add_edge(source, ("left", left), 1, 0.0)
+    for right in right_nodes:
+        add_edge(("right", right), sink, 1, 0.0)
+    for distance, left, right in sorted(candidates, key=lambda row: (float(row[0]), str(row[1]), str(row[2]))):
+        add_edge(("left", left), ("right", right), 1, float(distance))
+
+    while True:
+        distances = {node: math.inf for node in graph}
+        distances[source] = 0.0
+        previous: dict[Any, tuple[Any, list[Any]]] = {}
+        for _ in range(len(graph) - 1):
+            changed = False
+            for start in sorted(graph, key=str):
+                if not math.isfinite(distances[start]):
+                    continue
+                for edge in graph[start]:
+                    end, capacity, cost, _ = edge
+                    candidate = distances[start] + cost
+                    if capacity and candidate < distances[end] - 1e-15:
+                        distances[end] = candidate
+                        previous[end] = (start, edge)
+                        changed = True
+            if not changed:
+                break
+        if sink not in previous:
+            break
+        node = sink
+        while node != source:
+            start, edge = previous[node]
+            edge[1] -= 1
+            edge[3][1] += 1
+            node = start
+
+    pairs = []
+    for left in left_nodes:
+        for edge in graph[("left", left)]:
+            end, capacity, _, _ = edge
+            if isinstance(end, tuple) and len(end) == 2 and end[0] == "right" and capacity == 0:
+                pairs.append((left, end[1]))
+    return tuple(sorted(pairs, key=lambda pair: str(pair)))
 
 
 def align_and_compare(target: Sequence[TelemetrySample], simulator: Sequence[TelemetrySample], *, time_tolerance: float = 0.1) -> tuple[MetricDifference, ...]:
@@ -329,7 +361,7 @@ def align_and_compare(target: Sequence[TelemetrySample], simulator: Sequence[Tel
         for simulator_id, right_rows in simulator_sessions.items():
             distance = min(abs(left.time_seconds - right.time_seconds) for left in left_rows for right in right_rows)
             if distance <= time_tolerance:
-                session_candidates.append(((distance, target_id != simulator_id), target_id, simulator_id))
+                session_candidates.append((distance, target_id, simulator_id))
     session_pairs = _maximum_unique_pairs(session_candidates)
 
     by_session: dict[str, list[dict[str, float]]] = {}

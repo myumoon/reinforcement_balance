@@ -51,6 +51,24 @@ def test_alignment_does_not_reuse_simulator_session_or_sample() -> None:
     assert result[0].session_count == 1
 
 
+def test_alignment_minimizes_total_time_distance_without_crossing() -> None:
+    """最大対応数が同じ場合に総時間差が最小の sample 対応を選ぶ。
+
+    完全な一対一対応が可能でも交差させず、近い時刻同士の値で session 集計します。
+    """
+    target = (
+        TelemetrySample("target", 0.00, {"speed": 0.0}, {}),
+        TelemetrySample("target", 0.09, {"speed": 100.0}, {}),
+    )
+    simulator = (
+        TelemetrySample("simulator", 0.08, {"speed": 100.0}, {}),
+        TelemetrySample("simulator", 0.10, {"speed": 0.0}, {}),
+    )
+    result = align_and_compare(target, simulator, time_tolerance=0.1)
+    assert result[0].mean_difference == pytest.approx(0.0)
+    assert result[0].session_count == 1
+
+
 def test_nonfinite_and_unknown_fields_fail_closed() -> None:
     """非 finite 値と未知 field を抽出境界で拒否する。
 
