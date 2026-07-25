@@ -143,6 +143,8 @@ def test_wrapper_rejects_unknown_nested_input():
     "mutation",
     [
         lambda raw: raw.update(viewport=("bad", "bad")),
+        lambda raw: raw.update(viewport=(1.5, 2)),
+        lambda raw: raw.update(viewport=(True, 2)),
         lambda raw: raw["privileged"].update(enemy_hp="bad"),
         lambda raw: raw["world_entities"][0].update(unused=1),
         lambda raw: raw["target_camera"].update(half_width=0),

@@ -232,6 +232,11 @@ def visible_track_estimates(tracks: Sequence[Mapping[str, Any]], viewport: tuple
 
     off-screen・occluded・clipped track は全体数にも最近傍にも含めず leakage を防ぎます。
     """
+    ensure(isinstance(viewport, tuple) and len(viewport) == 2, "viewport must be pair tuple")
+    ensure(
+        all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in viewport),
+        "viewport values must be positive int",
+    )
     visible: list[tuple[float, float, int]] = []
     for track in tracks:
         ensure(isinstance(track, Mapping) and set(track) == _TRACK_KEYS, "track keys mismatch")

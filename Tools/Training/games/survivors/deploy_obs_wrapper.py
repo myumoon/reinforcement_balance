@@ -54,8 +54,11 @@ def _validate_raw(raw: Mapping[str, Any]) -> None:
     ensure(isinstance(raw, Mapping) and set(raw) == _RAW_KEYS, "raw observation keys mismatch")
     ensure(isinstance(raw["timestamp_ns"], int) and not isinstance(raw["timestamp_ns"], bool) and raw["timestamp_ns"] >= 0, "invalid timestamp")
     viewport = raw["viewport"]
-    ensure(isinstance(viewport, (list, tuple)) and len(viewport) == 2, "invalid viewport")
-    ensure(all(_finite_number(x, "viewport") > 0 for x in viewport), "viewport must be positive")
+    ensure(isinstance(viewport, tuple) and len(viewport) == 2, "invalid viewport")
+    ensure(
+        all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in viewport),
+        "viewport values must be positive int",
+    )
     camera = _exact_mapping(raw["target_camera"], _CAMERA_KEYS, "target_camera")
     for key in ("center_x", "center_y"):
         _finite_number(camera[key], f"target_camera.{key}")
