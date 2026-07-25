@@ -37,6 +37,20 @@ def test_extract_alignment_cluster_ci_and_unmeasurable() -> None:
     assert result[0].session_count == 1
 
 
+def test_alignment_does_not_reuse_simulator_session_or_sample() -> None:
+    """simulator session/sample を複数 target cluster へ再利用しない。
+
+    一つの simulator run を二つの独立観測として数えず、標本不足を N に反映します。
+    """
+    target = (
+        TelemetrySample("target-a", 1.00, {"speed": 10.0}, {}),
+        TelemetrySample("target-b", 1.02, {"speed": 20.0}, {}),
+    )
+    simulator = (TelemetrySample("sim-one", 1.01, {"speed": 5.0}, {}),)
+    result = align_and_compare(target, simulator, time_tolerance=0.1)
+    assert result[0].session_count == 1
+
+
 def test_nonfinite_and_unknown_fields_fail_closed() -> None:
     """非 finite 値と未知 field を抽出境界で拒否する。
 

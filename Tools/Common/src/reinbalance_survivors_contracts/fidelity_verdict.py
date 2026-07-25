@@ -93,11 +93,12 @@ class FidelityMetric:
     unit: str
     measurable: bool
     accepted_uncertainty: str | None = None
+    within_tolerance: bool | None = None
 
     def __post_init__(self) -> None:
         """構築経路を問わず metric の型・有限性・整合性を検証する。
 
-        measurable=false の値は None に限定し、理由のない uncertainty を拒否します。
+        measurable=false の値は None に限定し、許容判定は実測値にだけ要求します。
         """
         _text(self.name, "metric.name")
         _text(self.unit, "metric.unit", allow_empty=True)
@@ -106,9 +107,11 @@ class FidelityMetric:
             ensure(isinstance(self.value, (int, float)) and not isinstance(self.value, bool), "measurable metric.value must be numeric")
             ensure(math.isfinite(float(self.value)), "metric.value must be finite")
             ensure(self.accepted_uncertainty is None, "measurable metric cannot have accepted_uncertainty")
+            ensure(type(self.within_tolerance) is bool, "measurable metric.within_tolerance must be bool")
         else:
             ensure(self.value is None, "unmeasurable metric.value must be null")
             _text(self.accepted_uncertainty, "metric.accepted_uncertainty")
+            ensure(self.within_tolerance is None, "unmeasurable metric cannot have within_tolerance")
 
     @classmethod
     def from_wire(cls, value: Any) -> "FidelityMetric":
@@ -117,17 +120,20 @@ class FidelityMetric:
         任意フィールドも明示的に列挙し、schema 外の値を保持しません。
         """
         data = _mapping(value, "metric")
-        allowed = {"name", "value", "unit", "measurable", "accepted_uncertainty"}
+        allowed = {"name", "value", "unit", "measurable", "accepted_uncertainty", "within_tolerance"}
         ensure(set(data) <= allowed, f"metric unknown keys: {sorted(set(data)-allowed)}")
-        ensure({"name", "value", "unit", "measurable"} <= set(data), "metric missing required keys")
-        return cls(data["name"], data["value"], data["unit"], data["measurable"], data.get("accepted_uncertainty"))
+        ensure({"name", "value", "unit", "measurable", "within_tolerance"} <= set(data), "metric missing required keys")
+        return cls(data["name"], data["value"], data["unit"], data["measurable"], data.get("accepted_uncertainty"), data["within_tolerance"])
 
     def to_wire(self) -> dict[str, Any]:
         """metric を canonical wire object に変換する。
 
         uncertainty は存在するときだけ出力し、意味のない null field を増やしません。
         """
-        result = {"name": self.name, "value": self.value, "unit": self.unit, "measurable": self.measurable}
+        result = {
+            "name": self.name, "value": self.value, "unit": self.unit,
+            "measurable": self.measurable, "within_tolerance": self.within_tolerance,
+        }
         if self.accepted_uncertainty is not None:
             result["accepted_uncertainty"] = self.accepted_uncertainty
         return result
@@ -184,7 +190,7 @@ class FidelityVerdict:
     def __post_init__(self) -> None:
         """全 nested object と stage 固有 gate を対称に検証する。
 
-        baseline は DeployObs を absent とし、action/offer/terminal を常に blocking にします。
+        baseline は固定 gate、昇格 stage は visibility measurement と blocking を分離します。
         """
         ensure(self.verdict_stage in STAGES, "invalid verdict_stage")
         subject = dict(_mapping(self.subject, "subject"))
@@ -209,6 +215,8 @@ class FidelityVerdict:
                 ensure(isinstance(digest, str) and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest), f"invalid resolved producer hash: {key}")
         ensure(all(isinstance(x, FidelityMetric) for x in self.metrics), "metrics must contain FidelityMetric")
         ensure(all(isinstance(x, BlockingReason) for x in self.blocking_reasons), "blocking_reasons must contain BlockingReason")
+        metric_names = [metric.name for metric in self.metrics]
+        ensure(len(metric_names) == len(set(metric_names)), "metric names must be unique")
         hashes = _mapping(self.gating_producer_hashes, "gating_producer_hashes")
         _exact_keys(hashes, set(GATING_KEYS), "gating_producer_hashes")
         for key, digest in hashes.items():
@@ -219,7 +227,13 @@ class FidelityVerdict:
             ensure(hashes["deploy_obs_schema"] == hashes["deploy_release_adapter"] == "absent", "baseline DeployObs hashes must be absent")
             ensure({"action", "offer", "terminal"} <= categories, "baseline requires action/offer/terminal blocking rows")
         else:
-            ensure("deploy_obs_visibility" in categories, "integration/post_curriculum requires DeployObs visibility blocking row")
+            visibility = next((metric for metric in self.metrics if metric.name == "deploy_obs_visibility"), None)
+            ensure(visibility is not None, "integration/post_curriculum requires DeployObs visibility dimension")
+            visibility_blocks = not visibility.measurable or visibility.within_tolerance is not True
+            ensure(
+                ("deploy_obs_visibility" in categories) == visibility_blocks,
+                "DeployObs visibility blocking row must match measurement state",
+            )
 
     @classmethod
     def from_wire(cls, value: Any) -> "FidelityVerdict":
@@ -284,7 +298,7 @@ def downstream_release_allowed(
     """current verdict が下流処理を解禁できるかを返す。
 
     verdict の妥当性・鮮度は例外で検証し、blocking row の有無だけを解禁可否として
-    分離するため、必須の visibility 行を持つ昇格 verdict 自体は current と判定できます。
+    分離するため、実測かつ許容内の visibility dimension は blocking 行を要求しません。
     """
     checked = verify_current_fidelity(verdict, current_gating_producer_hashes, required_stage)
     return not checked.blocking_reasons

@@ -277,33 +277,85 @@ def run_fidelity_audit(
     return align_and_compare(checked_target, checked_simulator)
 
 
+def _maximum_unique_pairs(candidates: Sequence[tuple[Any, Any, Any]]) -> tuple[tuple[Any, Any], ...]:
+    """候補辺から再利用のない最大二部 matching を作る。
+
+    距離の近い候補を各左 node の優先順にしつつ、augmenting path で標本数を最大化します。
+    これにより単純 greedy が独立 sample を不必要に捨てることも防ぎます。
+    """
+    adjacency: dict[Any, list[tuple[Any, Any]]] = {}
+    for distance, left, right in candidates:
+        adjacency.setdefault(left, []).append((distance, right))
+    for edges in adjacency.values():
+        edges.sort(key=lambda edge: (edge[0], str(edge[1])))
+    right_owner: dict[Any, Any] = {}
+
+    def assign(left: Any, visited: set[Any]) -> bool:
+        """一つの左 node を未使用または再配置可能な右 node へ割り当てる。
+
+        同じ右 node を一回の探索で巡回せず、既存割当を押し出せる場合だけ更新します。
+        """
+        for _, right in adjacency[left]:
+            if right in visited:
+                continue
+            visited.add(right)
+            owner = right_owner.get(right)
+            if owner is None or assign(owner, visited):
+                right_owner[right] = left
+                return True
+        return False
+
+    for left in sorted(adjacency, key=lambda item: (len(adjacency[item]), str(item))):
+        assign(left, set())
+    return tuple(sorted(((left, right) for right, left in right_owner.items()), key=lambda pair: str(pair)))
+
+
 def align_and_compare(target: Sequence[TelemetrySample], simulator: Sequence[TelemetrySample], *, time_tolerance: float = 0.1) -> tuple[MetricDifference, ...]:
     """独立 session を time band で整列し viewport/unit 換算後の差を集計する。
 
-    target と simulator の session identity は共有を要求せず、最寄り時刻で対応付けます。
+    target と simulator の session identity は共有せず、一対一の session/sample 対応を作ります。
     `*_px` は viewport_width で正規化し、None metric は policy 比較から除外します。
     """
     if not math.isfinite(time_tolerance) or time_tolerance < 0:
         raise ValueError("time_tolerance must be finite and non-negative")
+    target_sessions: dict[str, list[TelemetrySample]] = {}
+    simulator_sessions: dict[str, list[TelemetrySample]] = {}
+    for sample in target:
+        target_sessions.setdefault(sample.session_id, []).append(sample)
+    for sample in simulator:
+        simulator_sessions.setdefault(sample.session_id, []).append(sample)
+    session_candidates = []
+    for target_id, left_rows in target_sessions.items():
+        for simulator_id, right_rows in simulator_sessions.items():
+            distance = min(abs(left.time_seconds - right.time_seconds) for left in left_rows for right in right_rows)
+            if distance <= time_tolerance:
+                session_candidates.append(((distance, target_id != simulator_id), target_id, simulator_id))
+    session_pairs = _maximum_unique_pairs(session_candidates)
+
     by_session: dict[str, list[dict[str, float]]] = {}
-    for left in target:
-        candidates = [right for right in simulator if abs(right.time_seconds - left.time_seconds) <= time_tolerance]
-        if not candidates:
-            continue
-        right = min(candidates, key=lambda row: abs(row.time_seconds - left.time_seconds))
-        row: dict[str, float] = {}
-        for name in set(left.metrics) & set(right.metrics):
-            lv, rv = left.metrics[name], right.metrics[name]
-            if lv is None or rv is None or name == "viewport_width":
-                continue
-            if name.endswith("_px"):
-                lw, rw = left.metrics.get("viewport_width"), right.metrics.get("viewport_width")
-                if not lw or not rw:
+    for target_id, simulator_id in session_pairs:
+        sample_candidates = [
+            (abs(left.time_seconds - right.time_seconds), left_index, right_index)
+            for left_index, left in enumerate(target_sessions[target_id])
+            for right_index, right in enumerate(simulator_sessions[simulator_id])
+            if abs(left.time_seconds - right.time_seconds) <= time_tolerance
+        ]
+        for left_index, right_index in _maximum_unique_pairs(sample_candidates):
+            left = target_sessions[target_id][left_index]
+            right = simulator_sessions[simulator_id][right_index]
+            row: dict[str, float] = {}
+            for name in set(left.metrics) & set(right.metrics):
+                lv, rv = left.metrics[name], right.metrics[name]
+                if lv is None or rv is None or name == "viewport_width":
                     continue
-                row[name] = float(lv) / float(lw) - float(rv) / float(rw)
-            else:
-                row[name] = float(lv) - float(rv)
-        by_session.setdefault(left.session_id, []).append(row)
+                if name.endswith("_px"):
+                    lw, rw = left.metrics.get("viewport_width"), right.metrics.get("viewport_width")
+                    if not lw or not rw:
+                        continue
+                    row[name] = float(lv) / float(lw) - float(rv) / float(rw)
+                else:
+                    row[name] = float(lv) - float(rv)
+            by_session.setdefault(target_id, []).append(row)
     metric_sessions: dict[str, list[float]] = {}
     for rows in by_session.values():
         for metric in set().union(*(row.keys() for row in rows)):
