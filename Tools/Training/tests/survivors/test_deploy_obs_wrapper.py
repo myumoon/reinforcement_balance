@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from survivors.deploy_obs_adapter import load_schema
+from survivors.deploy_obs_adapter import build_deploy_observation, load_schema
 from games.survivors.deploy_obs_wrapper import DeployObsWrapper, fresh_vecnormalize
 
 CONFIG = Path(__file__).parents[3] / "Deployment" / "configs" / "deploy_obs_v1.yaml"
@@ -82,6 +82,24 @@ def test_modes_are_separate_and_oracle_artifact_is_forbidden():
         oracle.assert_release_artifact_allowed()
     assert oracle.run_manifest["deploy_obs_mode"] == "oracle_diagnostic"
     assert not np.array_equal(release.observation(_raw()), oracle.observation(_raw()))
+
+
+def test_release_constructor_and_builder_have_no_oracle_switch():
+    """release constructor と公開 builder の両方から oracle 切替を除外する。
+
+    wrapper の release 経路は privileged truth を変えても不変であり、
+    builder へ旧 bool capability を渡す呼び方も拒否されます。
+    """
+    schema = load_schema(CONFIG)
+    release = DeployObsWrapper.release(FakeEnv(), schema)
+    assert np.array_equal(
+        release.observation(_raw()),
+        release.observation(_raw({"player_pos": [0, 0], "enemy_hp": 0., "cooldown": 0., "all_entity_count": 0, "density": 0.})),
+    )
+    with pytest.raises(TypeError):
+        build_deploy_observation(schema, {}, 0, oracle_diagnostic=True)
+    with pytest.raises(ValueError):
+        DeployObsWrapper(FakeEnv(), schema, "oracle_diagnostic")
 
 
 def test_reset_step_and_fresh_vecnormalize_outside():

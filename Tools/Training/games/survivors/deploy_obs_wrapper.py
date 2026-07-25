@@ -10,12 +10,14 @@ from typing import Any, Mapping, Sequence
 import math
 
 from survivors.deploy_obs_adapter import (
-    NamedEstimate, build_deploy_observation, normalized_category, visible_track_estimates,
+    NamedEstimate, build_deploy_observation, build_oracle_diagnostic_observation,
+    normalized_category, visible_track_estimates,
 )
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from reinbalance_survivors_contracts.ui_intent import ensure, is_strict_number
 
 _RAW_KEYS = frozenset({"timestamp_ns", "viewport", "target_camera", "hud", "player_world", "world_entities", "temporal", "inventory", "privileged"})
+_CONSTRUCTOR_TOKEN = object()
 _HUD_KEYS = frozenset({"player_hp", "level"})
 _TEMPORAL_KEYS = frozenset({"movement_direction", "timestamp_ns"})
 _INVENTORY_KEYS = frozenset({"weapon_category"})
@@ -119,11 +121,12 @@ class DeployObsWrapper:
     Gymnasium/SB3 を import せず reset/step を委譲するため、契約 test は単独実行できます。
     """
 
-    def __init__(self, env: Any, schema: DeployObsSchema, mode: str) -> None:
+    def __init__(self, env: Any, schema: DeployObsSchema, mode: str, *, _token: object | None = None) -> None:
         """検証済み環境・schema・mode を保持する。
 
         直接構築を禁止し、release/oracle の明示 constructor からだけ作ります。
         """
+        ensure(_token is _CONSTRUCTOR_TOKEN, "use release/oracle_diagnostic constructor")
         ensure(mode in {"release", "oracle_diagnostic"}, "invalid deploy observation mode")
         self.env, self.schema, self.mode = env, schema, mode
         self.run_manifest = {"deploy_obs_mode": mode, "deploy_obs_schema_hash": schema.schema_hash, "vecnormalize": "fresh_outside_deploy_tensor"}
@@ -134,7 +137,7 @@ class DeployObsWrapper:
 
         release artifact を生成できる唯一の mode で、privileged state は読みません。
         """
-        return cls(env, schema, "release")
+        return cls(env, schema, "release", _token=_CONSTRUCTOR_TOKEN)
 
     @classmethod
     def oracle_diagnostic(cls, env: Any, schema: DeployObsSchema) -> "DeployObsWrapper":
@@ -142,7 +145,7 @@ class DeployObsWrapper:
 
         学習調査専用であり、release artifact の保存は明示的に禁止されます。
         """
-        return cls(env, schema, "oracle_diagnostic")
+        return cls(env, schema, "oracle_diagnostic", _token=_CONSTRUCTOR_TOKEN)
 
     @property
     def release_artifact_allowed(self) -> bool:
@@ -180,9 +183,10 @@ class DeployObsWrapper:
             for name in ("enemy_hp", "cooldown"):
                 if name in raw["privileged"]:
                     estimates[name] = NamedEstimate((raw["privileged"][name],), now)
-        observation = build_deploy_observation(
-            self.schema, estimates, now, oracle_diagnostic=self.mode == "oracle_diagnostic",
-        )
+        if self.mode == "oracle_diagnostic":
+            observation = build_oracle_diagnostic_observation(self.schema, estimates, now)
+        else:
+            observation = build_deploy_observation(self.schema, estimates, now)
         observation.validate_for(self.schema)
         return observation.as_policy_tensor(self.schema)
 

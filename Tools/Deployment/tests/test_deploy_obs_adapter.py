@@ -9,8 +9,9 @@ import numpy as np
 import pytest
 
 from survivors.deploy_obs_adapter import (
-    NamedEstimate, build_deploy_observation, deploy_obs_producer_hash, load_schema, normalized_category,
-    screen_to_centered, visible_track_estimates,
+    NamedEstimate, build_deploy_observation, build_oracle_diagnostic_observation,
+    deploy_obs_producer_hash, load_schema, normalized_category, screen_to_centered,
+    visible_track_estimates,
 )
 
 CONFIG = Path(__file__).parents[1] / "configs" / "deploy_obs_v1.yaml"
@@ -54,6 +55,39 @@ def test_missing_and_unobservable_are_neutral_invalid_old():
         assert np.all(obs.values[offset:offset + size] == 0)
         assert np.all(obs.validity[offset:offset + size] == 0)
         assert np.all(obs.age[offset:offset + size] == 1)
+
+
+def test_release_builder_cannot_enable_oracle_segments():
+    """公開 release builder から oracle capability を到達不能にする。
+
+    privileged 値を入力しても欠損のままで、旧 bool 引数による開放も
+    Python の引数境界で拒否されることを再現します。
+    """
+    schema = load_schema(CONFIG)
+    estimates = _estimates({"enemy_hp": (.9,), "cooldown": (.8,)})
+    release = build_deploy_observation(schema, estimates, 1_000_000_000)
+    for name in ("enemy_hp", "cooldown"):
+        offset, size = schema.layout[name]
+        assert np.all(release.values[offset:offset + size] == 0)
+        assert np.all(release.validity[offset:offset + size] == 0)
+        assert np.all(release.age[offset:offset + size] == 1)
+    with pytest.raises(TypeError):
+        build_deploy_observation(schema, estimates, 1_000_000_000, oracle_diagnostic=True)
+
+
+def test_oracle_segments_require_diagnostic_builder():
+    """oracle segment を専用の診断 builder だけで有効化する。
+
+    release artifact 能力を持たない低層診断 API として分離され、
+    release builder と同じ入力でも結果が明確に異なります。
+    """
+    schema = load_schema(CONFIG)
+    estimates = _estimates({"enemy_hp": (.9,), "cooldown": (.8,)})
+    oracle = build_oracle_diagnostic_observation(schema, estimates, 1_000_000_000)
+    for name, expected in (("enemy_hp", .9), ("cooldown", .8)):
+        offset, _ = schema.layout[name]
+        assert oracle.values[offset] == pytest.approx(expected)
+        assert oracle.validity[offset] == 1
 
 
 def test_age_and_stale_validity_decay():

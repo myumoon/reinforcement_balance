@@ -92,14 +92,14 @@ def _resolve(
     estimates: Mapping[str, NamedEstimate],
     now_ns: int,
     *,
-    oracle_diagnostic: bool,
+    include_unobservable: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """一つの segment を value・validity・age へ解決する。
 
     source class が違っても欠損表現と stale decay はこの共通経路を必ず通ります。
     """
     neutral = np.full(field.size, field.neutral, dtype=np.float32)
-    if field.source_class == "unobservable" and not oracle_diagnostic:
+    if field.source_class == "unobservable" and not include_unobservable:
         return neutral, np.zeros(field.size, np.float32), np.ones(field.size, np.float32)
     if field.source_class == "constant":
         return np.ones(field.size, np.float32), np.ones(field.size, np.float32), np.zeros(field.size, np.float32)
@@ -141,20 +141,47 @@ def build_deploy_observation(
     schema: DeployObsSchema,
     estimates: Mapping[str, NamedEstimate],
     timestamp_ns: int,
-    *,
-    oracle_diagnostic: bool = False,
 ) -> DeployObservation:
-    """named estimates から DeployObservation を構築する。
+    """release 用 named estimates から DeployObservation を構築する。
 
-    未知名を拒否し、全 segment を schema 順に resolver へ渡して layout のずれを防ぎます。
+    privileged estimate を渡されても unobservable segment は必ず欠損にし、
+    公開 release 経路から oracle 診断値を有効化できないようにします。
+    """
+    return _build_observation(schema, estimates, timestamp_ns, include_unobservable=False)
+
+
+def build_oracle_diagnostic_observation(
+    schema: DeployObsSchema,
+    estimates: Mapping[str, NamedEstimate],
+    timestamp_ns: int,
+) -> DeployObservation:
+    """artifact 化禁止の oracle 診断 Observation を構築する。
+
+    privileged segment を有効にする唯一の公開入口です。呼び出し側は
+    oracle 専用 constructor と release artifact gate を必ず併用します。
+    """
+    return _build_observation(schema, estimates, timestamp_ns, include_unobservable=True)
+
+
+def _build_observation(
+    schema: DeployObsSchema,
+    estimates: Mapping[str, NamedEstimate],
+    timestamp_ns: int,
+    *,
+    include_unobservable: bool,
+) -> DeployObservation:
+    """mode 固定済みの estimates を schema 順に tensor 化する。
+
+    release/oracle の公開入口が選んだ能力だけを内部 resolver へ渡し、
+    bare な公開 bool で privileged segment を開放させません。
     """
     ensure(isinstance(estimates, Mapping), "estimates must be mapping")
     ensure(isinstance(timestamp_ns, int) and not isinstance(timestamp_ns, bool) and timestamp_ns >= 0, "invalid timestamp")
     names = {field.name for field in schema.fields}
     ensure(set(estimates) <= names and all(isinstance(x, NamedEstimate) for x in estimates.values()), "unknown or invalid estimate")
-    ensure(type(oracle_diagnostic) is bool, "oracle_diagnostic must be bool")
+    ensure(type(include_unobservable) is bool, "include_unobservable must be bool")
     planes = [
-        _resolve(field, estimates, timestamp_ns, oracle_diagnostic=oracle_diagnostic)
+        _resolve(field, estimates, timestamp_ns, include_unobservable=include_unobservable)
         for field in schema.fields
     ]
     observation = DeployObservation(
