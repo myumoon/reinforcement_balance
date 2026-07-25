@@ -14,6 +14,7 @@ import numpy as np
 
 _VIDEO_FIELDS = frozenset({"direction_x", "direction_y", "speed_px", "viewport_width", "enemy_density", "chest_visible"})
 _TELEMETRY_FIELDS = frozenset({"cadence_hz", "timer_seconds", "level", "offer_count", "terminal_event"})
+_REQUIRED_METRICS = _VIDEO_FIELDS | _TELEMETRY_FIELDS
 
 
 @dataclass(frozen=True)
@@ -350,8 +351,20 @@ def align_and_compare(target: Sequence[TelemetrySample], simulator: Sequence[Tel
     """
     if not math.isfinite(time_tolerance) or time_tolerance < 0:
         raise ValueError("time_tolerance must be finite and non-negative")
+    if not isinstance(target, Sequence) or isinstance(target, (str, bytes)) or not target:
+        raise ValueError("target samples must be a non-empty array")
+    if not isinstance(simulator, Sequence) or isinstance(simulator, (str, bytes)) or not simulator:
+        raise ValueError("simulator samples must be a non-empty array")
     target_sessions: dict[str, list[TelemetrySample]] = {}
     simulator_sessions: dict[str, list[TelemetrySample]] = {}
+    for source, samples in (("target", target), ("simulator", simulator)):
+        for sample in samples:
+            if not isinstance(sample, TelemetrySample):
+                raise ValueError(f"{source} samples must be TelemetrySample")
+            if set(sample.metrics) != _REQUIRED_METRICS:
+                missing = sorted(_REQUIRED_METRICS - set(sample.metrics))
+                unknown = sorted(set(sample.metrics) - _REQUIRED_METRICS)
+                raise ValueError(f"{source} required metric keys mismatch: missing={missing}, unknown={unknown}")
     for sample in target:
         target_sessions.setdefault(sample.session_id, []).append(sample)
     for sample in simulator:
@@ -363,6 +376,8 @@ def align_and_compare(target: Sequence[TelemetrySample], simulator: Sequence[Tel
             if distance <= time_tolerance:
                 session_candidates.append((distance, target_id, simulator_id))
     session_pairs = _maximum_unique_pairs(session_candidates)
+    if not session_pairs:
+        raise ValueError("no target/simulator sessions align within the requested time tolerance")
 
     by_session: dict[str, list[dict[str, float]]] = {}
     for target_id, simulator_id in session_pairs:
@@ -399,4 +414,6 @@ def align_and_compare(target: Sequence[TelemetrySample], simulator: Sequence[Tel
         mean = float(np.mean(values))
         half = 0.0 if len(values) == 1 else 1.96 * float(np.std(values, ddof=1)) / math.sqrt(len(values))
         results.append(MetricDifference(metric, mean, mean - half, mean + half, len(values)))
+    if not results:
+        raise ValueError("aligned comparison produced no measurable metrics")
     return tuple(results)

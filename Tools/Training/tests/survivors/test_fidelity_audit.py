@@ -21,7 +21,22 @@ def _wire(session: str, speed: float | None, width: float = 100.0) -> dict:
 
     speed が None の場合だけ accepted uncertainty を付けます。
     """
-    return {"session_id": session, "time_seconds": 1.0, "metrics": {"speed_px": speed, "viewport_width": width}, "uncertainties": {"speed_px": "occluded"} if speed is None else {}}
+    metrics = {
+        "direction_x": 1.0, "direction_y": 0.0, "speed_px": speed, "viewport_width": width,
+        "enemy_density": 1.0, "chest_visible": 0.0, "cadence_hz": 10.0,
+        "timer_seconds": 1.0, "level": 2.0, "offer_count": 3.0, "terminal_event": 0.0,
+    }
+    return {"session_id": session, "time_seconds": 1.0, "metrics": metrics, "uncertainties": {"speed_px": "occluded"} if speed is None else {}}
+
+
+def _sample(session: str, time_seconds: float, speed: float) -> TelemetrySample:
+    """必須 metric を全て持つ比較 sample を返す。
+
+    個別テストは speed と時刻だけを変え、監査入力契約は常に満たします。
+    """
+    wire = _wire(session, speed)
+    wire["time_seconds"] = time_seconds
+    return TelemetrySample.from_wire(wire)
 
 
 def test_extract_alignment_cluster_ci_and_unmeasurable() -> None:
@@ -32,9 +47,9 @@ def test_extract_alignment_cluster_ci_and_unmeasurable() -> None:
     target = extract_action_telemetry([_wire("a", 20), _wire("b", None)])
     simulator = extract_action_telemetry([_wire("a", 10, 50), _wire("b", 50)])
     result = align_and_compare(target, simulator)
-    assert result[0].metric == "speed_px"
-    assert result[0].mean_difference == pytest.approx(0.0)
-    assert result[0].session_count == 1
+    speed = next(row for row in result if row.metric == "speed_px")
+    assert speed.mean_difference == pytest.approx(0.0)
+    assert speed.session_count == 1
 
 
 def test_alignment_does_not_reuse_simulator_session_or_sample() -> None:
@@ -43,12 +58,12 @@ def test_alignment_does_not_reuse_simulator_session_or_sample() -> None:
     一つの simulator run を二つの独立観測として数えず、標本不足を N に反映します。
     """
     target = (
-        TelemetrySample("target-a", 1.00, {"speed": 10.0}, {}),
-        TelemetrySample("target-b", 1.02, {"speed": 20.0}, {}),
+        _sample("target-a", 1.00, 10.0),
+        _sample("target-b", 1.02, 20.0),
     )
-    simulator = (TelemetrySample("sim-one", 1.01, {"speed": 5.0}, {}),)
+    simulator = (_sample("sim-one", 1.01, 5.0),)
     result = align_and_compare(target, simulator, time_tolerance=0.1)
-    assert result[0].session_count == 1
+    assert all(row.session_count == 1 for row in result)
 
 
 def test_alignment_minimizes_total_time_distance_without_crossing() -> None:
@@ -57,16 +72,17 @@ def test_alignment_minimizes_total_time_distance_without_crossing() -> None:
     完全な一対一対応が可能でも交差させず、近い時刻同士の値で session 集計します。
     """
     target = (
-        TelemetrySample("target", 0.00, {"speed": 0.0}, {}),
-        TelemetrySample("target", 0.09, {"speed": 100.0}, {}),
+        _sample("target", 0.00, 0.0),
+        _sample("target", 0.09, 100.0),
     )
     simulator = (
-        TelemetrySample("simulator", 0.08, {"speed": 100.0}, {}),
-        TelemetrySample("simulator", 0.10, {"speed": 0.0}, {}),
+        _sample("simulator", 0.08, 100.0),
+        _sample("simulator", 0.10, 0.0),
     )
     result = align_and_compare(target, simulator, time_tolerance=0.1)
-    assert result[0].mean_difference == pytest.approx(0.0)
-    assert result[0].session_count == 1
+    speed = next(row for row in result if row.metric == "speed_px")
+    assert speed.mean_difference == pytest.approx(0.0)
+    assert speed.session_count == 1
 
 
 def test_nonfinite_and_unknown_fields_fail_closed() -> None:
@@ -136,3 +152,24 @@ def test_missing_required_source_field_is_not_guessed() -> None:
     """
     with pytest.raises(ValueError):
         extract_target_session([], [])
+
+
+def test_required_metric_coverage_and_nonempty_alignment_fail_closed() -> None:
+    """target/simulator の必須 metric 欠落と空比較を拒否する。
+
+    積集合が空でも成功扱いせず、accepted uncertainty は key を明示した場合だけ許可します。
+    """
+    complete = _sample("target", 1.0, 10.0)
+    missing_metrics = dict(complete.metrics)
+    missing_metrics.pop("terminal_event")
+    missing = TelemetrySample("simulator", 1.0, missing_metrics, {})
+    with pytest.raises(ValueError, match="required metric keys mismatch"):
+        align_and_compare((complete,), (missing,))
+    with pytest.raises(ValueError, match="no target/simulator sessions align"):
+        align_and_compare((complete,), (_sample("simulator", 5.0, 10.0),))
+
+    all_unmeasurable_metrics = {name: None for name in complete.metrics}
+    all_uncertainties = {name: "accepted unavailable" for name in complete.metrics}
+    unmeasurable = TelemetrySample("simulator", 1.0, all_unmeasurable_metrics, all_uncertainties)
+    with pytest.raises(ValueError, match="no measurable metrics"):
+        align_and_compare((TelemetrySample("target", 1.0, all_unmeasurable_metrics, all_uncertainties),), (unmeasurable,))

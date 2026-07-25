@@ -6,6 +6,7 @@
 
 #include "Misc/MD5.h"
 #include "Survivors/Game/SurvivorsGame.h"
+#include "Survivors/SurvivorsGameConstants.h"
 #include "Survivors/SurvivorsGameLogic.h"
 #include "UObject/UObjectGlobals.h"
 
@@ -33,4 +34,10 @@ TEST_CASE("Survivors facade delegates canonical fidelity schema to logic", "[uni
 	CHECK(FMD5::HashAnsiString(*FacadeActionTime) == FMD5::HashAnsiString(*LogicActionTime));
 	CHECK(FacadeContent.Contains(TEXT("\"xp_curve\"")));
 	CHECK(FacadeActionTime.Contains(TEXT("\"directions\"")));
+	CHECK(FacadeContent.Contains(*FString::Printf(
+		TEXT("\"id\":\"blue\",\"xp\":%.9g"), SurvivorsGameConstants::GemXPValues[0])));
+	CHECK(FacadeContent.Contains(*FString::Printf(
+		TEXT("\"id\":\"green\",\"xp\":%.9g"), SurvivorsGameConstants::GemXPValues[1])));
+	CHECK(FacadeContent.Contains(*FString::Printf(
+		TEXT("\"id\":\"red\",\"xp\":%.9g"), SurvivorsGameConstants::GemXPValues[2])));
 }
