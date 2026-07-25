@@ -112,6 +112,63 @@ class MetricDifference:
             raise ValueError("session_count must be positive")
 
 
+@dataclass(frozen=True)
+class ExtractedVideoFrame:
+    """画像 frame から抽出した screen-measurable metric。
+
+    fixture でも実 capture と同じ interface を通し、既に計算済みの metric を video として
+    素通しする経路を作りません。
+    """
+    metrics: Mapping[str, float]
+
+    def __post_init__(self) -> None:
+        """抽出済み metric 集合を直接構築時にも検証する。
+
+        extractor factory を迂回して未知 field や非有限値を監査入力へ混ぜることを
+        防ぎます。
+        """
+        if not isinstance(self.metrics, Mapping) or set(self.metrics) != _VIDEO_FIELDS:
+            raise ValueError("extracted video metric keys mismatch")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in self.metrics.values()):
+            raise ValueError("extracted video metrics must be finite numeric")
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "ExtractedVideoFrame":
+        """frame の幾何情報から方向・速度・密度・chest 可視性を抽出する。
+
+        player の現在/直前位置と経過時間を使い、画面内 entity は中心点の列として
+        fail-closed に検証します。
+        """
+        keys = {"player_xy", "previous_player_xy", "elapsed_seconds", "viewport_width", "enemy_centers", "chest_centers"}
+        if not isinstance(value, Mapping) or set(value) != keys:
+            raise ValueError("video frame keys mismatch")
+        for name in ("player_xy", "previous_player_xy"):
+            point = value[name]
+            if not isinstance(point, list) or len(point) != 2 or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in point):
+                raise ValueError(f"{name} must be a finite xy pair")
+        elapsed, width = value["elapsed_seconds"], value["viewport_width"]
+        if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x <= 0 for x in (elapsed, width)):
+            raise ValueError("elapsed_seconds and viewport_width must be positive finite")
+        for name in ("enemy_centers", "chest_centers"):
+            centers = value[name]
+            if not isinstance(centers, list):
+                raise ValueError(f"{name} must be an array")
+            for point in centers:
+                if not isinstance(point, list) or len(point) != 2 or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in point):
+                    raise ValueError(f"{name} entries must be finite xy pairs")
+        dx = float(value["player_xy"][0]) - float(value["previous_player_xy"][0])
+        dy = float(value["player_xy"][1]) - float(value["previous_player_xy"][1])
+        distance = math.hypot(dx, dy)
+        return cls({
+            "direction_x": 0.0 if distance == 0 else dx / distance,
+            "direction_y": 0.0 if distance == 0 else dy / distance,
+            "speed_px": distance / float(elapsed),
+            "viewport_width": float(width),
+            "enemy_density": float(len(value["enemy_centers"])),
+            "chest_visible": float(bool(value["chest_centers"])),
+        })
+
+
 def extract_action_telemetry(frames: Sequence[Mapping[str, Any]]) -> tuple[TelemetrySample, ...]:
     """抽出済み video/telemetry frame から監査 sample を生成する。
 
@@ -147,6 +204,27 @@ def _extract_source_rows(rows: Sequence[Mapping[str, Any]], required: frozenset[
     return output
 
 
+def _extract_video_rows(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[str, float], dict[str, float | None]]:
+    """raw frame 列を video extraction interface 経由で metric 行へ変換する。
+
+    session/time は capture metadata として保持し、frame payload 以外の数値 metric を
+    video source に直接置く入力は拒否します。
+    """
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or not rows:
+        raise ValueError("video rows must be a non-empty array")
+    output = {}
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) != {"session_id", "time_seconds", "frame"}:
+            raise ValueError("video row keys mismatch")
+        extracted = ExtractedVideoFrame.from_wire(row["frame"])
+        sample = TelemetrySample(row["session_id"], row["time_seconds"], extracted.metrics, {})
+        key = (sample.session_id, float(sample.time_seconds))
+        if key in output:
+            raise ValueError("duplicate video session/time row")
+        output[key] = dict(sample.metrics)
+    return output
+
+
 def extract_target_session(
     video_frames: Sequence[Mapping[str, Any]],
     telemetry_rows: Sequence[Mapping[str, Any]],
@@ -156,7 +234,7 @@ def extract_target_session(
     direction/speed/density/chest は画面、cadence/timer/level/offer/terminal は telemetry 由来とし、
     同じ session/time に揃わない入力を比較対象へ混ぜません。
     """
-    video = _extract_source_rows(video_frames, _VIDEO_FIELDS, "video")
+    video = _extract_video_rows(video_frames)
     telemetry = _extract_source_rows(telemetry_rows, _TELEMETRY_FIELDS, "telemetry")
     if set(video) != set(telemetry):
         raise ValueError("video/telemetry session-time keys differ")
@@ -200,15 +278,16 @@ def run_fidelity_audit(
 
 
 def align_and_compare(target: Sequence[TelemetrySample], simulator: Sequence[TelemetrySample], *, time_tolerance: float = 0.1) -> tuple[MetricDifference, ...]:
-    """同 session/time band の sample を整列し viewport/unit 換算後の差を集計する。
+    """独立 session を time band で整列し viewport/unit 換算後の差を集計する。
 
-    `*_px` は各 sample の viewport_width で正規化し、None metric は policy 比較から除外します。
+    target と simulator の session identity は共有を要求せず、最寄り時刻で対応付けます。
+    `*_px` は viewport_width で正規化し、None metric は policy 比較から除外します。
     """
     if not math.isfinite(time_tolerance) or time_tolerance < 0:
         raise ValueError("time_tolerance must be finite and non-negative")
     by_session: dict[str, list[dict[str, float]]] = {}
     for left in target:
-        candidates = [right for right in simulator if right.session_id == left.session_id and abs(right.time_seconds - left.time_seconds) <= time_tolerance]
+        candidates = [right for right in simulator if abs(right.time_seconds - left.time_seconds) <= time_tolerance]
         if not candidates:
             continue
         right = min(candidates, key=lambda row: abs(row.time_seconds - left.time_seconds))

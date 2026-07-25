@@ -10,8 +10,8 @@ import os
 import pytest
 
 from reinbalance_survivors_contracts.fidelity_verdict import (
-    BlockingReason, FidelityVerdict, GATING_KEYS, verify_current_fidelity,
-    write_verdict_pair_atomic,
+    BlockingReason, FidelityVerdict, GATING_KEYS, downstream_release_allowed,
+    read_verdict_pair_atomic, verify_current_fidelity, write_verdict_pair_atomic,
 )
 from reinbalance_survivors_contracts.ui_intent import ContractValidationError
 
@@ -100,8 +100,8 @@ def test_verify_ignores_provenance_but_rejects_hash_and_stage() -> None:
     wire = verdict.to_wire()
     wire["provenance"]["git_commit"] = "two"
     current = dict(verdict.gating_producer_hashes)
-    with pytest.raises(ContractValidationError):
-        verify_current_fidelity(wire, current, "integration")
+    assert verify_current_fidelity(wire, current, "integration").verdict_stage == "integration"
+    assert downstream_release_allowed(wire, current, "integration") is False
     current["logic_private"] = "b" * 64
     with pytest.raises(ContractValidationError):
         verify_current_fidelity(wire, current, "integration")
@@ -120,31 +120,34 @@ def test_consumer_fixture_rejects_stale_verdict(consumer: str) -> None:
         verify_current_fidelity(verdict, stale, "integration")
 
 
-def test_artifact_pair_rolls_back_second_replace_failure(tmp_path, monkeypatch) -> None:
-    """二つ目の artifact 置換失敗時に旧世代 pair を復元する。
+def test_artifact_pair_has_single_atomic_commit_point(tmp_path, monkeypatch) -> None:
+    """artifact pair の外部可視化が単一 rename だけで起きることを検証する。
 
-    新 JSON と旧 Markdown の混在や、片側だけの削除を残さないことを固定します。
+    payload は世代 directory 内で完成させ、commit marker の置換前には reader が新世代を
+    観測できないことを固定します。
     """
     json_path = tmp_path / "verdict.json"
     report_path = tmp_path / "verdict.md"
     json_path.write_text("old-json", encoding="utf-8")
     report_path.write_text("old-report", encoding="utf-8")
     real_replace = os.replace
-    calls = 0
+    destinations = []
 
-    def failing_replace(source, destination):
-        """四回目の rename だけを失敗させる fault injector。
+    def recording_replace(source, destination):
+        """rename の宛先を記録する fault injector。
 
-        backup 二件と JSON 反映後の Markdown 反映を crash 相当として模擬します。
+        pair ごとの commit marker 以外を外部可視 path へ rename していないか確認します。
         """
-        nonlocal calls
-        calls += 1
-        if calls == 4:
-            raise OSError("injected second artifact failure")
+        destinations.append(os.fspath(destination))
         return real_replace(source, destination)
 
-    monkeypatch.setattr(os, "replace", failing_replace)
-    with pytest.raises(OSError):
-        write_verdict_pair_atomic(_verdict("baseline"), json_path, report_path, "new-report")
-    assert json_path.read_text(encoding="utf-8") == "old-json"
-    assert report_path.read_text(encoding="utf-8") == "old-report"
+    monkeypatch.setattr(os, "replace", recording_replace)
+    write_verdict_pair_atomic(_verdict("baseline"), json_path, report_path, "new-report")
+    assert len(destinations) == 1
+    assert destinations[0].endswith(".verdict.json.verdict.md.commit")
+    marker = __import__("json").loads((tmp_path / ".verdict.json.verdict.md.commit").read_text(encoding="utf-8"))
+    generation = tmp_path / marker["generation"]
+    assert (generation / "verdict.md").read_text(encoding="utf-8") == "new-report"
+    committed_verdict, committed_report = read_verdict_pair_atomic(json_path, report_path)
+    assert committed_verdict.verdict_stage == "baseline"
+    assert committed_report == "new-report"

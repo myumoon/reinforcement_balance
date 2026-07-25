@@ -79,3 +79,36 @@ def test_compiled_closure_bytes_are_bound_to_gating_hash(tmp_path) -> None:
     weapon.unlink()
     fourth = resolve_gating_producer_hashes(tmp_path, manifest, {})
     assert third["logic_private"] != fourth["logic_private"]
+
+
+@pytest.mark.parametrize("key", ["logic_public", "logic_private", "game_facade", "http_service"])
+def test_recursive_header_set_is_bound_to_each_cpp_gating_hash(tmp_path, key) -> None:
+    """recursive root の header 変更・追加・削除を全 C++ key の hash へ結ぶ。
+
+    public/private header の集合と bytes が compiled TU と対称に producer identity へ入ります。
+    """
+    root = tmp_path / "Module/Public"
+    root.mkdir(parents=True)
+    header = root / "Producer.h"
+    header.write_text("one", encoding="utf-8")
+    producers = {}
+    for producer_key in GATING_KEYS:
+        producers[producer_key] = {
+            "ordered_exact_paths": [],
+            "recursive_roots": [],
+            "explicit_excludes": [],
+            "generated_inputs": [],
+            "transitive_dependency_mode": "none",
+        }
+    producers[key]["recursive_roots"] = [{"path": "Module/Public", "include_globs": ["**/*.h"]}]
+    manifest = type(load_producer_path_manifest())("v", producers, "f" * 64)
+    first = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    header.write_text("two", encoding="utf-8")
+    second = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    assert first[key] != second[key]
+    (root / "Added.h").write_text("added", encoding="utf-8")
+    third = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    assert second[key] != third[key]
+    header.unlink()
+    fourth = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    assert third[key] != fourth[key]

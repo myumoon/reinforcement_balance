@@ -7,6 +7,7 @@ import pytest
 
 from audit_survivors_fidelity import (
     AuditRunProfile,
+    ExtractedVideoFrame,
     TelemetrySample,
     align_and_compare,
     extract_action_telemetry,
@@ -54,9 +55,11 @@ def test_required_video_telemetry_and_matching_simulator_run() -> None:
 
     runner へ監査条件がそのまま渡り、合成入力だけで end-to-end 比較できます。
     """
-    video = [{"session_id": "a", "time_seconds": 1.0, "direction_x": 1.0,
-              "direction_y": 0.0, "speed_px": 20.0, "viewport_width": 100.0,
-              "enemy_density": 3.0, "chest_visible": 0.0}]
+    video = [{"session_id": "a", "time_seconds": 1.0,
+              "frame": {"player_xy": [10.0, 10.0], "previous_player_xy": [8.0, 10.0],
+                        "elapsed_seconds": 0.1, "viewport_width": 100.0,
+                        "enemy_centers": [[20.0, 20.0], [30.0, 30.0], [40.0, 40.0]],
+                        "chest_centers": []}}]
     telemetry = [{"session_id": "a", "time_seconds": 1.0, "cadence_hz": 10.0,
                   "timer_seconds": 1.0, "level": 2.0, "offer_count": 3.0,
                   "terminal_event": 0.0}]
@@ -70,11 +73,28 @@ def test_required_video_telemetry_and_matching_simulator_run() -> None:
         production simulator の代わりに deterministic fixture を注入します。
         """
         seen.append(request)
-        return target
+        return tuple(
+            TelemetrySample("sim-" + row.session_id, row.time_seconds, row.metrics, row.uncertainties)
+            for row in target
+        )
 
     result = run_fidelity_audit(target, profile, runner)
     assert seen == [profile]
     assert {row.metric for row in result} >= {"speed_px", "timer_seconds", "terminal_event"}
+
+
+def test_video_frames_use_extraction_interface() -> None:
+    """frame payload を metric 抽出 interface に必ず通す。
+
+    数値 metric の素通しではなく、位置差と elapsed time から方向・速度を導出します。
+    """
+    frame = ExtractedVideoFrame.from_wire({
+        "player_xy": [4.0, 2.0], "previous_player_xy": [2.0, 2.0],
+        "elapsed_seconds": 0.5, "viewport_width": 20.0,
+        "enemy_centers": [[1.0, 1.0]], "chest_centers": [],
+    })
+    assert frame.metrics["direction_x"] == 1.0
+    assert frame.metrics["speed_px"] == 4.0
 
 
 def test_missing_required_source_field_is_not_guessed() -> None:

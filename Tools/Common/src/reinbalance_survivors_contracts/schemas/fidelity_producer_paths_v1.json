@@ -11,7 +11,7 @@
     },
     "logic_private": {
       "ordered_exact_paths": ["ReinBalance/Source/ReinBalanceLogic/Private/Survivors/SurvivorsGameLogic.cpp"],
-      "recursive_roots": [{"path": "ReinBalance/Source/ReinBalanceLogic/Private/Survivors", "include_globs": ["**/*.cpp"]}],
+      "recursive_roots": [{"path": "ReinBalance/Source/ReinBalanceLogic/Private/Survivors", "include_globs": ["**/*.cpp", "**/*.h"]}],
       "explicit_excludes": [],
       "generated_inputs": [],
       "transitive_dependency_mode": "compiled_module_closure",
@@ -19,12 +19,12 @@
     },
     "game_facade": {
       "ordered_exact_paths": ["ReinBalance/Source/ReinBalance/Private/Survivors/Game/SurvivorsGame.cpp", "ReinBalance/Source/ReinBalance/Public/Survivors/Game/SurvivorsGame.h"],
-      "recursive_roots": [], "explicit_excludes": [], "generated_inputs": [], "transitive_dependency_mode": "compiled_module_closure",
+      "recursive_roots": [{"path": "ReinBalance/Source/ReinBalance/Public/Survivors/Game", "include_globs": ["**/*.h"]}], "explicit_excludes": [], "generated_inputs": [], "transitive_dependency_mode": "compiled_module_closure",
       "compiled_module_closure": {"module_name": "ReinBalance", "build_cs": "ReinBalance/Source/ReinBalance/ReinBalance.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalance/Private/Survivors"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalance/Private/Survivors/**/*.cpp", "repo_local_module_dependency_edges": [{"module_name": "ReinBalanceLogic", "build_cs": "ReinBalance/Source/ReinBalanceLogic/ReinBalanceLogic.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceLogic/Private"]}], "allowed_non_behavior_excludes": []}
     },
     "http_service": {
-      "ordered_exact_paths": ["ReinBalance/Source/ReinBalanceEditor/Private/Training/SurvivorsHttpEnvService.cpp"],
-      "recursive_roots": [], "explicit_excludes": [], "generated_inputs": [], "transitive_dependency_mode": "compiled_module_closure",
+      "ordered_exact_paths": ["ReinBalance/Source/ReinBalanceEditor/Private/Training/SurvivorsHttpEnvService.cpp", "ReinBalance/Source/ReinBalanceEditor/Public/Training/SurvivorsHttpEnvService.h"],
+      "recursive_roots": [{"path": "ReinBalance/Source/ReinBalanceEditor/Public/Training", "include_globs": ["SurvivorsHttpEnvService.h"]}], "explicit_excludes": [], "generated_inputs": [], "transitive_dependency_mode": "compiled_module_closure",
       "compiled_module_closure": {"module_name": "ReinBalanceEditor", "build_cs": "ReinBalance/Source/ReinBalanceEditor/ReinBalanceEditor.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceEditor/Private/Training"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalanceEditor/Private/Training/**/*.cpp", "repo_local_module_dependency_edges": [], "allowed_non_behavior_excludes": []}
     },
     "sim_runtime_config": {"ordered_exact_paths": ["ReinBalance/Config/DefaultGame.ini"], "recursive_roots": [], "explicit_excludes": [], "generated_inputs": [], "transitive_dependency_mode": "none"},

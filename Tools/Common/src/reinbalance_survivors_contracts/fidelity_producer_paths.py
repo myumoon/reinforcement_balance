@@ -116,10 +116,26 @@ def resolve_gating_producer_hashes(repo_root: Path, manifest: ProducerPathManife
             result[key] = "absent"
             continue
         records: list[dict[str, str]] = []
+        known_paths: set[str] = set()
         for relative in entry["ordered_exact_paths"]:
             path = repo_root / relative
             ensure(path.is_file(), f"missing producer path: {relative}")
             records.append({"path": relative, "sha256": sha256_hex(path.read_bytes())})
+            known_paths.add(relative)
+        excluded_paths = {item["path"] for item in entry["explicit_excludes"]}
+        for root_spec in entry["recursive_roots"]:
+            root_relative = root_spec["path"]
+            root = repo_root / root_relative
+            ensure(root.is_dir(), f"missing producer recursive root: {root_relative}")
+            matched: set[Path] = set()
+            for include_glob in root_spec["include_globs"]:
+                matched.update(path for path in root.glob(include_glob) if path.is_file())
+            for path in sorted(matched):
+                relative = path.relative_to(repo_root).as_posix()
+                if relative in excluded_paths or relative in known_paths:
+                    continue
+                records.append({"path": relative, "sha256": sha256_hex(path.read_bytes())})
+                known_paths.add(relative)
         generated = {}
         for name in entry["generated_inputs"]:
             ensure(name in generated_inputs, f"missing generated input: {name}")
@@ -128,7 +144,6 @@ def resolve_gating_producer_hashes(repo_root: Path, manifest: ProducerPathManife
         if entry["transitive_dependency_mode"] == "compiled_module_closure":
             closure = resolve_cpp_producer_closure(repo_root, entry["compiled_module_closure"])
             closure_identity = closure.identity_hash
-            known_paths = {record["path"] for record in records}
             for relative in (*closure.build_files, *(source.path for source in closure.sources)):
                 if relative not in known_paths:
                     records.append({"path": relative, "sha256": sha256_hex((repo_root / relative).read_bytes())})

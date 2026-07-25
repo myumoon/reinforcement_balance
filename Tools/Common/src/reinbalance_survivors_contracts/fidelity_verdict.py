@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 import tempfile
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping
@@ -273,60 +273,97 @@ def verify_current_fidelity(verdict: FidelityVerdict | Mapping[str, Any], curren
     ensure(STAGES.index(checked.verdict_stage) >= STAGES.index(required_stage), "fidelity verdict stage is stale")
     ensure(not (required_stage != "baseline" and checked.verdict_stage == "baseline"), "baseline verdict cannot unlock downstream")
     ensure(dict(checked.gating_producer_hashes) == current, "gating producer hashes differ")
-    ensure(not checked.blocking_reasons, "fidelity verdict contains blocking rows")
     return checked
 
 
-def write_verdict_pair_atomic(verdict: FidelityVerdict, json_path: Path, report_path: Path, report_markdown: str) -> None:
-    """JSON と Markdown を rollback 可能な同一世代として確定する。
+def downstream_release_allowed(
+    verdict: FidelityVerdict | Mapping[str, Any],
+    current_gating_producer_hashes: Mapping[str, str],
+    required_stage: str,
+) -> bool:
+    """current verdict が下流処理を解禁できるかを返す。
 
-    既存 pair を backup してから両方を反映し、片側の置換失敗時は旧 pair を完全復元します。
+    verdict の妥当性・鮮度は例外で検証し、blocking row の有無だけを解禁可否として
+    分離するため、必須の visibility 行を持つ昇格 verdict 自体は current と判定できます。
+    """
+    checked = verify_current_fidelity(verdict, current_gating_producer_hashes, required_stage)
+    return not checked.blocking_reasons
+
+
+def _pair_commit_path(json_path: Path, report_path: Path) -> Path:
+    """artifact pair 専用の commit marker path を決定する。
+
+    file 名の組を marker 名へ含め、同じ directory に複数の pair があっても世代を
+    取り違えないようにします。
+    """
+    return json_path.parent / f".{json_path.name}.{report_path.name}.commit"
+
+
+def read_verdict_pair_atomic(json_path: Path, report_path: Path) -> tuple[FidelityVerdict, str]:
+    """commit marker が指す同一世代の JSON と Markdown を読み込む。
+
+    呼び出し側は個別 path を直接開かず、最後に確定した marker から二つの payload を
+    同時に解決することで half-committed generation を観測しません。
+    """
+    ensure(json_path.parent == report_path.parent, "artifact pair must share a directory")
+    marker_path = _pair_commit_path(json_path, report_path)
+    try:
+        marker = json.loads(marker_path.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractValidationError(f"invalid fidelity pair commit marker: {exc}") from exc
+    marker_data = _mapping(marker, "artifact_pair_marker")
+    _exact_keys(marker_data, {"generation", "json_name", "report_name"}, "artifact_pair_marker")
+    ensure(marker_data["json_name"] == json_path.name and marker_data["report_name"] == report_path.name, "artifact pair marker names mismatch")
+    generation_relative = _text(marker_data["generation"], "artifact_pair_marker.generation")
+    generation_path = Path(generation_relative)
+    ensure(not generation_path.is_absolute() and ".." not in generation_path.parts, "artifact pair generation escapes directory")
+    generation = json_path.parent / generation_path
+    try:
+        verdict_wire = json.loads((generation / json_path.name).read_bytes())
+        report = (generation / report_path.name).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractValidationError(f"invalid committed fidelity pair: {exc}") from exc
+    return FidelityVerdict.from_wire(verdict_wire), report
+
+
+def write_verdict_pair_atomic(verdict: FidelityVerdict, json_path: Path, report_path: Path, report_markdown: str) -> None:
+    """JSON と Markdown を単一 commit marker で同一世代として確定する。
+
+    完成済み bundle は reader から不可視の staging area に置き、最後の marker rename
+    一回だけを外部可視な commit 点にします。電源断 durability は保証範囲外です。
     """
     checked = FidelityVerdict.from_wire(verdict.to_wire())
     ensure(json_path.parent == report_path.parent, "artifact pair must share a directory")
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    temps: list[str] = []
-    token = uuid.uuid4().hex
-    backups = (json_path.with_name(f".{json_path.name}.{token}.bak"), report_path.with_name(f".{report_path.name}.{token}.bak"))
-    existed = (json_path.exists(), report_path.exists())
-    ensure(existed[0] == existed[1], "existing artifact generation must be a complete pair")
-    backed_up = 0
+    staging = Path(tempfile.mkdtemp(prefix=".fidelity-pair-", dir=json_path.parent))
+    bundle_root = json_path.parent / ".fidelity-pairs"
+    bundle_root.mkdir(exist_ok=True)
+    generation_id = canonical_hash({"verdict_identity": checked.identity_hash, "report_markdown": report_markdown})
+    generation = bundle_root / generation_id
+    marker = _pair_commit_path(json_path, report_path)
+    marker_temp: Path | None = None
     try:
-        for target, payload in ((json_path, canonical_json_bytes(checked.to_wire())), (report_path, report_markdown.encode("utf-8"))):
-            fd, temp = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
-            temps.append(temp)
-            with os.fdopen(fd, "wb") as stream:
+        for name, payload in ((json_path.name, canonical_json_bytes(checked.to_wire())), (report_path.name, report_markdown.encode("utf-8"))):
+            with (staging / name).open("wb") as stream:
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
-        if existed[0]:
-            os.replace(json_path, backups[0])
-            backed_up = 1
-            os.replace(report_path, backups[1])
-            backed_up = 2
-        try:
-            os.replace(temps[0], json_path)
-            os.replace(temps[1], report_path)
-            temps.clear()
-        except OSError:
-            json_path.unlink(missing_ok=True)
-            report_path.unlink(missing_ok=True)
-            if existed[0]:
-                os.replace(backups[0], json_path)
-                os.replace(backups[1], report_path)
-                backed_up = 0
-            raise
-        for backup in backups:
-            backup.unlink(missing_ok=True)
-        backed_up = 0
-    except OSError:
-        if backed_up == 1:
-            os.replace(backups[0], json_path)
-            backed_up = 0
-        raise
+        if not generation.exists():
+            staging.rename(generation)
+        marker_payload = canonical_json_bytes({
+            "generation": generation.relative_to(json_path.parent).as_posix(),
+            "json_name": json_path.name,
+            "report_name": report_path.name,
+        })
+        fd, marker_name = tempfile.mkstemp(prefix=f".{marker.name}.", dir=json_path.parent)
+        marker_temp = Path(marker_name)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(marker_payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(marker_temp, marker)
+        marker_temp = None
     finally:
-        for temp in temps:
-            try:
-                os.unlink(temp)
-            except FileNotFoundError:
-                pass
+        shutil.rmtree(staging, ignore_errors=True)
+        if marker_temp is not None:
+            marker_temp.unlink(missing_ok=True)
