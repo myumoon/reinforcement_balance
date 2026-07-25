@@ -144,12 +144,8 @@ def _validate_cpp_export(export: Mapping[str, Any]) -> None:
     xp_curve = content["xp_curve"]
     if not isinstance(xp_curve, list) or len(xp_curve) != max_level:
         raise ValueError("xp_curve length must equal content.max_level")
-    previous_xp: float | None = None
     for value in xp_curve:
-        xp = _finite_number(value, "xp_curve entry", nonnegative=True)
-        if previous_xp is not None and xp < previous_xp:
-            raise ValueError("xp_curve must be non-decreasing")
-        previous_xp = xp
+        _finite_number(value, "xp_curve entry", nonnegative=True)
     _known_string(content["level_cadence"], _LEVEL_CADENCES, "level_cadence")
     offer = _exact_object(content["offer"], {"count", "fallback"}, "offer")
     _positive_int(offer["count"], "offer.count")

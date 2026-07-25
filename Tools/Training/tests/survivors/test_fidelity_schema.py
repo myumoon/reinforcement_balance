@@ -56,6 +56,32 @@ def _export() -> dict:
     }
 
 
+def _real_xp_curve(max_level: int = 100) -> list[int]:
+    """実ゲーム式と同じ breakpoint spike を持つ XP curve を返す。
+
+    level 21 と 41 の一時的な増加後に必要 XP が下がる形状を再現し、
+    loader がゲーム固有の曲線形状を制約しないことを検証します。
+    """
+    curve: list[int] = []
+    for level in range(1, max_level + 1):
+        if level <= 1:
+            xp = 0
+        elif level == 2:
+            xp = 5
+        elif level <= 20:
+            xp = 5 + 10 * (level - 2)
+        elif level == 21:
+            xp = 195 + 600
+        elif level <= 40:
+            xp = 195 + 13 * (level - 21)
+        elif level == 41:
+            xp = 455 + 2400
+        else:
+            xp = 455 + 16 * (level - 41)
+        curve.append(xp)
+    return curve
+
+
 def test_schema_ids_are_taken_only_from_cpp_export() -> None:
     """入力に追加した id をコード変更なしで annotation できる。
 
@@ -95,6 +121,44 @@ def test_cpp_export_accepts_level_one_zero_xp_and_optional_evolution_sentinels()
     assert result.cpp_schema["content"]["evolutions"][1]["passive_id"] == "0"
 
 
+def test_cpp_export_accepts_real_nonmonotonic_xp_curve() -> None:
+    """breakpoint spike 後に低下する実 XP curve を受理する。
+
+    loader は長さと各値の有限・非負だけを検証し、ゲーム固有の曲線形状を
+    一般的な単調性で誤って拒否しないことを固定します。
+    """
+    export = _export()
+    export["content"]["max_level"] = 100
+    export["content"]["xp_curve"] = _real_xp_curve()
+
+    result = annotate_cpp_content_schema(export, {})
+
+    curve = result.cpp_schema["content"]["xp_curve"]
+    assert (curve[20], curve[21]) == (795, 208)
+    assert (curve[40], curve[41]) == (2855, 471)
+
+
+@pytest.mark.parametrize(
+    ("xp_curve", "match"),
+    [
+        ([0], "length"),
+        ([0, -1], "non-negative"),
+        ([0, float("inf")], "finite"),
+        ([0, float("nan")], "finite"),
+    ],
+)
+def test_cpp_export_rejects_invalid_xp_curve_entries(xp_curve, match: str) -> None:
+    """XP curve の構造・有限性・非負境界を fail-closed に保つ。
+
+    曲線形状だけを自由にし、長さ不一致、負値、非有限値は従来どおり
+    annotation 前に拒否されることを兄弟ケースで確認します。
+    """
+    export = _export()
+    export["content"]["xp_curve"] = xp_curve
+    with pytest.raises(ValueError, match=match):
+        annotate_cpp_content_schema(export, {})
+
+
 @pytest.mark.parametrize(
     ("mutate", "match"),
     [
@@ -122,8 +186,6 @@ def test_cpp_export_missing_invalid_and_nonfinite_fields_fail_closed(mutate, mat
     ("mutate", "match"),
     [
         (lambda value: value["action_time"]["directions"][0].update(x=1.1), "direction"),
-        (lambda value: value["content"].update(xp_curve=[0, -1]), "non-negative"),
-        (lambda value: value["content"].update(xp_curve=[5, 4]), "non-decreasing"),
         (lambda value: value["content"].update(level_cadence="per_frame"), "level_cadence"),
         (
             lambda value: value["content"]["evolutions"][0].update(evolved_id="missing"),
