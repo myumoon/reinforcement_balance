@@ -61,6 +61,12 @@ public:
 	/** obs 次元に影響するパラメータから生成するハッシュ */
 	FString GetObsSchemaHash() const;
 
+	/** Logic が生成した content schema を変更せず返す。 */
+	FString GetContentSchema() const;
+
+	/** Logic が生成した action/time schema を変更せず返す。 */
+	FString GetActionTimeSchema() const;
+
 	/** ステップ報酬を返す */
 	float GetReward() const;
 

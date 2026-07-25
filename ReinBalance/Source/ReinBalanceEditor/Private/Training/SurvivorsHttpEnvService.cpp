@@ -34,6 +34,9 @@ public:
 		CachedObsSchemaJson = FString::Printf(
 			TEXT("{\"segments\":[%s],\"total_dim\":%d,\"obs_schema_hash\":\"%s\"}"),
 			*SegmentsStr, Game->GetObsDim(), *Game->GetObsSchemaHash());
+		CachedContentSchemaJson = FString::Printf(
+			TEXT("{\"schema_version\":\"survivors.content_schema.v1\",\"content\":%s,\"action_time\":%s}"),
+			*Game->GetContentSchema(), *Game->GetActionTimeSchema());
 	}
 
 	// ---- ParamsQueue 外部制御 API ----
@@ -104,6 +107,9 @@ protected:
 		ObsSchemaRoute = Router->BindRoute(
 			FHttpPath(TEXT("/obs_schema")), EHttpServerRequestVerbs::VERB_GET,
 			FHttpRequestHandler::CreateRaw(this, &FSurvivorsEnvServer::HandleObsSchema));
+		ContentSchemaRoute = Router->BindRoute(
+			FHttpPath(TEXT("/content_schema")), EHttpServerRequestVerbs::VERB_GET,
+			FHttpRequestHandler::CreateRaw(this, &FSurvivorsEnvServer::HandleContentSchema));
 
 		ParamsRoute = Router->BindRoute(
 			FHttpPath(TEXT("/params")), EHttpServerRequestVerbs::VERB_POST,
@@ -115,6 +121,7 @@ protected:
 		if (Router)
 		{
 			Router->UnbindRoute(ObsSchemaRoute);
+			Router->UnbindRoute(ContentSchemaRoute);
 			Router->UnbindRoute(ParamsRoute);
 		}
 	}
@@ -122,6 +129,8 @@ protected:
 private:
 	// キャッシュ済み obs_schema JSON（HTTPワーカースレッドから Game に触れないよう事前構築）
 	FString CachedObsSchemaJson;
+	// HTTP worker が Game に触れないよう game thread で構築した content schema。
+	FString CachedContentSchemaJson;
 
 	// /params は Survivors 固有のためここで管理（FHttpEnvServerBase には追加しない）
 	TQueue<FParamsRequest, EQueueMode::Mpsc> ParamsQueue;
@@ -129,6 +138,13 @@ private:
 	bool HandleObsSchema(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 	{
 		OnComplete(MakeJsonResponse(CachedObsSchemaJson));
+		return true;
+	}
+
+	/** キャッシュ済み one-way schema を薄く返す。 */
+	bool HandleContentSchema(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+	{
+		OnComplete(MakeJsonResponse(CachedContentSchemaJson));
 		return true;
 	}
 
@@ -146,6 +162,7 @@ private:
 	}
 
 	FHttpRouteHandle ObsSchemaRoute;
+	FHttpRouteHandle ContentSchemaRoute;
 	FHttpRouteHandle ParamsRoute;
 	ASurvivorsGame*  Game;  // non-owning
 

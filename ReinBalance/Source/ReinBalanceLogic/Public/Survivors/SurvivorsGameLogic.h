@@ -137,6 +137,18 @@ public:
 	/** obs 次元に影響するパラメータから生成するハッシュ */
 	FString GetObsSchemaHash() const;
 
+	/**
+	 * コンテンツ契約を enum/table/config から JSON として一方向 export する。
+	 * Python 側が武器 ID や進化組を複製せず、ゲーム本体と同じ定義を監査に使える。
+	 */
+	FString GetContentSchema() const;
+
+	/**
+	 * 行動と時間刻みの契約を実際の Logic 定数・設定から JSON として返す。
+	 * 9方向、物理刻み、移動量、pause/level-up timing を監査側へ渡す。
+	 */
+	FString GetActionTimeSchema() const;
+
 	/** 観測次元数 */
 	int32 GetObsDim() const;
 

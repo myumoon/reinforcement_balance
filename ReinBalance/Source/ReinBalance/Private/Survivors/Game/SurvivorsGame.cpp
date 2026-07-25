@@ -109,6 +109,21 @@ FString ASurvivorsGame::GetObsSchemaHash() const
 	return Logic.GetObsSchemaHash();
 }
 
+/**
+ * schema の source of truth を Logic に固定する薄い facade。
+ * Actor/Component に content mirror を持たせず HTTP 層へそのまま渡す。
+ */
+FString ASurvivorsGame::GetContentSchema() const
+{
+	return Logic.GetContentSchema();
+}
+
+/** action/time schema を Logic からそのまま委譲する facade。 */
+FString ASurvivorsGame::GetActionTimeSchema() const
+{
+	return Logic.GetActionTimeSchema();
+}
+
 int32 ASurvivorsGame::GetObsDim() const
 {
 	if (CachedObsDim >= 0) return CachedObsDim;

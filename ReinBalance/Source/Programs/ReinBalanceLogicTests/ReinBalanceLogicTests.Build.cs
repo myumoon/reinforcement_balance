@@ -6,6 +6,7 @@ public class ReinBalanceLogicTests : TestModuleRules
 	{
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
+			"ReinBalance",
 			"ReinBalanceLogic",
 		});
 	}

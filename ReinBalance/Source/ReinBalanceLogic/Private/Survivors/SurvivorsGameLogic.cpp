@@ -24,6 +24,17 @@
 // ---- ローカルヘルパー --------------------------------------------------------
 namespace
 {
+	/**
+	 * action/offer schema と実ロジックが共有する固定テーブル。
+	 * schema 専用の数値を持たず、移動適用と level-up 候補生成が使う値を直接公開する。
+	 */
+	static constexpr int32 MaxLevelUpOfferCount = 3;
+	static const FVector2D ActionDirections[] = {
+		{0.f,1.f}, {UE_INV_SQRT_2,UE_INV_SQRT_2}, {1.f,0.f},
+		{UE_INV_SQRT_2,-UE_INV_SQRT_2}, {0.f,-1.f}, {-UE_INV_SQRT_2,-UE_INV_SQRT_2},
+		{-1.f,0.f}, {-UE_INV_SQRT_2,UE_INV_SQRT_2}, {0.f,0.f}
+	};
+
 	static int32 WSSampleIndex(const TArray<float>& Weights, FRandomStream& RS)
 	{
 		float Total = 0.f; for (float W : Weights) Total += W;
@@ -328,6 +339,76 @@ FString FSurvivorsGameLogic::GetObsSchemaHash() const
 		EnemyDensityDirCount,GemDensityDirCount,
 		EnemyNearestDistanceMax,GemNearestDistanceMax);
 	return FMD5::HashAnsiString(*S);
+}
+
+/**
+ * enum/table/config に基づく監査用 content schema を構築する。
+ * ID・最大レベル・XP曲線・進化/union・offer/slot/chest semantics を単一方向で公開する。
+ */
+FString FSurvivorsGameLogic::GetContentSchema() const
+{
+	using namespace SurvivorsGameConstants;
+	FString Weapons;
+	for (int32 Id = 1; Id <= static_cast<int32>(EWeaponType::Vandalier); ++Id)
+	{
+		if (!Weapons.IsEmpty()) Weapons += TEXT(",");
+		const EWeaponType Type = static_cast<EWeaponType>(Id);
+		Weapons += FString::Printf(TEXT("{\"id\":\"%d\",\"max_level\":%d}"), Id, GetWeaponMaxLevel(Type));
+	}
+	FString Passives;
+	for (int32 Id = 1; Id <= static_cast<int32>(EPassiveItemType::TorronasBox); ++Id)
+	{
+		if (!Passives.IsEmpty()) Passives += TEXT(",");
+		Passives += FString::Printf(TEXT("{\"id\":\"%d\",\"max_level\":%d}"), Id, PassiveMaxLevel[Id]);
+	}
+	FString XP;
+	for (int32 Level = 1; Level <= MaxPlayerLevel; ++Level)
+	{
+		if (!XP.IsEmpty()) XP += TEXT(",");
+		XP += FString::Printf(TEXT("%.0f"), SurvivorsWikiSpec::XPRequiredForLevel(Level));
+	}
+	FString Gems;
+	const TCHAR* const GemIds[] = { TEXT("blue"), TEXT("green"), TEXT("red") };
+	static_assert(UE_ARRAY_COUNT(GemIds) == UE_ARRAY_COUNT(GemXPValues));
+	for (int32 Id = 0; Id < UE_ARRAY_COUNT(GemIds); ++Id)
+	{
+		if (!Gems.IsEmpty()) Gems += TEXT(",");
+		Gems += FString::Printf(TEXT("{\"id\":\"%s\",\"xp\":%.9g}"), GemIds[Id], GemXPValues[Id]);
+	}
+	FString Evolutions;
+	for (const FEvolutionRule& Rule : EvolutionTable)
+	{
+		if (!Evolutions.IsEmpty()) Evolutions += TEXT(",");
+		Evolutions += FString::Printf(
+			TEXT("{\"base_id\":\"%d\",\"evolved_id\":\"%d\",\"passive_id\":\"%d\",\"union_partner_id\":\"%d\"}"),
+			static_cast<int32>(Rule.BaseWeapon), static_cast<int32>(Rule.EvolvedWeapon),
+			static_cast<int32>(Rule.RequiredPassive), static_cast<int32>(Rule.UnionPartner));
+	}
+	return FString::Printf(
+		TEXT("{\"max_level\":%d,\"weapons\":[%s],\"passives\":[%s],\"gems\":[%s],")
+		TEXT("\"xp_curve\":[%s],\"level_cadence\":\"xp_threshold\",\"offer\":{\"count\":%d,\"fallback\":\"none_when_pool_empty\"},")
+		TEXT("\"slots\":{\"weapon\":%d,\"passive\":%d},\"evolutions\":[%s],\"chest\":{\"boss_drop\":true,\"evolution_enabled_by_config\":%s}}"),
+		MaxPlayerLevel, *Weapons, *Passives, *Gems, *XP, MaxLevelUpOfferCount, MaxWeaponSlots, MaxPassiveSlots, *Evolutions,
+		CurrentConfig.bEnableEvolutions ? TEXT("true") : TEXT("false"));
+}
+
+/**
+ * ApplyAction と物理設定に一致する action/time schema を構築する。
+ * simulator の9 action、decision cadence、画面変位換算、level-up中の時間挙動を公開する。
+ */
+FString FSurvivorsGameLogic::GetActionTimeSchema() const
+{
+	FString Actions;
+	for (int32 Id = 0; Id < UE_ARRAY_COUNT(ActionDirections); ++Id)
+	{
+		if (!Actions.IsEmpty()) Actions += TEXT(",");
+		Actions += FString::Printf(
+			TEXT("{\"id\":%d,\"x\":%.7g,\"y\":%.7g}"), Id, ActionDirections[Id].X, ActionDirections[Id].Y);
+	}
+	return FString::Printf(
+		TEXT("{\"physics_dt\":%.9g,\"decision_steps\":1,\"directions\":[%s],\"move_speed\":%.9g,")
+		TEXT("\"screen_displacement_per_step\":%.9g,\"pause_during_level_up\":false,\"level_up_timing\":\"same_physics_step\"}"),
+		PhysicsDt, *Actions, CurrentConfig.MoveSpeed, CurrentConfig.MoveSpeed * PhysicsDt);
 }
 
 int32 FSurvivorsGameLogic::GetObsDim() const
@@ -878,24 +959,24 @@ TArray<FLevelUpChoice> FSurvivorsGameLogic::BuildLevelUpChoices()
 	}
 
 	TArray<FLevelUpChoice> Choices;
-	for(const FLevelUpChoice& C:Evolutions){if(Choices.Num()>=3)break;Choices.Add(C);}
-	if(CurrentConfig.bEnablePassives&&Choices.Num()<3)
+	for(const FLevelUpChoice& C:Evolutions){if(Choices.Num()>=MaxLevelUpOfferCount)break;Choices.Add(C);}
+	if(CurrentConfig.bEnablePassives&&Choices.Num()<MaxLevelUpOfferCount)
 	{ TArray<FLevelUpChoice> AP; AP.Append(PassiveUpgrades); AP.Append(PassiveNew);
 	  if(AP.Num()>0) Choices.Add(AP[RandStream.RandRange(0,AP.Num()-1)]); }
 	TArray<FLevelUpChoice> WPool; WPool.Append(WeaponUpgrades); WPool.Append(NewWeapons);
 	for(int32 j=WPool.Num()-1;j>=0;--j)
 	{ for(const FLevelUpChoice& E:Choices) if(E.WeaponType==WPool[j].WeaponType&&E.WeaponType!=EWeaponType::None){WPool.RemoveAt(j);break;} }
 	const bool bWL=CurrentConfig.WeaponPoolMode.Equals(TEXT("weighted"),ESearchCase::IgnoreCase)&&!CurrentConfig.WeaponWeights.IsEmpty();
-	while(Choices.Num()<3&&WPool.Num()>0)
+	while(Choices.Num()<MaxLevelUpOfferCount&&WPool.Num()>0)
 	{ int32 SI2=0;
 	  if(bWL){float T=0.f;for(const FLevelUpChoice& C:WPool){float W=1.f;if(C.ChoiceType==FLevelUpChoice::EChoiceType::WeaponNew){const float* F=CurrentConfig.WeaponWeights.Find((int32)C.WeaponType);W=F&&*F>0.f?*F:1.f;}T+=W;}
 	    if(T>0.f){float R=RandStream.FRandRange(0.f,T),Cum2=0.f;for(int32 j=0;j<WPool.Num();++j){float W=1.f;if(WPool[j].ChoiceType==FLevelUpChoice::EChoiceType::WeaponNew){const float* F=CurrentConfig.WeaponWeights.Find((int32)WPool[j].WeaponType);W=F&&*F>0.f?*F:1.f;}Cum2+=W;if(R<=Cum2){SI2=j;break;}}}}
 	  else SI2=RandStream.RandRange(0,WPool.Num()-1);
 	  Choices.Add(WPool[SI2]);WPool.RemoveAt(SI2); }
-	if(CurrentConfig.bEnablePassives&&Choices.Num()<3)
+	if(CurrentConfig.bEnablePassives&&Choices.Num()<MaxLevelUpOfferCount)
 	{ TArray<FLevelUpChoice> AP2; AP2.Append(PassiveUpgrades); AP2.Append(PassiveNew);
 	  for(int32 j=AP2.Num()-1;j>=0;--j){for(const FLevelUpChoice& E:Choices) if(E.ChoiceType!=FLevelUpChoice::EChoiceType::WeaponNew&&E.ChoiceType!=FLevelUpChoice::EChoiceType::WeaponUpgrade&&E.ChoiceType!=FLevelUpChoice::EChoiceType::WeaponEvolve&&E.PassiveType==AP2[j].PassiveType){AP2.RemoveAt(j);break;}}
-	  while(Choices.Num()<3&&AP2.Num()>0){int32 I=RandStream.RandRange(0,AP2.Num()-1);Choices.Add(AP2[I]);AP2.RemoveAt(I);} }
+	  while(Choices.Num()<MaxLevelUpOfferCount&&AP2.Num()>0){int32 I=RandStream.RandRange(0,AP2.Num()-1);Choices.Add(AP2[I]);AP2.RemoveAt(I);} }
 	return Choices;
 }
 
