@@ -10,10 +10,11 @@ from typing import Any, Mapping, Sequence
 import math
 
 from survivors.deploy_obs_adapter import (
-    NamedEstimate, build_deploy_observation, build_oracle_diagnostic_observation,
-    normalized_category, visible_track_estimates,
+    NamedEstimate, assert_release_artifact_allowed as assert_adapter_release_artifact_allowed,
+    build_deploy_observation, build_oracle_diagnostic_observation,
+    normalized_category, release_policy_tensor, visible_track_estimates,
 )
-from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
+from reinbalance_survivors_contracts.deploy_obs import DeployObservation, DeployObsSchema
 from reinbalance_survivors_contracts.ui_intent import ensure, is_strict_number
 
 _RAW_KEYS = frozenset({"timestamp_ns", "viewport", "target_camera", "hud", "player_world", "world_entities", "temporal", "inventory", "privileged"})
@@ -155,12 +156,18 @@ class DeployObsWrapper:
         """
         return self.mode == "release"
 
-    def assert_release_artifact_allowed(self) -> None:
+    def assert_release_artifact_allowed(
+        self,
+        observation: DeployObservation | None = None,
+    ) -> None:
         """oracle mode の artifact 出力を fail-closed で拒否する。
 
-        保存処理は実行直前にこの gate を呼び、診断用 truth の混入を防ぎます。
+        wrapper mode と observation 自身の provenance を保存直前に確認し、
+        release wrapper へ渡された oracle 診断値も拒否します。
         """
         ensure(self.release_artifact_allowed, "oracle_diagnostic cannot create release artifacts")
+        if observation is not None:
+            assert_adapter_release_artifact_allowed(observation, self.schema)
 
     def observation(self, raw: Mapping[str, Any]):
         """raw state を投影・可視性判定・named estimates 経由で tensor 化する。
@@ -188,6 +195,9 @@ class DeployObsWrapper:
         else:
             observation = build_deploy_observation(self.schema, estimates, now)
         observation.validate_for(self.schema)
+        if self.mode == "release":
+            self.assert_release_artifact_allowed(observation)
+            return release_policy_tensor(observation, self.schema)
         return observation.as_policy_tensor(self.schema)
 
     def reset(self, **kwargs: Any):

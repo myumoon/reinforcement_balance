@@ -25,6 +25,18 @@ def _wire():
     return deepcopy(yaml.safe_load(CONFIG.read_text(encoding="utf-8")))
 
 
+def _missing_planes(schema):
+    """schema-defined neutral を使った欠損三平面を返す。
+
+    release 観測として妥当な validity 0・age 1 を全 segment に設定します。
+    """
+    values = np.empty(schema.dim, np.float32)
+    for field in schema.fields:
+        offset, size = schema.layout[field.name]
+        values[offset:offset + size] = field.neutral
+    return values, np.zeros(schema.dim, np.float32), np.ones(schema.dim, np.float32)
+
+
 def test_stable_hash_dim_and_ordered_layout():
     """同じ YAML から hash・dim・layout を決定的に再生成する。
 
@@ -78,12 +90,11 @@ def test_observation_planes_are_immutable_and_shape_checked():
     policy tensor が value・validity・age の全てを含み、検証後に変更されないことを示します。
     """
     schema = load_schema(CONFIG)
-    values = np.zeros(schema.dim, np.float32)
-    validity = np.ones(schema.dim, np.float32)
-    age = np.full(schema.dim, .25, np.float32)
+    values, validity, age = _missing_planes(schema)
     obs = DeployObservation(values, validity, age, schema.schema_hash, 1)
     assert obs.as_policy_tensor(schema).shape == (schema.dim * 3,)
-    assert np.all(obs.as_policy_tensor(schema)[schema.dim:2 * schema.dim] == 1)
+    assert np.all(obs.as_policy_tensor(schema)[schema.dim:2 * schema.dim] == 0)
+    assert np.all(obs.as_policy_tensor(schema)[2 * schema.dim:] == 1)
     values[0] = .9
     assert obs.values[0] == 0 and not obs.values.flags.writeable
     with pytest.raises(ValueError):
@@ -125,3 +136,28 @@ def test_policy_tensor_revalidates_schema_after_frozen_bypass():
     object.__setattr__(metadata_forged, "validity", np.full(schema.dim, 2.0))
     with pytest.raises(ValueError):
         metadata_forged.as_policy_tensor(schema)
+
+
+def test_provenance_is_validated_and_release_cannot_claim_privileged_values():
+    """provenance と privileged segment の整合を利用直前に検証する。
+
+    oracle 値を release マーカー付きで組み立てた反例は拒否し、
+    不明な provenance も観測生成時点で受理しません。
+    """
+    schema = load_schema(CONFIG)
+    values, validity, age = _missing_planes(schema)
+    enemy_hp_offset, _ = schema.layout["enemy_hp"]
+    values[enemy_hp_offset] = .9
+    validity[enemy_hp_offset] = 1
+    age[enemy_hp_offset] = 0
+    release_forgery = DeployObservation(
+        values, validity, age, schema.schema_hash, 1, "release",
+    )
+    with pytest.raises(ValueError):
+        release_forgery.as_policy_tensor(schema)
+    oracle = DeployObservation(
+        values, validity, age, schema.schema_hash, 1, "oracle_diagnostic",
+    )
+    assert oracle.as_policy_tensor(schema)[enemy_hp_offset] == pytest.approx(.9)
+    with pytest.raises(ValueError):
+        DeployObservation(values, validity, age, schema.schema_hash, 1, "unknown")

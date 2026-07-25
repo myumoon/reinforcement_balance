@@ -16,6 +16,7 @@ from .canonical_json import canonical_hash
 from .ui_intent import ContractValidationError, ensure, is_strict_number
 
 DEPLOY_OBS_SCHEMA_VERSION = "deploy_obs.v1"
+OBSERVATION_PROVENANCE = frozenset({"release", "oracle_diagnostic"})
 SOURCE_CLASSES = frozenset(
     {"hud_inventory", "screen_world_observed", "temporal_inferred", "constant", "unobservable"}
 )
@@ -186,6 +187,7 @@ class DeployObservation:
     age: np.ndarray
     schema_hash: str
     timestamp_ns: int
+    provenance: str = "release"
 
     def __post_init__(self) -> None:
         """配列・hash・時刻の基本契約を検証して凍結する。
@@ -194,6 +196,7 @@ class DeployObservation:
         """
         ensure(isinstance(self.schema_hash, str) and len(self.schema_hash) == 64, "invalid schema hash")
         ensure(isinstance(self.timestamp_ns, int) and not isinstance(self.timestamp_ns, bool) and self.timestamp_ns >= 0, "invalid timestamp")
+        ensure(type(self.provenance) is str and self.provenance in OBSERVATION_PROVENANCE, "invalid observation provenance")
         arrays = []
         for value in (self.values, self.validity, self.age):
             ensure(isinstance(value, np.ndarray) and value.ndim == 1, "observation planes must be 1d ndarray")
@@ -228,6 +231,11 @@ class DeployObservation:
             ensure(np.all((values >= field.minimum) & (values <= field.maximum)), f"{field.name} value out of range")
             missing = validity == 0
             ensure(np.all(values[missing] == field.neutral) and np.all(age[missing] == 1), f"{field.name} invalid missing representation")
+            if self.provenance == "release" and field.source_class == "unobservable":
+                ensure(
+                    np.all(values == field.neutral) and np.all(validity == 0) and np.all(age == 1),
+                    f"{field.name} privileged value requires oracle provenance",
+                )
 
     def as_policy_tensor(self, schema: DeployObsSchema) -> np.ndarray:
         """schema 再検証後に三平面を連結した float32 tensor を返す。

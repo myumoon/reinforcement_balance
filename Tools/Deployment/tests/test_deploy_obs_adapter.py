@@ -9,9 +9,10 @@ import numpy as np
 import pytest
 
 from survivors.deploy_obs_adapter import (
-    NamedEstimate, build_deploy_observation, build_oracle_diagnostic_observation,
+    NamedEstimate, assert_release_artifact_allowed, build_deploy_observation,
+    build_oracle_diagnostic_observation,
     deploy_obs_producer_hash, load_schema, normalized_category, screen_to_centered,
-    visible_track_estimates,
+    release_policy_tensor, visible_track_estimates,
 )
 
 CONFIG = Path(__file__).parents[1] / "configs" / "deploy_obs_v1.yaml"
@@ -84,10 +85,19 @@ def test_oracle_segments_require_diagnostic_builder():
     schema = load_schema(CONFIG)
     estimates = _estimates({"enemy_hp": (.9,), "cooldown": (.8,)})
     oracle = build_oracle_diagnostic_observation(schema, estimates, 1_000_000_000)
+    release = build_deploy_observation(schema, estimates, 1_000_000_000)
+    assert oracle.provenance == "oracle_diagnostic"
+    assert release.provenance == "release"
     for name, expected in (("enemy_hp", .9), ("cooldown", .8)):
         offset, _ = schema.layout[name]
         assert oracle.values[offset] == pytest.approx(expected)
         assert oracle.validity[offset] == 1
+    assert assert_release_artifact_allowed(release, schema) is release
+    assert np.array_equal(release_policy_tensor(release, schema), release.as_policy_tensor(schema))
+    with pytest.raises(ValueError):
+        assert_release_artifact_allowed(oracle, schema)
+    with pytest.raises(ValueError):
+        release_policy_tensor(oracle, schema)
 
 
 def test_age_and_stale_validity_decay():

@@ -128,6 +128,30 @@ def validate_output(observation: DeployObservation, schema: DeployObsSchema) -> 
     return observation
 
 
+def assert_release_artifact_allowed(
+    observation: DeployObservation,
+    schema: DeployObsSchema,
+) -> DeployObservation:
+    """release artifact 境界で provenance と観測契約を再検証する。
+
+    oracle 診断値は tensor 自体が有限でも本番成果物へ出せないため、
+    保存・シリアライズ直前に内在マーカーを確認して拒否します。
+    """
+    ensure(isinstance(observation, DeployObservation), "observation must be DeployObservation")
+    observation.validate_for(schema)
+    ensure(observation.provenance == "release", "oracle_diagnostic cannot create release artifacts")
+    return observation
+
+
+def release_policy_tensor(observation: DeployObservation, schema: DeployObsSchema) -> np.ndarray:
+    """release 用 policy tensor を guarded observation から生成する。
+
+    adapter を直接使う保存経路でも wrapper と同じ provenance gate を通し、
+    oracle observation の bare な artifact 化を防ぎます。
+    """
+    return assert_release_artifact_allowed(observation, schema).as_policy_tensor(schema)
+
+
 def deploy_obs_producer_hash(schema: DeployObsSchema, release_adapter_hash: str) -> str:
     """schema と release adapter を束ねた producer identity を計算する。
 
@@ -147,7 +171,9 @@ def build_deploy_observation(
     privileged estimate を渡されても unobservable segment は必ず欠損にし、
     公開 release 経路から oracle 診断値を有効化できないようにします。
     """
-    return _build_observation(schema, estimates, timestamp_ns, include_unobservable=False)
+    return _build_observation(
+        schema, estimates, timestamp_ns, include_unobservable=False, provenance="release",
+    )
 
 
 def build_oracle_diagnostic_observation(
@@ -160,7 +186,10 @@ def build_oracle_diagnostic_observation(
     privileged segment を有効にする唯一の公開入口です。呼び出し側は
     oracle 専用 constructor と release artifact gate を必ず併用します。
     """
-    return _build_observation(schema, estimates, timestamp_ns, include_unobservable=True)
+    return _build_observation(
+        schema, estimates, timestamp_ns,
+        include_unobservable=True, provenance="oracle_diagnostic",
+    )
 
 
 def _build_observation(
@@ -169,6 +198,7 @@ def _build_observation(
     timestamp_ns: int,
     *,
     include_unobservable: bool,
+    provenance: str,
 ) -> DeployObservation:
     """mode 固定済みの estimates を schema 順に tensor 化する。
 
@@ -180,13 +210,19 @@ def _build_observation(
     names = {field.name for field in schema.fields}
     ensure(set(estimates) <= names and all(isinstance(x, NamedEstimate) for x in estimates.values()), "unknown or invalid estimate")
     ensure(type(include_unobservable) is bool, "include_unobservable must be bool")
+    ensure(
+        (include_unobservable, provenance) in {
+            (False, "release"), (True, "oracle_diagnostic"),
+        },
+        "observation capability and provenance mismatch",
+    )
     planes = [
         _resolve(field, estimates, timestamp_ns, include_unobservable=include_unobservable)
         for field in schema.fields
     ]
     observation = DeployObservation(
         np.concatenate([x[0] for x in planes]), np.concatenate([x[1] for x in planes]),
-        np.concatenate([x[2] for x in planes]), schema.schema_hash, timestamp_ns,
+        np.concatenate([x[2] for x in planes]), schema.schema_hash, timestamp_ns, provenance,
     )
     return validate_output(observation, schema)
 

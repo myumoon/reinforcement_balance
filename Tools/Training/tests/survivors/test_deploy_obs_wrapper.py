@@ -8,7 +8,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from survivors.deploy_obs_adapter import build_deploy_observation, load_schema
+from survivors.deploy_obs_adapter import (
+    NamedEstimate, build_deploy_observation, build_oracle_diagnostic_observation, load_schema,
+)
 from games.survivors.deploy_obs_wrapper import DeployObsWrapper, fresh_vecnormalize
 
 CONFIG = Path(__file__).parents[3] / "Deployment" / "configs" / "deploy_obs_v1.yaml"
@@ -80,6 +82,13 @@ def test_modes_are_separate_and_oracle_artifact_is_forbidden():
     release.assert_release_artifact_allowed()
     with pytest.raises(ValueError):
         oracle.assert_release_artifact_allowed()
+    oracle_observation = build_oracle_diagnostic_observation(
+        schema, {"enemy_hp": NamedEstimate((.9,), 1_000_000_000)}, 1_000_000_000,
+    )
+    release_observation = build_deploy_observation(schema, {}, 1_000_000_000)
+    release.assert_release_artifact_allowed(release_observation)
+    with pytest.raises(ValueError):
+        release.assert_release_artifact_allowed(oracle_observation)
     assert oracle.run_manifest["deploy_obs_mode"] == "oracle_diagnostic"
     assert not np.array_equal(release.observation(_raw()), oracle.observation(_raw()))
 
