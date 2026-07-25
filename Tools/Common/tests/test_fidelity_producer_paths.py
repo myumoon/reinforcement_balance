@@ -59,6 +59,7 @@ def _empty_producers() -> dict:
         for key in GATING_KEYS
     }
     for key in ("logic_public", "logic_private", "game_facade", "http_service"):
+        producers[key]["transitive_dependency_mode"] = "compiled_module_closure"
         producers[key]["compiled_module_closure"] = _cpp_closure()
     return producers
 
@@ -106,6 +107,29 @@ def test_unknown_or_missing_producer_is_rejected(tmp_path) -> None:
         load_producer_path_manifest(path)
 
 
+@pytest.mark.parametrize("key", ["logic_public", "logic_private", "game_facade", "http_service"])
+@pytest.mark.parametrize("mode", ["none", "generated_schema", "python_import_closure"])
+def test_cpp_dependency_mode_is_fixed_at_load_and_use(tmp_path, key, mode) -> None:
+    """C++ producer の dependency mode を load／利用直前の両方で固定する。
+
+    compiled TU closure を外す既知の全 mode を4つの C++ identity 経路で拒否します。
+    """
+    original = load_producer_path_manifest()
+    producers = _mutable(original.producers)
+    producers[key]["transitive_dependency_mode"] = mode
+    path = tmp_path / f"{key}-{mode}.json"
+    path.write_text(
+        json.dumps({"schema_version": original.schema_version, "producers": producers}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ContractValidationError):
+        load_producer_path_manifest(path)
+
+    forged = replace(original, producers=producers)
+    with pytest.raises(ContractValidationError):
+        resolve_gating_producer_hashes(tmp_path, forged, {})
+
+
 def test_compiled_closure_bytes_are_bound_to_gating_hash(tmp_path) -> None:
     """compiled closure の TU 追加・変更・削除を gating hash へ接続する。
 
@@ -118,7 +142,6 @@ def test_compiled_closure_bytes_are_bound_to_gating_hash(tmp_path) -> None:
     weapon = private / "Weapon.cpp"
     weapon.write_text("one", encoding="utf-8")
     producers = _empty_producers()
-    producers["logic_private"]["transitive_dependency_mode"] = "compiled_module_closure"
     manifest = type(load_producer_path_manifest())("v", producers, "f" * 64)
     first = resolve_gating_producer_hashes(tmp_path, manifest, {})
     weapon.write_text("two", encoding="utf-8")

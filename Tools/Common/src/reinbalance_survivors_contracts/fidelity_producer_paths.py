@@ -19,6 +19,8 @@ from .fidelity_verdict import GATING_KEYS, PRODUCER_ALLOWLIST_VERSION
 from .ui_intent import ContractValidationError, ensure
 
 _ENTRY_KEYS = {"ordered_exact_paths", "recursive_roots", "explicit_excludes", "generated_inputs", "transitive_dependency_mode"}
+_CPP_PRODUCER_KEYS = {"logic_public", "logic_private", "game_facade", "http_service"}
+_DEPENDENCY_MODES = {"none", "generated_schema", "python_import_closure", "compiled_module_closure"}
 
 
 @dataclass(frozen=True)
@@ -52,7 +54,7 @@ def _validate_producers(producers: Any) -> None:
     for key, entry in producers.items():
         ensure(isinstance(entry, Mapping), f"producer {key} must be an object")
         expected = set(_ENTRY_KEYS)
-        if key in {"logic_public", "logic_private", "game_facade", "http_service"}:
+        if key in _CPP_PRODUCER_KEYS:
             expected.add("compiled_module_closure")
         ensure(set(entry) == expected, f"producer {key} keys mismatch")
         for array_key in ("ordered_exact_paths", "recursive_roots", "generated_inputs", "explicit_excludes"):
@@ -67,7 +69,12 @@ def _validate_producers(producers: Any) -> None:
             ensure(isinstance(excluded, Mapping) and set(excluded) == {"path", "reason"}, f"{key}.exclude keys mismatch")
             _repo_path(excluded["path"], f"{key}.exclude.path")
             ensure(isinstance(excluded["reason"], str) and excluded["reason"], f"{key}.exclude reason required")
-        ensure(entry["transitive_dependency_mode"] in {"none", "generated_schema", "python_import_closure", "compiled_module_closure"}, f"{key}.transitive_dependency_mode invalid")
+        ensure(entry["transitive_dependency_mode"] in _DEPENDENCY_MODES, f"{key}.transitive_dependency_mode invalid")
+        if key in _CPP_PRODUCER_KEYS:
+            ensure(
+                entry["transitive_dependency_mode"] == "compiled_module_closure",
+                f"{key}.transitive_dependency_mode must be compiled_module_closure",
+            )
         if "compiled_module_closure" in entry:
             closure = entry["compiled_module_closure"]
             closure_keys = {"module_name", "build_cs", "private_source_roots", "compiled_tu_include_glob", "repo_local_module_dependency_edges", "allowed_non_behavior_excludes"}
