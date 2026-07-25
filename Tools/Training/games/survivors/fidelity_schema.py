@@ -13,7 +13,7 @@ from typing import Any, Mapping
 _LEVEL_CADENCES = frozenset({"xp_threshold"})
 _OFFER_FALLBACKS = frozenset({"none_when_pool_empty"})
 _LEVEL_UP_TIMINGS = frozenset({"same_physics_step"})
-_UNION_PARTNER_SENTINELS = frozenset({"0"})
+_EVOLUTION_OPTIONAL_ID_SENTINELS = frozenset({"0"})
 _EXPECTED_DIRECTIONS = (
     (0.0, 1.0),
     (math.sqrt(0.5), math.sqrt(0.5)),
@@ -47,7 +47,13 @@ def _exact_object(value: Any, keys: set[str], label: str) -> Mapping[str, Any]:
     return value
 
 
-def _finite_number(value: Any, label: str, *, positive: bool = False) -> float:
+def _finite_number(
+    value: Any,
+    label: str,
+    *,
+    positive: bool = False,
+    nonnegative: bool = False,
+) -> float:
     """bool を除く有限数を検証する。
 
     JSON の NaN/Infinity や数値 field への真偽値混入を監査前に拒否します。
@@ -56,6 +62,8 @@ def _finite_number(value: Any, label: str, *, positive: bool = False) -> float:
         raise ValueError(f"{label} must be finite numeric")
     if positive and value <= 0:
         raise ValueError(f"{label} must be positive")
+    if nonnegative and value < 0:
+        raise ValueError(f"{label} must be non-negative")
     return float(value)
 
 
@@ -138,7 +146,7 @@ def _validate_cpp_export(export: Mapping[str, Any]) -> None:
         raise ValueError("xp_curve length must equal content.max_level")
     previous_xp: float | None = None
     for value in xp_curve:
-        xp = _finite_number(value, "xp_curve entry", positive=True)
+        xp = _finite_number(value, "xp_curve entry", nonnegative=True)
         if previous_xp is not None and xp < previous_xp:
             raise ValueError("xp_curve must be non-decreasing")
         previous_xp = xp
@@ -165,11 +173,14 @@ def _validate_cpp_export(export: Mapping[str, Any]) -> None:
         for key in ("base_id", "evolved_id"):
             if item[key] not in content_ids["weapons"]:
                 raise ValueError(f"evolution {key} references unknown weapon")
-        if item["passive_id"] not in content_ids["passives"]:
+        if (
+            item["passive_id"] not in content_ids["passives"]
+            and item["passive_id"] not in _EVOLUTION_OPTIONAL_ID_SENTINELS
+        ):
             raise ValueError("evolution passive_id references unknown passive")
         if (
             item["union_partner_id"] not in content_ids["weapons"]
-            and item["union_partner_id"] not in _UNION_PARTNER_SENTINELS
+            and item["union_partner_id"] not in _EVOLUTION_OPTIONAL_ID_SENTINELS
         ):
             raise ValueError("evolution union_partner_id references unknown weapon")
     chest = _exact_object(content["chest"], {"boss_drop", "evolution_enabled_by_config"}, "chest")

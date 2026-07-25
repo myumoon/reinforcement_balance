@@ -24,11 +24,14 @@ def _export() -> dict:
             ],
             "passives": [{"id": "1", "max_level": 5}],
             "gems": [{"id": "blue", "xp": 2}, {"id": "green", "xp": 9}, {"id": "red", "xp": 10}],
-            "xp_curve": [5, 10],
+            "xp_curve": [0, 10],
             "level_cadence": "xp_threshold",
             "offer": {"count": 3, "fallback": "none_when_pool_empty"},
             "slots": {"weapon": 6, "passive": 6},
-            "evolutions": [{"base_id": "1", "evolved_id": "2", "passive_id": "1", "union_partner_id": "0"}],
+            "evolutions": [
+                {"base_id": "1", "evolved_id": "2", "passive_id": "1", "union_partner_id": "0"},
+                {"base_id": "1", "evolved_id": "2", "passive_id": "0", "union_partner_id": "1"},
+            ],
             "chest": {"boss_drop": True, "evolution_enabled_by_config": True},
         },
         "action_time": {
@@ -80,6 +83,18 @@ def test_annotation_ids_are_namespaced_by_collection() -> None:
     assert result.annotations["passives"]["1"]["target_relevant"] is False
 
 
+def test_cpp_export_accepts_level_one_zero_xp_and_optional_evolution_sentinels() -> None:
+    """実 C++ export の 0 値 sentinel を正常値として受理する。
+
+    level 1 の必要 XP、通常進化の union partner、union 進化の passive が
+    未使用を表す場合でも、監査 schema を生成できることを固定します。
+    """
+    result = annotate_cpp_content_schema(_export(), {})
+    assert result.cpp_schema["content"]["xp_curve"][0] == 0
+    assert result.cpp_schema["content"]["evolutions"][0]["union_partner_id"] == "0"
+    assert result.cpp_schema["content"]["evolutions"][1]["passive_id"] == "0"
+
+
 @pytest.mark.parametrize(
     ("mutate", "match"),
     [
@@ -107,11 +122,20 @@ def test_cpp_export_missing_invalid_and_nonfinite_fields_fail_closed(mutate, mat
     ("mutate", "match"),
     [
         (lambda value: value["action_time"]["directions"][0].update(x=1.1), "direction"),
+        (lambda value: value["content"].update(xp_curve=[0, -1]), "non-negative"),
         (lambda value: value["content"].update(xp_curve=[5, 4]), "non-decreasing"),
         (lambda value: value["content"].update(level_cadence="per_frame"), "level_cadence"),
         (
             lambda value: value["content"]["evolutions"][0].update(evolved_id="missing"),
             "evolved_id",
+        ),
+        (
+            lambda value: value["content"]["evolutions"][0].update(passive_id="missing"),
+            "passive_id",
+        ),
+        (
+            lambda value: value["content"]["evolutions"][0].update(union_partner_id="missing"),
+            "union_partner_id",
         ),
     ],
 )
