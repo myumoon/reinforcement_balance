@@ -1,0 +1,31 @@
+# 知覚方式の実現性判定に使うパイロット条件と合格基準。
+# 収録量、品質・速度のしきい値、比較する方式、利用可能な資源をまとめ、
+# 小規模検証から次工程へ進めるかを同じ基準で判断できるようにします。
+schema_version: perception_feasibility.v1
+# パイロット収録で最低限そろえるセッション、時間、画像、場面の条件。
+pilot:
+  min_sessions: 3
+  max_sessions: 5
+  min_minutes_per_session: 10
+  min_frames: 300
+  required_slices: [early, mid, late, heavy, level_up, chest, death_result]
+  min_sessions_per_slice: 2
+# 知覚精度、推論速度、アノテーション品質・速度の合格しきい値。
+thresholds:
+  ssdlite320_p10_short_side_px: 4.0
+  oracle_recall: 0.85
+  single_pass_p95_ms: 25.0
+  bbox_qa_iou: 0.80
+  class_agreement: 0.95
+  dense_entities_per_hour: 300.0
+# 実験で比較し、欠落や重複がないことを検証する知覚アーキテクチャ群。
+architectures:
+  - ssdlite320
+  - ssdlite640_multiscale
+  - tile_2x2
+  - coarse_density
+# 並列作業数、1フレームの保存量、GPU処理時間に関する資源上限。
+budget:
+  parallel_worker_limit: 4
+  frame_storage_bytes: 8294400
+  gpu_seconds_per_frame: 0.05
