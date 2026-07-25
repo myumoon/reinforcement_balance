@@ -46,6 +46,20 @@ def _exact_mapping(value: Any, keys: frozenset[str], label: str) -> Mapping[str,
     return value
 
 
+def _validated_viewport(viewport: Any) -> tuple[int, int]:
+    """viewport の wire 表現を検証して不変 tuple へ正規化する。
+
+    Python 内の tuple と JSON decode 後の list を等しく受理し、
+    文字列・bool・非整数・非正寸法は全 wrapper 経路で拒否します。
+    """
+    ensure(isinstance(viewport, (tuple, list)) and len(viewport) == 2, "invalid viewport")
+    ensure(
+        all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in viewport),
+        "viewport values must be positive int",
+    )
+    return viewport[0], viewport[1]
+
+
 def _validate_raw(raw: Mapping[str, Any]) -> None:
     """raw world state と全 nested 値を利用前に厳密検証する。
 
@@ -53,12 +67,7 @@ def _validate_raw(raw: Mapping[str, Any]) -> None:
     """
     ensure(isinstance(raw, Mapping) and set(raw) == _RAW_KEYS, "raw observation keys mismatch")
     ensure(isinstance(raw["timestamp_ns"], int) and not isinstance(raw["timestamp_ns"], bool) and raw["timestamp_ns"] >= 0, "invalid timestamp")
-    viewport = raw["viewport"]
-    ensure(isinstance(viewport, tuple) and len(viewport) == 2, "invalid viewport")
-    ensure(
-        all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in viewport),
-        "viewport values must be positive int",
-    )
+    _validated_viewport(raw["viewport"])
     camera = _exact_mapping(raw["target_camera"], _CAMERA_KEYS, "target_camera")
     for key in ("center_x", "center_y"):
         _finite_number(camera[key], f"target_camera.{key}")
@@ -98,7 +107,7 @@ def _project_world(raw: Mapping[str, Any]) -> tuple[tuple[float, float] | None, 
 
     同じ共有経路から player と敵 track の画面座標を作り、事前投影値を要求しません。
     """
-    camera, viewport = raw["target_camera"], raw["viewport"]
+    camera, viewport = raw["target_camera"], _validated_viewport(raw["viewport"])
 
     def project(x: float, y: float) -> tuple[float, float, bool]:
         nx = (x - camera["center_x"]) / camera["half_width"]
@@ -178,7 +187,7 @@ class DeployObsWrapper:
         release 経路では privileged mapping を一切参照しません。
         """
         _validate_raw(raw)
-        now, viewport = raw["timestamp_ns"], raw["viewport"]
+        now, viewport = raw["timestamp_ns"], _validated_viewport(raw["viewport"])
         player_screen, tracks = _project_world(raw)
         estimates = visible_track_estimates(tracks, tuple(viewport), now)
         for name in ("player_hp", "level"):

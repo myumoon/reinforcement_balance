@@ -140,10 +140,18 @@ def test_visible_tracks_only_clipping_occlusion_and_camera_scale():
 ])
 @pytest.mark.parametrize("viewport", [
     ("bad", "bad"),
+    ["bad", "bad"],
     (0, 0),
+    [0, 0],
     (-1, 5),
+    [-1, 5],
     (1.5, 2),
+    [1.5, 2],
     (True, 2),
+    [True, 2],
+    (1,),
+    [1],
+    "10",
 ])
 def test_invalid_viewport_rejected_without_visible_tracks(tracks, viewport):
     """可視 track がなくても viewport を入口で fail-closed 検証する。
@@ -159,12 +167,13 @@ def test_invalid_viewport_rejected_without_visible_tracks(tracks, viewport):
     [{"screen_x": 10., "screen_y": 10., "visible": True, "occluded": True, "clipped": False, "timestamp_ns": 10}],
     [{"screen_x": 10., "screen_y": 10., "visible": True, "occluded": False, "clipped": True, "timestamp_ns": 10}],
 ])
-def test_valid_viewport_without_visible_tracks_returns_zero_count(tracks):
+@pytest.mark.parametrize("viewport", [(100, 100), [100, 100]])
+def test_valid_viewport_without_visible_tracks_returns_zero_count(tracks, viewport):
     """妥当 viewport と可視 track なしの count 契約を維持する。
 
     不正入力の拒否を追加しても、敵が見えない正常場面はゼロ件として扱います。
     """
-    out = visible_track_estimates(tracks, (100, 100), 10)
+    out = visible_track_estimates(tracks, viewport, 10)
     assert out["visible_enemy_count"].value == (0.0,)
     assert "nearest_enemy_offset" not in out
 

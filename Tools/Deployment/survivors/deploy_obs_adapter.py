@@ -227,16 +227,26 @@ def _build_observation(
     return validate_output(observation, schema)
 
 
-def visible_track_estimates(tracks: Sequence[Mapping[str, Any]], viewport: tuple[int, int], timestamp_ns: int) -> dict[str, NamedEstimate]:
-    """可視 track だけから敵 offset と count の named estimates を作る。
+def _validated_viewport(viewport: Any) -> tuple[int, int]:
+    """viewport の wire 表現を検証して不変 tuple へ正規化する。
 
-    off-screen・occluded・clipped track は全体数にも最近傍にも含めず leakage を防ぎます。
+    Python 内の tuple と JSON decode 後の list を同じ入力として扱い、
+    画面寸法ではない文字列や bool、非正の整数を入口で拒否します。
     """
-    ensure(isinstance(viewport, tuple) and len(viewport) == 2, "viewport must be pair tuple")
+    ensure(isinstance(viewport, (tuple, list)) and len(viewport) == 2, "viewport must be pair sequence")
     ensure(
         all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in viewport),
         "viewport values must be positive int",
     )
+    return viewport[0], viewport[1]
+
+
+def visible_track_estimates(tracks: Sequence[Mapping[str, Any]], viewport: tuple[int, int] | list[int], timestamp_ns: int) -> dict[str, NamedEstimate]:
+    """可視 track だけから敵 offset と count の named estimates を作る。
+
+    off-screen・occluded・clipped track は全体数にも最近傍にも含めず leakage を防ぎます。
+    """
+    width, height = _validated_viewport(viewport)
     visible: list[tuple[float, float, int]] = []
     for track in tracks:
         ensure(isinstance(track, Mapping) and set(track) == _TRACK_KEYS, "track keys mismatch")
@@ -244,7 +254,7 @@ def visible_track_estimates(tracks: Sequence[Mapping[str, Any]], viewport: tuple
         ensure(all(is_strict_number(track[k]) and np.isfinite(track[k]) for k in ("screen_x", "screen_y")), "track coordinates must be finite")
         ensure(isinstance(track["timestamp_ns"], int) and not isinstance(track["timestamp_ns"], bool) and 0 <= track["timestamp_ns"] <= timestamp_ns, "invalid track timestamp")
         if track["visible"] and not track["occluded"] and not track["clipped"]:
-            x, y = screen_to_centered(track["screen_x"], track["screen_y"], viewport[0], viewport[1])
+            x, y = screen_to_centered(track["screen_x"], track["screen_y"], width, height)
             visible.append((x, y, track["timestamp_ns"]))
     result = {"visible_enemy_count": NamedEstimate((min(len(visible) / 20.0, 1.0),), timestamp_ns)}
     if visible:

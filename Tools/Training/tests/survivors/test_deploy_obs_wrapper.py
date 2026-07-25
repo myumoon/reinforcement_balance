@@ -71,6 +71,20 @@ def test_release_projection_and_privileged_leakage():
     assert wrapper.run_manifest["deploy_obs_mode"] == "release"
 
 
+@pytest.mark.parametrize("viewport", [(100, 100), [100, 100]])
+def test_wrapper_accepts_tuple_and_json_list_viewport(viewport):
+    """tuple と JSON 由来 list の正常 viewport を等しく受理する。
+
+    wire decode でコンテナ型だけが変わっても、同じ画面寸法なら
+    release projection と policy tensor が一致することを確認します。
+    """
+    schema = load_schema(CONFIG)
+    wrapper = DeployObsWrapper.release(FakeEnv(), schema)
+    raw = _raw()
+    raw["viewport"] = viewport
+    assert np.array_equal(wrapper.observation(raw), wrapper.observation(_raw()))
+
+
 def test_modes_are_separate_and_oracle_artifact_is_forbidden():
     """release と oracle diagnostic の constructor/gate を分離する。
 
@@ -143,8 +157,18 @@ def test_wrapper_rejects_unknown_nested_input():
     "mutation",
     [
         lambda raw: raw.update(viewport=("bad", "bad")),
+        lambda raw: raw.update(viewport=["bad", "bad"]),
+        lambda raw: raw.update(viewport=(0, 0)),
+        lambda raw: raw.update(viewport=[0, 0]),
+        lambda raw: raw.update(viewport=(-1, 5)),
+        lambda raw: raw.update(viewport=[-1, 5]),
         lambda raw: raw.update(viewport=(1.5, 2)),
+        lambda raw: raw.update(viewport=[1.5, 2]),
         lambda raw: raw.update(viewport=(True, 2)),
+        lambda raw: raw.update(viewport=[True, 2]),
+        lambda raw: raw.update(viewport=(1,)),
+        lambda raw: raw.update(viewport=[1]),
+        lambda raw: raw.update(viewport="10"),
         lambda raw: raw["privileged"].update(enemy_hp="bad"),
         lambda raw: raw["world_entities"][0].update(unused=1),
         lambda raw: raw["target_camera"].update(half_width=0),
