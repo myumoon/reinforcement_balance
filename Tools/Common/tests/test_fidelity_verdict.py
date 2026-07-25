@@ -178,3 +178,20 @@ def test_artifact_pair_has_single_atomic_commit_point(tmp_path, monkeypatch) -> 
     committed_verdict, committed_report = read_verdict_pair_atomic(json_path, report_path)
     assert committed_verdict.verdict_stage == "baseline"
     assert committed_report == "new-report"
+
+
+def test_same_content_pairs_with_different_names_are_independent(tmp_path) -> None:
+    """同一内容でも filename が異なる artifact pair を別世代へ確定する。
+
+    generation directory の衝突で二組目が読めなくなる回帰を防ぎます。
+    """
+    verdict = _verdict("baseline")
+    first_json, first_report = tmp_path / "first.json", tmp_path / "first.md"
+    second_json, second_report = tmp_path / "second.json", tmp_path / "second.md"
+    write_verdict_pair_atomic(verdict, first_json, first_report, "same-report")
+    write_verdict_pair_atomic(verdict, second_json, second_report, "same-report")
+    first_marker = __import__("json").loads((tmp_path / ".first.json.first.md.commit").read_text(encoding="utf-8"))
+    second_marker = __import__("json").loads((tmp_path / ".second.json.second.md.commit").read_text(encoding="utf-8"))
+    assert first_marker["generation"] != second_marker["generation"]
+    assert read_verdict_pair_atomic(first_json, first_report)[1] == "same-report"
+    assert read_verdict_pair_atomic(second_json, second_report)[1] == "same-report"

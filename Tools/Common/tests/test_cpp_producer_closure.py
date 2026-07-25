@@ -50,3 +50,29 @@ def test_action_graph_mismatch_and_behavior_exclude_are_rejected(tmp_path) -> No
     spec["allowed_non_behavior_excludes"] = [{"path": "Module/Private/Survivors/Weapons/Weapon.cpp", "reason": "bad"}]
     with pytest.raises(ContractValidationError):
         resolve_cpp_producer_closure(tmp_path, spec)
+
+
+def test_untracked_repo_local_build_dependency_is_rejected(tmp_path) -> None:
+    """Build.cs にだけ追加された repo-local module dependency を拒否する。
+
+    manifest edge に無い helper module の TU が gating identity から漏れるのを防ぎます。
+    """
+    spec = _fixture(tmp_path)
+    helper_private = tmp_path / "Helper/Private"
+    helper_private.mkdir(parents=True)
+    (tmp_path / "Helper/Helper.Build.cs").write_text("using UnrealBuildTool;", encoding="utf-8")
+    (helper_private / "Behavior.cpp").write_text("behavior", encoding="utf-8")
+    (tmp_path / "Module/Module.Build.cs").write_text(
+        'PublicDependencyModuleNames.AddRange(new string[] { "Core", "Helper" });',
+        encoding="utf-8",
+    )
+    with pytest.raises(ContractValidationError, match="missing=.*Helper"):
+        resolve_cpp_producer_closure(tmp_path, spec)
+
+    spec["repo_local_module_dependency_edges"] = [{
+        "module_name": "Helper",
+        "build_cs": "Helper/Helper.Build.cs",
+        "private_source_roots": ["Helper/Private"],
+    }]
+    closure = resolve_cpp_producer_closure(tmp_path, spec)
+    assert any(source.path == "Helper/Private/Behavior.cpp" for source in closure.sources)

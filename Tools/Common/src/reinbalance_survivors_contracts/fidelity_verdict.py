@@ -352,7 +352,12 @@ def write_verdict_pair_atomic(verdict: FidelityVerdict, json_path: Path, report_
     staging = Path(tempfile.mkdtemp(prefix=".fidelity-pair-", dir=json_path.parent))
     bundle_root = json_path.parent / ".fidelity-pairs"
     bundle_root.mkdir(exist_ok=True)
-    generation_id = canonical_hash({"verdict_identity": checked.identity_hash, "report_markdown": report_markdown})
+    generation_id = canonical_hash({
+        "verdict_identity": checked.identity_hash,
+        "report_markdown": report_markdown,
+        "json_name": json_path.name,
+        "report_name": report_path.name,
+    })
     generation = bundle_root / generation_id
     marker = _pair_commit_path(json_path, report_path)
     marker_temp: Path | None = None

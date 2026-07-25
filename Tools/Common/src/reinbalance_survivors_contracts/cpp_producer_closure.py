@@ -7,6 +7,7 @@ Build.cs、Private 配下の translation unit、依存 module の実装を exact
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
@@ -76,6 +77,41 @@ def _matches_compiled_glob(path: str, pattern: str) -> bool:
     return any(fnmatch.fnmatch(path, candidate) for candidate in candidates)
 
 
+def _declared_module_dependencies(build_cs: Path) -> set[str]:
+    """Build.cs の Public/Private dependency 宣言から module 名を抽出する。
+
+    AddRange と Add の文字列 literal を読み、実宣言された repo-local edge の照合に使います。
+    """
+    try:
+        source = build_cs.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ContractValidationError(f"cannot read Build.cs: {build_cs}") from exc
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    source = re.sub(r"//[^\r\n]*", "", source)
+    declarations: set[str] = set()
+    pattern = re.compile(
+        r"(?:Public|Private)DependencyModuleNames\s*\.\s*(?:AddRange|Add)\s*\((.*?)\)\s*;",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(source):
+        declarations.update(re.findall(r'"([^"\\]+)"', match.group(1)))
+    return declarations
+
+
+def _repo_local_build_modules(repo_root: Path) -> dict[str, str]:
+    """repository 内の .Build.cs を module 名から exact path へ索引化する。
+
+    同名 module が複数あれば曖昧な dependency identity になるため拒否します。
+    """
+    modules: dict[str, str] = {}
+    for path in repo_root.rglob("*.Build.cs"):
+        relative = path.relative_to(repo_root).as_posix()
+        module_name = path.name.removesuffix(".Build.cs")
+        ensure(module_name not in modules, f"duplicate repo-local module: {module_name}")
+        modules[module_name] = relative
+    return modules
+
+
 def resolve_cpp_producer_closure(
     repo_root: Path,
     spec: Mapping[str, Any],
@@ -90,23 +126,40 @@ def resolve_cpp_producer_closure(
     ensure(isinstance(spec, Mapping) and set(spec) == required, "compiled_module_closure keys mismatch")
     ensure(isinstance(spec["module_name"], str) and spec["module_name"], "module_name must be non-empty")
     roots_value = spec["private_source_roots"]
-    roots = list(roots_value) if isinstance(roots_value, list) else roots_value
+    roots = list(roots_value) if isinstance(roots_value, (list, tuple)) else roots_value
     ensure(isinstance(roots, list) and roots and all(isinstance(x, str) for x in roots), "private_source_roots must be strings")
     glob_pattern = spec["compiled_tu_include_glob"]
     ensure(isinstance(glob_pattern, str) and glob_pattern.endswith(".cpp"), "compiled_tu_include_glob must select .cpp")
     excludes = spec["allowed_non_behavior_excludes"]
-    ensure(isinstance(excludes, list), "allowed_non_behavior_excludes must be an array")
+    ensure(isinstance(excludes, (list, tuple)), "allowed_non_behavior_excludes must be an array")
     for entry in excludes:
         ensure(isinstance(entry, Mapping) and set(entry) == {"path", "reason"}, "exclude entry keys mismatch")
         ensure(not str(entry["path"]).endswith(".cpp"), "behavior .cpp cannot be excluded")
         ensure(isinstance(entry["reason"], str) and entry["reason"], "exclude reason required")
     build_files = [spec["build_cs"]]
     edges = spec["repo_local_module_dependency_edges"]
-    ensure(isinstance(edges, list), "repo_local_module_dependency_edges must be an array")
+    ensure(isinstance(edges, (list, tuple)), "repo_local_module_dependency_edges must be an array")
+    declared_edge_names: set[str] = set()
     for edge in edges:
         ensure(isinstance(edge, Mapping) and set(edge) == {"module_name", "build_cs", "private_source_roots"}, "module dependency edge keys mismatch")
+        ensure(isinstance(edge["module_name"], str) and edge["module_name"], "dependency module_name required")
+        ensure(edge["module_name"] not in declared_edge_names, "duplicate module dependency edge")
+        declared_edge_names.add(edge["module_name"])
         build_files.append(edge["build_cs"])
         roots.extend(x for x in edge["private_source_roots"] if x not in roots)
+    repo_modules = _repo_local_build_modules(repo_root)
+    discovered_local_dependencies: set[str] = set()
+    for build_file in build_files:
+        for dependency in _declared_module_dependencies(repo_root / build_file):
+            if dependency in repo_modules and dependency != spec["module_name"]:
+                discovered_local_dependencies.add(dependency)
+    ensure(
+        discovered_local_dependencies == declared_edge_names,
+        f"repo-local module dependency edges mismatch: missing={sorted(discovered_local_dependencies-declared_edge_names)}, "
+        f"undeclared={sorted(declared_edge_names-discovered_local_dependencies)}",
+    )
+    for edge in edges:
+        ensure(repo_modules.get(edge["module_name"]) == edge["build_cs"], f"dependency Build.cs mismatch: {edge['module_name']}")
     resolved: list[ResolvedCppSource] = []
     for root in roots:
         root_path = repo_root / root
