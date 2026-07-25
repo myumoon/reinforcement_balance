@@ -213,9 +213,15 @@ class DeployObservation:
 
         保存後の破損や別 schema との取り違えを policy 出力前に止めます。
         """
+        ensure(isinstance(schema, DeployObsSchema), "schema must be DeployObsSchema")
         ensure(self.schema_hash == schema.schema_hash, "schema hash mismatch")
         ensure(self.values.shape == self.validity.shape == self.age.shape == (schema.dim,), "plane shape mismatch")
-        ensure(np.all(np.isfinite(self.values)), "values must be finite")
+        ensure(
+            np.all(np.isfinite(self.values)) and np.all(np.isfinite(self.validity)) and np.all(np.isfinite(self.age)),
+            "observation planes must be finite",
+        )
+        ensure(np.all((self.validity >= 0) & (self.validity <= 1)), "validity out of range")
+        ensure(np.all((self.age >= 0) & (self.age <= 1)), "age out of range")
         for field in schema.fields:
             offset, size = schema.layout[field.name]
             values, validity, age = self.values[offset:offset + size], self.validity[offset:offset + size], self.age[offset:offset + size]
@@ -223,12 +229,12 @@ class DeployObservation:
             missing = validity == 0
             ensure(np.all(values[missing] == field.neutral) and np.all(age[missing] == 1), f"{field.name} invalid missing representation")
 
-    def as_policy_tensor(self) -> np.ndarray:
-        """value・validity・age を順番に連結した float32 tensor を返す。
+    def as_policy_tensor(self, schema: DeployObsSchema) -> np.ndarray:
+        """schema 再検証後に三平面を連結した float32 tensor を返す。
 
-        policy が観測値だけでなく欠損と鮮度も判断できる入力になります。
+        policy 利用直前に hash・次元・範囲・欠損表現を全て再確認し、
+        検証後に不正に差し替えられた配列も出力しません。
         """
-        ensure(self.values.shape == self.validity.shape == self.age.shape, "plane shape mismatch")
-        ensure(np.all(np.isfinite(self.values)) and np.all(np.isfinite(self.validity)) and np.all(np.isfinite(self.age)), "observation planes must be finite")
-        ensure(np.all((self.validity >= 0) & (self.validity <= 1)) and np.all((self.age >= 0) & (self.age <= 1)), "metadata plane out of range")
+        ensure(isinstance(schema, DeployObsSchema), "schema must be DeployObsSchema")
+        self.validate_for(schema)
         return np.concatenate([self.values, self.validity, self.age]).astype(np.float32)

@@ -82,8 +82,8 @@ def test_observation_planes_are_immutable_and_shape_checked():
     validity = np.ones(schema.dim, np.float32)
     age = np.full(schema.dim, .25, np.float32)
     obs = DeployObservation(values, validity, age, schema.schema_hash, 1)
-    assert obs.as_policy_tensor().shape == (schema.dim * 3,)
-    assert np.all(obs.as_policy_tensor()[schema.dim:2 * schema.dim] == 1)
+    assert obs.as_policy_tensor(schema).shape == (schema.dim * 3,)
+    assert np.all(obs.as_policy_tensor(schema)[schema.dim:2 * schema.dim] == 1)
     values[0] = .9
     assert obs.values[0] == 0 and not obs.values.flags.writeable
     with pytest.raises(ValueError):
@@ -101,3 +101,27 @@ def test_nonfinite_and_missing_representation_rejected_at_use():
     obs = DeployObservation(np.zeros(schema.dim), np.zeros(schema.dim), np.zeros(schema.dim), schema.schema_hash, 1)
     with pytest.raises(ValueError):
         obs.validate_for(schema)
+
+
+def test_policy_tensor_revalidates_schema_after_frozen_bypass():
+    """tensor 化直前に schema 契約を再検証する。
+
+    frozen dataclass を低水準APIで迂回して有限な範囲外値へ差し替えても出力を拒否します。
+    """
+    schema = load_schema(CONFIG)
+    obs = DeployObservation(
+        np.zeros(schema.dim), np.ones(schema.dim), np.zeros(schema.dim),
+        schema.schema_hash, 1,
+    )
+    forged = np.array(obs.values, copy=True)
+    forged[0] = 99
+    object.__setattr__(obs, "values", forged)
+    with pytest.raises(ValueError):
+        obs.as_policy_tensor(schema)
+    metadata_forged = DeployObservation(
+        np.zeros(schema.dim), np.ones(schema.dim), np.zeros(schema.dim),
+        schema.schema_hash, 1,
+    )
+    object.__setattr__(metadata_forged, "validity", np.full(schema.dim, 2.0))
+    with pytest.raises(ValueError):
+        metadata_forged.as_policy_tensor(schema)

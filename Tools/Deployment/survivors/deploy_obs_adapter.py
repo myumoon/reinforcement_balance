@@ -87,13 +87,19 @@ def screen_to_centered(x: float, y: float, width: float, height: float) -> tuple
     return (2.0 * x / width - 1.0, 2.0 * y / height - 1.0)
 
 
-def _resolve(field: DeployObsField, estimates: Mapping[str, NamedEstimate], now_ns: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _resolve(
+    field: DeployObsField,
+    estimates: Mapping[str, NamedEstimate],
+    now_ns: int,
+    *,
+    oracle_diagnostic: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """一つの segment を value・validity・age へ解決する。
 
     source class が違っても欠損表現と stale decay はこの共通経路を必ず通ります。
     """
     neutral = np.full(field.size, field.neutral, dtype=np.float32)
-    if field.source_class == "unobservable":
+    if field.source_class == "unobservable" and not oracle_diagnostic:
         return neutral, np.zeros(field.size, np.float32), np.ones(field.size, np.float32)
     if field.source_class == "constant":
         return np.ones(field.size, np.float32), np.ones(field.size, np.float32), np.zeros(field.size, np.float32)
@@ -131,7 +137,13 @@ def deploy_obs_producer_hash(schema: DeployObsSchema, release_adapter_hash: str)
     return canonical_hash({"schema_hash": schema.schema_hash, "release_adapter_hash": release_adapter_hash})
 
 
-def build_deploy_observation(schema: DeployObsSchema, estimates: Mapping[str, NamedEstimate], timestamp_ns: int) -> DeployObservation:
+def build_deploy_observation(
+    schema: DeployObsSchema,
+    estimates: Mapping[str, NamedEstimate],
+    timestamp_ns: int,
+    *,
+    oracle_diagnostic: bool = False,
+) -> DeployObservation:
     """named estimates から DeployObservation を構築する。
 
     未知名を拒否し、全 segment を schema 順に resolver へ渡して layout のずれを防ぎます。
@@ -140,7 +152,11 @@ def build_deploy_observation(schema: DeployObsSchema, estimates: Mapping[str, Na
     ensure(isinstance(timestamp_ns, int) and not isinstance(timestamp_ns, bool) and timestamp_ns >= 0, "invalid timestamp")
     names = {field.name for field in schema.fields}
     ensure(set(estimates) <= names and all(isinstance(x, NamedEstimate) for x in estimates.values()), "unknown or invalid estimate")
-    planes = [_resolve(field, estimates, timestamp_ns) for field in schema.fields]
+    ensure(type(oracle_diagnostic) is bool, "oracle_diagnostic must be bool")
+    planes = [
+        _resolve(field, estimates, timestamp_ns, oracle_diagnostic=oracle_diagnostic)
+        for field in schema.fields
+    ]
     observation = DeployObservation(
         np.concatenate([x[0] for x in planes]), np.concatenate([x[1] for x in planes]),
         np.concatenate([x[2] for x in planes]), schema.schema_hash, timestamp_ns,

@@ -38,8 +38,8 @@ def test_synthetic_early_mid_late_smoke(stage):
     schema = load_schema(CONFIG)
     obs = build_deploy_observation(schema, _estimates(FIXTURES[stage]), 1_000_000_000)
     assert obs.schema_hash == schema.schema_hash
-    assert obs.as_policy_tensor().shape == (schema.dim * 3,)
-    assert np.all(np.isfinite(obs.as_policy_tensor()))
+    assert obs.as_policy_tensor(schema).shape == (schema.dim * 3,)
+    assert np.all(np.isfinite(obs.as_policy_tensor(schema)))
 
 
 def test_missing_and_unobservable_are_neutral_invalid_old():
@@ -116,3 +116,41 @@ def test_schema_change_invalidates_producer_identity():
     baseline = deploy_obs_producer_hash(schema, adapter_hash)
     assert deploy_obs_producer_hash(changed, adapter_hash) != baseline
     assert deploy_obs_producer_hash(schema, "b" * 64) != baseline
+
+
+def test_deploy_identity_invalidates_existing_baseline_verdict():
+    """既存13-key fidelity APIで DeployObs producer 導入時の失効を検証する。
+
+    baseline の absent identity を現在の schema/adapter identityへ更新すると、
+    00-05 の利用直前検証が不一致として必ず拒否します。
+    """
+    from reinbalance_survivors_contracts.fidelity_verdict import (
+        BlockingReason, FidelityVerdict, GATING_KEYS, verify_current_fidelity,
+    )
+
+    baseline_hashes = {key: "a" * 64 for key in GATING_KEYS}
+    baseline_hashes["deploy_obs_schema"] = baseline_hashes["deploy_release_adapter"] = "absent"
+    verdict = FidelityVerdict(
+        "baseline",
+        {
+            "target_profile_hash": "1" * 64,
+            "target_build_attestation_hash": "2" * 64,
+            "report_scope": "exact_target",
+            "producer_allowlist_version": "fidelity_producer_paths.v1",
+            "producer_manifest_hash": "3" * 64,
+            "resolved_producers": {key: [] for key in GATING_KEYS},
+        },
+        (),
+        tuple(BlockingReason(name, "baseline gate") for name in ("action", "offer", "terminal")),
+        {
+            "git_commit": "baseline", "workspace_dirty_summary": "",
+            "audit_tool_version": "1", "dependency_versions": {},
+            "operator": "test", "timestamp": "2026-07-25T00:00:00Z",
+        },
+        baseline_hashes,
+    )
+    current = dict(baseline_hashes)
+    producer = deploy_obs_producer_hash(load_schema(CONFIG), "b" * 64)
+    current["deploy_obs_schema"] = current["deploy_release_adapter"] = producer
+    with pytest.raises(ValueError):
+        verify_current_fidelity(verdict, current, "baseline")

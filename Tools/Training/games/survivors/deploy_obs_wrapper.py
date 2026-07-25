@@ -6,19 +6,111 @@ raw 配列の slice を避け、release と oracle diagnostic を別 constructor
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
+import math
 
 from survivors.deploy_obs_adapter import (
     NamedEstimate, build_deploy_observation, normalized_category, visible_track_estimates,
 )
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
-from reinbalance_survivors_contracts.ui_intent import ensure
+from reinbalance_survivors_contracts.ui_intent import ensure, is_strict_number
 
-_RAW_KEYS = frozenset({"timestamp_ns", "viewport", "hud", "player_screen", "tracks", "temporal", "inventory", "privileged"})
+_RAW_KEYS = frozenset({"timestamp_ns", "viewport", "target_camera", "hud", "player_world", "world_entities", "temporal", "inventory", "privileged"})
 _HUD_KEYS = frozenset({"player_hp", "level"})
 _TEMPORAL_KEYS = frozenset({"movement_direction", "timestamp_ns"})
 _INVENTORY_KEYS = frozenset({"weapon_category"})
 _PRIVILEGED_KEYS = frozenset({"player_pos", "enemy_hp", "cooldown", "all_entity_count", "density"})
+_CAMERA_KEYS = frozenset({"center_x", "center_y", "half_width", "half_height"})
+_WORLD_POINT_KEYS = frozenset({"x", "y"})
+_ENTITY_KEYS = frozenset({"world_x", "world_y", "occluded", "timestamp_ns"})
+
+
+def _finite_number(value: Any, label: str) -> float:
+    """有限な実数を暗黙変換なしで検証する。
+
+    bool・文字列・NaN・Inf を nested 入力の未使用箇所でも入口で拒否します。
+    """
+    ensure(is_strict_number(value) and math.isfinite(float(value)), f"{label} must be finite number")
+    return float(value)
+
+
+def _exact_mapping(value: Any, keys: frozenset[str], label: str) -> Mapping[str, Any]:
+    """nested mapping の未知キーと欠落キーを対称に拒否する。
+
+    parser typo や将来項目を黙認せず、全 raw 型を同じ fail-closed 規則で扱います。
+    """
+    ensure(isinstance(value, Mapping) and set(value) == keys, f"{label} keys mismatch")
+    return value
+
+
+def _validate_raw(raw: Mapping[str, Any]) -> None:
+    """raw world state と全 nested 値を利用前に厳密検証する。
+
+    release で参照しない privileged 値も含め、型・有限性・範囲を入口で確定します。
+    """
+    ensure(isinstance(raw, Mapping) and set(raw) == _RAW_KEYS, "raw observation keys mismatch")
+    ensure(isinstance(raw["timestamp_ns"], int) and not isinstance(raw["timestamp_ns"], bool) and raw["timestamp_ns"] >= 0, "invalid timestamp")
+    viewport = raw["viewport"]
+    ensure(isinstance(viewport, (list, tuple)) and len(viewport) == 2, "invalid viewport")
+    ensure(all(_finite_number(x, "viewport") > 0 for x in viewport), "viewport must be positive")
+    camera = _exact_mapping(raw["target_camera"], _CAMERA_KEYS, "target_camera")
+    for key in ("center_x", "center_y"):
+        _finite_number(camera[key], f"target_camera.{key}")
+    for key in ("half_width", "half_height"):
+        ensure(_finite_number(camera[key], f"target_camera.{key}") > 0, "camera extents must be positive")
+    hud = _exact_mapping(raw["hud"], _HUD_KEYS, "hud")
+    ensure(all(0 <= _finite_number(hud[key], f"hud.{key}") <= 1 for key in _HUD_KEYS), "hud value out of range")
+    player = _exact_mapping(raw["player_world"], _WORLD_POINT_KEYS, "player_world")
+    for key in _WORLD_POINT_KEYS:
+        _finite_number(player[key], f"player_world.{key}")
+    entities = raw["world_entities"]
+    ensure(isinstance(entities, Sequence) and not isinstance(entities, (str, bytes)), "world_entities must be sequence")
+    for entity in entities:
+        row = _exact_mapping(entity, _ENTITY_KEYS, "world_entity")
+        _finite_number(row["world_x"], "world_entity.world_x")
+        _finite_number(row["world_y"], "world_entity.world_y")
+        ensure(type(row["occluded"]) is bool, "world_entity.occluded must be bool")
+        ensure(isinstance(row["timestamp_ns"], int) and not isinstance(row["timestamp_ns"], bool) and 0 <= row["timestamp_ns"] <= raw["timestamp_ns"], "invalid world_entity timestamp")
+    temporal = _exact_mapping(raw["temporal"], _TEMPORAL_KEYS, "temporal")
+    direction = temporal["movement_direction"]
+    ensure(isinstance(direction, (list, tuple)) and len(direction) == 2, "movement_direction must be pair")
+    ensure(all(-1 <= _finite_number(x, "movement_direction") <= 1 for x in direction), "movement_direction out of range")
+    ensure(isinstance(temporal["timestamp_ns"], int) and not isinstance(temporal["timestamp_ns"], bool) and 0 <= temporal["timestamp_ns"] <= raw["timestamp_ns"], "invalid temporal timestamp")
+    inventory = _exact_mapping(raw["inventory"], _INVENTORY_KEYS, "inventory")
+    ensure(isinstance(inventory["weapon_category"], str), "weapon_category must be str")
+    privileged = _exact_mapping(raw["privileged"], _PRIVILEGED_KEYS, "privileged")
+    ensure(isinstance(privileged["player_pos"], (list, tuple)) and len(privileged["player_pos"]) == 2, "privileged.player_pos must be pair")
+    for value in privileged["player_pos"]:
+        _finite_number(value, "privileged.player_pos")
+    for key in ("enemy_hp", "cooldown", "density"):
+        ensure(0 <= _finite_number(privileged[key], f"privileged.{key}") <= 1, f"privileged.{key} out of range")
+    ensure(isinstance(privileged["all_entity_count"], int) and not isinstance(privileged["all_entity_count"], bool) and privileged["all_entity_count"] >= 0, "invalid all_entity_count")
+
+
+def _project_world(raw: Mapping[str, Any]) -> tuple[tuple[float, float] | None, list[dict[str, Any]]]:
+    """target camera で world 座標を projection・visibility・clipping 判定する。
+
+    同じ共有経路から player と敵 track の画面座標を作り、事前投影値を要求しません。
+    """
+    camera, viewport = raw["target_camera"], raw["viewport"]
+
+    def project(x: float, y: float) -> tuple[float, float, bool]:
+        nx = (x - camera["center_x"]) / camera["half_width"]
+        ny = (y - camera["center_y"]) / camera["half_height"]
+        inside = -1 <= nx <= 1 and -1 <= ny <= 1
+        return (nx + 1) * viewport[0] / 2, (ny + 1) * viewport[1] / 2, not inside
+
+    px, py, player_clipped = project(raw["player_world"]["x"], raw["player_world"]["y"])
+    player_screen = None if player_clipped else (px, py)
+    tracks = []
+    for entity in raw["world_entities"]:
+        x, y, clipped = project(entity["world_x"], entity["world_y"])
+        tracks.append({
+            "screen_x": x, "screen_y": y, "visible": not clipped and not entity["occluded"],
+            "occluded": entity["occluded"], "clipped": clipped,
+            "timestamp_ns": entity["timestamp_ns"],
+        })
+    return player_screen, tracks
 
 
 class DeployObsWrapper:
@@ -72,31 +164,27 @@ class DeployObsWrapper:
 
         release 経路では privileged mapping を一切参照しません。
         """
-        ensure(isinstance(raw, Mapping) and set(raw) == _RAW_KEYS, "raw observation keys mismatch")
+        _validate_raw(raw)
         now, viewport = raw["timestamp_ns"], raw["viewport"]
-        ensure(isinstance(viewport, (list, tuple)) and len(viewport) == 2, "invalid viewport")
-        ensure(isinstance(raw["hud"], Mapping) and set(raw["hud"]) <= _HUD_KEYS, "hud keys mismatch")
-        ensure(isinstance(raw["temporal"], Mapping) and set(raw["temporal"]) <= _TEMPORAL_KEYS, "temporal keys mismatch")
-        ensure(isinstance(raw["inventory"], Mapping) and set(raw["inventory"]) <= _INVENTORY_KEYS, "inventory keys mismatch")
-        ensure(isinstance(raw["privileged"], Mapping) and set(raw["privileged"]) <= _PRIVILEGED_KEYS, "privileged keys mismatch")
-        estimates = visible_track_estimates(raw["tracks"], tuple(viewport), now)
+        player_screen, tracks = _project_world(raw)
+        estimates = visible_track_estimates(tracks, tuple(viewport), now)
         for name in ("player_hp", "level"):
             if name in raw["hud"]:
                 estimates[name] = NamedEstimate((raw["hud"][name],), now)
-        if raw["player_screen"] is not None:
+        if player_screen is not None:
             from survivors.deploy_obs_adapter import screen_to_centered
-            estimates["player_screen_pos"] = NamedEstimate(screen_to_centered(*raw["player_screen"], *viewport), now)
-        if "movement_direction" in raw["temporal"]:
-            ensure(set(raw["temporal"]) == _TEMPORAL_KEYS, "temporal estimate keys mismatch")
-            estimates["movement_direction"] = NamedEstimate(tuple(raw["temporal"]["movement_direction"]), raw["temporal"]["timestamp_ns"])
-        estimates["weapon_category"] = NamedEstimate((normalized_category(raw["inventory"].get("weapon_category", "unknown")),), now)
+            estimates["player_screen_pos"] = NamedEstimate(screen_to_centered(*player_screen, *viewport), now)
+        estimates["movement_direction"] = NamedEstimate(tuple(raw["temporal"]["movement_direction"]), raw["temporal"]["timestamp_ns"])
+        estimates["weapon_category"] = NamedEstimate((normalized_category(raw["inventory"]["weapon_category"]),), now)
         if self.mode == "oracle_diagnostic":
             for name in ("enemy_hp", "cooldown"):
                 if name in raw["privileged"]:
                     estimates[name] = NamedEstimate((raw["privileged"][name],), now)
-        observation = build_deploy_observation(self.schema, estimates, now)
+        observation = build_deploy_observation(
+            self.schema, estimates, now, oracle_diagnostic=self.mode == "oracle_diagnostic",
+        )
         observation.validate_for(self.schema)
-        return observation.as_policy_tensor()
+        return observation.as_policy_tensor(self.schema)
 
     def reset(self, **kwargs: Any):
         """下位環境を reset し deploy tensor と info を返す。
