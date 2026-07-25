@@ -330,6 +330,72 @@ FString FSurvivorsGameLogic::GetObsSchemaHash() const
 	return FMD5::HashAnsiString(*S);
 }
 
+/**
+ * enum/table/config に基づく監査用 content schema を構築する。
+ * ID・最大レベル・XP曲線・進化/union・offer/slot/chest semantics を単一方向で公開する。
+ */
+FString FSurvivorsGameLogic::GetContentSchema() const
+{
+	using namespace SurvivorsGameConstants;
+	FString Weapons;
+	for (int32 Id = 1; Id <= static_cast<int32>(EWeaponType::Vandalier); ++Id)
+	{
+		if (!Weapons.IsEmpty()) Weapons += TEXT(",");
+		const EWeaponType Type = static_cast<EWeaponType>(Id);
+		Weapons += FString::Printf(TEXT("{\"id\":\"%d\",\"max_level\":%d}"), Id, GetWeaponMaxLevel(Type));
+	}
+	FString Passives;
+	for (int32 Id = 1; Id <= static_cast<int32>(EPassiveItemType::TorronasBox); ++Id)
+	{
+		if (!Passives.IsEmpty()) Passives += TEXT(",");
+		Passives += FString::Printf(TEXT("{\"id\":\"%d\",\"max_level\":%d}"), Id, PassiveMaxLevel[Id]);
+	}
+	FString XP;
+	for (int32 Level = 1; Level <= MaxPlayerLevel; ++Level)
+	{
+		if (!XP.IsEmpty()) XP += TEXT(",");
+		XP += FString::Printf(TEXT("%.0f"), SurvivorsWikiSpec::XPRequiredForLevel(Level));
+	}
+	FString Evolutions;
+	for (const FEvolutionRule& Rule : EvolutionTable)
+	{
+		if (!Evolutions.IsEmpty()) Evolutions += TEXT(",");
+		Evolutions += FString::Printf(
+			TEXT("{\"base_id\":\"%d\",\"evolved_id\":\"%d\",\"passive_id\":\"%d\",\"union_partner_id\":\"%d\"}"),
+			static_cast<int32>(Rule.BaseWeapon), static_cast<int32>(Rule.EvolvedWeapon),
+			static_cast<int32>(Rule.RequiredPassive), static_cast<int32>(Rule.UnionPartner));
+	}
+	return FString::Printf(
+		TEXT("{\"weapons\":[%s],\"passives\":[%s],\"gems\":[{\"id\":\"blue\",\"xp\":1},{\"id\":\"green\",\"xp\":5},{\"id\":\"red\",\"xp\":\"accumulated\"}],")
+		TEXT("\"xp_curve\":[%s],\"level_cadence\":\"xp_threshold\",\"offer\":{\"count\":3,\"fallback\":\"none_when_pool_empty\"},")
+		TEXT("\"slots\":{\"weapon\":%d,\"passive\":%d},\"evolutions\":[%s],\"chest\":{\"boss_drop\":true,\"evolution_enabled_by_config\":%s}}"),
+		*Weapons, *Passives, *XP, MaxWeaponSlots, MaxPassiveSlots, *Evolutions,
+		CurrentConfig.bEnableEvolutions ? TEXT("true") : TEXT("false"));
+}
+
+/**
+ * ApplyAction と物理設定に一致する action/time schema を構築する。
+ * simulator の9 action、decision cadence、画面変位換算、level-up中の時間挙動を公開する。
+ */
+FString FSurvivorsGameLogic::GetActionTimeSchema() const
+{
+	const FVector2D Directions[9] = {
+		{0.f,1.f}, {UE_INV_SQRT_2,UE_INV_SQRT_2}, {1.f,0.f},
+		{UE_INV_SQRT_2,-UE_INV_SQRT_2}, {0.f,-1.f}, {-UE_INV_SQRT_2,-UE_INV_SQRT_2},
+		{-1.f,0.f}, {-UE_INV_SQRT_2,UE_INV_SQRT_2}, {0.f,0.f}
+	};
+	FString Actions;
+	for (int32 Id = 0; Id < 9; ++Id)
+	{
+		if (!Actions.IsEmpty()) Actions += TEXT(",");
+		Actions += FString::Printf(TEXT("{\"id\":%d,\"x\":%.7g,\"y\":%.7g}"), Id, Directions[Id].X, Directions[Id].Y);
+	}
+	return FString::Printf(
+		TEXT("{\"physics_dt\":%.9g,\"decision_steps\":1,\"directions\":[%s],\"move_speed\":%.9g,")
+		TEXT("\"screen_displacement_per_step\":%.9g,\"pause_during_level_up\":false,\"level_up_timing\":\"same_physics_step\"}"),
+		PhysicsDt, *Actions, CurrentConfig.MoveSpeed, CurrentConfig.MoveSpeed * PhysicsDt);
+}
+
 int32 FSurvivorsGameLogic::GetObsDim() const
 {
 	if (CachedObsDim >= 0) return CachedObsDim;

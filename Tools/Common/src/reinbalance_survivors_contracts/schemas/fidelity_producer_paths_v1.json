@@ -1,0 +1,40 @@
+{
+  "schema_version": "fidelity_producer_paths.v1",
+  "producers": {
+    "logic_public": {
+      "ordered_exact_paths": ["ReinBalance/Source/ReinBalanceLogic/Public/Survivors/SurvivorsGameLogic.h"],
+      "recursive_roots": [{"path": "ReinBalance/Source/ReinBalanceLogic/Public/Survivors", "include_globs": ["**/*.h"]}],
+      "explicit_excludes": [],
+      "generated_inputs": [],
+      "transitive_dependency_mode": "compiled_module_closure",
+      "compiled_module_closure": {"module_name": "ReinBalanceLogic", "build_cs": "ReinBalance/Source/ReinBalanceLogic/ReinBalanceLogic.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceLogic/Private"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalanceLogic/Private/**/*.cpp", "repo_local_module_dependency_edges": [], "allowed_non_behavior_excludes": []}
+    },
+    "logic_private": {
+      "ordered_exact_paths": ["ReinBalance/Source/ReinBalanceLogic/Private/Survivors/SurvivorsGameLogic.cpp"],
+      "recursive_roots": [{"path": "ReinBalance/Source/ReinBalanceLogic/Private/Survivors", "include_globs": ["**/*.cpp"]}],
+      "explicit_excludes": [],
+      "generated_inputs": [],
+      "transitive_dependency_mode": "compiled_module_closure",
+      "compiled_module_closure": {"module_name": "ReinBalanceLogic", "build_cs": "ReinBalance/Source/ReinBalanceLogic/ReinBalanceLogic.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceLogic/Private"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalanceLogic/Private/**/*.cpp", "repo_local_module_dependency_edges": [], "allowed_non_behavior_excludes": []}
+    },
+    "game_facade": {
+      "ordered_exact_paths": ["ReinBalance/Source/ReinBalance/Private/Survivors/Game/SurvivorsGame.cpp", "ReinBalance/Source/ReinBalance/Public/Survivors/Game/SurvivorsGame.h"],
+      "recursive_roots": [], "explicit_excludes": [], "generated_inputs": [], "transitive_dependency_mode": "compiled_module_closure",
+      "compiled_module_closure": {"module_name": "ReinBalance", "build_cs": "ReinBalance/Source/ReinBalance/ReinBalance.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalance/Private/Survivors"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalance/Private/Survivors/**/*.cpp", "repo_local_module_dependency_edges": [{"module_name": "ReinBalanceLogic", "build_cs": "ReinBalance/Source/ReinBalanceLogic/ReinBalanceLogic.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceLogic/Private"]}], "allowed_non_behavior_excludes": []}
+    },
+    "http_service": {
+      "ordered_exact_paths": ["ReinBalance/Source/ReinBalanceEditor/Private/Training/SurvivorsHttpEnvService.cpp"],
+      "recursive_roots": [], "explicit_excludes": [], "generated_inputs": [], "transitive_dependency_mode": "compiled_module_closure",
+      "compiled_module_closure": {"module_name": "ReinBalanceEditor", "build_cs": "ReinBalance/Source/ReinBalanceEditor/ReinBalanceEditor.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceEditor/Private/Training"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalanceEditor/Private/Training/**/*.cpp", "repo_local_module_dependency_edges": [], "allowed_non_behavior_excludes": []}
+    },
+    "sim_runtime_config": {"ordered_exact_paths": ["ReinBalance/Config/DefaultGame.ini"], "recursive_roots": [], "explicit_excludes": [], "generated_inputs": [], "transitive_dependency_mode": "none"},
+    "content_schema": {"ordered_exact_paths": [], "recursive_roots": [], "explicit_excludes": [], "generated_inputs": ["content_schema"], "transitive_dependency_mode": "generated_schema"},
+    "action_time_schema": {"ordered_exact_paths": [], "recursive_roots": [], "explicit_excludes": [], "generated_inputs": ["action_time_schema"], "transitive_dependency_mode": "generated_schema"},
+    "external_decision_schema": {"ordered_exact_paths": [], "recursive_roots": [], "explicit_excludes": [], "generated_inputs": ["external_decision_schema"], "transitive_dependency_mode": "generated_schema"},
+    "preview_schema": {"ordered_exact_paths": [], "recursive_roots": [], "explicit_excludes": [], "generated_inputs": ["preview_schema"], "transitive_dependency_mode": "generated_schema"},
+    "deploy_obs_schema": {"ordered_exact_paths": [], "recursive_roots": [], "explicit_excludes": [], "generated_inputs": ["deploy_obs_schema"], "transitive_dependency_mode": "generated_schema"},
+    "deploy_release_adapter": {"ordered_exact_paths": [], "recursive_roots": [], "explicit_excludes": [], "generated_inputs": ["deploy_release_adapter"], "transitive_dependency_mode": "generated_schema"},
+    "target_profile": {"ordered_exact_paths": [], "recursive_roots": [], "explicit_excludes": [], "generated_inputs": ["target_profile"], "transitive_dependency_mode": "generated_schema"},
+    "target_build_attestation": {"ordered_exact_paths": [], "recursive_roots": [], "explicit_excludes": [], "generated_inputs": ["target_build_attestation"], "transitive_dependency_mode": "generated_schema"}
+  }
+}
