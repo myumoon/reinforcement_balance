@@ -97,7 +97,10 @@ def test_duplicate_schema_id_is_blocked(collection: str) -> None:
     同じ ID の二重定義が後勝ちで隠れることを防ぎます。
     """
     schema = canonical_schema()
-    schema["content"][collection].append(copy.deepcopy(schema["content"][collection][0]))
+    if collection == "gems":
+        schema["content"][collection][1]["id"] = schema["content"][collection][0]["id"]
+    else:
+        schema["content"][collection].append(copy.deepcopy(schema["content"][collection][0]))
     with pytest.raises(ContractValidationError, match="duplicate"):
         build_manifest(schema, load_annotations(ANNOTATIONS))
 
