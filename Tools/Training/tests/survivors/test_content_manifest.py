@@ -15,9 +15,17 @@ from games.survivors.content_manifest import (
     ContractValidationError,
     audit_manifest,
     build_manifest,
+    compatibility_constants,
     load_annotations,
 )
-from games.survivors.survivors_vs_spec import EVOLUTION_TABLE, PASSIVE_MAX_LEVEL
+from games.survivors.survivors_vs_spec import (
+    EVOLVED_MAX_LEVEL, EVOLUTION_TABLE, PASSIVE_MAX_LEVEL, WEAPON_MAX_LEVEL,
+    WEAPON_EXCLUDED_AS_STARTING, PassiveItemType,
+)
+from games.survivors.survivors_weapon_curriculum import WeaponType
+from games.survivors.survivors_weapon_table import (
+    WEAPON_UNLOCK_TABLES, validate_unlock_table_against_generated_ids,
+)
 
 ROOT = Path(__file__).resolve().parents[4]
 ANNOTATIONS = ROOT / "Tools/Training/configs/survivors_content_annotations_v1.yaml"
@@ -119,24 +127,57 @@ def test_unimplemented_level_handler_reachability_and_observation_are_blocking()
         annotations = copy.deepcopy(load_annotations(ANNOTATIONS))
         annotations["collections"]["weapons"]["1"][key] = "" if key != "reachable" else False
         if key == "reachable":
-            assert audit_manifest(build_manifest(canonical_schema(), annotations))["blocking"] == 1
+            with pytest.raises(ContractValidationError, match="contradicts resolved evidence"):
+                build_manifest(canonical_schema(), annotations)
         else:
             with pytest.raises(ContractValidationError):
                 build_manifest(canonical_schema(), annotations)
 
 
 def test_python_compatibility_mirrors_match_generated_schema() -> None:
-    """既存 Python compatibility 定数が generated schema と一致する。
+    """全 Python compatibility 定数と手動 mirror が generated schema と一致する。
 
     初心者向け:
     移行期間中の手書き表が C++ export とずれたら CI で発見します。
     """
     manifest = build_manifest(canonical_schema(), load_annotations(ANNOTATIONS))
+    constants = compatibility_constants(manifest)
+    weapon_enum_ids = {
+        str(value) for name, value in vars(WeaponType).items()
+        if name.isupper() and name != "NONE" and type(value) is int
+    }
+    passive_enum_ids = {
+        str(value) for name, value in vars(PassiveItemType).items()
+        if name.isupper() and name != "NONE" and type(value) is int
+    }
+    assert weapon_enum_ids == constants["weapon_ids"]
+    assert passive_enum_ids == constants["passive_ids"]
     assert PASSIVE_MAX_LEVEL == {0: 0, **{int(key): value for key, value in manifest.max_levels["passives"].items()}}
+    assert all(
+        max_level == (WEAPON_MAX_LEVEL if int(item_id) <= 14 else
+                      (7 if item_id == "15" else EVOLVED_MAX_LEVEL))
+        for item_id, max_level in constants["weapon_max_levels"].items()
+    )
     assert {
         (str(row["base"]), str(row["evolved"]), str(row["passive"]), str(row.get("union_weapon", 0)))
         for row in EVOLUTION_TABLE
     } == set(manifest.evolution_pairs)
+    validate_unlock_table_against_generated_ids(constants["weapon_ids"])
+    evolved_ids = {pair[1] for pair in constants["evolution_pairs"]}
+    expected_unlock_ids = (
+        constants["weapon_ids"] - evolved_ids
+        - frozenset(str(value) for value in WEAPON_EXCLUDED_AS_STARTING)
+    )
+    for table in WEAPON_UNLOCK_TABLES.values():
+        table_ids = [str(entry.weapon_id) for entry in table]
+        assert len(table_ids) == len(set(table_ids))
+        assert frozenset(table_ids) == expected_unlock_ids
+    content = manifest.schema["content"]
+    for key in ("max_level", "level_cadence", "offer", "slots", "chest"):
+        assert constants[key] == content[key]
+    assert constants["xp_curve"] == tuple(content["xp_curve"])
+    assert constants["gem_xp"] == {row["id"]: row["xp"] for row in content["gems"]}
+    assert constants["action_time"] == manifest.schema["action_time"]
 
 
 def test_unknown_keys_and_nonfinite_values_fail_closed() -> None:
@@ -153,3 +194,16 @@ def test_unknown_keys_and_nonfinite_values_fail_closed() -> None:
     schema["content"]["gems"][0]["xp"] = float("nan")
     with pytest.raises(ContractValidationError, match="finite"):
         build_manifest(schema, load_annotations(ANNOTATIONS))
+
+
+@pytest.mark.parametrize("key", ["effect_handler", "obs_category", "scenario"])
+def test_unresolved_trace_evidence_is_blocked(key: str) -> None:
+    """架空の handler・観測・scenario を全て blocking にする。
+
+    初心者向け:
+    boolean が true のままでも、実在証跡へ解決できない文字列なら監査を開始しません。
+    """
+    annotations = copy.deepcopy(load_annotations(ANNOTATIONS))
+    annotations["collections"]["weapons"]["1"][key] = "does_not_exist"
+    with pytest.raises(ContractValidationError, match="unresolved"):
+        build_manifest(canonical_schema(), annotations)

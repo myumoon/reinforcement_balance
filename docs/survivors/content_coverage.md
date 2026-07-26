@@ -12,6 +12,8 @@
 
 `audit_survivors_content.py --schema <captured-content-schema.json>` は全行を利用直前に再検証し、各 gate の blocking 件数を JSON で出力する。ID の追加・削除、未知 key、重複 ID、非有限値、未実装 level、effect/obs/scenario 欠落は fail-closed で拒否する。
 
+YAML の5つの真偽値は互換上の claim にすぎず、監査結果には直接使わない。監査は handler/obs category の canonical registry、表駆動 LLT の scenario、機械判定 assertion を production source の実在 anchor へ解決して gate を導出し、claim と食い違う入力や架空参照を拒否する。combination は member の collection/ID/重複と scenario/assertion を同様に exact 検証する。
+
 ## Intentional exclusions
 
 Pentagram (12)、Laurel (15)、Gorgeous Moon (27) は starting weapon のみから除外する。Pentagram は継続的な starting XP を保証せず、Laurel は防御専用、Gorgeous Moon は進化取得だからである。この除外は acquisition、effect、observation、training、evaluation の免除ではない。YAML には理由と alternative coverage が必須で、5 gates のどれかを落とすと監査は失敗する。

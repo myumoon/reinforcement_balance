@@ -9,6 +9,25 @@
 #include "Survivors/SurvivorsGameConstants.h"
 #include "Survivors/SurvivorsGameLogic.h"
 
+/**
+ * production の非公開 choice/evolution/default table を LLT から実行する friend adapter。
+ * 初心者向け:
+ * テスト専用の値を作らず、ゲーム本体が使う処理と既定表をそのまま検査します。
+ */
+struct FSurvivorsGameTestAccess
+{
+	static TArray<FLevelUpChoice> BuildChoices(FSurvivorsGameLogic& Logic) { return Logic.BuildLevelUpChoices(); }
+	static void ApplyChoice(FSurvivorsGameLogic& Logic, const FLevelUpChoice& Choice)
+	{
+		Logic.ApplyLevelUpChoice(Choice);
+		Logic.RecalcPassiveEffects();
+	}
+	static const TArray<FEnemyTypeParams>& EnemyTable(const FSurvivorsGameLogic& Logic)
+	{
+		return Logic.CurrentConfig.EnemyTypeTable;
+	}
+};
+
 namespace
 {
 /**
@@ -23,6 +42,98 @@ void CheckFiniteObservation(const FSurvivorsGameLogic& Logic)
 	for (const float Value : Observation)
 	{
 		CHECK(FMath::IsFinite(Value));
+	}
+}
+
+/**
+ * 指定武器の実在する level-up choice を返す。
+ * 初心者向け:
+ * 初期 slot へ目的武器を直接置かず、ゲームが提示した取得・強化候補だけを選びます。
+ */
+FLevelUpChoice RequireWeaponChoice(FSurvivorsGameLogic& Logic, EWeaponType Type, FLevelUpChoice::EChoiceType ChoiceType)
+{
+	const TArray<FLevelUpChoice> Choices = FSurvivorsGameTestAccess::BuildChoices(Logic);
+	for (const FLevelUpChoice& Choice : Choices)
+	{
+		if (Choice.WeaponType == Type && Choice.ChoiceType == ChoiceType) return Choice;
+	}
+	FAIL("required production level-up choice was not offered");
+	return FLevelUpChoice();
+}
+
+/**
+ * passive 合成結果が既定の no-combat 値から変化したかを返す。
+ * 初心者向け:
+ * 各 field を名前で比較し、構造体の並びや padding に依存しないようにします。
+ */
+bool HasCombatPassiveEffect(const FPassiveEffects& Value)
+{
+	const FPassiveEffects Default;
+	return !FMath::IsNearlyEqual(Value.DamageMult, Default.DamageMult)
+		|| !FMath::IsNearlyEqual(Value.CooldownMult, Default.CooldownMult)
+		|| !FMath::IsNearlyEqual(Value.AreaMult, Default.AreaMult)
+		|| !FMath::IsNearlyEqual(Value.SpeedMult, Default.SpeedMult)
+		|| !FMath::IsNearlyEqual(Value.DurationMult, Default.DurationMult)
+		|| !FMath::IsNearlyEqual(Value.ExtraAmount, Default.ExtraAmount)
+		|| !FMath::IsNearlyEqual(Value.MoveSpeedMult, Default.MoveSpeedMult)
+		|| !FMath::IsNearlyEqual(Value.PickupRadiusMult, Default.PickupRadiusMult)
+		|| !FMath::IsNearlyEqual(Value.HpMult, Default.HpMult)
+		|| !FMath::IsNearlyEqual(Value.GrowthMult, Default.GrowthMult)
+		|| !FMath::IsNearlyEqual(Value.CurseMult, Default.CurseMult)
+		|| !FMath::IsNearlyEqual(Value.RegenPerSec, Default.RegenPerSec)
+		|| !FMath::IsNearlyEqual(Value.ArmorFlat, Default.ArmorFlat)
+		|| Value.MaxRevivalCount != Default.MaxRevivalCount;
+}
+
+/**
+ * observation segment の先頭 offset を schema から解決する。
+ * 初心者向け:
+ * 固定の数値位置を手書きせず、production schema の並びを使って対象 field を検査します。
+ */
+int32 FindObservationOffset(const FSurvivorsGameLogic& Logic, const TCHAR* SegmentName)
+{
+	int32 Offset = 0;
+	for (const FSurvivorsObsSegment& Segment : Logic.GetObsSchema())
+	{
+		if (Segment.Name == SegmentName) return Offset;
+		Offset += Segment.Dim;
+	}
+	FAIL("required observation segment was not found");
+	return INDEX_NONE;
+}
+
+/**
+ * passive 1-17 の production effect summary を種類ごとに検証する。
+ * 初心者向け:
+ * 「何かが変わった」だけでなく、それぞれが担当する能力値を明示して確認します。
+ */
+void CheckPassiveEffectSummary(EPassiveItemType Type, const FPassiveEffects& Effects)
+{
+	switch (Type)
+	{
+	case EPassiveItemType::Spinach: CHECK(Effects.DamageMult > 1.f); break;
+	case EPassiveItemType::Armor: CHECK(Effects.ArmorFlat > 0.f); break;
+	case EPassiveItemType::HollowHeart: CHECK(Effects.HpMult > 1.f); break;
+	case EPassiveItemType::Pummarola: CHECK(Effects.RegenPerSec > 0.f); break;
+	case EPassiveItemType::EmptyTome: CHECK(Effects.CooldownMult < 1.f); break;
+	case EPassiveItemType::Candelabrador: CHECK(Effects.AreaMult > 1.f); break;
+	case EPassiveItemType::Bracer: CHECK(Effects.SpeedMult > 1.f); break;
+	case EPassiveItemType::Spellbinder: CHECK(Effects.DurationMult > 1.f); break;
+	case EPassiveItemType::Duplicator: CHECK(Effects.ExtraAmount > 0.f); break;
+	case EPassiveItemType::Wings: CHECK(Effects.MoveSpeedMult > 1.f); break;
+	case EPassiveItemType::Attractorb: CHECK(Effects.PickupRadiusMult > 1.f); break;
+	case EPassiveItemType::Crown: CHECK(Effects.GrowthMult > 1.f); break;
+	case EPassiveItemType::SkullOManiac: CHECK(Effects.CurseMult > 1.f); break;
+	case EPassiveItemType::Tirajisu: CHECK(Effects.MaxRevivalCount > 0); break;
+	case EPassiveItemType::TorronasBox:
+		CHECK(Effects.DamageMult > 1.f);
+		CHECK(Effects.CurseMult > 1.f);
+		break;
+	case EPassiveItemType::Clover:
+	case EPassiveItemType::StoneMask:
+		CHECK_FALSE(HasCombatPassiveEffect(Effects));
+		break;
+	default: FAIL("unexpected passive type"); break;
 	}
 }
 }
@@ -51,6 +162,37 @@ TEST_CASE("Survivors all weapons reset and step finitely", "[unit][survivors][co
 }
 
 /**
+ * Pentagram/Laurel を starting 除外状態から choice 経由で取得・強化する。
+ * 初心者向け:
+ * Garlic で開始した後、実際のレベルアップ候補から対象武器を選び、level 2 まで上げます。
+ */
+TEST_CASE("Survivors excluded starting weapons remain acquirable and upgradeable", "[unit][survivors][content][choice]")
+{
+	for (const EWeaponType Target : {EWeaponType::Pentagram, EWeaponType::Laurel})
+	{
+		FSurvivorsGameLogicConfig Config;
+		Config.bHasInitialOverride = true;
+		Config.InitialWeaponSlots.Add({static_cast<int32>(EWeaponType::Garlic), 1});
+		Config.WeaponPoolMode = TEXT("fixed_subset");
+		Config.AllowedWeaponTypes.Add(static_cast<int32>(Target));
+		Config.bEnablePassives = false;
+		FSurvivorsGameLogic Logic;
+		Logic.Initialize(Config);
+		Logic.Reset(1500 + static_cast<int32>(Target));
+		FSurvivorsGameTestAccess::ApplyChoice(
+			Logic, RequireWeaponChoice(Logic, Target, FLevelUpChoice::EChoiceType::WeaponNew));
+		int32 TargetSlot = INDEX_NONE;
+		for (int32 SlotIdx = 0; SlotIdx < SurvivorsGameConstants::MaxWeaponSlots; ++SlotIdx)
+			if (Logic.GetWeaponSlot(SlotIdx).Type == Target) TargetSlot = SlotIdx;
+		REQUIRE(TargetSlot != INDEX_NONE);
+		CHECK(Logic.GetWeaponSlot(TargetSlot).Level.Value == 1);
+		FSurvivorsGameTestAccess::ApplyChoice(
+			Logic, RequireWeaponChoice(Logic, Target, FLevelUpChoice::EChoiceType::WeaponUpgrade));
+		CHECK(Logic.GetWeaponSlot(TargetSlot).Level.Value == 2);
+	}
+}
+
+/**
  * passive 1-17 の最大 level、effect summary、obs を検証する。
  * 初心者向け:
  * Stone Mask も戦闘効果なしの5レベル item として slot と観測に残ることを確認する。
@@ -73,6 +215,14 @@ TEST_CASE("Survivors all passives expose max level and finite summary", "[unit][
 		CHECK(Logic.GetPassiveSlot(0).Level == MaxLevel);
 		Logic.PhysicsStep(8);
 		CheckFiniteObservation(Logic);
+		const TArray<float> Observation = Logic.GetObservation();
+		const int32 PassiveOffset = FindObservationOffset(Logic, TEXT("passive_slots"));
+		REQUIRE(PassiveOffset != INDEX_NONE);
+		CHECK(Observation[PassiveOffset] == static_cast<float>(PassiveId)
+			/ static_cast<float>(SurvivorsGameConstants::MaxPassiveTypeCountReserved));
+		CHECK(Observation[PassiveOffset + 1] == 1.f);
+		const FPassiveEffects& Effects = Logic.GetCachedPassiveEffects();
+		CheckPassiveEffectSummary(Type, Effects);
 	}
 }
 
@@ -91,21 +241,11 @@ TEST_CASE("Survivors all enemies spawn and encode type finitely", "[unit][surviv
 	{
 		FSurvivorsGameLogicConfig Config;
 		Config.MaxEnemyTypeId = 10;
-		for (int32 TableId = 0; TableId <= 10; ++TableId)
-		{
-			FEnemyTypeParams Row;
-			Row.Name = FString::Printf(TEXT("CoverageEnemy%d"), TableId);
-			Row.BaseHP = ExpectedHP[TableId];
-			Row.ContactDamage = ExpectedDamage[TableId];
-			Row.XPDrop = ExpectedXP[TableId];
-			Row.bIsBoss = TableId == 10;
-			Row.bResistsFreeze = TableId == 10;
-			Row.bResistsInstantKill = TableId == 10;
-			Row.bResistsDebuff = TableId == 10;
-			Config.EnemyTypeTable.Add(Row);
-		}
-		REQUIRE(Config.EnemyTypeTable.IsValidIndex(EnemyId));
-		const FEnemyTypeParams& Params = Config.EnemyTypeTable[EnemyId];
+		FSurvivorsGameLogic Logic;
+		Logic.Initialize(Config);
+		const TArray<FEnemyTypeParams>& DefaultTable = FSurvivorsGameTestAccess::EnemyTable(Logic);
+		REQUIRE(DefaultTable.IsValidIndex(EnemyId));
+		const FEnemyTypeParams& Params = DefaultTable[EnemyId];
 		CHECK(Params.BaseHP == ExpectedHP[EnemyId]);
 		CHECK(Params.ContactDamage == ExpectedDamage[EnemyId]);
 		CHECK(Params.XPDrop == ExpectedXP[EnemyId]);
@@ -118,23 +258,27 @@ TEST_CASE("Survivors all enemies spawn and encode type finitely", "[unit][surviv
 		Wave.MinEnemies = 1;
 		Wave.MaxEnemies = 1;
 		Wave.EnemyWeights.Add({EnemyId, 1.f});
-		Config.SpawnWaves = {Wave};
-		Config.BossSpawnTime = EnemyId == 10 ? 0.f : 100.f;
-		FSurvivorsGameLogic Logic;
-		Logic.Initialize(Config);
+		FSurvivorsGameLogicConfig SpawnConfig = Config;
+		SpawnConfig.SpawnWaves = {Wave};
+		SpawnConfig.BossSpawnTime = EnemyId == 10 ? 0.f : 100.f;
+		Logic.ApplyConfig(SpawnConfig);
 		Logic.Reset(3000 + EnemyId);
 		Logic.PhysicsStep(8);
 		REQUIRE(Logic.GetEnemyCount() > 0);
 		CHECK(Logic.GetEnemyType(0) == EnemyId);
 		CHECK(FMath::IsFinite(Logic.GetEnemyHP(0)));
 		CheckFiniteObservation(Logic);
+		const TArray<float> Observation = Logic.GetObservation();
+		const int32 EnemyTypeOffset = FindObservationOffset(Logic, TEXT("enemy_type"));
+		REQUIRE(EnemyTypeOffset != INDEX_NONE);
+		CHECK(Observation[EnemyTypeOffset] == static_cast<float>(EnemyId) / 10.f);
 	}
 }
 
 /**
  * Gorgeous Moon と Vandalier の prerequisite と slot 消費契約を固定する。
  * 初心者向け:
- * 全進化表を確認し、union だけ partner が必要で二枠から一枠へなる規則を schema と同じ表で追跡する。
+ * 全進化表を成立させ、production choice を適用して通常置換と union の二枠から一枠への消費を確認する。
  */
 TEST_CASE("Survivors evolution prerequisites include moon and vandalier union", "[unit][survivors][content][evolution]")
 {
@@ -154,6 +298,25 @@ TEST_CASE("Survivors evolution prerequisites include moon and vandalier union", 
 				&& Rule.RequiredPassive == EPassiveItemType::None
 				&& Rule.UnionPartner == EWeaponType::EbonyWings;
 		}
+		FSurvivorsGameLogicConfig Config;
+		Config.bHasInitialOverride = true;
+		Config.bEnableEvolutions = true;
+		Config.InitialWeaponSlots.Add({
+			static_cast<int32>(Rule.BaseWeapon), SurvivorsGameConstants::GetWeaponMaxLevel(Rule.BaseWeapon)});
+		if (Rule.UnionPartner != EWeaponType::None)
+			Config.InitialWeaponSlots.Add({
+				static_cast<int32>(Rule.UnionPartner), SurvivorsGameConstants::GetWeaponMaxLevel(Rule.UnionPartner)});
+		if (Rule.RequiredPassive != EPassiveItemType::None)
+			Config.InitialPassiveSlots.Add({static_cast<int32>(Rule.RequiredPassive), 1});
+		FSurvivorsGameLogic Logic;
+		Logic.Initialize(Config);
+		Logic.Reset(4000 + static_cast<int32>(Rule.EvolvedWeapon));
+		FSurvivorsGameTestAccess::ApplyChoice(
+			Logic, RequireWeaponChoice(Logic, Rule.EvolvedWeapon, FLevelUpChoice::EChoiceType::WeaponEvolve));
+		CHECK(Logic.GetWeaponSlot(0).Type == Rule.EvolvedWeapon);
+		CHECK(Logic.GetWeaponSlot(0).Level.Value == 1);
+		if (Rule.UnionPartner != EWeaponType::None)
+			CHECK(Logic.GetWeaponSlot(1).Type == EWeaponType::None);
 	}
 	CHECK(bFoundMoon);
 	CHECK(bFoundVandalier);
