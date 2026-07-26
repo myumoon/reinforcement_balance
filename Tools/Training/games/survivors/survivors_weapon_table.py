@@ -68,10 +68,25 @@ WEAPON_UNLOCK_TABLES: dict[str, list[WeaponEntry]] = {
 
 
 def resolve_weapon_unlock_order(table_name: str) -> list[WeaponEntry]:
-    """テーブル名から WeaponEntry リストを返す。不明な名前は ValueError。"""
+    """武器 unlock table の既知名だけを解決する。
+
+    初心者向け:
+    不明な名前を既定値へ置き換えず、設定ミスとして通知します。
+    """
     if table_name not in WEAPON_UNLOCK_TABLES:
         raise ValueError(f"Unknown weapon_unlock_table: {table_name!r}")
     return WEAPON_UNLOCK_TABLES[table_name]
+
+
+def validate_unlock_table_against_generated_ids(generated_weapon_ids: frozenset[str]) -> None:
+    """手書き curriculum table が generated weapon ID 集合から逸脱しないことを検証する。
+
+    初心者向け:
+    unlock 順序は訓練用 annotation ですが、存在しない武器 ID を参照した場合は即座に失敗させます。
+    """
+    unlock_ids = [entry.weapon_id for entries in WEAPON_UNLOCK_TABLES.values() for entry in entries]
+    if any(str(weapon_id) not in generated_weapon_ids for weapon_id in unlock_ids):
+        raise ValueError("weapon unlock table contains an ID absent from generated schema")
 
 
 ITEM_SYSTEM_STAGES: dict[str, ItemSystemStage] = {

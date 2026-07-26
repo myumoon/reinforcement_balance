@@ -1,5 +1,8 @@
 #pragma once
 
+// Survivors Logic の canonical gameplay 定数と content coverage 契約。
+// 初心者向け: ゲーム本体と schema が同じ値を見るための表をこのファイルに集めます。
+
 #include "CoreMinimal.h"
 #include "Survivors/SurvivorsWikiSpec.h"
 #include "Survivors/SurvivorsTypes.h"
@@ -636,8 +639,12 @@ namespace SurvivorsGameConstants
 	// アイテム別最大レベルテーブル（EPassiveItemType のインデックスと対応）
 	// None=0, Spinach=5, Armor=5, HollowHeart=5, Pummarola=5, EmptyTome=5,
 	// Candelabrador=5, Bracer=5, Spellbinder=5, Duplicator=2, Wings=5,
-	// Attractorb=5, Clover=5, Crown=5, StoneMask=0(coin対象外), SkullOManiac=5, Tirajisu=2, TorronasBox=9
-	inline constexpr const int32 (&PassiveMaxLevel)[18] = SurvivorsWikiSpec::PassiveMaxLevel;
+	// Attractorb=5, Clover=5, Crown=5, StoneMask=5(戦闘寄与なし), SkullOManiac=5, Tirajisu=2, TorronasBox=9
+	// Passive 最大レベル契約。Stone Mask は戦闘寄与なしでも取得・強化可能な5レベルとして扱う。
+	// 初心者向け: 金貨効果を戦闘シムへ加えなくても、選択肢と観測の coverage から外れないようにします。
+	inline constexpr int32 PassiveMaxLevel[18] = {
+		0, 5, 5, 5, 5, 5, 5, 5, 5, 2, 5, 5, 5, 5, 5, 5, 2, 9
+	};
 
 	inline constexpr const float (&AttractorbPickupRadiusMult)[5] = SurvivorsWikiSpec::AttractorbPickupRadiusMult;
 

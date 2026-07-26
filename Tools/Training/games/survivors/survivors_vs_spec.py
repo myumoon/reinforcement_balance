@@ -9,7 +9,11 @@ from games.survivors.survivors_weapon_curriculum import WeaponType  # 既存を�
 
 
 class PassiveItemType:
-    """EPassiveItemType の integer 値（C++ enum と一致させること）。"""
+    """EPassiveItemType の互換 integer 値。
+
+    初心者向け:
+    既存訓練コード向けの名前であり、coverage 監査では generated schema との一致を必ず確認します。
+    """
     NONE          = 0
     SPINACH       = 1
     ARMOR         = 2
@@ -24,7 +28,7 @@ class PassiveItemType:
     ATTRACTORB    = 11
     CLOVER        = 12
     CROWN         = 13
-    STONE_MASK    = 14  # MaxLevel=0（効果未実装）
+    STONE_MASK    = 14  # MaxLevel=5（金貨効果は combat contribution なし）
     SKULL_O_MANIAC= 15
     TIRAJISU      = 16  # MaxLevel=2（リバイバル）
     TORRONAS_BOX  = 17  # MaxLevel=9
@@ -45,7 +49,7 @@ PASSIVE_MAX_LEVEL: dict[int, int] = {
     PassiveItemType.ATTRACTORB:     5,
     PassiveItemType.CLOVER:         5,
     PassiveItemType.CROWN:          5,
-    PassiveItemType.STONE_MASK:     0,
+    PassiveItemType.STONE_MASK:     5,
     PassiveItemType.SKULL_O_MANIAC: 5,
     PassiveItemType.TIRAJISU:       2,
     PassiveItemType.TORRONAS_BOX:   9,
