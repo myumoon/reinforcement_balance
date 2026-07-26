@@ -252,6 +252,130 @@ def _coverage_cells(source: str, array_name: str) -> dict[str, tuple[str, str]]:
     return result
 
 
+def _trace_evidence_registries(
+    ids: Mapping[str, frozenset[str]],
+    pairs: tuple[tuple[str, str, str, str], ...],
+) -> tuple[Mapping[str, Mapping[str, str]], Mapping[str, Mapping[str, str]]]:
+    """annotation の意味名を production handler・obs schema へ静的解決する。
+
+    初心者向け:
+    YAML 内だけで名前を照合せず、対応する本体処理と観測フィールドが実在する行だけを登録します。
+    """
+    logic = _LOGIC_PATH.read_text(encoding="utf-8")
+    types = _TYPES_PATH.read_text(encoding="utf-8")
+    weapon_names = _enum_id_names(types, "EWeaponType")
+    passive_names = _enum_id_names(types, "EPassiveItemType")
+    weapon_factory = _function_body(logic, "FSurvivorsGameLogic::CreateWeaponLogic")
+    passive_effects = _function_body(logic, "FSurvivorsGameLogic::ComputePassiveEffects")
+    level_up = _function_body(logic, "FSurvivorsGameLogic::ApplyLevelUpChoice")
+    evolve_weapon = _function_body(logic, "FSurvivorsGameLogic::EvolveWeapon")
+    gem_pickup = _function_body(logic, "FSurvivorsGameLogic::ApplyPickupHits")
+    enemy_spawn = _function_body(logic, "FSurvivorsGameLogic::SpawnEnemy")
+    boss_spawn = _function_body(logic, "FSurvivorsGameLogic::SpawnBoss")
+    contact_hits = _function_body(logic, "FSurvivorsGameLogic::ApplyContactHits")
+    obs_schema = _function_body(logic, "FSurvivorsGameLogic::GetObsSchema")
+    obs_fields = frozenset(re.findall(r'TEXT\("([a-z0-9_]+)"\)', obs_schema))
+
+    weapon_special = {
+        "12": "pentagram_logic", "13": "peachone_logic", "14": "ebony_wings_logic",
+        "15": "laurel_shield_logic", "27": "gorgeous_moon_logic", "28": "vandalier_logic",
+    }
+    passive_handlers = {
+        "1": "passive_stat_power", "2": "passive_stat_armor", "3": "passive_stat_max_health",
+        "4": "passive_stat_regeneration", "5": "passive_stat_cooldown", "6": "passive_stat_area",
+        "7": "passive_stat_speed", "8": "passive_stat_duration", "9": "passive_stat_amount",
+        "10": "passive_stat_move_speed", "11": "passive_stat_magnet", "12": "passive_stat_luck",
+        "13": "passive_stat_growth", "14": "intentional_no_combat_gold_only",
+        "15": "passive_stat_curse", "16": "passive_revive_counter", "17": "passive_stat_omni_curse",
+    }
+    handlers: dict[str, dict[str, str]] = {collection: {} for collection in _COLLECTIONS}
+    for item_id in ids["weapons"]:
+        name = weapon_names[item_id]
+        if re.search(rf"case\s+EWeaponType::{re.escape(name)}\s*:", weapon_factory):
+            handlers["weapons"][item_id] = weapon_special.get(
+                item_id, f"weapon_logic_{item_id}" if int(item_id) <= 11 else f"evolved_weapon_logic_{item_id}",
+            )
+    for item_id in ids["passives"]:
+        name = passive_names[item_id]
+        if re.search(rf"case\s+EPassiveItemType::{re.escape(name)}\s*:", passive_effects) or name in {"Clover", "StoneMask"}:
+            handlers["passives"][item_id] = passive_handlers[item_id]
+    if all(anchor in gem_pickup for anchor in ("ProcessXPGain(", "Gems[GI].Type", "RedGemExperienceForMultiplier")):
+        handlers["gems"] = {
+            "blue": "gem_xp_gain", "green": "gem_xp_gain", "red": "gem_xp_gain_multiplier",
+        }
+    # 進化は level-up choice から EvolveWeapon へ入り、同じ slot を evolved weapon で置換する。
+    # 初心者向け: 実装が使わない生成 API 名へ依存せず、進化関数の実際の slot 更新を証拠にします。
+    evolution_choice_routes_to_handler = (
+        "EChoiceType::WeaponEvolve" in level_up
+        and re.search(r"\bEvolveWeapon\s*\(", level_up) is not None
+    )
+    evolution_replaces_slot = (
+        re.search(
+            r"WeaponSlots\s*\[\s*SlotIdx\s*\]\s*\.\s*Type\s*=\s*EvolvedType\s*;",
+            evolve_weapon,
+        )
+        is not None
+        and re.search(
+            r"\bEquipWeapon\s*\(\s*SlotIdx\s*,\s*EvolvedType\s*,\s*1\s*\)",
+            evolve_weapon,
+        )
+        is not None
+    )
+    if evolution_choice_routes_to_handler and evolution_replaces_slot:
+        handlers["evolutions"] = {
+            f"{base}:{evolved}": (
+                "union_two_to_one_slots" if partner != "0" else "evolution_slot_replace"
+            )
+            for base, evolved, _, partner in pairs
+        }
+    if all("Enemies.Add" in body for body in (enemy_spawn, boss_spawn)) and all(
+        anchor in contact_hits for anchor in ("ContactDamage", "PlayerHP")
+    ):
+        handlers["enemies"] = {
+            item_id: "boss_spawn_resistance_contact" if item_id == "10" else "enemy_spawn_and_contact"
+            for item_id in ids["enemies"]
+        }
+
+    obs_requirements = {
+        "weapon_slots": {"weapon_slots"},
+        "shield_and_weapon_slots": {"shield_active", "shield_timer_norm", "weapon_slots"},
+        "passive_slots": {"passive_slots"},
+        "passive_slots_and_armor": {"passive_slots", "armor_flat_norm"},
+        "passive_slots_and_regen": {"passive_slots", "regen_per_sec_norm"},
+        "blue_gem_observation": {"blue_gem_rel_pos"},
+        "green_gem_observation": {"green_gem_rel_pos"},
+        "red_gem_observation": {"red_gem_rel_pos"},
+        "enemy_type_hp": {"enemy_type", "enemy_hp"},
+    }
+    available_obs = frozenset(
+        name for name, required in obs_requirements.items() if required <= obs_fields
+    )
+    observations: dict[str, dict[str, str]] = {collection: {} for collection in _COLLECTIONS}
+    observations["weapons"] = {
+        item_id: "shield_and_weapon_slots" if item_id == "15" else "weapon_slots"
+        for item_id in ids["weapons"]
+        if ("shield_and_weapon_slots" if item_id == "15" else "weapon_slots") in available_obs
+    }
+    observations["passives"] = {
+        item_id: "passive_slots_and_armor" if item_id == "2" else (
+            "passive_slots_and_regen" if item_id == "4" else "passive_slots"
+        )
+        for item_id in ids["passives"]
+        if ("passive_slots_and_armor" if item_id == "2" else (
+            "passive_slots_and_regen" if item_id == "4" else "passive_slots"
+        )) in available_obs
+    }
+    gem_obs = {color: f"{color}_gem_observation" for color in ids["gems"]}
+    observations["gems"] = {key: value for key, value in gem_obs.items() if value in available_obs}
+    observations["evolutions"] = {
+        item_id: "weapon_slots" for item_id in ids["evolutions"] if "weapon_slots" in available_obs
+    }
+    observations["enemies"] = {
+        item_id: "enemy_type_hp" for item_id in ids["enemies"] if "enemy_type_hp" in available_obs
+    }
+    return handlers, observations
+
+
 def _resolve_static_evidence(
     ids: Mapping[str, frozenset[str]],
     pairs: tuple[tuple[str, str, str, str], ...],
@@ -457,6 +581,7 @@ def build_manifest(schema: Mapping[str, Any], annotations: Mapping[str, Any]) ->
     """
     ids, levels, pairs = load_content_schema(schema)
     static_evidence = _resolve_static_evidence(ids, pairs)
+    handler_registry, obs_registry = _trace_evidence_registries(ids, pairs)
     wire = _exact_object(annotations, _ANNOTATION_TOP_KEYS, "annotations")
     ensure(wire["schema_version"] == "survivors.content_annotations.v1", "unsupported annotation schema")
     collections = _exact_object(wire["collections"], _COLLECTIONS, "annotation collections")
@@ -477,6 +602,14 @@ def build_manifest(schema: Mapping[str, Any], annotations: Mapping[str, Any]) ->
             ensure(row["target_relevant"], f"{collection}:{item_id} cannot be excluded from full coverage")
             expected_scenarios = _expected_scenario(collection, item_id)
             ensure(row["scenario"] in expected_scenarios, f"{collection}:{item_id} unresolved scenario")
+            ensure(
+                row["effect_handler"] == handler_registry[collection].get(item_id),
+                f"{collection}:{item_id} unresolved effect_handler",
+            )
+            ensure(
+                row["obs_category"] == obs_registry[collection].get(item_id),
+                f"{collection}:{item_id} unresolved obs_category",
+            )
             prefix = {"weapons": "weapon", "passives": "passive", "gems": "gem",
                       "evolutions": "evolution", "enemies": "enemy"}[collection]
             registry_scenario = build_content_training_cells(ids)[f"{prefix}:{item_id}"]

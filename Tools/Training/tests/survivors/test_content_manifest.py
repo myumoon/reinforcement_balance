@@ -226,7 +226,7 @@ def test_removed_production_weapon_case_is_blocking(monkeypatch: pytest.MonkeyPa
         return source
 
     monkeypatch.setattr(Path, "read_text", mutated_read_text)
-    with pytest.raises(ContractValidationError, match="weapons:1 unresolved static evidence"):
+    with pytest.raises(ContractValidationError, match="weapons:1 unresolved"):
         build_manifest(canonical_schema(), load_annotations(ANNOTATIONS))
 
 
