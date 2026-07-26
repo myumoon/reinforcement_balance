@@ -89,6 +89,53 @@ def validate_unlock_table_against_generated_ids(generated_weapon_ids: frozenset[
         raise ValueError("weapon unlock table contains an ID absent from generated schema")
 
 
+def build_content_training_cells(
+    generated_ids: dict[str, frozenset[str]] | object,
+) -> dict[str, str]:
+    """generated schema の全 content を訓練 scenario cell へ展開する。
+
+    初心者向け:
+    初期武器の表だけで訓練対象を決めず、schema にある武器・アイテム・敵を全て
+    決定的なセルへ登録します。ID 自体は C++ schema から受け取るため複製しません。
+    """
+    if not isinstance(generated_ids, dict):
+        generated_ids = dict(generated_ids)  # type: ignore[arg-type]
+    cells: dict[str, str] = {}
+    weapon_special = {
+        "12": "pentagram_acquisition_upgrade",
+        "13": "peachone_union_prerequisite",
+        "14": "ebony_union_prerequisite",
+        "15": "laurel_acquisition_upgrade",
+        "27": "gorgeous_moon_evolution",
+        "28": "vandalier_union_slot_consumption",
+    }
+    for item_id in generated_ids["weapons"]:
+        cells[f"weapon:{item_id}"] = weapon_special.get(
+            item_id,
+            f"weapon_{item_id}_reset_step" if int(item_id) <= 15
+            else f"evolution_{int(item_id) - 15}_{item_id}",
+        )
+    for item_id in generated_ids["passives"]:
+        cells[f"passive:{item_id}"] = (
+            "stone_mask_no_combat_semantics" if item_id == "14"
+            else f"passive_{item_id}_max_effect"
+        )
+    for item_id in generated_ids["gems"]:
+        cells[f"gem:{item_id}"] = f"gem_{item_id}_pickup"
+    for item_id in generated_ids["evolutions"]:
+        base_id, evolved_id = item_id.split(":")
+        cells[f"evolution:{item_id}"] = {
+            "12:27": "gorgeous_moon_12_27",
+            "13:28": "vandalier_union_13_28",
+        }.get(item_id, f"evolve_{base_id}_{evolved_id}")
+    for item_id in generated_ids["enemies"]:
+        cells[f"enemy:{item_id}"] = (
+            "enemy_10_boss_reset_step" if item_id == "10"
+            else f"enemy_{item_id}_reset_step"
+        )
+    return cells
+
+
 ITEM_SYSTEM_STAGES: dict[str, ItemSystemStage] = {
     "IS0": ItemSystemStage(key="IS0", enable_passives=False, enable_evolutions=False),
     "IS1": ItemSystemStage(key="IS1", enable_passives=True,  enable_evolutions=False),

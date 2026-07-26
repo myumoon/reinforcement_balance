@@ -7,10 +7,12 @@ C++ schema と YAML の差、重複、欠落、手書き互換定数のずれを
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
 
 import pytest
 
+import games.survivors.content_manifest as content_manifest_module
 from games.survivors.content_manifest import (
     ContractValidationError,
     audit_manifest,
@@ -207,3 +209,84 @@ def test_unresolved_trace_evidence_is_blocked(key: str) -> None:
     annotations["collections"]["weapons"]["1"][key] = "does_not_exist"
     with pytest.raises(ContractValidationError, match="unresolved"):
         build_manifest(canonical_schema(), annotations)
+
+
+def test_removed_production_weapon_case_is_blocking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """production handler を削除した content を implemented にしない。
+
+    初心者向け:
+    Python の handler 名を残しても、ゲーム本体の武器生成 case が消えれば監査を失敗させます。
+    """
+    original = Path.read_text
+
+    def mutated_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        source = original(path, *args, **kwargs)
+        if path == content_manifest_module._LOGIC_PATH:
+            source = source.replace("case EWeaponType::Garlic:\n", "", 1)
+        return source
+
+    monkeypatch.setattr(Path, "read_text", mutated_read_text)
+    with pytest.raises(ContractValidationError, match="weapons:1 unresolved static evidence"):
+        build_manifest(canonical_schema(), load_annotations(ANNOTATIONS))
+
+
+def test_removed_llt_content_assertion_registry_row_is_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """content ID ごとの LLT scenario/eval registry 欠落を拒否する。
+
+    初心者向け:
+    YAML の名前を残しても、実行対象テストから gem 行を消せば coverage は成立しません。
+    """
+    original = Path.read_text
+
+    def mutated_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        source = original(path, *args, **kwargs)
+        if path == content_manifest_module._LLT_PATH:
+            source = re.sub(r'^\s*\{TEXT\("gem:blue"\).*$', "", source, count=1, flags=re.MULTILINE)
+        return source
+
+    monkeypatch.setattr(Path, "read_text", mutated_read_text)
+    with pytest.raises(ContractValidationError, match="LLT content coverage keys mismatch"):
+        build_manifest(canonical_schema(), load_annotations(ANNOTATIONS))
+
+
+def test_removed_table_driven_eval_assertion_is_blocking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """registry を残したまま実評価 CHECK を消しても拒否する。
+
+    初心者向け:
+    scenario/eval の名前だけでは足りず、全 ID を回す LLT の判定本体が必要です。
+    """
+    original = Path.read_text
+
+    def mutated_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        source = original(path, *args, **kwargs)
+        if path == content_manifest_module._LLT_PATH:
+            source = source.replace(
+                "CHECK(static_cast<int32>(Logic.GetWeaponSlot(0).Type) == WeaponId);",
+                "",
+                1,
+            )
+        return source
+
+    monkeypatch.setattr(Path, "read_text", mutated_read_text)
+    with pytest.raises(ContractValidationError, match="table-driven eval assertion missing"):
+        build_manifest(canonical_schema(), load_annotations(ANNOTATIONS))
+
+
+def test_removed_training_consumer_cell_is_blocking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """訓練 consumer から content を除外すると trained gate を閉じる。
+
+    初心者向け:
+    scenario 名が YAML と LLT に残っていても、訓練セルに収録されていなければ拒否します。
+    """
+    original_builder = content_manifest_module.build_content_training_cells
+
+    def without_weapon_one(ids: dict[str, frozenset[str]]) -> dict[str, str]:
+        cells = original_builder(ids)
+        cells.pop("weapon:1")
+        return cells
+
+    monkeypatch.setattr(content_manifest_module, "build_content_training_cells", without_weapon_one)
+    with pytest.raises(ContractValidationError, match="training content keys mismatch"):
+        build_manifest(canonical_schema(), load_annotations(ANNOTATIONS))

@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from games.survivors.survivors_weapon_table import build_content_training_cells
+
 try:
     import yaml
 except ImportError:  # pragma: no cover - CLI が分かりやすいエラーを返すための境界
@@ -64,32 +66,6 @@ _REQUIRED_COMBINATIONS = frozenset({
 _ENEMY_IDS = frozenset(str(value) for value in range(11))
 _GATES = ("implemented", "reachable", "observed", "trained", "evaluated")
 _STARTING_EXCLUSION_IDS = frozenset({"12", "15", "27"})
-_OBS_CATEGORIES = frozenset({
-    "weapon_slots", "shield_and_weapon_slots", "passive_slots", "passive_slots_and_armor",
-    "passive_slots_and_regen", "blue_gem_observation", "green_gem_observation",
-    "red_gem_observation", "enemy_type_hp",
-})
-_WEAPON_HANDLERS = frozenset({
-    *(f"weapon_logic_{item_id}" for item_id in range(1, 12)),
-    "pentagram_logic", "peachone_logic", "ebony_wings_logic", "laurel_shield_logic",
-    *(f"evolved_weapon_logic_{item_id}" for item_id in range(16, 27)),
-    "gorgeous_moon_logic", "vandalier_logic",
-})
-_PASSIVE_HANDLERS = frozenset({
-    "passive_stat_power", "passive_stat_armor", "passive_stat_max_health",
-    "passive_stat_regeneration", "passive_stat_cooldown", "passive_stat_area",
-    "passive_stat_speed", "passive_stat_duration", "passive_stat_amount",
-    "passive_stat_move_speed", "passive_stat_magnet", "passive_stat_luck",
-    "passive_stat_growth", "intentional_no_combat_gold_only", "passive_stat_curse",
-    "passive_revive_counter", "passive_stat_omni_curse",
-})
-_HANDLERS = {
-    "weapons": _WEAPON_HANDLERS,
-    "passives": _PASSIVE_HANDLERS,
-    "gems": frozenset({"gem_xp_gain", "gem_xp_gain_multiplier"}),
-    "evolutions": frozenset({"evolution_slot_replace", "union_two_to_one_slots"}),
-    "enemies": frozenset({"enemy_spawn_and_contact", "boss_spawn_resistance_contact"}),
-}
 _COMBINATION_EVIDENCE = {
     "pair_evolution_union": (
         frozenset({"weapon:13", "weapon:14", "weapon:28"}),
@@ -109,18 +85,12 @@ _COMBINATION_EVIDENCE = {
     ),
 }
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-_PRODUCTION_EVIDENCE = {
-    _REPOSITORY_ROOT / "ReinBalance/Source/ReinBalanceLogic/Private/Survivors/SurvivorsGameLogic.cpp": (
-        "CreateWeaponLogic", "ComputePassiveEffects", "GetObservation", "DropGem",
-        "EvolveWeapon", "InitDefaultEnemyTable", "BuildLevelUpChoices",
-    ),
-    _REPOSITORY_ROOT / "ReinBalance/Source/Programs/ReinBalanceLogicTests/Private/Survivors/SurvivorsWeaponTests.cpp": (
-        "excluded starting weapons remain acquirable and upgradeable",
-        "all passives expose max level and finite summary",
-        "all enemies spawn and encode type finitely",
-        "evolution prerequisites include moon and vandalier union",
-    ),
-}
+_LOGIC_PATH = _REPOSITORY_ROOT / "ReinBalance/Source/ReinBalanceLogic/Private/Survivors/SurvivorsGameLogic.cpp"
+_TYPES_PATH = _REPOSITORY_ROOT / "ReinBalance/Source/ReinBalanceLogic/Public/Survivors/SurvivorsTypes.h"
+_CONSTANTS_PATH = _REPOSITORY_ROOT / "ReinBalance/Source/ReinBalanceLogic/Public/Survivors/SurvivorsGameConstants.h"
+_LLT_PATH = _REPOSITORY_ROOT / (
+    "ReinBalance/Source/Programs/ReinBalanceLogicTests/Private/Survivors/SurvivorsWeaponTests.cpp"
+)
 
 
 def ensure(condition: bool, message: str) -> None:
@@ -219,39 +189,161 @@ def _expected_scenario(collection: str, item_id: str) -> frozenset[str]:
     return frozenset({"enemy_10_boss_reset_step" if item_id == "10" else f"enemy_{item_id}_reset_step"})
 
 
-def _resolve_trace(collection: str, item_id: str, row: Mapping[str, Any]) -> dict[str, bool]:
-    """自己申告 boolean を使わず production/LLT 証跡から5ゲートを導出する。
+def _enum_id_names(source: str, enum_name: str) -> dict[str, str]:
+    """C++ enum の明示 ID と名前を機械的に抽出する。
 
     初心者向け:
-    handler、観測カテゴリ、シナリオのどれかが架空なら manifest 作成時点で拒否します。
+    Python に武器名やパッシブ名を複製せず、ゲーム本体の型宣言から対応を読み取ります。
     """
-    handler_ok = row["effect_handler"] in _HANDLERS[collection]
-    obs_ok = row["obs_category"] in _OBS_CATEGORIES
-    scenario_ok = row["scenario"] in _expected_scenario(collection, item_id)
-    ensure(handler_ok, f"{collection}:{item_id} unresolved effect_handler")
-    ensure(obs_ok, f"{collection}:{item_id} unresolved obs_category")
-    ensure(scenario_ok, f"{collection}:{item_id} unresolved scenario")
-    # LLT の表駆動 scenario は reset/choice/step と assertion を同じ行で実行する。
-    return {
-        "implemented": handler_ok,
-        "reachable": scenario_ok,
-        "observed": obs_ok,
-        "trained": scenario_ok,
-        "evaluated": scenario_ok,
+    match = re.search(rf"enum\s+class\s+{re.escape(enum_name)}\b[^{{]*{{(?P<body>.*?)}};", source, re.DOTALL)
+    ensure(match is not None, f"{enum_name} enum missing")
+    pairs = re.findall(r"^\s*([A-Za-z_]\w*)\s*=\s*(\d+)\s*,?", match.group("body"), re.MULTILINE)
+    result = {item_id: name for name, item_id in pairs if item_id != "0"}
+    ensure(len(result) == len(pairs) - sum(item_id == "0" for _, item_id in pairs), f"duplicate {enum_name} id")
+    return result
+
+
+def _function_body(source: str, signature: str) -> str:
+    """C++ 関数の波括弧範囲を簡易 lexer で切り出す。
+
+    初心者向け:
+    関数名が残っているだけでは成功させず、その関数の中に実装があるかを調べます。
+    """
+    start = source.find(signature)
+    ensure(start >= 0, f"production function missing: {signature}")
+    brace = source.find("{", start)
+    ensure(brace >= 0, f"production function body missing: {signature}")
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[brace + 1:index]
+    raise ContractValidationError(f"unterminated production function: {signature}")
+
+
+def _coverage_cells(source: str, array_name: str) -> dict[str, tuple[str, str]]:
+    """LLT の機械可読 cell registry を exact-set map として解決する。
+
+    初心者向け:
+    各 content の scenario と評価名が実際に LLT の実行対象配列へ入っているか確認します。
+    """
+    match = re.search(
+        rf"{re.escape(array_name)}\[\]\s*=\s*\{{(?P<body>.*?)\n\}};",
+        source,
+        re.DOTALL,
+    )
+    ensure(match is not None, f"LLT registry missing: {array_name}")
+    entries = re.findall(
+        r'\{\s*TEXT\("([^"]+)"\)\s*,\s*TEXT\("([^"]+)"\)\s*,\s*TEXT\("([^"]+)"\)\s*\}',
+        match.group("body"),
+    )
+    result: dict[str, tuple[str, str]] = {}
+    for key, scenario, assertion in entries:
+        ensure(key not in result, f"duplicate LLT coverage key: {key}")
+        result[key] = (scenario, assertion)
+    ensure(
+        re.search(rf"for\s*\([^)]*:\s*{re.escape(array_name)}\s*\)", source) is not None,
+        f"LLT registry is not executed: {array_name}",
+    )
+    ensure("CHECK(!FString(Cell.EvalAssertionId).IsEmpty())" in source, "LLT eval assertion check missing")
+    return result
+
+
+def _resolve_static_evidence(
+    ids: Mapping[str, frozenset[str]],
+    pairs: tuple[tuple[str, str, str, str], ...],
+) -> Mapping[str, Mapping[str, Mapping[str, bool]]]:
+    """production・training consumer・LLT を別々に解析し5ゲート証跡を作る。
+
+    初心者向け:
+    どれか一つの許可リストから全項目を成功にせず、実装、取得、観測、訓練、評価を別々に確認します。
+    """
+    logic = _LOGIC_PATH.read_text(encoding="utf-8")
+    types = _TYPES_PATH.read_text(encoding="utf-8")
+    constants = _CONSTANTS_PATH.read_text(encoding="utf-8")
+    llt = _LLT_PATH.read_text(encoding="utf-8")
+    weapon_names = _enum_id_names(types, "EWeaponType")
+    passive_names = _enum_id_names(types, "EPassiveItemType")
+    weapon_factory = _function_body(logic, "FSurvivorsGameLogic::CreateWeaponLogic")
+    choices = _function_body(logic, "FSurvivorsGameLogic::BuildLevelUpChoices")
+    passive_effects = _function_body(logic, "FSurvivorsGameLogic::ComputePassiveEffects")
+    observation = _function_body(logic, "FSurvivorsGameLogic::GetObservation")
+    enemy_table = _function_body(logic, "FSurvivorsGameLogic::InitDefaultEnemyTable")
+    gem_drop = _function_body(logic, "FSurvivorsGameLogic::DropGem")
+    cells = _coverage_cells(llt, "ContentCoverageCells")
+    llt_assertion_anchors = {
+        "weapons": "CHECK(static_cast<int32>(Logic.GetWeaponSlot(0).Type) == WeaponId)",
+        "passives": "CHECK(static_cast<int32>(Logic.GetPassiveSlot(0).Type) == PassiveId)",
+        "gems": "CHECK(static_cast<int32>(Logic.GetItemGemType(0)) == GemIndex)",
+        "evolutions": "CHECK(Logic.GetWeaponSlot(0).Type == Rule.EvolvedWeapon)",
+        "enemies": "CHECK(Logic.GetEnemyType(0) == EnemyId)",
     }
-
-
-def _verify_production_evidence() -> None:
-    """handler・obs・scenario registry の production/LLT anchor 実在を検証する。
-
-    初心者向け:
-    Python 内の許可名だけで成功させず、ゲーム本体と実行テストが削除されていないことも確認します。
-    """
-    for path, anchors in _PRODUCTION_EVIDENCE.items():
-        ensure(path.is_file(), f"production evidence file missing: {path}")
-        source = path.read_text(encoding="utf-8")
-        for anchor in anchors:
-            ensure(anchor in source, f"production evidence anchor missing: {anchor}")
+    for collection, anchor in llt_assertion_anchors.items():
+        ensure(anchor in llt, f"{collection} table-driven eval assertion missing")
+    expected_keys = {
+        f"{prefix}:{item_id}"
+        for collection, prefix in (
+            ("weapons", "weapon"), ("passives", "passive"), ("gems", "gem"),
+            ("evolutions", "evolution"), ("enemies", "enemy"),
+        )
+        for item_id in ids[collection]
+    }
+    ensure(frozenset(cells) == frozenset(expected_keys), "LLT content coverage keys mismatch")
+    training = build_content_training_cells(ids)
+    ensure(frozenset(training) == frozenset(expected_keys), "training content keys mismatch")
+    enemy_rows = re.findall(r'\{TEXT\("[^"]+"\),[^{}]+\}', enemy_table)
+    evolution_names = {
+        f"{base}:{evolved}": (weapon_names[base], weapon_names[evolved])
+        for base, evolved, _, _ in pairs
+    }
+    resolved: dict[str, dict[str, dict[str, bool]]] = {}
+    for collection in _COLLECTIONS:
+        prefix = {"weapons": "weapon", "passives": "passive", "gems": "gem",
+                  "evolutions": "evolution", "enemies": "enemy"}[collection]
+        resolved[collection] = {}
+        for item_id in ids[collection]:
+            key = f"{prefix}:{item_id}"
+            if collection == "weapons":
+                name = weapon_names[item_id]
+                implemented = re.search(rf"case\s+EWeaponType::{re.escape(name)}\s*:", weapon_factory) is not None
+                reachable = (
+                    re.search(rf"EWeaponType::{re.escape(name)}\b", choices) is not None
+                    or re.search(rf"EWeaponType::{re.escape(name)}\b", constants) is not None
+                )
+                observed = "WeaponSlots" in observation and 'TEXT("weapon_slots")' in logic
+            elif collection == "passives":
+                name = passive_names[item_id]
+                implemented = (
+                    re.search(rf"case\s+EPassiveItemType::{re.escape(name)}\s*:", passive_effects) is not None
+                    or name in {"Clover", "StoneMask"}
+                )
+                reachable = re.search(rf"EPassiveItemType::{re.escape(name)}\b", choices) is not None
+                observed = 'TEXT("passive_slots")' in llt and "PassiveSlots" in observation
+            elif collection == "gems":
+                implemented = "GemXPValues" in gem_drop and "Gems.Add" in gem_drop
+                reachable = "DropGem(" in logic
+                observed = "Gems" in observation and f"gem_{item_id}_pickup" in llt
+            elif collection == "evolutions":
+                base_name, evolved_name = evolution_names[item_id]
+                implemented = all(name in constants for name in (base_name, evolved_name))
+                reachable = "WeaponEvolve" in choices and all(name in constants for name in (base_name, evolved_name))
+                observed = "WeaponSlots" in observation
+            else:
+                implemented = int(item_id) < len(enemy_rows)
+                reachable = implemented and ("SpawnEnemy" in logic or "SpawnOneEnemy" in logic)
+                observed = 'TEXT("enemy_type")' in llt and "Enemies" in observation
+            scenario, assertion = cells[key]
+            resolved[collection][item_id] = {
+                "implemented": implemented,
+                "reachable": reachable,
+                "observed": observed,
+                "trained": training.get(key) == scenario,
+                "evaluated": bool(assertion) and key in cells,
+            }
+    return resolved
 
 
 def load_content_schema(value: Mapping[str, Any]) -> tuple[dict[str, frozenset[str]], dict[str, dict[str, int]], tuple[tuple[str, str, str, str], ...]]:
@@ -363,8 +455,8 @@ def build_manifest(schema: Mapping[str, Any], annotations: Mapping[str, Any]) ->
     初心者向け:
     全行に実装、取得、観測、訓練、評価の証拠が揃うまで manifest を作りません。
     """
-    _verify_production_evidence()
     ids, levels, pairs = load_content_schema(schema)
+    static_evidence = _resolve_static_evidence(ids, pairs)
     wire = _exact_object(annotations, _ANNOTATION_TOP_KEYS, "annotations")
     ensure(wire["schema_version"] == "survivors.content_annotations.v1", "unsupported annotation schema")
     collections = _exact_object(wire["collections"], _COLLECTIONS, "annotation collections")
@@ -383,11 +475,39 @@ def build_manifest(schema: Mapping[str, Any], annotations: Mapping[str, Any]) ->
             for key in ("scenario", "effect_handler", "obs_category"):
                 ensure(isinstance(row[key], str) and bool(row[key].strip()), f"{collection}:{item_id}.{key} required")
             ensure(row["target_relevant"], f"{collection}:{item_id} cannot be excluded from full coverage")
-            resolved = _resolve_trace(collection, item_id, row)
+            expected_scenarios = _expected_scenario(collection, item_id)
+            ensure(row["scenario"] in expected_scenarios, f"{collection}:{item_id} unresolved scenario")
+            prefix = {"weapons": "weapon", "passives": "passive", "gems": "gem",
+                      "evolutions": "evolution", "enemies": "enemy"}[collection]
+            registry_scenario = build_content_training_cells(ids)[f"{prefix}:{item_id}"]
+            ensure(row["scenario"] == registry_scenario, f"{collection}:{item_id} training scenario mismatch")
+            resolved = dict(static_evidence[collection][item_id])
+            ensure(all(resolved.values()), f"{collection}:{item_id} unresolved static evidence")
             for gate in _GATES:
                 ensure(row[gate] == resolved[gate], f"{collection}:{item_id}.{gate} contradicts resolved evidence")
             resolved_gates[collection][item_id] = resolved
     combinations = wire["combinations"]
+    combination_cells = _coverage_cells(
+        _LLT_PATH.read_text(encoding="utf-8"), "CombinationCoverageCells",
+    )
+    llt_source = _LLT_PATH.read_text(encoding="utf-8")
+    combination_sections = {
+        "pair_evolution_union": "pair evolution union",
+        "weak_defensive_weapon": "weak defensive weapon",
+        "instant_kill_resistance": "instant kill resistance",
+        "boss_interaction": "boss interaction",
+    }
+    for kind, section_name in combination_sections.items():
+        start = llt_source.find(f'SECTION("{section_name}")')
+        ensure(start >= 0, f"combination LLT section missing: {kind}")
+        next_start = llt_source.find("SECTION(", start + 1)
+        section = llt_source[start:next_start if next_start >= 0 else len(llt_source)]
+        ensure("CHECK(" in section, f"combination eval assertion missing: {kind}")
+    ensure(
+        frozenset(combination_cells)
+        == frozenset(f"combination:{kind}" for kind in _REQUIRED_COMBINATIONS),
+        "LLT combination coverage keys mismatch",
+    )
     ensure(isinstance(combinations, list), "combinations must be an array")
     kinds: set[str] = set()
     for raw in combinations:
@@ -410,8 +530,9 @@ def build_manifest(schema: Mapping[str, Any], annotations: Mapping[str, Any]) ->
         ensure(isinstance(row["eval_assertion"], str) and row["eval_assertion"], "combination eval required")
         expected_members, expected_scenario, expected_eval = _COMBINATION_EVIDENCE[row["kind"]]
         ensure(frozenset(row["members"]) == expected_members, "combination members evidence mismatch")
-        ensure(row["scenario"] == expected_scenario, "unresolved combination scenario")
-        ensure(row["eval_assertion"] == expected_eval, "unresolved combination eval assertion")
+        registry_scenario, registry_eval = combination_cells[f"combination:{row['kind']}"]
+        ensure(row["scenario"] == expected_scenario == registry_scenario, "unresolved combination scenario")
+        ensure(row["eval_assertion"] == expected_eval == registry_eval, "unresolved combination eval assertion")
     ensure(kinds == _REQUIRED_COMBINATIONS, "combination kinds mismatch")
     exclusions = wire["intentional_exclusions"]
     ensure(isinstance(exclusions, list), "intentional_exclusions must be an array")

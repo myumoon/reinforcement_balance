@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
 
 import pytest
 
+import games.survivors.content_manifest as content_manifest_module
 from games.survivors.content_manifest import ContractValidationError, build_manifest, load_annotations
 from games.survivors.survivors_vs_spec import WEAPON_EXCLUDED_AS_STARTING
 from games.survivors.survivors_weapon_curriculum import EXCLUDED_AS_STARTING_WEAPON
@@ -119,3 +121,28 @@ def test_combination_execution_evidence_must_resolve(key: str) -> None:
     annotations["combinations"][0][key] = "does_not_exist"
     with pytest.raises(ContractValidationError, match="unresolved"):
         build_manifest(canonical_schema(), annotations)
+
+
+def test_removed_combination_cell_is_blocking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """combination の実行 cell を削除すると audit 前に拒否する。
+
+    初心者向け:
+    YAML と Python の名前が残っていても、LLT の組合せテスト対象がなければ成功しません。
+    """
+    original = Path.read_text
+
+    def mutated_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        source = original(path, *args, **kwargs)
+        if path == content_manifest_module._LLT_PATH:
+            source = re.sub(
+                r'^\s*\{TEXT\("combination:weak_defensive_weapon"\).*$',
+                "",
+                source,
+                count=1,
+                flags=re.MULTILINE,
+            )
+        return source
+
+    monkeypatch.setattr(Path, "read_text", mutated_read_text)
+    with pytest.raises(ContractValidationError, match="LLT combination coverage keys mismatch"):
+        build_manifest(canonical_schema(), load_annotations(ANNOTATIONS))
