@@ -4,11 +4,52 @@
  */
 #include "TestHarness.h"
 
+#include "HAL/PlatformFileManager.h"
+#include "Misc/FileHelper.h"
 #include "Misc/MD5.h"
+#include "Misc/Paths.h"
 #include "Survivors/Game/SurvivorsGame.h"
 #include "Survivors/SurvivorsGameConstants.h"
 #include "Survivors/SurvivorsGameLogic.h"
 #include "UObject/UObjectGlobals.h"
+
+/**
+ * JSON の構造を変えず formatting whitespace だけを除去する。
+ * 初心者向け:
+ * capture の改行やインデントには依存せず、C++ が出した全 key と値を同じ順で比較します。
+ */
+static FString CompactCapturedSchema(FString Value)
+{
+	Value.ReplaceInline(TEXT("\r"), TEXT(""));
+	Value.ReplaceInline(TEXT("\n"), TEXT(""));
+	Value.ReplaceInline(TEXT("\t"), TEXT(""));
+	return Value;
+}
+
+/**
+ * committed capture と live Logic export の完全一致を検証する。
+ * 初心者向け:
+ * C++ の content を変えたのに Python 用 capture を更新し忘れると、Windows LLT が失敗します。
+ */
+TEST_CASE("Survivors live content schema equals committed capture", "[unit][survivors][content][capture]")
+{
+	FSurvivorsGameLogic Logic;
+	FSurvivorsGameLogicConfig Config;
+	Logic.Initialize(Config);
+
+	const FString CapturePath = FPaths::ConvertRelativePathToFull(
+		FPaths::ProjectDir(),
+		TEXT("../Tools/Training/configs/survivors_content_schema_capture_v1.json"));
+	FString Captured;
+	REQUIRE(FPlatformFileManager::Get().GetPlatformFile().FileExists(*CapturePath));
+	REQUIRE(FFileHelper::LoadFileToString(Captured, *CapturePath));
+
+	const FString Live = FString::Printf(
+		TEXT("{\"schema_version\":\"survivors.content_schema.v1\",\"content\":%s,\"action_time\":%s}"),
+		*Logic.GetContentSchema(),
+		*Logic.GetActionTimeSchema());
+	CHECK(CompactCapturedSchema(Captured) == Live);
+}
 
 /**
  * facade→Logic の schema bytes と hash 整合を検証する。

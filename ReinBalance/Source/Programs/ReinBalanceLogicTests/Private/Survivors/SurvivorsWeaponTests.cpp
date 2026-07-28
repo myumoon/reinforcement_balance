@@ -34,6 +34,33 @@ struct FSurvivorsGameTestAccess
 	{
 		return Logic.Gems.IsValidIndex(Index) ? Logic.Gems[Index].BaseExperienceValue : 0.f;
 	}
+	/**
+	 * production enemy state を既定 table から投入する。
+	 * 初心者向け: 接触・武器・drop 処理へ渡す敵を、ゲーム本体と同じ値で用意します。
+	 */
+	static void AddEnemy(FSurvivorsGameLogic& Logic, int32 TypeId, bool bPendingRemove = false)
+	{
+		const FEnemyTypeParams& Params = Logic.CurrentConfig.EnemyTypeTable[TypeId];
+		FEnemyState Enemy;
+		Enemy.Pos = Logic.PlayerPos;
+		Enemy.TypeId = TypeId;
+		Enemy.MaxHP = Params.BaseHP;
+		Enemy.HP = Params.BaseHP;
+		Enemy.ContactDamage = Params.ContactDamage;
+		Enemy.CollisionRadius = Params.CollisionRadius;
+		Enemy.UniqueId = Logic.NextEnemyId++;
+		Enemy.PlayerLastHitTime = -1000.f;
+		Enemy.bPendingRemove = bPendingRemove;
+		Logic.Enemies.Add(Enemy);
+	}
+	/** boss kill 後の production drop 確定処理を呼ぶ。
+	 * 初心者向け: 倒した敵が宝箱へ変わる実処理をテストから進めます。
+	 */
+	static void FinalizeEnemyDrops(FSurvivorsGameLogic& Logic) { Logic.FinalizePendingEnemies(); }
+	/** production special pickup 効果を適用する。
+	 * 初心者向け: 宝箱取得による進化をゲーム本体の処理で発生させます。
+	 */
+	static void CollectSpecialPickups(FSurvivorsGameLogic& Logic) { Logic.CheckSpecialPickups(); }
 };
 
 namespace
@@ -160,6 +187,8 @@ const FContentCoverageCell& RequireCombinationCell(const FString& Kind)
 	return CombinationCoverageCells[0];
 }
 
+int32 FindObservationOffset(const FSurvivorsGameLogic& Logic, const TCHAR* SegmentName);
+
 /**
  * 全観測値が finite であることを確認する。
  * 初心者向け:
@@ -223,18 +252,33 @@ TEST_CASE("Survivors combination coverage cells assert production mechanics", "[
 		FSurvivorsGameLogic Logic;
 		Logic.Initialize(Config);
 		Logic.Reset(5100);
-		CHECK(Logic.GetWeaponSlot(0).Type == EWeaponType::Laurel);
+		FSurvivorsGameTestAccess::AddEnemy(Logic, 0);
+		const float HPBeforeContact = Logic.GetPlayerHP();
+		Logic.PhysicsStep(8);
+		const int32 ShieldOffset = FindObservationOffset(Logic, TEXT("shield_active"));
 		CHECK(Logic.IsShieldActive());
+		CHECK(Logic.GetPlayerHP() == HPBeforeContact);
+		CHECK(Logic.GetObservation()[ShieldOffset] == 1.f);
 	}
 	SECTION("instant kill resistance")
 	{
 		const FContentCoverageCell& Cell = RequireCombinationCell(TEXT("instant_kill_resistance"));
 		INFO(Cell.ScenarioId); INFO(Cell.EvalAssertionId);
+		FSurvivorsGameLogicConfig Config;
+		Config.bHasInitialOverride = true;
+		Config.InitialWeaponSlots.Add({static_cast<int32>(EWeaponType::Pentagram), 1});
 		FSurvivorsGameLogic Logic;
+		Logic.Initialize(Config);
 		Logic.Reset(5200);
 		const FEnemyTypeParams& Boss = FSurvivorsGameTestAccess::EnemyTable(Logic)[10];
 		CHECK(Boss.bIsBoss);
 		CHECK(Boss.bResistsInstantKill);
+		FSurvivorsGameTestAccess::AddEnemy(Logic, 10);
+		const float BossHPBefore = Logic.GetEnemyHP(0);
+		Logic.PhysicsStep(8);
+		CHECK(Logic.GetEnemyCount() == 1);
+		CHECK(Logic.GetEnemyHP(0) > 0.f);
+		CHECK(Logic.GetEnemyHP(0) < BossHPBefore);
 	}
 	SECTION("boss interaction")
 	{
@@ -242,16 +286,21 @@ TEST_CASE("Survivors combination coverage cells assert production mechanics", "[
 		INFO(Cell.ScenarioId); INFO(Cell.EvalAssertionId);
 		FSurvivorsGameLogicConfig Config;
 		Config.bEnableEvolutions = true;
+		Config.bHasInitialOverride = true;
+		Config.InitialWeaponSlots.Add({static_cast<int32>(EWeaponType::Pentagram), 8});
+		Config.InitialPassiveSlots.Add({static_cast<int32>(EPassiveItemType::Crown), 1});
 		FSurvivorsGameLogic Logic;
 		Logic.Initialize(Config);
 		Logic.Reset(5300);
 		CHECK(FSurvivorsGameTestAccess::EnemyTable(Logic)[10].bIsBoss);
-		CHECK(SurvivorsGameConstants::EvolutionTable.ContainsByPredicate(
-			[](const SurvivorsGameConstants::FEvolutionRule& Rule)
-			{
-				return Rule.BaseWeapon == EWeaponType::Pentagram
-					&& Rule.EvolvedWeapon == EWeaponType::GorgeousMoon;
-			}));
+		FSurvivorsGameTestAccess::AddEnemy(Logic, 10, true);
+		FSurvivorsGameTestAccess::FinalizeEnemyDrops(Logic);
+		CHECK(Logic.GetEnemyCount() == 0);
+		CHECK(Logic.GetSpecialPickupCount() == 1);
+		CHECK(Logic.GetSpecialPickupType(0) == ESpecialPickupType::TreasureChest);
+		FSurvivorsGameTestAccess::CollectSpecialPickups(Logic);
+		CHECK(Logic.GetSpecialPickupCount() == 0);
+		CHECK(Logic.GetWeaponSlot(0).Type == EWeaponType::GorgeousMoon);
 	}
 }
 

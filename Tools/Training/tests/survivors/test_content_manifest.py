@@ -7,6 +7,7 @@ C++ schema と YAML の差、重複、欠落、手書き互換定数のずれを
 from __future__ import annotations
 
 import copy
+import json
 import re
 from pathlib import Path
 
@@ -31,46 +32,16 @@ from games.survivors.survivors_weapon_table import (
 
 ROOT = Path(__file__).resolve().parents[4]
 ANNOTATIONS = ROOT / "Tools/Training/configs/survivors_content_annotations_v1.yaml"
+SCHEMA_CAPTURE = ROOT / "Tools/Training/configs/survivors_content_schema_capture_v1.json"
 
 
 def canonical_schema() -> dict:
-    """現行 C++ export と同じ collection identity の fixture を返す。
+    """LLT が live C++ export と照合する committed capture を返す。
 
     初心者向け:
-    値のミラーを production へ置かず、テスト内だけで不正入力を作る土台にします。
+    Python の手書き定数から schema を組み立てず、C++ 出力を保存した独立入力を使います。
     """
-    weapon_rows = [{"id": str(item_id), "max_level": 8 if item_id < 15 else (7 if item_id == 15 else 1)}
-                   for item_id in range(1, 29)]
-    passive_rows = [{"id": str(item_id), "max_level": PASSIVE_MAX_LEVEL[item_id]} for item_id in range(1, 18)]
-    evolution_rows = [
-        {
-            "base_id": str(row["base"]), "evolved_id": str(row["evolved"]),
-            "passive_id": str(row["passive"]), "union_partner_id": str(row.get("union_weapon", 0)),
-        }
-        for row in EVOLUTION_TABLE
-    ]
-    directions = [
-        (0.0, 1.0), (2 ** -0.5, 2 ** -0.5), (1.0, 0.0), (2 ** -0.5, -(2 ** -0.5)),
-        (0.0, -1.0), (-(2 ** -0.5), -(2 ** -0.5)), (-1.0, 0.0),
-        (-(2 ** -0.5), 2 ** -0.5), (0.0, 0.0),
-    ]
-    return {
-        "schema_version": "survivors.content_schema.v1",
-        "content": {
-            "max_level": 100, "weapons": weapon_rows, "passives": passive_rows,
-            "gems": [{"id": "blue", "xp": 2}, {"id": "green", "xp": 9}, {"id": "red", "xp": 10}],
-            "xp_curve": [0] * 100, "level_cadence": "xp_threshold",
-            "offer": {"count": 3, "fallback": "none_when_pool_empty"},
-            "slots": {"weapon": 6, "passive": 6}, "evolutions": evolution_rows,
-            "chest": {"boss_drop": True, "evolution_enabled_by_config": True},
-        },
-        "action_time": {
-            "physics_dt": 1 / 60, "decision_steps": 1,
-            "directions": [{"id": index, "x": xy[0], "y": xy[1]} for index, xy in enumerate(directions)],
-            "move_speed": 80, "screen_displacement_per_step": 80 / 60,
-            "pause_during_level_up": False, "level_up_timing": "same_physics_step",
-        },
-    }
+    return json.loads(SCHEMA_CAPTURE.read_text(encoding="utf-8"))
 
 
 def test_all_content_has_five_gate_trace_and_audit_is_clear() -> None:
@@ -87,16 +58,34 @@ def test_all_content_has_five_gate_trace_and_audit_is_clear() -> None:
 
 
 @pytest.mark.parametrize("collection", ["weapons", "passives", "gems", "evolutions", "enemies"])
-def test_added_content_without_annotation_is_blocked(collection: str) -> None:
+def test_added_content_without_annotation_is_blocked(
+    collection: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """全 collection の annotation 過不足を対称に拒否する。
 
     初心者向け:
-    どの種類でも行を一つ消せば manifest が作れないことを確認します。
+    どの種類でも C++ schema 側へ行だけを追加すれば manifest が作れないことを確認します。
     """
-    annotations = copy.deepcopy(load_annotations(ANNOTATIONS))
-    annotations["collections"][collection].pop(next(iter(annotations["collections"][collection])))
-    with pytest.raises(ContractValidationError, match="annotation ids mismatch"):
-        build_manifest(canonical_schema(), annotations)
+    schema = canonical_schema()
+    if collection == "weapons":
+        schema["content"]["weapons"].append({"id": "29", "max_level": 1})
+    elif collection == "passives":
+        schema["content"]["passives"].append({"id": "18", "max_level": 1})
+    elif collection == "gems":
+        schema["content"]["gems"].append({"id": "gold", "xp": 1})
+    elif collection == "evolutions":
+        schema["content"]["evolutions"].append({
+            "base_id": "15", "evolved_id": "16", "passive_id": "1", "union_partner_id": "0",
+        })
+    else:
+        monkeypatch.setattr(
+            content_manifest_module,
+            "_ENEMY_IDS",
+            content_manifest_module._ENEMY_IDS | frozenset({"11"}),
+        )
+    with pytest.raises(ContractValidationError):
+        build_manifest(schema, load_annotations(ANNOTATIONS))
 
 
 @pytest.mark.parametrize("collection", ["weapons", "passives", "gems"])
