@@ -67,6 +67,7 @@ class FakeLevelUpHttpTransport:
         self.applies = 0
         self.cached: dict | None = None
         self.timeout_delivered = False
+        self.item_selection_mode = "external"
 
     def step(self) -> dict:
         return {
@@ -88,12 +89,19 @@ class FakeLevelUpHttpTransport:
         }
 
     def post(self, endpoint, payload, **_kwargs) -> dict:
+        if endpoint == "/params":
+            assert payload == {"item_selection_mode": "auto"}
+            assert self.cached is not None
+            self.item_selection_mode = "auto"
+            return {"status": "ok"}
+
         assert endpoint == "/level_up_choice"
         assert payload == {
             "decision_id": "level-up-1-1-2",
             "choice_id": "choice-0",
         }
         if self.cached is None:
+            assert self.item_selection_mode == "external"
             self.applies += 1
             self.cached = {
                 "status": "applied",
@@ -126,6 +134,7 @@ def test_monitor_choice_ack_and_duplicate_response_are_idempotent(monkeypatch) -
     assert pending["info"]["level_up_choices"][0]["choice_id"] == "choice-0"
 
     first = monitor.choose_level_up("level-up-1-1-2", "choice-0")
+    transport.post("/params", {"item_selection_mode": "auto"})
     duplicate = monitor.choose_level_up("level-up-1-1-2", "choice-0")
 
     assert first == duplicate

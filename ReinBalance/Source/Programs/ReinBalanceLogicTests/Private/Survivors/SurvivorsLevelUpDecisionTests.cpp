@@ -160,3 +160,99 @@ TEST_CASE("Survivors external overflow advances one level and freezes simulation
 	CHECK(Stale.Status == ESurvivorsLevelUpApplyStatus::StaleDecision);
 	CHECK(Logic.GetPlayerLevel() == 3);
 }
+
+TEST_CASE("Survivors duplicate retry remains idempotent after switching to auto",
+	"[unit][survivors][level-up][external][idempotency]")
+{
+	FSurvivorsGameLogicConfig Config;
+	Config.ItemSelectionMode = TEXT("external");
+	Config.WeaponPoolMode = TEXT("garlic_only");
+	Config.bEnablePassives = false;
+	Config.bEnableEvolutions = false;
+
+	FSurvivorsGameLogic Logic;
+	Logic.Initialize(Config);
+	Logic.Reset(17);
+	Logic.AddExperience(5.f);
+
+	REQUIRE(Logic.IsLevelUpPending());
+	const FSurvivorsPendingLevelUpDecision Pending =
+		Logic.GetPendingLevelUpDecision();
+	REQUIRE(!Pending.Choices.IsEmpty());
+	const FString ChoiceId = Pending.Choices[0].ChoiceId;
+	const FSurvivorsLevelUpApplyResult Applied =
+		Logic.ApplyExternalLevelUpChoice(Pending.DecisionId, ChoiceId);
+	REQUIRE(Applied.Status == ESurvivorsLevelUpApplyStatus::Applied);
+	const int32 LevelAfterApply = Logic.GetPlayerLevel();
+	const int32 GarlicLevelAfterApply = Logic.GetWeaponSlot(0).Level.Value;
+
+	FSurvivorsGameLogicConfig AutoConfig = Config;
+	AutoConfig.ItemSelectionMode = TEXT("auto");
+	Logic.ApplyConfig(AutoConfig);
+
+	const FSurvivorsLevelUpApplyResult Duplicate =
+		Logic.ApplyExternalLevelUpChoice(Pending.DecisionId, ChoiceId);
+	CHECK(Duplicate.Status == ESurvivorsLevelUpApplyStatus::Applied);
+	CHECK(Duplicate.PostChoiceObs == Applied.PostChoiceObs);
+	CHECK(Logic.GetPlayerLevel() == LevelAfterApply);
+	CHECK(Logic.GetWeaponSlot(0).Level.Value == GarlicLevelAfterApply);
+
+	const FSurvivorsLevelUpApplyResult DifferentChoice =
+		Logic.ApplyExternalLevelUpChoice(Pending.DecisionId, TEXT("choice-999"));
+	CHECK(DifferentChoice.Status == ESurvivorsLevelUpApplyStatus::StaleDecision);
+	const FSurvivorsLevelUpApplyResult UnknownDecision =
+		Logic.ApplyExternalLevelUpChoice(TEXT("level-up-unknown"), ChoiceId);
+	CHECK(UnknownDecision.Status == ESurvivorsLevelUpApplyStatus::StaleDecision);
+}
+
+TEST_CASE("Survivors exhausted external pool drains overflow through no-upgrade decisions",
+	"[unit][survivors][level-up][external][backlog]")
+{
+	FSurvivorsGameLogicConfig Config;
+	Config.ItemSelectionMode = TEXT("external");
+	Config.WeaponPoolMode = TEXT("garlic_only");
+	Config.bEnablePassives = false;
+	Config.bEnableEvolutions = false;
+	Config.MinActiveEnemies = 0;
+
+	FSurvivorsGameLogic Logic;
+	Logic.Initialize(Config);
+	Logic.Reset(23);
+	Logic.AddExperience(405.f);
+
+	bool bSawNoUpgrade = false;
+	int32 AcceptedCount = 0;
+	while (Logic.IsLevelUpPending() && AcceptedCount < 32)
+	{
+		const FSurvivorsPendingLevelUpDecision Pending =
+			Logic.GetPendingLevelUpDecision();
+		REQUIRE(!Pending.Choices.IsEmpty());
+		bSawNoUpgrade |= Pending.Choices[0].Choice.ChoiceType
+			== FLevelUpChoice::EChoiceType::NoUpgrade;
+
+		const float TimeBefore = Logic.GetElapsedTime();
+		Logic.PhysicsStep(0);
+		CHECK(Logic.GetElapsedTime() == TimeBefore);
+
+		const int32 LevelBefore = Logic.GetPlayerLevel();
+		const FSurvivorsLevelUpApplyResult Applied =
+			Logic.ApplyExternalLevelUpChoice(
+				Pending.DecisionId, Pending.Choices[0].ChoiceId);
+		REQUIRE(Applied.Status == ESurvivorsLevelUpApplyStatus::Applied);
+		CHECK(Logic.GetPlayerLevel() <= LevelBefore + 1);
+		if (Logic.GetLevelUpBacklog() > 0)
+		{
+			CHECK(Logic.IsLevelUpPending());
+			CHECK(!Logic.GetPendingLevelUpDecision().Choices.IsEmpty());
+		}
+		++AcceptedCount;
+	}
+
+	CHECK(AcceptedCount < 32);
+	CHECK(bSawNoUpgrade);
+	CHECK(!Logic.IsLevelUpPending());
+	CHECK(Logic.GetLevelUpBacklog() == 0);
+	CHECK(Logic.GetPlayerLevel() == 10);
+	CHECK(Logic.GetWeaponSlot(0).Level.Value
+		== SurvivorsGameConstants::GetWeaponMaxLevel(EWeaponType::Garlic));
+}

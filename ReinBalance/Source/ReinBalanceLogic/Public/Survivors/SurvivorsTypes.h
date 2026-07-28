@@ -1,5 +1,9 @@
 #pragma once
 
+/**
+ * Survivors のロジック層で共有する列挙型と状態型を定義する。
+ * 初心者向け: ゲーム進行と外部 API が同じ値の意味を共有するための型一覧です。
+ */
 #include "CoreMinimal.h"
 #include "Survivors/SurvivorsCollisionTypes.h"
 #include "Survivors/SurvivorsValueTypes.h"
@@ -142,6 +146,7 @@ struct FLevelUpChoice
 		WeaponEvolve,
 		PassiveNew,
 		PassiveUpgrade,
+		NoUpgrade,  // external mode で候補 pool が枯渇したレベルの確認
 	};
 
 	EChoiceType      ChoiceType  = EChoiceType::WeaponNew;

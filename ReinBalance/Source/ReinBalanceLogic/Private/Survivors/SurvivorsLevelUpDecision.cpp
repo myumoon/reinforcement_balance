@@ -89,6 +89,8 @@ FString SurvivorsLevelUpChoiceTypeToString(FLevelUpChoice::EChoiceType ChoiceTyp
 		return TEXT("passive_new");
 	case FLevelUpChoice::EChoiceType::PassiveUpgrade:
 		return TEXT("passive_upgrade");
+	case FLevelUpChoice::EChoiceType::NoUpgrade:
+		return TEXT("no_upgrade");
 	default:
 		return TEXT("unknown");
 	}

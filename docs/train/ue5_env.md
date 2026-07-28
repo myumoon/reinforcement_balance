@@ -90,7 +90,8 @@ Content-Type: application/json
 
 成功時は `status="applied"`、要求 ID、適用直後の `obs`、`obs_schema_hash`、
 次の pending 状態を含む `info` を返す。通信タイムアウト時は同じ payload を
-再送でき、直前に受理した同一要求には最初と同じ `200` response を返す。
+再送でき、直前に受理した同一要求には現在の `item_selection_mode` に関係なく
+最初と同じ `200` response を返す。
 
 ### XP overflow 遷移
 
@@ -100,6 +101,7 @@ Content-Type: application/json
 | pending 中の `/step` | 変化なし | 同じ ID と候補 | time/reward/spawn も変化なし |
 | valid choice | item を 1 回適用 | current を原子的に解除 | backlog の閾値を 1 つだけ評価 |
 | 次の閾値も超過済み | level をさらに 1 だけ増加 | 新しい decision ID | 再び停止 |
+| 候補 pool 枯渇かつ次の閾値を超過済み | level を 1 だけ増加 | `type="no_upgrade"` の非空候補 | no-upgrade の受理まで停止し、残り backlog も同様に1つずつ処理 |
 | `/reset` | level/XP を初期化 | なし | backlog と idempotency 履歴も消去 |
 
 ### HTTP エラー

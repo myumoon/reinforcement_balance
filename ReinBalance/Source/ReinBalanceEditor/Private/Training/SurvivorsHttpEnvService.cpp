@@ -62,12 +62,19 @@ TSharedRef<FJsonObject> BuildLevelUpInfoObject(
 		ChoiceJson->SetStringField(TEXT("choice_id"), Offer.ChoiceId);
 		ChoiceJson->SetStringField(
 			TEXT("type"), SurvivorsLevelUpChoiceTypeToString(Choice.ChoiceType));
+		const bool bNoUpgrade =
+			Choice.ChoiceType == FLevelUpChoice::EChoiceType::NoUpgrade;
 		const bool bWeapon = Choice.WeaponType != EWeaponType::None;
 		ChoiceJson->SetStringField(
-			TEXT("item_kind"), bWeapon ? TEXT("weapon") : TEXT("passive"));
+			TEXT("item_kind"),
+			bNoUpgrade
+				? TEXT("none")
+				: (bWeapon ? TEXT("weapon") : TEXT("passive")));
 		ChoiceJson->SetNumberField(
 			TEXT("item_id"),
-			bWeapon
+			bNoUpgrade
+				? 0
+				: bWeapon
 				? static_cast<int32>(Choice.WeaponType)
 				: static_cast<int32>(Choice.PassiveType));
 		ChoiceJson->SetNumberField(TEXT("slot_index"), Choice.SlotIdx);

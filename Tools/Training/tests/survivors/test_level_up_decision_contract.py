@@ -91,3 +91,24 @@ def test_decision_id_generation_does_not_use_game_rng() -> None:
     assert "DecisionSequence" in source
     assert "RandStream" not in source
     assert "FRandom" not in source
+
+
+def test_duplicate_retry_precedes_mode_gate_and_empty_pool_stays_pending() -> None:
+    source = (
+        ROOT
+        / "ReinBalance/Source/ReinBalanceLogic/Private/Survivors/SurvivorsGameLogic.cpp"
+    ).read_text(encoding="utf-8")
+    apply_body = source.split(
+        "FSurvivorsLevelUpApplyResult FSurvivorsGameLogic::ApplyExternalLevelUpChoice",
+        1,
+    )[1].split("FPassiveEffects FSurvivorsGameLogic::ComputePassiveEffects", 1)[0]
+    advance_body = source.split(
+        "void FSurvivorsGameLogic::AdvanceEligibleLevels()", 1
+    )[1].split("void FSurvivorsGameLogic::OnLevelUp", 1)[0]
+
+    assert apply_body.index("ValidateChoice") < apply_body.index(
+        "CurrentConfig.ItemSelectionMode"
+    )
+    assert "ESurvivorsLevelUpChoiceValidation::Duplicate" in apply_body
+    assert "EChoiceType::NoUpgrade" in advance_body
+    assert "BeginDecision" in advance_body

@@ -846,14 +846,23 @@ void FSurvivorsGameLogic::AdvanceEligibleLevels()
 	{
 		if (CurrentConfig.ItemSelectionMode.Equals(TEXT("external"), ESearchCase::CaseSensitive))
 		{
-			const TArray<FLevelUpChoice> Choices = BuildLevelUpChoices();
+			TArray<FLevelUpChoice> Choices = BuildLevelUpChoices();
 			if (Choices.IsEmpty())
 			{
-				LevelUpBacklog = CountEligibleLevelBacklog();
-				return;
+				// 外部 mode では候補枯渇も明示的な no-upgrade decision にする。
+				// 初心者向け: 選べる強化がなくても確認を1回受けるまで時間を止め、レベルを一つずつ進めます。
+				FLevelUpChoice NoUpgradeChoice;
+				NoUpgradeChoice.ChoiceType =
+					FLevelUpChoice::EChoiceType::NoUpgrade;
+				NoUpgradeChoice.NewLevel = 0;
+				Choices.Add(NoUpgradeChoice);
 			}
 			++PlayerLevel;
-			LevelUpDecisionState.BeginDecision(PlayerLevel, Choices);
+			const bool bDecisionStarted =
+				LevelUpDecisionState.BeginDecision(PlayerLevel, Choices);
+			checkf(
+				bDecisionStarted,
+				TEXT("external level-up must create a non-empty pending decision"));
 			LevelUpBacklog = CountEligibleLevelBacklog();
 			return;
 		}
@@ -897,11 +906,6 @@ FSurvivorsLevelUpApplyResult FSurvivorsGameLogic::ApplyExternalLevelUpChoice(
 	Rejected.DecisionId = DecisionId;
 	Rejected.ChoiceId = ChoiceId;
 
-	if (!CurrentConfig.ItemSelectionMode.Equals(TEXT("external"), ESearchCase::CaseSensitive))
-	{
-		return Rejected;
-	}
-
 	int32 ChoiceIndex = INDEX_NONE;
 	const ESurvivorsLevelUpChoiceValidation Validation =
 		LevelUpDecisionState.ValidateChoice(DecisionId, ChoiceId, ChoiceIndex);
@@ -910,6 +914,10 @@ FSurvivorsLevelUpApplyResult FSurvivorsGameLogic::ApplyExternalLevelUpChoice(
 		return LastAppliedLevelUpResult.IsSet()
 			? LastAppliedLevelUpResult.GetValue()
 			: Rejected;
+	}
+	if (!CurrentConfig.ItemSelectionMode.Equals(TEXT("external"), ESearchCase::CaseSensitive))
+	{
+		return Rejected;
 	}
 	if (Validation == ESurvivorsLevelUpChoiceValidation::InvalidChoice)
 	{
@@ -1114,6 +1122,8 @@ void FSurvivorsGameLogic::ApplyLevelUpChoice(const FLevelUpChoice& Choice)
 {
 	switch (Choice.ChoiceType)
 	{
+	case FLevelUpChoice::EChoiceType::NoUpgrade:
+		return;
 	case FLevelUpChoice::EChoiceType::PassiveNew:
 		for(int32 i=0;i<MaxPassiveSlots;++i) if(PassiveSlots[i].Type==EPassiveItemType::None){PassiveSlots[i].Type=Choice.PassiveType;PassiveSlots[i].Level=1;break;} return;
 	case FLevelUpChoice::EChoiceType::PassiveUpgrade:
@@ -1122,8 +1132,10 @@ void FSurvivorsGameLogic::ApplyLevelUpChoice(const FLevelUpChoice& Choice)
 		for(const SurvivorsGameConstants::FEvolutionRule& Rule:SurvivorsGameConstants::EvolutionTable) if(Rule.EvolvedWeapon==Choice.WeaponType){for(int32 i=0;i<MaxWeaponSlots;++i) if(WeaponSlots[i].Type==Rule.BaseWeapon){EvolveWeapon(i,Choice.WeaponType);return;} break;} return;
 	case FLevelUpChoice::EChoiceType::WeaponUpgrade:
 		for(int32 i=0;i<MaxWeaponSlots;++i) if(WeaponSlots[i].Type==Choice.WeaponType){const int32 NL=FMath::Min(Choice.NewLevel,SurvivorsGameConstants::GetWeaponMaxLevel(Choice.WeaponType));WeaponSlots[i].Level=FWeaponLevel(NL);if(Weapons.IsValidIndex(i)&&Weapons[i])Weapons[i]->SetLevel(FWeaponLevel(NL));return;} return;
-	case FLevelUpChoice::EChoiceType::WeaponNew: default:
+	case FLevelUpChoice::EChoiceType::WeaponNew:
 		for(int32 i=0;i<MaxWeaponSlots;++i) if(WeaponSlots[i].Type==EWeaponType::None){WeaponSlots[i].Type=Choice.WeaponType;WeaponSlots[i].Level=FWeaponLevel(1);EquipWeapon(i,Choice.WeaponType,1);return;} return;
+	default:
+		return;
 	}
 }
 
