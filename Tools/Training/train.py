@@ -49,6 +49,7 @@ from games.survivors.task_cell_sampler_callback import TaskCellSamplerCallback
 from games.survivors.modules.task_cell_sampler_module import TaskCellSamplerStateModule
 from games.survivors.modules.weapon_unlock_module import WeaponUnlockStateModule
 from games.survivors.survivors_weapon_table import resolve_weapon_unlock_order
+from reinbalance_survivors_contracts.perception_error import PerceptionErrorProfile
 
 try:
     import wandb
@@ -147,6 +148,25 @@ def _read_json(path: Path) -> dict:
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_perception_error_profile(path: Path) -> PerceptionErrorProfile:
+    """perception error JSON を共有 fail-closed 契約でロードする。
+
+    train.py 側で field を独自解釈せず、未知 field・型・範囲・split 重複を
+    Common の versioned loader に一任して同じ canonical hash を得ます。
+    """
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"--perception-error-profile が見つかりません: {path}"
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"--perception-error-profile は有効な JSON ではありません: {path}"
+        ) from exc
+    return PerceptionErrorProfile.from_wire(payload)
 
 
 def _write_json(path: Path, data: dict) -> None:
@@ -468,6 +488,14 @@ def _write_run_meta(run_dir: Path, args: argparse.Namespace, config_hash: str) -
         "game": args.game,
         "config_path": str(args.config) if args.config else None,
         "config_hash": config_hash,
+        "perception_error_profile_path": (
+            str(args.perception_error_profile)
+            if getattr(args, "perception_error_profile", None)
+            else None
+        ),
+        "perception_error_profile_hash": getattr(
+            args, "perception_error_profile_hash", None
+        ),
         "git_branch": _git_value(["branch", "--show-current"]),
         "git_commit": _git_value(["rev-parse", "HEAD"]),
     })
@@ -946,6 +974,15 @@ def parse_args() -> argparse.Namespace:
                    help="距離バイアスの強さ (--entity-attention 専用, default: 1.0)")
     p.add_argument("--reward-fn", type=Path, default=None,
                    help="報酬シェーピング関数のパス (例: eureka_results/my_run/best/reward_fn.py, --game coin/survivors 専用)")
+    p.add_argument(
+        "--perception-error-profile",
+        type=Path,
+        default=None,
+        help=(
+            "Survivors perception error profile JSON。03-02 では厳格検証し、"
+            "canonical hash を run manifest に記録します"
+        ),
+    )
     p.add_argument("--no-vec-normalize", action="store_true",
                    help="VecNormalize による観測・報酬の正規化を無効化する")
     p.add_argument("--anneal-threshold", type=float, default=0.1,
@@ -1213,6 +1250,22 @@ def main() -> None:
     _use_wandb = False
     wandb_logger = WandbLogger(enabled=False)
     args = parse_args()
+
+    args.perception_error_profile_hash = None
+    if args.perception_error_profile is not None:
+        if args.game != "survivors":
+            raise ValueError(
+                "--perception-error-profile は --game survivors 専用です"
+            )
+        perception_error_profile = _load_perception_error_profile(
+            args.perception_error_profile
+        )
+        args.perception_error_profile_hash = perception_error_profile.profile_hash
+        print(
+            "[INFO] perception error profile を検証しました: "
+            f"path={args.perception_error_profile}, "
+            f"hash={args.perception_error_profile_hash}"
+        )
 
     if args.recurrent and not _SB3_CONTRIB_AVAILABLE:
         raise ImportError(
