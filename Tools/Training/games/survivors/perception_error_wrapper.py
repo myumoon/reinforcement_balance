@@ -48,7 +48,7 @@ _HUD_STALE_PROBABILITIES = {
     "level": "hud_xp_stale_prob",
     "weapon_category": "hud_inventory_stale_prob",
 }
-_COUNT_FULL_SCALE = 32
+_COUNT_FULL_SCALE = 20
 _FRAME_DURATION_MS = 1000.0 / 60.0
 
 
@@ -436,22 +436,21 @@ class PerceptionErrorWrapper(gym.Wrapper):
     def _apply_false_entities(self, observation: np.ndarray) -> np.ndarray:
         """visible entity count を profile の検出上限へ clip する。
 
-        DeployObsV1 は個別 entity list を持たないため shape を増やさず、
-        false/double detection の集約結果だけを count segment の範囲内へ制限します。
+        producer と同じ20体=1.0の尺度で整数 count へ戻してから上限を適用し、
+        20以上の上限では入力済み producer tensor を一切量子化し直しません。
         """
         values, validity, age = self._planes(observation)
         count_field = self._fields["visible_enemy_count"]
         count_values, count_validity, _ = self._field_planes(
             count_field, values, validity, age
         )
-        if count_validity[0] > 0.0:
-            normalized_cap = min(
-                1.0, self.profile.count_clip_max / _COUNT_FULL_SCALE
-            )
-            cap = count_field.minimum + (
-                count_field.maximum - count_field.minimum
-            ) * normalized_cap
-            count_values[0] = min(float(count_values[0]), cap)
+        if (
+            count_validity[0] > 0.0
+            and self.profile.count_clip_max < _COUNT_FULL_SCALE
+        ):
+            producer_count = round(float(count_values[0]) * _COUNT_FULL_SCALE)
+            clipped_count = min(producer_count, self.profile.count_clip_max)
+            count_values[0] = clipped_count / _COUNT_FULL_SCALE
         return np.concatenate((values, validity, age)).astype(np.float32)
 
     def corrupt_observation(self, observation: np.ndarray) -> np.ndarray:

@@ -13,6 +13,7 @@ import pytest
 
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from reinbalance_survivors_contracts.perception_error import (
+    ITEM_CATEGORY_SIZE,
     PERCEPTION_ERROR_SCHEMA_VERSION,
     PerceptionErrorProfile,
 )
@@ -105,11 +106,11 @@ def test_profile_rejects_wrong_types_nonfinite_and_out_of_range(field, value):
 @pytest.mark.parametrize(
     "matrix",
     [
-        [[0.5, 0.6], [0.0, 1.0]],
-        [[0.5], [0.5, 0.5]],
-        [[0.5, -0.1], [0.0, 1.0]],
-        [[0.5, float("nan")], [0.0, 1.0]],
-        [[0.5, True], [0.0, 1.0]],
+        [[0.5, 0.6, 0.0, 0.0], *[[0.0] * 4 for _ in range(3)]],
+        [[0.0] * 3, *[[0.0] * 4 for _ in range(3)]],
+        [[0.5, -0.1, 0.0, 0.0], *[[0.0] * 4 for _ in range(3)]],
+        [[0.5, float("nan"), 0.0, 0.0], *[[0.0] * 4 for _ in range(3)]],
+        [[0.5, True, 0.0, 0.0], *[[0.0] * 4 for _ in range(3)]],
         "not-a-matrix",
     ],
 )
@@ -123,6 +124,36 @@ def test_confusion_matrices_are_square_finite_probabilities(matrix):
     data["item_confusion_matrix"] = matrix
     with pytest.raises(ValueError):
         PerceptionErrorProfile.from_wire(data)
+
+
+@pytest.mark.parametrize("size", [1, 2, 3, 5])
+def test_item_confusion_matrix_rejects_nonproduction_vocabulary_sizes(size):
+    """item confusion を production の4カテゴリ語彙へ束縛する。
+
+    正方かつ確率として妥当でも、weapon category と異なる次元の行列は
+    未定義カテゴリを生成するため profile load の時点で拒否します。
+    """
+    data = _clean_wire()
+    data["item_confusion_matrix"] = [[0.0] * size for _ in range(size)]
+    with pytest.raises(ValueError):
+        PerceptionErrorProfile.from_wire(data)
+
+
+def test_item_confusion_accepts_zero_4x4_and_enemy_matrix_remains_unbound():
+    """4x4 item no-op と任意次元の未使用 enemy 行列を受理する。
+
+    item の全ゼロ行は残余確率で元カテゴリを維持し、DeployObsV1 に
+    category field がない enemy 側へ架空の語彙サイズを課しません。
+    """
+    data = _clean_wire()
+    data["item_confusion_matrix"] = [
+        [0.0] * ITEM_CATEGORY_SIZE for _ in range(ITEM_CATEGORY_SIZE)
+    ]
+    data["enemy_confusion_matrix"] = [[0.0] * 3 for _ in range(3)]
+    profile = PerceptionErrorProfile.from_wire(data)
+
+    assert len(profile.item_confusion_matrix) == ITEM_CATEGORY_SIZE
+    assert len(profile.enemy_confusion_matrix) == 3
 
 
 def test_profile_rejects_unknown_missing_version_and_session_overlap():

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 import json
 import pickle
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from reinbalance_survivors_contracts.perception_error import PerceptionErrorProfile
+from survivors.deploy_obs_adapter import visible_track_estimates
 from games.survivors.perception_error_wrapper import PerceptionErrorWrapper
 
 BOOTSTRAP = Path(__file__).parents[2] / "configs" / "perception_error_bootstrap_v1.json"
@@ -163,7 +165,12 @@ def test_fixed_seed_exact_sequence_and_pipeline_order():
         burst_exit_prob=0.2,
         burst_dropout_prob=0.3,
         coord_noise_std=0.05,
-        item_confusion_matrix=[[0.0, 0.25], [0.5, 0.0]],
+        item_confusion_matrix=[
+            [0.0, 0.25, 0.0, 0.0],
+            [0.5, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ],
         hud_hp_misread_std=0.02,
     )
     first = _wrapper(profile, seed=1234)
@@ -195,7 +202,12 @@ def test_measured_dropout_noise_and_confusion_match_profile_over_100k_samples():
         burst_exit_prob=0.0,
         burst_dropout_prob=0.2,
         coord_noise_std=0.05,
-        item_confusion_matrix=[[0.0, 0.3], [0.3, 0.0]],
+        item_confusion_matrix=[
+            [0.0, 0.0, 0.0, 0.3],
+            [0.3, 0.0, 0.0, 0.0],
+            [0.0, 0.3, 0.0, 0.0],
+            [0.0, 0.0, 0.3, 0.0],
+        ],
     )
     wrapper = _wrapper(profile, seed=2468)
     source = _release_tensor(player_pos=(0.0, 0.0), weapon_category=0.0)
@@ -220,6 +232,38 @@ def test_measured_dropout_noise_and_confusion_match_profile_over_100k_samples():
     assert float(np.mean(noise_samples)) == pytest.approx(0.0, abs=0.003)
     assert float(np.std(noise_samples)) == pytest.approx(0.05, abs=0.003)
     assert confusion_count / valid_count == pytest.approx(0.3, abs=0.01)
+
+
+def test_item_confusion_never_emits_outside_production_vocabulary():
+    """全 source category の corruption 出力を production 語彙内へ保つ。
+
+    全ゼロ行の残余確率は元カテゴリを保ち、非ゼロ行から多数回再標本化しても
+    正規化済みの 0・1/3・2/3・1 以外を生成しないことを確認します。
+    """
+    matrix = [[0.25] * 4 for _ in range(4)]
+    wrapper = _wrapper(_profile(item_confusion_matrix=matrix), seed=8642)
+    zero_wrapper = _wrapper(
+        _profile(item_confusion_matrix=[[0.0] * 4 for _ in range(4)]),
+        seed=8642,
+    )
+    weapon_offset, _ = SCHEMA.layout["weapon_category"]
+    categories = (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0)
+
+    for source_category in categories:
+        retained = zero_wrapper.corrupt_observation(
+            _release_tensor(weapon_category=source_category)
+        )
+        assert np.isclose(
+            retained[weapon_offset], source_category, atol=1e-7
+        )
+        for _ in range(100):
+            output = wrapper.corrupt_observation(
+                _release_tensor(weapon_category=source_category)
+            )
+            assert any(
+                np.isclose(output[weapon_offset], allowed, atol=1e-7)
+                for allowed in categories
+            )
 
 
 def test_per_env_rng_is_independent_and_reset_seed_replays_sequence():
@@ -248,11 +292,13 @@ def test_per_env_rng_is_independent_and_reset_seed_replays_sequence():
 
 
 def test_corruption_state_pickle_roundtrip_replays_subproc_resume_sequence():
-    """SubprocVecEnv RPC 相当の pickle 往復後に corruption 系列を再現する。
+    """spawn した SubprocVecEnv worker 間で corruption 系列を再現する。
 
-    RNG だけでなく latency buffer・burst・stale 状態も export/import し、
-    worker process 間で渡せる組み込み型だけの state にします。
+    env_method の IPC で worker 別stateを取得・復元し、再開後の全worker出力と
+    片workerだけ進めた際の他worker state非干渉を byte 比較します。
     """
+    from stable_baselines3.common.vec_env import SubprocVecEnv
+
     profile = _profile(
         latency_mean_frames=2.0,
         latency_std_frames=0.5,
@@ -262,17 +308,47 @@ def test_corruption_state_pickle_roundtrip_replays_subproc_resume_sequence():
         coord_noise_std=0.03,
         hud_xp_stale_prob=0.5,
     )
-    source = _release_tensor()
-    original = _wrapper(profile, seed=99)
-    for _ in range(7):
-        original.corrupt_observation(source)
-    transferred = pickle.loads(pickle.dumps(original.get_corruption_state()))
-    expected = [original.corrupt_observation(source).tobytes() for _ in range(12)]
+    original = SubprocVecEnv(
+        [partial(_wrapper, profile, seed) for seed in (99, 100)],
+        start_method="spawn",
+    )
+    resumed = SubprocVecEnv(
+        [partial(_wrapper, profile, seed) for seed in (123_456, 123_457)],
+        start_method="spawn",
+    )
+    actions = np.array([0, 0])
+    try:
+        original.reset()
+        resumed.reset()
+        for _ in range(7):
+            original.step(actions)
 
-    resumed = _wrapper(profile, seed=123_456)
-    resumed.set_corruption_state(transferred)
-    actual = [resumed.corrupt_observation(source).tobytes() for _ in range(12)]
-    assert actual == expected
+        worker_states = original.env_method("get_corruption_state")
+        assert len(worker_states) == 2
+        transferred_states = pickle.loads(pickle.dumps(worker_states))
+        for worker_index, state in enumerate(transferred_states):
+            resumed.env_method(
+                "set_corruption_state", state, indices=worker_index
+            )
+
+        for _ in range(12):
+            expected, _, _, _ = original.step(actions)
+            actual, _, _, _ = resumed.step(actions)
+            assert actual.tobytes() == expected.tobytes()
+
+        unaffected_before = original.env_method(
+            "get_corruption_state", indices=1
+        )[0]
+        original.env_method(
+            "corrupt_observation", _release_tensor(), indices=0
+        )
+        unaffected_after = original.env_method(
+            "get_corruption_state", indices=1
+        )[0]
+        assert pickle.dumps(unaffected_after) == pickle.dumps(unaffected_before)
+    finally:
+        original.close()
+        resumed.close()
 
 
 def test_dropout_latency_stale_and_count_clip_update_matching_metadata():
@@ -304,10 +380,34 @@ def test_dropout_latency_stale_and_count_clip_update_matching_metadata():
     assert stale_output[level_offset] == first[level_offset]
     assert stale_output[value_dim * 2 + level_offset] > 0.0
 
+    visible_tracks = [
+        {
+            "screen_x": 960.0,
+            "screen_y": 540.0,
+            "visible": True,
+            "occluded": False,
+            "clipped": False,
+            "timestamp_ns": 10,
+        }
+        for _ in range(15)
+    ]
+    producer_count = visible_track_estimates(
+        visible_tracks, (1920, 1080), 10
+    )["visible_enemy_count"].value[0]
+    assert producer_count == 0.75
+
+    count_source = _release_tensor(count=producer_count)
     clipped = _wrapper(_profile(count_clip_max=4), seed=5).corrupt_observation(
-        _release_tensor(count=0.75)
+        count_source
     )
-    assert clipped[count_offset] == pytest.approx(4 / 32)
+    assert clipped[count_offset] == np.float32(0.2)
+    for count_clip_max in (20, 21, 32):
+        unchanged = _wrapper(
+            _profile(count_clip_max=count_clip_max), seed=5
+        ).corrupt_observation(count_source)
+        assert unchanged[count_offset].tobytes() == count_source[
+            count_offset
+        ].tobytes()
 
     dropped = _wrapper(
         _profile(

@@ -14,11 +14,13 @@ from .canonical_json import canonical_hash
 from .ui_intent import ensure, is_strict_number
 
 __all__ = [
+    "ITEM_CATEGORY_SIZE",
     "PERCEPTION_ERROR_SCHEMA_VERSION",
     "PerceptionErrorProfile",
 ]
 
 PERCEPTION_ERROR_SCHEMA_VERSION = "perception_error.v1"
+ITEM_CATEGORY_SIZE = 4
 
 _WIRE_KEYS = frozenset(
     {
@@ -170,11 +172,20 @@ class PerceptionErrorProfile:
             and self.count_clip_max > 0,
             "count_clip_max must be a positive int",
         )
-        object.__setattr__(
-            self,
-            "item_confusion_matrix",
-            _validated_matrix(self.item_confusion_matrix, "item_confusion_matrix"),
+        item_confusion_matrix = _validated_matrix(
+            self.item_confusion_matrix, "item_confusion_matrix"
         )
+        ensure(
+            not item_confusion_matrix
+            or len(item_confusion_matrix) == ITEM_CATEGORY_SIZE,
+            f"item_confusion_matrix must be empty or "
+            f"{ITEM_CATEGORY_SIZE}x{ITEM_CATEGORY_SIZE}",
+        )
+        object.__setattr__(
+            self, "item_confusion_matrix", item_confusion_matrix
+        )
+        # DeployObsV1 に enemy category field はまだないため、enemy 行列は
+        # production vocabulary へ束縛せず、空または任意サイズの正方行列を保つ。
         object.__setattr__(
             self,
             "enemy_confusion_matrix",
