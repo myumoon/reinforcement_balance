@@ -43,6 +43,21 @@ UE5 の NNERuntimeORT で推論するために必要。
 
 DeployObs schema または release adapter の producer hash を変更した場合、既存 00-05 baseline は意図的に失効する。00-05 の verdict/gating 契約は変更せず、01-05 formal 収集前に integration fidelity verdict を再発行する。詳細は [`docs/deployment/deploy_obs_v1.md`](../../deployment/deploy_obs_v1.md) を参照。
 
+## Perception error profile
+
+`--perception-error-profile` に
+`Tools/Training/configs/perception_error_bootstrap_v1.json` のような
+`perception_error.v1` JSON を指定できる。03-02 では profile を共有契約で
+fail-closed 検証し、その canonical SHA-256 を `log/run_meta.json` の
+`perception_error_profile_hash` と resolved config に記録する。
+
+この段階では profile の学習環境への自動適用は行わない。画面由来の
+`DeployObsV1` tensor を個別に検証する場合は
+`games.survivors.perception_error_wrapper.PerceptionErrorWrapper` を使う。
+wrapper は latency、burst dropout、座標ノイズ、categorical confusion、
+false entity count clipping の順序を固定し、worker ごとの corruption state を
+`get_corruption_state()` / `set_corruption_state()` で保存・再開できる。
+
 ## 関連ドキュメント
 
 - UE5 との通信仕様: [`ue5_env.md`](ue5_env.md)
