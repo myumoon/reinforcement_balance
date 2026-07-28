@@ -1,4 +1,7 @@
-"""UE5 Survivors ゲーム gymnasium 環境ラッパー。"""
+"""UE5 Survivors ゲーム gymnasium 環境ラッパー。
+
+初心者向け: 通常 action と保留中の level-up choice を別 HTTP API として安全に送る。
+"""
 
 from typing import Callable
 
@@ -233,6 +236,7 @@ class SurvivorsEnv(BaseUE5Env):
             replay_old_phase_fraction (float): 旧フェーズリプレイの割合 (0.0-1.0)
             starting_weapon_mode (str):  開始武器選択モード（"pool_random" など）
             weapon_weights      (dict):  武器タイプ int → 重み float の辞書（"weighted" モード用）
+            item_selection_mode (str):   "auto"（既定）または "external"
         Returns:
             True if successful
         """
@@ -244,12 +248,59 @@ class SurvivorsEnv(BaseUE5Env):
             print(f"[WARN] /params 更新失敗: {e}")
             return False
 
+    def choose_level_up(
+        self, decision_id: str, choice_id: str
+    ) -> tuple[np.ndarray, dict]:
+        """保留中の level-up choice を exactly-once endpoint へ送る。
+
+        初心者向け: 通信タイムアウト時は同じ ID を再送するため、UE5 側の
+        idempotency 応答によりアイテムが二重適用されない。
+        """
+        if not isinstance(decision_id, str) or not decision_id:
+            raise ValueError("decision_id must be a non-empty string")
+        if not isinstance(choice_id, str) or not choice_id:
+            raise ValueError("choice_id must be a non-empty string")
+
+        data = self._post_json(
+            "/level_up_choice",
+            {"decision_id": decision_id, "choice_id": choice_id},
+            timeout=10,
+            retries=2,
+        )
+        if data.get("status") != "applied":
+            raise RuntimeError(f"unexpected level-up response: {data!r}")
+        if data.get("decision_id") != decision_id or data.get("choice_id") != choice_id:
+            raise RuntimeError("level-up acknowledgement IDs do not match request")
+
+        received_hash = data.get("obs_schema_hash", "")
+        if self._expected_schema_hash and received_hash != self._expected_schema_hash:
+            raise RuntimeError(
+                "obs_schema_hash が一致しません。"
+                f" expected={self._expected_schema_hash}, received={received_hash}"
+            )
+        info = data.get("info")
+        if (
+            not isinstance(info, dict)
+            or not isinstance(info.get("level_up_pending"), bool)
+            or not isinstance(info.get("level_up_choices"), list)
+        ):
+            raise RuntimeError("level-up response info contract is malformed")
+
+        obs = np.array(data["obs"], dtype=np.float32)
+        self._prev_obs = obs
+        return obs, info
+
     def get_params(self) -> dict:
         """最後に set_params で適用したパラメータを返す。eval_env との同期用。"""
         return dict(self._last_params)
 
     def _action_to_payload(self, action) -> dict:
         return {"action": [float(int(action))]}
+
+
+# 旧ドキュメント名を canonical SurvivorsEnv へ結び付ける互換 alias。
+# 初心者向け: SurvivorsUE5Env を import する既存コードでも同じ choice API を利用できる。
+SurvivorsUE5Env = SurvivorsEnv
 
 
 from stable_baselines3.common.monitor import Monitor
@@ -286,3 +337,9 @@ class SurvivorsMonitor(Monitor):
 
     def get_obs_schema(self):
         return self.env.get_obs_schema()
+
+    def choose_level_up(
+        self, decision_id: str, choice_id: str
+    ) -> tuple[np.ndarray, dict]:
+        """wrapped SurvivorsEnv の外部 level-up API を明示的に転送する。"""
+        return self.env.choose_level_up(decision_id, choice_id)

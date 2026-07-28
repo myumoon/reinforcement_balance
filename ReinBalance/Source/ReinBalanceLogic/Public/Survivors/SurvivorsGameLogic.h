@@ -1,4 +1,6 @@
 #pragma once
+// Survivors の canonical production state と外部 level-up API を定義する。
+// 初心者向け: UObject から独立したこの型だけがゲーム進行と選択状態を所有する。
 // このファイルは UObject 系ヘッダーをインクルードしてはならない。
 // CoreUObject.h, UObject/Object.h, Components/ActorComponent.h 等の追加は禁止。
 // 新しい依存を追加する場合はチームレビューを必須とする。
@@ -6,6 +8,7 @@
 #include "CoreMinimal.h"
 #include "Survivors/SurvivorsTypes.h"
 #include "Survivors/SurvivorsGameConstants.h"
+#include "Survivors/SurvivorsLevelUpDecision.h"
 #include "Survivors/SurvivorsCollisionTypes.h"  // FSurvivorsTargetGrid (ReinBalanceLogic module)
 #include "Survivors/Weapons/SurvivorsWeaponLogic.h"  // FSurvivorsWeaponLogic 完全定義（TUniquePtr が destructor を要求する）
 
@@ -23,6 +26,28 @@ struct FSurvivorsStepResult
 	bool  bDone      = false;
 	bool  bTruncated = false;
 	FString SpawnDebugJson;  // info_json 構築用
+};
+
+/** 外部 choice の適用結果と再送用スナップショット。 */
+enum class ESurvivorsLevelUpApplyStatus : uint8
+{
+	Applied,
+	StaleDecision,
+	InvalidChoice,
+};
+
+/**
+ * choice 適用直後の応答に必要な immutable snapshot。
+ * 初心者向け: 同じ要求が再送されたとき、この値をそのまま返して二重適用を防ぐ。
+ */
+struct FSurvivorsLevelUpApplyResult
+{
+	ESurvivorsLevelUpApplyStatus Status = ESurvivorsLevelUpApplyStatus::StaleDecision;
+	FString DecisionId;
+	FString ChoiceId;
+	TArray<float> PostChoiceObs;
+	FSurvivorsPendingLevelUpDecision PendingAfter;
+	int32 BacklogAfter = 0;
 };
 
 struct FSurvivorsResetResult
@@ -81,6 +106,7 @@ struct FSurvivorsGameLogicConfig
 	bool   bEnableEvolutions  = true;
 	float  ReplayOldPhaseFraction = 0.0f;
 	FString StartingWeaponMode = TEXT("garlic");
+	FString ItemSelectionMode = TEXT("auto");
 
 	// ---- RSI オーバーライド ----
 	struct FWeaponSlotOverride  { int32 WeaponId = 0; int32 Level = 1; };
@@ -161,6 +187,28 @@ public:
 
 	/** SpawnDebug JSON */
 	FString GetSpawnDebugJson() const;
+
+	/**
+	 * XP を source of truth である Logic に加算する。
+	 * 初心者向け: Component は計算せず、この入口へ渡すだけにして二重実装を防ぐ。
+	 */
+	void AddExperience(float Amount) { ProcessXPGain(Amount); }
+
+	/** 外部選択の保留状態を返す。 */
+	bool IsLevelUpPending() const { return LevelUpDecisionState.IsPending(); }
+	const FSurvivorsPendingLevelUpDecision& GetPendingLevelUpDecision() const
+	{
+		return LevelUpDecisionState.GetPending();
+	}
+	int32 GetLevelUpBacklog() const { return LevelUpBacklog; }
+	const FString& GetItemSelectionMode() const { return CurrentConfig.ItemSelectionMode; }
+
+	/**
+	 * game thread 上で choice を一度だけ適用する。
+	 * duplicate は直前の immutable result を返し、stale/invalid は mutation しない。
+	 */
+	FSurvivorsLevelUpApplyResult ApplyExternalLevelUpChoice(
+		const FString& DecisionId, const FString& ChoiceId);
 
 	// ---- ParallelFor 内で直接呼ぶ API ----
 
@@ -326,7 +374,10 @@ private:
 	mutable int32 CachedObsDim = -1;
 	float PhysicsAccumTime = 0.f;
 
-
+	uint64 EpisodeSerial = 0;
+	int32 LevelUpBacklog = 0;
+	FSurvivorsLevelUpDecisionState LevelUpDecisionState;
+	TOptional<FSurvivorsLevelUpApplyResult> LastAppliedLevelUpResult;
 
 	// ---- 内部メソッド ----
 	FVector2D RandomInsideField();
@@ -366,6 +417,8 @@ private:
 	float CumulativeXPForLevel(int32 Level) const;
 	void  ProcessXPGain(float Amount);
 	void  OnLevelUp(int32 NextLevel);
+	void  AdvanceEligibleLevels();
+	int32 CountEligibleLevelBacklog() const;
 	void  RecalcPassiveEffects();
 	FPassiveEffects ComputePassiveEffects() const;
 	TArray<FLevelUpChoice> BuildLevelUpChoices();

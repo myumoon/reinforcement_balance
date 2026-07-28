@@ -1,5 +1,7 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
+/**
+ * Survivors のデバッグ用スロット表示と候補フィルターを実装する。
+ * 初心者向け: 外部選択の no-upgrade はデバッグ除外設定に左右されず、そのまま残します。
+ */
 
 #include "Debug/Components/DebugSurvivorsSlotComponent.h"
 #include "Survivors/Game/SurvivorsGame.h"
@@ -68,6 +70,7 @@ bool UDebugSurvivorsSlotComponent::FilterLevelUpChoices(TArray<FLevelUpChoice>& 
 		case FLevelUpChoice::EChoiceType::WeaponUpgrade:
 		case FLevelUpChoice::EChoiceType::WeaponEvolve:
 		case FLevelUpChoice::EChoiceType::PassiveUpgrade: return !bSkipSlotLvUp;
+		case FLevelUpChoice::EChoiceType::NoUpgrade:      return true;
 		default:                                           return true;
 		}
 	});

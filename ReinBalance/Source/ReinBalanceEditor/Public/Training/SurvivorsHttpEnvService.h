@@ -1,5 +1,9 @@
 #pragma once
 
+/**
+ * Survivors 固有 HTTP transport と game-thread queue を定義する。
+ * 初心者向け: HTTP worker は要求文字列をキューへ積むだけで、Game object には直接触れない。
+ */
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "HttpEnvServerBase.h"
@@ -61,9 +65,16 @@ public:
 	 * エラー時は {"error":"..."} を返す（既存 HandleParams の挙動を維持）。
 	 */
 	FString ApplyParams(const FString& Json);
+	void CompleteParams(const FString& ResponseJson, FHttpResultCallback Callback);
 
 	/** ASurvivorsParallelSetupActor が並列 Tick 時に使用するゲームロジックポインタ */
 	FSurvivorsGameLogic* GetGameLogic();
+
+	/** MPSC choice queue を game thread で検証・適用して応答する。 */
+	void ProcessLevelUpChoiceRequests();
+
+	/** /step の既存情報と level-up fields を同じ JSON object に構築する。 */
+	FString BuildInfoJson() const;
 
 protected:
 	virtual void BeginPlay() override;

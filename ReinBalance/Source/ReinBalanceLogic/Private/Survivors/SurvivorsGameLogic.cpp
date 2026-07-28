@@ -1,3 +1,7 @@
+/**
+ * Survivors の production ゲームロジックを実装する。
+ * 初心者向け: 物理・報酬・レベルアップを一つの状態へ集約し、外部選択中は全更新を止める。
+ */
 #include "Survivors/SurvivorsGameLogic.h"
 #include "Survivors/SurvivorsWikiSpec.h"
 #include "Survivors/SurvivorsGameConstants.h"
@@ -110,6 +114,10 @@ void FSurvivorsGameLogic::Reset(TOptional<int32> Seed)
 {
 	if (Seed.IsSet()) RandStream.Initialize(Seed.GetValue());
 	else              RandStream.GenerateNewSeed();
+	++EpisodeSerial;
+	LevelUpDecisionState.Reset(EpisodeSerial);
+	LevelUpBacklog = 0;
+	LastAppliedLevelUpResult.Reset();
 
 	for (int32 i = 0; i < MaxWeaponSlots; ++i)
 	{
@@ -208,6 +216,7 @@ void FSurvivorsGameLogic::Reset(TOptional<int32> Seed)
 void FSurvivorsGameLogic::PhysicsStep(int32 ActionIdx)
 {
 	if (bDone || bTruncated) return;
+	if (IsLevelUpPending()) return;
 	LastReward = 0.f;
 
 	ApplyAction(ActionIdx, PhysicsDt);
@@ -233,6 +242,7 @@ void FSurvivorsGameLogic::PhysicsStep(int32 ActionIdx)
 	BuildPickupGrid();
 	{ FSurvivorsHitFrame HF; ComputePickupHits(HF); ApplyPickupHits(HF); }
 	FinalizePickupRemovals();
+	if (IsLevelUpPending()) return;
 
 	CheckFloorPickups();
 	CheckSpecialPickups();
@@ -263,7 +273,8 @@ FSurvivorsStepResult FSurvivorsGameLogic::ExecStep(const TArray<float>& Action, 
 	for (int32 i = 0; i < Steps; ++i)
 	{
 		PhysicsStep(ActionIdx);
-		AccReward += LastReward;
+		AccReward += GetReward();
+		if (IsLevelUpPending()) break;
 		if (bDone)     { Result.bDone      = true; break; }
 		if (bTruncated){ Result.bTruncated = true; break; }
 	}
@@ -418,7 +429,7 @@ int32 FSurvivorsGameLogic::GetObsDim() const
 	CachedObsDim = T; return T;
 }
 
-float FSurvivorsGameLogic::GetReward()     const { return LastReward; }
+float FSurvivorsGameLogic::GetReward()     const { return IsLevelUpPending() ? 0.f : LastReward; }
 bool  FSurvivorsGameLogic::IsDone()        const { return bDone; }
 bool  FSurvivorsGameLogic::IsTruncated()   const { return bTruncated; }
 
@@ -807,8 +818,58 @@ float FSurvivorsGameLogic::CumulativeXPForLevel(int32 Level) const { return Surv
 void FSurvivorsGameLogic::ProcessXPGain(float Amount)
 {
 	PlayerXP += SurvivorsWikiSpec::EffectiveXPGain(Amount, CachedPassiveEffects.GrowthMult, PlayerLevel);
-	while (true)
-	{ const float NT = CumulativeXPForLevel(PlayerLevel+1); if (PlayerXP < NT) break; PlayerLevel++; OnLevelUp(PlayerLevel); }
+	if (IsLevelUpPending())
+	{
+		LevelUpBacklog = CountEligibleLevelBacklog();
+		return;
+	}
+	AdvanceEligibleLevels();
+}
+
+int32 FSurvivorsGameLogic::CountEligibleLevelBacklog() const
+{
+	int32 Count = 0;
+	int32 TestLevel = PlayerLevel;
+	while (TestLevel < MaxPlayerLevel
+		&& PlayerXP >= CumulativeXPForLevel(TestLevel + 1))
+	{
+		++TestLevel;
+		++Count;
+	}
+	return Count;
+}
+
+void FSurvivorsGameLogic::AdvanceEligibleLevels()
+{
+	while (PlayerLevel < MaxPlayerLevel
+		&& PlayerXP >= CumulativeXPForLevel(PlayerLevel + 1))
+	{
+		if (CurrentConfig.ItemSelectionMode.Equals(TEXT("external"), ESearchCase::CaseSensitive))
+		{
+			TArray<FLevelUpChoice> Choices = BuildLevelUpChoices();
+			if (Choices.IsEmpty())
+			{
+				// 外部 mode では候補枯渇も明示的な no-upgrade decision にする。
+				// 初心者向け: 選べる強化がなくても確認を1回受けるまで時間を止め、レベルを一つずつ進めます。
+				FLevelUpChoice NoUpgradeChoice;
+				NoUpgradeChoice.ChoiceType =
+					FLevelUpChoice::EChoiceType::NoUpgrade;
+				NoUpgradeChoice.NewLevel = 0;
+				Choices.Add(NoUpgradeChoice);
+			}
+			++PlayerLevel;
+			const bool bDecisionStarted =
+				LevelUpDecisionState.BeginDecision(PlayerLevel, Choices);
+			checkf(
+				bDecisionStarted,
+				TEXT("external level-up must create a non-empty pending decision"));
+			LevelUpBacklog = CountEligibleLevelBacklog();
+			return;
+		}
+		++PlayerLevel;
+		OnLevelUp(PlayerLevel);
+	}
+	LevelUpBacklog = 0;
 }
 
 void FSurvivorsGameLogic::OnLevelUp(int32 NextLevel)
@@ -836,6 +897,63 @@ void FSurvivorsGameLogic::OnLevelUp(int32 NextLevel)
 	else ChoiceIdx = RandStream.RandRange(0, Choices.Num()-1);
 	ApplyLevelUpChoice(Choices[ChoiceIdx]);
 	RecalcPassiveEffects();
+}
+
+FSurvivorsLevelUpApplyResult FSurvivorsGameLogic::ApplyExternalLevelUpChoice(
+	const FString& DecisionId, const FString& ChoiceId)
+{
+	FSurvivorsLevelUpApplyResult Rejected;
+	Rejected.DecisionId = DecisionId;
+	Rejected.ChoiceId = ChoiceId;
+
+	int32 ChoiceIndex = INDEX_NONE;
+	const ESurvivorsLevelUpChoiceValidation Validation =
+		LevelUpDecisionState.ValidateChoice(DecisionId, ChoiceId, ChoiceIndex);
+	if (Validation == ESurvivorsLevelUpChoiceValidation::Duplicate)
+	{
+		return LastAppliedLevelUpResult.IsSet()
+			? LastAppliedLevelUpResult.GetValue()
+			: Rejected;
+	}
+	if (!CurrentConfig.ItemSelectionMode.Equals(TEXT("external"), ESearchCase::CaseSensitive))
+	{
+		return Rejected;
+	}
+	if (Validation == ESurvivorsLevelUpChoiceValidation::InvalidChoice)
+	{
+		Rejected.Status = ESurvivorsLevelUpApplyStatus::InvalidChoice;
+		return Rejected;
+	}
+	if (Validation != ESurvivorsLevelUpChoiceValidation::Accepted)
+	{
+		return Rejected;
+	}
+
+	const FSurvivorsPendingLevelUpDecision PendingBefore =
+		LevelUpDecisionState.GetPending();
+	if (!PendingBefore.Choices.IsValidIndex(ChoiceIndex))
+	{
+		Rejected.Status = ESurvivorsLevelUpApplyStatus::InvalidChoice;
+		return Rejected;
+	}
+
+	// 選択適用、pending 解除、次 backlog 判定を同じ game-thread call 内で完了する。
+	// 初心者向け: 途中で HTTP 応答を返さないため、半分だけ適用された状態は観測されない。
+	ApplyLevelUpChoice(PendingBefore.Choices[ChoiceIndex].Choice);
+	RecalcPassiveEffects();
+	LevelUpDecisionState.CommitChoice(DecisionId, ChoiceId);
+	LastReward = 0.f;
+	AdvanceEligibleLevels();
+
+	FSurvivorsLevelUpApplyResult Applied;
+	Applied.Status = ESurvivorsLevelUpApplyStatus::Applied;
+	Applied.DecisionId = DecisionId;
+	Applied.ChoiceId = ChoiceId;
+	Applied.PostChoiceObs = GetObservation();
+	Applied.PendingAfter = LevelUpDecisionState.GetPending();
+	Applied.BacklogAfter = LevelUpBacklog;
+	LastAppliedLevelUpResult = Applied;
+	return Applied;
 }
 
 FPassiveEffects FSurvivorsGameLogic::ComputePassiveEffects() const
@@ -1004,6 +1122,8 @@ void FSurvivorsGameLogic::ApplyLevelUpChoice(const FLevelUpChoice& Choice)
 {
 	switch (Choice.ChoiceType)
 	{
+	case FLevelUpChoice::EChoiceType::NoUpgrade:
+		return;
 	case FLevelUpChoice::EChoiceType::PassiveNew:
 		for(int32 i=0;i<MaxPassiveSlots;++i) if(PassiveSlots[i].Type==EPassiveItemType::None){PassiveSlots[i].Type=Choice.PassiveType;PassiveSlots[i].Level=1;break;} return;
 	case FLevelUpChoice::EChoiceType::PassiveUpgrade:
@@ -1012,8 +1132,10 @@ void FSurvivorsGameLogic::ApplyLevelUpChoice(const FLevelUpChoice& Choice)
 		for(const SurvivorsGameConstants::FEvolutionRule& Rule:SurvivorsGameConstants::EvolutionTable) if(Rule.EvolvedWeapon==Choice.WeaponType){for(int32 i=0;i<MaxWeaponSlots;++i) if(WeaponSlots[i].Type==Rule.BaseWeapon){EvolveWeapon(i,Choice.WeaponType);return;} break;} return;
 	case FLevelUpChoice::EChoiceType::WeaponUpgrade:
 		for(int32 i=0;i<MaxWeaponSlots;++i) if(WeaponSlots[i].Type==Choice.WeaponType){const int32 NL=FMath::Min(Choice.NewLevel,SurvivorsGameConstants::GetWeaponMaxLevel(Choice.WeaponType));WeaponSlots[i].Level=FWeaponLevel(NL);if(Weapons.IsValidIndex(i)&&Weapons[i])Weapons[i]->SetLevel(FWeaponLevel(NL));return;} return;
-	case FLevelUpChoice::EChoiceType::WeaponNew: default:
+	case FLevelUpChoice::EChoiceType::WeaponNew:
 		for(int32 i=0;i<MaxWeaponSlots;++i) if(WeaponSlots[i].Type==EWeaponType::None){WeaponSlots[i].Type=Choice.WeaponType;WeaponSlots[i].Level=FWeaponLevel(1);EquipWeapon(i,Choice.WeaponType,1);return;} return;
+	default:
+		return;
 	}
 }
 
@@ -1162,6 +1284,7 @@ void FSurvivorsGameLogic::ApplyPickupHits(FSurvivorsHitFrame& HitFrame)
 		{ const int32 Mult=RandStream.RandRange(SurvivorsGameConstants::RedGemMinMultiplier,SurvivorsGameConstants::RedGemMaxMultiplier); XPG=SurvivorsWikiSpec::RedGemExperienceForMultiplier(XPG,Mult); }
 		ProcessXPGain(XPG);
 		LastReward += CurrentConfig.ItemReward;
+		if (IsLevelUpPending()) break;
 	}
 }
 
