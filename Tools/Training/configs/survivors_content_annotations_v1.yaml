@@ -1,0 +1,104 @@
+# Coverage annotation 契約。C++ schema の定義値を複製せず、対象性と証跡だけを保持する。
+# 初心者向け: 各 ID の行は、実装から評価まで辿れるシナリオ名を登録します。
+schema_version: survivors.content_annotations.v1
+collections:
+  # 武器 coverage。ID は schema との照合キーであり、名称・level・進化条件は記載しない。
+  # 初心者向け: 基本武器と実装済み進化・union の全てを同じ5ゲートで確認します。
+  weapons:
+    "1": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: weapon_1_reset_step, trained: true, evaluated: true, effect_handler: weapon_logic_1, obs_category: weapon_slots}
+    "2": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: weapon_2_reset_step, trained: true, evaluated: true, effect_handler: weapon_logic_2, obs_category: weapon_slots}
+    "3": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: weapon_3_reset_step, trained: true, evaluated: true, effect_handler: weapon_logic_3, obs_category: weapon_slots}
+    "4": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: weapon_4_reset_step, trained: true, evaluated: true, effect_handler: weapon_logic_4, obs_category: weapon_slots}
+    "5": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: weapon_5_reset_step, trained: true, evaluated: true, effect_handler: weapon_logic_5, obs_category: weapon_slots}
+    "6": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: weapon_6_reset_step, trained: true, evaluated: true, effect_handler: weapon_logic_6, obs_category: weapon_slots}
+    "7": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: weapon_7_reset_step, trained: true, evaluated: true, effect_handler: weapon_logic_7, obs_category: weapon_slots}
+    "8": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: weapon_8_reset_step, trained: true, evaluated: true, effect_handler: weapon_logic_8, obs_category: weapon_slots}
+    "9": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: weapon_9_reset_step, trained: true, evaluated: true, effect_handler: weapon_logic_9, obs_category: weapon_slots}
+    "10": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: weapon_10_reset_step, trained: true, evaluated: true, effect_handler: weapon_logic_10, obs_category: weapon_slots}
+    "11": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: weapon_11_reset_step, trained: true, evaluated: true, effect_handler: weapon_logic_11, obs_category: weapon_slots}
+    "12": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: pentagram_acquisition_upgrade, trained: true, evaluated: true, effect_handler: pentagram_logic, obs_category: weapon_slots}
+    "13": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: peachone_union_prerequisite, trained: true, evaluated: true, effect_handler: peachone_logic, obs_category: weapon_slots}
+    "14": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: ebony_union_prerequisite, trained: true, evaluated: true, effect_handler: ebony_wings_logic, obs_category: weapon_slots}
+    "15": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: laurel_acquisition_upgrade, trained: true, evaluated: true, effect_handler: laurel_shield_logic, obs_category: shield_and_weapon_slots}
+    "16": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolution_1_16, trained: true, evaluated: true, effect_handler: evolved_weapon_logic_16, obs_category: weapon_slots}
+    "17": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolution_2_17, trained: true, evaluated: true, effect_handler: evolved_weapon_logic_17, obs_category: weapon_slots}
+    "18": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolution_3_18, trained: true, evaluated: true, effect_handler: evolved_weapon_logic_18, obs_category: weapon_slots}
+    "19": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolution_4_19, trained: true, evaluated: true, effect_handler: evolved_weapon_logic_19, obs_category: weapon_slots}
+    "20": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolution_5_20, trained: true, evaluated: true, effect_handler: evolved_weapon_logic_20, obs_category: weapon_slots}
+    "21": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolution_6_21, trained: true, evaluated: true, effect_handler: evolved_weapon_logic_21, obs_category: weapon_slots}
+    "22": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolution_7_22, trained: true, evaluated: true, effect_handler: evolved_weapon_logic_22, obs_category: weapon_slots}
+    "23": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolution_8_23, trained: true, evaluated: true, effect_handler: evolved_weapon_logic_23, obs_category: weapon_slots}
+    "24": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolution_9_24, trained: true, evaluated: true, effect_handler: evolved_weapon_logic_24, obs_category: weapon_slots}
+    "25": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolution_10_25, trained: true, evaluated: true, effect_handler: evolved_weapon_logic_25, obs_category: weapon_slots}
+    "26": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolution_11_26, trained: true, evaluated: true, effect_handler: evolved_weapon_logic_26, obs_category: weapon_slots}
+    "27": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: gorgeous_moon_evolution, trained: true, evaluated: true, effect_handler: gorgeous_moon_logic, obs_category: weapon_slots}
+    "28": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: vandalier_union_slot_consumption, trained: true, evaluated: true, effect_handler: vandalier_logic, obs_category: weapon_slots}
+  # パッシブ coverage。Stone Mask は no-combat handler を明示する。
+  # 初心者向け: 攻撃力へ直接影響しない item も取得・観測・評価から除外しません。
+  passives:
+    "1": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_1_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_power, obs_category: passive_slots}
+    "2": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_2_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_armor, obs_category: passive_slots_and_armor}
+    "3": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_3_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_max_health, obs_category: passive_slots}
+    "4": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_4_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_regeneration, obs_category: passive_slots_and_regen}
+    "5": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_5_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_cooldown, obs_category: passive_slots}
+    "6": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_6_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_area, obs_category: passive_slots}
+    "7": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_7_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_speed, obs_category: passive_slots}
+    "8": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_8_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_duration, obs_category: passive_slots}
+    "9": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_9_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_amount, obs_category: passive_slots}
+    "10": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_10_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_move_speed, obs_category: passive_slots}
+    "11": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_11_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_magnet, obs_category: passive_slots}
+    "12": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_12_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_luck, obs_category: passive_slots}
+    "13": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_13_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_growth, obs_category: passive_slots}
+    "14": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: stone_mask_no_combat_semantics, trained: true, evaluated: true, effect_handler: intentional_no_combat_gold_only, obs_category: passive_slots}
+    "15": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_15_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_curse, obs_category: passive_slots}
+    "16": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_16_max_effect, trained: true, evaluated: true, effect_handler: passive_revive_counter, obs_category: passive_slots}
+    "17": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: passive_17_max_effect, trained: true, evaluated: true, effect_handler: passive_stat_omni_curse, obs_category: passive_slots}
+  # Gem coverage。XP 値は schema のみから取得する。
+  # 初心者向け: 色ごとの取得と XP 観測シナリオだけを登録します。
+  gems:
+    blue: {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: gem_blue_pickup, trained: true, evaluated: true, effect_handler: gem_xp_gain, obs_category: blue_gem_observation}
+    green: {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: gem_green_pickup, trained: true, evaluated: true, effect_handler: gem_xp_gain, obs_category: green_gem_observation}
+    red: {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: gem_red_pickup, trained: true, evaluated: true, effect_handler: gem_xp_gain_multiplier, obs_category: red_gem_observation}
+  # Evolution coverage。キーは schema pair から導出し、条件値を YAML に複製しない。
+  # 初心者向け: 各置換が決定的な chest シナリオと評価へ結び付きます。
+  evolutions:
+    "1:16": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolve_1_16, trained: true, evaluated: true, effect_handler: evolution_slot_replace, obs_category: weapon_slots}
+    "2:17": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolve_2_17, trained: true, evaluated: true, effect_handler: evolution_slot_replace, obs_category: weapon_slots}
+    "3:18": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolve_3_18, trained: true, evaluated: true, effect_handler: evolution_slot_replace, obs_category: weapon_slots}
+    "4:19": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolve_4_19, trained: true, evaluated: true, effect_handler: evolution_slot_replace, obs_category: weapon_slots}
+    "5:20": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolve_5_20, trained: true, evaluated: true, effect_handler: evolution_slot_replace, obs_category: weapon_slots}
+    "6:21": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolve_6_21, trained: true, evaluated: true, effect_handler: evolution_slot_replace, obs_category: weapon_slots}
+    "7:22": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolve_7_22, trained: true, evaluated: true, effect_handler: evolution_slot_replace, obs_category: weapon_slots}
+    "8:23": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolve_8_23, trained: true, evaluated: true, effect_handler: evolution_slot_replace, obs_category: weapon_slots}
+    "9:24": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolve_9_24, trained: true, evaluated: true, effect_handler: evolution_slot_replace, obs_category: weapon_slots}
+    "10:25": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolve_10_25, trained: true, evaluated: true, effect_handler: evolution_slot_replace, obs_category: weapon_slots}
+    "11:26": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: evolve_11_26, trained: true, evaluated: true, effect_handler: evolution_slot_replace, obs_category: weapon_slots}
+    "12:27": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: gorgeous_moon_12_27, trained: true, evaluated: true, effect_handler: evolution_slot_replace, obs_category: weapon_slots}
+    "13:28": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: vandalier_union_13_28, trained: true, evaluated: true, effect_handler: union_two_to_one_slots, obs_category: weapon_slots}
+  # Enemy coverage。0-10 の canonical default table は C++ LLT で値と encoding を固定する。
+  # 初心者向け: 通常敵と boss を全て reset/step して有限な観測になることを追跡します。
+  enemies:
+    "0": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: enemy_0_reset_step, trained: true, evaluated: true, effect_handler: enemy_spawn_and_contact, obs_category: enemy_type_hp}
+    "1": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: enemy_1_reset_step, trained: true, evaluated: true, effect_handler: enemy_spawn_and_contact, obs_category: enemy_type_hp}
+    "2": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: enemy_2_reset_step, trained: true, evaluated: true, effect_handler: enemy_spawn_and_contact, obs_category: enemy_type_hp}
+    "3": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: enemy_3_reset_step, trained: true, evaluated: true, effect_handler: enemy_spawn_and_contact, obs_category: enemy_type_hp}
+    "4": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: enemy_4_reset_step, trained: true, evaluated: true, effect_handler: enemy_spawn_and_contact, obs_category: enemy_type_hp}
+    "5": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: enemy_5_reset_step, trained: true, evaluated: true, effect_handler: enemy_spawn_and_contact, obs_category: enemy_type_hp}
+    "6": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: enemy_6_reset_step, trained: true, evaluated: true, effect_handler: enemy_spawn_and_contact, obs_category: enemy_type_hp}
+    "7": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: enemy_7_reset_step, trained: true, evaluated: true, effect_handler: enemy_spawn_and_contact, obs_category: enemy_type_hp}
+    "8": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: enemy_8_reset_step, trained: true, evaluated: true, effect_handler: enemy_spawn_and_contact, obs_category: enemy_type_hp}
+    "9": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: enemy_9_reset_step, trained: true, evaluated: true, effect_handler: enemy_spawn_and_contact, obs_category: enemy_type_hp}
+    "10": {target_relevant: true, implemented: true, reachable: true, observed: true, scenario: enemy_10_boss_reset_step, trained: true, evaluated: true, effect_handler: boss_spawn_resistance_contact, obs_category: enemy_type_hp}
+# Combination coverage。複数 mechanics が同時に成立する境界を4種類固定する。
+# 初心者向け: 単体テストだけでは見えない union、防御、即死耐性、boss 相互作用を確認します。
+combinations:
+  - {kind: pair_evolution_union, members: ["weapon:13", "weapon:14", "weapon:28"], scenario: vandalier_consumes_partner_slot, eval_assertion: one_vandalier_slot_and_one_empty_slot}
+  - {kind: weak_defensive_weapon, members: ["weapon:15", "enemy:4"], scenario: laurel_shield_under_contact, eval_assertion: shield_absorbs_hit_and_observation_changes}
+  - {kind: instant_kill_resistance, members: ["weapon:12", "enemy:10"], scenario: pentagram_against_resistant_boss, eval_assertion: boss_survives_instant_kill}
+  - {kind: boss_interaction, members: ["enemy:10", "evolution:12:27"], scenario: gorgeous_moon_boss_chest, eval_assertion: boss_drop_and_evolution_are_observed}
+# Starting-only exclusions。取得・effect・obs・eval の代替 coverage を必須にする。
+# 初心者向け: 初期武器にできないことを、ゲーム全体から除外する意味にはしません。
+intentional_exclusions:
+  - {collection: weapons, id: "12", scope: starting_weapon, reason: instant-kill weapon cannot sustain starting XP, alternative_coverage: pentagram_acquisition_upgrade}
+  - {collection: weapons, id: "15", scope: starting_weapon, reason: defensive weapon has no starting damage, alternative_coverage: laurel_acquisition_upgrade}
+  - {collection: weapons, id: "27", scope: starting_weapon, reason: evolved weapon is acquired through evolution, alternative_coverage: gorgeous_moon_evolution}

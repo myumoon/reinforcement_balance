@@ -927,6 +927,26 @@ TArray<FLevelUpChoice> FSurvivorsGameLogic::BuildLevelUpChoices()
 	};
 	TArray<FLevelUpChoice> Evolutions, WeaponUpgrades, NewWeapons, PassiveUpgrades, PassiveNew;
 
+	// 進化候補は実際の prerequisite を満たす slot からだけ生成する。
+	// 初心者向け: 最大レベルの武器と必要 item が揃ったときだけ、通常進化や union を選択肢へ出します。
+	if (CurrentConfig.bEnableEvolutions)
+	{
+		for (const int32 SlotIdx : GetEvolvableWeapons())
+		{
+			for (const SurvivorsGameConstants::FEvolutionRule& Rule : SurvivorsGameConstants::EvolutionTable)
+			{
+				if (WeaponSlots[SlotIdx].Type != Rule.BaseWeapon) continue;
+				FLevelUpChoice Choice;
+				Choice.ChoiceType = FLevelUpChoice::EChoiceType::WeaponEvolve;
+				Choice.WeaponType = Rule.EvolvedWeapon;
+				Choice.SlotIdx = SlotIdx;
+				Choice.NewLevel = 1;
+				Evolutions.Add(Choice);
+				break;
+			}
+		}
+	}
+
 	// 武器アップグレード
 	for (int32 i=0;i<MaxWeaponSlots;++i)
 	{ if(WeaponSlots[i].Type==EWeaponType::None||WeaponSlots[i].Level.Value>=SurvivorsGameConstants::GetWeaponMaxLevel(WeaponSlots[i].Type)) continue;
