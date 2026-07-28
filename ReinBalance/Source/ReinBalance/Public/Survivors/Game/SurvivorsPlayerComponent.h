@@ -1,5 +1,9 @@
 #pragma once
 
+/**
+ * legacy PlayerComponent の薄い facade を定義する。
+ * 初心者向け: XP と進化は Game 経由で Logic へ渡し、Component 自身にはレベルアップ本体を持たせない。
+ */
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Survivors/SurvivorsTypes.h"
@@ -22,13 +26,6 @@ public:
 	float XPRequiredForLevel(int32 Level) const;
 	float CumulativeXPForLevel(int32 Level) const;
 	void ProcessXPGain(float Amount);
-	void OnLevelUp(int32 NextLevel);
-
-	/** パッシブスロットの変化後に呼ぶ。CachedPassiveEffects / MaxPlayerHP / GemPickupRadius を更新する */
-	void RecalcPassiveEffects();
-
-	/** BuildLevelUpChoices: レベルアップ時の選択肢を生成する（3択）*/
-	TArray<FLevelUpChoice> BuildLevelUpChoices();
 
 	/** 進化可能な武器スロットを返す */
 	TArray<int32> GetEvolvableWeapons() const;
@@ -36,12 +33,8 @@ public:
 	/** 武器を進化させる */
 	void EvolveWeapon(int32 SlotIdx, EWeaponType EvolvedType);
 
-	/** レベルアップ選択肢を適用する（武器・パッシブ兼用） */
-	void ApplyLevelUpChoice(const FLevelUpChoice& Choice);
-
 private:
 	UPROPERTY()
 	TObjectPtr<ASurvivorsGame> Game;
 
-	FPassiveEffects ComputePassiveEffects() const;
 };
