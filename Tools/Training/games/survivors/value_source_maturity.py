@@ -1,12 +1,10 @@
 """旧 Value Source maturity record を読み書きする互換 wrapper。
 
-初心者向け:
 過去の分析用 field は維持しますが、label-ready 判定は teacher validation へ移ったため
 この module から正式 gate field を出力しません。
 """
 
 from __future__ import annotations
-
 
 def make_value_source_maturity_record(
     *,
@@ -21,7 +19,6 @@ def make_value_source_maturity_record(
 ) -> dict:
     """deprecated maturity 情報を gate を含まない互換 record として返す。
 
-    初心者向け:
     ``ready_for_value_labels`` を復元せず、呼び出し元を immutable descriptor の
     ``ready_for_probe`` と後続 teacher verdict へ段階的に移行させます。
     """

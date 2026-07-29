@@ -1,6 +1,5 @@
 """Survivors value source descriptor の不変 identity と gate を検証する。
 
-初心者向け:
 モデル一式を後工程へ渡す前に、内容が同じなら同じ ID、内容が変われば別 ID になることを
 確認し、検証結果やローカル環境だけでは ID が揺れないことを保証します。
 """
@@ -28,11 +27,9 @@ from games.survivors.value_source_descriptor import (
 )
 from reinbalance_survivors_contracts.canonical_json import sha256_hex
 
-
 def _write_inputs(root: Path) -> tuple[Path, dict, dict]:
     """ready descriptor に必要な最小 fixture を作成する。
 
-    初心者向け:
     実運用の run と source tree を小さな一時ディレクトリで再現します。
     """
     run_dir = root / "runs" / "source-run"
@@ -100,11 +97,9 @@ def _write_inputs(root: Path) -> tuple[Path, dict, dict]:
     }
     return run_dir, completion, provenance
 
-
 def _obs_schema() -> dict:
     """順序付き observation schema fixture を返す。
 
-    初心者向け:
     segment 順序もモデル入力契約なので identity の一部として扱います。
     """
     return {
@@ -116,7 +111,6 @@ def _obs_schema() -> dict:
         ],
     }
 
-
 def _build(
     run_dir: Path,
     completion: dict,
@@ -127,7 +121,6 @@ def _build(
 ) -> dict:
     """共通の固定入力で descriptor を構築する。
 
-    初心者向け:
     テストごとの差分を一項目だけにして、何が identity を変えたか明確にします。
     """
     return build_value_source_descriptor(
@@ -139,13 +132,11 @@ def _build(
         source_provenance=provenance,
     )
 
-
 def test_ready_descriptor_is_strict_and_contains_no_label_or_verdict_fields(
     tmp_path: Path,
 ) -> None:
     """全 artifact と provenance が揃った IS2 descriptor だけを ready にする。
 
-    初心者向け:
     teacher 判定は後工程の子 artifact であり、source 自身へ逆参照させません。
     """
     run_dir, completion, provenance = _write_inputs(tmp_path)
@@ -167,13 +158,11 @@ def test_ready_descriptor_is_strict_and_contains_no_label_or_verdict_fields(
     with pytest.raises(ValueSourceDescriptorError, match="unknown"):
         validate_value_source_descriptor(invalid)
 
-
 def test_identity_ignores_clock_paths_and_gate_results_but_binds_content(
     tmp_path: Path,
 ) -> None:
     """volatile metadata を除外し、全 immutable content を identity に束縛する。
 
-    初心者向け:
     コピー先や監査時刻は同一性を変えず、モデル・設定・コード・action の変更は必ず
     identity を変えることを反例で確認します。
     """
@@ -216,7 +205,6 @@ def test_identity_ignores_clock_paths_and_gate_results_but_binds_content(
     provenance_b["runtime"]["ordered_action_map"].append("move_dx-1_dy0")
     assert _build(run_b, completion_b, provenance_b)["identity_sha256"] != first["identity_sha256"]
 
-
 @pytest.mark.parametrize(
     ("mutation", "expected_reason"),
     [
@@ -246,7 +234,6 @@ def test_missing_completion_artifacts_or_provenance_is_not_ready(
 ) -> None:
     """probe gate の全 blocking sibling を fail-closed にする。
 
-    初心者向け:
     一項目でも証明できなければ ready と推測せず、理由を機械可読に残します。
     """
     run_dir, completion, provenance = _write_inputs(tmp_path)
@@ -255,13 +242,11 @@ def test_missing_completion_artifacts_or_provenance_is_not_ready(
     assert descriptor["ready_for_probe"] is False
     assert any(reason.startswith(expected_reason) for reason in descriptor["blocking_reasons"])
 
-
 def test_unknown_observation_and_action_hashes_are_both_blocking(
     tmp_path: Path,
 ) -> None:
     """schema と action hash の両契約を対称に fail-closed にする。
 
-    初心者向け:
     model 入力か出力のどちらか一方だけが不明でも probe ready にはしません。
     """
     run_dir, completion, provenance = _write_inputs(tmp_path)
@@ -276,13 +261,11 @@ def test_unknown_observation_and_action_hashes_are_both_blocking(
     assert "obs_schema_hash_unknown" in descriptor["blocking_reasons"]
     assert "ordered_action_map_hash_unknown" in descriptor["blocking_reasons"]
 
-
 def test_dirty_source_is_rejected_by_default_and_patch_is_stored_when_allowed(
     tmp_path: Path,
 ) -> None:
     """dirty source の黙認を禁止し、許可時は patch hash を identity に含める。
 
-    初心者向け:
     commit にない修正も patch artifact として固定し、同じ commit の別内容を区別します。
     """
     run_dir, completion, provenance = _write_inputs(tmp_path)
@@ -305,14 +288,12 @@ def test_dirty_source_is_rejected_by_default_and_patch_is_stored_when_allowed(
     changed["patch_text"] += "+another-change\n"
     assert _build(run_dir, completion, changed)["identity_sha256"] != descriptor["identity_sha256"]
 
-
 def test_write_validates_then_atomically_replaces_descriptor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """temp file から os.replace する atomic publish を検証する。
 
-    初心者向け:
     書き込み途中の JSON が result に見える時間を作らないようにします。
     """
     run_dir, completion, provenance = _write_inputs(tmp_path)
@@ -326,7 +307,6 @@ def test_write_validates_then_atomically_replaces_descriptor(
     def recording_replace(source, destination):
         """atomic publish が一時 file から destination を置換したことを記録する。
 
-        初心者向け:
         本物の os.replace はそのまま実行しつつ、呼出順と二つの path を後から検査します。
         """
         calls.append((Path(source), Path(destination)))
@@ -346,7 +326,6 @@ def test_write_validates_then_atomically_replaces_descriptor(
         write_value_source_descriptor(run_dir, changed_metadata)
     assert json.loads(destination.read_text(encoding="utf-8")) == descriptor
 
-
 @pytest.mark.parametrize("entry_path", ["resume", "new_run_name_collision"])
 def test_released_run_is_rejected_before_any_sibling_artifact_is_mutated(
     tmp_path: Path,
@@ -354,7 +333,6 @@ def test_released_run_is_rejected_before_any_sibling_artifact_is_mutated(
 ) -> None:
     """resume と同名 run 衝突の両経路を provenance 書込み前に拒否する。
 
-    初心者向け:
     公開済み descriptor だけでなく config と run metadata も source の一部なので、
     拒否された訓練開始の前後で bytes・SHA-256・mtime が全て不変なことを確認します。
     """
@@ -392,11 +370,9 @@ def test_released_run_is_rejected_before_any_sibling_artifact_is_mutated(
     }
     assert after == before
 
-
 def test_finalize_never_mutates_an_already_released_run(tmp_path: Path) -> None:
     """公開済み run の正常・異常終了 sibling を全て no-op にする。
 
-    初心者向け:
     終了処理が再度呼ばれても descriptor と既存 log の bytes・SHA-256・mtime を変えず、
     incomplete marker も追加しないことを確認します。
     """
@@ -438,7 +414,6 @@ def test_finalize_never_mutates_an_already_released_run(tmp_path: Path) -> None:
         run_dir / "log" / "value_source_descriptor.incomplete.json"
     ).exists()
 
-
 @pytest.mark.parametrize("exit_reason", ["keyboard_interrupt", "exception"])
 def test_finalize_keeps_incomplete_out_of_result_on_abnormal_exit(
     tmp_path: Path,
@@ -446,7 +421,6 @@ def test_finalize_keeps_incomplete_out_of_result_on_abnormal_exit(
 ) -> None:
     """SIGINT / 例外の全 sibling 経路で descriptor 昇格を禁止する。
 
-    初心者向け:
     model が保存できていても正常な IS2 完了でなければ log marker だけを残します。
     """
     run_dir, completion, provenance = _write_inputs(tmp_path)
@@ -469,13 +443,11 @@ def test_finalize_keeps_incomplete_out_of_result_on_abnormal_exit(
     )
     assert incomplete["reason"] == exit_reason
 
-
 def test_finalize_publishes_only_curriculum_complete_with_model(
     tmp_path: Path,
 ) -> None:
     """IS2 正常終了と model 存在を同時に要求する。
 
-    初心者向け:
     同じ completion 入力でも model 欠落は incomplete、存在時だけ result publish になります。
     """
     missing_run, completion, provenance = _write_inputs(tmp_path / "missing")

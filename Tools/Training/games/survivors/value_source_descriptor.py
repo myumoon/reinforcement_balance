@@ -1,6 +1,5 @@
 """Survivors の immutable Value Source descriptor を構築・公開する。
 
-初心者向け:
 訓練モデルと、その入力・設定・コード・実行条件を一つの内容 ID にまとめます。時刻や
 保存場所、後から得られる検証結果は内容 ID へ入れず、同じ source を安定して参照できます。
 """
@@ -57,19 +56,15 @@ _FORBIDDEN_FIELD_PARTS = (
     "teacher_validation",
 )
 
-
 class ValueSourceDescriptorError(ValueError):
     """Value Source descriptor を安全に構築・検証できない場合の例外。
 
-    初心者向け:
     不明な field や dirty source の黙認を通常の入力ミスと区別して呼び出し元へ伝えます。
     """
-
 
 def _is_sha256(value: Any) -> bool:
     """小文字 64 桁 SHA-256 文字列だけを受理する。
 
-    初心者向け:
     単なるラベルを content hash と誤認して ready にしないための共通判定です。
     """
     return (
@@ -78,11 +73,9 @@ def _is_sha256(value: Any) -> bool:
         and all(character in "0123456789abcdef" for character in value)
     )
 
-
 def _is_git_commit(value: Any) -> bool:
     """SHA-1 / SHA-256 repository の完全 commit ID だけを受理する。
 
-    初心者向け:
     ``HEAD`` や短縮 SHA のように後から別内容を指し得る参照を immutable identity にしません。
     """
     return (
@@ -91,17 +84,14 @@ def _is_git_commit(value: Any) -> bool:
         and all(character in "0123456789abcdef" for character in value)
     )
 
-
 def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
     """mapping 型を検査し、違反時は契約エラーに変換する。
 
-    初心者向け:
     AttributeError ではなく descriptor のどの入力が不正かを明示します。
     """
     if not isinstance(value, Mapping):
         raise ValueSourceDescriptorError(f"{label} must be an object")
     return value
-
 
 def _require_exact_fields(
     value: Any,
@@ -110,7 +100,6 @@ def _require_exact_fields(
 ) -> Mapping[str, Any]:
     """wire object の field 集合を完全一致で検証する。
 
-    初心者向け:
     typo や将来の verdict field を黙って読み捨てず、schema 境界で拒否します。
     """
     data = _require_mapping(value, label)
@@ -122,11 +111,9 @@ def _require_exact_fields(
         raise ValueSourceDescriptorError(f"missing {label} fields: {sorted(missing)}")
     return data
 
-
 def _reject_forbidden_fields(value: Any, path: str = "descriptor") -> None:
     """descriptor 全階層から verdict / label-ready の逆参照を拒否する。
 
-    初心者向け:
     source → teacher verdict → dataset の一方向性を、field 名の全階層 sweep で守ります。
     """
     if isinstance(value, Mapping):
@@ -141,11 +128,9 @@ def _reject_forbidden_fields(value: Any, path: str = "descriptor") -> None:
         for index, child in enumerate(value):
             _reject_forbidden_fields(child, f"{path}[{index}]")
 
-
 def _parse_created_at(value: str) -> None:
     """created_at_utc が timezone 付き ISO-8601 であることを検証する。
 
-    初心者向け:
     identity 外の監査情報でも、曖昧なローカル時刻は保存しません。
     """
     if not isinstance(value, str) or not value:
@@ -161,11 +146,9 @@ def _parse_created_at(value: str) -> None:
     if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
         raise ValueSourceDescriptorError("created_at_utc must use UTC")
 
-
 def _relative_run_path(run_dir: Path, configured: Any, label: str) -> tuple[str, Path]:
     """run artifact の path を run 相対参照と実 path に解決する。
 
-    初心者向け:
     descriptor へ絶対 path を漏らさず、run 外への ``..`` 脱出も拒否します。
     """
     if not isinstance(configured, (str, Path)) or not str(configured):
@@ -184,11 +167,9 @@ def _relative_run_path(run_dir: Path, configured: Any, label: str) -> tuple[str,
         raise ValueSourceDescriptorError(f"{label}.path must reference a file")
     return relative.as_posix(), candidate
 
-
 def _source_path(source_root: Path, configured: Any, label: str) -> Path:
     """source provenance の file path を source root 配下へ解決する。
 
-    初心者向け:
     code hash の対象を checkout 内に限定し、任意のローカル file を取り込みません。
     """
     if not isinstance(configured, (str, Path)) or not str(configured):
@@ -205,17 +186,14 @@ def _source_path(source_root: Path, configured: Any, label: str) -> Path:
         raise ValueSourceDescriptorError(f"{label}.path must be inside source_root") from exc
     return candidate
 
-
 def _file_sha256(path: Path) -> str | None:
     """存在する通常 file の raw bytes SHA-256 を返す。
 
-    初心者向け:
     欠落は例外で ready と推測せず ``None`` にし、後段で blocking reason へ変換します。
     """
     if not path.is_file():
         return None
     return sha256_hex(path.read_bytes())
-
 
 def _artifact_descriptor(
     run_dir: Path,
@@ -224,7 +202,6 @@ def _artifact_descriptor(
 ) -> dict[str, Any]:
     """model 等の run 相対参照と content hash を組み立てる。
 
-    初心者向け:
     保存場所は可搬な参照、同一性は file 内容の hash として別々に保持します。
     """
     configured = artifacts.get(name, {})
@@ -242,11 +219,9 @@ def _artifact_descriptor(
     )
     return {"path_relative": relative, "sha256": _file_sha256(path)}
 
-
 def _normalize_model_spec(value: Any) -> dict[str, Any]:
     """algorithm / policy / recurrent 設定を immutable model spec に整形する。
 
-    初心者向け:
     model bytes だけでなく、推論方法を決める設定も source identity に含めます。
     """
     data = value if isinstance(value, Mapping) else {}
@@ -260,11 +235,9 @@ def _normalize_model_spec(value: Any) -> dict[str, Any]:
         "settings": json.loads(canonical_json_bytes(dict(settings)).decode("utf-8")),
     }
 
-
 def _normalize_obs_schema(value: Mapping[str, Any]) -> dict[str, Any]:
     """obs schema を total dim と順序付き segment 契約へ正規化する。
 
-    初心者向け:
     UE5 の補助 hash を信用するだけでなく、実際の順序付き構造を canonical hash します。
     """
     raw_segments = value.get("segments")
@@ -321,14 +294,12 @@ def _normalize_obs_schema(value: Mapping[str, Any]) -> dict[str, Any]:
         **normalized,
     }
 
-
 def _normalize_code_hashes(
     source_root: Path,
     value: Any,
 ) -> dict[str, str | None]:
     """全必須 code sibling の file hash を対称に収集する。
 
-    初心者向け:
     C++ / Python / NovelD のどれか一経路だけを取りこぼさないよう、固定 key を sweep します。
     """
     code = value if isinstance(value, Mapping) else {}
@@ -352,11 +323,9 @@ def _normalize_code_hashes(
         hashes[name] = _file_sha256(path)
     return hashes
 
-
 def _normalize_runtime(value: Any) -> dict[str, Any]:
     """action と物理 tick の実行契約を正規化する。
 
-    初心者向け:
     同じ model でも action 順序や frame skip が違えば別 source として識別します。
     """
     data = value if isinstance(value, Mapping) else {}
@@ -385,20 +354,16 @@ def _normalize_runtime(value: Any) -> dict[str, Any]:
         "ordered_action_map_sha256": action_hash,
     }
 
-
 def _coverage_count(value: Any) -> int:
     """coverage count を非負の厳密 int に正規化する。
 
-    初心者向け:
     bool や負数を件数として誤受理せず、未証明の 0 として gate を閉じます。
     """
     return value if type(value) is int and value >= 0 else 0
 
-
 def _normalize_completion(value: Mapping[str, Any]) -> dict[str, Any]:
     """IS2 completion と全 coverage sibling を固定 field へ正規化する。
 
-    初心者向け:
     weapon / passive / evolution / union を同じ規則で扱い、片側だけ ready にしません。
     """
     return {
@@ -416,11 +381,9 @@ def _normalize_completion(value: Mapping[str, Any]) -> dict[str, Any]:
         "union_coverage_count": _coverage_count(value.get("union_coverage_count")),
     }
 
-
 def _load_artifact_store_class():
     """既存 Tools/Artifacts の ArtifactStore class を遅延 import する。
 
-    初心者向け:
     dirty 許可時だけ store 実装を読み、通常の clean descriptor には追加依存を持ち込みません。
     """
     tools_root = Path(__file__).resolve().parents[3]
@@ -433,7 +396,6 @@ def _load_artifact_store_class():
         raise ValueSourceDescriptorError("ArtifactStore is unavailable") from exc
     return ArtifactStore
 
-
 def _dirty_patch_ref(
     run_dir: Path,
     source_run: str,
@@ -441,7 +403,6 @@ def _dirty_patch_ref(
 ) -> dict[str, Any] | None:
     """dirty source の patch を content-addressed store へ保存する。
 
-    初心者向け:
     明示許可がない dirty tree は拒否し、許可時も patch 内容を source identity に固定します。
     """
     dirty = provenance.get("dirty")
@@ -483,11 +444,9 @@ def _dirty_patch_ref(
     )
     return ref.to_wire()
 
-
 def _blocking_reasons(descriptor: Mapping[str, Any]) -> list[str]:
     """全 probe-ready 条件を列挙し deterministic な blocking reason を返す。
 
-    初心者向け:
     最初の失敗で止めず、修復に必要な不足を一度の audit で全て表示します。
     """
     reasons: list[str] = []
@@ -574,11 +533,9 @@ def _blocking_reasons(descriptor: Mapping[str, Any]) -> list[str]:
         reasons.append("dirty_patch_artifact_missing")
     return reasons
 
-
 def _identity_payload(descriptor: Mapping[str, Any]) -> dict[str, Any]:
     """volatile path / clock / gate result を除く identity payload を返す。
 
-    初心者向け:
     除外規則を再帰的な key 推測にせず、全 field を明示列挙して意図しない混入を防ぎます。
     """
     artifacts = descriptor["artifacts"]
@@ -599,7 +556,6 @@ def _identity_payload(descriptor: Mapping[str, Any]) -> dict[str, Any]:
         "completion": descriptor["completion"],
     }
 
-
 def build_value_source_descriptor(
     *,
     run_dir: Path,
@@ -611,7 +567,6 @@ def build_value_source_descriptor(
 ) -> dict[str, Any]:
     """immutable ``survivors.value_source_descriptor.v1`` を構築する。
 
-    初心者向け:
     欠落 artifact は blocking reason として表し、dirty source や schema 違反だけを例外で
     fail-closed にします。identity 計算は Common の canonical JSON 実装へ一任します。
     """
@@ -695,13 +650,11 @@ def build_value_source_descriptor(
     validate_value_source_descriptor(descriptor)
     return descriptor
 
-
 def validate_value_source_descriptor(
     descriptor: Mapping[str, Any],
 ) -> None:
     """descriptor の exact schema・hash binding・非循環 field を検証する。
 
-    初心者向け:
     write 前にも同じ validator を通し、呼び出し側が verdict field を追加した payload を
     immutable source として公開できないようにします。
     """
@@ -892,14 +845,12 @@ def validate_value_source_descriptor(
             "identity_sha256 does not match immutable descriptor fields"
         )
 
-
 def write_value_source_descriptor(
     run_dir: Path,
     descriptor: Mapping[str, Any],
 ) -> Path:
     """検証済み descriptor を result へ atomic replace で公開する。
 
-    初心者向け:
     同じ directory に temp file を fsync してから rename し、途中 JSON を観測させません。
     """
     validate_value_source_descriptor(descriptor)
@@ -937,11 +888,9 @@ def write_value_source_descriptor(
             temp_path.unlink()
     return destination
 
-
 def ensure_value_source_run_unreleased(run_dir: Path) -> None:
     """公開済み descriptor を持つ run への追加書込みを拒否する。
 
-    初心者向け:
     訓練の再開や同名 run の衝突を、config や status を書く前に止めるための共通 gate です。
     low-level writer の atomicity に加えて run 全体の provenance も immutable に保ちます。
     """
@@ -951,7 +900,6 @@ def ensure_value_source_run_unreleased(run_dir: Path) -> None:
             "immutable Value Source descriptor が既に存在する run は変更できません: "
             f"{destination}"
         )
-
 
 def finalize_value_source_descriptor(
     *,
@@ -966,7 +914,6 @@ def finalize_value_source_descriptor(
 ) -> Path | None:
     """train 終了理由を gate にして descriptor または incomplete marker を書く。
 
-    初心者向け:
     ``curriculum_complete`` と model/schema の存在が揃う場合だけ result へ atomic publish し、
     SIGINT・例外・欠落時は log に理由を残して ``None`` を返します。
     """

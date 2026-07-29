@@ -1,6 +1,5 @@
 """SB3 PPO による BalancePole / CoinGame / Survivors 訓練スクリプト。
 
-初心者向け:
 環境の生成から学習・checkpoint・終了処理までを統括し、Survivors IS2 完走時には
 後工程が内容で参照できる immutable Value Source descriptor も公開します。
 
@@ -74,7 +73,6 @@ _GAME_DEFAULTS = {
     "survivors": {"port": 8767},
 }
 
-
 _PPO_KWARGS = dict(
     learning_rate=_linear_schedule(3e-4),
     n_steps=4096,
@@ -87,14 +85,12 @@ _PPO_KWARGS = dict(
     verbose=1,
 )
 
-
 def _log_device_status(requested_device: str) -> None:
     print(f"[INFO] requested device: {requested_device}")
     print(f"[INFO] torch={torch.__version__}, cuda_available={torch.cuda.is_available()}, "
           f"torch_cuda={torch.version.cuda}")
     if torch.cuda.is_available():
         print(f"[INFO] cuda device[0]: {torch.cuda.get_device_name(0)}")
-
 
 def _get_raw_env(env):
     """VecEnv ラッパーチェーンを辿って生の環境（DummyVecEnv の env[0]）を返す。
@@ -112,7 +108,6 @@ def _get_raw_env(env):
             inner = inner.unwrapped
         return inner
     return None  # SubprocVecEnv
-
 
 def _get_obs_attrs(env) -> tuple[dict, list]:
     """DummyVecEnv / SubprocVecEnv 両対応で _offsets と _obs_schema を取得する。
@@ -132,7 +127,6 @@ def _get_obs_attrs(env) -> tuple[dict, list]:
     obs_schema = inner.env_method("get_obs_schema")[0]
     return offsets, obs_schema
 
-
 def _find_vecnormalize(env):
     """VecEnv ラッパーチェーンから VecNormalize レイヤーを見つけて返す（無ければ None）。"""
     cur = env
@@ -142,18 +136,15 @@ def _find_vecnormalize(env):
         cur = getattr(cur, "venv", None)
     return None
 
-
 def _json_default(value: Any):
     if isinstance(value, Path):
         return str(value)
     return str(value)
 
-
 def _read_json(path: Path) -> dict:
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
-
 
 def _load_perception_error_profile(path: Path) -> PerceptionErrorProfile:
     """perception error JSON を共有 fail-closed 契約でロードする。
@@ -173,10 +164,8 @@ def _load_perception_error_profile(path: Path) -> PerceptionErrorProfile:
         ) from exc
     return PerceptionErrorProfile.from_wire(payload)
 
-
 def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
 
 def _default_weapon_bootstrap_initial_status(
     weapon_unlock_order: list,
@@ -197,9 +186,6 @@ def _default_weapon_bootstrap_initial_status(
     status[current_entry.key] = "solo_bootstrap"
     return status
 
-
-
-
 def get_effective_bootstrap_gate_eval_freq(args: argparse.Namespace) -> int:
     """bootstrap gate deterministic eval の実効実行間隔を返す。
 
@@ -207,7 +193,6 @@ def get_effective_bootstrap_gate_eval_freq(args: argparse.Namespace) -> int:
     """
     freq = getattr(args, "bootstrap_gate_eval_freq", None)
     return int(freq if freq is not None else getattr(args, "eval_freq", 0))
-
 
 def validate_bootstrap_gate_args(args: argparse.Namespace, *, base_port: int) -> None:
     """bootstrap gate 関連の引数バリデーション。テストから直接呼べるよう独立関数として定義。"""
@@ -252,7 +237,6 @@ def validate_bootstrap_gate_args(args: argparse.Namespace, *, base_port: int) ->
                 f"--bootstrap-gate-eval-port が他のポートと重複しています: "
                 f"bootstrap_gate_eval_port={bgate_port}, eval_port={args.eval_port}"
             )
-
 
 def validate_survivors_supervisor_args(args: argparse.Namespace) -> None:
     """survivors supervisor 関連の引数バリデーション。テストから直接呼べるよう独立関数として定義。"""
@@ -323,7 +307,6 @@ def validate_survivors_supervisor_args(args: argparse.Namespace) -> None:
                 f" --evolution-stage-max-cells >= {_evo_cover} を指定してください。"
             )
 
-
 def _parse_step_shorthand(s: str) -> int:
     """200k/2M/2.5M/2_000k/200_000 などを int に変換する。
 
@@ -339,7 +322,6 @@ def _parse_step_shorthand(s: str) -> int:
     if s_clean.lower().endswith("m"):
         return int(float(s_clean[:-1]) * 1_000_000)
     return int(s_clean)
-
 
 def _parse_resume_spec(spec: str) -> "tuple[Path, int | None]":
     """path@step または path を (Path, int | None) に分解する。
@@ -365,7 +347,6 @@ def _parse_resume_spec(spec: str) -> "tuple[Path, int | None]":
         )
     return Path(path_part), step
 
-
 def _list_available_steps(source_dir: Path) -> list[int]:
     """source_dir/work/model_steps/model_*_steps.zip をglobしてステップ数の昇順リストを返す。"""
     model_steps_dir = source_dir / "work" / "model_steps"
@@ -380,7 +361,6 @@ def _list_available_steps(source_dir: Path) -> list[int]:
         except ValueError:
             pass
     return sorted(steps)
-
 
 def _resolve_resume_from_run(
     source_dir: Path,
@@ -446,10 +426,8 @@ def _resolve_resume_from_run(
     status_dict = _read_json(status_path) if status_path.exists() else {}
     return model_zip, vecnorm_path, status_dict
 
-
 def _model_zip_path(model_base: Path) -> Path:
     return model_base if model_base.suffix.lower() == ".zip" else model_base.with_suffix(".zip")
-
 
 def _git_value(args: list[str]) -> str | None:
     try:
@@ -461,7 +439,6 @@ def _git_value(args: list[str]) -> str | None:
     except Exception:
         return None
 
-
 def _resolved_config(args: argparse.Namespace) -> dict:
     return {
         key: value
@@ -469,11 +446,9 @@ def _resolved_config(args: argparse.Namespace) -> dict:
         if not key.startswith("_")
     }
 
-
 def _config_hash(config: dict) -> str:
     encoded = json.dumps(config, default=_json_default, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:16]
-
 
 def _write_resolved_config(run_dir: Path, args: argparse.Namespace) -> str:
     config = _resolved_config(args)
@@ -485,7 +460,6 @@ def _write_resolved_config(run_dir: Path, args: argparse.Namespace) -> str:
         encoding="utf-8",
     )
     return config_hash
-
 
 def _write_run_meta(run_dir: Path, args: argparse.Namespace, config_hash: str) -> None:
     _write_json(run_dir / "run_meta.json", {
@@ -505,11 +479,9 @@ def _write_run_meta(run_dir: Path, args: argparse.Namespace, config_hash: str) -
         "git_commit": _git_value(["rev-parse", "HEAD"]),
     })
 
-
 def _capture_git_patch(project_root: Path) -> tuple[bool, str]:
     """tracked と untracked を含む source worktree patch を取得する。
 
-    初心者向け:
     commit に含まれない変更を許可する場合でも、変更内容そのものを artifact 化できるよう
     binary diff を固定します。clean tree の場合は空文字列を返します。
     """
@@ -570,11 +542,9 @@ def _capture_git_patch(project_root: Path) -> tuple[bool, str]:
         patch_parts.append(diff.stdout)
     return True, b"".join(patch_parts).decode("utf-8", errors="surrogateescape")
 
-
 def _write_package_freeze(log_dir: Path) -> Path | None:
     """実行 Python の package freeze を provenance artifact として保存する。
 
-    初心者向け:
     package 一覧を推測せず interpreter 自身から取得し、取得失敗時は file を作らず
     descriptor gate を fail-closed にします。
     """
@@ -607,11 +577,9 @@ def _write_package_freeze(log_dir: Path) -> Path | None:
         print(f"[WARN] package freeze の保存に失敗しました: {exc}")
         return None
 
-
 def _value_source_config_hash(args: argparse.Namespace) -> str:
     """ローカル path を除いた resolved config の canonical hash を返す。
 
-    初心者向け:
     checkout や resume 元の保存場所が変わっても同じ設定を同一視し、path が指す実内容は
     model / code / profile の個別 content hash で別途束縛します。
     """
@@ -636,7 +604,6 @@ def _value_source_config_hash(args: argparse.Namespace) -> str:
     }
     return canonical_hash(identity_config)
 
-
 def _prepare_value_source_provenance(
     *,
     run_dir: Path,
@@ -645,7 +612,6 @@ def _prepare_value_source_provenance(
 ) -> dict[str, Any]:
     """IS2 run 開始時の code/config/runtime provenance を固定する。
 
-    初心者向け:
     長時間訓練の終了後に checkout を再観測せず、開始時 commit と dirty patch を
     ``log/value_source_provenance.json`` に保存して descriptor 入力にします。
     """
@@ -758,7 +724,6 @@ def _prepare_value_source_provenance(
     )
     return provenance
 
-
 def _value_source_completion(
     *,
     task_cell_sampler_module,
@@ -766,7 +731,6 @@ def _value_source_completion(
 ) -> dict[str, Any]:
     """終了時 state から IS2 と全 content coverage count を集約する。
 
-    初心者向け:
     weapon / passive / evolution / union を同じ episode 実績から数え、候補を生成しただけでは
     coverage 済みと扱いません。
     """
@@ -816,11 +780,9 @@ def _value_source_completion(
         "union_coverage_count": len(union_cells),
     }
 
-
 def _write_observation_schema(run_dir: Path, env) -> dict[str, Any]:
     """live Survivors env の順序付き observation schema を result に保存する。
 
-    初心者向け:
     model 入力契約を手書き定数から再構築せず、学習に接続した UE5 env 自身から取得します。
     """
     _, segments = _get_obs_attrs(env)
@@ -840,7 +802,6 @@ def _write_observation_schema(run_dir: Path, env) -> dict[str, Any]:
     _write_json(run_dir / "result" / "obs_schema.json", schema)
     return schema
 
-
 def _finalize_value_source_descriptor(
     *,
     run_dir: Path,
@@ -854,7 +815,6 @@ def _finalize_value_source_descriptor(
 ) -> Path | None:
     """IS2 正常完了時だけ descriptor を result へ昇格する。
 
-    初心者向け:
     SIGINT・例外・model 欠落では ``log/`` の incomplete marker だけを更新し、後工程が
     途中 artifact を immutable source と誤認しないようにします。
     """
@@ -915,7 +875,6 @@ def _finalize_value_source_descriptor(
     )
     return destination
 
-
 def _save_training_status(
     status_path: Path,
     args: argparse.Namespace,
@@ -970,7 +929,6 @@ def _save_training_status(
         mirror_path.parent.mkdir(parents=True, exist_ok=True)
         _write_json(mirror_path, data)
 
-
 class _RunCheckpointCallback(BaseCallback):
     def __init__(
         self,
@@ -1005,7 +963,6 @@ class _RunCheckpointCallback(BaseCallback):
         self._status_writer(_model_zip_path(model_base), vecnorm_path, self.num_timesteps)
         print(f"[INFO] checkpoint saved: {_model_zip_path(model_base)}")
         return True
-
 
 class _CurriculumCompletionCallback(BaseCallback):
     """カリキュラム完了条件を満たしたら SB3 の learn を停止する。"""
@@ -1080,7 +1037,6 @@ class _CurriculumCompletionCallback(BaseCallback):
             "min_episode_len_ratio": self.min_episode_len_ratio,
             "last_diagnostics": self.last_diagnostics,
         }
-
 
 class _AnnealingShapingCallback(BaseCallback):
     """shaped_reward を線形アニーリングするコールバック。
@@ -1253,7 +1209,6 @@ class _AnnealingShapingCallback(BaseCallback):
 
         return True
 
-
 def _load_reward_fn(path: Path):
     if not path.exists():
         raise FileNotFoundError(f"--reward-fn ファイルが見つかりません: {path}")
@@ -1262,11 +1217,9 @@ def _load_reward_fn(path: Path):
     spec.loader.exec_module(mod)
     return mod.reward_shaping
 
-
 def _strip_zip(path: Path) -> Path:
     """SB3 が .zip を自動付加するため、ユーザーが指定した .zip 拡張子を除去する。"""
     return path.with_suffix("") if path.suffix.lower() == ".zip" else path
-
 
 def _create_model(args, env, algo_class, default_policy: str, ppo_kwargs: dict):
     """現在の args/env から PPO モデルを新規作成する。
@@ -1318,7 +1271,6 @@ def _create_model(args, env, algo_class, default_policy: str, ppo_kwargs: dict):
     else:
         return algo_class(default_policy, env, **ppo_kwargs)
 
-
 def _load_policy_weights_from_model(
     model, init_model_path: Path, algo_class, device: str
 ) -> None:
@@ -1345,11 +1297,9 @@ def _load_policy_weights_from_model(
     print("[INFO] --init-model: policy weights のみを移植しました (strict=True)")
     print("[INFO] PPO ハイパーパラメータは BC zip ではなく現在の config を使用します")
 
-
 def parse_args() -> argparse.Namespace:
     """全ゲーム共通とゲーム固有の CLI 引数を解決する。
 
-    初心者向け:
     YAML default を先に適用してから明示 CLI を優先し、Value Source の dirty 許可も
     artifact store root と別々の明示 option として受け取ります。
     """
@@ -1680,11 +1630,9 @@ def parse_args() -> argparse.Namespace:
 
     return p.parse_args()
 
-
 def main() -> None:
     """訓練 lifecycle を実行し、終了理由に応じて artifact を確定する。
 
-    初心者向け:
     通常 checkpoint は中断時にも保存しますが、immutable Value Source descriptor だけは
     Survivors IS2 の正常完了を確認した場合に限って result へ公開します。
     """
@@ -3040,7 +2988,6 @@ def main() -> None:
                 wandb.finish()
             except Exception as e:
                 print(f"[WARN] W&B finish/log failed: {e}")
-
 
 if __name__ == "__main__":
     main()

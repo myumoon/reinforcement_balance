@@ -1,6 +1,5 @@
 """旧 Value Source maturity helper の互換出力を検証する。
 
-初心者向け:
 古い呼び出し元の情報は維持しつつ、廃止した label-ready 判定を新しい probe gate へ
 混入させないことを確認します。
 """
@@ -16,11 +15,9 @@ if str(_TRAINING_ROOT) not in sys.path:
 
 from games.survivors.value_source_maturity import make_value_source_maturity_record
 
-
 def test_value_source_maturity_is_compatibility_data_without_label_gate():
     """互換 record から deprecated label-ready field を除外する。
 
-    初心者向け:
     label の可否は後続 teacher validation の責務なので、この helper は判定しません。
     """
     record = make_value_source_maturity_record(

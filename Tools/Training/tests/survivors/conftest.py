@@ -1,6 +1,5 @@
 """Survivors test collection の optional training dependency 境界を定義する。
 
-初心者向け:
 Common 契約だけを入れた最小 venv では SB3・Gymnasium・PyYAML・Deployment package が
 ありません。それらを import 時または実行時に必要とする既存 test file だけを収集対象外にし、
 残る契約 test は実行します。
@@ -9,7 +8,6 @@ Common 契約だけを入れた最小 venv では SB3・Gymnasium・PyYAML・Dep
 from __future__ import annotations
 
 import importlib.util
-
 
 _OPTIONAL_DEPENDENCY_TESTS = {
     "stable_baselines3": {

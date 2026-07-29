@@ -1,6 +1,5 @@
 """保存済み Survivors run から Value Source descriptor を監査・公開する CLI。
 
-初心者向け:
 訓練プロセスとは別に run の固定済み artifact を再検査し、probe ready・not ready・入力不正を
 終了コード 0 / 2 / 3 で自動化へ返します。
 """
@@ -19,11 +18,9 @@ from games.survivors.value_source_descriptor import (
     write_value_source_descriptor,
 )
 
-
 class _AuditArgumentParser(argparse.ArgumentParser):
     """audit の構文エラーを descriptor 入力不正として報告する parser。
 
-    初心者向け:
     argparse 既定の終了コード 2 は not-ready と衝突するため、構文エラーを共通例外へ
     変換し、main が invalid 用の終了コード 3 を返せるようにします。
     """
@@ -31,17 +28,14 @@ class _AuditArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         """必須引数欠落や未知 option を Value Source 契約エラーへ変換する。
 
-        初心者向け:
         parser がプロセスを直接終了せず、JSON 不正など他の invalid 入力と同じ経路で
         終了コード 3 に分類できるようにします。
         """
         raise ValueSourceDescriptorError(f"invalid audit arguments: {message}")
 
-
 def _read_json_object(path: Path, label: str) -> Mapping[str, Any]:
     """UTF-8 JSON object を読み、欠落・構文・root 型を一つの契約エラーにする。
 
-    初心者向け:
     audit が空 object で処理を続けず、入力修復が必要な場合は終了コード 3 にできます。
     """
     if not path.is_file():
@@ -54,11 +48,9 @@ def _read_json_object(path: Path, label: str) -> Mapping[str, Any]:
         raise ValueSourceDescriptorError(f"{label} must contain a JSON object")
     return value
 
-
 def _parser() -> argparse.ArgumentParser:
     """Value Source audit の versioned CLI parser を構築する。
 
-    初心者向け:
     run・schema・時刻を全て明示入力にして、cwd や wall clock による結果の揺れを防ぎます。
     """
     parser = _AuditArgumentParser(
@@ -69,11 +61,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--created-at-utc", required=True)
     return parser
 
-
 def main(argv: Sequence[str] | None = None) -> int:
     """audit を実行し ready=0 / not-ready=2 / invalid=3 を返す。
 
-    初心者向け:
     not-ready descriptor も不足理由の診断用に atomic publish し、schema 不正だけは公開しません。
     """
     try:
@@ -120,7 +110,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ValueSourceDescriptorError, OSError, TypeError, ValueError) as exc:
         print(f"[ERROR] invalid value source input: {exc}", file=sys.stderr)
         return 3
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
