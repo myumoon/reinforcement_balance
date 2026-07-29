@@ -3,11 +3,16 @@
 初心者向け: 通常 action と保留中の level-up choice を別 HTTP API として安全に送る。
 """
 
+from collections.abc import Collection
 from typing import Callable
 
 import numpy as np
 import gymnasium as gym
 from base.base_ue5_env import BaseUE5Env
+from games.survivors.choice_preview import (
+    SurvivorsLevelUpPreview,
+    parse_level_up_preview,
+)
 
 _NUM_ACTIONS = 9
 
@@ -290,6 +295,61 @@ class SurvivorsEnv(BaseUE5Env):
         self._prev_obs = obs
         return obs, info
 
+    def preview_level_up(
+        self, decision_id: str, expected_choice_ids: Collection[str]
+    ) -> SurvivorsLevelUpPreview:
+        """pending全候補のproduction適用直後raw observationを取得する。
+
+        初心者向け: Pythonでは値を予測せず、decision・schema・choice ID集合が
+        現在の契約と一致することだけを検査してimmutable型へ変換する。
+        """
+
+        if not isinstance(decision_id, str) or not decision_id:
+            raise ValueError("decision_id must be a non-empty string")
+        if not self._expected_schema_hash:
+            raise ValueError("obs_schema_hash is not initialized")
+        shape = getattr(self.observation_space, "shape", None)
+        if (
+            not isinstance(shape, tuple)
+            or len(shape) != 1
+            or isinstance(shape[0], bool)
+            or not isinstance(shape[0], int)
+            or shape[0] <= 0
+        ):
+            raise ValueError("observation_space must expose one positive dimension")
+        segment_names: list[str] = []
+        schema_dim = 0
+        for index, segment in enumerate(self._obs_schema):
+            if not isinstance(segment, dict):
+                raise ValueError(f"obs_schema segment {index} must be an object")
+            name = segment.get("name")
+            dim = segment.get("dim")
+            if not isinstance(name, str) or not name or name in segment_names:
+                raise ValueError(f"obs_schema segment {index} has invalid name")
+            if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+                raise ValueError(f"obs_schema segment {index} has invalid dim")
+            segment_names.append(name)
+            schema_dim += dim
+        if schema_dim != shape[0]:
+            raise ValueError(
+                "obs_schema dimension mismatch: "
+                f"segments={schema_dim}, observation_space={shape[0]}"
+            )
+        data = self._post_json(
+            "/preview_level_up",
+            {"decision_id": decision_id},
+            timeout=10,
+            retries=2,
+        )
+        return parse_level_up_preview(
+            data,
+            expected_decision_id=decision_id,
+            expected_schema_hash=self._expected_schema_hash,
+            expected_choice_ids=expected_choice_ids,
+            obs_dim=shape[0],
+            schema_segment_names=segment_names,
+        )
+
     def get_params(self) -> dict:
         """最後に set_params で適用したパラメータを返す。eval_env との同期用。"""
         return dict(self._last_params)
@@ -343,3 +403,13 @@ class SurvivorsMonitor(Monitor):
     ) -> tuple[np.ndarray, dict]:
         """wrapped SurvivorsEnv の外部 level-up API を明示的に転送する。"""
         return self.env.choose_level_up(decision_id, choice_id)
+
+    def preview_level_up(
+        self, decision_id: str, expected_choice_ids: Collection[str]
+    ) -> SurvivorsLevelUpPreview:
+        """wrapped SurvivorsEnv のtyped preview APIを明示的に転送する。
+
+        初心者向け: VecEnvからenv_methodで呼ぶ場合も同じwire検証を必ず通す。
+        """
+
+        return self.env.preview_level_up(decision_id, expected_choice_ids)

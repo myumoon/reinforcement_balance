@@ -14,6 +14,24 @@ struct FSurvivorsLevelUpChoiceOffer
 	FLevelUpChoice Choice;
 };
 
+/**
+ * 一つのchoiceをproduction適用した直後の反実仮想観測。
+ * 初心者向け: Errorが空でない場合はclone不能またはID不一致なので、観測値を使用してはいけない。
+ */
+struct FSurvivorsChoicePreview
+{
+	FString ChoiceId;
+	TArray<float> ProjectedObservation;
+	TArray<FString> ChangedSegments;
+	FString Error;
+
+	bool IsValid() const
+	{
+		return Error.IsEmpty() && !ChoiceId.IsEmpty()
+			&& !ProjectedObservation.IsEmpty();
+	}
+};
+
 /** 現在保留中のレベルアップ選択。 */
 struct FSurvivorsPendingLevelUpDecision
 {

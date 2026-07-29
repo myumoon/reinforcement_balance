@@ -12,6 +12,15 @@ public:
 	virtual int32     GetOrbitOrbCount()           const override { return 2; }
 	virtual FVector2D GetOrbitOrbPos(int32 OrbIdx) const override;
 	virtual float     GetOrbitOrbVisualRadius()    const override { return CachedTargetZoneRadius; }
+	/** Vandalierの両orbit/burst stateをsandboxへ複製する。
+	 * 初心者向け: union固有の二組のtimerを保ち、参照先Logicだけをcloneへ付け替える。 */
+	virtual TUniquePtr<FSurvivorsWeaponLogic> CloneForPreview(
+		FSurvivorsGameLogic* InLogic) const override
+	{
+		auto Clone = MakeUnique<FSurvivorsWeaponVandalierLogic>(*this);
+		Clone->Logic = InLogic;
+		return Clone;
+	}
 
 private:
 	float CachedDamage           = 55.f;

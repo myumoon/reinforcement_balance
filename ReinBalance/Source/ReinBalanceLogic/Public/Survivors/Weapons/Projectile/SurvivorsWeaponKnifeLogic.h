@@ -8,6 +8,15 @@ class REINBALANCELOGIC_API FSurvivorsWeaponKnifeLogic : public FSurvivorsWeaponL
 public:
 	virtual void Tick(float Dt) override;
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
+	/** Knifeのburst/facing stateをsandboxへ複製する。
+	 * 初心者向け: 発射途中の向きとtimerを保ち、参照先Logicだけをcloneへ付け替える。 */
+	virtual TUniquePtr<FSurvivorsWeaponLogic> CloneForPreview(
+		FSurvivorsGameLogic* InLogic) const override
+	{
+		auto Clone = MakeUnique<FSurvivorsWeaponKnifeLogic>(*this);
+		Clone->Logic = InLogic;
+		return Clone;
+	}
 
 private:
 	float CachedDamage   = 6.5f;

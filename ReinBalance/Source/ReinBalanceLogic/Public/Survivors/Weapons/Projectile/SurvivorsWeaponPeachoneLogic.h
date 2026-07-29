@@ -12,6 +12,15 @@ public:
 	virtual int32     GetOrbitOrbCount()           const override { return 1; }
 	virtual FVector2D GetOrbitOrbPos(int32 OrbIdx) const override { return OrbIdx == 0 ? CurrentOrbitPos : FVector2D::ZeroVector; }
 	virtual float     GetOrbitOrbVisualRadius()    const override { return CachedTargetZoneRadius; }
+	/** Peachoneのorbit/burst stateをsandboxへ複製する。
+	 * 初心者向け: 爆撃途中の位置とtimerを保ち、参照先Logicだけをcloneへ付け替える。 */
+	virtual TUniquePtr<FSurvivorsWeaponLogic> CloneForPreview(
+		FSurvivorsGameLogic* InLogic) const override
+	{
+		auto Clone = MakeUnique<FSurvivorsWeaponPeachoneLogic>(*this);
+		Clone->Logic = InLogic;
+		return Clone;
+	}
 
 protected:
 	float CachedDamage           = 10.f;

@@ -956,6 +956,173 @@ FSurvivorsLevelUpApplyResult FSurvivorsGameLogic::ApplyExternalLevelUpChoice(
 	return Applied;
 }
 
+TUniquePtr<FSurvivorsGameLogic> FSurvivorsGameLogic::CloneForPreview() const
+{
+	// 値型stateは明示列挙し、copy不能な武器だけはvirtual deep cloneする。
+	// 初心者向け: 新しいstate追加時にこの一覧へ足さない限り自動共有されない設計です。
+	auto Clone = MakeUnique<FSurvivorsGameLogic>();
+	Clone->PlayerPos = PlayerPos;
+	Clone->PlayerVel = PlayerVel;
+	Clone->PlayerHP = PlayerHP;
+	Clone->PlayerXP = PlayerXP;
+	Clone->PlayerLevel = PlayerLevel;
+	for (int32 SlotIdx = 0; SlotIdx < MaxWeaponSlots; ++SlotIdx)
+	{
+		Clone->WeaponSlots[SlotIdx] = WeaponSlots[SlotIdx];
+	}
+	for (int32 SlotIdx = 0; SlotIdx < MaxPassiveSlots; ++SlotIdx)
+	{
+		Clone->PassiveSlots[SlotIdx] = PassiveSlots[SlotIdx];
+	}
+	Clone->CachedPassiveEffects = CachedPassiveEffects;
+	Clone->GlobalFreezeUntilTime = GlobalFreezeUntilTime;
+	Clone->PlayerShieldTimer = PlayerShieldTimer;
+	Clone->bShieldActive = bShieldActive;
+	Clone->MaxRevivalCount = MaxRevivalCount;
+	Clone->UsedRevivalCount = UsedRevivalCount;
+	Clone->NextEnemyId = NextEnemyId;
+	Clone->NextGemId = NextGemId;
+	Clone->FloorPickups = FloorPickups;
+	Clone->SpecialPickups = SpecialPickups;
+	Clone->Destructibles = Destructibles;
+	Clone->Gems = Gems;
+	Clone->Enemies = Enemies;
+	Clone->ElapsedTime = ElapsedTime;
+	Clone->SpawnAccumulator = SpawnAccumulator;
+	Clone->bBossSpawned = bBossSpawned;
+	Clone->LastReward = LastReward;
+	Clone->EpisodeBaseReward = EpisodeBaseReward;
+	Clone->EpisodeStepCount = EpisodeStepCount;
+	Clone->bDone = bDone;
+	Clone->bTruncated = bTruncated;
+	Clone->RandStream = RandStream;
+	Clone->LastSpawnDebug = LastSpawnDebug;
+	Clone->Projectiles = Projectiles;
+	Clone->GroundZones = GroundZones;
+	Clone->CurrentConfig = CurrentConfig;
+	Clone->CachedObsDim = CachedObsDim;
+	Clone->PhysicsAccumTime = PhysicsAccumTime;
+	Clone->EpisodeSerial = EpisodeSerial;
+	Clone->LevelUpBacklog = LevelUpBacklog;
+	Clone->LevelUpDecisionState = LevelUpDecisionState;
+	Clone->LastAppliedLevelUpResult = LastAppliedLevelUpResult;
+
+	Clone->Weapons.SetNum(Weapons.Num());
+	for (int32 SlotIdx = 0; SlotIdx < Weapons.Num(); ++SlotIdx)
+	{
+		if (!Weapons[SlotIdx])
+		{
+			continue;
+		}
+		Clone->Weapons[SlotIdx] = Weapons[SlotIdx]->CloneForPreview(Clone.Get());
+		if (!Clone->Weapons[SlotIdx])
+		{
+			// 未対応resourceを黙って共有せずpreview全体を拒否する。
+			// 初心者向け: 一部だけ複製したsandboxをproduction相当として返しません。
+			return nullptr;
+		}
+	}
+
+	// gridはpointer共有を避け、clone済みentity配列から明示的に再構築する。
+	// 初心者向け: 将来preview後に同じLogicをstepしても、元stateの索引を参照しません。
+	Clone->BuildEnemyGrid();
+	Clone->BuildPickupGrid();
+	return Clone;
+}
+
+FSurvivorsChoicePreview FSurvivorsGameLogic::PreviewLevelUpChoice(
+	const FString& DecisionId, const FString& ChoiceId) const
+{
+	FSurvivorsChoicePreview Preview;
+	Preview.ChoiceId = ChoiceId;
+
+	int32 ChoiceIndex = INDEX_NONE;
+	const ESurvivorsLevelUpChoiceValidation Validation =
+		LevelUpDecisionState.ValidateChoice(DecisionId, ChoiceId, ChoiceIndex);
+	if (Validation != ESurvivorsLevelUpChoiceValidation::Accepted)
+	{
+		Preview.Error = Validation == ESurvivorsLevelUpChoiceValidation::InvalidChoice
+			? TEXT("invalid choice")
+			: TEXT("pending decision does not match");
+		return Preview;
+	}
+	const FSurvivorsPendingLevelUpDecision& Pending =
+		LevelUpDecisionState.GetPending();
+	if (!Pending.Choices.IsValidIndex(ChoiceIndex)
+		|| Pending.Choices[ChoiceIndex].ChoiceId != ChoiceId)
+	{
+		Preview.Error = TEXT("choice set changed");
+		return Preview;
+	}
+
+	TUniquePtr<FSurvivorsGameLogic> Sandbox = CloneForPreview();
+	if (!Sandbox)
+	{
+		Preview.Error = TEXT("preview clone rejected");
+		return Preview;
+	}
+	// base観測もsandboxから取得し、元Logicのmutable次元cacheさえ変更しない。
+	// 初心者向け: const getter内部の高速化用cacheもgame stateとして扱い、preview元には触れません。
+	const TArray<float> BaseObservation = Sandbox->GetObservation();
+
+	// sandboxでもproduction external transitionをそのまま通し、その結果を再計算する。
+	// 初心者向け: ApplyLevelUpChoiceやpassive式のpreview専用mirrorを作らないため本番とずれません。
+	const FSurvivorsLevelUpApplyResult Applied =
+		Sandbox->ApplyExternalLevelUpChoice(DecisionId, ChoiceId);
+	if (Applied.Status != ESurvivorsLevelUpApplyStatus::Applied)
+	{
+		Preview.Error = TEXT("preview production apply rejected");
+		return Preview;
+	}
+	Preview.ProjectedObservation = Sandbox->GetObservation();
+	if (BaseObservation.Num() != Preview.ProjectedObservation.Num())
+	{
+		Preview.ProjectedObservation.Reset();
+		Preview.Error = TEXT("preview observation dimension changed");
+		return Preview;
+	}
+
+	// schema順にbase/projected配列を直接比較して変更segmentを導出する。
+	// 初心者向け: item種別ごとの「変わるはず一覧」は使わず、実際に変わった値だけを報告します。
+	int32 Offset = 0;
+	TSet<FString> SchemaNames;
+	for (const FSurvivorsObsSegment& Segment : Sandbox->GetObsSchema())
+	{
+		if (Segment.Name.IsEmpty() || Segment.Dim <= 0
+			|| Offset > BaseObservation.Num() - Segment.Dim
+			|| SchemaNames.Contains(Segment.Name))
+		{
+			Preview.ProjectedObservation.Reset();
+			Preview.ChangedSegments.Reset();
+			Preview.Error = TEXT("observation schema does not match dimension");
+			return Preview;
+		}
+		SchemaNames.Add(Segment.Name);
+		bool bChanged = false;
+		for (int32 LocalIndex = 0; LocalIndex < Segment.Dim; ++LocalIndex)
+		{
+			const int32 Index = Offset + LocalIndex;
+			if (BaseObservation[Index] != Preview.ProjectedObservation[Index])
+			{
+				bChanged = true;
+				break;
+			}
+		}
+		if (bChanged)
+		{
+			Preview.ChangedSegments.Add(Segment.Name);
+		}
+		Offset += Segment.Dim;
+	}
+	if (Offset != BaseObservation.Num())
+	{
+		Preview.ProjectedObservation.Reset();
+		Preview.ChangedSegments.Reset();
+		Preview.Error = TEXT("observation schema does not cover dimension");
+	}
+	return Preview;
+}
+
 FPassiveEffects FSurvivorsGameLogic::ComputePassiveEffects() const
 {
 	FPassiveEffects PE;

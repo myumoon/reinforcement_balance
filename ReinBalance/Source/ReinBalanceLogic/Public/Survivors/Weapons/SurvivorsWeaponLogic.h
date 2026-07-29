@@ -33,6 +33,13 @@ public:
 	/** 武器レベル変更時（パラメータ再キャッシュ用） */
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) {}
 
+	/**
+	 * preview sandbox向けに派生runtime stateごとdeep cloneする。
+	 * 初心者向け: 元Logicへのpointerを共有せず、clone側Logicへ明示的に付け替える。
+	 */
+	virtual TUniquePtr<FSurvivorsWeaponLogic> CloneForPreview(
+		FSurvivorsGameLogic* InLogic) const = 0;
+
 	// ---- 軌道オーブ View API（KingBible / Peachone / EbonyWings / Vandalier） ----
 	virtual int32     GetOrbitOrbCount()                  const { return 0; }
 	virtual FVector2D GetOrbitOrbPos(int32 OrbIdx)        const { return FVector2D::ZeroVector; }
