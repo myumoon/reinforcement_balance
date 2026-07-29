@@ -16,6 +16,15 @@ public:
 	virtual float     GetOrbitOrbVisualRadius()           const override;
 	virtual float     GetOrbitOrbTtl(int32 OrbIdx)        const override { return bOrbsActive ? ActiveTimer : 0.f; }
 	virtual float     GetCooldownObsDenominator()         const override;
+	/** King Bibleのorb位置・timerをsandboxへ複製する。
+	 * 初心者向け: 軌道途中の見え方を保ち、参照先Logicだけをcloneへ付け替える。 */
+	virtual TUniquePtr<FSurvivorsWeaponLogic> CloneForPreview(
+		FSurvivorsGameLogic* InLogic) const override
+	{
+		auto Clone = MakeUnique<FSurvivorsWeaponKingBibleLogic>(*this);
+		Clone->Logic = InLogic;
+		return Clone;
+	}
 
 private:
 	float CachedDamage            = 10.f;

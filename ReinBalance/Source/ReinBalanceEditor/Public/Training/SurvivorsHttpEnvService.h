@@ -73,6 +73,12 @@ public:
 	/** MPSC choice queue を game thread で検証・適用して応答する。 */
 	void ProcessLevelUpChoiceRequests();
 
+	/**
+	 * MPSC preview queueをgame threadでpending stateへ束縛して応答する。
+	 * 初心者向け: HTTP workerはGameを読まず、このmethodだけがconst Logic previewを呼びます。
+	 */
+	void ProcessLevelUpPreviewRequests();
+
 	/** /step の既存情報と level-up fields を同じ JSON object に構築する。 */
 	FString BuildInfoJson() const;
 

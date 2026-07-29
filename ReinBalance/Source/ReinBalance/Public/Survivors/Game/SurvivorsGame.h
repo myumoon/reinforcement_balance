@@ -87,6 +87,12 @@ public:
 	/** 外部 level-up choice を game thread 上の Logic へ委譲する。 */
 	FSurvivorsLevelUpApplyResult ApplyExternalLevelUpChoice(
 		const FString& DecisionId, const FString& ChoiceId);
+	/**
+	 * 反実仮想previewをcanonical Logicへ変更せず委譲する。
+	 * 初心者向け: ActorやComponentには選択適用・観測計算の複製を置きません。
+	 */
+	FSurvivorsChoicePreview PreviewLevelUpChoice(
+		const FString& DecisionId, const FString& ChoiceId) const;
 	bool IsLevelUpPending() const { return Logic.IsLevelUpPending(); }
 	const FSurvivorsPendingLevelUpDecision& GetPendingLevelUpDecision() const
 	{

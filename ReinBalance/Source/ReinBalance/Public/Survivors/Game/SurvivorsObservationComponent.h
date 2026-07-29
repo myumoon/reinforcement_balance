@@ -1,5 +1,9 @@
 #pragma once
 
+/**
+ * legacy observation facadeのLogic委譲APIを定義する。
+ * 初心者向け: Component自身はschemaや観測値を計算せず、canonical Game Logicだけを参照する。
+ */
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Survivors/SurvivorsTypes.h"

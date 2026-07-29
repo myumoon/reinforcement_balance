@@ -210,6 +210,13 @@ public:
 	FSurvivorsLevelUpApplyResult ApplyExternalLevelUpChoice(
 		const FString& DecisionId, const FString& ChoiceId);
 
+	/**
+	 * pending choiceをinternal sandboxへ適用し、productionと同じraw observationを返す。
+	 * 初心者向け: const method内でdeep cloneだけを変更するため、本物のepisode stateは不変のままです。
+	 */
+	FSurvivorsChoicePreview PreviewLevelUpChoice(
+		const FString& DecisionId, const FString& ChoiceId) const;
+
 	// ---- ParallelFor 内で直接呼ぶ API ----
 
 	/** 複数物理ステップを実行して結果を返す */
@@ -435,8 +442,14 @@ private:
 	void  BuildPickupGrid();
 	void  QueryPickupContacts(FVector2D Pos, float Radius, TArray<const struct FSurvivorsTargetProxy*>& Out) const;
 	TUniquePtr<FSurvivorsWeaponLogic> CreateWeaponLogic(EWeaponType Type);
+	/**
+	 * preview専用に全stateをdeep cloneし、外部pointerをclone側へ再束縛する。
+	 * 初心者向け: public snapshot APIにはせず、反実仮想計算の一時objectだけを生成します。
+	 */
+	TUniquePtr<FSurvivorsGameLogic> CloneForPreview() const;
 
 #if WITH_AUTOMATION_TESTS
 	friend struct FSurvivorsGameTestAccess;
+	friend struct FSurvivorsChoiceProjectionTestAccess;
 #endif
 };

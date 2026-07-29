@@ -292,6 +292,12 @@ FSurvivorsLevelUpApplyResult ASurvivorsGame::ApplyExternalLevelUpChoice(
 	return Logic.ApplyExternalLevelUpChoice(DecisionId, ChoiceId);
 }
 
+FSurvivorsChoicePreview ASurvivorsGame::PreviewLevelUpChoice(
+	const FString& DecisionId, const FString& ChoiceId) const
+{
+	return Logic.PreviewLevelUpChoice(DecisionId, ChoiceId);
+}
+
 TArray<int32> ASurvivorsGame::GetEvolvableWeaponsForChest() const
 {
 	return Logic.GetEvolvableWeapons();

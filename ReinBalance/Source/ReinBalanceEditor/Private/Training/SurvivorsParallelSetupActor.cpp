@@ -219,6 +219,9 @@ void ASurvivorsParallelSetupActor::Tick(float DeltaTime)
 	for (ASurvivorsHttpEnvService* Svc : AllServices)
 	{
 		if (!Svc) continue;
+		// previewをchoice mutationより先に処理してpending bindingを保つ。
+		// 初心者向け: 同じframeに両requestが来ても、反実仮想値を古いIDへ誤結合しません。
+		Svc->ProcessLevelUpPreviewRequests();
 		Svc->ProcessLevelUpChoiceRequests();
 		FString Json;
 		FHttpResultCallback Cb;

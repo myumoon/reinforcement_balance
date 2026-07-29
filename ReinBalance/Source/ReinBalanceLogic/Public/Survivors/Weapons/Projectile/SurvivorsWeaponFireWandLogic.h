@@ -10,6 +10,15 @@ public:
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
 	virtual void ComputeHits(FSurvivorsHitFrame& HitFrame) override;
 	virtual float GetCooldownObsDenominator() const override;
+	/** Fire Wandのcooldown/cacheをsandboxへ複製する。
+	 * 初心者向け: 元episodeへのpointerだけを共有せず、clone側Logicへ明示的に再束縛する。 */
+	virtual TUniquePtr<FSurvivorsWeaponLogic> CloneForPreview(
+		FSurvivorsGameLogic* InLogic) const override
+	{
+		auto Clone = MakeUnique<FSurvivorsWeaponFireWandLogic>(*this);
+		Clone->Logic = InLogic;
+		return Clone;
+	}
 
 private:
 	float CachedDamage          = 40.f;
