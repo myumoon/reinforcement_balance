@@ -649,16 +649,14 @@ def _prepare_value_source_provenance(
     長時間訓練の終了後に checkout を再観測せず、開始時 commit と dirty patch を
     ``log/value_source_provenance.json`` に保存して descriptor 入力にします。
     """
+    from games.survivors.value_source_descriptor import (
+        ensure_value_source_run_unreleased,
+    )
     from reinbalance_survivors_contracts.canonical_json import sha256_hex
     from reinbalance_survivors_contracts.target_action import ActionSemantics
 
     project_root = Path(__file__).resolve().parents[2]
-    released_descriptor = run_dir / "result" / "value_source_descriptor.json"
-    if released_descriptor.exists():
-        raise ValueError(
-            "immutable Value Source descriptor が既に存在する run は再学習できません: "
-            f"{released_descriptor}"
-        )
+    ensure_value_source_run_unreleased(run_dir)
     dirty, patch_text = _capture_git_patch(project_root)
     allow_dirty = bool(getattr(args, "allow_dirty_value_source", False))
     artifact_store_root = getattr(args, "value_source_artifact_store", None)
@@ -860,6 +858,13 @@ def _finalize_value_source_descriptor(
     SIGINT・例外・model 欠落では ``log/`` の incomplete marker だけを更新し、後工程が
     途中 artifact を immutable source と誤認しないようにします。
     """
+    released_descriptor = run_dir / "result" / "value_source_descriptor.json"
+    if released_descriptor.exists():
+        print(
+            "[WARN] 公開済み immutable Value Source descriptor を保持し、"
+            f"終了処理の上書きをスキップします: {released_descriptor}"
+        )
+        return released_descriptor
     if source_provenance is None:
         return None
     incomplete_path = log_dir / "value_source_descriptor.incomplete.json"
@@ -1825,6 +1830,20 @@ def main() -> None:
         if not args.version_name:
             raise ValueError("--version-name は必須です（新規 run 時）")
         run_dir = Path("runs") / args.game / args.version_name / "train" / args.run_name
+
+    from games.survivors.value_source_descriptor import (
+        ValueSourceDescriptorError,
+        ensure_value_source_run_unreleased,
+    )
+
+    try:
+        ensure_value_source_run_unreleased(run_dir)
+    except ValueSourceDescriptorError:
+        print(
+            "[WARN] 公開済み immutable Value Source descriptor を持つ run のため、"
+            f"訓練開始前に変更を拒否します: {run_dir}"
+        )
+        raise
 
     # サブディレクトリ定義
     work_dir        = run_dir / "work"

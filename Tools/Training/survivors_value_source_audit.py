@@ -20,6 +20,24 @@ from games.survivors.value_source_descriptor import (
 )
 
 
+class _AuditArgumentParser(argparse.ArgumentParser):
+    """audit の構文エラーを descriptor 入力不正として報告する parser。
+
+    初心者向け:
+    argparse 既定の終了コード 2 は not-ready と衝突するため、構文エラーを共通例外へ
+    変換し、main が invalid 用の終了コード 3 を返せるようにします。
+    """
+
+    def error(self, message: str) -> None:
+        """必須引数欠落や未知 option を Value Source 契約エラーへ変換する。
+
+        初心者向け:
+        parser がプロセスを直接終了せず、JSON 不正など他の invalid 入力と同じ経路で
+        終了コード 3 に分類できるようにします。
+        """
+        raise ValueSourceDescriptorError(f"invalid audit arguments: {message}")
+
+
 def _read_json_object(path: Path, label: str) -> Mapping[str, Any]:
     """UTF-8 JSON object を読み、欠落・構文・root 型を一つの契約エラーにする。
 
@@ -43,7 +61,7 @@ def _parser() -> argparse.ArgumentParser:
     初心者向け:
     run・schema・時刻を全て明示入力にして、cwd や wall clock による結果の揺れを防ぎます。
     """
-    parser = argparse.ArgumentParser(
+    parser = _AuditArgumentParser(
         description="Audit and publish a Survivors immutable value source descriptor."
     )
     parser.add_argument("--run-dir", type=Path, required=True)

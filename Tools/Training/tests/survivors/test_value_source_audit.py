@@ -10,6 +10,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 _TRAINING_ROOT = Path(__file__).resolve().parents[2]
 if str(_TRAINING_ROOT) not in sys.path:
     sys.path.insert(0, str(_TRAINING_ROOT))
@@ -105,6 +107,63 @@ def test_audit_returns_two_for_not_ready_and_three_for_invalid(tmp_path: Path) -
             str(invalid_run),
             "--obs-schema-json",
             str(invalid_obs),
+            "--created-at-utc",
+            "2026-07-29T00:00:00Z",
+        ]
+    ) == 3
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [],
+        ["--run-dir", "/tmp/run", "--created-at-utc", "2026-07-29T00:00:00Z"],
+        [
+            "--obs-schema-json",
+            "/tmp/obs.json",
+            "--created-at-utc",
+            "2026-07-29T00:00:00Z",
+        ],
+        ["--run-dir", "/tmp/run", "--obs-schema-json", "/tmp/obs.json"],
+        [
+            "--run-dir",
+            "/tmp/run",
+            "--obs-schema-json",
+            "/tmp/obs.json",
+            "--created-at-utc",
+            "2026-07-29T00:00:00Z",
+            "--unknown-option",
+        ],
+    ],
+)
+def test_audit_returns_three_for_all_argument_error_siblings(
+    argv: list[str],
+) -> None:
+    """必須引数欠落と未知 option の全 sibling を invalid=3 に分類する。
+
+    初心者向け:
+    argparse の既定 code 2 を外へ出さず、not-ready artifact と CLI 構文エラーを
+    自動化が確実に区別できることを確認します。
+    """
+    assert main(argv) == 3
+
+
+def test_audit_returns_three_for_invalid_artifact_metadata(tmp_path: Path) -> None:
+    """run 外 path を持つ artifact metadata を invalid=3 で拒否する。
+
+    初心者向け:
+    JSON 構文だけでなく、artifact 参照が run の外へ脱出する意味上の不正も同じ invalid
+    boundary に閉じ込めます。
+    """
+    run_dir, completion, provenance = _write_inputs(tmp_path)
+    provenance["artifacts"]["model"]["path"] = "../../outside-model.zip"
+    obs_path = _write_audit_metadata(run_dir, completion, provenance)
+    assert main(
+        [
+            "--run-dir",
+            str(run_dir),
+            "--obs-schema-json",
+            str(obs_path),
             "--created-at-utc",
             "2026-07-29T00:00:00Z",
         ]

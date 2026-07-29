@@ -21,10 +21,12 @@ if str(_TRAINING_ROOT) not in sys.path:
 from games.survivors.value_source_descriptor import (
     ValueSourceDescriptorError,
     build_value_source_descriptor,
+    ensure_value_source_run_unreleased,
     finalize_value_source_descriptor,
     validate_value_source_descriptor,
     write_value_source_descriptor,
 )
+from reinbalance_survivors_contracts.canonical_json import sha256_hex
 
 
 def _write_inputs(root: Path) -> tuple[Path, dict, dict]:
@@ -322,6 +324,11 @@ def test_write_validates_then_atomically_replaces_descriptor(
     real_replace = module.os.replace
 
     def recording_replace(source, destination):
+        """atomic publish が一時 file から destination を置換したことを記録する。
+
+        初心者向け:
+        本物の os.replace はそのまま実行しつつ、呼出順と二つの path を後から検査します。
+        """
         calls.append((Path(source), Path(destination)))
         real_replace(source, destination)
 
@@ -338,6 +345,98 @@ def test_write_validates_then_atomically_replaces_descriptor(
     with pytest.raises(ValueSourceDescriptorError, match="different immutable"):
         write_value_source_descriptor(run_dir, changed_metadata)
     assert json.loads(destination.read_text(encoding="utf-8")) == descriptor
+
+
+@pytest.mark.parametrize("entry_path", ["resume", "new_run_name_collision"])
+def test_released_run_is_rejected_before_any_sibling_artifact_is_mutated(
+    tmp_path: Path,
+    entry_path: str,
+) -> None:
+    """resume と同名 run 衝突の両経路を provenance 書込み前に拒否する。
+
+    初心者向け:
+    公開済み descriptor だけでなく config と run metadata も source の一部なので、
+    拒否された訓練開始の前後で bytes・SHA-256・mtime が全て不変なことを確認します。
+    """
+    run_dir, completion, provenance = _write_inputs(tmp_path / entry_path)
+    (run_dir / "log" / "run_meta.json").write_text(
+        json.dumps({"git_commit": "a" * 40}),
+        encoding="utf-8",
+    )
+    descriptor = _build(run_dir, completion, provenance)
+    destination = write_value_source_descriptor(run_dir, descriptor)
+    protected_paths = [
+        destination,
+        run_dir / "log" / "config_resolved.yaml",
+        run_dir / "log" / "run_meta.json",
+    ]
+    before = {
+        path: (
+            path.read_bytes(),
+            sha256_hex(path.read_bytes()),
+            path.stat().st_mtime_ns,
+        )
+        for path in protected_paths
+    }
+
+    with pytest.raises(ValueSourceDescriptorError, match="変更できません"):
+        ensure_value_source_run_unreleased(run_dir)
+
+    after = {
+        path: (
+            path.read_bytes(),
+            sha256_hex(path.read_bytes()),
+            path.stat().st_mtime_ns,
+        )
+        for path in protected_paths
+    }
+    assert after == before
+
+
+def test_finalize_never_mutates_an_already_released_run(tmp_path: Path) -> None:
+    """公開済み run の正常・異常終了 sibling を全て no-op にする。
+
+    初心者向け:
+    終了処理が再度呼ばれても descriptor と既存 log の bytes・SHA-256・mtime を変えず、
+    incomplete marker も追加しないことを確認します。
+    """
+    run_dir, completion, provenance = _write_inputs(tmp_path)
+    descriptor = _build(run_dir, completion, provenance)
+    destination = write_value_source_descriptor(run_dir, descriptor)
+    protected_path = run_dir / "log" / "config_resolved.yaml"
+    before = {
+        path: (
+            path.read_bytes(),
+            sha256_hex(path.read_bytes()),
+            path.stat().st_mtime_ns,
+        )
+        for path in (destination, protected_path)
+    }
+
+    for exit_reason in ("curriculum_complete", "keyboard_interrupt", "exception"):
+        assert finalize_value_source_descriptor(
+            run_dir=run_dir,
+            exit_reason=exit_reason,
+            final_model_zip=run_dir / "result" / "model.zip",
+            completion=completion,
+            obs_schema=_obs_schema(),
+            git_commit="a" * 40,
+            created_at_utc="2030-01-01T00:00:00Z",
+            source_provenance=provenance,
+        ) == destination
+
+    after = {
+        path: (
+            path.read_bytes(),
+            sha256_hex(path.read_bytes()),
+            path.stat().st_mtime_ns,
+        )
+        for path in (destination, protected_path)
+    }
+    assert after == before
+    assert not (
+        run_dir / "log" / "value_source_descriptor.incomplete.json"
+    ).exists()
 
 
 @pytest.mark.parametrize("exit_reason", ["keyboard_interrupt", "exception"])

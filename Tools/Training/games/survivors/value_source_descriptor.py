@@ -938,6 +938,21 @@ def write_value_source_descriptor(
     return destination
 
 
+def ensure_value_source_run_unreleased(run_dir: Path) -> None:
+    """公開済み descriptor を持つ run への追加書込みを拒否する。
+
+    初心者向け:
+    訓練の再開や同名 run の衝突を、config や status を書く前に止めるための共通 gate です。
+    low-level writer の atomicity に加えて run 全体の provenance も immutable に保ちます。
+    """
+    destination = Path(run_dir).resolve() / "result" / "value_source_descriptor.json"
+    if destination.exists():
+        raise ValueSourceDescriptorError(
+            "immutable Value Source descriptor が既に存在する run は変更できません: "
+            f"{destination}"
+        )
+
+
 def finalize_value_source_descriptor(
     *,
     run_dir: Path,
@@ -956,6 +971,16 @@ def finalize_value_source_descriptor(
     SIGINT・例外・欠落時は log に理由を残して ``None`` を返します。
     """
     run_path = Path(run_dir).resolve()
+    released_path = run_path / "result" / "value_source_descriptor.json"
+    if released_path.exists():
+        try:
+            released = json.loads(released_path.read_text(encoding="utf-8"))
+            validate_value_source_descriptor(released)
+        except (OSError, json.JSONDecodeError, ValueSourceDescriptorError) as exc:
+            raise ValueSourceDescriptorError(
+                "existing value_source_descriptor.json is invalid and immutable"
+            ) from exc
+        return released_path
     log_dir = run_path / "log"
     log_dir.mkdir(parents=True, exist_ok=True)
     incomplete_path = log_dir / "value_source_descriptor.incomplete.json"
