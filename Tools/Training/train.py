@@ -1,5 +1,9 @@
 """SB3 PPO による BalancePole / CoinGame / Survivors 訓練スクリプト。
 
+初心者向け:
+環境の生成から学習・checkpoint・終了処理までを統括し、Survivors IS2 完走時には
+後工程が内容で参照できる immutable Value Source descriptor も公開します。
+
 使い方:
   python train.py                              # BalancePole (UE5 接続)
   python train.py --game coin                  # CoinGame    (UE5 接続)
@@ -21,8 +25,9 @@ import hashlib
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 # リファクタリング前に保存されたモデル（entity_attention_extractor モジュールで pickle 化）を
 # --resume でロードできるよう、旧モジュールパスを sys.modules に登録する
@@ -501,6 +506,411 @@ def _write_run_meta(run_dir: Path, args: argparse.Namespace, config_hash: str) -
     })
 
 
+def _capture_git_patch(project_root: Path) -> tuple[bool, str]:
+    """tracked と untracked を含む source worktree patch を取得する。
+
+    初心者向け:
+    commit に含まれない変更を許可する場合でも、変更内容そのものを artifact 化できるよう
+    binary diff を固定します。clean tree の場合は空文字列を返します。
+    """
+    status = subprocess.run(
+        ["git", "-C", str(project_root), "status", "--porcelain", "-z"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
+    if not status:
+        return False, ""
+    patch_parts = [
+        subprocess.run(
+            ["git", "-C", str(project_root), "diff", "--binary", "HEAD", "--"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+    ]
+    untracked_output = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project_root),
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
+    for raw_relative in untracked_output.split(b"\0"):
+        if not raw_relative:
+            continue
+        relative = os.fsdecode(raw_relative)
+        diff = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(project_root),
+                "diff",
+                "--no-index",
+                "--binary",
+                "--",
+                "/dev/null",
+                relative,
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if diff.returncode not in (0, 1):
+            raise RuntimeError(
+                f"untracked source patch capture failed: {relative}"
+            )
+        patch_parts.append(diff.stdout)
+    return True, b"".join(patch_parts).decode("utf-8", errors="surrogateescape")
+
+
+def _write_package_freeze(log_dir: Path) -> Path | None:
+    """実行 Python の package freeze を provenance artifact として保存する。
+
+    初心者向け:
+    package 一覧を推測せず interpreter 自身から取得し、取得失敗時は file を作らず
+    descriptor gate を fail-closed にします。
+    """
+    destination = log_dir / "package_freeze.txt"
+    try:
+        freeze = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "list",
+                "--format=freeze",
+                "--disable-pip-version-check",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+        packages = sorted(
+            line
+            for line in freeze.decode("utf-8").splitlines()
+            if line and " @ file:" not in line and not line.startswith("-e ")
+        )
+        destination.write_text(
+            "\n".join(packages) + "\n",
+            encoding="utf-8",
+        )
+        return destination
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"[WARN] package freeze の保存に失敗しました: {exc}")
+        return None
+
+
+def _value_source_config_hash(args: argparse.Namespace) -> str:
+    """ローカル path を除いた resolved config の canonical hash を返す。
+
+    初心者向け:
+    checkout や resume 元の保存場所が変わっても同じ設定を同一視し、path が指す実内容は
+    model / code / profile の個別 content hash で別途束縛します。
+    """
+    from reinbalance_survivors_contracts.canonical_json import canonical_hash
+
+    local_path_keys = {
+        "config",
+        "reward_fn",
+        "perception_error_profile",
+        "init_model",
+        "init_vecnormalize",
+        "resume",
+        "value_source_artifact_store",
+    }
+    identity_config = {
+        key: (
+            "<local-path-excluded>"
+            if key in local_path_keys or isinstance(value, Path)
+            else value
+        )
+        for key, value in _resolved_config(args).items()
+    }
+    return canonical_hash(identity_config)
+
+
+def _prepare_value_source_provenance(
+    *,
+    run_dir: Path,
+    log_dir: Path,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """IS2 run 開始時の code/config/runtime provenance を固定する。
+
+    初心者向け:
+    長時間訓練の終了後に checkout を再観測せず、開始時 commit と dirty patch を
+    ``log/value_source_provenance.json`` に保存して descriptor 入力にします。
+    """
+    from reinbalance_survivors_contracts.canonical_json import sha256_hex
+    from reinbalance_survivors_contracts.target_action import ActionSemantics
+
+    project_root = Path(__file__).resolve().parents[2]
+    released_descriptor = run_dir / "result" / "value_source_descriptor.json"
+    if released_descriptor.exists():
+        raise ValueError(
+            "immutable Value Source descriptor が既に存在する run は再学習できません: "
+            f"{released_descriptor}"
+        )
+    dirty, patch_text = _capture_git_patch(project_root)
+    allow_dirty = bool(getattr(args, "allow_dirty_value_source", False))
+    artifact_store_root = getattr(args, "value_source_artifact_store", None)
+    if dirty and not allow_dirty:
+        raise ValueError(
+            "Value Source 対象の source worktree が dirty です。clean にするか、"
+            "--allow-dirty-value-source と --value-source-artifact-store を明示してください。"
+        )
+    if dirty and artifact_store_root is None:
+        raise ValueError(
+            "--allow-dirty-value-source には --value-source-artifact-store が必要です"
+        )
+    _write_package_freeze(log_dir)
+    action_semantics = ActionSemantics.default_v1()
+    policy = "MlpLstmPolicy" if args.recurrent else "MlpPolicy"
+    provenance: dict[str, Any] = {
+        "source_root": str(project_root),
+        "dirty": dirty,
+        "allow_dirty": allow_dirty,
+        "artifacts": {
+            "model": {"path": "result/model.zip"},
+            "vecnormalize": {"path": "result/vecnormalize.pkl"},
+            "package_freeze": {"path": "log/package_freeze.txt"},
+        },
+        "model_spec": {
+            "algorithm": "RecurrentPPO" if args.recurrent else "PPO",
+            "policy": policy,
+            "recurrent": bool(args.recurrent),
+            "settings": {
+                "entity_attention": bool(args.entity_attention),
+                "frame_stack": int(args.frame_stack),
+                "lstm_hidden_size": (
+                    int(args.lstm_hidden_size) if args.recurrent else None
+                ),
+                "n_lstm_layers": (
+                    int(args.n_lstm_layers) if args.recurrent else None
+                ),
+            },
+        },
+        "resolved_config": {"path": "log/config_resolved.yaml"},
+        "code": {
+            "cpp_logic": {
+                "path": (
+                    "ReinBalance/Source/ReinBalanceLogic/Private/Survivors/"
+                    "SurvivorsGameLogic.cpp"
+                )
+            },
+            "cpp_base_reward": {
+                "path": (
+                    "ReinBalance/Source/ReinBalanceLogic/Private/Survivors/"
+                    "SurvivorsGameLogic.cpp"
+                )
+            },
+            "python_reward": {
+                "path": (
+                    str(args.reward_fn.resolve())
+                    if args.reward_fn is not None
+                    else "Tools/Training/games/survivors/survivors_env.py"
+                )
+            },
+            "hp_penalty": {
+                "path": "Tools/Training/games/survivors/survivors_env.py"
+            },
+            "noveld_config": {"path": "Tools/Training/train.py"},
+            "noveld_callback": {
+                "path": "Tools/Training/common/sb_callback/noveld_callback.py"
+            },
+        },
+        "runtime": {
+            "action_semantics_version": action_semantics.schema_version,
+            "physics_dt": 1.0 / 60.0,
+            "frame_skip": int(args.frame_skip),
+            "decision_hz": 60.0 / int(args.frame_skip),
+            "ordered_action_map": list(action_semantics.actions),
+        },
+    }
+    provenance["resolved_config"]["sha256"] = _value_source_config_hash(args)
+    for code_ref in provenance["code"].values():
+        code_path = Path(code_ref["path"])
+        if not code_path.is_absolute():
+            code_path = project_root / code_path
+        code_ref["sha256"] = (
+            sha256_hex(code_path.read_bytes()) if code_path.is_file() else None
+        )
+    if dirty:
+        provenance["patch_text"] = patch_text
+        provenance["artifact_store_root"] = str(
+            Path(artifact_store_root).resolve()
+        )
+    _write_json(log_dir / "value_source_provenance.json", provenance)
+    _write_json(
+        log_dir / "value_source_descriptor.incomplete.json",
+        {
+            "schema_version": "survivors.value_source_descriptor.incomplete.v1",
+            "source_run": run_dir.name,
+            "status": "training",
+            "reason": "is2_not_completed",
+        },
+    )
+    return provenance
+
+
+def _value_source_completion(
+    *,
+    task_cell_sampler_module,
+    weapon_bootstrap_module,
+) -> dict[str, Any]:
+    """終了時 state から IS2 と全 content coverage count を集約する。
+
+    初心者向け:
+    weapon / passive / evolution / union を同じ episode 実績から数え、候補を生成しただけでは
+    coverage 済みと扱いません。
+    """
+    stats = (
+        task_cell_sampler_module.export_state().get("stats", [])
+        if task_cell_sampler_module is not None
+        else []
+    )
+    exercised = [
+        entry
+        for entry in stats
+        if type(entry.get("episode_count")) is int and entry["episode_count"] > 0
+    ]
+    weapon_ids = {
+        entry.get("cell", {}).get("first_weapon_id")
+        for entry in exercised
+        if entry.get("cell", {}).get("first_weapon_id") is not None
+    }
+    passive_ids = {
+        slot[0]
+        for entry in exercised
+        for slot in entry.get("cell", {}).get("initial_passive_slots", [])
+        if isinstance(slot, (list, tuple)) and slot
+    }
+    evolution_cells = [
+        entry
+        for entry in exercised
+        if entry.get("cell", {}).get("task_kind") == "evolution_stage"
+    ]
+    union_cells = [
+        entry
+        for entry in evolution_cells
+        if len(entry.get("cell", {}).get("initial_weapon_slots", [])) > 1
+    ]
+    if weapon_bootstrap_module is not None:
+        weapon_ids.update(
+            weapon.get("weapon_id")
+            for weapon in weapon_bootstrap_module.export_state().get("weapons", [])
+            if weapon.get("status") in {"bootstrap", "maintenance"}
+        )
+    return {
+        "item_stage_key": "IS2",
+        "is2_complete": True,
+        "weapon_coverage_count": len(weapon_ids),
+        "passive_coverage_count": len(passive_ids),
+        "evolution_coverage_count": len(evolution_cells),
+        "union_coverage_count": len(union_cells),
+    }
+
+
+def _write_observation_schema(run_dir: Path, env) -> dict[str, Any]:
+    """live Survivors env の順序付き observation schema を result に保存する。
+
+    初心者向け:
+    model 入力契約を手書き定数から再構築せず、学習に接続した UE5 env 自身から取得します。
+    """
+    _, segments = _get_obs_attrs(env)
+    hashes = env.env_method("get_obs_schema_hash")
+    if not hashes or len(set(hashes)) != 1:
+        raise RuntimeError("Survivors observation schema hash is unavailable")
+    total_dim = sum(
+        segment["dim"]
+        for segment in segments
+        if isinstance(segment, dict) and type(segment.get("dim")) is int
+    )
+    schema = {
+        "obs_schema_hash": hashes[0],
+        "total_dim": total_dim,
+        "segments": segments,
+    }
+    _write_json(run_dir / "result" / "obs_schema.json", schema)
+    return schema
+
+
+def _finalize_value_source_descriptor(
+    *,
+    run_dir: Path,
+    log_dir: Path,
+    exit_reason: str,
+    final_model_zip: Path | None,
+    obs_schema: Mapping[str, Any] | None,
+    source_provenance: Mapping[str, Any] | None,
+    task_cell_sampler_module,
+    weapon_bootstrap_module,
+) -> Path | None:
+    """IS2 正常完了時だけ descriptor を result へ昇格する。
+
+    初心者向け:
+    SIGINT・例外・model 欠落では ``log/`` の incomplete marker だけを更新し、後工程が
+    途中 artifact を immutable source と誤認しないようにします。
+    """
+    if source_provenance is None:
+        return None
+    incomplete_path = log_dir / "value_source_descriptor.incomplete.json"
+    completion = None
+    if exit_reason == "curriculum_complete":
+        completion = _value_source_completion(
+            task_cell_sampler_module=task_cell_sampler_module,
+            weapon_bootstrap_module=weapon_bootstrap_module,
+        )
+        _write_json(log_dir / "value_source_completion.json", completion)
+    try:
+        from games.survivors.value_source_descriptor import (
+            finalize_value_source_descriptor,
+        )
+
+        git_commit = _read_json(log_dir / "run_meta.json").get("git_commit")
+        destination = finalize_value_source_descriptor(
+            run_dir=run_dir,
+            exit_reason=exit_reason,
+            final_model_zip=final_model_zip,
+            completion=completion,
+            obs_schema=obs_schema,
+            git_commit=git_commit,
+            created_at_utc=datetime.now(timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            source_provenance=source_provenance,
+        )
+    except Exception as exc:
+        _write_json(
+            incomplete_path,
+            {
+                "schema_version": "survivors.value_source_descriptor.incomplete.v1",
+                "source_run": run_dir.name,
+                "status": "incomplete",
+                "reason": "descriptor_generation_failed",
+                "error": str(exc),
+            },
+        )
+        print(f"[WARN] Value Source descriptor の生成に失敗しました: {exc}")
+        return None
+    if destination is None:
+        return None
+    descriptor = _read_json(destination)
+    print(
+        "[INFO] Survivors Value Source descriptor を公開しました: "
+        f"{destination} (ready_for_probe={descriptor['ready_for_probe']})"
+    )
+    return destination
+
+
 def _save_training_status(
     status_path: Path,
     args: argparse.Namespace,
@@ -932,6 +1342,12 @@ def _load_policy_weights_from_model(
 
 
 def parse_args() -> argparse.Namespace:
+    """全ゲーム共通とゲーム固有の CLI 引数を解決する。
+
+    初心者向け:
+    YAML default を先に適用してから明示 CLI を優先し、Value Source の dirty 許可も
+    artifact store root と別々の明示 option として受け取ります。
+    """
     # 事前パース: --config のみ抽出（他の引数は無視）
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--config", type=Path, default=None)
@@ -964,6 +1380,20 @@ def parse_args() -> argparse.Namespace:
                    help="runs/<game>/<version-name>/ 以下に成果物を保存するバージョン名（新規run時は必須）")
     p.add_argument("--run-name", default=None,
                    help="runs/<game>/<version-name>/train/<run-name>/ に成果物を保存する実行名")
+    p.add_argument(
+        "--allow-dirty-value-source",
+        action="store_true",
+        help=(
+            "Survivors IS2 Value Source に dirty source を明示許可する。"
+            "patch は --value-source-artifact-store へ保存される"
+        ),
+    )
+    p.add_argument(
+        "--value-source-artifact-store",
+        type=Path,
+        default=None,
+        help="dirty Value Source patch 用の明示的な content-addressed artifact store root",
+    )
     p.add_argument("--resume", type=str, default=None,
                    help="再開する run_dir または既存モデルのパス（.zip 拡張子は省略・付加どちらでも可）")
     p.add_argument("--checkpoint-freq", type=int, default=10_000,
@@ -1247,6 +1677,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """訓練 lifecycle を実行し、終了理由に応じて artifact を確定する。
+
+    初心者向け:
+    通常 checkpoint は中断時にも保存しますが、immutable Value Source descriptor だけは
+    Survivors IS2 の正常完了を確認した場合に限って result へ公開します。
+    """
     _use_wandb = False
     wandb_logger = WandbLogger(enabled=False)
     args = parse_args()
@@ -1427,6 +1863,14 @@ def main() -> None:
     spalf_status_path       = log_dir / "spalf_state.json"
     config_hash = _write_resolved_config(log_dir, args)
     _write_run_meta(log_dir, args, config_hash)
+    value_source_provenance = None
+    value_source_obs_schema = None
+    if args.game == "survivors" and args.until_curriculum_complete:
+        value_source_provenance = _prepare_value_source_provenance(
+            run_dir=run_dir,
+            log_dir=log_dir,
+            args=args,
+        )
     print(f"[INFO] run_dir: {run_dir}")
     print(f"[INFO] config_path: {args.config if args.config else '(none)'}")
     print(f"[INFO] config_hash: {config_hash}")
@@ -1632,6 +2076,9 @@ def main() -> None:
             print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{base_port}〜{base_port + args.n_envs - 1} に接続...")
         else:
             print(f"[INFO] game={args.game}  UE5 サーバー {args.host}:{port} に接続...")
+
+    if args.game == "survivors" and args.until_curriculum_complete:
+        value_source_obs_schema = _write_observation_schema(run_dir, env)
 
     # VecNormalize 適用
     # - 新規訓練: 正規化統計を初期化
@@ -2442,6 +2889,7 @@ def main() -> None:
 
     exit_reason = "completed"
     exit_error = None
+    final_model_zip = None
 
     try:
         # --resume: 継続 (False), --init-model / 新規: 0から開始 (True)
@@ -2453,7 +2901,7 @@ def main() -> None:
         if '_survivors_supervisor_cb' in locals() and _survivors_supervisor_cb is not None:
             supervisor_state = _survivors_supervisor_cb.export_state()
             supervisor_exit_reason = supervisor_state.get("exit_reason")
-            if supervisor_exit_reason:
+            if supervisor_exit_reason and exit_reason != "curriculum_complete":
                 exit_reason = f"survivors_supervisor:{supervisor_exit_reason}"
     except KeyboardInterrupt:
         exit_reason = "keyboard_interrupt"
@@ -2463,6 +2911,10 @@ def main() -> None:
         exit_error = str(e)
         print("\n[WARN] UE5 HTTP 接続が復旧できませんでした。モデルを保存して終了します。")
         print(f"[WARN] {exit_error}")
+    except Exception as e:
+        exit_reason = "exception"
+        exit_error = f"{type(e).__name__}: {e}"
+        raise
     finally:
         try:
             _reward_logger.save(log_dir, metadata={"run": str(run_dir.name)})
@@ -2493,6 +2945,16 @@ def main() -> None:
                 if spalf_cb is not None:
                     spalf_cb._save_status()
                     print(f"[INFO] SPALF state を保存: {spalf_status_path}")
+            _finalize_value_source_descriptor(
+                run_dir=run_dir,
+                log_dir=log_dir,
+                exit_reason=exit_reason,
+                final_model_zip=final_model_zip,
+                obs_schema=value_source_obs_schema,
+                source_provenance=value_source_provenance,
+                task_cell_sampler_module=_task_cell_sampler_module,
+                weapon_bootstrap_module=locals().get("_weapon_bootstrap_module"),
+            )
         finally:
             if env is not None:
                 try:

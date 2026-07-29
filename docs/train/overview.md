@@ -58,6 +58,32 @@ wrapper は latency、burst dropout、座標ノイズ、categorical confusion、
 false entity count clipping の順序を固定し、worker ごとの corruption state を
 `get_corruption_state()` / `set_corruption_state()` で保存・再開できる。
 
+## Survivors Value Source descriptor
+
+Survivors IS2 が `curriculum_complete` で正常終了すると、`train.py` は model /
+VecNormalize、obs schema、resolved config、code、package freeze、action semantics、
+coverage を束縛した `survivors.value_source_descriptor.v1` を
+`result/value_source_descriptor.json` へ atomic publish する。SIGINT、接続断、例外時は
+`log/value_source_descriptor.incomplete.json` だけを残し、descriptor を昇格しない。
+
+source worktree が dirty の場合はデフォルトで開始を拒否する。意図的に許可する場合だけ
+`--allow-dirty-value-source --value-source-artifact-store <store-root>` を指定する。
+この場合は binary patch が content-addressed artifact store に保存され、その SHA-256 が
+descriptor identity に含まれる。
+
+保存済み run は次の CLI でも再監査できる。
+
+```bash
+python survivors_value_source_audit.py \
+  --run-dir runs/survivors/<version>/train/<run> \
+  --obs-schema-json runs/survivors/<version>/train/<run>/result/obs_schema.json \
+  --created-at-utc 2026-07-29T00:00:00Z
+```
+
+終了コードは `0=probe ready`、`2=not ready`、`3=invalid input`。descriptor は immutable
+source のみを表し、`ready_for_labels`、teacher validation、verdict は含めない。これらは
+後続 phase で descriptor を参照する別 artifact として発行する。
+
 ## 関連ドキュメント
 
 - UE5 との通信仕様: [`ue5_env.md`](ue5_env.md)
