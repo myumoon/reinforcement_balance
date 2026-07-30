@@ -461,6 +461,10 @@ class ChoiceTraceCollector:
             decision_id,
         )
         existing = self._journal["transactions"].get(record_id)
+        record_was_committed = self.writer.contains_record(
+            record_id,
+            committed_only=True,
+        )
         if record_id in self._runtime_results:
             return self._runtime_results[record_id]
         if existing is not None and (
@@ -472,10 +476,13 @@ class ChoiceTraceCollector:
             or existing.get("choice_ids") != choices
         ):
             raise CollectorError("resume transaction binding mismatch")
-        if self.writer.active_shard_id is None:
+        if (
+            not record_was_committed
+            and self.writer.active_shard_id is None
+        ):
             self.writer.start_shard()
-        self._active_record_id = record_id
-        if isinstance(existing, Mapping):
+        self._active_record_id = None if record_was_committed else record_id
+        if isinstance(existing, Mapping) and not record_was_committed:
             stored_events = existing.get("replay_events")
             if not isinstance(stored_events, list) or not stored_events:
                 raise CollectorError("resume replay events are missing")
@@ -503,7 +510,7 @@ class ChoiceTraceCollector:
             if context is None:
                 raise CollectorError("pending retry context disappeared") from exc
         self.session.validate_context(context)
-        if existing is None:
+        if existing is None or record_was_committed:
             self._event(
                 "external_decision",
                 episode_logical_id=episode_logical_id,
@@ -511,6 +518,7 @@ class ChoiceTraceCollector:
                 decision_id=decision_id,
                 choice_ids=choices,
             )
+        if existing is None:
             existing = {
                 "status": "started",
                 "episode_logical_id": episode_logical_id,
@@ -685,10 +693,6 @@ class ChoiceTraceCollector:
             value = getattr(context, name)
             if value is not None:
                 arrays[name] = np.asarray(value, dtype=np.float32).copy()
-        record_was_committed = self.writer.contains_record(
-            record_id,
-            committed_only=True,
-        )
         appended_id = (
             record_id
             if self.writer.contains_record(record_id)
@@ -849,12 +853,20 @@ class ChoiceTraceCollector:
                 episode_start=False,
             )
             action = transition.movement_action
-        if episode_record_ids:
+        active_episode_record_ids = [
+            record_id
+            for record_id in episode_record_ids
+            if not self.writer.contains_record(
+                record_id,
+                committed_only=True,
+            )
+        ]
+        if active_episode_record_ids:
             self.writer.finalize_replay_trace(
-                episode_record_ids,
+                active_episode_record_ids,
                 self._replay_events,
             )
-            for record_id in episode_record_ids:
+            for record_id in active_episode_record_ids:
                 transaction = self._journal["transactions"].get(record_id)
                 if isinstance(transaction, dict):
                     transaction["replay_events"] = list(self._replay_events)

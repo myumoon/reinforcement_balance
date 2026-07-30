@@ -176,14 +176,19 @@ class FakeEpisodeEnv(FakeChoiceEnv):
         super().__init__()
         self.pending = False
         self.step_calls = 0
+        self.actions: list[int] = []
 
     def reset(self, *, seed: int):
         """固定初期 observation と空 info を返す。
 
-        reset seed は replay event 側で検証し、fake dynamics 自体は seed に依存させない。
+        同じ logical episode の process resume は dynamics だけを先頭へ戻し、server-side
+        apply cache は維持して duplicate choice request の mutation を防ぐ。
         """
 
         assert seed == 13
+        self.pending = False
+        self.step_calls = 0
+        self.actions = []
         return np.asarray([0.0, 0.5, 1.0], dtype=np.float32), {}
 
     def step(self, action: int):
@@ -196,6 +201,7 @@ class FakeEpisodeEnv(FakeChoiceEnv):
         assert isinstance(action, int)
         if self.pending:
             raise AssertionError("/step while pending")
+        self.actions.append(action)
         self.step_calls += 1
         if self.step_calls == 1:
             self.pending = True
@@ -512,6 +518,81 @@ def test_episode_never_steps_while_choice_is_pending_and_saves_replay(
     assert kinds.count("choice_preview_ack") == 1
     assert kinds.count("choice_request") == 2
     assert kinds.count("choice_ack") == 1
+
+
+def test_completed_episode_process_resume_skips_committed_record_reactivation(
+    tmp_path: Path,
+) -> None:
+    """episode commit 後の process resume を committed row のまま再生する。
+
+    shard_size=1 で既に commit 済みの decision を active row として再 finalize せず、
+    server mutation/dataset row を増やさずに次 action と recurrent state を再現する。
+    """
+
+    collector, _, scorer, first_session, writer = _collector(tmp_path)
+    collector.shard_size = 1
+    episode_env = FakeEpisodeEnv()
+    episode_env.schema_hash = (
+        scorer.source.descriptor["observation_schema"]["reported_hash"]
+        or scorer.source.descriptor["observation_schema"]["sha256"]
+    )
+    collector.env = episode_env
+
+    assert collector.collect_episode(
+        seed=13,
+        episode_logical_id="episode-13",
+    ) == 1
+    assert writer.active_shard_id is None
+    first_actions = list(episode_env.actions)
+    before_resume = read_dataset(tmp_path / "dataset")
+
+    resumed_writer = DatasetWriter(
+        tmp_path / "dataset",
+        dataset_id="survivors-choice-test",
+        source_identity_sha256=collector.source_identity_sha256,
+    )
+    verdict, hashes = _fidelity()
+    resumed_session = scorer.new_session()
+    resumed = ChoiceTraceCollector(
+        env=episode_env,
+        scorer=scorer,
+        session=resumed_session,
+        writer=resumed_writer,
+        source_identity_sha256=collector.source_identity_sha256,
+        fidelity_verdict=verdict,
+        current_gating_producer_hashes=hashes,
+        epsilon=collector.epsilon,
+        seed=13,
+        shard_size=1,
+        journal_path=tmp_path / "collector-journal.json",
+    )
+
+    assert resumed.collect_episode(
+        seed=13,
+        episode_logical_id="episode-13",
+    ) == 1
+    after_resume = read_dataset(tmp_path / "dataset")
+
+    assert episode_env.applies == 1
+    assert after_resume.manifest["record_count"] == 1
+    assert resumed_writer.active_shard_id is None
+    assert episode_env.actions == first_actions
+    assert after_resume.rows == before_resume.rows
+    assert set(after_resume.arrays[0]) == set(before_resume.arrays[0])
+    for name in after_resume.arrays[0]:
+        np.testing.assert_array_equal(
+            after_resume.arrays[0][name],
+            before_resume.arrays[0][name],
+        )
+    assert resumed_session.state_hash == first_session.state_hash
+    for actual_pair, expected_pair in zip(
+        resumed_session.states,
+        first_session.states,
+    ):
+        assert actual_pair is not None
+        assert expected_pair is not None
+        for actual, expected in zip(actual_pair, expected_pair):
+            np.testing.assert_array_equal(actual, expected)
 
 
 def test_formal_collector_rejects_missing_baseline_stale_and_blocked_fidelity(
