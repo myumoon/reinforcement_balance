@@ -492,6 +492,15 @@ class RecurrentPolicySession:
         )
         return copy_pair(self._pi), copy_pair(self._vf)
 
+    @property
+    def pending_context(self) -> CriticContext | None:
+        """現在 pending 中の immutable critic context を返す。
+
+        collector の HTTP retry/resume が private state を直接参照せず、begin 時に発行された
+        seal 済み context と同一 object だけを再利用できるようにする。
+        """
+        return None if self._pending is None else self._pending.context
+
     def _advance_policy(
         self,
         raw_obs: np.ndarray,

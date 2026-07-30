@@ -113,6 +113,59 @@ pending/base observation は recurrent state を進めず、全 candidate は同
 UE5 build / LLT: 未実行（Windows 専用）。real completed source model の label release
 判定と HTTP 接続を使う burn-in end-to-end integration は後続 phase で実施する。
 
+## Survivors choice trace dataset collection
+
+`collect_survivors_value_choices.py` は current-hash `integration` fidelity verdict、immutable
+Value Source、UE5 external choice API を親に持つ formal collector である。baseline、
+stale、missing、blocking verdict では起動しない。behavior は既定
+`epsilon_source_scorer` / `epsilon=0.20` で、teacher ranking と selected behavior は別
+field に保存する。propensity は候補数を `K` として、teacher best は
+`1-epsilon+epsilon/K`、その他は `epsilon/K` を記録する。
+
+```bash
+python collect_survivors_value_choices.py \
+  --manifest /artifact/value-source/result/value_source_descriptor.json \
+  --fidelity-verdict /artifact/fidelity/integration-verdict.json \
+  --current-producer-hashes /artifact/fidelity/current-producer-hashes.json \
+  --artifact-store /artifact/survivors-choice-datasets \
+  --seed-start 1000 --seed-end 1099 --episode-count 100 \
+  --shard-size 100 --ue5-ports 8767 8777 --epsilon 0.20
+```
+
+dataset ID の既定形式は
+`survivors-value-choices-<source identity先頭12桁>-seeds-<開始>-<終了>` である。明示
+`--dataset-id` も使用できるが、同じ ID の既存 manifest へ異なる source identity を追加
+することはできない。manifest と各 row には source、model、VecNormalize、observation
+schema、policy state schema、fidelity verdict の content hash を provenance として保存
+する。reset、全 movement action、全 preview/choice request/ack、external decision ID も
+ordered replay events に残す。
+
+dataset は Git worktree 外の `--artifact-store` にのみ作成する。各 shard は canonical
+JSONL metadata、pickle-free compressed NPZ、commit marker の組で、全 ndarray は
+`float32` / `int32` に固定する。actor/critic LSTM h/c の元 shape は維持する。容量は概ね
+`decision数 × (base observation + 全candidate observation + selected observation +
+pi/vf h/c) × 4 byte` に JSONL/NPZ overhead を加えた値であり、圧縮率は observation と
+state に依存する。formal 件数の storage/wall-clock 上限は pilot 後に固定するため、この
+CLI は budget を推測しない。
+
+停止時は commit 前 shard が `.staging` に残る。次回起動は中断 staging、partial NPZ、
+JSONL/NPZ count mismatch を `quarantine/` へ隔離する。shard directory の確定後かつ
+manifest 更新前に停止した場合だけ、commit marker と全 hash/count の read-back 成功を
+条件に manifest へ exactly once recovery する。collector journal は選択と ack を
+decision ID ごとに保存し、process resume でも別 choice/record を発行しない。record ID は
+source identity + episode logical ID + external decision ID の canonical SHA-256 なので、
+HTTP retry と episode 再実行は deduplicate される。manifest histogram は shard commit
+時だけ更新される。
+
+artifact store の backup/retention は dataset directory 全体（manifest、`shards/`、
+`journals/`、`quarantine/`）を同じ世代として扱う。NPZ/JSONL は Git に追加しない。
+formal collection 前に current producer hashes で integration fidelity verdict を再検証
+し、source descriptor と fidelity verdict は dataset と同じ artifact store の immutable
+親として保持する。
+
+UE5 build / LLT: 未実行（Windows 専用）。PIE 100 decisions pilot、formal storage/
+parallel-port/wall-clock budget の固定は後続 phase で実施する。
+
 ## 関連ドキュメント
 
 - UE5 との通信仕様: [`ue5_env.md`](ue5_env.md)
