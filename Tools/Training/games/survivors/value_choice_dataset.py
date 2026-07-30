@@ -971,6 +971,85 @@ class DatasetWriter:
             self.abort_shard(reason=str(exc))
             raise
 
+    def finalize_replay_trace(
+        self,
+        record_ids: Sequence[str],
+        replay_events: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """active row 群へ episode 完了時の replay trace を確定する。
+
+        decision 後の movement も含む全 event と action array を commit 前に一括更新し、
+        row content hash と dedup hash を同じ atomic shard transaction 内で再計算する。
+        """
+
+        if self._active_id is None or self._active_path is None:
+            raise DatasetError("no shard transaction is active")
+        try:
+            selected_ids = list(record_ids)
+            if (
+                not selected_ids
+                or len(set(selected_ids)) != len(selected_ids)
+                or any(not _is_sha256(record_id) for record_id in selected_ids)
+            ):
+                raise DatasetError("replay trace record IDs are invalid")
+            copied_events = _copy_json(list(replay_events), "replay events")
+            if (
+                not copied_events
+                or any(not isinstance(event, Mapping) for event in copied_events)
+            ):
+                raise DatasetError("replay events must be non-empty objects")
+            actions = [
+                event["action"]
+                for event in copied_events
+                if event.get("kind") == "action"
+            ]
+            if any(type(action) is not int for action in actions):
+                raise DatasetError("replay actions must be integers")
+            movement_actions = _normalize_arrays(
+                {
+                    "movement_actions": np.asarray(
+                        actions,
+                        dtype=np.int32,
+                    )
+                }
+            )["movement_actions"]
+            pending = {entry.row["record_id"]: entry for entry in self._pending}
+            if any(record_id not in pending for record_id in selected_ids):
+                raise DatasetError("replay trace record is not active")
+            for record_id in selected_ids:
+                entry = pending[record_id]
+                entry.row["replay_events"] = copied_events
+                entry.arrays["movement_actions"] = movement_actions.copy()
+                entry.row["arrays"] = {
+                    name: _array_descriptor(array)
+                    for name, array in entry.arrays.items()
+                }
+                metadata = {
+                    key: value
+                    for key, value in entry.row.items()
+                    if key not in _ROW_RESERVED_FIELDS
+                }
+                content_hash = canonical_hash(
+                    {
+                        "source_identity_sha256": self.source_identity_sha256,
+                        "metadata": metadata,
+                        "arrays": entry.row["arrays"],
+                    }
+                )
+                entry.row["record_content_sha256"] = content_hash
+                self._pending_by_id[record_id] = content_hash
+                _copy_json(entry.row, "dataset row")
+        except (DatasetError, KeyError, TypeError, ValueError) as exc:
+            reason = (
+                str(exc)
+                if isinstance(exc, DatasetError)
+                else f"invalid replay trace: {exc}"
+            )
+            self.abort_shard(reason=reason)
+            if isinstance(exc, DatasetError):
+                raise
+            raise DatasetError(reason) from exc
+
     def commit_shard(self) -> Mapping[str, Any]:
         """active shard の JSONL/NPZ/marker を read-back 後に一回 commit する。
 

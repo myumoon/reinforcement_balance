@@ -254,6 +254,7 @@ class ChoiceTraceCollector:
         self._runtime_results: dict[str, CollectorDecisionResult] = {}
         self._runtime_acknowledged: set[str] = set()
         self._active_record_id: str | None = None
+        self._episode_active = False
         self._replay_events: list[dict[str, Any]] = [
             {"kind": "artifact_identity", **self.artifact_identity}
         ]
@@ -719,6 +720,7 @@ class ChoiceTraceCollector:
             existing["status"] = "completed"
         elif (
             self.shard_size is not None
+            and not self._episode_active
             and self.writer.active_row_count >= self.shard_size
         ):
             self.writer.commit_shard()
@@ -784,6 +786,7 @@ class ChoiceTraceCollector:
         action = transition.movement_action
         environment_step = 0
         decision_count = 0
+        episode_record_ids: list[str] = []
         while True:
             if (
                 max_environment_steps is not None
@@ -825,15 +828,20 @@ class ChoiceTraceCollector:
                     if not isinstance(choice_id, str) or not choice_id:
                         raise CollectorError("pending choice ID is invalid")
                     choices.append(choice_id)
-                result = self.collect_decision(
-                    episode_logical_id=episode_logical_id,
-                    environment_step=environment_step,
-                    decision_id=decision_id,
-                    pending_obs=observation,
-                    episode_start=False,
-                    choice_ids=choices,
-                )
+                self._episode_active = True
+                try:
+                    result = self.collect_decision(
+                        episode_logical_id=episode_logical_id,
+                        environment_step=environment_step,
+                        decision_id=decision_id,
+                        pending_obs=observation,
+                        episode_start=False,
+                        choice_ids=choices,
+                    )
+                finally:
+                    self._episode_active = False
                 decision_count += 1
+                episode_record_ids.append(result.record_id)
                 action = result.commit.movement_action
                 continue
             transition = self.session.advance_movement(
@@ -841,6 +849,21 @@ class ChoiceTraceCollector:
                 episode_start=False,
             )
             action = transition.movement_action
+        if episode_record_ids:
+            self.writer.finalize_replay_trace(
+                episode_record_ids,
+                self._replay_events,
+            )
+            for record_id in episode_record_ids:
+                transaction = self._journal["transactions"].get(record_id)
+                if isinstance(transaction, dict):
+                    transaction["replay_events"] = list(self._replay_events)
+            self._save_journal()
+            if (
+                self.shard_size is not None
+                and self.writer.active_row_count >= self.shard_size
+            ):
+                self.writer.commit_shard()
         return decision_count
 
 

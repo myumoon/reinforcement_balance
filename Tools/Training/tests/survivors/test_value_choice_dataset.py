@@ -157,6 +157,45 @@ def test_retry_duplicate_is_deduplicated_and_histogram_changes_only_on_commit(
     assert manifest_after["histogram"]["selected_choice_id"] == {"choice-a": 1}
 
 
+def test_conflicting_duplicate_is_quarantined_without_manifest_mutation(
+    tmp_path: Path,
+) -> None:
+    """同じ canonical record ID に異なる内容を再送した shard を隔離する。
+
+    正常な同一内容 retry の dedup と対称に、array 内容だけを変えた衝突は DatasetError とし、
+    active shard、record count、histogram のいずれも publish しない。
+    """
+
+    root = tmp_path / "dataset"
+    writer = DatasetWriter(
+        root,
+        dataset_id="survivors-choice-test",
+        source_identity_sha256=SOURCE,
+    )
+    writer.start_shard("shard-00000")
+    metadata, arrays = _record("decision-conflict")
+    writer.append(metadata, arrays)
+    conflicting_arrays = {
+        name: value.copy()
+        for name, value in arrays.items()
+    }
+    conflicting_arrays["pending_obs"][0] = 0.75
+
+    with pytest.raises(DatasetError, match="conflicting content"):
+        writer.append(metadata, conflicting_arrays)
+
+    snapshot = read_dataset(root)
+    assert snapshot.manifest["record_count"] == 0
+    assert snapshot.manifest["histogram"] == {
+        "behavior_policy": {},
+        "candidate_count": {},
+        "selected_choice_id": {},
+        "teacher_choice_id": {},
+    }
+    assert writer.active_shard_id is None
+    assert list((root / "quarantine").iterdir())
+
+
 def test_source_identity_mismatch_is_rejected(tmp_path: Path) -> None:
     """既存 dataset と異なる source identity の writer を拒否する。
 

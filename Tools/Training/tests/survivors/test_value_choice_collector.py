@@ -416,10 +416,11 @@ def test_new_process_recovers_uncommitted_record_with_same_server_apply(
         source_identity_sha256=collector.source_identity_sha256,
     )
     verdict, hashes = _fidelity()
+    resumed_session = scorer.new_session()
     resumed = ChoiceTraceCollector(
         env=env,
         scorer=scorer,
-        session=scorer.new_session(),
+        session=resumed_session,
         writer=resumed_writer,
         source_identity_sha256=collector.source_identity_sha256,
         fidelity_verdict=verdict,
@@ -439,6 +440,29 @@ def test_new_process_recovers_uncommitted_record_with_same_server_apply(
 
     assert resumed.record_id == first.record_id
     assert resumed.selected_choice_id == first.selected_choice_id
+    selected_obs = np.asarray(
+        (
+            [0.25, 0.5, 1.0]
+            if resumed.selected_choice_id == "choice-a"
+            else [0.0, 0.75, 1.0]
+        ),
+        dtype=np.float32,
+    )
+    reference = scorer.new_session()
+    reference_step = reference.advance_movement(
+        selected_obs,
+        episode_start=False,
+    )
+    assert resumed.commit.commit_count == 1
+    assert resumed.commit.movement_action == reference_step.movement_action
+    for actual_pair, expected_pair in zip(
+        resumed_session.states,
+        reference.states,
+    ):
+        assert actual_pair is not None
+        assert expected_pair is not None
+        for actual, expected in zip(actual_pair, expected_pair):
+            np.testing.assert_array_equal(actual, expected)
     assert env.applies == 1
     snapshot = read_dataset(tmp_path / "dataset")
     assert snapshot.manifest["record_count"] == 1
@@ -473,7 +497,16 @@ def test_episode_never_steps_while_choice_is_pending_and_saves_replay(
     row = read_dataset(tmp_path / "dataset").rows[0]
     kinds = [event["kind"] for event in row["replay_events"]]
     assert kinds[0:2] == ["artifact_identity", "reset"]
-    assert kinds.count("action") == 1
+    actions = [
+        event["action"]
+        for event in row["replay_events"]
+        if event["kind"] == "action"
+    ]
+    assert len(actions) == env.step_calls == 2
+    np.testing.assert_array_equal(
+        read_dataset(tmp_path / "dataset").arrays[0]["movement_actions"],
+        np.asarray(actions, dtype=np.int32),
+    )
     assert kinds.count("external_decision") == 1
     assert kinds.count("choice_preview_request") == 2
     assert kinds.count("choice_preview_ack") == 1
