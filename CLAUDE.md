@@ -47,6 +47,18 @@ python train.py --game survivors --total-steps 500000
 
 - モジュールなどをインポートする場合はバージョンを固定してください
 
+### テスト実行
+
+Python テストは以下の conda 環境を使用して実行してください。
+
+```bash
+/mnt/c/Users/neko/anaconda3/envs/reinbalance/python.exe -m pytest Tools/Training/tests -q -rs
+```
+
+`/usr/bin/python3` には pytest / torch / sb3 がインストールされていないため、使用できません。
+
+`review-contract.md` の M12 を記載する際は、上記 conda 環境パスを使用してください。`/usr/bin/python3 使用` と書いてはいけません。
+
 ### ブランチ名のルール
 
 - 機能実装 : feature/機能名
