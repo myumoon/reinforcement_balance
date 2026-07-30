@@ -84,6 +84,35 @@ python survivors_value_source_audit.py \
 source のみを表し、`ready_for_labels`、teacher validation、verdict は含めない。これらは
 後続 phase で descriptor を参照する別 artifact として発行する。
 
+## Survivors recurrent value choice scorer
+
+`survivors_value_choice_probe.py` は immutable Value Source descriptor、level-up preview
+JSON、policy-bound critic context NPZ を読み、`survivors.value_choice_ranking.v3` JSONL を
+生成する。PPO/RecurrentPPO は保存 zip の policy class から自動判定し、model /
+VecNormalize の raw byte hash、observation schema、`shared_lstm`、
+`enable_critic_lstm`、hidden size、layer count、policy state schema hash をロード時に
+再検証する。
+
+```bash
+/usr/bin/python3 survivors_value_choice_probe.py \
+  --manifest runs/survivors/<run>/result/value_source_descriptor.json \
+  --preview-json /path/to/level_up_preview.json \
+  --context-npz /path/to/critic_context.npz \
+  --output-jsonl /path/to/value_choice_ranking.jsonl
+```
+
+preview JSON は HTTP preview の field に `environment_step` を加えた固定形式とする。
+pending/base observation は recurrent state を進めず、全 candidate は同一 `hidden_in`
+から評価する。selected post-choice observation の state 更新は
+`RecurrentPolicySession.commit_selected()` だけが exactly once 実行する。
+
+`--zero-state-smoke` は診断専用で、出力の
+`ready_for_training_label=false` を強制する。formal ranking 自体も label release verdict
+ではないため ready を主張せず、tie は epsilon `1e-5` のまま後続 verdict へ渡す。
+
+UE5 build / LLT: 未実行（Windows 専用）。real completed source model の label release
+判定と HTTP 接続を使う burn-in end-to-end integration は後続 phase で実施する。
+
 ## 関連ドキュメント
 
 - UE5 との通信仕様: [`ue5_env.md`](ue5_env.md)
