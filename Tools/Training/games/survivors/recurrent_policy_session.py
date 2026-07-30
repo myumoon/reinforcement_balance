@@ -623,23 +623,19 @@ class RecurrentPolicySession:
     def validate_context(self, context: CriticContext) -> None:
         """score context を現在 pending decision と state へ照合する。
 
-        phase・step・decision・obs hash・state hash の全 binding を一つでも不一致なら拒否する。
+        begin_level_up() が発行した context seal（context_sha256）と完全一致するものだけを受理し、
+        episode_start や context_mode を含む全フィールドの事後変更を拒否する。
+        seal チェックを validate_for_policy() より先に実施し、変更検出を優先する。
         """
         if self._pending is None:
             raise RecurrentSessionError("no level-up decision is pending")
+        expected = self._pending
+        if context.context_sha256 != expected.context.context_sha256:
+            raise RecurrentSessionError("context seal mismatch: context does not match the one issued by begin_level_up")
         context.validate_for_policy(
             self.source.policy_state_schema,
             allow_zero_state_smoke=False,
         )
-        expected = self._pending
-        if context.environment_step != expected.environment_step:
-            raise RecurrentSessionError("context environment step mismatch")
-        if context.decision_id != expected.decision_id:
-            raise RecurrentSessionError("context decision id mismatch")
-        if context.pending_obs_hash != expected.pending_obs_hash:
-            raise RecurrentSessionError("context pending obs hash mismatch")
-        if recurrent_state_hash(context.pi, context.vf) != expected.state_before_hash:
-            raise RecurrentSessionError("context recurrent state mismatch")
         if self.state_hash != expected.state_before_hash:
             raise RecurrentSessionError("pending retry advanced recurrent state")
 

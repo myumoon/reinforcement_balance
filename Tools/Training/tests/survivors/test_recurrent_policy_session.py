@@ -116,10 +116,12 @@ def test_session_rejects_context_and_retry_binding_mismatches(
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
-        ({"environment_step": 12}, "step"),
-        ({"decision_id": "other"}, "decision"),
-        ({"pending_obs_hash": "0" * 64}, "obs"),
-        ({"phase": "selected_post_commit"}, "phase"),
+        ({"environment_step": 12}, "seal"),
+        ({"decision_id": "other"}, "seal"),
+        ({"pending_obs_hash": "0" * 64}, "seal"),
+        ({"phase": "selected_post_commit"}, "seal"),
+        ({"episode_start": True}, "seal"),
+        ({"context_mode": "zero_state_smoke"}, "seal"),
     ],
 )
 def test_session_rejects_all_formal_context_binding_siblings(
@@ -127,9 +129,10 @@ def test_session_rejects_all_formal_context_binding_siblings(
     updates: dict,
     message: str,
 ) -> None:
-    """context phase・step・decision・obs hash の不一致を全て拒否する。
+    """context seal の全 field 変更（step・decision・obs hash・phase・episode_start・context_mode）を拒否する。
 
-    seal が正しく再計算された別 context でも、現在 pending session との binding は緩めない。
+    begin_level_up() が発行した context_sha256 と一致しない context は score 前に拒否され、
+    episode_start や context_mode を変えた再 seal 済み context も受理しない。
     """
     manifest_path, _, _ = build_saved_value_source(tmp_path, recurrent=True)
     scorer = ValueScorer.load(manifest_path)
