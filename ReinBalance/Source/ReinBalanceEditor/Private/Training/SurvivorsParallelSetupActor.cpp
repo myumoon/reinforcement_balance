@@ -1,3 +1,7 @@
+/**
+ * Survivors の複数 HTTP 環境を game thread と ParallelFor に配線する。
+ * 初心者向け: state mutation が必要な params/level-up choice は並列処理より先に安全に適用する。
+ */
 #include "Training/SurvivorsParallelSetupActor.h"
 #include "Training/SurvivorsHttpEnvService.h"
 #include "Survivors/Game/SurvivorsGame.h"
@@ -183,15 +187,15 @@ void ASurvivorsParallelSetupActor::BeginPlay()
 namespace
 {
 	/** FSurvivorsStepResult → FEnvStepResult 変換 */
-	static FEnvStepResult ConvertStepResult(const FSurvivorsStepResult& Src)
+	static FEnvStepResult ConvertStepResult(
+		const FSurvivorsStepResult& Src, const FString& InfoJson)
 	{
 		FEnvStepResult Dst;
 		Dst.Obs       = Src.Obs;
 		Dst.Reward    = Src.Reward;
 		Dst.bDone     = Src.bDone;
 		Dst.bTruncated = Src.bTruncated;
-		Dst.InfoJson  = FString::Printf(TEXT("{\"spawn_debug\":%s}"),
-			Src.SpawnDebugJson.IsEmpty() ? TEXT("{}") : *Src.SpawnDebugJson);
+		Dst.InfoJson = InfoJson;
 		return Dst;
 	}
 
@@ -215,12 +219,16 @@ void ASurvivorsParallelSetupActor::Tick(float DeltaTime)
 	for (ASurvivorsHttpEnvService* Svc : AllServices)
 	{
 		if (!Svc) continue;
+		// previewをchoice mutationより先に処理してpending bindingを保つ。
+		// 初心者向け: 同じframeに両requestが来ても、反実仮想値を古いIDへ誤結合しません。
+		Svc->ProcessLevelUpPreviewRequests();
+		Svc->ProcessLevelUpChoiceRequests();
 		FString Json;
 		FHttpResultCallback Cb;
 		while (Svc->TakeParamsRequest(Json, Cb))
 		{
 			FString ResponseJson = Svc->ApplyParams(Json);
-			Cb(FHttpEnvServerBase::MakeJsonResponse(ResponseJson));
+			Svc->CompleteParams(ResponseJson, MoveTemp(Cb));
 		}
 	}
 
@@ -286,7 +294,8 @@ void ASurvivorsParallelSetupActor::Tick(float DeltaTime)
 		FPendingWork& W = Works[i];
 		if (W.bIsStep)
 		{
-			FEnvStepResult EnvResult = ConvertStepResult(LogicStepResults[i]);
+				FEnvStepResult EnvResult = ConvertStepResult(
+					LogicStepResults[i], W.Service->BuildInfoJson());
 			W.Service->CompleteStep(MoveTemp(EnvResult), MoveTemp(W.StepCallback));
 		}
 		else

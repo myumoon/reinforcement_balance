@@ -1,3 +1,7 @@
+/**
+ * Survivors Actor facade から canonical Logic への委譲を実装する。
+ * 初心者向け: UObject や Component は入出力を担当し、ゲーム状態の変更は Logic に集約する。
+ */
 #include "Survivors/Game/SurvivorsGame.h"
 #include "Survivors/Game/SurvivorsCollisionComponent.h"
 #include "Survivors/Game/SurvivorsEnemyComponent.h"
@@ -107,6 +111,21 @@ TArray<FSurvivorsObsSegment> ASurvivorsGame::GetObsSchema() const
 FString ASurvivorsGame::GetObsSchemaHash() const
 {
 	return Logic.GetObsSchemaHash();
+}
+
+/**
+ * schema の source of truth を Logic に固定する薄い facade。
+ * Actor/Component に content mirror を持たせず HTTP 層へそのまま渡す。
+ */
+FString ASurvivorsGame::GetContentSchema() const
+{
+	return Logic.GetContentSchema();
+}
+
+/** action/time schema を Logic からそのまま委譲する facade。 */
+FString ASurvivorsGame::GetActionTimeSchema() const
+{
+	return Logic.GetActionTimeSchema();
 }
 
 int32 ASurvivorsGame::GetObsDim() const
@@ -262,6 +281,33 @@ FString ASurvivorsGame::GetSpawnDebugJson() const
 	return Logic.GetSpawnDebugJson();
 }
 
+void ASurvivorsGame::AddExperience(float Amount)
+{
+	Logic.AddExperience(Amount);
+}
+
+FSurvivorsLevelUpApplyResult ASurvivorsGame::ApplyExternalLevelUpChoice(
+	const FString& DecisionId, const FString& ChoiceId)
+{
+	return Logic.ApplyExternalLevelUpChoice(DecisionId, ChoiceId);
+}
+
+FSurvivorsChoicePreview ASurvivorsGame::PreviewLevelUpChoice(
+	const FString& DecisionId, const FString& ChoiceId) const
+{
+	return Logic.PreviewLevelUpChoice(DecisionId, ChoiceId);
+}
+
+TArray<int32> ASurvivorsGame::GetEvolvableWeaponsForChest() const
+{
+	return Logic.GetEvolvableWeapons();
+}
+
+void ASurvivorsGame::EvolveWeaponFromChest(int32 SlotIdx, EWeaponType EvolvedType)
+{
+	Logic.EvolveWeapon(SlotIdx, EvolvedType);
+}
+
 FVector2D ASurvivorsGame::GetItemPos(int32 i) const { return Logic.GetItemPos(i); }
 EGemType  ASurvivorsGame::GetItemGemType(int32 i) const { return Logic.GetItemGemType(i); }
 
@@ -314,16 +360,6 @@ float ASurvivorsGame::XPRequiredForLevel(int32 Level) const
 float ASurvivorsGame::CumulativeXPForLevel(int32 Level) const
 {
 	return PlayerComponent->CumulativeXPForLevel(Level);
-}
-
-void ASurvivorsGame::ProcessXPGain(float Amount)
-{
-	Logic.ProcessXPGain(Amount);
-}
-
-void ASurvivorsGame::OnLevelUp(int32 NextLevel)
-{
-	Logic.OnLevelUp(NextLevel);
 }
 
 FVector2D ASurvivorsGame::RandomInsideField()
@@ -490,6 +526,7 @@ void ASurvivorsGame::SyncConfigToLogic()
 	Cfg.bEnableEvolutions    = bEnableEvolutions;
 	Cfg.ReplayOldPhaseFraction = ReplayOldPhaseFraction;
 	Cfg.StartingWeaponMode   = StartingWeaponMode;
+	Cfg.ItemSelectionMode    = ItemSelectionMode;
 
 	// ---- RSI オーバーライド ----
 	Cfg.InitialElapsedTime   = InitialElapsedTime;

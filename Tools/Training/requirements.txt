@@ -10,8 +10,10 @@ onnx==1.16.1
 onnxruntime==1.18.1
 numpy==1.26.4
 requests==2.32.3
-anthropic
-wandb>=0.17.0
-tensorboard>=2.16.0
+anthropic==0.97.0
+wandb==0.26.1
+tensorboard==2.20.0
 PyYAML==6.0.2
+# 共有 Survivors 契約は PyPI ではなく Tools/Common から editable でインストールする：
+# `pip install -e ../Common`。Tools/Deployment を sys.path に追加しないこと。
 scikit-learn==1.6.1

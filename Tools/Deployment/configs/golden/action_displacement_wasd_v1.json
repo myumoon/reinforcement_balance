@@ -1,0 +1,21 @@
+{
+  "schema_version": "survivors_action_telemetry.v1",
+  "measurement": "simulator displacement sign cross-checked against target WASD dry-run screen displacement",
+  "attestation": {
+    "operator": "deployment-target-calibration",
+    "date": "2026-07-18",
+    "run_id": "wasd-dry-run-v1",
+    "capture_evidence_hash": "1bbbd963eddd496f0112e4170afad764c0fe06be08a357da9d6a771bddc29660"
+  },
+  "samples": [
+    {"index": 0, "sim_delta_sign": [0, 1], "screen_delta_sign": [0, -1], "keys": ["W"]},
+    {"index": 1, "sim_delta_sign": [1, 1], "screen_delta_sign": [1, -1], "keys": ["W", "D"]},
+    {"index": 2, "sim_delta_sign": [1, 0], "screen_delta_sign": [1, 0], "keys": ["D"]},
+    {"index": 3, "sim_delta_sign": [1, -1], "screen_delta_sign": [1, 1], "keys": ["S", "D"]},
+    {"index": 4, "sim_delta_sign": [0, -1], "screen_delta_sign": [0, 1], "keys": ["S"]},
+    {"index": 5, "sim_delta_sign": [-1, -1], "screen_delta_sign": [-1, 1], "keys": ["S", "A"]},
+    {"index": 6, "sim_delta_sign": [-1, 0], "screen_delta_sign": [-1, 0], "keys": ["A"]},
+    {"index": 7, "sim_delta_sign": [-1, 1], "screen_delta_sign": [-1, -1], "keys": ["W", "A"]},
+    {"index": 8, "sim_delta_sign": [0, 0], "screen_delta_sign": [0, 0], "keys": []}
+  ]
+}

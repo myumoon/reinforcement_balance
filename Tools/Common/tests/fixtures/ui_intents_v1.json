@@ -1,0 +1,412 @@
+{
+  "schema_version": "ui_intents_fixture.v1",
+  "valid": [
+    {
+      "name": "choose_card",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_card",
+        "semantic_action": "choose_card",
+        "decision_owner": "item_selector_session",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_index": 1,
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "item_selector_session",
+        "decision_rule_id": "item_selector_v1",
+        "decision_config_hash": "73c56b25e2eedad1debc2623203c89ad97fa31e2f9fb02592e280dd9bf170415"
+      },
+      "intent_hash": "2c095816b86f7f6e1ab804323e1c807d0eff379420402bf71fc90b463a3f4941"
+    },
+    {
+      "name": "choose_fallback",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_fallback",
+        "semantic_action": "chicken",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "chicken_pickup_0",
+        "target_index": 0,
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "intent_hash": "2a15756cdd58cc249c63638972c7376d3e592ac2c7c36ed28f1c7cfb4db4e377"
+    },
+    {
+      "name": "reroll",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "reroll",
+        "semantic_action": "reroll",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "meta_choice_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "intent_hash": "a0c69ab382ef83a72c0f12c2d459275504a883a339efb8f6135c5aa4d2e04413"
+    },
+    {
+      "name": "skip",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "skip",
+        "semantic_action": "skip",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "meta_choice_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "intent_hash": "f587bb4a9ffab1459bda7a0428bd4757575476a2f4bd1bb2065af4703a191fdd"
+    },
+    {
+      "name": "banish",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "banish",
+        "semantic_action": "banish",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "meta_choice_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "intent_hash": "f972f1fb387a29950ee36c84201cc7f0d1079e659d3d76e2c48cd219c7bf0012"
+    },
+    {
+      "name": "ack_chest",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "ack_chest",
+        "semantic_action": "ack_chest",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "ack_confirm_rule_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "intent_hash": "719df5b77cd9a62cfb146fde9e12e865bccd060bb90484fba61ca52dd76e1c35"
+    },
+    {
+      "name": "confirm",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "confirm",
+        "semantic_action": "confirm",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "ack_confirm_rule_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "intent_hash": "02e594c8dedf52b82ed8a57c2093f28ed9e8b364fca14873160ba2c81f9798c1"
+    },
+    {
+      "name": "no_op",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "no_op",
+        "semantic_action": "no_op",
+        "decision_owner": "runtime_safety",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key"
+      },
+      "intent_hash": "9550d634cce47830c3edac3ebe7c4f05791ef4792d63fee3819c5d9fe98b6d13"
+    },
+    {
+      "name": "stop",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "stop",
+        "semantic_action": "stop",
+        "decision_owner": "runtime_safety",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key"
+      },
+      "intent_hash": "8984d95326f72b55be52ca2f730a0f68b93ee9b92fa49843ea20814e94194bce"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "state_machine_as_decision_source",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_fallback",
+        "semantic_action": "chicken",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "chicken_pickup_0",
+        "target_index": 0,
+        "decision_policy_id": "ui_state_machine_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "error_contains": "ui_state_machine"
+    },
+    {
+      "name": "effect_owner_not_state_machine",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_fallback",
+        "semantic_action": "chicken",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "some_other_owner",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "chicken_pickup_0",
+        "target_index": 0,
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "error_contains": "effect_owner must be"
+    },
+    {
+      "name": "wrong_owner_for_kind",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_fallback",
+        "semantic_action": "chicken",
+        "decision_owner": "runtime_safety",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "chicken_pickup_0",
+        "target_index": 0,
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "error_contains": "must be owned by"
+    },
+    {
+      "name": "reroll_forbids_target_index",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "reroll",
+        "semantic_action": "reroll",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_index": 3,
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "error_contains": "forbids field target_index"
+    },
+    {
+      "name": "choose_card_missing_candidate_set_hash",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_card",
+        "semantic_action": "choose_card",
+        "decision_owner": "item_selector_session",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_index": 0,
+        "decision_policy_id": "item_selector_session",
+        "decision_rule_id": "item_selector_v1",
+        "decision_config_hash": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+      },
+      "error_contains": "requires field candidate_set_hash"
+    },
+    {
+      "name": "unknown_field",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_fallback",
+        "semantic_action": "chicken",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "chicken_pickup_0",
+        "target_index": 0,
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8",
+        "roi": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      "error_contains": "unknown UiIntentV1 fields"
+    },
+    {
+      "name": "missing_schema_version",
+      "wire": {
+        "kind": "choose_fallback",
+        "semantic_action": "chicken",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "chicken_pickup_0",
+        "target_index": 0,
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "error_contains": "schema_version"
+    },
+    {
+      "name": "target_index_wrong_type",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_card",
+        "semantic_action": "choose_card",
+        "decision_owner": "item_selector_session",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_index": true,
+        "decision_policy_id": "item_selector_session",
+        "decision_rule_id": "item_selector_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8",
+        "candidate_set_hash": "1386f8fbb2e92c912f9bbf2b5e95d6ff3bcc0802ef621b8ff8cb6fb0b71dc6c4"
+      },
+      "error_contains": "target_index must be a non-negative int"
+    },
+    {
+      "name": "button_kind_forbids_target_id",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "ack_chest",
+        "semantic_action": "ack_chest",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "chest_0",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "ack_confirm_rule_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "error_contains": "forbids field target_id"
+    },
+    {
+      "name": "choose_card_forbids_target_id",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_card",
+        "semantic_action": "choose_card",
+        "decision_owner": "item_selector_session",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "card_0",
+        "target_index": 0,
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "decision_policy_id": "item_selector_session",
+        "decision_rule_id": "item_selector_v1",
+        "decision_config_hash": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+      },
+      "error_contains": "forbids field target_id"
+    },
+    {
+      "name": "unknown_kind",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "teleport",
+        "semantic_action": "chicken",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "chicken_pickup_0",
+        "target_index": 0,
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "error_contains": "unknown UiIntentV1 kind"
+    },
+    {
+      "name": "unknown_decision_owner",
+      "wire": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_fallback",
+        "semantic_action": "chicken",
+        "decision_owner": "gremlin",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "chicken_pickup_0",
+        "target_index": 0,
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      },
+      "error_contains": "unknown decision_owner"
+    }
+  ]
+}

@@ -35,6 +35,230 @@ UE5 の NNERuntimeORT で推論するために必要。
 新しいゲームを追加する場合は `games/<game>/` にモジュールを作成し、
 `train.py` の `_GAME_DEFAULTS` と env 選択分岐に追加する。
 
+## DeployObsV1 wrapper
+
+`games/survivors/deploy_obs_wrapper.py` は privileged raw observation を直接 slice せず、target camera の screen projection と visibility/occlusion/clipping を経て、Deployment と共有する named-estimate adapter から `value + validity + age` tensor を生成する。
+
+本番相当の学習・評価には `DeployObsWrapper.release()` を使う。`oracle_diagnostic()` は全 state と比較する診断専用で release artifact を生成できない。VecNormalize は deploy tensor の外側へ新規 fit し、既存 privileged observation の統計を流用しない。
+
+DeployObs schema または release adapter の producer hash を変更した場合、既存 00-05 baseline は意図的に失効する。00-05 の verdict/gating 契約は変更せず、01-05 formal 収集前に integration fidelity verdict を再発行する。詳細は [`docs/deployment/deploy_obs_v1.md`](../../deployment/deploy_obs_v1.md) を参照。
+
+## Perception error profile
+
+`--perception-error-profile` に
+`Tools/Training/configs/perception_error_bootstrap_v1.json` のような
+`perception_error.v1` JSON を指定できる。03-02 では profile を共有契約で
+fail-closed 検証し、その canonical SHA-256 を `log/run_meta.json` の
+`perception_error_profile_hash` と resolved config に記録する。
+
+この段階では profile の学習環境への自動適用は行わない。画面由来の
+`DeployObsV1` tensor を個別に検証する場合は
+`games.survivors.perception_error_wrapper.PerceptionErrorWrapper` を使う。
+wrapper は latency、burst dropout、座標ノイズ、categorical confusion、
+false entity count clipping の順序を固定し、worker ごとの corruption state を
+`get_corruption_state()` / `set_corruption_state()` で保存・再開できる。
+
+## Survivors Value Source descriptor
+
+Survivors IS2 が `curriculum_complete` で正常終了すると、`train.py` は model /
+VecNormalize、obs schema、resolved config、code、package freeze、action semantics、
+coverage を束縛した `survivors.value_source_descriptor.v1` を
+`result/value_source_descriptor.json` へ atomic publish する。SIGINT、接続断、例外時は
+`log/value_source_descriptor.incomplete.json` だけを残し、descriptor を昇格しない。
+
+source worktree が dirty の場合はデフォルトで開始を拒否する。意図的に許可する場合だけ
+`--allow-dirty-value-source --value-source-artifact-store <store-root>` を指定する。
+この場合は binary patch が content-addressed artifact store に保存され、その SHA-256 が
+descriptor identity に含まれる。
+
+保存済み run は次の CLI でも再監査できる。
+
+```bash
+python survivors_value_source_audit.py \
+  --run-dir runs/survivors/<version>/train/<run> \
+  --obs-schema-json runs/survivors/<version>/train/<run>/result/obs_schema.json \
+  --created-at-utc 2026-07-29T00:00:00Z
+```
+
+終了コードは `0=probe ready`、`2=not ready`、`3=invalid input`。descriptor は immutable
+source のみを表し、`ready_for_labels`、teacher validation、verdict は含めない。これらは
+後続 phase で descriptor を参照する別 artifact として発行する。
+
+## Survivors recurrent value choice scorer
+
+`survivors_value_choice_probe.py` は immutable Value Source descriptor、level-up preview
+JSON、policy-bound critic context NPZ を読み、`survivors.value_choice_ranking.v3` JSONL を
+生成する。PPO/RecurrentPPO は保存 zip の policy class から自動判定し、model /
+VecNormalize の raw byte hash、observation schema、`shared_lstm`、
+`enable_critic_lstm`、hidden size、layer count、policy state schema hash をロード時に
+再検証する。
+
+```bash
+/usr/bin/python3 survivors_value_choice_probe.py \
+  --manifest runs/survivors/<run>/result/value_source_descriptor.json \
+  --preview-json /path/to/level_up_preview.json \
+  --context-npz /path/to/critic_context.npz \
+  --output-jsonl /path/to/value_choice_ranking.jsonl
+```
+
+preview JSON は HTTP preview の field に `environment_step` を加えた固定形式とする。
+pending/base observation は recurrent state を進めず、全 candidate は同一 `hidden_in`
+から評価する。selected post-choice observation の state 更新は
+`RecurrentPolicySession.commit_selected()` だけが exactly once 実行する。
+
+`--zero-state-smoke` は診断専用で、出力の
+`ready_for_training_label=false` を強制する。formal ranking 自体も label release verdict
+ではないため ready を主張せず、tie は epsilon `1e-5` のまま後続 verdict へ渡す。
+
+UE5 build / LLT: 未実行（Windows 専用）。real completed source model の label release
+判定と HTTP 接続を使う burn-in end-to-end integration は後続 phase で実施する。
+
+## Survivors choice trace dataset collection
+
+`collect_survivors_value_choices.py` は current-hash `integration` fidelity verdict、immutable
+Value Source、UE5 external choice API を親に持つ formal collector である。baseline、
+stale、missing、blocking verdict では起動しない。behavior は既定
+`epsilon_source_scorer` / `epsilon=0.20` で、teacher ranking と selected behavior は別
+field に保存する。propensity は候補数を `K` として、teacher best は
+`1-epsilon+epsilon/K`、その他は `epsilon/K` を記録する。
+
+```bash
+python collect_survivors_value_choices.py \
+  --manifest /artifact/value-source/result/value_source_descriptor.json \
+  --fidelity-verdict /artifact/fidelity/integration-verdict.json \
+  --current-producer-hashes /artifact/fidelity/current-producer-hashes.json \
+  --artifact-store /artifact/survivors-choice-datasets \
+  --seed-start 1000 --seed-end 1099 --episode-count 100 \
+  --shard-size 100 --ue5-ports 8767 8777 --epsilon 0.20
+```
+
+dataset ID の既定形式は
+`survivors-value-choices-<source identity先頭12桁>-seeds-<開始>-<終了>` である。明示
+`--dataset-id` も使用できるが、同じ ID の既存 manifest へ異なる source identity を追加
+することはできない。manifest と各 row には source、model、VecNormalize、observation
+schema、policy state schema、fidelity verdict の content hash を provenance として保存
+する。reset、全 movement action、全 preview/choice request/ack、external decision ID も
+ordered replay events に残す。
+
+dataset は Git worktree 外の `--artifact-store` にのみ作成する。各 shard は canonical
+JSONL metadata、pickle-free compressed NPZ、commit marker の組で、全 ndarray は
+`float32` / `int32` に固定する。actor/critic LSTM h/c の元 shape は維持する。容量は概ね
+`decision数 × (base observation + 全candidate observation + selected observation +
+pi/vf h/c) × 4 byte` に JSONL/NPZ overhead を加えた値であり、圧縮率は observation と
+state に依存する。formal 件数の storage/wall-clock 上限は pilot 後に固定するため、この
+CLI は budget を推測しない。
+
+停止時は commit 前 shard が `.staging` に残る。次回起動は中断 staging、partial NPZ、
+JSONL/NPZ count mismatch を `quarantine/` へ隔離する。shard directory の確定後かつ
+manifest 更新前に停止した場合だけ、commit marker と全 hash/count の read-back 成功を
+条件に manifest へ exactly once recovery する。collector journal は選択と ack を
+decision ID ごとに保存し、process resume でも別 choice/record を発行しない。record ID は
+source identity + episode logical ID + external decision ID の canonical SHA-256 なので、
+HTTP retry と episode 再実行は deduplicate される。manifest histogram は shard commit
+時だけ更新される。
+
+artifact store の backup/retention は dataset directory 全体（manifest、`shards/`、
+`journals/`、`quarantine/`）を同じ世代として扱う。NPZ/JSONL は Git に追加しない。
+formal collection 前に current producer hashes で integration fidelity verdict を再検証
+し、source descriptor と fidelity verdict は dataset と同じ artifact store の immutable
+親として保持する。
+
+UE5 build / LLT: 未実行（Windows 専用）。PIE 100 decisions pilot、formal storage/
+parallel-port/wall-clock budget の固定は後続 phase で実施する。
+
+## Paired rollout teacher validation
+
+`validate_survivors_value_teacher.py` は `survivors.paired_rollout_corpus.v1`、immutable
+Value Source descriptor、current integration fidelity verdict を入力とし、episode split、
+teacher score scale、reliability calibration、short/full validation report、
+`survivors.label_release_verdict.v1` を一方向に生成する。release threshold の CLI override
+は提供しない。development train で outcome normalization、development train/validation
+で score scale と calibration を確定した後、untouched final test を一度だけ評価する。
+
+```powershell
+Set-Location "<PROJECT_ROOT>\Tools\Training"
+python validate_survivors_value_teacher.py `
+  --corpus <ARTIFACTS_DIR>\paired-rollout-corpus.json `
+  --source-descriptor <ARTIFACTS_DIR>\value_source_descriptor.json `
+  --integration-fidelity-verdict <ARTIFACTS_DIR>\integration-fidelity-verdict.json `
+  --output-dir <ARTIFACTS_DIR>\teacher-validation
+```
+
+追加モジュールの責務は次のとおり。
+
+| モジュール | 責務 |
+|---|---|
+| `games/survivors/choice_branch_rollout.py` | complete semantic trace、candidate/worker 非依存 replication key と post-decision RNG stream、quarantine/RNG seam |
+| `games/survivors/teacher_validation_split.py` | episode-group development/final split の freeze と final lineage sealing |
+| `games/survivors/teacher_score_scale.py` | development score-difference refs の q05/q95 scale fit・create-once commit |
+| `games/survivors/teacher_reliability.py` | exact/fallback slice の episode/seed-cluster residual CI・error UCB・weight |
+| `games/survivors/teacher_validation.py` | short/full の tie-aware top-1、pairwise、NDCG@3、regret と固定 release gate |
+
+UE5 Editor の `/validation_branch_rng` は semantic replay 後の validation worker 専用であり、
+通常 `/reset` が必ず解除する。`/step` info の `elapsed` / `level` / `gems` / `kills` /
+`alive` / `stage_clear` は read-only outcome metrics で、base/shaped/HP penalty reward
+semantics は変更しない。NovelD、shaped reward、HP penalty は provenance に残るが
+ground-truth utility には入らない。
+
+回帰テストは Windows conda env で skip なしに実行する。
+
+```powershell
+Set-Location "<PROJECT_ROOT>\Tools\Training"
+python -m pytest tests\survivors\ -q --tb=short
+```
+
+formal corpus（300 decisions / 30 episodes 以上）と formal gate 達成は実環境収集後に行う。
+UE5 build / LLT: 未実行（Windows 専用）。
+
+## Survivors extrinsic utility value overlay
+
+raw PPO critic が paired gate を満たさない場合は
+`train_survivors_value_overlay.py` で source-bound critic latent dataset から utility head を
+学習する。source policy 全体（actor、feature extractor、critic LSTM を含む）は freeze
+され、optimizer には `Linear(latent, 128) → GELU → Linear(128, 1)` の head parameter
+だけが登録される。loss は `Huber + 0.5 * pairwise logistic`、Adam は
+`lr=1e-3` / `weight_decay=1e-4`、上限100 epoch / patience 10で、development validation
+NDCG が最良の checkpoint だけを保存する。
+
+```powershell
+Set-Location "<PROJECT_ROOT>\Tools\Training"
+& 'C:\Users\neko\anaconda3\envs\reinbalance\python.exe' `
+  train_survivors_value_overlay.py `
+  --source-manifest <ARTIFACTS_DIR>\value_source_descriptor.json `
+  --dataset <ARTIFACTS_DIR>\extrinsic-value-training-set.json `
+  --output-dir <ARTIFACTS_DIR>\extrinsic-value-overlay
+```
+
+dataset split は episode/decision seed group で固定し、target mean/std は
+`development_train` だけから fit する。censored、early failure、quarantine branch は
+loss から除外し、primary tie は pairwise loss に使用しない。`final_test` は学習・
+checkpoint 選択では開封せず、後続 revalidation の method lock 後だけ利用する。
+
+出力は `extrinsic_value_overlay.pt` と
+`extrinsic_value_overlay_manifest.json` の組である。manifest は source model、
+policy-state schema、VecNormalize、context shape、actor invariance、paired dataset、
+state dict hash、target normalization、best validation NDCG を束縛する。片方欠損、
+hash 不一致、別 source/context ではロードを拒否する。
+
+choice probe/collector は任意の
+`--value-overlay <overlay-manifest-or-directory>` を受け取る。未指定時は従来の raw
+critic path をそのまま使用する。
+
+対象回帰テストは Windows conda env で skip なしに実行する。
+
+```powershell
+Set-Location "<PROJECT_ROOT>\Tools\Training"
+& 'C:\Users\neko\anaconda3\envs\reinbalance\python.exe' -m pytest `
+  tests\survivors\test_extrinsic_value_overlay.py `
+  tests\survivors\test_train_value_overlay.py -q --tb=short
+& 'C:\Users\neko\anaconda3\envs\reinbalance\python.exe' -m pytest `
+  tests\survivors\ -q --tb=short
+```
+
+UE5 build / LLT: 未実行（Windows 専用）。実データによる promotion gate、overlay
+reliability calibration、raw critic 比較、label release verdict は後続 revalidation
+フェーズで実施する。
+
 ## 関連ドキュメント
 
 - UE5 との通信仕様: [`ue5_env.md`](ue5_env.md)

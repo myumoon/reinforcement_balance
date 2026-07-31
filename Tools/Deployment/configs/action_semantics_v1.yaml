@@ -1,0 +1,24 @@
+# 9 アクションの physics_hz/frame_skip/decision 周期と WASD 変位の正準定義(config)。
+#
+# 操作の種類とタイミング、方向ごとの動き方を固定した設定ファイルです。
+
+schema_version: survivors_action.v1
+physics_hz: 60
+frame_skip: 4
+decision_hz: 15
+golden_fixture: simulator_displacement_and_key_dry_run.v1
+source_descriptor:
+  path: ReinBalance/Source/ReinBalanceLogic/Private/Survivors/SurvivorsGameLogic.cpp
+  function: FSurvivorsGameLogic::ApplyAction
+  physics_dt: 1/60
+  telemetry: golden/action_displacement_wasd_v1.json
+rows:
+  - {index: 0, name: N, sim_vector: [0, 1], screen_direction: up, wasd_chord: [W]}
+  - {index: 1, name: NE, sim_vector: [1, 1], screen_direction: up_right, wasd_chord: [W, D]}
+  - {index: 2, name: E, sim_vector: [1, 0], screen_direction: right, wasd_chord: [D]}
+  - {index: 3, name: SE, sim_vector: [1, -1], screen_direction: down_right, wasd_chord: [S, D]}
+  - {index: 4, name: S, sim_vector: [0, -1], screen_direction: down, wasd_chord: [S]}
+  - {index: 5, name: SW, sim_vector: [-1, -1], screen_direction: down_left, wasd_chord: [S, A]}
+  - {index: 6, name: W, sim_vector: [-1, 0], screen_direction: left, wasd_chord: [A]}
+  - {index: 7, name: NW, sim_vector: [-1, 1], screen_direction: up_left, wasd_chord: [W, A]}
+  - {index: 8, name: idle, sim_vector: [0, 0], screen_direction: idle, wasd_chord: []}

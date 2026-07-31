@@ -1,4 +1,6 @@
 #pragma once
+// Survivors の canonical production state と外部 level-up API を定義する。
+// 初心者向け: UObject から独立したこの型だけがゲーム進行と選択状態を所有する。
 // このファイルは UObject 系ヘッダーをインクルードしてはならない。
 // CoreUObject.h, UObject/Object.h, Components/ActorComponent.h 等の追加は禁止。
 // 新しい依存を追加する場合はチームレビューを必須とする。
@@ -6,6 +8,7 @@
 #include "CoreMinimal.h"
 #include "Survivors/SurvivorsTypes.h"
 #include "Survivors/SurvivorsGameConstants.h"
+#include "Survivors/SurvivorsLevelUpDecision.h"
 #include "Survivors/SurvivorsCollisionTypes.h"  // FSurvivorsTargetGrid (ReinBalanceLogic module)
 #include "Survivors/Weapons/SurvivorsWeaponLogic.h"  // FSurvivorsWeaponLogic 完全定義（TUniquePtr が destructor を要求する）
 
@@ -25,10 +28,45 @@ struct FSurvivorsStepResult
 	FString SpawnDebugJson;  // info_json 構築用
 };
 
+/** 外部 choice の適用結果と再送用スナップショット。 */
+enum class ESurvivorsLevelUpApplyStatus : uint8
+{
+	Applied,
+	StaleDecision,
+	InvalidChoice,
+};
+
+/**
+ * choice 適用直後の応答に必要な immutable snapshot。
+ * 初心者向け: 同じ要求が再送されたとき、この値をそのまま返して二重適用を防ぐ。
+ */
+struct FSurvivorsLevelUpApplyResult
+{
+	ESurvivorsLevelUpApplyStatus Status = ESurvivorsLevelUpApplyStatus::StaleDecision;
+	FString DecisionId;
+	FString ChoiceId;
+	TArray<float> PostChoiceObs;
+	FSurvivorsPendingLevelUpDecision PendingAfter;
+	int32 BacklogAfter = 0;
+};
+
 struct FSurvivorsResetResult
 {
 	TArray<float> Obs;
 	FString ObsSchemaHash;  // Python 側の /reset レスポンス互換のため必須
+};
+
+/**
+ * validation-only post-decision RNG stream の immutable binding。
+ * 通常 reset/step は bActive=false のまま従来 RandStream semantics を使う。
+ */
+struct FSurvivorsValidationBranchRngState
+{
+	bool bActive = false;
+	FString SchemaVersion;
+	FString ReplicationKey;
+	int32 StreamSeed = 0;
+	int32 InitialStreamState = 0;
 };
 
 // ============================================================
@@ -81,6 +119,7 @@ struct FSurvivorsGameLogicConfig
 	bool   bEnableEvolutions  = true;
 	float  ReplayOldPhaseFraction = 0.0f;
 	FString StartingWeaponMode = TEXT("garlic");
+	FString ItemSelectionMode = TEXT("auto");
 
 	// ---- RSI オーバーライド ----
 	struct FWeaponSlotOverride  { int32 WeaponId = 0; int32 Level = 1; };
@@ -137,6 +176,18 @@ public:
 	/** obs 次元に影響するパラメータから生成するハッシュ */
 	FString GetObsSchemaHash() const;
 
+	/**
+	 * コンテンツ契約を enum/table/config から JSON として一方向 export する。
+	 * Python 側が武器 ID や進化組を複製せず、ゲーム本体と同じ定義を監査に使える。
+	 */
+	FString GetContentSchema() const;
+
+	/**
+	 * 行動と時間刻みの契約を実際の Logic 定数・設定から JSON として返す。
+	 * 9方向、物理刻み、移動量、pause/level-up timing を監査側へ渡す。
+	 */
+	FString GetActionTimeSchema() const;
+
 	/** 観測次元数 */
 	int32 GetObsDim() const;
 
@@ -150,6 +201,35 @@ public:
 	/** SpawnDebug JSON */
 	FString GetSpawnDebugJson() const;
 
+	/**
+	 * XP を source of truth である Logic に加算する。
+	 * 初心者向け: Component は計算せず、この入口へ渡すだけにして二重実装を防ぐ。
+	 */
+	void AddExperience(float Amount) { ProcessXPGain(Amount); }
+
+	/** 外部選択の保留状態を返す。 */
+	bool IsLevelUpPending() const { return LevelUpDecisionState.IsPending(); }
+	const FSurvivorsPendingLevelUpDecision& GetPendingLevelUpDecision() const
+	{
+		return LevelUpDecisionState.GetPending();
+	}
+	int32 GetLevelUpBacklog() const { return LevelUpBacklog; }
+	const FString& GetItemSelectionMode() const { return CurrentConfig.ItemSelectionMode; }
+
+	/**
+	 * game thread 上で choice を一度だけ適用する。
+	 * duplicate は直前の immutable result を返し、stale/invalid は mutation しない。
+	 */
+	FSurvivorsLevelUpApplyResult ApplyExternalLevelUpChoice(
+		const FString& DecisionId, const FString& ChoiceId);
+
+	/**
+	 * pending choiceをinternal sandboxへ適用し、productionと同じraw observationを返す。
+	 * 初心者向け: const method内でdeep cloneだけを変更するため、本物のepisode stateは不変のままです。
+	 */
+	FSurvivorsChoicePreview PreviewLevelUpChoice(
+		const FString& DecisionId, const FString& ChoiceId) const;
+
 	// ---- ParallelFor 内で直接呼ぶ API ----
 
 	/** 複数物理ステップを実行して結果を返す */
@@ -157,6 +237,31 @@ public:
 
 	/** リセットして初期 obs を返す */
 	FSurvivorsResetResult ExecReset(TOptional<int32> Seed);
+
+	/**
+	 * semantic replay 完了後の validation worker だけが post-decision stream を切り替える。
+	 * schema/key 不正時は RandStream を変更せず false を返す。
+	 */
+	bool ActivateValidationBranchRng(
+		const FString& SchemaVersion,
+		const FString& ReplicationKey,
+		int32 StreamSeed);
+
+	/** validation branch RNG の固定 schema version を返す。 */
+	static const TCHAR* GetValidationBranchRngSchemaVersion()
+	{
+		return TEXT("survivors.branch_rng.v1");
+	}
+
+	/** validation stream binding と現在 state を監査する。 */
+	const FSurvivorsValidationBranchRngState& GetValidationBranchRngState() const
+	{
+		return ValidationBranchRngState;
+	}
+	int32 GetValidationBranchRngCurrentState() const
+	{
+		return RandStream.GetCurrentSeed();
+	}
 
 	// ---- ビュー / デバッグ向けアクセサ ----
 
@@ -170,6 +275,10 @@ public:
 	float     GetLastReward()  const { return LastReward; }
 	float     GetEpisodeBaseReward()  const { return EpisodeBaseReward; }
 	int32     GetEpisodeStepCount()   const { return EpisodeStepCount; }
+	int32     GetEpisodeGemCount()    const { return EpisodeGemCount; }
+	int32     GetEpisodeKillCount()   const { return EpisodeKillCount; }
+	bool      IsAlive()               const { return !bDone; }
+	bool      IsStageClear()          const { return bTruncated && !bDone; }
 	bool      IsShieldActive() const { return bShieldActive; }
 	float     GetPlayerShieldTimer() const { return PlayerShieldTimer; }
 
@@ -275,9 +384,12 @@ public:
 	float                 LastReward        = 0.f;
 	float                 EpisodeBaseReward = 0.f;
 	int32                 EpisodeStepCount  = 0;
+	int32                 EpisodeGemCount   = 0;
+	int32                 EpisodeKillCount  = 0;
 	bool                  bDone             = false;
 	bool                  bTruncated        = false;
 	FRandomStream         RandStream;
+	FSurvivorsValidationBranchRngState ValidationBranchRngState;
 	FSurvivorsSpawnDebug  LastSpawnDebug;
 
 	// プロジェクタイル・グラウンドゾーン
@@ -314,7 +426,10 @@ private:
 	mutable int32 CachedObsDim = -1;
 	float PhysicsAccumTime = 0.f;
 
-
+	uint64 EpisodeSerial = 0;
+	int32 LevelUpBacklog = 0;
+	FSurvivorsLevelUpDecisionState LevelUpDecisionState;
+	TOptional<FSurvivorsLevelUpApplyResult> LastAppliedLevelUpResult;
 
 	// ---- 内部メソッド ----
 	FVector2D RandomInsideField();
@@ -354,6 +469,8 @@ private:
 	float CumulativeXPForLevel(int32 Level) const;
 	void  ProcessXPGain(float Amount);
 	void  OnLevelUp(int32 NextLevel);
+	void  AdvanceEligibleLevels();
+	int32 CountEligibleLevelBacklog() const;
 	void  RecalcPassiveEffects();
 	FPassiveEffects ComputePassiveEffects() const;
 	TArray<FLevelUpChoice> BuildLevelUpChoices();
@@ -370,8 +487,14 @@ private:
 	void  BuildPickupGrid();
 	void  QueryPickupContacts(FVector2D Pos, float Radius, TArray<const struct FSurvivorsTargetProxy*>& Out) const;
 	TUniquePtr<FSurvivorsWeaponLogic> CreateWeaponLogic(EWeaponType Type);
+	/**
+	 * preview専用に全stateをdeep cloneし、外部pointerをclone側へ再束縛する。
+	 * 初心者向け: public snapshot APIにはせず、反実仮想計算の一時objectだけを生成します。
+	 */
+	TUniquePtr<FSurvivorsGameLogic> CloneForPreview() const;
 
 #if WITH_AUTOMATION_TESTS
 	friend struct FSurvivorsGameTestAccess;
+	friend struct FSurvivorsChoiceProjectionTestAccess;
 #endif
 };

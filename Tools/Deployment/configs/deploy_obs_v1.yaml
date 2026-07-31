@@ -1,0 +1,16 @@
+# DeployObsV1 の順序付き segment schema。
+# Training と Deployment が同じ特徴の並び・範囲・欠損値を利用します。
+schema_version: deploy_obs.v1
+# HUD と inventory から直接読める特徴。
+# 画面表示が無い場合は neutral・validity 0・age 1 になります。
+fields:
+  - {name: player_hp, size: 1, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 1000.0, stale_after_ms: 250.0}
+  - {name: level, size: 1, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 2000.0, stale_after_ms: 1000.0}
+  - {name: player_screen_pos, size: 2, source_class: screen_world_observed, minimum: -1.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: nearest_enemy_offset, size: 2, source_class: screen_world_observed, minimum: -1.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: visible_enemy_count, size: 1, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: movement_direction, size: 2, source_class: temporal_inferred, minimum: -1.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: weapon_category, size: 1, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 1.0, max_age_ms: 5000.0, stale_after_ms: 2000.0}
+  - {name: bias, size: 1, source_class: constant, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 1.0, stale_after_ms: 1.0}
+  - {name: enemy_hp, size: 1, source_class: unobservable, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 1.0, stale_after_ms: 0.0}
+  - {name: cooldown, size: 1, source_class: unobservable, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 1.0, stale_after_ms: 0.0}

@@ -1,3 +1,7 @@
+/**
+ * Survivors の production ゲームロジックを実装する。
+ * 初心者向け: 物理・報酬・レベルアップを一つの状態へ集約し、外部選択中は全更新を止める。
+ */
 #include "Survivors/SurvivorsGameLogic.h"
 #include "Survivors/SurvivorsWikiSpec.h"
 #include "Survivors/SurvivorsGameConstants.h"
@@ -24,6 +28,17 @@
 // ---- ローカルヘルパー --------------------------------------------------------
 namespace
 {
+	/**
+	 * action/offer schema と実ロジックが共有する固定テーブル。
+	 * schema 専用の数値を持たず、移動適用と level-up 候補生成が使う値を直接公開する。
+	 */
+	static constexpr int32 MaxLevelUpOfferCount = 3;
+	static const FVector2D ActionDirections[] = {
+		{0.f,1.f}, {UE_INV_SQRT_2,UE_INV_SQRT_2}, {1.f,0.f},
+		{UE_INV_SQRT_2,-UE_INV_SQRT_2}, {0.f,-1.f}, {-UE_INV_SQRT_2,-UE_INV_SQRT_2},
+		{-1.f,0.f}, {-UE_INV_SQRT_2,UE_INV_SQRT_2}, {0.f,0.f}
+	};
+
 	static int32 WSSampleIndex(const TArray<float>& Weights, FRandomStream& RS)
 	{
 		float Total = 0.f; for (float W : Weights) Total += W;
@@ -39,6 +54,19 @@ namespace
 		float R = RS.FRandRange(0.f, Total), Cum = 0.f;
 		for (const auto& P : WMap) { Cum += P.Value; if (R <= Cum) return P.Key; }
 		return WMap.CreateConstIterator()->Key;
+	}
+	static bool IsLowerSha256(const FString& Value)
+	{
+		if (Value.Len() != 64) return false;
+		for (const TCHAR Character : Value)
+		{
+			if (!((Character >= TEXT('0') && Character <= TEXT('9'))
+				|| (Character >= TEXT('a') && Character <= TEXT('f'))))
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 	static void BuildDirDensity(const TArray<FVector2D>& Pos, const FVector2D& PPos,
 		int32 DC, float NDistMax, float NNear, float NMid, float NNorm, float MNorm, TArray<float>& Out)
@@ -99,6 +127,11 @@ void FSurvivorsGameLogic::Reset(TOptional<int32> Seed)
 {
 	if (Seed.IsSet()) RandStream.Initialize(Seed.GetValue());
 	else              RandStream.GenerateNewSeed();
+	ValidationBranchRngState = FSurvivorsValidationBranchRngState();
+	++EpisodeSerial;
+	LevelUpDecisionState.Reset(EpisodeSerial);
+	LevelUpBacklog = 0;
+	LastAppliedLevelUpResult.Reset();
 
 	for (int32 i = 0; i < MaxWeaponSlots; ++i)
 	{
@@ -163,6 +196,7 @@ void FSurvivorsGameLogic::Reset(TOptional<int32> Seed)
 
 	ElapsedTime = 0.f; GlobalFreezeUntilTime = -1.f;
 	LastReward = 0.f; EpisodeBaseReward = 0.f; EpisodeStepCount = 0;
+	EpisodeGemCount = 0; EpisodeKillCount = 0;
 	bDone = false; bTruncated = false;
 
 	// RSI オーバーライド
@@ -197,6 +231,7 @@ void FSurvivorsGameLogic::Reset(TOptional<int32> Seed)
 void FSurvivorsGameLogic::PhysicsStep(int32 ActionIdx)
 {
 	if (bDone || bTruncated) return;
+	if (IsLevelUpPending()) return;
 	LastReward = 0.f;
 
 	ApplyAction(ActionIdx, PhysicsDt);
@@ -222,6 +257,7 @@ void FSurvivorsGameLogic::PhysicsStep(int32 ActionIdx)
 	BuildPickupGrid();
 	{ FSurvivorsHitFrame HF; ComputePickupHits(HF); ApplyPickupHits(HF); }
 	FinalizePickupRemovals();
+	if (IsLevelUpPending()) return;
 
 	CheckFloorPickups();
 	CheckSpecialPickups();
@@ -252,7 +288,8 @@ FSurvivorsStepResult FSurvivorsGameLogic::ExecStep(const TArray<float>& Action, 
 	for (int32 i = 0; i < Steps; ++i)
 	{
 		PhysicsStep(ActionIdx);
-		AccReward += LastReward;
+		AccReward += GetReward();
+		if (IsLevelUpPending()) break;
 		if (bDone)     { Result.bDone      = true; break; }
 		if (bTruncated){ Result.bTruncated = true; break; }
 	}
@@ -269,6 +306,25 @@ FSurvivorsResetResult FSurvivorsGameLogic::ExecReset(TOptional<int32> Seed)
 	Result.Obs           = GetObservation();
 	Result.ObsSchemaHash = GetObsSchemaHash();
 	return Result;
+}
+
+bool FSurvivorsGameLogic::ActivateValidationBranchRng(
+	const FString& SchemaVersion,
+	const FString& ReplicationKey,
+	int32 StreamSeed)
+{
+	if (SchemaVersion != GetValidationBranchRngSchemaVersion()
+		|| !IsLowerSha256(ReplicationKey))
+	{
+		return false;
+	}
+	RandStream.Initialize(StreamSeed);
+	ValidationBranchRngState.bActive = true;
+	ValidationBranchRngState.SchemaVersion = SchemaVersion;
+	ValidationBranchRngState.ReplicationKey = ReplicationKey;
+	ValidationBranchRngState.StreamSeed = StreamSeed;
+	ValidationBranchRngState.InitialStreamState = RandStream.GetCurrentSeed();
+	return true;
 }
 
 // ============================================================================
@@ -330,6 +386,76 @@ FString FSurvivorsGameLogic::GetObsSchemaHash() const
 	return FMD5::HashAnsiString(*S);
 }
 
+/**
+ * enum/table/config に基づく監査用 content schema を構築する。
+ * ID・最大レベル・XP曲線・進化/union・offer/slot/chest semantics を単一方向で公開する。
+ */
+FString FSurvivorsGameLogic::GetContentSchema() const
+{
+	using namespace SurvivorsGameConstants;
+	FString Weapons;
+	for (int32 Id = 1; Id <= static_cast<int32>(EWeaponType::Vandalier); ++Id)
+	{
+		if (!Weapons.IsEmpty()) Weapons += TEXT(",");
+		const EWeaponType Type = static_cast<EWeaponType>(Id);
+		Weapons += FString::Printf(TEXT("{\"id\":\"%d\",\"max_level\":%d}"), Id, GetWeaponMaxLevel(Type));
+	}
+	FString Passives;
+	for (int32 Id = 1; Id <= static_cast<int32>(EPassiveItemType::TorronasBox); ++Id)
+	{
+		if (!Passives.IsEmpty()) Passives += TEXT(",");
+		Passives += FString::Printf(TEXT("{\"id\":\"%d\",\"max_level\":%d}"), Id, PassiveMaxLevel[Id]);
+	}
+	FString XP;
+	for (int32 Level = 1; Level <= MaxPlayerLevel; ++Level)
+	{
+		if (!XP.IsEmpty()) XP += TEXT(",");
+		XP += FString::Printf(TEXT("%.0f"), SurvivorsWikiSpec::XPRequiredForLevel(Level));
+	}
+	FString Gems;
+	const TCHAR* const GemIds[] = { TEXT("blue"), TEXT("green"), TEXT("red") };
+	static_assert(UE_ARRAY_COUNT(GemIds) == UE_ARRAY_COUNT(GemXPValues));
+	for (int32 Id = 0; Id < UE_ARRAY_COUNT(GemIds); ++Id)
+	{
+		if (!Gems.IsEmpty()) Gems += TEXT(",");
+		Gems += FString::Printf(TEXT("{\"id\":\"%s\",\"xp\":%.9g}"), GemIds[Id], GemXPValues[Id]);
+	}
+	FString Evolutions;
+	for (const FEvolutionRule& Rule : EvolutionTable)
+	{
+		if (!Evolutions.IsEmpty()) Evolutions += TEXT(",");
+		Evolutions += FString::Printf(
+			TEXT("{\"base_id\":\"%d\",\"evolved_id\":\"%d\",\"passive_id\":\"%d\",\"union_partner_id\":\"%d\"}"),
+			static_cast<int32>(Rule.BaseWeapon), static_cast<int32>(Rule.EvolvedWeapon),
+			static_cast<int32>(Rule.RequiredPassive), static_cast<int32>(Rule.UnionPartner));
+	}
+	return FString::Printf(
+		TEXT("{\"max_level\":%d,\"weapons\":[%s],\"passives\":[%s],\"gems\":[%s],")
+		TEXT("\"xp_curve\":[%s],\"level_cadence\":\"xp_threshold\",\"offer\":{\"count\":%d,\"fallback\":\"none_when_pool_empty\"},")
+		TEXT("\"slots\":{\"weapon\":%d,\"passive\":%d},\"evolutions\":[%s],\"chest\":{\"boss_drop\":true,\"evolution_enabled_by_config\":%s}}"),
+		MaxPlayerLevel, *Weapons, *Passives, *Gems, *XP, MaxLevelUpOfferCount, MaxWeaponSlots, MaxPassiveSlots, *Evolutions,
+		CurrentConfig.bEnableEvolutions ? TEXT("true") : TEXT("false"));
+}
+
+/**
+ * ApplyAction と物理設定に一致する action/time schema を構築する。
+ * simulator の9 action、decision cadence、画面変位換算、level-up中の時間挙動を公開する。
+ */
+FString FSurvivorsGameLogic::GetActionTimeSchema() const
+{
+	FString Actions;
+	for (int32 Id = 0; Id < UE_ARRAY_COUNT(ActionDirections); ++Id)
+	{
+		if (!Actions.IsEmpty()) Actions += TEXT(",");
+		Actions += FString::Printf(
+			TEXT("{\"id\":%d,\"x\":%.7g,\"y\":%.7g}"), Id, ActionDirections[Id].X, ActionDirections[Id].Y);
+	}
+	return FString::Printf(
+		TEXT("{\"physics_dt\":%.9g,\"decision_steps\":1,\"directions\":[%s],\"move_speed\":%.9g,")
+		TEXT("\"screen_displacement_per_step\":%.9g,\"pause_during_level_up\":false,\"level_up_timing\":\"same_physics_step\"}"),
+		PhysicsDt, *Actions, CurrentConfig.MoveSpeed, CurrentConfig.MoveSpeed * PhysicsDt);
+}
+
 int32 FSurvivorsGameLogic::GetObsDim() const
 {
 	if (CachedObsDim >= 0) return CachedObsDim;
@@ -337,7 +463,7 @@ int32 FSurvivorsGameLogic::GetObsDim() const
 	CachedObsDim = T; return T;
 }
 
-float FSurvivorsGameLogic::GetReward()     const { return LastReward; }
+float FSurvivorsGameLogic::GetReward()     const { return IsLevelUpPending() ? 0.f : LastReward; }
 bool  FSurvivorsGameLogic::IsDone()        const { return bDone; }
 bool  FSurvivorsGameLogic::IsTruncated()   const { return bTruncated; }
 
@@ -726,8 +852,58 @@ float FSurvivorsGameLogic::CumulativeXPForLevel(int32 Level) const { return Surv
 void FSurvivorsGameLogic::ProcessXPGain(float Amount)
 {
 	PlayerXP += SurvivorsWikiSpec::EffectiveXPGain(Amount, CachedPassiveEffects.GrowthMult, PlayerLevel);
-	while (true)
-	{ const float NT = CumulativeXPForLevel(PlayerLevel+1); if (PlayerXP < NT) break; PlayerLevel++; OnLevelUp(PlayerLevel); }
+	if (IsLevelUpPending())
+	{
+		LevelUpBacklog = CountEligibleLevelBacklog();
+		return;
+	}
+	AdvanceEligibleLevels();
+}
+
+int32 FSurvivorsGameLogic::CountEligibleLevelBacklog() const
+{
+	int32 Count = 0;
+	int32 TestLevel = PlayerLevel;
+	while (TestLevel < MaxPlayerLevel
+		&& PlayerXP >= CumulativeXPForLevel(TestLevel + 1))
+	{
+		++TestLevel;
+		++Count;
+	}
+	return Count;
+}
+
+void FSurvivorsGameLogic::AdvanceEligibleLevels()
+{
+	while (PlayerLevel < MaxPlayerLevel
+		&& PlayerXP >= CumulativeXPForLevel(PlayerLevel + 1))
+	{
+		if (CurrentConfig.ItemSelectionMode.Equals(TEXT("external"), ESearchCase::CaseSensitive))
+		{
+			TArray<FLevelUpChoice> Choices = BuildLevelUpChoices();
+			if (Choices.IsEmpty())
+			{
+				// 外部 mode では候補枯渇も明示的な no-upgrade decision にする。
+				// 初心者向け: 選べる強化がなくても確認を1回受けるまで時間を止め、レベルを一つずつ進めます。
+				FLevelUpChoice NoUpgradeChoice;
+				NoUpgradeChoice.ChoiceType =
+					FLevelUpChoice::EChoiceType::NoUpgrade;
+				NoUpgradeChoice.NewLevel = 0;
+				Choices.Add(NoUpgradeChoice);
+			}
+			++PlayerLevel;
+			const bool bDecisionStarted =
+				LevelUpDecisionState.BeginDecision(PlayerLevel, Choices);
+			checkf(
+				bDecisionStarted,
+				TEXT("external level-up must create a non-empty pending decision"));
+			LevelUpBacklog = CountEligibleLevelBacklog();
+			return;
+		}
+		++PlayerLevel;
+		OnLevelUp(PlayerLevel);
+	}
+	LevelUpBacklog = 0;
 }
 
 void FSurvivorsGameLogic::OnLevelUp(int32 NextLevel)
@@ -755,6 +931,233 @@ void FSurvivorsGameLogic::OnLevelUp(int32 NextLevel)
 	else ChoiceIdx = RandStream.RandRange(0, Choices.Num()-1);
 	ApplyLevelUpChoice(Choices[ChoiceIdx]);
 	RecalcPassiveEffects();
+}
+
+FSurvivorsLevelUpApplyResult FSurvivorsGameLogic::ApplyExternalLevelUpChoice(
+	const FString& DecisionId, const FString& ChoiceId)
+{
+	FSurvivorsLevelUpApplyResult Rejected;
+	Rejected.DecisionId = DecisionId;
+	Rejected.ChoiceId = ChoiceId;
+
+	int32 ChoiceIndex = INDEX_NONE;
+	const ESurvivorsLevelUpChoiceValidation Validation =
+		LevelUpDecisionState.ValidateChoice(DecisionId, ChoiceId, ChoiceIndex);
+	if (Validation == ESurvivorsLevelUpChoiceValidation::Duplicate)
+	{
+		return LastAppliedLevelUpResult.IsSet()
+			? LastAppliedLevelUpResult.GetValue()
+			: Rejected;
+	}
+	if (!CurrentConfig.ItemSelectionMode.Equals(TEXT("external"), ESearchCase::CaseSensitive))
+	{
+		return Rejected;
+	}
+	if (Validation == ESurvivorsLevelUpChoiceValidation::InvalidChoice)
+	{
+		Rejected.Status = ESurvivorsLevelUpApplyStatus::InvalidChoice;
+		return Rejected;
+	}
+	if (Validation != ESurvivorsLevelUpChoiceValidation::Accepted)
+	{
+		return Rejected;
+	}
+
+	const FSurvivorsPendingLevelUpDecision PendingBefore =
+		LevelUpDecisionState.GetPending();
+	if (!PendingBefore.Choices.IsValidIndex(ChoiceIndex))
+	{
+		Rejected.Status = ESurvivorsLevelUpApplyStatus::InvalidChoice;
+		return Rejected;
+	}
+
+	// 選択適用、pending 解除、次 backlog 判定を同じ game-thread call 内で完了する。
+	// 初心者向け: 途中で HTTP 応答を返さないため、半分だけ適用された状態は観測されない。
+	ApplyLevelUpChoice(PendingBefore.Choices[ChoiceIndex].Choice);
+	RecalcPassiveEffects();
+	LevelUpDecisionState.CommitChoice(DecisionId, ChoiceId);
+	LastReward = 0.f;
+	AdvanceEligibleLevels();
+
+	FSurvivorsLevelUpApplyResult Applied;
+	Applied.Status = ESurvivorsLevelUpApplyStatus::Applied;
+	Applied.DecisionId = DecisionId;
+	Applied.ChoiceId = ChoiceId;
+	Applied.PostChoiceObs = GetObservation();
+	Applied.PendingAfter = LevelUpDecisionState.GetPending();
+	Applied.BacklogAfter = LevelUpBacklog;
+	LastAppliedLevelUpResult = Applied;
+	return Applied;
+}
+
+TUniquePtr<FSurvivorsGameLogic> FSurvivorsGameLogic::CloneForPreview() const
+{
+	// 値型stateは明示列挙し、copy不能な武器だけはvirtual deep cloneする。
+	// 初心者向け: 新しいstate追加時にこの一覧へ足さない限り自動共有されない設計です。
+	auto Clone = MakeUnique<FSurvivorsGameLogic>();
+	Clone->PlayerPos = PlayerPos;
+	Clone->PlayerVel = PlayerVel;
+	Clone->PlayerHP = PlayerHP;
+	Clone->PlayerXP = PlayerXP;
+	Clone->PlayerLevel = PlayerLevel;
+	for (int32 SlotIdx = 0; SlotIdx < MaxWeaponSlots; ++SlotIdx)
+	{
+		Clone->WeaponSlots[SlotIdx] = WeaponSlots[SlotIdx];
+	}
+	for (int32 SlotIdx = 0; SlotIdx < MaxPassiveSlots; ++SlotIdx)
+	{
+		Clone->PassiveSlots[SlotIdx] = PassiveSlots[SlotIdx];
+	}
+	Clone->CachedPassiveEffects = CachedPassiveEffects;
+	Clone->GlobalFreezeUntilTime = GlobalFreezeUntilTime;
+	Clone->PlayerShieldTimer = PlayerShieldTimer;
+	Clone->bShieldActive = bShieldActive;
+	Clone->MaxRevivalCount = MaxRevivalCount;
+	Clone->UsedRevivalCount = UsedRevivalCount;
+	Clone->NextEnemyId = NextEnemyId;
+	Clone->NextGemId = NextGemId;
+	Clone->FloorPickups = FloorPickups;
+	Clone->SpecialPickups = SpecialPickups;
+	Clone->Destructibles = Destructibles;
+	Clone->Gems = Gems;
+	Clone->Enemies = Enemies;
+	Clone->ElapsedTime = ElapsedTime;
+	Clone->SpawnAccumulator = SpawnAccumulator;
+	Clone->bBossSpawned = bBossSpawned;
+	Clone->LastReward = LastReward;
+	Clone->EpisodeBaseReward = EpisodeBaseReward;
+	Clone->EpisodeStepCount = EpisodeStepCount;
+	Clone->EpisodeGemCount = EpisodeGemCount;
+	Clone->EpisodeKillCount = EpisodeKillCount;
+	Clone->bDone = bDone;
+	Clone->bTruncated = bTruncated;
+	Clone->RandStream = RandStream;
+	Clone->ValidationBranchRngState = ValidationBranchRngState;
+	Clone->LastSpawnDebug = LastSpawnDebug;
+	Clone->Projectiles = Projectiles;
+	Clone->GroundZones = GroundZones;
+	Clone->CurrentConfig = CurrentConfig;
+	Clone->CachedObsDim = CachedObsDim;
+	Clone->PhysicsAccumTime = PhysicsAccumTime;
+	Clone->EpisodeSerial = EpisodeSerial;
+	Clone->LevelUpBacklog = LevelUpBacklog;
+	Clone->LevelUpDecisionState = LevelUpDecisionState;
+	Clone->LastAppliedLevelUpResult = LastAppliedLevelUpResult;
+
+	Clone->Weapons.SetNum(Weapons.Num());
+	for (int32 SlotIdx = 0; SlotIdx < Weapons.Num(); ++SlotIdx)
+	{
+		if (!Weapons[SlotIdx])
+		{
+			continue;
+		}
+		Clone->Weapons[SlotIdx] = Weapons[SlotIdx]->CloneForPreview(Clone.Get());
+		if (!Clone->Weapons[SlotIdx])
+		{
+			// 未対応resourceを黙って共有せずpreview全体を拒否する。
+			// 初心者向け: 一部だけ複製したsandboxをproduction相当として返しません。
+			return nullptr;
+		}
+	}
+
+	// gridはpointer共有を避け、clone済みentity配列から明示的に再構築する。
+	// 初心者向け: 将来preview後に同じLogicをstepしても、元stateの索引を参照しません。
+	Clone->BuildEnemyGrid();
+	Clone->BuildPickupGrid();
+	return Clone;
+}
+
+FSurvivorsChoicePreview FSurvivorsGameLogic::PreviewLevelUpChoice(
+	const FString& DecisionId, const FString& ChoiceId) const
+{
+	FSurvivorsChoicePreview Preview;
+	Preview.ChoiceId = ChoiceId;
+
+	int32 ChoiceIndex = INDEX_NONE;
+	const ESurvivorsLevelUpChoiceValidation Validation =
+		LevelUpDecisionState.ValidateChoice(DecisionId, ChoiceId, ChoiceIndex);
+	if (Validation != ESurvivorsLevelUpChoiceValidation::Accepted)
+	{
+		Preview.Error = Validation == ESurvivorsLevelUpChoiceValidation::InvalidChoice
+			? TEXT("invalid choice")
+			: TEXT("pending decision does not match");
+		return Preview;
+	}
+	const FSurvivorsPendingLevelUpDecision& Pending =
+		LevelUpDecisionState.GetPending();
+	if (!Pending.Choices.IsValidIndex(ChoiceIndex)
+		|| Pending.Choices[ChoiceIndex].ChoiceId != ChoiceId)
+	{
+		Preview.Error = TEXT("choice set changed");
+		return Preview;
+	}
+
+	TUniquePtr<FSurvivorsGameLogic> Sandbox = CloneForPreview();
+	if (!Sandbox)
+	{
+		Preview.Error = TEXT("preview clone rejected");
+		return Preview;
+	}
+	// base観測もsandboxから取得し、元Logicのmutable次元cacheさえ変更しない。
+	// 初心者向け: const getter内部の高速化用cacheもgame stateとして扱い、preview元には触れません。
+	const TArray<float> BaseObservation = Sandbox->GetObservation();
+
+	// sandboxでもproduction external transitionをそのまま通し、その結果を再計算する。
+	// 初心者向け: ApplyLevelUpChoiceやpassive式のpreview専用mirrorを作らないため本番とずれません。
+	const FSurvivorsLevelUpApplyResult Applied =
+		Sandbox->ApplyExternalLevelUpChoice(DecisionId, ChoiceId);
+	if (Applied.Status != ESurvivorsLevelUpApplyStatus::Applied)
+	{
+		Preview.Error = TEXT("preview production apply rejected");
+		return Preview;
+	}
+	Preview.ProjectedObservation = Sandbox->GetObservation();
+	if (BaseObservation.Num() != Preview.ProjectedObservation.Num())
+	{
+		Preview.ProjectedObservation.Reset();
+		Preview.Error = TEXT("preview observation dimension changed");
+		return Preview;
+	}
+
+	// schema順にbase/projected配列を直接比較して変更segmentを導出する。
+	// 初心者向け: item種別ごとの「変わるはず一覧」は使わず、実際に変わった値だけを報告します。
+	int32 Offset = 0;
+	TSet<FString> SchemaNames;
+	for (const FSurvivorsObsSegment& Segment : Sandbox->GetObsSchema())
+	{
+		if (Segment.Name.IsEmpty() || Segment.Dim <= 0
+			|| Offset > BaseObservation.Num() - Segment.Dim
+			|| SchemaNames.Contains(Segment.Name))
+		{
+			Preview.ProjectedObservation.Reset();
+			Preview.ChangedSegments.Reset();
+			Preview.Error = TEXT("observation schema does not match dimension");
+			return Preview;
+		}
+		SchemaNames.Add(Segment.Name);
+		bool bChanged = false;
+		for (int32 LocalIndex = 0; LocalIndex < Segment.Dim; ++LocalIndex)
+		{
+			const int32 Index = Offset + LocalIndex;
+			if (BaseObservation[Index] != Preview.ProjectedObservation[Index])
+			{
+				bChanged = true;
+				break;
+			}
+		}
+		if (bChanged)
+		{
+			Preview.ChangedSegments.Add(Segment.Name);
+		}
+		Offset += Segment.Dim;
+	}
+	if (Offset != BaseObservation.Num())
+	{
+		Preview.ProjectedObservation.Reset();
+		Preview.ChangedSegments.Reset();
+		Preview.Error = TEXT("observation schema does not cover dimension");
+	}
+	return Preview;
 }
 
 FPassiveEffects FSurvivorsGameLogic::ComputePassiveEffects() const
@@ -846,6 +1249,26 @@ TArray<FLevelUpChoice> FSurvivorsGameLogic::BuildLevelUpChoices()
 	};
 	TArray<FLevelUpChoice> Evolutions, WeaponUpgrades, NewWeapons, PassiveUpgrades, PassiveNew;
 
+	// 進化候補は実際の prerequisite を満たす slot からだけ生成する。
+	// 初心者向け: 最大レベルの武器と必要 item が揃ったときだけ、通常進化や union を選択肢へ出します。
+	if (CurrentConfig.bEnableEvolutions)
+	{
+		for (const int32 SlotIdx : GetEvolvableWeapons())
+		{
+			for (const SurvivorsGameConstants::FEvolutionRule& Rule : SurvivorsGameConstants::EvolutionTable)
+			{
+				if (WeaponSlots[SlotIdx].Type != Rule.BaseWeapon) continue;
+				FLevelUpChoice Choice;
+				Choice.ChoiceType = FLevelUpChoice::EChoiceType::WeaponEvolve;
+				Choice.WeaponType = Rule.EvolvedWeapon;
+				Choice.SlotIdx = SlotIdx;
+				Choice.NewLevel = 1;
+				Evolutions.Add(Choice);
+				break;
+			}
+		}
+	}
+
 	// 武器アップグレード
 	for (int32 i=0;i<MaxWeaponSlots;++i)
 	{ if(WeaponSlots[i].Type==EWeaponType::None||WeaponSlots[i].Level.Value>=SurvivorsGameConstants::GetWeaponMaxLevel(WeaponSlots[i].Type)) continue;
@@ -878,24 +1301,24 @@ TArray<FLevelUpChoice> FSurvivorsGameLogic::BuildLevelUpChoices()
 	}
 
 	TArray<FLevelUpChoice> Choices;
-	for(const FLevelUpChoice& C:Evolutions){if(Choices.Num()>=3)break;Choices.Add(C);}
-	if(CurrentConfig.bEnablePassives&&Choices.Num()<3)
+	for(const FLevelUpChoice& C:Evolutions){if(Choices.Num()>=MaxLevelUpOfferCount)break;Choices.Add(C);}
+	if(CurrentConfig.bEnablePassives&&Choices.Num()<MaxLevelUpOfferCount)
 	{ TArray<FLevelUpChoice> AP; AP.Append(PassiveUpgrades); AP.Append(PassiveNew);
 	  if(AP.Num()>0) Choices.Add(AP[RandStream.RandRange(0,AP.Num()-1)]); }
 	TArray<FLevelUpChoice> WPool; WPool.Append(WeaponUpgrades); WPool.Append(NewWeapons);
 	for(int32 j=WPool.Num()-1;j>=0;--j)
 	{ for(const FLevelUpChoice& E:Choices) if(E.WeaponType==WPool[j].WeaponType&&E.WeaponType!=EWeaponType::None){WPool.RemoveAt(j);break;} }
 	const bool bWL=CurrentConfig.WeaponPoolMode.Equals(TEXT("weighted"),ESearchCase::IgnoreCase)&&!CurrentConfig.WeaponWeights.IsEmpty();
-	while(Choices.Num()<3&&WPool.Num()>0)
+	while(Choices.Num()<MaxLevelUpOfferCount&&WPool.Num()>0)
 	{ int32 SI2=0;
 	  if(bWL){float T=0.f;for(const FLevelUpChoice& C:WPool){float W=1.f;if(C.ChoiceType==FLevelUpChoice::EChoiceType::WeaponNew){const float* F=CurrentConfig.WeaponWeights.Find((int32)C.WeaponType);W=F&&*F>0.f?*F:1.f;}T+=W;}
 	    if(T>0.f){float R=RandStream.FRandRange(0.f,T),Cum2=0.f;for(int32 j=0;j<WPool.Num();++j){float W=1.f;if(WPool[j].ChoiceType==FLevelUpChoice::EChoiceType::WeaponNew){const float* F=CurrentConfig.WeaponWeights.Find((int32)WPool[j].WeaponType);W=F&&*F>0.f?*F:1.f;}Cum2+=W;if(R<=Cum2){SI2=j;break;}}}}
 	  else SI2=RandStream.RandRange(0,WPool.Num()-1);
 	  Choices.Add(WPool[SI2]);WPool.RemoveAt(SI2); }
-	if(CurrentConfig.bEnablePassives&&Choices.Num()<3)
+	if(CurrentConfig.bEnablePassives&&Choices.Num()<MaxLevelUpOfferCount)
 	{ TArray<FLevelUpChoice> AP2; AP2.Append(PassiveUpgrades); AP2.Append(PassiveNew);
 	  for(int32 j=AP2.Num()-1;j>=0;--j){for(const FLevelUpChoice& E:Choices) if(E.ChoiceType!=FLevelUpChoice::EChoiceType::WeaponNew&&E.ChoiceType!=FLevelUpChoice::EChoiceType::WeaponUpgrade&&E.ChoiceType!=FLevelUpChoice::EChoiceType::WeaponEvolve&&E.PassiveType==AP2[j].PassiveType){AP2.RemoveAt(j);break;}}
-	  while(Choices.Num()<3&&AP2.Num()>0){int32 I=RandStream.RandRange(0,AP2.Num()-1);Choices.Add(AP2[I]);AP2.RemoveAt(I);} }
+	  while(Choices.Num()<MaxLevelUpOfferCount&&AP2.Num()>0){int32 I=RandStream.RandRange(0,AP2.Num()-1);Choices.Add(AP2[I]);AP2.RemoveAt(I);} }
 	return Choices;
 }
 
@@ -903,6 +1326,8 @@ void FSurvivorsGameLogic::ApplyLevelUpChoice(const FLevelUpChoice& Choice)
 {
 	switch (Choice.ChoiceType)
 	{
+	case FLevelUpChoice::EChoiceType::NoUpgrade:
+		return;
 	case FLevelUpChoice::EChoiceType::PassiveNew:
 		for(int32 i=0;i<MaxPassiveSlots;++i) if(PassiveSlots[i].Type==EPassiveItemType::None){PassiveSlots[i].Type=Choice.PassiveType;PassiveSlots[i].Level=1;break;} return;
 	case FLevelUpChoice::EChoiceType::PassiveUpgrade:
@@ -911,8 +1336,10 @@ void FSurvivorsGameLogic::ApplyLevelUpChoice(const FLevelUpChoice& Choice)
 		for(const SurvivorsGameConstants::FEvolutionRule& Rule:SurvivorsGameConstants::EvolutionTable) if(Rule.EvolvedWeapon==Choice.WeaponType){for(int32 i=0;i<MaxWeaponSlots;++i) if(WeaponSlots[i].Type==Rule.BaseWeapon){EvolveWeapon(i,Choice.WeaponType);return;} break;} return;
 	case FLevelUpChoice::EChoiceType::WeaponUpgrade:
 		for(int32 i=0;i<MaxWeaponSlots;++i) if(WeaponSlots[i].Type==Choice.WeaponType){const int32 NL=FMath::Min(Choice.NewLevel,SurvivorsGameConstants::GetWeaponMaxLevel(Choice.WeaponType));WeaponSlots[i].Level=FWeaponLevel(NL);if(Weapons.IsValidIndex(i)&&Weapons[i])Weapons[i]->SetLevel(FWeaponLevel(NL));return;} return;
-	case FLevelUpChoice::EChoiceType::WeaponNew: default:
+	case FLevelUpChoice::EChoiceType::WeaponNew:
 		for(int32 i=0;i<MaxWeaponSlots;++i) if(WeaponSlots[i].Type==EWeaponType::None){WeaponSlots[i].Type=Choice.WeaponType;WeaponSlots[i].Level=FWeaponLevel(1);EquipWeapon(i,Choice.WeaponType,1);return;} return;
+	default:
+		return;
 	}
 }
 
@@ -1061,6 +1488,8 @@ void FSurvivorsGameLogic::ApplyPickupHits(FSurvivorsHitFrame& HitFrame)
 		{ const int32 Mult=RandStream.RandRange(SurvivorsGameConstants::RedGemMinMultiplier,SurvivorsGameConstants::RedGemMaxMultiplier); XPG=SurvivorsWikiSpec::RedGemExperienceForMultiplier(XPG,Mult); }
 		ProcessXPGain(XPG);
 		LastReward += CurrentConfig.ItemReward;
+		++EpisodeGemCount;
+		if (IsLevelUpPending()) break;
 	}
 }
 
@@ -1271,7 +1700,7 @@ void FSurvivorsGameLogic::CheckSpecialPickups()
 		case ESpecialPickupType::Rosary:
 			for (FEnemyState& E:Enemies)
 			{ const bool bRI=CurrentConfig.EnemyTypeTable.IsValidIndex(E.TypeId)&&CurrentConfig.EnemyTypeTable[E.TypeId].bResistsInstantKill;
-			  if(!E.bPendingRemove&&!bRI){E.HP=0.f;E.bPendingRemove=true;LastReward+=CurrentConfig.KillReward;} } break;
+			  if(!E.bPendingRemove&&!bRI){E.HP=0.f;E.bPendingRemove=true;LastReward+=CurrentConfig.KillReward;++EpisodeKillCount;} } break;
 		case ESpecialPickupType::Vacuum: for(FGemState& G:Gems) if(!G.bPendingRemove) G.Pos=PlayerPos; break;
 		case ESpecialPickupType::Orologion: GlobalFreezeUntilTime=ElapsedTime+10.f; break;
 		case ESpecialPickupType::TreasureChest:
@@ -1571,7 +2000,7 @@ void FSurvivorsGameLogic::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 				}
 			}
 		}
-		if(E.HP<=0.f){E.bPendingRemove=true;LastReward+=CurrentConfig.KillReward;}
+		if(E.HP<=0.f){E.bPendingRemove=true;LastReward+=CurrentConfig.KillReward;++EpisodeKillCount;}
 	}
 	TArray<int32> SR=PR.Array(); SR.Sort([](int32 A,int32 B){return A>B;});
 	for (int32 I:SR) if(Projectiles.IsValidIndex(I)) Projectiles.RemoveAt(I);

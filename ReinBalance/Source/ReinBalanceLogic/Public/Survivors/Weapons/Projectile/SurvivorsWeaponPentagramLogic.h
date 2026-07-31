@@ -10,6 +10,15 @@ public:
 	virtual void OnLevelChanged(FWeaponLevel NewLevel) override;
 	virtual void ComputeHits(FSurvivorsHitFrame& HitFrame) override;
 	virtual float GetCooldownObsDenominator() const override;
+	/** Pentagramのpending fireをsandboxへ複製する。
+	 * 初心者向け: 発動待ちflagとcooldownを保ち、参照先Logicだけをcloneへ付け替える。 */
+	virtual TUniquePtr<FSurvivorsWeaponLogic> CloneForPreview(
+		FSurvivorsGameLogic* InLogic) const override
+	{
+		auto Clone = MakeUnique<FSurvivorsWeaponPentagramLogic>(*this);
+		Clone->Logic = InLogic;
+		return Clone;
+	}
 
 private:
 	float CachedDamage   = 999.f;

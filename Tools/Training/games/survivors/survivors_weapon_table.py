@@ -68,10 +68,72 @@ WEAPON_UNLOCK_TABLES: dict[str, list[WeaponEntry]] = {
 
 
 def resolve_weapon_unlock_order(table_name: str) -> list[WeaponEntry]:
-    """テーブル名から WeaponEntry リストを返す。不明な名前は ValueError。"""
+    """武器 unlock table の既知名だけを解決する。
+
+    初心者向け:
+    不明な名前を既定値へ置き換えず、設定ミスとして通知します。
+    """
     if table_name not in WEAPON_UNLOCK_TABLES:
         raise ValueError(f"Unknown weapon_unlock_table: {table_name!r}")
     return WEAPON_UNLOCK_TABLES[table_name]
+
+
+def validate_unlock_table_against_generated_ids(generated_weapon_ids: frozenset[str]) -> None:
+    """手書き curriculum table が generated weapon ID 集合から逸脱しないことを検証する。
+
+    初心者向け:
+    unlock 順序は訓練用 annotation ですが、存在しない武器 ID を参照した場合は即座に失敗させます。
+    """
+    unlock_ids = [entry.weapon_id for entries in WEAPON_UNLOCK_TABLES.values() for entry in entries]
+    if any(str(weapon_id) not in generated_weapon_ids for weapon_id in unlock_ids):
+        raise ValueError("weapon unlock table contains an ID absent from generated schema")
+
+
+def build_content_training_cells(
+    generated_ids: dict[str, frozenset[str]] | object,
+) -> dict[str, str]:
+    """generated schema の全 content を訓練 scenario cell へ展開する。
+
+    初心者向け:
+    初期武器の表だけで訓練対象を決めず、schema にある武器・アイテム・敵を全て
+    決定的なセルへ登録します。ID 自体は C++ schema から受け取るため複製しません。
+    """
+    if not isinstance(generated_ids, dict):
+        generated_ids = dict(generated_ids)  # type: ignore[arg-type]
+    cells: dict[str, str] = {}
+    weapon_special = {
+        "12": "pentagram_acquisition_upgrade",
+        "13": "peachone_union_prerequisite",
+        "14": "ebony_union_prerequisite",
+        "15": "laurel_acquisition_upgrade",
+        "27": "gorgeous_moon_evolution",
+        "28": "vandalier_union_slot_consumption",
+    }
+    for item_id in generated_ids["weapons"]:
+        cells[f"weapon:{item_id}"] = weapon_special.get(
+            item_id,
+            f"weapon_{item_id}_reset_step" if int(item_id) <= 15
+            else f"evolution_{int(item_id) - 15}_{item_id}",
+        )
+    for item_id in generated_ids["passives"]:
+        cells[f"passive:{item_id}"] = (
+            "stone_mask_no_combat_semantics" if item_id == "14"
+            else f"passive_{item_id}_max_effect"
+        )
+    for item_id in generated_ids["gems"]:
+        cells[f"gem:{item_id}"] = f"gem_{item_id}_pickup"
+    for item_id in generated_ids["evolutions"]:
+        base_id, evolved_id = item_id.split(":")
+        cells[f"evolution:{item_id}"] = {
+            "12:27": "gorgeous_moon_12_27",
+            "13:28": "vandalier_union_13_28",
+        }.get(item_id, f"evolve_{base_id}_{evolved_id}")
+    for item_id in generated_ids["enemies"]:
+        cells[f"enemy:{item_id}"] = (
+            "enemy_10_boss_reset_step" if item_id == "10"
+            else f"enemy_{item_id}_reset_step"
+        )
+    return cells
 
 
 ITEM_SYSTEM_STAGES: dict[str, ItemSystemStage] = {

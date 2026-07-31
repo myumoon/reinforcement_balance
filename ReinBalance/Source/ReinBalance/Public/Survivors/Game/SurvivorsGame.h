@@ -1,5 +1,9 @@
 #pragma once
 
+/**
+ * Survivors の UObject facade とエディタ公開設定を定義する。
+ * 初心者向け: 実際のレベルアップ計算は FSurvivorsGameLogic だけが所有し、この Actor は委譲する。
+ */
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Survivors/SurvivorsGameConstants.h"
@@ -61,6 +65,12 @@ public:
 	/** obs 次元に影響するパラメータから生成するハッシュ */
 	FString GetObsSchemaHash() const;
 
+	/** Logic が生成した content schema を変更せず返す。 */
+	FString GetContentSchema() const;
+
+	/** Logic が生成した action/time schema を変更せず返す。 */
+	FString GetActionTimeSchema() const;
+
 	/** ステップ報酬を返す */
 	float GetReward() const;
 
@@ -70,6 +80,29 @@ public:
 
 	FSurvivorsSpawnDebug GetSpawnDebug() const { return Logic.GetSpawnDebug(); }
 	FString GetSpawnDebugJson() const;
+
+	/** Component から受けた XP を canonical Logic へ委譲する。 */
+	void AddExperience(float Amount);
+
+	/** 外部 level-up choice を game thread 上の Logic へ委譲する。 */
+	FSurvivorsLevelUpApplyResult ApplyExternalLevelUpChoice(
+		const FString& DecisionId, const FString& ChoiceId);
+	/**
+	 * 反実仮想previewをcanonical Logicへ変更せず委譲する。
+	 * 初心者向け: ActorやComponentには選択適用・観測計算の複製を置きません。
+	 */
+	FSurvivorsChoicePreview PreviewLevelUpChoice(
+		const FString& DecisionId, const FString& ChoiceId) const;
+	bool IsLevelUpPending() const { return Logic.IsLevelUpPending(); }
+	const FSurvivorsPendingLevelUpDecision& GetPendingLevelUpDecision() const
+	{
+		return Logic.GetPendingLevelUpDecision();
+	}
+	int32 GetLevelUpBacklog() const { return Logic.GetLevelUpBacklog(); }
+
+	/** legacy chest Component から進化処理だけを canonical Logic へ委譲する。 */
+	TArray<int32> GetEvolvableWeaponsForChest() const;
+	void EvolveWeaponFromChest(int32 SlotIdx, EWeaponType EvolvedType);
 
 	// ---- ビュー / デバッグ向けアクセサー ----
 
@@ -296,6 +329,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
 	FString StartingWeaponMode = TEXT("garlic");
 
+	/** level-up item の選択元: "auto"（既定）/ "external" */
+	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
+	FString ItemSelectionMode = TEXT("auto");
+
 	// RSI: 武器スロット初期化用の構造体
 	struct FWeaponSlotOverride
 	{
@@ -479,11 +516,9 @@ private:
 	float GetEnemySpeed(int32 TypeId) const;
 	float GetEnemyTypeMaxHP(int32 TypeId) const;
 
-	// XP 処理
+	// XP curve 参照（legacy Component 用）
 	float XPRequiredForLevel(int32 Level) const;
 	float CumulativeXPForLevel(int32 Level) const;
-	void  ProcessXPGain(float Amount);
-	void  OnLevelUp(int32 NextLevel);
 
 	mutable int32 CachedObsDim = -1;
 

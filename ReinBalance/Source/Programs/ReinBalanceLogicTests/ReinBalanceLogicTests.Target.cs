@@ -5,6 +5,8 @@ public class ReinBalanceLogicTestsTarget : TestTargetRules
 {
 	public ReinBalanceLogicTestsTarget(TargetInfo Target) : base(Target)
 	{
-		bNeverCompileAgainstEngine = true;
+		// ASurvivorsGame facade の委譲を実オブジェクトで検証するため Engine module を有効化する。
+		// schema の文字列断片だけでなく、production facade と純粋 Logic の同一性を LLT で確認する。
+		bNeverCompileAgainstEngine = false;
 	}
 }

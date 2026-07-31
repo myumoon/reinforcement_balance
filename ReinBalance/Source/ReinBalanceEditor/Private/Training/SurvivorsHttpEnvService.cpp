@@ -1,9 +1,298 @@
+/**
+ * Survivors HTTP transport の MPSC enqueue と game-thread 適用を実装する。
+ * 初心者向け: worker thread は JSON の形だけを検査し、ゲーム状態の読書きは Tick に限定する。
+ */
 #include "Training/SurvivorsHttpEnvService.h"
 #include "HttpEnvServerBase.h"
+#include "HttpServerResponse.h"
 #include "Kismet/GameplayStatics.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
+
+namespace
+{
+FString SerializeJsonObject(const TSharedRef<FJsonObject>& Object)
+{
+	FString Json;
+	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Json);
+	FJsonSerializer::Serialize(Object, Writer);
+	return Json;
+}
+
+bool IsLowerSha256(const FString& Value)
+{
+	if (Value.Len() != 64) return false;
+	for (const TCHAR Character : Value)
+	{
+		if (!((Character >= TEXT('0') && Character <= TEXT('9'))
+			|| (Character >= TEXT('a') && Character <= TEXT('f'))))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+TUniquePtr<FHttpServerResponse> MakeStatusJsonResponse(
+	const FString& Json, EHttpServerResponseCodes Code)
+{
+	TUniquePtr<FHttpServerResponse> Response =
+		FHttpServerResponse::Create(Json, TEXT("application/json"));
+	Response->Code = Code;
+	return Response;
+}
+
+/**
+ * raw observationをlive schemaのdimとfinite条件へ束縛する。
+ * 初心者向け: reset/step/apply/previewの全responseが同じ検査を通り、壊れた配列を送信しない。
+ */
+bool ValidateObservationForResponse(
+	const ASurvivorsGame* Game,
+	const TArray<float>& Observation,
+	FString& OutError)
+{
+	if (!Game)
+	{
+		OutError = TEXT("game not set");
+		return false;
+	}
+	const int32 ExpectedDim = Game->GetObsDim();
+	if (ExpectedDim <= 0 || Observation.Num() != ExpectedDim)
+	{
+		OutError = FString::Printf(
+			TEXT("observation dimension mismatch: expected=%d actual=%d"),
+			ExpectedDim, Observation.Num());
+		return false;
+	}
+	int32 SchemaDim = 0;
+	TSet<FString> SchemaNames;
+	for (const FSurvivorsObsSegment& Segment : Game->GetObsSchema())
+	{
+		if (Segment.Name.IsEmpty() || Segment.Dim <= 0
+			|| SchemaDim > MAX_int32 - Segment.Dim
+			|| SchemaNames.Contains(Segment.Name))
+		{
+			OutError = TEXT("invalid observation schema");
+			return false;
+		}
+		SchemaNames.Add(Segment.Name);
+		SchemaDim += Segment.Dim;
+	}
+	if (SchemaDim != ExpectedDim || Game->GetObsSchemaHash().IsEmpty())
+	{
+		OutError = TEXT("obs schema changed");
+		return false;
+	}
+	for (int32 Index = 0; Index < Observation.Num(); ++Index)
+	{
+		if (!FMath::IsFinite(Observation[Index]))
+		{
+			OutError = FString::Printf(
+				TEXT("observation is not finite at index %d"), Index);
+			return false;
+		}
+	}
+	OutError.Empty();
+	return true;
+}
+
+TSharedRef<FJsonObject> BuildLevelUpInfoObject(
+	const FSurvivorsPendingLevelUpDecision& Pending,
+	int32 Backlog,
+	const FString* SpawnDebugJson,
+	const ASurvivorsGame* Game)
+{
+	TSharedRef<FJsonObject> Info = MakeShared<FJsonObject>();
+	if (SpawnDebugJson)
+	{
+		TSharedPtr<FJsonObject> SpawnDebug;
+		const TSharedRef<TJsonReader<>> Reader =
+			TJsonReaderFactory<>::Create(*SpawnDebugJson);
+		if (!FJsonSerializer::Deserialize(Reader, SpawnDebug) || !SpawnDebug.IsValid())
+		{
+			SpawnDebug = MakeShared<FJsonObject>();
+		}
+		Info->SetObjectField(TEXT("spawn_debug"), SpawnDebug);
+	}
+
+	Info->SetBoolField(TEXT("level_up_pending"), Pending.IsSet());
+	Info->SetStringField(TEXT("level_up_decision_id"), Pending.DecisionId);
+	Info->SetNumberField(TEXT("level_up_player_level"), Pending.PlayerLevel);
+	Info->SetNumberField(TEXT("level_up_backlog"), Backlog);
+	Info->SetNumberField(TEXT("elapsed"), Game ? Game->GetElapsedTime() : 0.f);
+	Info->SetNumberField(TEXT("level"), Game ? Game->GetPlayerLevel() : 0);
+	Info->SetNumberField(
+		TEXT("gems"), Game ? Game->GetLogic()->GetEpisodeGemCount() : 0);
+	Info->SetNumberField(
+		TEXT("kills"), Game ? Game->GetLogic()->GetEpisodeKillCount() : 0);
+	Info->SetBoolField(TEXT("alive"), Game ? Game->GetLogic()->IsAlive() : false);
+	Info->SetBoolField(
+		TEXT("stage_clear"), Game ? Game->GetLogic()->IsStageClear() : false);
+
+	TArray<TSharedPtr<FJsonValue>> ChoicesJson;
+	ChoicesJson.Reserve(Pending.Choices.Num());
+	for (const FSurvivorsLevelUpChoiceOffer& Offer : Pending.Choices)
+	{
+		const FLevelUpChoice& Choice = Offer.Choice;
+		TSharedRef<FJsonObject> ChoiceJson = MakeShared<FJsonObject>();
+		ChoiceJson->SetStringField(TEXT("choice_id"), Offer.ChoiceId);
+		ChoiceJson->SetStringField(
+			TEXT("type"), SurvivorsLevelUpChoiceTypeToString(Choice.ChoiceType));
+		const bool bNoUpgrade =
+			Choice.ChoiceType == FLevelUpChoice::EChoiceType::NoUpgrade;
+		const bool bWeapon = Choice.WeaponType != EWeaponType::None;
+		ChoiceJson->SetStringField(
+			TEXT("item_kind"),
+			bNoUpgrade
+				? TEXT("none")
+				: (bWeapon ? TEXT("weapon") : TEXT("passive")));
+		ChoiceJson->SetNumberField(
+			TEXT("item_id"),
+			bNoUpgrade
+				? 0
+				: bWeapon
+				? static_cast<int32>(Choice.WeaponType)
+				: static_cast<int32>(Choice.PassiveType));
+		ChoiceJson->SetNumberField(TEXT("slot_index"), Choice.SlotIdx);
+		ChoiceJson->SetNumberField(TEXT("new_level"), Choice.NewLevel);
+		ChoicesJson.Add(MakeShared<FJsonValueObject>(ChoiceJson));
+	}
+	Info->SetArrayField(TEXT("level_up_choices"), MoveTemp(ChoicesJson));
+	return Info;
+}
+
+bool BuildLevelUpApplyResponseJson(
+	const FSurvivorsLevelUpApplyResult& Result,
+	const FString& ObsSchemaHash,
+	const ASurvivorsGame* Game,
+	FString& OutJson,
+	FString& OutError)
+{
+	if (!ValidateObservationForResponse(Game, Result.PostChoiceObs, OutError)
+		|| !Game
+		|| ObsSchemaHash != Game->GetObsSchemaHash())
+	{
+		if (OutError.IsEmpty())
+		{
+			OutError = TEXT("obs schema changed");
+		}
+		return false;
+	}
+	TSharedRef<FJsonObject> Response = MakeShared<FJsonObject>();
+	Response->SetStringField(TEXT("status"), TEXT("applied"));
+	Response->SetStringField(TEXT("decision_id"), Result.DecisionId);
+	Response->SetStringField(TEXT("choice_id"), Result.ChoiceId);
+	Response->SetStringField(TEXT("obs_schema_hash"), ObsSchemaHash);
+
+	TArray<TSharedPtr<FJsonValue>> ObsJson;
+	ObsJson.Reserve(Result.PostChoiceObs.Num());
+	for (float Value : Result.PostChoiceObs)
+	{
+		ObsJson.Add(MakeShared<FJsonValueNumber>(Value));
+	}
+	Response->SetArrayField(TEXT("obs"), MoveTemp(ObsJson));
+	Response->SetObjectField(
+		TEXT("info"),
+		BuildLevelUpInfoObject(
+			Result.PendingAfter, Result.BacklogAfter, nullptr, Game));
+	OutJson = SerializeJsonObject(Response);
+	return true;
+}
+
+/**
+ * 検証済みpreview集合をHTTP responseへ直列化する。
+ * 初心者向け: JSON化の直前にも全配列を再検査し、検証後の差し替えをfail-closedで止める。
+ */
+bool BuildLevelUpPreviewResponseJson(
+	const FString& DecisionId,
+	const FString& ObsSchemaHash,
+	const TArray<float>& BaseObservation,
+	const TArray<FSurvivorsChoicePreview>& Previews,
+	const ASurvivorsGame* Game,
+	FString& OutJson,
+	FString& OutError)
+{
+	if (!ValidateObservationForResponse(Game, BaseObservation, OutError)
+		|| !Game
+		|| ObsSchemaHash != Game->GetObsSchemaHash())
+	{
+		if (OutError.IsEmpty())
+		{
+			OutError = TEXT("obs schema changed");
+		}
+		return false;
+	}
+	TSet<FString> ChoiceIds;
+	TSet<FString> SchemaNames;
+	for (const FSurvivorsObsSegment& Segment : Game->GetObsSchema())
+	{
+		SchemaNames.Add(Segment.Name);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> PreviewJson;
+	PreviewJson.Reserve(Previews.Num());
+	for (const FSurvivorsChoicePreview& Preview : Previews)
+	{
+		if (!Preview.IsValid()
+			|| ChoiceIds.Contains(Preview.ChoiceId)
+			|| !ValidateObservationForResponse(
+				Game, Preview.ProjectedObservation, OutError))
+		{
+			if (OutError.IsEmpty())
+			{
+				OutError = TEXT("choice set changed");
+			}
+			return false;
+		}
+		ChoiceIds.Add(Preview.ChoiceId);
+
+		TSet<FString> ChangedNames;
+		TArray<TSharedPtr<FJsonValue>> ChangedJson;
+		for (const FString& SegmentName : Preview.ChangedSegments)
+		{
+			if (!SchemaNames.Contains(SegmentName)
+				|| ChangedNames.Contains(SegmentName))
+			{
+				OutError = TEXT("invalid changed segment");
+				return false;
+			}
+			ChangedNames.Add(SegmentName);
+			ChangedJson.Add(MakeShared<FJsonValueString>(SegmentName));
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ProjectedJson;
+		ProjectedJson.Reserve(Preview.ProjectedObservation.Num());
+		for (float Value : Preview.ProjectedObservation)
+		{
+			ProjectedJson.Add(MakeShared<FJsonValueNumber>(Value));
+		}
+		TSharedRef<FJsonObject> PreviewObject = MakeShared<FJsonObject>();
+		PreviewObject->SetStringField(TEXT("choice_id"), Preview.ChoiceId);
+		PreviewObject->SetArrayField(
+			TEXT("projected_obs"), MoveTemp(ProjectedJson));
+		PreviewObject->SetArrayField(
+			TEXT("changed_segments"), MoveTemp(ChangedJson));
+		PreviewJson.Add(MakeShared<FJsonValueObject>(PreviewObject));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> BaseJson;
+	BaseJson.Reserve(BaseObservation.Num());
+	for (float Value : BaseObservation)
+	{
+		BaseJson.Add(MakeShared<FJsonValueNumber>(Value));
+	}
+	TSharedRef<FJsonObject> Response = MakeShared<FJsonObject>();
+	Response->SetStringField(TEXT("decision_id"), DecisionId);
+	Response->SetStringField(TEXT("obs_schema_hash"), ObsSchemaHash);
+	Response->SetArrayField(TEXT("base_obs"), MoveTemp(BaseJson));
+	Response->SetArrayField(TEXT("previews"), MoveTemp(PreviewJson));
+	OutJson = SerializeJsonObject(Response);
+	OutError.Empty();
+	return true;
+}
+}
 
 // ============================================================
 // FSurvivorsEnvServer: FHttpEnvServerBase の Survivors 固有派生クラス
@@ -34,6 +323,9 @@ public:
 		CachedObsSchemaJson = FString::Printf(
 			TEXT("{\"segments\":[%s],\"total_dim\":%d,\"obs_schema_hash\":\"%s\"}"),
 			*SegmentsStr, Game->GetObsDim(), *Game->GetObsSchemaHash());
+		CachedContentSchemaJson = FString::Printf(
+			TEXT("{\"schema_version\":\"survivors.content_schema.v1\",\"content\":%s,\"action_time\":%s}"),
+			*Game->GetContentSchema(), *Game->GetActionTimeSchema());
 	}
 
 	// ---- ParamsQueue 外部制御 API ----
@@ -41,6 +333,27 @@ public:
 	struct FParamsRequest
 	{
 		FString             JsonBody;
+		FHttpResultCallback Callback;
+	};
+
+	struct FLevelUpChoiceRequest
+	{
+		FString DecisionId;
+		FString ChoiceId;
+		FHttpResultCallback Callback;
+	};
+
+	struct FPreviewLevelUpRequest
+	{
+		FString DecisionId;
+		FHttpResultCallback Callback;
+	};
+
+	struct FValidationBranchRngRequest
+	{
+		FString SchemaVersion;
+		FString ReplicationKey;
+		int32 StreamSeed = 0;
 		FHttpResultCallback Callback;
 	};
 
@@ -53,6 +366,36 @@ public:
 		return true;
 	}
 
+	bool TakeLevelUpChoiceRequest(
+		FString& OutDecisionId,
+		FString& OutChoiceId,
+		FHttpResultCallback& OutCallback)
+	{
+		FLevelUpChoiceRequest Request;
+		if (!LevelUpChoiceQueue.Dequeue(Request)) return false;
+		OutDecisionId = MoveTemp(Request.DecisionId);
+		OutChoiceId = MoveTemp(Request.ChoiceId);
+		OutCallback = MoveTemp(Request.Callback);
+		return true;
+	}
+
+	bool TakePreviewLevelUpRequest(
+		FString& OutDecisionId,
+		FHttpResultCallback& OutCallback)
+	{
+		FPreviewLevelUpRequest Request;
+		if (!PreviewLevelUpQueue.Dequeue(Request)) return false;
+		OutDecisionId = MoveTemp(Request.DecisionId);
+		OutCallback = MoveTemp(Request.Callback);
+		return true;
+	}
+
+	bool TakeValidationBranchRngRequest(
+		FValidationBranchRngRequest& OutRequest)
+	{
+		return ValidationBranchRngQueue.Dequeue(OutRequest);
+	}
+
 	// ---- IHttpEnvServer 実装 ----
 
 	virtual FEnvResetResult ProcessReset(TOptional<int32> Seed) override
@@ -63,6 +406,14 @@ public:
 			Game->ResetState(Seed);
 			Result.Obs           = Game->GetObservation();
 			Result.ObsSchemaHash = Game->GetObsSchemaHash();
+			FString ValidationError;
+			if (!ValidateObservationForResponse(
+				Game, Result.Obs, ValidationError)
+				|| Result.ObsSchemaHash != Game->GetObsSchemaHash())
+			{
+				Result.Obs.Reset();
+				Result.ObsSchemaHash.Empty();
+			}
 		}
 		return Result;
 	}
@@ -80,6 +431,10 @@ public:
 			{
 				Game->PhysicsStep(ActionIdx);
 				AccumulatedReward += Game->GetReward();
+				if (Game->IsLevelUpPending())
+				{
+					break;
+				}
 				if (Game->IsDone())
 				{
 					Result.bDone = true;
@@ -93,9 +448,78 @@ public:
 			}
 			Result.Obs      = Game->GetObservation();
 			Result.Reward   = AccumulatedReward;
-			Result.InfoJson = FString::Printf(TEXT("{\"spawn_debug\":%s}"), *Game->GetSpawnDebugJson());
+			const FSurvivorsPendingLevelUpDecision& Pending =
+				Game->GetPendingLevelUpDecision();
+			const FString SpawnDebugJson = Game->GetSpawnDebugJson();
+			Result.InfoJson = SerializeJsonObject(BuildLevelUpInfoObject(
+				Pending, Game->GetLevelUpBacklog(), &SpawnDebugJson, Game));
+			FString ValidationError;
+			if (!ValidateObservationForResponse(
+				Game, Result.Obs, ValidationError))
+			{
+				Result.Obs.Reset();
+			}
 		}
 		return Result;
+	}
+
+	virtual void Tick() override
+	{
+		TOptional<int32> Seed;
+		FHttpResultCallback ResetCallback;
+		if (TakeResetRequest(Seed, ResetCallback))
+		{
+			CompleteReset(ProcessReset(Seed), MoveTemp(ResetCallback));
+		}
+
+		TArray<float> Action;
+		int32 Steps = 1;
+		FHttpResultCallback StepCallback;
+		if (TakeStepRequest(Action, Steps, StepCallback))
+		{
+			CompleteStep(
+				ProcessStep(Action, Steps), MoveTemp(StepCallback));
+		}
+	}
+
+	virtual void CompleteStep(
+		FEnvStepResult Result,
+		FHttpResultCallback Callback) override
+	{
+		FString ValidationError;
+		if (!ValidateObservationForResponse(
+			Game, Result.Obs, ValidationError))
+		{
+			Callback(MakeStatusJsonResponse(
+				FString::Printf(
+					TEXT("{\"error\":\"%s\"}"), *ValidationError),
+				EHttpServerResponseCodes::ServerError));
+			return;
+		}
+		Callback(MakeJsonResponse(BuildStepJson(Result)));
+	}
+
+	virtual void CompleteReset(
+		FEnvResetResult Result,
+		FHttpResultCallback Callback) override
+	{
+		FString ValidationError;
+		if (!ValidateObservationForResponse(
+			Game, Result.Obs, ValidationError)
+			|| !Game
+			|| Result.ObsSchemaHash != Game->GetObsSchemaHash())
+		{
+			if (ValidationError.IsEmpty())
+			{
+				ValidationError = TEXT("obs schema changed");
+			}
+			Callback(MakeStatusJsonResponse(
+				FString::Printf(
+					TEXT("{\"error\":\"%s\"}"), *ValidationError),
+				EHttpServerResponseCodes::ServerError));
+			return;
+		}
+		Callback(MakeJsonResponse(BuildResetJson(Result)));
 	}
 
 protected:
@@ -104,10 +528,26 @@ protected:
 		ObsSchemaRoute = Router->BindRoute(
 			FHttpPath(TEXT("/obs_schema")), EHttpServerRequestVerbs::VERB_GET,
 			FHttpRequestHandler::CreateRaw(this, &FSurvivorsEnvServer::HandleObsSchema));
+		ContentSchemaRoute = Router->BindRoute(
+			FHttpPath(TEXT("/content_schema")), EHttpServerRequestVerbs::VERB_GET,
+			FHttpRequestHandler::CreateRaw(this, &FSurvivorsEnvServer::HandleContentSchema));
 
 		ParamsRoute = Router->BindRoute(
 			FHttpPath(TEXT("/params")), EHttpServerRequestVerbs::VERB_POST,
 			FHttpRequestHandler::CreateRaw(this, &FSurvivorsEnvServer::HandleParams));
+		LevelUpChoiceRoute = Router->BindRoute(
+			FHttpPath(TEXT("/level_up_choice")), EHttpServerRequestVerbs::VERB_POST,
+			FHttpRequestHandler::CreateRaw(
+				this, &FSurvivorsEnvServer::HandleLevelUpChoice));
+		PreviewLevelUpRoute = Router->BindRoute(
+			FHttpPath(TEXT("/preview_level_up")), EHttpServerRequestVerbs::VERB_POST,
+			FHttpRequestHandler::CreateRaw(
+				this, &FSurvivorsEnvServer::HandlePreviewLevelUp));
+		ValidationBranchRngRoute = Router->BindRoute(
+			FHttpPath(TEXT("/validation_branch_rng")),
+			EHttpServerRequestVerbs::VERB_POST,
+			FHttpRequestHandler::CreateRaw(
+				this, &FSurvivorsEnvServer::HandleValidationBranchRng));
 	}
 
 	virtual void UnregisterAdditionalRoutes(TSharedPtr<IHttpRouter> Router) override
@@ -115,20 +555,39 @@ protected:
 		if (Router)
 		{
 			Router->UnbindRoute(ObsSchemaRoute);
+			Router->UnbindRoute(ContentSchemaRoute);
 			Router->UnbindRoute(ParamsRoute);
+			Router->UnbindRoute(LevelUpChoiceRoute);
+			Router->UnbindRoute(PreviewLevelUpRoute);
+			Router->UnbindRoute(ValidationBranchRngRoute);
 		}
 	}
 
 private:
 	// キャッシュ済み obs_schema JSON（HTTPワーカースレッドから Game に触れないよう事前構築）
 	FString CachedObsSchemaJson;
+	// HTTP worker が Game に触れないよう game thread で構築した content schema。
+	FString CachedContentSchemaJson;
 
 	// /params は Survivors 固有のためここで管理（FHttpEnvServerBase には追加しない）
 	TQueue<FParamsRequest, EQueueMode::Mpsc> ParamsQueue;
+	// worker thread は typed IDs を積むだけで Game へ直接アクセスしない。
+	TQueue<FLevelUpChoiceRequest, EQueueMode::Mpsc> LevelUpChoiceQueue;
+	// previewもworkerではdecision IDのJSON形だけを検査し、state参照はgame threadへ送る。
+	TQueue<FPreviewLevelUpRequest, EQueueMode::Mpsc> PreviewLevelUpQueue;
+	// validation RNG は strict wire を検査後、game thread だけで RandStream を切り替える。
+	TQueue<FValidationBranchRngRequest, EQueueMode::Mpsc> ValidationBranchRngQueue;
 
 	bool HandleObsSchema(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 	{
 		OnComplete(MakeJsonResponse(CachedObsSchemaJson));
+		return true;
+	}
+
+	/** キャッシュ済み one-way schema を薄く返す。 */
+	bool HandleContentSchema(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+	{
+		OnComplete(MakeJsonResponse(CachedContentSchemaJson));
 		return true;
 	}
 
@@ -138,15 +597,155 @@ private:
 		FString BodyStr = ParseBodyString(Request);
 		if (BodyStr.IsEmpty())
 		{
-			OnComplete(MakeJsonResponse(TEXT("{\"error\":\"empty body\"}")));
+			OnComplete(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"empty body\"}"),
+				EHttpServerResponseCodes::BadRequest));
 			return true;
 		}
 		ParamsQueue.Enqueue({ MoveTemp(BodyStr), OnComplete });
 		return true;  // 非同期応答
 	}
 
+	bool HandleLevelUpChoice(
+		const FHttpServerRequest& Request,
+		const FHttpResultCallback& OnComplete)
+	{
+		const FString Body = ParseBodyString(Request);
+		TSharedPtr<FJsonObject> JsonObject;
+		const TSharedRef<TJsonReader<>> Reader =
+			TJsonReaderFactory<>::Create(Body);
+		if (Body.IsEmpty()
+			|| !FJsonSerializer::Deserialize(Reader, JsonObject)
+			|| !JsonObject.IsValid()
+			|| JsonObject->Values.Num() != 2)
+		{
+			OnComplete(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"malformed request\"}"),
+				EHttpServerResponseCodes::BadRequest));
+			return true;
+		}
+
+		const TSharedPtr<FJsonValue>* DecisionValue =
+			JsonObject->Values.Find(TEXT("decision_id"));
+		const TSharedPtr<FJsonValue>* ChoiceValue =
+			JsonObject->Values.Find(TEXT("choice_id"));
+		if (!DecisionValue || !ChoiceValue
+			|| !DecisionValue->IsValid() || !ChoiceValue->IsValid()
+			|| (*DecisionValue)->Type != EJson::String
+			|| (*ChoiceValue)->Type != EJson::String)
+		{
+			OnComplete(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"decision_id and choice_id must be strings\"}"),
+				EHttpServerResponseCodes::BadRequest));
+			return true;
+		}
+
+		FString DecisionId = (*DecisionValue)->AsString();
+		FString ChoiceId = (*ChoiceValue)->AsString();
+		if (DecisionId.IsEmpty() || ChoiceId.IsEmpty())
+		{
+			OnComplete(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"decision_id and choice_id are required\"}"),
+				EHttpServerResponseCodes::BadRequest));
+			return true;
+		}
+
+		LevelUpChoiceQueue.Enqueue({
+			MoveTemp(DecisionId), MoveTemp(ChoiceId), OnComplete});
+		return true;
+	}
+
+	bool HandlePreviewLevelUp(
+		const FHttpServerRequest& Request,
+		const FHttpResultCallback& OnComplete)
+	{
+		const FString Body = ParseBodyString(Request);
+		TSharedPtr<FJsonObject> JsonObject;
+		const TSharedRef<TJsonReader<>> Reader =
+			TJsonReaderFactory<>::Create(Body);
+		if (Body.IsEmpty()
+			|| !FJsonSerializer::Deserialize(Reader, JsonObject)
+			|| !JsonObject.IsValid()
+			|| JsonObject->Values.Num() != 1)
+		{
+			OnComplete(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"malformed request\"}"),
+				EHttpServerResponseCodes::BadRequest));
+			return true;
+		}
+		const TSharedPtr<FJsonValue>* DecisionValue =
+			JsonObject->Values.Find(TEXT("decision_id"));
+		if (!DecisionValue
+			|| !DecisionValue->IsValid()
+			|| (*DecisionValue)->Type != EJson::String
+			|| (*DecisionValue)->AsString().IsEmpty())
+		{
+			OnComplete(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"decision_id must be a non-empty string\"}"),
+				EHttpServerResponseCodes::BadRequest));
+			return true;
+		}
+		FString DecisionId = (*DecisionValue)->AsString();
+		PreviewLevelUpQueue.Enqueue({
+			MoveTemp(DecisionId), OnComplete});
+		return true;
+	}
+
+	bool HandleValidationBranchRng(
+		const FHttpServerRequest& Request,
+		const FHttpResultCallback& OnComplete)
+	{
+		const FString Body = ParseBodyString(Request);
+		TSharedPtr<FJsonObject> JsonObject;
+		const TSharedRef<TJsonReader<>> Reader =
+			TJsonReaderFactory<>::Create(Body);
+		if (Body.IsEmpty()
+			|| !FJsonSerializer::Deserialize(Reader, JsonObject)
+			|| !JsonObject.IsValid()
+			|| JsonObject->Values.Num() != 3)
+		{
+			OnComplete(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"malformed validation branch RNG request\"}"),
+				EHttpServerResponseCodes::BadRequest));
+			return true;
+		}
+		FString SchemaVersion;
+		FString ReplicationKey;
+		double StreamSeedNumber = 0.0;
+		if (!JsonObject->TryGetStringField(
+				TEXT("schema_version"), SchemaVersion)
+			|| !JsonObject->TryGetStringField(
+				TEXT("replication_key"), ReplicationKey)
+			|| !JsonObject->TryGetNumberField(
+				TEXT("stream_seed"), StreamSeedNumber)
+			|| SchemaVersion
+				!= FSurvivorsGameLogic::GetValidationBranchRngSchemaVersion()
+			|| !IsLowerSha256(ReplicationKey)
+			|| !FMath::IsFinite(StreamSeedNumber)
+			|| FMath::FloorToDouble(StreamSeedNumber) != StreamSeedNumber
+			|| StreamSeedNumber < static_cast<double>(MIN_int32)
+			|| StreamSeedNumber > static_cast<double>(MAX_int32))
+		{
+			OnComplete(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"invalid validation branch RNG binding\"}"),
+				EHttpServerResponseCodes::BadRequest));
+			return true;
+		}
+		FValidationBranchRngRequest BranchRequest;
+		BranchRequest.SchemaVersion = MoveTemp(SchemaVersion);
+		BranchRequest.ReplicationKey = MoveTemp(ReplicationKey);
+		BranchRequest.StreamSeed = static_cast<int32>(StreamSeedNumber);
+		BranchRequest.Callback = OnComplete;
+		ValidationBranchRngQueue.Enqueue(MoveTemp(BranchRequest));
+		return true;
+	}
+
 	FHttpRouteHandle ObsSchemaRoute;
+	FHttpRouteHandle ContentSchemaRoute;
 	FHttpRouteHandle ParamsRoute;
+	FHttpRouteHandle LevelUpChoiceRoute;
+	FHttpRouteHandle PreviewLevelUpRoute;
+	FHttpRouteHandle ValidationBranchRngRoute;
 	ASurvivorsGame*  Game;  // non-owning
 
 	friend class ASurvivorsHttpEnvService;
@@ -166,6 +765,53 @@ static FString ApplyParamsToGame(ASurvivorsGame* Game, const FString& BodyStr)
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(BodyStr);
 	if (!FJsonSerializer::Deserialize(Reader, JsonObj) || !JsonObj.IsValid())
 		return TEXT("{\"error\":\"invalid json\"}");
+
+	// 全 mode は他 field を mutation する前に fail-closed で検証する。
+	// 初心者向け: 一部だけ設定された後で mode エラーになる半端な更新を防ぎます。
+	FString ItemSelectionMode;
+	if (JsonObj->Values.Contains(TEXT("item_selection_mode")))
+	{
+		if (!JsonObj->TryGetStringField(
+				TEXT("item_selection_mode"), ItemSelectionMode)
+			|| (ItemSelectionMode != TEXT("auto")
+				&& ItemSelectionMode != TEXT("external")))
+		{
+			return TEXT("{\"error\":\"unknown item_selection_mode\"}");
+		}
+	}
+	FString WeaponPoolMode;
+	if (JsonObj->Values.Contains(TEXT("weapon_pool_mode")))
+	{
+		static const TSet<FString> ValidPoolModes = {
+			TEXT("garlic_only"), TEXT("fixed_subset"), TEXT("all_base"),
+			TEXT("all_with_evolutions"), TEXT("weighted")
+		};
+		if (!JsonObj->TryGetStringField(TEXT("weapon_pool_mode"), WeaponPoolMode)
+			|| !ValidPoolModes.Contains(WeaponPoolMode))
+		{
+			return TEXT("{\"error\":\"unknown weapon_pool_mode\"}");
+		}
+	}
+	FString StartingWeaponMode;
+	if (JsonObj->Values.Contains(TEXT("starting_weapon_mode")))
+	{
+		static const TSet<FString> ValidStartingModes = {
+			TEXT("garlic"), TEXT("whip"), TEXT("random"),
+			TEXT("pool_random"), TEXT("custom")
+		};
+		if (!JsonObj->TryGetStringField(
+				TEXT("starting_weapon_mode"), StartingWeaponMode)
+			|| !ValidStartingModes.Contains(StartingWeaponMode))
+		{
+			return TEXT("{\"error\":\"unknown starting_weapon_mode\"}");
+		}
+	}
+	if (Game->IsLevelUpPending()
+		&& !ItemSelectionMode.IsEmpty()
+		&& ItemSelectionMode != Game->ItemSelectionMode)
+	{
+		return TEXT("{\"error\":\"cannot change item_selection_mode while pending\"}");
+	}
 
 	// 各パラメータを上書き（存在するフィールドのみ）
 	int32 MinActiveEnemies;
@@ -205,22 +851,9 @@ static FString ApplyParamsToGame(ASurvivorsGame* Game, const FString& BodyStr)
 		Game->MaxEpisodeTime = FMath::Clamp(static_cast<float>(MaxEpisodeTime), 30.f, 1800.f);
 
 	// weapon_pool_mode
-	FString WeaponPoolMode;
-	if (JsonObj->TryGetStringField(TEXT("weapon_pool_mode"), WeaponPoolMode))
+	if (!WeaponPoolMode.IsEmpty())
 	{
-		static const TSet<FString> ValidPoolModes = {
-			TEXT("garlic_only"), TEXT("fixed_subset"), TEXT("all_base"),
-			TEXT("all_with_evolutions"), TEXT("weighted")
-		};
-		if (ValidPoolModes.Contains(WeaponPoolMode))
-			Game->WeaponPoolMode = WeaponPoolMode;
-		else
-		{
-			UE_LOG(LogTemp, Warning,
-				TEXT("SurvivorsHttpEnvService: 未知の weapon_pool_mode \"%s\" -> \"garlic_only\" にフォールバック"),
-				*WeaponPoolMode);
-			Game->WeaponPoolMode = TEXT("garlic_only");
-		}
+		Game->WeaponPoolMode = WeaponPoolMode;
 	}
 
 	const TArray<TSharedPtr<FJsonValue>>* AllowedWeaponTypesArr;
@@ -289,9 +922,11 @@ static FString ApplyParamsToGame(ASurvivorsGame* Game, const FString& BodyStr)
 	if (JsonObj->TryGetNumberField(TEXT("replay_old_phase_fraction"), ReplayOldPhaseFraction))
 		Game->ReplayOldPhaseFraction = FMath::Clamp(static_cast<float>(ReplayOldPhaseFraction), 0.f, 1.f);
 
-	FString StartingWeaponMode;
-	if (JsonObj->TryGetStringField(TEXT("starting_weapon_mode"), StartingWeaponMode))
+	if (!StartingWeaponMode.IsEmpty())
 		Game->StartingWeaponMode = StartingWeaponMode;
+
+	if (!ItemSelectionMode.IsEmpty())
+		Game->ItemSelectionMode = ItemSelectionMode;
 
 	// RSI: initial_elapsed_time
 	double InitialElapsedTime = 0.0;
@@ -411,9 +1046,14 @@ void ASurvivorsHttpEnvService::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	if (!EnvServer) return;
+
+	ProcessValidationBranchRngRequests();
+
 	if (bManagedExternally) return;
 
-	if (!EnvServer) return;
+	ProcessLevelUpPreviewRequests();
+	ProcessLevelUpChoiceRequests();
 
 	{
 		FString Json;
@@ -421,11 +1061,45 @@ void ASurvivorsHttpEnvService::Tick(float DeltaTime)
 		while (TakeParamsRequest(Json, Cb))
 		{
 			FString ResponseJson = ApplyParams(Json);
-			Cb(FHttpEnvServerBase::MakeJsonResponse(ResponseJson));
+			CompleteParams(ResponseJson, MoveTemp(Cb));
 		}
 	}
 
 	EnvServer->Tick();
+}
+
+void ASurvivorsHttpEnvService::ProcessValidationBranchRngRequests()
+{
+	if (!EnvServer) return;
+	auto* Server = static_cast<FSurvivorsEnvServer*>(EnvServer.Get());
+	if (!Server) return;
+
+	FSurvivorsEnvServer::FValidationBranchRngRequest BranchRequest;
+	while (Server->TakeValidationBranchRngRequest(BranchRequest))
+	{
+		if (!SurvivorsGame
+			|| !SurvivorsGame->GetLogic()->ActivateValidationBranchRng(
+				BranchRequest.SchemaVersion,
+				BranchRequest.ReplicationKey,
+				BranchRequest.StreamSeed))
+		{
+			BranchRequest.Callback(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"validation branch RNG binding rejected\"}"),
+				EHttpServerResponseCodes::Conflict));
+			continue;
+		}
+		const FSurvivorsValidationBranchRngState& State =
+			SurvivorsGame->GetLogic()->GetValidationBranchRngState();
+		TSharedRef<FJsonObject> Response = MakeShared<FJsonObject>();
+		Response->SetStringField(TEXT("schema_version"), State.SchemaVersion);
+		Response->SetStringField(TEXT("replication_key"), State.ReplicationKey);
+		Response->SetNumberField(TEXT("stream_seed"), State.StreamSeed);
+		Response->SetNumberField(
+			TEXT("initial_stream_state"), State.InitialStreamState);
+		Response->SetBoolField(TEXT("validation_only"), State.bActive);
+		BranchRequest.Callback(FHttpEnvServerBase::MakeJsonResponse(
+			SerializeJsonObject(Response)));
+	}
 }
 
 
@@ -466,7 +1140,247 @@ FString ASurvivorsHttpEnvService::ApplyParams(const FString& Json)
 	return ApplyParamsToGame(SurvivorsGame.Get(), Json);
 }
 
+void ASurvivorsHttpEnvService::CompleteParams(
+	const FString& ResponseJson, FHttpResultCallback Callback)
+{
+	if (ResponseJson.StartsWith(TEXT("{\"error\"")))
+	{
+		Callback(MakeStatusJsonResponse(
+			ResponseJson,
+			EHttpServerResponseCodes::BadRequest));
+	}
+	else
+	{
+		Callback(FHttpEnvServerBase::MakeJsonResponse(ResponseJson));
+	}
+}
+
 FSurvivorsGameLogic* ASurvivorsHttpEnvService::GetGameLogic()
 {
 	return SurvivorsGame ? SurvivorsGame->GetLogic() : nullptr;
+}
+
+void ASurvivorsHttpEnvService::ProcessLevelUpChoiceRequests()
+{
+	if (!EnvServer) return;
+	auto* Server = static_cast<FSurvivorsEnvServer*>(EnvServer.Get());
+	if (!Server) return;
+
+	FString DecisionId;
+	FString ChoiceId;
+	FHttpResultCallback Callback;
+	while (Server->TakeLevelUpChoiceRequest(DecisionId, ChoiceId, Callback))
+	{
+		if (!SurvivorsGame)
+		{
+			Callback(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"game not set\"}"),
+				EHttpServerResponseCodes::Conflict));
+			continue;
+		}
+
+		const FSurvivorsLevelUpApplyResult Result =
+			SurvivorsGame->ApplyExternalLevelUpChoice(DecisionId, ChoiceId);
+		if (Result.Status != ESurvivorsLevelUpApplyStatus::Applied)
+		{
+			const FString Error =
+				Result.Status == ESurvivorsLevelUpApplyStatus::InvalidChoice
+					? TEXT("invalid choice")
+					: TEXT("stale decision");
+			TSharedRef<FJsonObject> ErrorObject = MakeShared<FJsonObject>();
+			ErrorObject->SetStringField(TEXT("error"), Error);
+			ErrorObject->SetStringField(TEXT("decision_id"), DecisionId);
+			ErrorObject->SetStringField(TEXT("choice_id"), ChoiceId);
+			Callback(MakeStatusJsonResponse(
+				SerializeJsonObject(ErrorObject),
+				EHttpServerResponseCodes::Conflict));
+			continue;
+		}
+
+		FString ResponseJson;
+		FString ValidationError;
+		if (!BuildLevelUpApplyResponseJson(
+			Result,
+			SurvivorsGame->GetObsSchemaHash(),
+			SurvivorsGame.Get(),
+			ResponseJson,
+			ValidationError))
+		{
+			Callback(MakeStatusJsonResponse(
+				FString::Printf(
+					TEXT("{\"error\":\"%s\"}"), *ValidationError),
+				EHttpServerResponseCodes::ServerError));
+			continue;
+		}
+		Callback(FHttpEnvServerBase::MakeJsonResponse(ResponseJson));
+	}
+}
+
+void ASurvivorsHttpEnvService::ProcessLevelUpPreviewRequests()
+{
+	if (!EnvServer) return;
+	auto* Server = static_cast<FSurvivorsEnvServer*>(EnvServer.Get());
+	if (!Server) return;
+
+	FString DecisionId;
+	FHttpResultCallback Callback;
+	while (Server->TakePreviewLevelUpRequest(DecisionId, Callback))
+	{
+		if (!SurvivorsGame)
+		{
+			Callback(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"game not set\"}"),
+				EHttpServerResponseCodes::Conflict));
+			continue;
+		}
+
+		const FSurvivorsPendingLevelUpDecision PendingBefore =
+			SurvivorsGame->GetPendingLevelUpDecision();
+		if (!PendingBefore.IsSet()
+			|| PendingBefore.DecisionId != DecisionId)
+		{
+			Callback(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"pending decision does not match\"}"),
+				EHttpServerResponseCodes::Conflict));
+			continue;
+		}
+
+		TSet<FString> ExpectedChoiceIds;
+		bool bChoiceSetValid = !PendingBefore.Choices.IsEmpty();
+		for (const FSurvivorsLevelUpChoiceOffer& Offer : PendingBefore.Choices)
+		{
+			if (Offer.ChoiceId.IsEmpty()
+				|| ExpectedChoiceIds.Contains(Offer.ChoiceId))
+			{
+				bChoiceSetValid = false;
+				break;
+			}
+			ExpectedChoiceIds.Add(Offer.ChoiceId);
+		}
+		if (!bChoiceSetValid)
+		{
+			Callback(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"choice set changed\"}"),
+				EHttpServerResponseCodes::Conflict));
+			continue;
+		}
+
+		const FString SchemaHashBefore = SurvivorsGame->GetObsSchemaHash();
+		const TArray<float> BaseObservation = SurvivorsGame->GetObservation();
+		FString ValidationError;
+		if (!ValidateObservationForResponse(
+			SurvivorsGame.Get(), BaseObservation, ValidationError))
+		{
+			Callback(MakeStatusJsonResponse(
+				FString::Printf(
+					TEXT("{\"error\":\"%s\"}"), *ValidationError),
+				EHttpServerResponseCodes::ServerError));
+			continue;
+		}
+
+		TArray<FSurvivorsChoicePreview> Previews;
+		Previews.Reserve(PendingBefore.Choices.Num());
+		bool bPreviewValid = true;
+		for (const FSurvivorsLevelUpChoiceOffer& Offer : PendingBefore.Choices)
+		{
+			FSurvivorsChoicePreview Preview =
+				SurvivorsGame->PreviewLevelUpChoice(
+					DecisionId, Offer.ChoiceId);
+			if (!Preview.IsValid()
+				|| Preview.ChoiceId != Offer.ChoiceId
+				|| !ValidateObservationForResponse(
+					SurvivorsGame.Get(),
+					Preview.ProjectedObservation,
+					ValidationError))
+			{
+				if (ValidationError.IsEmpty())
+				{
+					ValidationError = Preview.Error.IsEmpty()
+						? TEXT("preview rejected")
+						: Preview.Error;
+				}
+				bPreviewValid = false;
+				break;
+			}
+			Previews.Add(MoveTemp(Preview));
+		}
+		if (!bPreviewValid)
+		{
+			Callback(MakeStatusJsonResponse(
+				FString::Printf(
+					TEXT("{\"error\":\"%s\"}"), *ValidationError),
+				EHttpServerResponseCodes::ServerError));
+			continue;
+		}
+
+		const FSurvivorsPendingLevelUpDecision PendingAfter =
+			SurvivorsGame->GetPendingLevelUpDecision();
+		TSet<FString> ActualChoiceIds;
+		for (const FSurvivorsLevelUpChoiceOffer& Offer : PendingAfter.Choices)
+		{
+			ActualChoiceIds.Add(Offer.ChoiceId);
+		}
+		bool bChoiceSetsMatch =
+			ActualChoiceIds.Num() == PendingAfter.Choices.Num()
+			&& ActualChoiceIds.Num() == ExpectedChoiceIds.Num();
+		for (const FString& ExpectedChoiceId : ExpectedChoiceIds)
+		{
+			bChoiceSetsMatch &=
+				ActualChoiceIds.Contains(ExpectedChoiceId);
+		}
+		if (PendingAfter.DecisionId != PendingBefore.DecisionId
+			|| PendingAfter.PlayerLevel != PendingBefore.PlayerLevel
+			|| !bChoiceSetsMatch)
+		{
+			Callback(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"choice set changed\"}"),
+				EHttpServerResponseCodes::Conflict));
+			continue;
+		}
+		if (SchemaHashBefore.IsEmpty()
+			|| SchemaHashBefore != SurvivorsGame->GetObsSchemaHash())
+		{
+			Callback(MakeStatusJsonResponse(
+				TEXT("{\"error\":\"obs schema changed\"}"),
+				EHttpServerResponseCodes::ServerError));
+			continue;
+		}
+
+		FString ResponseJson;
+		if (!BuildLevelUpPreviewResponseJson(
+			DecisionId,
+			SchemaHashBefore,
+			BaseObservation,
+			Previews,
+			SurvivorsGame.Get(),
+			ResponseJson,
+			ValidationError))
+		{
+			Callback(MakeStatusJsonResponse(
+				FString::Printf(
+					TEXT("{\"error\":\"%s\"}"), *ValidationError),
+				EHttpServerResponseCodes::ServerError));
+			continue;
+		}
+		Callback(FHttpEnvServerBase::MakeJsonResponse(ResponseJson));
+	}
+}
+
+FString ASurvivorsHttpEnvService::BuildInfoJson() const
+{
+	if (!SurvivorsGame)
+	{
+		return TEXT(
+			"{\"spawn_debug\":{},\"level_up_pending\":false,"
+			"\"level_up_decision_id\":\"\",\"level_up_player_level\":0,"
+			"\"level_up_backlog\":0,\"elapsed\":0,\"level\":0,"
+			"\"gems\":0,\"kills\":0,\"alive\":false,\"stage_clear\":false,"
+			"\"level_up_choices\":[]}");
+	}
+	const FString SpawnDebug = SurvivorsGame->GetSpawnDebugJson();
+	return SerializeJsonObject(BuildLevelUpInfoObject(
+		SurvivorsGame->GetPendingLevelUpDecision(),
+		SurvivorsGame->GetLevelUpBacklog(),
+		&SpawnDebug,
+		SurvivorsGame.Get()));
 }

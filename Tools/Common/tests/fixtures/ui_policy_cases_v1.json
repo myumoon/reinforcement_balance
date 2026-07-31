@@ -1,0 +1,492 @@
+{
+  "schema_version": "ui_policy_cases.v1",
+  "config": "default",
+  "config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8",
+  "expected_jsonl_sha256": "7d040ae9b326c6dd7dfa4a18e64872895b537869cbd2b029447fa95881633a91",
+  "cases": [
+    {
+      "name": "chest_ack",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "chest",
+        "hp_fraction": 1.0,
+        "fallback_targets": [],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": {
+        "schema_version": "ui_intent.v1",
+        "kind": "ack_chest",
+        "semantic_action": "ack_chest",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "ack_confirm_rule_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      }
+    },
+    {
+      "name": "confirm",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "confirm",
+        "hp_fraction": 1.0,
+        "fallback_targets": [],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": {
+        "schema_version": "ui_intent.v1",
+        "kind": "confirm",
+        "semantic_action": "confirm",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "ack_confirm_rule_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      }
+    },
+    {
+      "name": "fallback_both_low_hp_chicken",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "fallback",
+        "hp_fraction": 0.5,
+        "fallback_targets": [
+          {
+            "target_id": "chicken_0",
+            "target_index": 0,
+            "semantic": "chicken",
+            "valid": true
+          },
+          {
+            "target_id": "gold_1",
+            "target_index": 1,
+            "semantic": "gold",
+            "valid": true
+          }
+        ],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_fallback",
+        "semantic_action": "chicken",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "chicken_0",
+        "target_index": 0,
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      }
+    },
+    {
+      "name": "fallback_both_high_hp_gold",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "fallback",
+        "hp_fraction": 0.9,
+        "fallback_targets": [
+          {
+            "target_id": "chicken_0",
+            "target_index": 0,
+            "semantic": "chicken",
+            "valid": true
+          },
+          {
+            "target_id": "gold_1",
+            "target_index": 1,
+            "semantic": "gold",
+            "valid": true
+          }
+        ],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_fallback",
+        "semantic_action": "gold",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "gold_1",
+        "target_index": 1,
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      }
+    },
+    {
+      "name": "fallback_threshold_boundary_chicken",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "fallback",
+        "hp_fraction": 0.7,
+        "fallback_targets": [
+          {
+            "target_id": "chicken_0",
+            "target_index": 0,
+            "semantic": "chicken",
+            "valid": true
+          },
+          {
+            "target_id": "gold_1",
+            "target_index": 1,
+            "semantic": "gold",
+            "valid": true
+          }
+        ],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_fallback",
+        "semantic_action": "chicken",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "chicken_0",
+        "target_index": 0,
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      }
+    },
+    {
+      "name": "fallback_only_gold",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "fallback",
+        "hp_fraction": 0.2,
+        "fallback_targets": [
+          {
+            "target_id": "chicken_0",
+            "target_index": 0,
+            "semantic": "chicken",
+            "valid": false
+          },
+          {
+            "target_id": "gold_1",
+            "target_index": 1,
+            "semantic": "gold",
+            "valid": true
+          }
+        ],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_fallback",
+        "semantic_action": "gold",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "gold_1",
+        "target_index": 1,
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      }
+    },
+    {
+      "name": "fallback_only_chicken_high_hp",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "fallback",
+        "hp_fraction": 0.95,
+        "fallback_targets": [
+          {
+            "target_id": "chicken_0",
+            "target_index": 0,
+            "semantic": "chicken",
+            "valid": true
+          }
+        ],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": {
+        "schema_version": "ui_intent.v1",
+        "kind": "choose_fallback",
+        "semantic_action": "chicken",
+        "decision_owner": "non_model_ui_policy",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "target_id": "chicken_0",
+        "target_index": 0,
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      }
+    },
+    {
+      "name": "fallback_empty_stop",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "fallback",
+        "hp_fraction": 0.5,
+        "fallback_targets": [],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": {
+        "schema_version": "ui_intent.v1",
+        "kind": "stop",
+        "semantic_action": "stop",
+        "decision_owner": "runtime_safety",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      }
+    },
+    {
+      "name": "fallback_duplicate_semantic_stop",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "fallback",
+        "hp_fraction": 0.5,
+        "fallback_targets": [
+          {
+            "target_id": "chicken_0",
+            "target_index": 0,
+            "semantic": "chicken",
+            "valid": true
+          },
+          {
+            "target_id": "chicken_1",
+            "target_index": 1,
+            "semantic": "chicken",
+            "valid": true
+          }
+        ],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": {
+        "schema_version": "ui_intent.v1",
+        "kind": "stop",
+        "semantic_action": "stop",
+        "decision_owner": "runtime_safety",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      }
+    },
+    {
+      "name": "fallback_unknown_semantic_stop",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "fallback",
+        "hp_fraction": 0.5,
+        "fallback_targets": [
+          {
+            "target_id": "map_0",
+            "target_index": 0,
+            "semantic": "map",
+            "valid": true
+          }
+        ],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": {
+        "schema_version": "ui_intent.v1",
+        "kind": "stop",
+        "semantic_action": "stop",
+        "decision_owner": "runtime_safety",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      }
+    },
+    {
+      "name": "fallback_mixed_known_unknown_stop",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "fallback",
+        "hp_fraction": 0.5,
+        "fallback_targets": [
+          {
+            "target_id": "chicken_0",
+            "target_index": 0,
+            "semantic": "chicken",
+            "valid": true
+          },
+          {
+            "target_id": "map_1",
+            "target_index": 1,
+            "semantic": "map",
+            "valid": true
+          }
+        ],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": {
+        "schema_version": "ui_intent.v1",
+        "kind": "stop",
+        "semantic_action": "stop",
+        "decision_owner": "runtime_safety",
+        "effect_owner": "ui_state_machine_v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "decision_policy_id": "non_model_ui_policy_v1",
+        "decision_rule_id": "fallback_heuristic_v1",
+        "decision_config_hash": "c3635afc68cab6e24efa257a42d939794f7865291c9fe15c4673d4a6107f2cd8"
+      }
+    },
+    {
+      "name": "level_up_meta_disabled_none",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "level_up",
+        "hp_fraction": 1.0,
+        "fallback_targets": [],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189",
+        "button": {
+          "semantic": "reroll",
+          "capability": true
+        }
+      },
+      "expected": null
+    },
+    {
+      "name": "gameplay_none",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "gameplay",
+        "hp_fraction": 1.0,
+        "fallback_targets": [],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": null
+    },
+    {
+      "name": "unknown_none",
+      "input": {
+        "schema_version": "ui_policy_input.v1",
+        "source_snapshot_hash": "16a0eeb0791b6c92451fd284dd9f599e0a7dbe7f6ebea6e2d2d06c7f74aec112",
+        "source_frame_hash": "9dff50df08c635815f4b19da10f756605a34a79a48d4ba48712782502975a70e",
+        "source_content_hash": "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+        "ui_state_key": "level_up::deterministic_state_key",
+        "screen_state": "unknown",
+        "hp_fraction": 1.0,
+        "fallback_targets": [],
+        "candidate_set_hash": "ba159dbf9d2f740f56bc2ea7245187ee726da4263440b055ceb89485f4dbcf38",
+        "inventory_hash": "b11a85b296a90afc460430434a504e7acb04b064575b7277724688af0e59d189"
+      },
+      "expected": null
+    }
+  ]
+}
