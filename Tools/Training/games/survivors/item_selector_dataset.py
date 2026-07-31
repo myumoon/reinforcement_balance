@@ -845,13 +845,35 @@ class LearningCurvePolicy:
         """coverage/plateau または hard cap 到達で収集停止を判定する。
 
         coverage 未達の plateau だけでは停止せず rare taxonomy の欠落を防ぐ。
+        全 point が initial_decisions 以上かつ block_size cadence に従うことを強制する。
         """
         if not points:
             return False
-        latest_count = points[-1].get("decision_count")
-        if type(latest_count) is not int:
-            raise DatasetReleaseError("learning curve decision_count must be int")
-        if latest_count >= hard_cap:
+        counts = []
+        for point in points:
+            c = point.get("decision_count")
+            if type(c) is not int:
+                raise DatasetReleaseError("learning curve decision_count must be int")
+            counts.append(c)
+        if counts[0] < self.initial_decisions:
+            raise DatasetReleaseError(
+                f"first learning curve point must be >= initial_decisions "
+                f"({self.initial_decisions}), got {counts[0]}"
+            )
+        if counts[0] != self.initial_decisions:
+            raise DatasetReleaseError(
+                f"first learning curve point must equal initial_decisions "
+                f"({self.initial_decisions}), got {counts[0]}"
+            )
+        for idx in range(1, len(counts)):
+            expected = self.initial_decisions + idx * self.block_size
+            if counts[idx] != expected:
+                raise DatasetReleaseError(
+                    f"learning curve point {idx} must be at cadence "
+                    f"{expected} (initial={self.initial_decisions} + "
+                    f"{idx}*block_size={self.block_size}), got {counts[idx]}"
+                )
+        if counts[-1] >= hard_cap:
             return True
         if not coverage_complete or len(points) < self.consecutive_blocks + 1:
             return False
@@ -968,15 +990,18 @@ class ItemSelectorDatasetBuilder:
                 verdict,
                 source_identity=self._source_identity,
             )
-            action_kind = row.get("label_action_kind", "choose_card")
+            action_kind = row.get("label_action_kind")
         else:
             if verdict.get("status") != "approved":
                 raise DatasetReleaseError("label verdict must be approved")
             if verdict.get("teacher_identity") != self._teacher_identity:
                 raise DatasetReleaseError("label verdict teacher identity mismatch")
             action_kind = verdict.get("action_kind")
-        if action_kind is not None and action_kind != "choose_card":
-            raise DatasetReleaseError("selector label can contain choose_card only")
+        if action_kind != "choose_card":
+            raise DatasetReleaseError(
+                "selector label must have explicit action_kind='choose_card'; "
+                f"got {action_kind!r}"
+            )
         ancestors = row.get("ancestor_refs")
         if (
             not isinstance(ancestors, list)

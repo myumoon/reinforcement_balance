@@ -14,6 +14,7 @@ import pytest
 from games.survivors.item_selector_dataset import (
     DatasetReleaseError,
     ItemSelectorDatasetBuilder,
+    LearningCurvePolicy,
     SplitManifest,
     SplitSealedError,
     TeacherArtifactError,
@@ -285,7 +286,7 @@ def test_release_builder_rejects_identity_verdict_cycle_split_and_test_write(tmp
         "source_identity": source,
         "source_trace_ref": "trace/source-1",
         "ancestor_refs": ["trace/root"],
-        "label_verdict": {"status": "approved", "teacher_identity": "a" * 64},
+        "label_verdict": {"status": "approved", "teacher_identity": "a" * 64, "action_kind": "choose_card"},
     }
     builder = ItemSelectorDatasetBuilder(
         split_manifest=manifest,
@@ -322,3 +323,105 @@ def test_release_builder_rejects_identity_verdict_cycle_split_and_test_write(tmp
     test_payload = {**row, **test_row, "split": "test"}
     with pytest.raises(DatasetReleaseError, match="test"):
         builder.release([test_payload], tmp_path / "test-write")
+
+
+def test_learning_curve_policy_enforces_cadence_and_rejects_non_boundary_counts() -> None:
+    """LearningCurvePolicy.should_stop が block cadence を強制し境界外は拒否する。
+
+    initial_decisions=2000、block_size=2000 の場合、count が 1/2/3 では
+    DatasetReleaseError を送出し、2000/4000/6000 の正規 cadence のみを受理する。
+    """
+    policy = LearningCurvePolicy(
+        initial_decisions=2000,
+        block_size=2000,
+        ndcg_gain_threshold=0.005,
+        consecutive_blocks=2,
+    )
+
+    # 境界外の point (1, 2, 3) は拒否される
+    for bad_counts in ([1], [2], [3], [1, 2, 3]):
+        bad_points = [{"decision_count": c, "validation_ndcg": 0.5 + i * 0.01}
+                      for i, c in enumerate(bad_counts)]
+        with pytest.raises(DatasetReleaseError, match="initial_decisions|cadence"):
+            policy.should_stop(bad_points, coverage_complete=True, hard_cap=100_000)
+
+    # 正規 cadence: 2000, 4000 → 2 点でまだ停止しない
+    two_points = [
+        {"decision_count": 2000, "validation_ndcg": 0.700},
+        {"decision_count": 4000, "validation_ndcg": 0.701},
+    ]
+    assert policy.should_stop(two_points, coverage_complete=True, hard_cap=100_000) is False
+
+    # 正規 cadence: 2000, 4000, 6000 で NDCG gain < 0.005 が 2 block 継続 → 停止
+    plateau_points = [
+        {"decision_count": 2000, "validation_ndcg": 0.700},
+        {"decision_count": 4000, "validation_ndcg": 0.7003},
+        {"decision_count": 6000, "validation_ndcg": 0.7005},
+    ]
+    assert policy.should_stop(plateau_points, coverage_complete=True, hard_cap=100_000) is True
+
+    # hard_cap 超過は cadence 問わず停止
+    assert policy.should_stop(two_points[:1], coverage_complete=False, hard_cap=2000) is True
+
+    # cadence は正しいが gap が合わない (2000, 5000) は拒否
+    wrong_gap = [
+        {"decision_count": 2000, "validation_ndcg": 0.700},
+        {"decision_count": 5000, "validation_ndcg": 0.701},
+    ]
+    with pytest.raises(DatasetReleaseError, match="cadence"):
+        policy.should_stop(wrong_gap, coverage_complete=True, hard_cap=100_000)
+
+
+def test_release_builder_requires_explicit_choose_card_action_kind(tmp_path) -> None:
+    """ItemSelectorDatasetBuilder.release が action_kind='choose_card' を明示的に要求する。
+
+    action_kind が None / fallback / missing の場合は DatasetReleaseError を送出し、
+    デフォルト値への暗黙 fallback を許さない。
+    """
+    source = "1" * 64
+    teacher = "a" * 64
+    manifest = SplitManifest.freeze(_split_rows(), seed="selector-v1")
+    base = _split_rows()[0]
+    split = manifest.split_for(base)
+    builder = ItemSelectorDatasetBuilder(
+        split_manifest=manifest,
+        source_identity=source,
+        teacher_identity=teacher,
+        derived_logical_id="derived/item-selector-action-test",
+    )
+
+    def _row(action_kind_override=None, explicit_none=False):
+        verdict: dict = {"status": "approved", "teacher_identity": teacher}
+        if explicit_none:
+            verdict["action_kind"] = None
+        elif action_kind_override is not None:
+            verdict["action_kind"] = action_kind_override
+        return {
+            **base,
+            "split": split,
+            "source_identity": source,
+            "source_trace_ref": "trace/source-1",
+            "ancestor_refs": ["trace/root"],
+            "label_verdict": verdict,
+        }
+
+    # 正常: action_kind='choose_card' 明示
+    explicit_row = _row("choose_card")
+    result = builder.release([explicit_row], tmp_path / "valid")
+    assert result["row_count"] == 1
+
+    # 異常: action_kind なし (key 自体がない)
+    no_kind_row = _row()
+    with pytest.raises(DatasetReleaseError, match="choose_card"):
+        builder.release([no_kind_row], tmp_path / "no-kind")
+
+    # 異常: action_kind=None 明示
+    none_row = _row(explicit_none=True)
+    with pytest.raises(DatasetReleaseError, match="choose_card"):
+        builder.release([none_row], tmp_path / "none-kind")
+
+    # 異常: fallback action_kind
+    for bad_kind in ("choose_fallback", "reroll", "skip", "banish", "ack_chest", "confirm"):
+        bad_row = _row(bad_kind)
+        with pytest.raises(DatasetReleaseError, match="choose_card"):
+            builder.release([bad_row], tmp_path / f"bad-{bad_kind}")
