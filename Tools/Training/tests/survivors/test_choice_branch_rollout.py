@@ -560,3 +560,46 @@ def test_changed_python_files_have_two_stage_japanese_comments() -> None:
                 or "\u4e00" <= character <= "\u9fff"
                 for character in docstring
             )
+
+
+def _minimal_seam_record(replication_key: str = "a" * 64, stream_sha256: str = "b" * 64) -> dict:
+    """validate_rng_seam \u306e\u30c6\u30b9\u30c8\u7528\u6700\u5c0f record \u3092\u751f\u6210\u3059\u308b\u3002
+
+    draw_trace_sha256 \u3092\u6301\u305f\u306a\u3044 record \u3067 seam \u691c\u8a3c\u304c\u901a\u308b\u3053\u3068\u3092\u78ba\u8a8d\u3059\u308b\u305f\u3081\u306b\u4f7f\u3046\u3002
+    """
+    return {
+        "replication_key": replication_key,
+        "stream_sha256": stream_sha256,
+        "replication_index": 0,
+        "candidate_id": "cand_a",
+        "expected_branch_count": 1,
+        "outcome_utility": 0.5,
+        # draw_trace_sha256 \u306f\u610f\u56f3\u7684\u306b\u7701\u7565
+    }
+
+
+def test_validate_rng_seam_without_draw_trace_sha256_passes() -> None:
+    """draw_trace_sha256 \u3092\u6301\u305f\u306a\u3044 artifact \u304c invalid-stream-identity \u3067\u30d6\u30ed\u30c3\u30af\u3055\u308c\u306a\u3044\u3053\u3068\u3092\u78ba\u8a8d\u3059\u308b\u3002
+
+    Sonnet \u76e3\u67fb\u3067\u767a\u898b\u3055\u308c\u305f\u5883\u754c\u6761\u4ef6\u306e\u30c6\u30b9\u30c8\uff08boundary/M1-I5/draw-trace-sha256-missing\uff09\u3002
+    draw_trace_sha256 \u306f optional \u30d5\u30a3\u30fc\u30eb\u30c9\u3067\u3042\u308a\u3001\u672a\u63d0\u4f9b\u6642\u306f seam \u691c\u8a3c\u3092\u30b9\u30ad\u30c3\u30d7\u3059\u308b\u3002
+    """
+    record = _minimal_seam_record()
+    result = validate_rng_seam([record])
+    assert "invalid-stream-identity" not in result.get("blocking_reasons", []), (
+        "draw_trace_sha256 \u306a\u3057\u3067 invalid-stream-identity \u304c\u30d6\u30ed\u30c3\u30af\u3055\u308c\u305f"
+    )
+    assert result.get("passed") is True, f"seam failed unexpectedly: {result}"
+
+
+def test_validate_rng_seam_with_invalid_draw_trace_sha256_blocks() -> None:
+    """draw_trace_sha256 \u304c\u5b58\u5728\u3059\u308b\u304c\u4e0d\u6b63\u306a\u5834\u5408\u306f invalid-stream-identity \u3067\u30d6\u30ed\u30c3\u30af\u3055\u308c\u308b\u3053\u3068\u3092\u78ba\u8a8d\u3059\u308b\u3002
+
+    optional \u30c1\u30a7\u30c3\u30af\u304c\u300c\u5b58\u5728\u3059\u308b\u5834\u5408\u306e\u307f\u53b3\u5bc6\u306b\u691c\u8a3c\u3059\u308b\u300d\u52d5\u4f5c\u3092\u4fdd\u8a3c\u3059\u308b\u3002
+    """
+    record = _minimal_seam_record()
+    record["draw_trace_sha256"] = "not-a-valid-sha256"
+    result = validate_rng_seam([record])
+    assert "invalid-stream-identity" in result.get("blocking_reasons", []), (
+        "\u4e0d\u6b63\u306a draw_trace_sha256 \u304c\u691c\u51fa\u3055\u308c\u306a\u304b\u3063\u305f"
+    )

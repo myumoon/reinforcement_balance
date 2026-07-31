@@ -597,7 +597,11 @@ def validate_rng_seam(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         try:
             _require_sha256(row.get("replication_key"), "replication_key")
             _require_sha256(row.get("stream_sha256"), "stream_sha256")
-            _require_sha256(row.get("draw_trace_sha256"), "draw_trace_sha256")
+            # draw_trace_sha256 は optional: 存在する場合のみ検証し、
+            # 未提供（None）の場合は draw-trace consistency チェックをスキップする。
+            dts = row.get("draw_trace_sha256")
+            if dts is not None:
+                _require_sha256(dts, "draw_trace_sha256")
         except BranchRolloutError:
             blocking.add("invalid-stream-identity")
             continue
@@ -625,7 +629,9 @@ def validate_rng_seam(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             blocking.add("replication-key-mismatch")
         if len({row.get("stream_sha256") for row in group}) != 1:
             blocking.add("candidate-crn-mismatch")
-        if len({row.get("draw_trace_sha256") for row in group}) != 1:
+        # draw_trace_sha256 は optional: 全 row が None でない場合のみ一致を要求する。
+        dts_vals = {row.get("draw_trace_sha256") for row in group}
+        if None not in dts_vals and len(dts_vals) != 1:
             blocking.add("draw-trace-mismatch")
         policy_states = {
             row.get("policy_state_before_sha256")
