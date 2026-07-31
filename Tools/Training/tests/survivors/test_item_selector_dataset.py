@@ -123,6 +123,38 @@ def test_split_freeze_is_grouped_70_15_15_and_create_once(tmp_path) -> None:
         changed.commit(path)
 
 
+def test_episode_prefix_binding_is_enforced_across_all_split_paths() -> None:
+    """frozen prefix へ別 episode を差し替える再 grouping を全経路で拒否する。
+
+    split_for、development/partition/test reader は同じ manifest membership を共有する。
+    """
+    rows = _split_rows()
+    manifest = SplitManifest.freeze(rows, seed="selector-v1")
+    original = rows[0]
+    substituted = {**original, "episode_id": rows[-1]["episode_id"]}
+    with pytest.raises(SplitSealedError, match="membership"):
+        manifest.split_for(substituted)
+    for reader in (
+        lambda: manifest.read_partition_rows(
+            [substituted], "train", purpose="training"
+        ),
+        lambda: manifest.read_development_rows(
+            [substituted], purpose="feature_ablation"
+        ),
+        lambda: manifest.read_test_rows(
+            [substituted], purpose="sealed_evaluation"
+        ),
+    ):
+        with pytest.raises(SplitSealedError, match="membership"):
+            reader()
+
+    regrouped = copy.deepcopy(rows)
+    regrouped[1]["prefix_group_id"] = "different-prefix"
+    regrouped[1]["near_duplicate_key"] = "different-trace"
+    with pytest.raises(SplitSealedError, match="episode overlap"):
+        SplitManifest.freeze(regrouped, seed="selector-v1")
+
+
 def test_test_partition_read_is_sealed_from_development_callers() -> None:
     """test 行を汎用 partition reader と ablation purpose から読めなくする。
 
@@ -279,6 +311,9 @@ def test_release_builder_rejects_identity_verdict_cycle_split_and_test_write(tmp
     mismatched = copy.deepcopy(row)
     mismatched["split"] = "test" if split != "test" else "train"
     mutations.append(mismatched)
+    regrouped = copy.deepcopy(row)
+    regrouped["episode_id"] = _split_rows()[-1]["episode_id"]
+    mutations.append(regrouped)
     for index, mutation in enumerate(mutations):
         with pytest.raises(DatasetReleaseError):
             builder.release([mutation], tmp_path / f"bad-{index}")

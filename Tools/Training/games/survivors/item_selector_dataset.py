@@ -104,12 +104,12 @@ def _group_id(row: Mapping[str, Any]) -> str:
     """
     prefix = row.get("prefix_group_id")
     episode = row.get("episode_id")
+    if not isinstance(episode, str) or not episode:
+        raise SplitSealedError("episode_id must be non-empty")
     if prefix is not None:
         if not isinstance(prefix, str) or not prefix:
             raise SplitSealedError("prefix_group_id must be non-empty")
         return f"prefix:{prefix}"
-    if not isinstance(episode, str) or not episode:
-        raise SplitSealedError("episode_id must be non-empty")
     return f"episode:{episode}"
 
 
@@ -261,13 +261,23 @@ class SplitManifest:
             raise SplitSealedError("group member keys must match assignments")
         seen_episodes: set[str] = set()
         for group, episodes in members.items():
+            valid_group_name = (
+                group.startswith("prefix:") and len(group) > len("prefix:")
+            ) or (
+                group.startswith("episode:") and len(group) > len("episode:")
+            )
             if (
-                not isinstance(episodes, (tuple, list))
+                not valid_group_name
+                or not isinstance(episodes, (tuple, list))
                 or not episodes
                 or any(not isinstance(item, str) or not item for item in episodes)
                 or len(set(episodes)) != len(episodes)
             ):
                 raise SplitSealedError(f"group {group} members are invalid")
+            if group.startswith("episode:") and tuple(episodes) != (
+                group.removeprefix("episode:"),
+            ):
+                raise SplitSealedError("episode group must contain only its named episode")
             overlap = seen_episodes.intersection(episodes)
             if overlap:
                 raise SplitSealedError("episode overlap across split groups")
@@ -452,11 +462,13 @@ class SplitManifest:
     def split_for(self, row: Mapping[str, Any]) -> str:
         """row の frozen group assignment を返し declared split も照合する。
 
-        unknown group と split substitution は partition filter 前に拒否する。
+        unknown group、episode/prefix substitution、split substitution は filter 前に拒否する。
         """
         group = _group_id(row)
         if group not in self.group_assignments:
             raise SplitSealedError("row belongs to an unknown split group")
+        if row["episode_id"] not in self.group_members[group]:
+            raise SplitSealedError("row episode/prefix group membership mismatch")
         expected = self.group_assignments[group]
         declared = row.get("split")
         if declared is not None and declared != expected:
