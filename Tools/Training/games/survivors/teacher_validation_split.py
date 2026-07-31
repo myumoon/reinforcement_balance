@@ -187,7 +187,10 @@ def commit_frozen_episode_split(
     try:
         descriptor = os.open(
             destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0),
             0o644,
         )
     except FileExistsError:
