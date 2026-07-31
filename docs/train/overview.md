@@ -176,13 +176,12 @@ teacher score scale、reliability calibration、short/full validation report、
 で score scale と calibration を確定した後、untouched final test を一度だけ評価する。
 
 ```powershell
-$WT = "D:\prog\0_myprogram\.worktrees\ue5_reinforcement_balance\feature\phase6-paired-rollout-teacher-validation"
-Set-Location "$WT\Tools\Training"
-& 'C:\Users\neko\anaconda3\envs\reinbalance\python.exe' validate_survivors_value_teacher.py `
-  --corpus D:\artifacts\paired-rollout-corpus.json `
-  --source-descriptor D:\artifacts\value_source_descriptor.json `
-  --integration-fidelity-verdict D:\artifacts\integration-fidelity-verdict.json `
-  --output-dir D:\artifacts\teacher-validation
+Set-Location "<PROJECT_ROOT>\Tools\Training"
+python validate_survivors_value_teacher.py `
+  --corpus <ARTIFACTS_DIR>\paired-rollout-corpus.json `
+  --source-descriptor <ARTIFACTS_DIR>\value_source_descriptor.json `
+  --integration-fidelity-verdict <ARTIFACTS_DIR>\integration-fidelity-verdict.json `
+  --output-dir <ARTIFACTS_DIR>\teacher-validation
 ```
 
 追加モジュールの責務は次のとおり。
@@ -204,9 +203,8 @@ ground-truth utility には入らない。
 回帰テストは Windows conda env で skip なしに実行する。
 
 ```powershell
-$WT = "D:\prog\0_myprogram\.worktrees\ue5_reinforcement_balance\feature\phase6-paired-rollout-teacher-validation"
-Set-Location "$WT\Tools\Training"
-& 'C:\Users\neko\anaconda3\envs\reinbalance\python.exe' -m pytest tests\survivors\ -q --tb=short
+Set-Location "<PROJECT_ROOT>\Tools\Training"
+python -m pytest tests\survivors\ -q --tb=short
 ```
 
 formal corpus（300 decisions / 30 episodes 以上）と formal gate 達成は実環境収集後に行う。
