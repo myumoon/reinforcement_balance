@@ -166,6 +166,50 @@ formal collection 前に current producer hashes で integration fidelity verdic
 UE5 build / LLT: 未実行（Windows 専用）。PIE 100 decisions pilot、formal storage/
 parallel-port/wall-clock budget の固定は後続 phase で実施する。
 
+## Paired rollout teacher validation
+
+`validate_survivors_value_teacher.py` は `survivors.paired_rollout_corpus.v1`、immutable
+Value Source descriptor、current integration fidelity verdict を入力とし、episode split、
+teacher score scale、reliability calibration、short/full validation report、
+`survivors.label_release_verdict.v1` を一方向に生成する。release threshold の CLI override
+は提供しない。development train で outcome normalization、development train/validation
+で score scale と calibration を確定した後、untouched final test を一度だけ評価する。
+
+```powershell
+Set-Location "<PROJECT_ROOT>\Tools\Training"
+python validate_survivors_value_teacher.py `
+  --corpus <ARTIFACTS_DIR>\paired-rollout-corpus.json `
+  --source-descriptor <ARTIFACTS_DIR>\value_source_descriptor.json `
+  --integration-fidelity-verdict <ARTIFACTS_DIR>\integration-fidelity-verdict.json `
+  --output-dir <ARTIFACTS_DIR>\teacher-validation
+```
+
+追加モジュールの責務は次のとおり。
+
+| モジュール | 責務 |
+|---|---|
+| `games/survivors/choice_branch_rollout.py` | complete semantic trace、candidate/worker 非依存 replication key と post-decision RNG stream、quarantine/RNG seam |
+| `games/survivors/teacher_validation_split.py` | episode-group development/final split の freeze と final lineage sealing |
+| `games/survivors/teacher_score_scale.py` | development score-difference refs の q05/q95 scale fit・create-once commit |
+| `games/survivors/teacher_reliability.py` | exact/fallback slice の episode/seed-cluster residual CI・error UCB・weight |
+| `games/survivors/teacher_validation.py` | short/full の tie-aware top-1、pairwise、NDCG@3、regret と固定 release gate |
+
+UE5 Editor の `/validation_branch_rng` は semantic replay 後の validation worker 専用であり、
+通常 `/reset` が必ず解除する。`/step` info の `elapsed` / `level` / `gems` / `kills` /
+`alive` / `stage_clear` は read-only outcome metrics で、base/shaped/HP penalty reward
+semantics は変更しない。NovelD、shaped reward、HP penalty は provenance に残るが
+ground-truth utility には入らない。
+
+回帰テストは Windows conda env で skip なしに実行する。
+
+```powershell
+Set-Location "<PROJECT_ROOT>\Tools\Training"
+python -m pytest tests\survivors\ -q --tb=short
+```
+
+formal corpus（300 decisions / 30 episodes 以上）と formal gate 達成は実環境収集後に行う。
+UE5 build / LLT: 未実行（Windows 専用）。
+
 ## 関連ドキュメント
 
 - UE5 との通信仕様: [`ue5_env.md`](ue5_env.md)

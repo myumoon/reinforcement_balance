@@ -55,6 +55,19 @@ namespace
 		for (const auto& P : WMap) { Cum += P.Value; if (R <= Cum) return P.Key; }
 		return WMap.CreateConstIterator()->Key;
 	}
+	static bool IsLowerSha256(const FString& Value)
+	{
+		if (Value.Len() != 64) return false;
+		for (const TCHAR Character : Value)
+		{
+			if (!((Character >= TEXT('0') && Character <= TEXT('9'))
+				|| (Character >= TEXT('a') && Character <= TEXT('f'))))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
 	static void BuildDirDensity(const TArray<FVector2D>& Pos, const FVector2D& PPos,
 		int32 DC, float NDistMax, float NNear, float NMid, float NNorm, float MNorm, TArray<float>& Out)
 	{
@@ -114,6 +127,7 @@ void FSurvivorsGameLogic::Reset(TOptional<int32> Seed)
 {
 	if (Seed.IsSet()) RandStream.Initialize(Seed.GetValue());
 	else              RandStream.GenerateNewSeed();
+	ValidationBranchRngState = FSurvivorsValidationBranchRngState();
 	++EpisodeSerial;
 	LevelUpDecisionState.Reset(EpisodeSerial);
 	LevelUpBacklog = 0;
@@ -182,6 +196,7 @@ void FSurvivorsGameLogic::Reset(TOptional<int32> Seed)
 
 	ElapsedTime = 0.f; GlobalFreezeUntilTime = -1.f;
 	LastReward = 0.f; EpisodeBaseReward = 0.f; EpisodeStepCount = 0;
+	EpisodeGemCount = 0; EpisodeKillCount = 0;
 	bDone = false; bTruncated = false;
 
 	// RSI オーバーライド
@@ -291,6 +306,25 @@ FSurvivorsResetResult FSurvivorsGameLogic::ExecReset(TOptional<int32> Seed)
 	Result.Obs           = GetObservation();
 	Result.ObsSchemaHash = GetObsSchemaHash();
 	return Result;
+}
+
+bool FSurvivorsGameLogic::ActivateValidationBranchRng(
+	const FString& SchemaVersion,
+	const FString& ReplicationKey,
+	int32 StreamSeed)
+{
+	if (SchemaVersion != GetValidationBranchRngSchemaVersion()
+		|| !IsLowerSha256(ReplicationKey))
+	{
+		return false;
+	}
+	RandStream.Initialize(StreamSeed);
+	ValidationBranchRngState.bActive = true;
+	ValidationBranchRngState.SchemaVersion = SchemaVersion;
+	ValidationBranchRngState.ReplicationKey = ReplicationKey;
+	ValidationBranchRngState.StreamSeed = StreamSeed;
+	ValidationBranchRngState.InitialStreamState = RandStream.GetCurrentSeed();
+	return true;
 }
 
 // ============================================================================
@@ -993,9 +1027,12 @@ TUniquePtr<FSurvivorsGameLogic> FSurvivorsGameLogic::CloneForPreview() const
 	Clone->LastReward = LastReward;
 	Clone->EpisodeBaseReward = EpisodeBaseReward;
 	Clone->EpisodeStepCount = EpisodeStepCount;
+	Clone->EpisodeGemCount = EpisodeGemCount;
+	Clone->EpisodeKillCount = EpisodeKillCount;
 	Clone->bDone = bDone;
 	Clone->bTruncated = bTruncated;
 	Clone->RandStream = RandStream;
+	Clone->ValidationBranchRngState = ValidationBranchRngState;
 	Clone->LastSpawnDebug = LastSpawnDebug;
 	Clone->Projectiles = Projectiles;
 	Clone->GroundZones = GroundZones;
@@ -1451,6 +1488,7 @@ void FSurvivorsGameLogic::ApplyPickupHits(FSurvivorsHitFrame& HitFrame)
 		{ const int32 Mult=RandStream.RandRange(SurvivorsGameConstants::RedGemMinMultiplier,SurvivorsGameConstants::RedGemMaxMultiplier); XPG=SurvivorsWikiSpec::RedGemExperienceForMultiplier(XPG,Mult); }
 		ProcessXPGain(XPG);
 		LastReward += CurrentConfig.ItemReward;
+		++EpisodeGemCount;
 		if (IsLevelUpPending()) break;
 	}
 }
@@ -1662,7 +1700,7 @@ void FSurvivorsGameLogic::CheckSpecialPickups()
 		case ESpecialPickupType::Rosary:
 			for (FEnemyState& E:Enemies)
 			{ const bool bRI=CurrentConfig.EnemyTypeTable.IsValidIndex(E.TypeId)&&CurrentConfig.EnemyTypeTable[E.TypeId].bResistsInstantKill;
-			  if(!E.bPendingRemove&&!bRI){E.HP=0.f;E.bPendingRemove=true;LastReward+=CurrentConfig.KillReward;} } break;
+			  if(!E.bPendingRemove&&!bRI){E.HP=0.f;E.bPendingRemove=true;LastReward+=CurrentConfig.KillReward;++EpisodeKillCount;} } break;
 		case ESpecialPickupType::Vacuum: for(FGemState& G:Gems) if(!G.bPendingRemove) G.Pos=PlayerPos; break;
 		case ESpecialPickupType::Orologion: GlobalFreezeUntilTime=ElapsedTime+10.f; break;
 		case ESpecialPickupType::TreasureChest:
@@ -1962,7 +2000,7 @@ void FSurvivorsGameLogic::ApplyWeaponHits(FSurvivorsHitFrame& HitFrame)
 				}
 			}
 		}
-		if(E.HP<=0.f){E.bPendingRemove=true;LastReward+=CurrentConfig.KillReward;}
+		if(E.HP<=0.f){E.bPendingRemove=true;LastReward+=CurrentConfig.KillReward;++EpisodeKillCount;}
 	}
 	TArray<int32> SR=PR.Array(); SR.Sort([](int32 A,int32 B){return A>B;});
 	for (int32 I:SR) if(Projectiles.IsValidIndex(I)) Projectiles.RemoveAt(I);

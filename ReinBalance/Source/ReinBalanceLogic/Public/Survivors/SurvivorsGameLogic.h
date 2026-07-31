@@ -56,6 +56,19 @@ struct FSurvivorsResetResult
 	FString ObsSchemaHash;  // Python 側の /reset レスポンス互換のため必須
 };
 
+/**
+ * validation-only post-decision RNG stream の immutable binding。
+ * 通常 reset/step は bActive=false のまま従来 RandStream semantics を使う。
+ */
+struct FSurvivorsValidationBranchRngState
+{
+	bool bActive = false;
+	FString SchemaVersion;
+	FString ReplicationKey;
+	int32 StreamSeed = 0;
+	int32 InitialStreamState = 0;
+};
+
 // ============================================================
 // 設定構造体: ASurvivorsGame の UPROPERTY から抽出したフィールドセット
 // ============================================================
@@ -225,6 +238,31 @@ public:
 	/** リセットして初期 obs を返す */
 	FSurvivorsResetResult ExecReset(TOptional<int32> Seed);
 
+	/**
+	 * semantic replay 完了後の validation worker だけが post-decision stream を切り替える。
+	 * schema/key 不正時は RandStream を変更せず false を返す。
+	 */
+	bool ActivateValidationBranchRng(
+		const FString& SchemaVersion,
+		const FString& ReplicationKey,
+		int32 StreamSeed);
+
+	/** validation branch RNG の固定 schema version を返す。 */
+	static const TCHAR* GetValidationBranchRngSchemaVersion()
+	{
+		return TEXT("survivors.branch_rng.v1");
+	}
+
+	/** validation stream binding と現在 state を監査する。 */
+	const FSurvivorsValidationBranchRngState& GetValidationBranchRngState() const
+	{
+		return ValidationBranchRngState;
+	}
+	int32 GetValidationBranchRngCurrentState() const
+	{
+		return RandStream.GetCurrentSeed();
+	}
+
 	// ---- ビュー / デバッグ向けアクセサ ----
 
 	FVector2D GetPlayerPos()   const { return PlayerPos; }
@@ -237,6 +275,10 @@ public:
 	float     GetLastReward()  const { return LastReward; }
 	float     GetEpisodeBaseReward()  const { return EpisodeBaseReward; }
 	int32     GetEpisodeStepCount()   const { return EpisodeStepCount; }
+	int32     GetEpisodeGemCount()    const { return EpisodeGemCount; }
+	int32     GetEpisodeKillCount()   const { return EpisodeKillCount; }
+	bool      IsAlive()               const { return !bDone; }
+	bool      IsStageClear()          const { return bTruncated && !bDone; }
 	bool      IsShieldActive() const { return bShieldActive; }
 	float     GetPlayerShieldTimer() const { return PlayerShieldTimer; }
 
@@ -342,9 +384,12 @@ public:
 	float                 LastReward        = 0.f;
 	float                 EpisodeBaseReward = 0.f;
 	int32                 EpisodeStepCount  = 0;
+	int32                 EpisodeGemCount   = 0;
+	int32                 EpisodeKillCount  = 0;
 	bool                  bDone             = false;
 	bool                  bTruncated        = false;
 	FRandomStream         RandStream;
+	FSurvivorsValidationBranchRngState ValidationBranchRngState;
 	FSurvivorsSpawnDebug  LastSpawnDebug;
 
 	// プロジェクタイル・グラウンドゾーン
