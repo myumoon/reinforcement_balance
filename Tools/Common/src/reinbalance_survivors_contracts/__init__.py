@@ -54,6 +54,7 @@ from .item_decision import (
     ITEM_DECISION_SCHEMA_VERSION,
     CandidateFeatures,
     ItemDecisionFeatures,
+    ItemDecisionSchemaV1,
 )
 from .perception_error import (
     PERCEPTION_ERROR_SCHEMA_VERSION,
@@ -125,6 +126,7 @@ __all__ = [
     # item decision（アイテム決定）
     "ITEM_DECISION_SCHEMA_VERSION",
     "CANDIDATE_FEATURES_SCHEMA_VERSION",
+    "ItemDecisionSchemaV1",
     "CandidateFeatures",
     "ItemDecisionFeatures",
     # perception error（perception 誤差）

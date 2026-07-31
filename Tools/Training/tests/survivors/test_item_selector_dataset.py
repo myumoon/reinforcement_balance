@@ -1,0 +1,289 @@
+"""ItemSelector dataset の split sealing、soft target、release gate を検証する。
+
+episode/prefix 単位の固定 split と既存 teacher artifact への束縛を counterexample 付きで
+確認し、test partition を開かずに derived dataset を構築する。
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+
+import pytest
+
+from games.survivors.item_selector_dataset import (
+    DatasetReleaseError,
+    ItemSelectorDatasetBuilder,
+    SplitManifest,
+    SplitSealedError,
+    TeacherArtifactError,
+    TeacherSoftTargetBuilder,
+)
+from games.survivors.teacher_reliability import fit_teacher_reliability
+from games.survivors.teacher_score_scale import fit_teacher_score_scale
+
+
+def _split_rows(count: int = 20) -> list[dict]:
+    """20 episode group と各 group の複数 decision を作る。
+
+    同一 episode の行は必ず同じ prefix group を共有する。
+    """
+    return [
+        {
+            "decision_id": f"d-{episode}-{decision}",
+            "episode_id": f"episode-{episode}",
+            "prefix_group_id": f"prefix-{episode}",
+            "near_duplicate_key": f"trace-{episode}",
+        }
+        for episode in range(count)
+        for decision in range(2)
+    ]
+
+
+def _score_scale() -> dict:
+    """01-06 形式の検証済み score scale artifact を作る。
+
+    sigma は dataset 側では fit せず既存 helper の出力を親とする。
+    """
+    return fit_teacher_score_scale(
+        teacher_type="raw_critic",
+        teacher_identity="a" * 64,
+        development_fit_partition_id="b" * 64,
+        score_difference_refs=[
+            {
+                "ref_id": f"diff-{index}",
+                "partition": "development_train",
+                "difference": float(index),
+            }
+            for index in range(21)
+        ],
+    )
+
+
+def _calibration(scale: dict, *, residual: float = 0.2) -> dict:
+    """01-07 形式の十分な support を持つ reliability artifact を作る。
+
+    outcome refs と episode/seed cluster は各 decision から追跡できる値にする。
+    """
+    rows = []
+    for index in range(30):
+        rows.append(
+            {
+                "decision_id": f"cal-{index}",
+                "episode_id": f"cal-episode-{index // 2}",
+                "seed_cluster_id": f"seed-{index // 2}",
+                "partition": "development_train",
+                "teacher_type": "raw_critic",
+                "teacher_identity": "a" * 64,
+                "choice_kind": "weapon",
+                "elapsed_seconds": 60.0,
+                "teacher_score_scale_id": scale["scale_identity"],
+                "outcome_scale_ids": {"short": "c" * 64, "full": "d" * 64},
+                "pairs": [
+                    {
+                        "candidate_i": "wand",
+                        "candidate_j": "knife",
+                        "teacher_margin_z": 1.0,
+                        "outcome_margin_z": {
+                            "short": 1.0 - residual,
+                            "full": 1.0 - residual,
+                        },
+                        "outcome_refs": {
+                            "short": f"short-{index}",
+                            "full": f"full-{index}",
+                        },
+                    }
+                ],
+            }
+        )
+    return fit_teacher_reliability(
+        rows,
+        development_split_id="e" * 64,
+        integration_fidelity_identity="f" * 64,
+        bootstrap_seed=7,
+        bootstrap_resamples=20,
+    )
+
+
+def test_split_freeze_is_grouped_70_15_15_and_create_once(tmp_path) -> None:
+    """episode prefix group を 70/15/15 へ一度だけ割り当てる。
+
+    decision 行を増減しても同じ group の partition は変わらず、異なる manifest 上書きは拒否する。
+    """
+    rows = _split_rows()
+    manifest = SplitManifest.freeze(rows, seed="selector-v1")
+    counts = manifest.partition_group_counts
+    assert counts == {"train": 14, "validation": 3, "test": 3}
+    assert all(manifest.split_for(row) == manifest.split_for({**row, "decision_id": "retry"}) for row in rows)
+    path = tmp_path / "split.json"
+    manifest.commit(path)
+    manifest.commit(path)
+    changed = SplitManifest.freeze(rows, seed="other-seed")
+    with pytest.raises(SplitSealedError, match="overwrite"):
+        changed.commit(path)
+
+
+def test_test_partition_read_is_sealed_from_development_callers() -> None:
+    """test 行を汎用 partition reader と ablation purpose から読めなくする。
+
+    test 専用 API でも feature selection 系 purpose は拒否し、監査記録を残さない。
+    """
+    rows = _split_rows()
+    manifest = SplitManifest.freeze(rows, seed="selector-v1")
+    with pytest.raises(SplitSealedError, match="test"):
+        manifest.read_partition_rows(rows, "test", purpose="ablation")
+    with pytest.raises(SplitSealedError, match="ablation"):
+        manifest.read_test_rows(rows, purpose="ablation")
+    development = manifest.read_development_rows(rows, purpose="learning_curve")
+    assert development
+    assert all(manifest.split_for(row) != "test" for row in development)
+
+
+def test_overlap_and_near_duplicate_cross_partition_are_rejected() -> None:
+    """同一 trace fingerprint と near duplicate の split 越境を検出する。
+
+    episode ID が異なっていても同じ prefix 内容なら独立 sample とみなさない。
+    """
+    rows = _split_rows()
+    rows[-1]["near_duplicate_key"] = rows[0]["near_duplicate_key"]
+    with pytest.raises(SplitSealedError, match="near-duplicate"):
+        SplitManifest.freeze(rows, seed="selector-v1")
+
+
+def test_soft_target_ties_masking_probability_and_permutation() -> None:
+    """tie epsilon、masked softmax、item ID 復元を exact に検証する。
+
+    near tie は同一 group とし、mask 候補は常に確率 0、valid 確率和は 1 にする。
+    """
+    scale = _score_scale()
+    calibration = _calibration(scale)
+    builder = TeacherSoftTargetBuilder(scale, calibration)
+    sigma = scale["sigma"]
+    result = builder.build(
+        candidate_item_ids=("wand", "knife", "axe", "masked"),
+        teacher_scores=(2.0, 2.0 - sigma * 0.019, 1.0, None),
+        card_mask=(True, True, True, False),
+        slice_key="raw_critic|weapon|0-5m",
+        temperature=1.0,
+    )
+    by_id = result.probability_by_item_id
+    assert by_id["wand"] == by_id["knife"]
+    assert by_id["masked"] == 0.0
+    assert sum(result.probabilities) == 1.0
+    assert result.tie_groups[0] == ("wand", "knife")
+    permuted = builder.build(
+        candidate_item_ids=("axe", "wand", "masked", "knife"),
+        teacher_scores=(1.0, 2.0, None, 2.0 - sigma * 0.019),
+        card_mask=(True, True, False, True),
+        slice_key="raw_critic|weapon|0-5m",
+        temperature=1.0,
+    )
+    assert permuted.probability_by_item_id == pytest.approx(by_id)
+
+
+def test_all_tie_and_temperature_grid_selection_are_deterministic() -> None:
+    """all-tie は valid 候補へ等確率を与え、development NLL で温度を選ぶ。
+
+    candidate count 不整合は softmax 前に拒否し、欠損 score を有効候補へ補完しない。
+    """
+    scale = _score_scale()
+    builder = TeacherSoftTargetBuilder(scale, _calibration(scale))
+    tied = builder.build(
+        candidate_item_ids=("wand", "knife", "axe", "masked"),
+        teacher_scores=(2.0, 2.0, 2.0, None),
+        card_mask=(True, True, True, False),
+        slice_key="raw_critic|weapon|0-5m",
+        temperature=1.0,
+    )
+    assert tied.probabilities[:3] == pytest.approx((1.0 / 3.0,) * 3)
+    assert tied.tie_groups == (("axe", "knife", "wand"),)
+    examples = [
+        {
+            "split": "validation",
+            "candidate_item_ids": ("wand", "knife"),
+            "teacher_scores": (2.0, 0.0),
+            "card_mask": (True, True),
+            "observed_best_item_id": "wand",
+        }
+    ]
+    assert builder.select_temperature(
+        examples, slice_key="raw_critic|weapon|0-5m"
+    ) == 0.25
+    with pytest.raises(TeacherArtifactError, match="invalid"):
+        builder.build(
+            candidate_item_ids=("wand", "knife"),
+            teacher_scores=(2.0,),
+            card_mask=(True, True),
+            slice_key="raw_critic|weapon|0-5m",
+            temperature=1.0,
+        )
+
+
+def test_scale_substitution_refit_and_blocked_reliability_are_rejected() -> None:
+    """scale identity substitution、02-01 再 fit、error UCB blocker を拒否する。
+
+    teacher type/identity/sigma/tie unit の全 binding sibling をロード時に検証する。
+    """
+    scale = _score_scale()
+    calibration = _calibration(scale)
+    other = _score_scale()
+    other["teacher_identity"] = "9" * 64
+    with pytest.raises(TeacherArtifactError):
+        TeacherSoftTargetBuilder(other, calibration)
+    builder = TeacherSoftTargetBuilder(scale, calibration)
+    with pytest.raises(TeacherArtifactError, match="refit"):
+        builder.refit_scale([])
+    blocked = _calibration(scale, residual=1.2)
+    with pytest.raises(TeacherArtifactError, match="blocker"):
+        TeacherSoftTargetBuilder(scale, blocked)
+
+
+def test_release_builder_rejects_identity_verdict_cycle_split_and_test_write(tmp_path) -> None:
+    """source identity、approval、DAG、split binding、test write を fail-closed にする。
+
+    各 counterexample は出力 directory を公開する前に失敗する。
+    """
+    source = "1" * 64
+    manifest = SplitManifest.freeze(_split_rows(), seed="selector-v1")
+    base = _split_rows()[0]
+    split = manifest.split_for(base)
+    row = {
+        **base,
+        "split": split,
+        "source_identity": source,
+        "source_trace_ref": "trace/source-1",
+        "ancestor_refs": ["trace/root"],
+        "label_verdict": {"status": "approved", "teacher_identity": "a" * 64},
+    }
+    builder = ItemSelectorDatasetBuilder(
+        split_manifest=manifest,
+        source_identity=source,
+        teacher_identity="a" * 64,
+        derived_logical_id="derived/item-selector-v1",
+    )
+    output = tmp_path / "release"
+    released = builder.release([row], output)
+    assert released["row_count"] == 1
+    assert json.loads((output / "manifest.json").read_text(encoding="utf-8"))["test_row_count"] == 0
+
+    mutations = []
+    wrong_source = copy.deepcopy(row)
+    wrong_source["source_identity"] = "2" * 64
+    mutations.append(wrong_source)
+    unapproved = copy.deepcopy(row)
+    unapproved["label_verdict"]["status"] = "pending"
+    mutations.append(unapproved)
+    cyclic = copy.deepcopy(row)
+    cyclic["ancestor_refs"].append("derived/item-selector-v1")
+    mutations.append(cyclic)
+    mismatched = copy.deepcopy(row)
+    mismatched["split"] = "test" if split != "test" else "train"
+    mutations.append(mismatched)
+    for index, mutation in enumerate(mutations):
+        with pytest.raises(DatasetReleaseError):
+            builder.release([mutation], tmp_path / f"bad-{index}")
+
+    test_row = next(row for row in _split_rows() if manifest.split_for(row) == "test")
+    test_payload = {**row, **test_row, "split": "test"}
+    with pytest.raises(DatasetReleaseError, match="test"):
+        builder.release([test_payload], tmp_path / "test-write")
