@@ -79,6 +79,9 @@ public:
 	 */
 	void ProcessLevelUpPreviewRequests();
 
+	/** managed/unmanaged worker 共通で validation-only RNG queue を適用する。 */
+	void ProcessValidationBranchRngRequests();
+
 	/** /step の既存情報と level-up fields を同じ JSON object に構築する。 */
 	FString BuildInfoJson() const;
 
