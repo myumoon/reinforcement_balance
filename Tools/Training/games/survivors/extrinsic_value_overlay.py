@@ -289,10 +289,11 @@ class OverlayPartitions:
         self.dataset_hash = dataset_hash
         self._final_test_opened = False
 
-    def assignment_for(self, example: OverlayExample) -> str:
-        """example の episode binding から partition 名を返す。
+    def _assignment_for_internal(self, example: OverlayExample) -> str:
+        """内部用: final_test を含む生の partition 名を返す。
 
-        object identity や branch 順ではなく immutable episode ID だけを参照する。
+        open_final_test・development_examples・スカラー集合など内部 filter だけが使い、
+        公開 API からは呼ばない。
         """
         try:
             return self._assignments[example.episode_id]
@@ -300,6 +301,19 @@ class OverlayPartitions:
             raise ExtrinsicValueOverlayError(
                 "example episode is not assigned"
             ) from exc
+
+    def assignment_for(self, example: OverlayExample) -> str:
+        """development partition 名を返す。final_test は開封前にアクセスできない。
+
+        object identity や branch 順ではなく immutable episode ID だけを参照する。
+        method lock 前に final_test 所属が判明しないよう封印する。
+        """
+        raw = self._assignment_for_internal(example)
+        if raw == "final_test" and not self._final_test_opened:
+            raise ExtrinsicValueOverlayError(
+                "final test assignment is sealed until open_final_test is called"
+            )
+        return raw
 
     def development_examples(
         self,
@@ -320,7 +334,7 @@ class OverlayPartitions:
             example
             for example in self._examples
             if example.loss_eligible
-            and self.assignment_for(example) == partition
+            and self._assignment_for_internal(example) == partition
         )
 
     @property
@@ -352,19 +366,21 @@ class OverlayPartitions:
         return tuple(
             example
             for example in self._examples
-            if self.assignment_for(example) == "final_test"
+            if self._assignment_for_internal(example) == "final_test"
         )
 
     @property
     def scalar_example_ids(self) -> set[str]:
-        """全 partition の scalar eligibility 診断集合を返す。
+        """development partition の scalar eligibility 診断集合を返す。
 
         split を変えずに censored/quarantine mask の対称性をテストする用途に限定する。
+        final_test 行は method lock 前に ID を公開しないため含めない。
         """
         return {
             example.example_id
             for example in self._examples
             if example.loss_eligible
+            and self._assignment_for_internal(example) != "final_test"
         }
 
     @property
@@ -382,7 +398,7 @@ class OverlayPartitions:
                 example
                 for example in self._examples
                 if example.loss_eligible
-                and self.assignment_for(example) == partition
+                and self._assignment_for_internal(example) == partition
             )
             for left, right in _pairwise_examples(examples):
                 identifiers.add(left.example_id)

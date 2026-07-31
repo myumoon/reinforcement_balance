@@ -68,14 +68,22 @@ def test_split_is_grouped_and_target_stats_use_train_only() -> None:
     """
     rows = [_row(episode, branch) for episode in range(15) for branch in range(2)]
     first = prepare_overlay_partitions(rows, split_seed="fixed-split")
+
+    def _safe_assignment(partitions, row):
+        """final_test sealed の場合は "_sealed" を返す。"""
+        try:
+            return partitions.assignment_for(row)
+        except ValueError:
+            return "_sealed"
+
     assignment_by_episode = {
-        row.episode_id: first.assignment_for(row)
+        row.episode_id: _safe_assignment(first, row)
         for row in rows
     }
     for episode in range(15):
         assert len(
             {
-                first.assignment_for(_row(episode, branch))
+                _safe_assignment(first, _row(episode, branch))
                 for branch in range(2)
             }
         ) == 1
@@ -121,11 +129,18 @@ def test_episode_with_multiple_decision_seeds_remains_one_partition() -> None:
         )
     )
 
-    partitions = prepare_overlay_partitions(rows, split_seed="fixed-split")
-
-    assert partitions.assignment_for(rows[0]) == partitions.assignment_for(
-        rows[-1]
+    partitions = prepare_overlay_partitions(
+        rows, split_seed="fixed-split", require_all_partitions=False
     )
+
+    def _safe_asgn(p, row):
+        """final_test sealed の場合は "_sealed" を返す。"""
+        try:
+            return p.assignment_for(row)
+        except ValueError:
+            return "_sealed"
+
+    assert _safe_asgn(partitions, rows[0]) == _safe_asgn(partitions, rows[-1])
 
 
 def test_branches_of_one_decision_cannot_claim_different_seeds() -> None:
