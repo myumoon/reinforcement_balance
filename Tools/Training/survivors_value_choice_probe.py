@@ -25,7 +25,10 @@ from games.survivors.value_choice_schema import (
     append_value_choice_ranking,
     build_value_choice_ranking,
 )
-from games.survivors.value_scorer import ValueScorer
+from games.survivors.value_scorer import (
+    ValueScorer,
+    add_value_overlay_argument,
+)
 
 
 class ValueChoiceProbeError(ValueError):
@@ -63,6 +66,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-jsonl", type=Path, required=True)
     parser.add_argument("--zero-state-smoke", action="store_true")
     parser.add_argument("--device", default="cpu")
+    add_value_overlay_argument(parser)
     return parser
 
 
@@ -179,7 +183,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     try:
         args = _parser().parse_args(argv)
-        scorer = ValueScorer.load(args.manifest, device=args.device)
+        scorer = ValueScorer.load(
+            args.manifest,
+            device=args.device,
+            value_overlay=args.value_overlay,
+        )
         payload = _read_preview(args.preview_json)
         parsed, choice_ids, raw_batch = _parse_bound_preview(payload, scorer)
         loaded_context = load_critic_context(args.context_npz)
@@ -252,4 +260,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
