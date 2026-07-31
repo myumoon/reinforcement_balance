@@ -21,10 +21,12 @@ from games.survivors.extrinsic_value_overlay import (
     OverlayExample,
     fit_overlay,
     load_extrinsic_value_overlay,
+    overlay_examples_from_paired_decisions,
     policy_invariance_hash,
     prepare_overlay_partitions,
     save_extrinsic_value_overlay,
 )
+from games.survivors.teacher_validation import OutcomeNormalizer
 from games.survivors.value_scorer import ValueScorer
 from value_scorer_fixtures import build_saved_value_source
 
@@ -135,10 +137,12 @@ def test_manifest_and_state_are_saved_with_all_source_bindings(
         artifact_dir,
         summary=summary,
         paired_dataset_hash="d" * 64,
+        partitions=partitions,
     )
 
     assert manifest_path == artifact_dir / MANIFEST_FILENAME
     assert (artifact_dir / STATE_FILENAME).is_file()
+    state_bytes = (artifact_dir / STATE_FILENAME).read_bytes()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     for field in (
         "source_model_hash",
@@ -152,6 +156,31 @@ def test_manifest_and_state_are_saved_with_all_source_bindings(
         assert field in manifest
     loaded = load_extrinsic_value_overlay(manifest_path, scorer.source)
     assert loaded.input_dim == overlay.input_dim
+    overlay_scorer = ValueScorer(scorer.source, loaded)
+    movement = np.asarray([0.0, 0.5, 1.0], dtype=np.float32)
+    session = overlay_scorer.new_session()
+    session.advance_movement(movement, episode_start=True)
+    context = session.begin_level_up(
+        environment_step=2,
+        decision_id="decision-overlay",
+        pending_obs=movement,
+        episode_start=False,
+    )
+    overlay_value = overlay_scorer.score(
+        np.asarray([[0.25, 0.5, 1.0]], dtype=np.float32),
+        context,
+    )[0]
+    assert np.isfinite(overlay_value.value_normalized_return)
+    assert np.isfinite(overlay_value.value_unscaled_return)
+    with pytest.raises(ValueError, match="already exists"):
+        save_extrinsic_value_overlay(
+            overlay,
+            artifact_dir,
+            summary=summary,
+            paired_dataset_hash="d" * 64,
+            partitions=partitions,
+        )
+    assert (artifact_dir / STATE_FILENAME).read_bytes() == state_bytes
 
 
 @pytest.mark.parametrize(
@@ -188,6 +217,7 @@ def test_load_rejects_wrong_source_schema_and_context_shape(
         tmp_path / f"artifact-{field}",
         summary=summary,
         paired_dataset_hash="e" * 64,
+        partitions=partitions,
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest[field] = value
@@ -239,3 +269,122 @@ def test_tie_censored_early_failure_and_quarantine_are_masked() -> None:
         "row-5",
     }
     assert partitions.pair_example_ids == set()
+
+
+def test_paired_outcomes_build_external_utility_and_mask_censored() -> None:
+    """paired candidate outcome から utility と primary rank を生成する。
+
+    censored branch は不完全 outcome でも target を捏造せず null/masked row として保持する。
+    """
+    normalizer = OutcomeNormalizer(
+        horizon="short",
+        partition_id="development-train",
+        level_gain_scale=10.0,
+        gem_gain_scale=100.0,
+        kill_gain_scale=50.0,
+        normalization_identity="a" * 64,
+    )
+    observed = {
+        "status": "observed",
+        "stage_cleared_or_survived_horizon": True,
+        "survival_seconds": 300.0,
+        "level_gain": 5.0,
+        "gem_gain": 50.0,
+        "kill_gain": 25.0,
+        "provenance": {
+            "noveld": 999.0,
+            "shaped_reward": 999.0,
+            "hp_penalty": -999.0,
+        },
+    }
+    decisions = [
+        {
+            "episode_id": "episode-1",
+            "decision_seed": "seed-1",
+            "decision_id": "decision-1",
+            "candidates": [
+                {
+                    "choice_id": "observed",
+                    "critic_features": [1.0, 2.0],
+                    "short": observed,
+                },
+                {
+                    "choice_id": "censored",
+                    "critic_features": [2.0, 3.0],
+                    "short": {"status": "censored"},
+                },
+            ],
+        }
+    ]
+
+    examples = overlay_examples_from_paired_decisions(
+        decisions,
+        normalizer,
+        horizon="short",
+    )
+
+    assert examples[0].target == pytest.approx(1.4)
+    assert examples[0].primary_rank[0] is True
+    assert examples[1].target is None
+    assert examples[1].loss_eligible is False
+
+
+def test_save_rejects_when_final_test_has_been_opened(tmp_path: Path) -> None:
+    """final_test 開封後の manifest 保存を拒否する。
+
+    fit → open_final_test の順に呼んでも sealed_unopened を書けないことで
+    final_test_status 偽装を防ぐ。
+    """
+    source_path, _, _ = build_saved_value_source(
+        tmp_path / "source",
+        recurrent=True,
+    )
+    scorer = ValueScorer.load(source_path)
+    overlay = ExtrinsicValueOverlay.create(scorer.source)
+    partitions = prepare_overlay_partitions(
+        _examples(overlay.input_dim),
+        split_seed="seal-test",
+    )
+    summary = fit_overlay(overlay, partitions, max_epochs=2, patience=1)
+
+    partitions.open_final_test(method_locked=True)
+    assert partitions.final_test_opened
+
+    with pytest.raises(Exception, match="final test"):
+        save_extrinsic_value_overlay(
+            overlay,
+            tmp_path / "artifact-seal",
+            summary=summary,
+            paired_dataset_hash="f" * 64,
+            partitions=partitions,
+        )
+
+
+def test_pair_example_ids_excludes_final_test_rows() -> None:
+    """pair_example_ids が final_test 行を含まないことを確認する。
+
+    development partition の pair IDs だけを返し、final_test data を leakage しない。
+    """
+    rows = [
+        OverlayExample(
+            example_id=f"ep{ep}-b{branch}",
+            episode_id=f"episode-{ep}",
+            decision_seed=f"seed-{ep}",
+            decision_id=f"decision-{ep}",
+            choice_id=f"choice-{branch}",
+            features=np.array([float(ep), float(branch)], dtype=np.float32),
+            target=float(ep + branch),
+            primary_rank=(float(ep + branch),),
+        )
+        for ep in range(12)
+        for branch in range(2)
+    ]
+    partitions = prepare_overlay_partitions(rows, split_seed="pair-test")
+
+    # pair_example_ids は development のみ
+    for example_id in partitions.pair_example_ids:
+        row = next(r for r in rows if r.example_id == example_id)
+        assert partitions.assignment_for(row) in (
+            "development_train",
+            "development_validation",
+        ), f"{example_id} should not be in final_test"

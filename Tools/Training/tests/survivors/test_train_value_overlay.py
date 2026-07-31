@@ -108,6 +108,32 @@ def test_episode_with_multiple_decision_seeds_remains_one_partition() -> None:
     seed 集合を episode group identity に含め、decision ごとに split して leakage させない。
     """
     rows = [_row(episode, branch) for episode in range(6) for branch in range(2)]
+    rows.append(
+        OverlayExample(
+            example_id="example-0-alt",
+            episode_id="episode-0",
+            decision_seed="different-seed",
+            decision_id="decision-0-alt",
+            choice_id="choice-alt",
+            features=np.zeros(4, dtype=np.float32),
+            target=0.5,
+            primary_rank=(0.5,),
+        )
+    )
+
+    partitions = prepare_overlay_partitions(rows, split_seed="fixed-split")
+
+    assert partitions.assignment_for(rows[0]) == partitions.assignment_for(
+        rows[-1]
+    )
+
+
+def test_branches_of_one_decision_cannot_claim_different_seeds() -> None:
+    """同じ decision の branches に異なる seed identity を許可しない。
+
+    composite group の一部だけを改変して train/validation 間を跨ぐ入力を fail-closed にする。
+    """
+    rows = [_row(episode, branch) for episode in range(3) for branch in range(2)]
     changed = rows[1]
     rows[1] = OverlayExample(
         example_id=changed.example_id,
@@ -120,11 +146,8 @@ def test_episode_with_multiple_decision_seeds_remains_one_partition() -> None:
         primary_rank=changed.primary_rank,
     )
 
-    partitions = prepare_overlay_partitions(rows, split_seed="fixed-split")
-
-    assert partitions.assignment_for(rows[0]) == partitions.assignment_for(
-        rows[1]
-    )
+    with pytest.raises(ValueError, match="decision seed"):
+        prepare_overlay_partitions(rows, split_seed="fixed-split")
 
 
 def test_value_scorer_keeps_raw_critic_path_without_overlay(

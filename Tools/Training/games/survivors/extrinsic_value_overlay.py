@@ -28,6 +28,10 @@ from reinbalance_survivors_contracts.canonical_json import (
 
 from games.survivors.recurrent_policy_session import CriticContext
 from games.survivors.teacher_validation_split import freeze_episode_split
+from games.survivors.teacher_validation import (
+    OutcomeNormalizer,
+    primary_rank,
+)
 from games.survivors.value_source_loader import LoadedValueSource
 
 SCHEMA_VERSION = "survivors.extrinsic_value_overlay.v1"
@@ -122,7 +126,7 @@ class OverlayExample:
     decision_id: str
     choice_id: str
     features: np.ndarray
-    target: float
+    target: float | None
     primary_rank: tuple[Any, ...]
     status: str = _ELIGIBLE_STATUS
     quarantined: bool = False
@@ -157,12 +161,19 @@ class OverlayExample:
             raise ExtrinsicValueOverlayError(
                 "features must be a finite non-empty vector"
             )
-        if (
+        if self.target is None:
+            if self.loss_eligible:
+                raise ExtrinsicValueOverlayError(
+                    "eligible target must be finite"
+                )
+        elif (
             isinstance(self.target, bool)
             or not isinstance(self.target, (int, float))
             or not math.isfinite(float(self.target))
         ):
-            raise ExtrinsicValueOverlayError("target must be finite")
+            raise ExtrinsicValueOverlayError(
+                "target must be finite or masked null"
+            )
         if not isinstance(self.primary_rank, tuple) or not self.primary_rank:
             raise ExtrinsicValueOverlayError(
                 "primary_rank must be a non-empty tuple"
@@ -183,7 +194,8 @@ class OverlayExample:
         detached = feature_array.copy()
         detached.setflags(write=False)
         object.__setattr__(self, "features", detached)
-        object.__setattr__(self, "target", float(self.target))
+        if self.target is not None:
+            object.__setattr__(self, "target", float(self.target))
 
     @property
     def loss_eligible(self) -> bool:
@@ -270,8 +282,8 @@ class OverlayPartitions:
 
         partition ごとの選択は内部で行い、final open 状態だけを明示的に追跡する。
         """
-        self.examples = tuple(examples)
-        self.assignments = dict(assignments)
+        self._examples = tuple(examples)
+        self._assignments = dict(assignments)
         self.target_mean = float(target_mean)
         self.target_std = float(target_std)
         self.dataset_hash = dataset_hash
@@ -283,7 +295,7 @@ class OverlayPartitions:
         object identity や branch 順ではなく immutable episode ID だけを参照する。
         """
         try:
-            return self.assignments[example.episode_id]
+            return self._assignments[example.episode_id]
         except KeyError as exc:
             raise ExtrinsicValueOverlayError(
                 "example episode is not assigned"
@@ -306,7 +318,7 @@ class OverlayPartitions:
             )
         return tuple(
             example
-            for example in self.examples
+            for example in self._examples
             if example.loss_eligible
             and self.assignment_for(example) == partition
         )
@@ -339,7 +351,7 @@ class OverlayPartitions:
         self._final_test_opened = True
         return tuple(
             example
-            for example in self.examples
+            for example in self._examples
             if self.assignment_for(example) == "final_test"
         )
 
@@ -351,7 +363,7 @@ class OverlayPartitions:
         """
         return {
             example.example_id
-            for example in self.examples
+            for example in self._examples
             if example.loss_eligible
         }
 
@@ -365,11 +377,10 @@ class OverlayPartitions:
         for partition in (
             "development_train",
             "development_validation",
-            "final_test",
         ):
             examples = tuple(
                 example
-                for example in self.examples
+                for example in self._examples
                 if example.loss_eligible
                 and self.assignment_for(example) == partition
             )
@@ -661,6 +672,149 @@ def _pairwise_examples(
     return pairs
 
 
+def overlay_examples_from_paired_decisions(
+    decisions: Sequence[Mapping[str, Any]],
+    normalizer: OutcomeNormalizer,
+    *,
+    horizon: str,
+) -> list[OverlayExample]:
+    """paired outcome decisions から scalar utility/rank training rows を作る。
+
+    utility と primary order は既存 external-outcome 契約だけを使い、censored/failure/quarantine を mask する。
+    """
+    if normalizer.horizon != horizon:
+        raise ExtrinsicValueOverlayError(
+            "outcome normalizer horizon mismatch"
+        )
+    if isinstance(decisions, (str, bytes)) or not decisions:
+        raise ExtrinsicValueOverlayError(
+            "paired decisions are required"
+        )
+    examples: list[OverlayExample] = []
+    for decision_index, decision in enumerate(decisions):
+        if not isinstance(decision, Mapping):
+            raise ExtrinsicValueOverlayError(
+                "paired decision must be an object"
+            )
+        episode_id = decision.get("episode_id")
+        decision_id = decision.get(
+            "decision_id",
+            f"decision-{decision_index}",
+        )
+        decision_seed = decision.get(
+            "decision_seed",
+            decision.get("seed_cluster_id"),
+        )
+        candidates = decision.get("candidates")
+        if (
+            not isinstance(episode_id, str)
+            or not episode_id
+            or not isinstance(decision_id, str)
+            or not decision_id
+            or not isinstance(decision_seed, str)
+            or not decision_seed
+            or not isinstance(candidates, list)
+            or len(candidates) < 2
+        ):
+            raise ExtrinsicValueOverlayError(
+                "paired decision identity/candidates are invalid"
+            )
+        decision_quarantined = decision.get("quarantined", False)
+        if type(decision_quarantined) is not bool:
+            raise ExtrinsicValueOverlayError(
+                "decision quarantined flag must be bool"
+            )
+        for candidate_index, candidate in enumerate(candidates):
+            if not isinstance(candidate, Mapping):
+                raise ExtrinsicValueOverlayError(
+                    "paired candidate must be an object"
+                )
+            choice_id = candidate.get("choice_id")
+            feature_values = candidate.get(
+                "critic_features",
+                candidate.get("features"),
+            )
+            outcome = candidate.get(horizon)
+            if (
+                not isinstance(choice_id, str)
+                or not choice_id
+                or not isinstance(outcome, Mapping)
+            ):
+                raise ExtrinsicValueOverlayError(
+                    "paired candidate identity/outcome is invalid"
+                )
+            candidate_quarantined = candidate.get(
+                "quarantined",
+                False,
+            )
+            if type(candidate_quarantined) is not bool:
+                raise ExtrinsicValueOverlayError(
+                    "candidate quarantined flag must be bool"
+                )
+            raw_status = outcome.get(
+                "status",
+                candidate.get("status", _ELIGIBLE_STATUS),
+            )
+            if raw_status in {"observed", "ok"}:
+                status = _ELIGIBLE_STATUS
+            elif raw_status == "censored":
+                status = "censored"
+            elif raw_status in {
+                "early_failure",
+                "early_death",
+                "early_death_before_decision",
+            } or (
+                raw_status == "failed"
+                and outcome.get("failure_reason")
+                in {
+                    "early_death",
+                    "early-death",
+                    "early_death_before_decision",
+                }
+            ):
+                status = "early_failure"
+            else:
+                status = "failed"
+            quarantined = (
+                decision_quarantined or candidate_quarantined
+            )
+            if status == _ELIGIBLE_STATUS and not quarantined:
+                try:
+                    target: float | None = normalizer.utility(outcome)
+                    rank: tuple[Any, ...] = primary_rank(
+                        outcome,
+                        horizon,
+                    )
+                except ValueError as exc:
+                    raise ExtrinsicValueOverlayError(
+                        "observed paired outcome is invalid"
+                    ) from exc
+            else:
+                target = None
+                rank = ("masked",)
+            examples.append(
+                OverlayExample(
+                    example_id=(
+                        f"{decision_id}:{choice_id}:{horizon}:"
+                        f"{candidate_index}"
+                    ),
+                    episode_id=episode_id,
+                    decision_seed=decision_seed,
+                    decision_id=decision_id,
+                    choice_id=choice_id,
+                    features=np.asarray(
+                        feature_values,
+                        dtype=np.float32,
+                    ),
+                    target=target,
+                    primary_rank=rank,
+                    status=status,
+                    quarantined=quarantined,
+                )
+            )
+    return examples
+
+
 def prepare_overlay_partitions(
     examples: Sequence[OverlayExample],
     *,
@@ -690,9 +844,22 @@ def prepare_overlay_partitions(
             "overlay feature dimensions must match"
         )
     episode_seeds: dict[str, set[str]] = defaultdict(set)
+    decision_groups: dict[str, tuple[str, str]] = {}
     decision_choices: set[tuple[str, str]] = set()
     for example in examples:
         episode_seeds[example.episode_id].add(example.decision_seed)
+        decision_group = (
+            example.episode_id,
+            example.decision_seed,
+        )
+        previous_group = decision_groups.setdefault(
+            example.decision_id,
+            decision_group,
+        )
+        if previous_group != decision_group:
+            raise ExtrinsicValueOverlayError(
+                "decision branches must share episode and decision seed"
+            )
         decision_choice = (example.decision_id, example.choice_id)
         if decision_choice in decision_choices:
             raise ExtrinsicValueOverlayError(
@@ -708,15 +875,15 @@ def prepare_overlay_partitions(
         )
         for episode_id, decision_seeds in episode_seeds.items()
     }
-    if len(group_ids) < 3:
-        if require_all_partitions:
-            raise ExtrinsicValueOverlayError(
-                "at least three episode/decision-seed groups are required"
-            )
+    if not require_all_partitions:
         assignments = {
             episode_id: "development_train"
             for episode_id in group_ids
         }
+    elif len(group_ids) < 3:
+        raise ExtrinsicValueOverlayError(
+            "at least three episode/decision-seed groups are required"
+        )
     else:
         split = freeze_episode_split(
             sorted(group_ids.values()),
@@ -1188,17 +1355,51 @@ def _validate_manifest(
         )
 
 
+def _reserve_artifact_paths(paths: Sequence[Path]) -> None:
+    """artifact sibling paths を create-once placeholder として予約する。
+
+    state/manifest の片方だけ予約に失敗した場合は全 placeholder を除去し、既存 artifact を上書きしない。
+    """
+    reserved: list[Path] = []
+    try:
+        for path in paths:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o644,
+            )
+            os.close(descriptor)
+            reserved.append(path)
+    except FileExistsError as exc:
+        for path in reserved:
+            path.unlink()
+        raise ExtrinsicValueOverlayError(
+            "overlay artifact already exists"
+        ) from exc
+    except OSError:
+        for path in reserved:
+            path.unlink()
+        raise
+
+
 def save_extrinsic_value_overlay(
     overlay: ExtrinsicValueOverlay,
     output_dir: Path,
     *,
     summary: OverlayTrainingSummary,
     paired_dataset_hash: str,
+    partitions: "OverlayPartitions",
 ) -> Path:
     """head state dict と source-bound canonical manifest を保存する。
 
     state を先に確定し manifest を commit marker として最後に置き、片方欠損を load で拒否する。
+    partitions.final_test_opened が True の場合は sealed_unopened manifest を書かない。
     """
+    if partitions.final_test_opened:
+        raise ExtrinsicValueOverlayError(
+            "cannot save overlay manifest with final_test_status='sealed_unopened' "
+            "after final test has been opened"
+        )
     overlay.assert_source_frozen()
     if summary.actor_invariance_hash != overlay.actor_invariance_hash:
         raise ExtrinsicValueOverlayError(
@@ -1209,18 +1410,35 @@ def save_extrinsic_value_overlay(
     destination.mkdir(parents=True, exist_ok=True)
     state_path = destination / STATE_FILENAME
     manifest_path = destination / MANIFEST_FILENAME
-    if state_path.exists() or manifest_path.exists():
-        raise ExtrinsicValueOverlayError(
-            "overlay artifact already exists"
+    _reserve_artifact_paths((state_path, manifest_path))
+    state_temp: Path | None = None
+    manifest_temp: Path | None = None
+    try:
+        state_descriptor, state_temp_name = tempfile.mkstemp(
+            prefix=".extrinsic-value-overlay-",
+            suffix=".pt.tmp",
+            dir=destination,
         )
-    state_descriptor, state_temp_name = tempfile.mkstemp(
-        prefix=".extrinsic-value-overlay-",
-        suffix=".pt.tmp",
-        dir=destination,
-    )
-    os.close(state_descriptor)
-    state_temp = Path(state_temp_name)
-    manifest_temp = destination / f".{MANIFEST_FILENAME}.tmp"
+        state_temp = Path(state_temp_name)
+        os.close(state_descriptor)
+        manifest_descriptor, manifest_temp_name = tempfile.mkstemp(
+            prefix=".extrinsic-value-overlay-manifest-",
+            suffix=".json.tmp",
+            dir=destination,
+        )
+        manifest_temp = Path(manifest_temp_name)
+        os.close(manifest_descriptor)
+    except OSError:
+        if state_temp is not None and state_temp.exists():
+            state_temp.unlink()
+        if manifest_temp is not None and manifest_temp.exists():
+            manifest_temp.unlink()
+        state_path.unlink(missing_ok=True)
+        manifest_path.unlink(missing_ok=True)
+        raise
+    assert state_temp is not None
+    assert manifest_temp is not None
+    published = False
     try:
         th.save(
             {
@@ -1282,11 +1500,17 @@ def save_extrinsic_value_overlay(
         )
         os.replace(state_temp, state_path)
         os.replace(manifest_temp, manifest_path)
+        published = True
     finally:
         if state_temp.exists():
             state_temp.unlink()
         if manifest_temp.exists():
             manifest_temp.unlink()
+        if not published:
+            if state_path.exists():
+                state_path.unlink()
+            if manifest_path.exists():
+                manifest_path.unlink()
     return manifest_path
 
 

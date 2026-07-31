@@ -258,6 +258,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.output_dir,
             summary=summary,
             paired_dataset_hash=dataset_hash,
+            partitions=partitions,
         )
         print(
             json.dumps(
