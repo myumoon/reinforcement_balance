@@ -210,6 +210,55 @@ python -m pytest tests\survivors\ -q --tb=short
 formal corpus（300 decisions / 30 episodes 以上）と formal gate 達成は実環境収集後に行う。
 UE5 build / LLT: 未実行（Windows 専用）。
 
+## Survivors extrinsic utility value overlay
+
+raw PPO critic が paired gate を満たさない場合は
+`train_survivors_value_overlay.py` で source-bound critic latent dataset から utility head を
+学習する。source policy 全体（actor、feature extractor、critic LSTM を含む）は freeze
+され、optimizer には `Linear(latent, 128) → GELU → Linear(128, 1)` の head parameter
+だけが登録される。loss は `Huber + 0.5 * pairwise logistic`、Adam は
+`lr=1e-3` / `weight_decay=1e-4`、上限100 epoch / patience 10で、development validation
+NDCG が最良の checkpoint だけを保存する。
+
+```powershell
+Set-Location "<PROJECT_ROOT>\Tools\Training"
+& 'C:\Users\neko\anaconda3\envs\reinbalance\python.exe' `
+  train_survivors_value_overlay.py `
+  --source-manifest <ARTIFACTS_DIR>\value_source_descriptor.json `
+  --dataset <ARTIFACTS_DIR>\extrinsic-value-training-set.json `
+  --output-dir <ARTIFACTS_DIR>\extrinsic-value-overlay
+```
+
+dataset split は episode/decision seed group で固定し、target mean/std は
+`development_train` だけから fit する。censored、early failure、quarantine branch は
+loss から除外し、primary tie は pairwise loss に使用しない。`final_test` は学習・
+checkpoint 選択では開封せず、後続 revalidation の method lock 後だけ利用する。
+
+出力は `extrinsic_value_overlay.pt` と
+`extrinsic_value_overlay_manifest.json` の組である。manifest は source model、
+policy-state schema、VecNormalize、context shape、actor invariance、paired dataset、
+state dict hash、target normalization、best validation NDCG を束縛する。片方欠損、
+hash 不一致、別 source/context ではロードを拒否する。
+
+choice probe/collector は任意の
+`--value-overlay <overlay-manifest-or-directory>` を受け取る。未指定時は従来の raw
+critic path をそのまま使用する。
+
+対象回帰テストは Windows conda env で skip なしに実行する。
+
+```powershell
+Set-Location "<PROJECT_ROOT>\Tools\Training"
+& 'C:\Users\neko\anaconda3\envs\reinbalance\python.exe' -m pytest `
+  tests\survivors\test_extrinsic_value_overlay.py `
+  tests\survivors\test_train_value_overlay.py -q --tb=short
+& 'C:\Users\neko\anaconda3\envs\reinbalance\python.exe' -m pytest `
+  tests\survivors\ -q --tb=short
+```
+
+UE5 build / LLT: 未実行（Windows 専用）。実データによる promotion gate、overlay
+reliability calibration、raw critic 比較、label release verdict は後続 revalidation
+フェーズで実施する。
+
 ## 関連ドキュメント
 
 - UE5 との通信仕様: [`ue5_env.md`](ue5_env.md)

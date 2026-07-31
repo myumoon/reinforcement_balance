@@ -22,7 +22,10 @@ from games.survivors.value_choice_collector import (
     CollectorError,
 )
 from games.survivors.value_choice_dataset import DatasetError, DatasetWriter
-from games.survivors.value_scorer import ValueScorer
+from games.survivors.value_scorer import (
+    ValueScorer,
+    add_value_overlay_argument,
+)
 
 
 class CollectionCliError(ValueError):
@@ -80,6 +83,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--connect-timeout", type=int, default=120)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--max-environment-steps", type=int)
+    add_value_overlay_argument(parser)
     return parser
 
 
@@ -202,7 +206,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = _parser().parse_args(argv)
         seeds = _validate_args(args)
         artifact_store = _external_store(args.artifact_store)
-        scorer = ValueScorer.load(args.manifest, device=args.device)
+        scorer = ValueScorer.load(
+            args.manifest,
+            device=args.device,
+            value_overlay=args.value_overlay,
+        )
         source_identity = scorer.source.descriptor["identity_sha256"]
         dataset_id = _dataset_id(args.dataset_id, source_identity, seeds)
         dataset_root = artifact_store / dataset_id
