@@ -7,12 +7,16 @@ calibration fit・method selection から final episode を fail-closed で隔�
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 
 import pytest
 
+import validate_survivors_value_teacher as validation_cli
 from games.survivors.teacher_validation_split import (
     SplitContractError,
     assert_calibration_lineage,
+    commit_frozen_episode_split,
     freeze_episode_split,
     validate_frozen_split,
 )
@@ -35,6 +39,96 @@ def test_episode_split_is_deterministic_disjoint_and_frozen() -> None:
         "development_validation",
         "final_test",
     }
+
+
+def test_frozen_split_commit_is_create_once(tmp_path: Path) -> None:
+    """byte-identical split の再利用だけを許し、別 seed の上書きを拒否する。
+
+    拒否後も初回 artifact bytes と final_test assignment が変わらないことを確認する。
+    """
+    episodes = [f"episode-{index:03d}" for index in range(60)]
+    destination = tmp_path / "teacher_validation_split.json"
+    first = freeze_episode_split(episodes, seed="phase6-a")
+    changed = freeze_episode_split(episodes, seed="phase6-b")
+    commit_frozen_episode_split(destination, first)
+    initial_bytes = destination.read_bytes()
+    commit_frozen_episode_split(destination, copy.deepcopy(first))
+    assert destination.read_bytes() == initial_bytes
+    with pytest.raises(SplitContractError, match="cannot be overwritten"):
+        commit_frozen_episode_split(destination, changed)
+    assert destination.read_bytes() == initial_bytes
+    stored = json.loads(destination.read_text(encoding="utf-8"))
+    assert {
+        episode
+        for episode, partition in stored["episode_partitions"].items()
+        if partition == "final_test"
+    } == {
+        episode
+        for episode, partition in first["episode_partitions"].items()
+        if partition == "final_test"
+    }
+
+
+def test_cli_split_rewrite_fails_before_child_artifact_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同じ output directory への別 seed CLI 再実行を split commit で停止する。
+
+    初回の split・scale・reliability・report・verdict bytes を一件も変更させない。
+    """
+    episodes = [f"episode-{index:03d}" for index in range(60)]
+    output_dir = tmp_path / "artifacts"
+
+    def fake_pipeline(**kwargs) -> dict:
+        """CLI persistence 順序だけを検証する最小 artifacts を返す。
+
+        split seed 以外の計算を省き、create-once failure が子 artifact 書込み前かを観測する。
+        """
+        split = freeze_episode_split(episodes, seed=kwargs["split_seed"])
+        return {
+            "split": split,
+            "score_scale": {"identity": kwargs["split_seed"]},
+            "reliability": {"identity": kwargs["split_seed"]},
+            "report": {"identity": kwargs["split_seed"]},
+            "verdict": {
+                "identity": kwargs["split_seed"],
+                "status": "FAIL",
+            },
+        }
+
+    monkeypatch.setattr(validation_cli, "_load_json", lambda *_args: {})
+    monkeypatch.setattr(
+        validation_cli,
+        "run_validation_pipeline",
+        fake_pipeline,
+    )
+    monkeypatch.setattr(
+        validation_cli,
+        "commit_teacher_score_scale",
+        validation_cli._write_canonical,
+    )
+    common_args = [
+        "--corpus",
+        str(tmp_path / "corpus.json"),
+        "--source-descriptor",
+        str(tmp_path / "source.json"),
+        "--integration-fidelity-verdict",
+        str(tmp_path / "fidelity.json"),
+        "--output-dir",
+        str(output_dir),
+    ]
+    assert validation_cli.main(common_args + ["--split-seed", "seed-a"]) == 2
+    initial = {
+        path.name: path.read_bytes()
+        for path in sorted(output_dir.iterdir())
+    }
+    with pytest.raises(SplitContractError, match="cannot be overwritten"):
+        validation_cli.main(common_args + ["--split-seed", "seed-b"])
+    assert {
+        path.name: path.read_bytes()
+        for path in sorted(output_dir.iterdir())
+    } == initial
 
 
 def test_tampered_assignment_or_identity_is_rejected() -> None:
@@ -125,4 +219,3 @@ def test_development_lineage_passes_and_records_final_exclusions() -> None:
     )
     assert lineage["split_identity"] == split["split_identity"]
     assert lineage["excluded_final_episode_ids"]
-

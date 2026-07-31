@@ -564,18 +564,17 @@ def quarantine_branch_records(
 
 
 def effective_replication_count(records: Sequence[Mapping[str, Any]]) -> int:
-    """unique decision/replication-key/stream pair の数を返す。
+    """unique decision/stream pair の数を返す。
 
-    candidate 行数や同一 stream の duplicate replay を replication 数へ加算しない。
+    replication key が異なっても同じ stream へ衝突した replay は一標本だけに数える。
     """
-    identities: set[tuple[Any, Any, Any]] = set()
+    identities: set[tuple[Any, Any]] = set()
     for row in records:
         if row.get("status", "ok") not in _ACCEPTED_BRANCH_STATUSES:
             continue
         identities.add(
             (
                 row.get("decision_id"),
-                row.get("replication_key"),
                 row.get("stream_sha256"),
             )
         )

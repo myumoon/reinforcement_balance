@@ -6,10 +6,15 @@ calibration・method selection へ final lineage が入った時点で fail-clos
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
-from reinbalance_survivors_contracts.canonical_json import canonical_hash
+from reinbalance_survivors_contracts.canonical_json import (
+    canonical_hash,
+    canonical_json_bytes,
+)
 
 SCHEMA_VERSION = "survivors.teacher_validation_split.v1"
 DEVELOPMENT_PARTITIONS = frozenset(
@@ -167,6 +172,39 @@ def validate_frozen_split(split: Any) -> None:
         raise SplitContractError("split identity mismatch")
 
 
+def commit_frozen_episode_split(
+    path: Path,
+    split: Mapping[str, Any],
+) -> None:
+    """frozen split を create-once の canonical artifact として保存する。
+
+    既存 bytes が完全一致する再実行だけを許し、seed・assignment・identity の変更を拒否する。
+    """
+    validate_frozen_split(split)
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    encoded = canonical_json_bytes(dict(split)) + b"\n"
+    try:
+        descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o644,
+        )
+    except FileExistsError:
+        if destination.read_bytes() != encoded:
+            raise SplitContractError(
+                "frozen episode split cannot be overwritten"
+            )
+        return
+    try:
+        written = os.write(descriptor, encoded)
+        if written != len(encoded):
+            raise OSError("short frozen split write")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _validate_lineage_refs(
     split: Mapping[str, Any],
     refs: Sequence[Mapping[str, Any]],
@@ -231,4 +269,3 @@ def assert_calibration_lineage(
         "used_outcome_refs": sorted(used_outcomes),
         "excluded_final_episode_ids": excluded_final,
     }
-

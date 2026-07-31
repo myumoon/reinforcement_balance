@@ -262,7 +262,7 @@ def _ndcg_at_3(
 ) -> float:
     """truth ties を同 gain とする NDCG@3 を返す。
 
-    teacher tie 内の順序は truth gain が同じとき不変で、choice ID を評価値へ混入させない。
+    teacher tie block は占有順位の discount を平均し、候補入力順を評価値へ混入させない。
     """
     count = len(candidates)
     wins = []
@@ -286,10 +286,28 @@ def _ndcg_at_3(
     gains = [2.0 ** (len(distinct) - dense_rank[value]) - 1.0 for value in wins]
     teacher_order = sorted(
         range(count),
-        key=lambda index: teacher_scores[index],
-        reverse=True,
+        key=lambda index: (
+            -teacher_scores[index],
+            str(candidates[index].get("choice_id", "")),
+        ),
     )
-    ideal_order = sorted(range(count), key=lambda index: gains[index], reverse=True)
+    teacher_blocks: list[list[int]] = []
+    for index in teacher_order:
+        if (
+            not teacher_blocks
+            or teacher_scores[teacher_blocks[-1][0]] - teacher_scores[index]
+            > TEACHER_TIE_EPSILON_Z
+        ):
+            teacher_blocks.append([index])
+        else:
+            teacher_blocks[-1].append(index)
+    ideal_order = sorted(
+        range(count),
+        key=lambda index: (
+            -gains[index],
+            str(candidates[index].get("choice_id", "")),
+        ),
+    )
 
     def dcg(order: Sequence[int]) -> float:
         """上位3候補の discounted cumulative gain を計算する。
@@ -301,8 +319,28 @@ def _ndcg_at_3(
             for position, index in enumerate(order[:3])
         )
 
+    def tie_aware_dcg(blocks: Sequence[Sequence[int]]) -> float:
+        """teacher tie block の全順列に対する期待 DCG@3 を計算する。
+
+        cutoff をまたぐ tie も block 全候補の平均 gain で評価し、列挙順依存を除く。
+        """
+        total = 0.0
+        position = 0
+        for block in blocks:
+            used = min(len(block), max(0, 3 - position))
+            if used:
+                mean_gain = float(np.mean([gains[index] for index in block]))
+                total += mean_gain * sum(
+                    1.0 / math.log2(rank + 2.0)
+                    for rank in range(position, position + used)
+                )
+            position += len(block)
+            if position >= 3:
+                break
+        return total
+
     ideal = dcg(ideal_order)
-    return 1.0 if ideal <= 0.0 else dcg(teacher_order) / ideal
+    return 1.0 if ideal <= 0.0 else tie_aware_dcg(teacher_blocks) / ideal
 
 
 def _decision_metrics(

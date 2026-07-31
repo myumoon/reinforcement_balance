@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from games.survivors.choice_branch_rollout import (
     validate_replay_observation,
     validate_rng_seam,
 )
+from validate_survivors_value_teacher import _validate_branch_evidence
 
 
 def _trace() -> dict:
@@ -224,6 +226,136 @@ def test_same_stream_duplicate_is_not_effective_replication() -> None:
     assert effective_replication_count(records + duplicate) == 1
 
 
+def test_same_stream_with_different_keys_is_one_effective_replication() -> None:
+    """異なる replication key が同じ stream へ衝突しても一標本だけ数える。
+
+    seam の stream-collision FAIL は維持しつつ effective sample の水増しを防止する。
+    """
+    records = []
+    for replication_index in (0, 1):
+        for candidate in ("a", "b"):
+            records.append(
+                _record(
+                    candidate=candidate,
+                    replication_index=replication_index,
+                    stream_sha256="1" * 64,
+                    outcome=float(replication_index),
+                )
+            )
+    assert len({row["replication_key"] for row in records}) == 2
+    assert effective_replication_count(records) == 1
+    verdict = validate_rng_seam(records)
+    assert verdict["passed"] is False
+    assert "stream-collision" in verdict["blocking_reasons"]
+
+
+def _branch_decisions(count: int = 1) -> list[dict]:
+    """RNG evidence coverage 用の decision/outcome lineage fixture を作る。
+
+    short/full ref を branch record と一意に照合できる最小構造だけを返す。
+    """
+    decisions = []
+    for decision_index in range(count):
+        decision_id = f"decision-{decision_index}"
+        decisions.append(
+            {
+                "decision_id": decision_id,
+                "candidates": [
+                    {
+                        "choice_id": candidate,
+                        "short": {
+                            "outcome_ref": f"{decision_id}|{candidate}|short"
+                        },
+                        "full": {
+                            "outcome_ref": f"{decision_id}|{candidate}|full"
+                        },
+                    }
+                    for candidate in ("a", "b")
+                ],
+            }
+        )
+    return decisions
+
+
+def _covered_branch_records(decision_id: str) -> list[dict]:
+    """一 decision の全候補を覆う有効 branch records を作る。
+
+    candidate 共通 stream/draw trace と corpus outcome refs を同じ replication に束縛する。
+    """
+    records = []
+    for candidate in ("a", "b"):
+        row = _record(
+            candidate=candidate,
+            replication_index=0,
+            stream_sha256="1" * 64,
+            outcome=0.5,
+        )
+        row["decision_id"] = decision_id
+        row["outcome_refs"] = {
+            horizon: f"{decision_id}|{candidate}|{horizon}"
+            for horizon in ("short", "full")
+        }
+        records.append(row)
+    return records
+
+
+def test_complete_rng_evidence_has_no_release_blocker() -> None:
+    """全 candidate と outcome lineage を覆う branch evidence を受理する。
+
+    fail-closed 検査が証跡のある一 replication まで常時拒否しない対照例を固定する。
+    """
+    evidence = _validate_branch_evidence(
+        _branch_decisions(),
+        _covered_branch_records("decision-0"),
+    )
+    assert evidence["accepted_branch_count"] == 2
+    assert evidence["effective_replications"] == 1
+    assert evidence["blocking_reasons"] == []
+
+
+@pytest.mark.parametrize("branch_records", [None, []])
+def test_missing_or_empty_rng_evidence_fails_closed(branch_records) -> None:
+    """branch_records の欠落と空配列を同じ release blocker にする。
+
+    quarantine 数がゼロでも RNG seam 証跡なしの corpus を PASS へ進めない。
+    """
+    evidence = _validate_branch_evidence(
+        _branch_decisions(),
+        branch_records,
+    )
+    assert evidence["effective_replications"] == 0
+    assert evidence["blocking_reasons"] == ["missing-branch-records"]
+
+
+def test_all_quarantined_rng_evidence_fails_closed() -> None:
+    """全 branch が quarantine された corpus を effective zero として拒否する。
+
+    timeout 行が存在するだけでは seam coverage の証拠にならないことを確認する。
+    """
+    records = _covered_branch_records("decision-0")
+    for row in records:
+        row["status"] = "timeout"
+    evidence = _validate_branch_evidence(_branch_decisions(), records)
+    assert evidence["accepted_branch_count"] == 0
+    assert evidence["quarantine_count"] == 2
+    assert "no-effective-branches" in evidence["blocking_reasons"]
+
+
+def test_partial_decision_coverage_and_unbound_outcome_fail_closed() -> None:
+    """一部 decision だけの branch evidence と outcome ref 詐称を拒否する。
+
+    decision/candidate/replication coverage と short/full lineage を同時に検査する。
+    """
+    records = _covered_branch_records("decision-0")
+    records[0]["outcome_refs"]["short"] = "unbound-outcome"
+    evidence = _validate_branch_evidence(_branch_decisions(count=2), records)
+    assert "decision-coverage-incomplete" in evidence["blocking_reasons"]
+    assert "candidate-replication-coverage-incomplete" in evidence[
+        "blocking_reasons"
+    ]
+    assert "outcome-lineage-mismatch" in evidence["blocking_reasons"]
+
+
 def test_missing_candidate_branch_is_detected_from_expected_count() -> None:
     """status 自己申告が ok でも candidate branch 欠落を quarantine する。
 
@@ -379,3 +511,52 @@ def test_survivors_step_info_exposes_read_only_outcome_metrics() -> None:
     ):
         assert field in source
     assert "base_reward + shaped + hp_penalty" in source
+
+
+def test_changed_python_files_have_two_stage_japanese_comments() -> None:
+    """全変更 Python の module・class・全関数に日本語2段 docstring を要求する。
+
+    nested function と forwarding method も AST で列挙し、一段コメントの再混入を防ぐ。
+    """
+    training_root = Path(__file__).resolve().parents[2]
+    relative_paths = (
+        "games/survivors/choice_branch_rollout.py",
+        "games/survivors/survivors_env.py",
+        "games/survivors/teacher_reliability.py",
+        "games/survivors/teacher_score_scale.py",
+        "games/survivors/teacher_validation.py",
+        "games/survivors/teacher_validation_split.py",
+        "tests/survivors/test_choice_branch_rollout.py",
+        "tests/survivors/test_teacher_reliability.py",
+        "tests/survivors/test_teacher_score_scale.py",
+        "tests/survivors/test_teacher_validation.py",
+        "tests/survivors/test_teacher_validation_split.py",
+        "validate_survivors_value_teacher.py",
+    )
+    node_types = (
+        ast.Module,
+        ast.ClassDef,
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+    )
+    for relative_path in relative_paths:
+        tree = ast.parse(
+            (training_root / relative_path).read_text(encoding="utf-8")
+        )
+        for node in ast.walk(tree):
+            if not isinstance(node, node_types):
+                continue
+            docstring = ast.get_docstring(node, clean=False)
+            assert docstring is not None, (
+                f"{relative_path}:{getattr(node, 'lineno', 1)} missing docstring"
+            )
+            assert "\n\n" in docstring, (
+                f"{relative_path}:{getattr(node, 'lineno', 1)} needs two stages"
+            )
+            forbidden_label = "初心者向け" + ":"
+            assert forbidden_label not in docstring
+            assert any(
+                "\u3040" <= character <= "\u30ff"
+                or "\u4e00" <= character <= "\u9fff"
+                for character in docstring
+            )

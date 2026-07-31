@@ -6,6 +6,8 @@ episode cluster 単位で評価する。
 
 from __future__ import annotations
 
+import copy
+
 from games.survivors.teacher_validation import (
     GATE_THRESHOLDS,
     OutcomeNormalizer,
@@ -107,6 +109,50 @@ def test_primary_ties_receive_tie_aware_credit() -> None:
     assert report["horizons"]["short"]["pairwise_agreement"] == 1.0
 
 
+def test_all_metrics_are_invariant_to_tied_candidate_permutation() -> None:
+    """teacher tie を含む候補順を変えても short/full の全指標を固定する。
+
+    NDCG@3 は tie block の平均 discount を使い、stable sort の入力順へ依存させない。
+    """
+    original = _decision(0)
+    original["candidates"][0]["teacher_score"] = 3.0
+    original["candidates"][1]["teacher_score"] = 3.0
+    permuted = copy.deepcopy(original)
+    permuted["candidates"] = [
+        permuted["candidates"][1],
+        permuted["candidates"][0],
+        permuted["candidates"][2],
+    ]
+    normalizers = {
+        horizon: OutcomeNormalizer.fit(
+            [original],
+            horizon,
+            partition_id="dev-train",
+        )
+        for horizon in ("short", "full")
+    }
+    first = evaluate_teacher(
+        [original],
+        normalizers,
+        bootstrap_resamples=20,
+    )
+    second = evaluate_teacher(
+        [permuted],
+        normalizers,
+        bootstrap_resamples=20,
+    )
+    for horizon in ("short", "full"):
+        for metric in (
+            "top1_agreement",
+            "pairwise_agreement",
+            "mean_ndcg_at_3",
+            "median_normalized_regret",
+        ):
+            assert first["horizons"][horizon][metric] == second["horizons"][
+                horizon
+            ][metric]
+
+
 def test_ground_truth_utility_excludes_training_reward_terms() -> None:
     """NovelD/shaped/HP penalty の変更で ground-truth utility が変わらない。
 
@@ -155,4 +201,3 @@ def test_gate_cannot_be_manually_overridden_and_binds_subject() -> None:
     assert verdict["subject"]["source_descriptor_identity"] == source_identity
     assert source_identity == "a" * 64
     assert GATE_THRESHOLDS["top1_agreement"] == 0.65
-

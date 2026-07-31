@@ -22,6 +22,7 @@ from reinbalance_survivors_contracts.fidelity_verdict import (
 )
 
 from games.survivors.choice_branch_rollout import (
+    effective_replication_count,
     quarantine_branch_records,
     validate_rng_seam,
 )
@@ -36,7 +37,10 @@ from games.survivors.teacher_validation import (
     evaluate_teacher,
     make_label_release_verdict,
 )
-from games.survivors.teacher_validation_split import freeze_episode_split
+from games.survivors.teacher_validation_split import (
+    commit_frozen_episode_split,
+    freeze_episode_split,
+)
 from games.survivors.value_source_descriptor import (
     ValueSourceDescriptorError,
     validate_value_source_descriptor,
@@ -293,6 +297,151 @@ def _reliability_rows(
     return rows
 
 
+def _expected_branch_lineage(
+    decisions: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, dict[str, str]]]:
+    """corpus decisions から candidate・short/full outcome lineage を列挙する。
+
+    明示 outcome_ref がない旧 corpus も reliability と同じ決定的 fallback ref へ束縛する。
+    """
+    expected: dict[str, dict[str, dict[str, str]]] = {}
+    for decision in decisions:
+        decision_id = decision.get("decision_id")
+        candidates = decision.get("candidates")
+        if (
+            not isinstance(decision_id, str)
+            or not decision_id
+            or decision_id in expected
+            or not isinstance(candidates, list)
+            or len(candidates) < 2
+        ):
+            raise TeacherPipelineError("branch lineage decisions are invalid")
+        candidate_refs: dict[str, dict[str, str]] = {}
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                raise TeacherPipelineError("branch lineage candidate is invalid")
+            choice_id = candidate.get("choice_id")
+            if (
+                not isinstance(choice_id, str)
+                or not choice_id
+                or choice_id in candidate_refs
+            ):
+                raise TeacherPipelineError("branch lineage choice IDs must be unique")
+            horizon_refs: dict[str, str] = {}
+            for horizon in ("short", "full"):
+                outcome = candidate.get(horizon)
+                if not isinstance(outcome, Mapping):
+                    raise TeacherPipelineError(
+                        "branch lineage outcomes are required"
+                    )
+                outcome_ref = outcome.get(
+                    "outcome_ref",
+                    f"{decision_id}|{choice_id}|{horizon}",
+                )
+                if not isinstance(outcome_ref, str) or not outcome_ref:
+                    raise TeacherPipelineError(
+                        "branch lineage outcome_ref must be non-empty"
+                    )
+                horizon_refs[horizon] = outcome_ref
+            candidate_refs[choice_id] = horizon_refs
+        expected[decision_id] = candidate_refs
+    return expected
+
+
+def _validate_branch_evidence(
+    decisions: Sequence[Mapping[str, Any]],
+    branch_records: Any,
+) -> dict[str, Any]:
+    """RNG seam evidence の非空性・coverage・outcome lineage を fail-closed 検証する。
+
+    欠落・全 quarantine・部分 decision/candidate/replication は blocker として verdict へ渡す。
+    """
+    blocking: set[str] = set()
+    empty_seam = {
+        "passed": False,
+        "blocking_reasons": ["no-effective-branches"],
+        "zero_outcome_variance": False,
+        "effective_replications": 0,
+    }
+    if not isinstance(branch_records, list) or not branch_records:
+        return {
+            "accepted_branch_count": 0,
+            "quarantine_count": 0,
+            "effective_replications": 0,
+            "seam": empty_seam,
+            "blocking_reasons": ["missing-branch-records"],
+        }
+    if any(not isinstance(row, Mapping) for row in branch_records):
+        return {
+            "accepted_branch_count": 0,
+            "quarantine_count": len(branch_records),
+            "effective_replications": 0,
+            "seam": empty_seam,
+            "blocking_reasons": ["malformed-branch-record"],
+        }
+
+    expected = _expected_branch_lineage(decisions)
+    accepted, quarantined = quarantine_branch_records(branch_records)
+    seam = validate_rng_seam(accepted) if accepted else empty_seam
+    blocking.update(seam["blocking_reasons"])
+    effective = effective_replication_count(accepted)
+    if effective == 0:
+        blocking.add("no-effective-branches")
+
+    covered: dict[tuple[str, int], set[str]] = {}
+    covered_decisions: set[str] = set()
+    for row in accepted:
+        decision_id = row.get("decision_id")
+        candidate_id = row.get("candidate_id")
+        replication_index = row.get("replication_index")
+        if (
+            decision_id not in expected
+            or candidate_id not in expected.get(decision_id, {})
+        ):
+            blocking.add("decision-candidate-lineage-mismatch")
+            continue
+        if (
+            isinstance(replication_index, bool)
+            or not isinstance(replication_index, int)
+            or replication_index < 0
+        ):
+            blocking.add("replication-coverage-incomplete")
+            continue
+        outcome_refs = row.get("outcome_refs")
+        if (
+            not isinstance(outcome_refs, Mapping)
+            or set(outcome_refs) != {"short", "full"}
+            or dict(outcome_refs) != expected[decision_id][candidate_id]
+        ):
+            blocking.add("outcome-lineage-mismatch")
+        covered.setdefault((decision_id, replication_index), set()).add(
+            candidate_id
+        )
+        covered_decisions.add(decision_id)
+
+    if covered_decisions != set(expected):
+        blocking.add("decision-coverage-incomplete")
+    for decision_id, candidate_refs in expected.items():
+        replication_groups = [
+            candidate_ids
+            for (group_decision_id, _), candidate_ids in covered.items()
+            if group_decision_id == decision_id
+        ]
+        if (
+            not replication_groups
+            or any(group != set(candidate_refs) for group in replication_groups)
+        ):
+            blocking.add("candidate-replication-coverage-incomplete")
+
+    return {
+        "accepted_branch_count": len(accepted),
+        "quarantine_count": len(quarantined),
+        "effective_replications": effective,
+        "seam": seam,
+        "blocking_reasons": sorted(blocking),
+    }
+
+
 def run_validation_pipeline(
     *,
     corpus: Mapping[str, Any],
@@ -408,18 +557,15 @@ def run_validation_pipeline(
         for item in reliability["slices"]
         if item["release_blocker"]
     )
-    branch_records = corpus.get("branch_records", [])
-    quarantine_count = 0
-    if branch_records:
-        if not isinstance(branch_records, list):
-            raise TeacherPipelineError("branch_records must be a list")
-        accepted, quarantined = quarantine_branch_records(branch_records)
-        quarantine_count = len(quarantined)
-        seam = validate_rng_seam(accepted)
-        if not seam["passed"]:
-            release_blockers.extend(
-                f"rng-seam:{reason}" for reason in seam["blocking_reasons"]
-            )
+    branch_evidence = _validate_branch_evidence(
+        decisions,
+        corpus.get("branch_records"),
+    )
+    quarantine_count = branch_evidence["quarantine_count"]
+    release_blockers.extend(
+        f"rng-evidence:{reason}"
+        for reason in branch_evidence["blocking_reasons"]
+    )
 
     scaled_final = _apply_teacher_scale(partitions["final_test"], score_scale)
     report = evaluate_teacher(
@@ -431,6 +577,7 @@ def run_validation_pipeline(
     )
     report["release_blockers"] = sorted(set(release_blockers))
     report["final_test_split_identity"] = split["split_identity"]
+    report["rng_evidence"] = branch_evidence
     verdict = make_label_release_verdict(
         report=report,
         source_descriptor_identity=source_identity,
@@ -499,7 +646,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         bootstrap_resamples=args.bootstrap_resamples,
     )
     output_dir = Path(args.output_dir)
-    _write_canonical(output_dir / "teacher_validation_split.json", artifacts["split"])
+    commit_frozen_episode_split(
+        output_dir / "teacher_validation_split.json",
+        artifacts["split"],
+    )
     commit_teacher_score_scale(
         output_dir / "teacher_score_scale.json",
         artifacts["score_scale"],

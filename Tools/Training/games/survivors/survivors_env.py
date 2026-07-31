@@ -31,7 +31,10 @@ class SurvivorsEnv(BaseUE5Env):
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8767, connect_timeout: int = 120,
                  shaping_weight: float = 1.0, frame_skip: int = 1):
-        """HTTP 接続・schema offsets・action/observation spaces を初期化する。"""
+        """HTTP 接続・schema offsets・action/observation spaces を初期化する。
+
+        server 接続完了後に live schema を受け取り、固定次元の Gym 環境として準備する。
+        """
         super().__init__(host=host, port=port, connect_timeout=connect_timeout, frame_skip=frame_skip)
         self.action_space = gym.spaces.Discrete(_NUM_ACTIONS)
         self._expected_schema_hash: str | None = None
@@ -48,7 +51,10 @@ class SurvivorsEnv(BaseUE5Env):
         self._wait_for_server()
 
     def _on_server_connected(self):
-        """live observation schema を取得し、segment offsets を固定する。"""
+        """live observation schema を取得し、segment offsets を固定する。
+
+        UE5 producer が公開した segment 順から observation space と名前別 offset を構築する。
+        """
         schema = self._get_json("/obs_schema", timeout=10, retries=3)
 
         total_dim = schema["total_dim"]
@@ -68,7 +74,10 @@ class SurvivorsEnv(BaseUE5Env):
         print(f"[INFO]   segments: {segments}")
 
     def _on_reset(self, data: dict):
-        """reset response の observation schema binding を検証する。"""
+        """reset response の observation schema binding を検証する。
+
+        接続時 schema と reset 時 hash の不一致を observation 解釈前に拒否する。
+        """
         received_hash = data.get("obs_schema_hash", "")
         if self._expected_schema_hash and received_hash != self._expected_schema_hash:
             raise RuntimeError(
@@ -78,13 +87,19 @@ class SurvivorsEnv(BaseUE5Env):
             )
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
-        """episode を reset し、HP penalty 用の直前 observation を更新する。"""
+        """episode を reset し、HP penalty 用の直前 observation を更新する。
+
+        親環境の reset semantics を保ち、次 step の差分計算用 state だけを保存する。
+        """
         obs, info = super().reset(seed=seed, options=options)
         self._prev_obs = obs
         return obs, info
 
     def step(self, action):
-        """通常 reward semantics を保ったまま rollout outcome info を追加する。"""
+        """通常 reward semantics を保ったまま rollout outcome info を追加する。
+
+        reward 計算経路は変更せず、teacher 検証用 metrics を read-only info として合成する。
+        """
         obs, base_reward, done, truncated, ue_info = super().step(action)
 
         # 永続 HP ダメージペナルティ（敵接触シグナルを強化）
@@ -120,20 +135,32 @@ class SurvivorsEnv(BaseUE5Env):
         return obs, base_reward + shaped + hp_penalty, done, truncated, info
 
     def _extract_training_metrics(self, obs: np.ndarray) -> dict:
-        """observation から既存 training diagnostics を読み出す。"""
+        """observation から既存 training diagnostics を読み出す。
+
+        live schema offsets を優先し、旧 schema の固定 offset は後方互換 fallback に限定する。
+        """
         def offset(name: str, default: int) -> int:
-            """segment name の offset を後方互換 default 付きで返す。"""
+            """segment name の offset を後方互換 default 付きで返す。
+
+            schema に名前がなければ呼び出し側指定の旧 offset をそのまま利用する。
+            """
             return self._offsets.get(name, default)
 
         def schema_dim(name: str, default: int) -> int:
-            """セグメント名から次元数を取得する。obs_schema が利用可能な場合に使用。"""
+            """セグメント名から次元数を取得する。
+
+            live obs_schema に対象がない場合は旧 producer 向け既定次元を返す。
+            """
             for seg in self._obs_schema:
                 if seg["name"] == name:
                     return seg["dim"]
             return default
 
         def nearest_distance(segment_name: str, default_offset: int, default_count: int) -> float | None:
-            """セグメント名ベースで最近傍距離を計算する（obs インデックスハードコードを廃止）。"""
+            """セグメント名ベースで最近傍距離を計算する。
+
+            entity の dx/dy pair を走査し、未使用のゼロ埋め slot を距離候補から除外する。
+            """
             start = offset(segment_name, default_offset)
             if start < 0:
                 # セグメントが obs_schema に存在しない場合はスキップ
@@ -251,27 +278,45 @@ class SurvivorsEnv(BaseUE5Env):
         }
 
     def get_obs_schema(self) -> list:
-        """SubprocVecEnv の env_method 経由での取得用。"""
+        """現在の observation schema segments を返す。
+
+        SubprocVecEnv の env_method 経由でも同じ schema snapshot を取得できるようにする。
+        """
         return self._obs_schema
 
     def get_offsets(self) -> dict:
-        """SubprocVecEnv の env_method 経由での取得用。"""
+        """現在の observation segment offsets を返す。
+
+        vectorized environment の外側から diagnostics の位置を確認するために公開する。
+        """
         return self._offsets
 
     def get_obs_schema_hash(self) -> str:
-        """全 env 間の obs_schema 一致確認用。"""
+        """接続中 producer の observation schema hash を返す。
+
+        hash 未初期化時は空文字とし、全 env 間の schema 一致確認に利用する。
+        """
         return self._expected_schema_hash or ""
 
     def get_shaping_weight(self) -> float:
-        """SubprocVecEnv / マルチenv の env_method 経由での取得用。"""
+        """現在の reward shaping weight を返す。
+
+        SubprocVecEnv / 複数 env の annealing 状態を外側から収集できるようにする。
+        """
         return self.shaping_weight
 
     def set_shaping_weight(self, weight: float) -> None:
-        """SubprocVecEnv / マルチenv の env_method 経由での設定用。"""
+        """reward shaping weight を更新する。
+
+        SubprocVecEnv / 複数 env へ同じ annealing 値を配布する入口として使う。
+        """
         self.shaping_weight = weight
 
     def clear_reward_fn(self) -> None:
-        """SubprocVecEnv / マルチenv の env_method 経由でアニーリング完了時に無効化。"""
+        """reward shaping function を解除する。
+
+        annealing 完了後は base reward と HP penalty だけの既存経路へ戻す。
+        """
         self._reward_fn = None
 
     def set_params(self, **kwargs) -> bool:
@@ -451,11 +496,17 @@ class SurvivorsEnv(BaseUE5Env):
         return dict(data)
 
     def get_params(self) -> dict:
-        """最後に set_params で適用したパラメータを返す。eval_env との同期用。"""
+        """最後に set_params で適用したパラメータを返す。
+
+        training env と eval env の curriculum 設定同期に使える copy を公開する。
+        """
         return dict(self._last_params)
 
     def _action_to_payload(self, action) -> dict:
-        """discrete action を UE5 /step wire payload へ変換する。"""
+        """discrete action を UE5 /step wire payload へ変換する。
+
+        Gym の整数 action を既存 HTTP 契約の単要素 float 配列として符号化する。
+        """
         return {"action": [float(int(action))]}
 
 
@@ -476,41 +527,68 @@ class SurvivorsMonitor(Monitor):
     """
 
     def set_params(self, **kwargs) -> bool:
-        """wrapped environment へ runtime parameters を転送する。"""
+        """wrapped environment へ runtime parameters を転送する。
+
+        Monitor を外さずに curriculum の /params 更新結果を呼び出し側へ返す。
+        """
         return self.env.set_params(**kwargs)
 
     def get_params(self) -> dict:
-        """wrapped environment の直近 parameters を返す。"""
+        """wrapped environment の直近 parameters を返す。
+
+        Monitor 配下でも eval environment との設定比較を可能にする。
+        """
         return self.env.get_params()
 
     def set_shaping_weight(self, weight: float) -> None:
-        """wrapped environment の shaping weight を更新する。"""
+        """wrapped environment の shaping weight を更新する。
+
+        vectorized annealing 呼び出しを Monitor の境界で明示転送する。
+        """
         self.env.set_shaping_weight(weight)
 
     def get_shaping_weight(self) -> float:
-        """wrapped environment の shaping weight を返す。"""
+        """wrapped environment の shaping weight を返す。
+
+        Monitor の外側から現在の annealing 値を観測できるようにする。
+        """
         return self.env.get_shaping_weight()
 
     def clear_reward_fn(self) -> None:
-        """wrapped environment の reward shaping function を解除する。"""
+        """wrapped environment の reward shaping function を解除する。
+
+        training callback が Monitor 経由で shaping 終了を一斉適用できるようにする。
+        """
         self.env.clear_reward_fn()
 
     def get_obs_schema_hash(self) -> str:
-        """wrapped environment の observation schema hash を返す。"""
+        """wrapped environment の observation schema hash を返す。
+
+        wrapper 階層を越えて複数 producer の schema binding を比較する。
+        """
         return self.env.get_obs_schema_hash()
 
     def get_offsets(self):
-        """wrapped environment の observation offsets を返す。"""
+        """wrapped environment の observation offsets を返す。
+
+        Monitor 配下でも schema-based diagnostics の位置情報を取得可能にする。
+        """
         return self.env.get_offsets()
 
     def get_obs_schema(self):
-        """wrapped environment の observation schema を返す。"""
+        """wrapped environment の observation schema を返す。
+
+        wrapper を外さず live segment 定義を inspection code へ転送する。
+        """
         return self.env.get_obs_schema()
 
     def choose_level_up(
         self, decision_id: str, choice_id: str
     ) -> tuple[np.ndarray, dict]:
-        """wrapped SurvivorsEnv の外部 level-up API を明示的に転送する。"""
+        """wrapped SurvivorsEnv の外部 level-up API を明示的に転送する。
+
+        Monitor 経由でも exactly-once decision/choice acknowledgement 検証を維持する。
+        """
         return self.env.choose_level_up(decision_id, choice_id)
 
     def preview_level_up(
@@ -528,7 +606,10 @@ class SurvivorsMonitor(Monitor):
         replication_key: str,
         stream_seed: int,
     ) -> dict:
-        """wrapped SurvivorsEnv の validation branch RNG API を転送する。"""
+        """wrapped SurvivorsEnv の validation branch RNG API を転送する。
+
+        validation-only stream binding の検証を wrapper の内側へ一元化したまま公開する。
+        """
         return self.env.activate_validation_branch_rng(
             replication_key,
             stream_seed,
