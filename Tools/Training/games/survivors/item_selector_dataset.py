@@ -62,6 +62,7 @@ _TEST_FORBIDDEN_PURPOSES = frozenset(
         "temperature_selection",
     }
 )
+_TEST_ALLOWED_PURPOSES = frozenset({"sealed_evaluation"})
 
 
 class SplitSealedError(ValueError):
@@ -156,10 +157,13 @@ def _validate_formal_label_verdict(
     verdict: Mapping[str, Any],
     *,
     source_identity: str,
+    scale_identity: str | None = None,
+    reliability_identity: str | None = None,
 ) -> str:
     """01-06/01-07 formal label release verdict の PASS と parent binding を検証する。
 
     status 文字列だけでなく gate checks、blocking slices、canonical verdict identity まで照合する。
+    scale_identity と reliability_identity を渡した場合は subject と厳密に照合する。
     """
     fields = {
         "schema_version",
@@ -187,6 +191,10 @@ def _validate_formal_label_verdict(
         raise DatasetReleaseError("label verdict source identity mismatch")
     if any(not _is_sha256(subject[field]) for field in subject_fields):
         raise DatasetReleaseError("label verdict parent identity is invalid")
+    if scale_identity is not None and subject["score_scale_identity"] != scale_identity:
+        raise DatasetReleaseError("label verdict score_scale_identity mismatch with builder")
+    if reliability_identity is not None and subject["reliability_identity"] != reliability_identity:
+        raise DatasetReleaseError("label verdict reliability_identity mismatch with builder")
     gates = verdict["gates"]
     if (
         verdict["status"] != "PASS"
@@ -541,12 +549,11 @@ class SplitManifest:
         ablation、ceiling、learning curve の purpose は専用 API からでも拒否する。
         """
         normalized_purpose = str(purpose).strip().lower()
-        if (
-            not normalized_purpose
-            or normalized_purpose in _TEST_FORBIDDEN_PURPOSES
-            or any(token in normalized_purpose for token in ("ablation", "ceiling", "learning"))
-        ):
-            raise SplitSealedError(f"{purpose} cannot read test partition")
+        if normalized_purpose not in _TEST_ALLOWED_PURPOSES:
+            raise SplitSealedError(
+                f"purpose {purpose!r} is not in the allowlist for test partition reads; "
+                f"only {sorted(_TEST_ALLOWED_PURPOSES)} are permitted"
+            )
         bound = self._bind_rows(rows)
         selected = tuple(row for row in bound if self.split_for(row) == "test")
         self._access_audit.append(
@@ -789,10 +796,12 @@ class TeacherSoftTargetBuilder:
         examples: Sequence[Mapping[str, Any]],
         *,
         slice_key: str,
+        split_manifest: "SplitManifest",
     ) -> float:
-        """development examples の NLL、次に Brier が最小の登録温度を選ぶ。
+        """frozen split_manifest で development 行のみを受理し最適温度を選ぶ。
 
-        test partition example と unknown target item は選定に使わない。
+        caller-declared split フィールドではなく manifest.split_for() で照合するため、
+        test 行を validation と偽装して温度選定に使うことができない。
         """
         if isinstance(examples, (str, bytes)) or not examples:
             raise TeacherArtifactError("temperature selection examples are required")
@@ -801,8 +810,10 @@ class TeacherSoftTargetBuilder:
             nll = 0.0
             brier = 0.0
             for example in examples:
-                if example.get("split") not in DEVELOPMENT_SPLITS:
-                    raise TeacherArtifactError("temperature selection requires development split")
+                if split_manifest.split_for(example) not in DEVELOPMENT_SPLITS:
+                    raise TeacherArtifactError(
+                        "temperature selection requires development split (verified via manifest)"
+                    )
                 target = self.build(
                     candidate_item_ids=example["candidate_item_ids"],
                     teacher_scores=example["teacher_scores"],
@@ -855,11 +866,8 @@ class LearningCurvePolicy:
             if type(c) is not int:
                 raise DatasetReleaseError("learning curve decision_count must be int")
             counts.append(c)
-        if counts[0] < self.initial_decisions:
-            raise DatasetReleaseError(
-                f"first learning curve point must be >= initial_decisions "
-                f"({self.initial_decisions}), got {counts[0]}"
-            )
+        if counts[-1] >= hard_cap:
+            return True
         if counts[0] != self.initial_decisions:
             raise DatasetReleaseError(
                 f"first learning curve point must equal initial_decisions "
@@ -873,8 +881,6 @@ class LearningCurvePolicy:
                     f"{expected} (initial={self.initial_decisions} + "
                     f"{idx}*block_size={self.block_size}), got {counts[idx]}"
                 )
-        if counts[-1] >= hard_cap:
-            return True
         if not coverage_complete or len(points) < self.consecutive_blocks + 1:
             return False
         gains = [
@@ -956,18 +962,27 @@ class ItemSelectorDatasetBuilder:
         source_identity: str,
         teacher_identity: str,
         derived_logical_id: str,
+        scale_identity: str | None = None,
+        reliability_identity: str | None = None,
     ) -> None:
         """release 全体の immutable parent identities と logical ID を固定する。
 
         row ごとの値で source/teacher identity を切り替えることは許可しない。
+        scale_identity と reliability_identity を渡すと formal verdict の lineage も照合する。
         """
         if not _is_sha256(source_identity) or not _is_sha256(teacher_identity):
             raise DatasetReleaseError("source/teacher identity must be lowercase sha256")
+        if scale_identity is not None and not _is_sha256(scale_identity):
+            raise DatasetReleaseError("scale_identity must be lowercase sha256")
+        if reliability_identity is not None and not _is_sha256(reliability_identity):
+            raise DatasetReleaseError("reliability_identity must be lowercase sha256")
         if not isinstance(derived_logical_id, str) or not derived_logical_id:
             raise DatasetReleaseError("derived logical ID must be non-empty")
         self._split_manifest = split_manifest
         self._source_identity = source_identity
         self._teacher_identity = teacher_identity
+        self._scale_identity = scale_identity
+        self._reliability_identity = reliability_identity
         self._derived_logical_id = derived_logical_id
 
     def _validate_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
@@ -989,6 +1004,8 @@ class ItemSelectorDatasetBuilder:
             _validate_formal_label_verdict(
                 verdict,
                 source_identity=self._source_identity,
+                scale_identity=self._scale_identity,
+                reliability_identity=self._reliability_identity,
             )
             action_kind = row.get("label_action_kind")
         else:

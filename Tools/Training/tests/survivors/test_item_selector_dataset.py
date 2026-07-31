@@ -172,6 +172,41 @@ def test_test_partition_read_is_sealed_from_development_callers() -> None:
     assert all(manifest.split_for(row) != "test" for row in development)
 
 
+def test_select_temperature_requires_manifest_and_rejects_test_rows() -> None:
+    """select_temperature が frozen manifest 経由で development 行のみを受理する。
+
+    caller-declared split='validation' で偽装した test 行を渡しても拒否し、
+    ablation purpose の test read も allowlist にない purpose は全て拒否する。
+    """
+    scale = _score_scale()
+    calibration = _calibration(scale)
+    builder = TeacherSoftTargetBuilder(scale, calibration)
+    rows = _split_rows()
+    manifest = SplitManifest.freeze(rows, seed="selector-v1")
+
+    test_row = next(r for r in rows if manifest.split_for(r) == "test")
+    forged = {
+        **test_row,
+        "split": "validation",
+        "candidate_item_ids": ("wand", "knife"),
+        "teacher_scores": (2.0, 0.0),
+        "card_mask": (True, True),
+        "observed_best_item_id": "wand",
+    }
+    with pytest.raises((TeacherArtifactError, SplitSealedError)):
+        builder.select_temperature(
+            [forged], slice_key="raw_critic|weapon|0-5m", split_manifest=manifest
+        )
+
+    for bad_purpose in ("ablation", "temperature_selection", "feature_selection", "arbitrary"):
+        with pytest.raises(SplitSealedError, match="allowlist"):
+            manifest.read_test_rows(rows, purpose=bad_purpose)
+
+    test_rows = manifest.read_test_rows(rows, purpose="sealed_evaluation")
+    assert test_rows
+    assert all(manifest.split_for(r) == "test" for r in test_rows)
+
+
 def test_overlap_and_near_duplicate_cross_partition_are_rejected() -> None:
     """同一 trace fingerprint と near duplicate の split 越境を検出する。
 
@@ -230,9 +265,12 @@ def test_all_tie_and_temperature_grid_selection_are_deterministic() -> None:
     )
     assert tied.probabilities[:3] == pytest.approx((1.0 / 3.0,) * 3)
     assert tied.tie_groups == (("axe", "knife", "wand"),)
+    _rows = _split_rows()
+    _manifest = SplitManifest.freeze(_rows, seed="selector-v1")
+    _dev_row = next(r for r in _rows if _manifest.split_for(r) in ("train", "validation"))
     examples = [
         {
-            "split": "validation",
+            **_dev_row,
             "candidate_item_ids": ("wand", "knife"),
             "teacher_scores": (2.0, 0.0),
             "card_mask": (True, True),
@@ -240,7 +278,7 @@ def test_all_tie_and_temperature_grid_selection_are_deterministic() -> None:
         }
     ]
     assert builder.select_temperature(
-        examples, slice_key="raw_critic|weapon|0-5m"
+        examples, slice_key="raw_critic|weapon|0-5m", split_manifest=_manifest
     ) == 0.25
     with pytest.raises(TeacherArtifactError, match="invalid"):
         builder.build(
