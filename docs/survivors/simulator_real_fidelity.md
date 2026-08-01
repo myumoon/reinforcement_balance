@@ -43,6 +43,36 @@ consumer は利用直前に `verify_current_fidelity` を呼ぶ。allowlist vers
 producer 欠落、stage 不足、hash 差、baseline 流用、blocking 行を warning で継続せず
 例外にする。
 
+## Current producer authority
+
+formal collector と teacher validator は、caller または corpus が渡す hash map を current
+authority にしない。script の位置から current checkout を固定し、package 同梱
+`fidelity_producer_paths_v1.json`、strict generated-input descriptor、fresh
+`survivors.ubt_action_graph.v1` を `resolve_current_gating_producer_hashes` へ渡して毎回再計算する。
+descriptor の input は repo-relative JSON/YAML source と format を exact key で列挙し、欠落、
+未知 key、repository escape を拒否する。corpus の `current_gating_producer_hashes` は収集時
+provenance と current resolver 結果の比較にだけ使う。
+
+UBT attestation の subject は `ReinBalanceEditor / Win64 / Development` と
+`ReinBalance/ReinBalance.uproject` に固定する。全 `.Build.cs`、`.Target.cs`、`.uproject`、
+`.uplugin` の current hash、UBT binary identity、sorted unique repo-local `.cpp` action set、
+canonical identity のいずれかが異なれば stale とする。C++ producer は各 primary/dependency
+source root の filesystem TU set とこの action set を exact 比較し、compiled TU から
+repo-local quote include を再帰解決する。Public/Private header と dependency module header
+（`PythonTrainingComm/Public` を含む）を hash し、missing/ambiguous include を拒否する。
+未解決の外部 quote include は producer manifest の理由付き `external_quote_includes` と完全一致
+する Unreal Engine header だけを許可する。UE が生成する `*.generated.h` だけは source header
+bytes で担保されるため除外する。
+
+current attestation は次で実 UBT `GenerateClangDatabase` から生成する。失敗、空 action set、
+subject/build input 差がある場合、exporter は attestation を発行しない。
+
+```powershell
+conda run -n reinbalance python Tools/Training/export_survivors_ubt_action_graph.py `
+  --engine-root 'C:\UnrealEngine\UE_5.4' `
+  --output "$env:TEMP\reinbalance-ubt-action-graph.json"
+```
+
 ## 計測と発行
 
 target video/telemetry と simulator run を同じ profile/time band へ揃え、座標を

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
+from reinbalance_survivors_contracts.current_fidelity import resolve_current_gating_producer_hashes
 from reinbalance_survivors_contracts.fidelity_verdict import (
     FidelityVerdict,
     downstream_release_allowed,
@@ -447,6 +448,7 @@ def run_validation_pipeline(
     corpus: Mapping[str, Any],
     source_descriptor: Mapping[str, Any],
     integration_fidelity_verdict: Mapping[str, Any],
+    current_gating_producer_hashes: Mapping[str, str],
     split_seed: str = "phase6-paired-rollout-teacher-validation",
     bootstrap_seed: int = 20260718,
     bootstrap_resamples: int = 2000,
@@ -477,18 +479,22 @@ def run_validation_pipeline(
     teacher_identity = _require_sha256(
         corpus.get("teacher_identity"), "teacher_identity"
     )
-    current_producer_hashes = corpus.get("current_gating_producer_hashes")
-    if not isinstance(current_producer_hashes, Mapping):
+    collected_producer_hashes = corpus.get("current_gating_producer_hashes")
+    if not isinstance(collected_producer_hashes, Mapping):
         raise TeacherPipelineError(
             "corpus must bind current_gating_producer_hashes"
         )
+    if not isinstance(current_gating_producer_hashes, Mapping):
+        raise TeacherPipelineError("current gating producer hashes are required")
+    if dict(collected_producer_hashes) != dict(current_gating_producer_hashes):
+        raise TeacherPipelineError("corpus fidelity provenance is not current")
     try:
         checked_fidelity = FidelityVerdict.from_wire(
             integration_fidelity_verdict
         )
         fidelity_passed = downstream_release_allowed(
             checked_fidelity,
-            current_producer_hashes,
+            current_gating_producer_hashes,
             "integration",
         )
     except (TypeError, ValueError) as exc:
@@ -610,6 +616,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--integration-fidelity-verdict", type=Path, required=True
     )
+    parser.add_argument("--generated-input-descriptor", type=Path, required=True)
+    parser.add_argument("--ubt-action-graph", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--verdict-output",
@@ -632,6 +640,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     gate FAIL は正常な検証結果として exit 2、契約/IO error は例外として exit 1 にする。
     """
     args = _build_parser().parse_args(argv)
+    current_context = resolve_current_gating_producer_hashes(
+        Path(__file__).resolve().parents[2],
+        args.generated_input_descriptor,
+        args.ubt_action_graph,
+    )
     artifacts = run_validation_pipeline(
         corpus=_load_json(args.corpus, "paired rollout corpus"),
         source_descriptor=_load_json(
@@ -641,6 +654,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.integration_fidelity_verdict,
             "integration fidelity verdict",
         ),
+        current_gating_producer_hashes=current_context.current_gating_producer_hashes,
         split_seed=args.split_seed,
         bootstrap_seed=args.bootstrap_seed,
         bootstrap_resamples=args.bootstrap_resamples,

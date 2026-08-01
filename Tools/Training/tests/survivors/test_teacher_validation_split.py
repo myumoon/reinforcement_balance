@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import validate_survivors_value_teacher as validation_cli
+from reinbalance_survivors_contracts.fidelity_verdict import FidelityMetric, FidelityVerdict, GATING_KEYS
 from games.survivors.teacher_validation_split import (
     SplitContractError,
     assert_calibration_lineage,
@@ -20,6 +21,7 @@ from games.survivors.teacher_validation_split import (
     freeze_episode_split,
     validate_frozen_split,
 )
+from value_scorer_fixtures import build_saved_value_source
 
 
 def test_episode_split_is_deterministic_disjoint_and_frozen() -> None:
@@ -100,6 +102,11 @@ def test_cli_split_rewrite_fails_before_child_artifact_changes(
     monkeypatch.setattr(validation_cli, "_load_json", lambda *_args: {})
     monkeypatch.setattr(
         validation_cli,
+        "resolve_current_gating_producer_hashes",
+        lambda *_args: type("Context", (), {"current_gating_producer_hashes": {}})(),
+    )
+    monkeypatch.setattr(
+        validation_cli,
         "run_validation_pipeline",
         fake_pipeline,
     )
@@ -115,6 +122,10 @@ def test_cli_split_rewrite_fails_before_child_artifact_changes(
         str(tmp_path / "source.json"),
         "--integration-fidelity-verdict",
         str(tmp_path / "fidelity.json"),
+        "--generated-input-descriptor",
+        str(tmp_path / "generated-inputs.json"),
+        "--ubt-action-graph",
+        str(tmp_path / "ubt-action-graph.json"),
         "--output-dir",
         str(output_dir),
     ]
@@ -129,6 +140,56 @@ def test_cli_split_rewrite_fails_before_child_artifact_changes(
         path.name: path.read_bytes()
         for path in sorted(output_dir.iterdir())
     } == initial
+
+
+def test_pipeline_rejects_old_verdict_and_corpus_map_when_current_resolver_differs(tmp_path: Path) -> None:
+    """corpus自己申告とverdictが一致しても明示current差をrelease前に拒否する。
+
+    current checkout から解決した map だけを authority とし、旧 map 二点セットの再利用を防ぐ。
+    """
+    manifest_path, _, _ = build_saved_value_source(tmp_path / "source", recurrent=True)
+    source_descriptor = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source_identity = source_descriptor["identity_sha256"]
+    old = {key: "a" * 64 for key in GATING_KEYS}
+    current = dict(old)
+    current["logic_private"] = "f" * 64
+    verdict = FidelityVerdict(
+        "integration",
+        {
+            "target_profile_hash": "1" * 64,
+            "target_build_attestation_hash": "2" * 64,
+            "report_scope": "exact_target",
+            "producer_allowlist_version": "fidelity_producer_paths.v1",
+            "producer_manifest_hash": "3" * 64,
+            "resolved_producers": {key: [] for key in GATING_KEYS},
+        },
+        (FidelityMetric("deploy_obs_visibility", 0.01, "normalized_error", True, None, True),),
+        (),
+        {
+            "git_commit": "fixture",
+            "workspace_dirty_summary": "",
+            "audit_tool_version": "fixture",
+            "dependency_versions": {},
+            "operator": "pytest",
+            "timestamp": "2026-08-01T00:00:00Z",
+        },
+        old,
+    )
+    corpus = {
+        "schema_version": "survivors.paired_rollout_corpus.v1",
+        "source_identity": source_identity,
+        "teacher_type": "raw_critic",
+        "teacher_identity": "b" * 64,
+        "current_gating_producer_hashes": old,
+    }
+
+    with pytest.raises(validation_cli.TeacherPipelineError, match="current"):
+        validation_cli.run_validation_pipeline(
+            corpus=corpus,
+            source_descriptor=source_descriptor,
+            integration_fidelity_verdict=verdict.to_wire(),
+            current_gating_producer_hashes=current,
+        )
 
 
 def test_tampered_assignment_or_identity_is_rejected() -> None:

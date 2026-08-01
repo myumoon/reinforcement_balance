@@ -20,6 +20,16 @@ from .canonical_json import (
     canonical_json_bytes,
     sha256_hex,
 )
+from .current_fidelity import (
+    GENERATED_INPUT_DESCRIPTOR_SCHEMA_VERSION,
+    CurrentFidelityContext,
+    GeneratedInputSourceIdentity,
+    resolve_current_gating_producer_hashes,
+)
+from .ubt_action_graph import (
+    UBT_ACTION_GRAPH_SCHEMA_VERSION,
+    UbtActionGraphAttestation,
+)
 from .artifact_dag import (
     ALLOWED_PARENT_KINDS,
     ArtifactDagReport,
@@ -97,6 +107,12 @@ __all__ = [
     "canonical_json_bytes",
     "sha256_hex",
     "canonical_hash",
+    "GENERATED_INPUT_DESCRIPTOR_SCHEMA_VERSION",
+    "GeneratedInputSourceIdentity",
+    "CurrentFidelityContext",
+    "resolve_current_gating_producer_hashes",
+    "UBT_ACTION_GRAPH_SCHEMA_VERSION",
+    "UbtActionGraphAttestation",
     # artifact identity / DAG（Artifact 識別・DAG）
     "OBJECT_URI_PREFIX",
     "ARTIFACT_REF_SCHEMA_VERSION",

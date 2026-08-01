@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
+from reinbalance_survivors_contracts.current_fidelity import resolve_current_gating_producer_hashes
 from reinbalance_survivors_contracts.fidelity_verdict import FidelityVerdict
 
 from games.survivors.value_choice_collector import (
@@ -70,7 +71,8 @@ def _parser() -> argparse.ArgumentParser:
         help="immutable value_source_descriptor.json",
     )
     parser.add_argument("--fidelity-verdict", type=Path, required=True)
-    parser.add_argument("--current-producer-hashes", type=Path, required=True)
+    parser.add_argument("--generated-input-descriptor", type=Path, required=True)
+    parser.add_argument("--ubt-action-graph", type=Path, required=True)
     parser.add_argument("--artifact-store", type=Path, required=True)
     parser.add_argument("--dataset-id")
     parser.add_argument("--seed-start", type=int, required=True)
@@ -99,28 +101,6 @@ def _read_json(path: Path, label: str) -> Any:
         return json.loads(canonical_json_bytes(value))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise CollectionCliError(f"{label} could not be read: {exc}") from exc
-
-
-def _current_hashes(value: Any) -> Mapping[str, str]:
-    """bare map または audit wrapper から current gating map を取り出す。
-
-    wrapper を許す場合も未知 top-level 形式から key を推測せず、明示
-    ``gating_producer_hashes`` field だけを参照する。
-    """
-
-    if not isinstance(value, Mapping):
-        raise CollectionCliError("current producer hashes must be an object")
-    if "gating_producer_hashes" in value:
-        if set(value) != {"gating_producer_hashes"}:
-            raise CollectionCliError(
-                "current producer hash wrapper fields mismatch"
-            )
-        value = value["gating_producer_hashes"]
-    if not isinstance(value, Mapping):
-        raise CollectionCliError(
-            "gating_producer_hashes must be an object"
-        )
-    return dict(value)
 
 
 def _validate_args(args: argparse.Namespace) -> list[int]:
@@ -205,6 +185,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
         seeds = _validate_args(args)
+        current_context = resolve_current_gating_producer_hashes(
+            Path(__file__).resolve().parents[2],
+            args.generated_input_descriptor,
+            args.ubt_action_graph,
+        )
         artifact_store = _external_store(args.artifact_store)
         scorer = ValueScorer.load(
             args.manifest,
@@ -217,12 +202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         verdict = FidelityVerdict.from_wire(
             _read_json(args.fidelity_verdict, "fidelity verdict")
         )
-        current_hashes = _current_hashes(
-            _read_json(
-                args.current_producer_hashes,
-                "current producer hashes",
-            )
-        )
+        current_hashes = current_context.current_gating_producer_hashes
         writer = DatasetWriter(
             dataset_root,
             dataset_id=dataset_id,

@@ -1,5 +1,45 @@
 {
   "schema_version": "fidelity_producer_paths.v1",
+  "external_quote_includes": [
+    {"include": "Async/ParallelFor.h", "reason": "Unreal Engine header"},
+    {"include": "Blueprint/UserWidget.h", "reason": "Unreal Engine header"},
+    {"include": "Blueprint/WidgetTree.h", "reason": "Unreal Engine header"},
+    {"include": "Components/ActorComponent.h", "reason": "Unreal Engine header"},
+    {"include": "Components/CanvasPanel.h", "reason": "Unreal Engine header"},
+    {"include": "Components/CanvasPanelSlot.h", "reason": "Unreal Engine header"},
+    {"include": "Components/InstancedStaticMeshComponent.h", "reason": "Unreal Engine header"},
+    {"include": "Components/ProgressBar.h", "reason": "Unreal Engine header"},
+    {"include": "Components/SceneComponent.h", "reason": "Unreal Engine header"},
+    {"include": "Components/StaticMeshComponent.h", "reason": "Unreal Engine header"},
+    {"include": "Components/WidgetComponent.h", "reason": "Unreal Engine header"},
+    {"include": "CoreMinimal.h", "reason": "Unreal Engine header"},
+    {"include": "Dom/JsonObject.h", "reason": "Unreal Engine header"},
+    {"include": "DrawDebugHelpers.h", "reason": "Unreal Engine header"},
+    {"include": "Engine/Engine.h", "reason": "Unreal Engine header"},
+    {"include": "Engine/GameViewportClient.h", "reason": "Unreal Engine header"},
+    {"include": "Engine/StaticMesh.h", "reason": "Unreal Engine header"},
+    {"include": "GameFramework/Actor.h", "reason": "Unreal Engine header"},
+    {"include": "GameFramework/PlayerController.h", "reason": "Unreal Engine header"},
+    {"include": "HttpServerModule.h", "reason": "Unreal Engine header"},
+    {"include": "HttpServerRequest.h", "reason": "Unreal Engine header"},
+    {"include": "HttpServerResponse.h", "reason": "Unreal Engine header"},
+    {"include": "IHttpRouter.h", "reason": "Unreal Engine header"},
+    {"include": "InputCoreTypes.h", "reason": "Unreal Engine header"},
+    {"include": "Kismet/GameplayStatics.h", "reason": "Unreal Engine header"},
+    {"include": "Materials/Material.h", "reason": "Unreal Engine header"},
+    {"include": "Materials/MaterialInstanceDynamic.h", "reason": "Unreal Engine header"},
+    {"include": "Misc/SecureHash.h", "reason": "Unreal Engine header"},
+    {"include": "Modules/ModuleManager.h", "reason": "Unreal Engine header"},
+    {"include": "NNE.h", "reason": "Unreal Engine header"},
+    {"include": "NNEModelData.h", "reason": "Unreal Engine header"},
+    {"include": "NNERuntimeCPU.h", "reason": "Unreal Engine header"},
+    {"include": "NNETensor.h", "reason": "Unreal Engine header"},
+    {"include": "Serialization/JsonReader.h", "reason": "Unreal Engine header"},
+    {"include": "Serialization/JsonSerializer.h", "reason": "Unreal Engine header"},
+    {"include": "Serialization/JsonWriter.h", "reason": "Unreal Engine header"},
+    {"include": "UObject/ConstructorHelpers.h", "reason": "Unreal Engine header"},
+    {"include": "UObject/NoExportTypes.h", "reason": "Unreal Engine header"}
+  ],
   "producers": {
     "logic_public": {
       "ordered_exact_paths": ["ReinBalance/Source/ReinBalanceLogic/Public/Survivors/SurvivorsGameLogic.h"],
@@ -7,7 +47,7 @@
       "explicit_excludes": [],
       "generated_inputs": [],
       "transitive_dependency_mode": "compiled_module_closure",
-      "compiled_module_closure": {"module_name": "ReinBalanceLogic", "build_cs": "ReinBalance/Source/ReinBalanceLogic/ReinBalanceLogic.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceLogic/Private"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalanceLogic/Private/**/*.cpp", "repo_local_module_dependency_edges": [], "allowed_non_behavior_excludes": []}
+      "compiled_module_closure": {"module_name": "ReinBalanceLogic", "build_cs": "ReinBalance/Source/ReinBalanceLogic/ReinBalanceLogic.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceLogic/Private"], "header_roots": ["ReinBalance/Source/ReinBalanceLogic/Public", "ReinBalance/Source/ReinBalanceLogic/Private"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalanceLogic/Private/**/*.cpp", "repo_local_module_dependency_edges": [], "allowed_non_behavior_excludes": []}
     },
     "logic_private": {
       "ordered_exact_paths": ["ReinBalance/Source/ReinBalanceLogic/Private/Survivors/SurvivorsGameLogic.cpp"],
@@ -15,17 +55,17 @@
       "explicit_excludes": [],
       "generated_inputs": [],
       "transitive_dependency_mode": "compiled_module_closure",
-      "compiled_module_closure": {"module_name": "ReinBalanceLogic", "build_cs": "ReinBalance/Source/ReinBalanceLogic/ReinBalanceLogic.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceLogic/Private"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalanceLogic/Private/**/*.cpp", "repo_local_module_dependency_edges": [], "allowed_non_behavior_excludes": []}
+      "compiled_module_closure": {"module_name": "ReinBalanceLogic", "build_cs": "ReinBalance/Source/ReinBalanceLogic/ReinBalanceLogic.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceLogic/Private"], "header_roots": ["ReinBalance/Source/ReinBalanceLogic/Public", "ReinBalance/Source/ReinBalanceLogic/Private"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalanceLogic/Private/**/*.cpp", "repo_local_module_dependency_edges": [], "allowed_non_behavior_excludes": []}
     },
     "game_facade": {
       "ordered_exact_paths": ["ReinBalance/Source/ReinBalance/Private/Survivors/Game/SurvivorsGame.cpp", "ReinBalance/Source/ReinBalance/Public/Survivors/Game/SurvivorsGame.h"],
       "recursive_roots": [{"path": "ReinBalance/Source/ReinBalance/Public/Survivors/Game", "include_globs": ["**/*.h"]}], "explicit_excludes": [], "generated_inputs": [], "transitive_dependency_mode": "compiled_module_closure",
-      "compiled_module_closure": {"module_name": "ReinBalance", "build_cs": "ReinBalance/Source/ReinBalance/ReinBalance.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalance/Private/Survivors"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalance/Private/Survivors/**/*.cpp", "repo_local_module_dependency_edges": [{"module_name": "ReinBalanceLogic", "build_cs": "ReinBalance/Source/ReinBalanceLogic/ReinBalanceLogic.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceLogic/Private"]}], "allowed_non_behavior_excludes": []}
+      "compiled_module_closure": {"module_name": "ReinBalance", "build_cs": "ReinBalance/Source/ReinBalance/ReinBalance.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalance/Private/Survivors"], "header_roots": ["ReinBalance/Source/ReinBalance/Public", "ReinBalance/Source/ReinBalance/Private"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalance/Private/Survivors/**/*.cpp", "repo_local_module_dependency_edges": [{"module_name": "ReinBalanceLogic", "build_cs": "ReinBalance/Source/ReinBalanceLogic/ReinBalanceLogic.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceLogic/Private"], "header_roots": ["ReinBalance/Source/ReinBalanceLogic/Public", "ReinBalance/Source/ReinBalanceLogic/Private"]}], "allowed_non_behavior_excludes": []}
     },
     "http_service": {
       "ordered_exact_paths": ["ReinBalance/Source/ReinBalanceEditor/Private/Training/SurvivorsHttpEnvService.cpp", "ReinBalance/Source/ReinBalanceEditor/Public/Training/SurvivorsHttpEnvService.h"],
       "recursive_roots": [{"path": "ReinBalance/Source/ReinBalanceEditor/Public/Training", "include_globs": ["SurvivorsHttpEnvService.h"]}], "explicit_excludes": [], "generated_inputs": [], "transitive_dependency_mode": "compiled_module_closure",
-      "compiled_module_closure": {"module_name": "ReinBalanceEditor", "build_cs": "ReinBalance/Source/ReinBalanceEditor/ReinBalanceEditor.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceEditor/Private/Training"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalanceEditor/Private/Training/**/*.cpp", "repo_local_module_dependency_edges": [{"module_name": "ReinBalance", "build_cs": "ReinBalance/Source/ReinBalance/ReinBalance.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalance/Private"]}, {"module_name": "ReinBalanceLogic", "build_cs": "ReinBalance/Source/ReinBalanceLogic/ReinBalanceLogic.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceLogic/Private"]}, {"module_name": "PythonTrainingComm", "build_cs": "ReinBalance/Plugins/PythonTrainingComm/Source/PythonTrainingComm/PythonTrainingComm.Build.cs", "private_source_roots": ["ReinBalance/Plugins/PythonTrainingComm/Source/PythonTrainingComm/Private"]}], "allowed_non_behavior_excludes": []}
+      "compiled_module_closure": {"module_name": "ReinBalanceEditor", "build_cs": "ReinBalance/Source/ReinBalanceEditor/ReinBalanceEditor.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceEditor/Private/Training"], "header_roots": ["ReinBalance/Source/ReinBalanceEditor/Public/Training", "ReinBalance/Source/ReinBalanceEditor/Private/Training"], "compiled_tu_include_glob": "ReinBalance/Source/ReinBalanceEditor/Private/Training/**/*.cpp", "repo_local_module_dependency_edges": [{"module_name": "ReinBalance", "build_cs": "ReinBalance/Source/ReinBalance/ReinBalance.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalance/Private"], "header_roots": ["ReinBalance/Source/ReinBalance/Public", "ReinBalance/Source/ReinBalance/Private"]}, {"module_name": "ReinBalanceLogic", "build_cs": "ReinBalance/Source/ReinBalanceLogic/ReinBalanceLogic.Build.cs", "private_source_roots": ["ReinBalance/Source/ReinBalanceLogic/Private"], "header_roots": ["ReinBalance/Source/ReinBalanceLogic/Public", "ReinBalance/Source/ReinBalanceLogic/Private"]}, {"module_name": "PythonTrainingComm", "build_cs": "ReinBalance/Plugins/PythonTrainingComm/Source/PythonTrainingComm/PythonTrainingComm.Build.cs", "private_source_roots": ["ReinBalance/Plugins/PythonTrainingComm/Source/PythonTrainingComm/Private"], "header_roots": ["ReinBalance/Plugins/PythonTrainingComm/Source/PythonTrainingComm/Public", "ReinBalance/Plugins/PythonTrainingComm/Source/PythonTrainingComm/Private"]}], "allowed_non_behavior_excludes": []}
     },
     "sim_runtime_config": {"ordered_exact_paths": ["ReinBalance/Config/DefaultGame.ini"], "recursive_roots": [], "explicit_excludes": [], "generated_inputs": [], "transitive_dependency_mode": "none"},
     "content_schema": {"ordered_exact_paths": [], "recursive_roots": [], "explicit_excludes": [], "generated_inputs": ["content_schema"], "transitive_dependency_mode": "generated_schema"},
