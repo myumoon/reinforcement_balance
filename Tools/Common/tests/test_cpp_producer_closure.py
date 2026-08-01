@@ -130,6 +130,73 @@ def test_dependency_public_header_transitive_leaf_changes_identity(tmp_path: Pat
     assert first.identity_hash != _resolve(tmp_path, spec).identity_hash
 
 
+def test_repo_local_angle_header_leaf_changes_identity(tmp_path: Path) -> None:
+    """Include-root angle dependencies and their leaves participate in identity."""
+    spec = _fixture(tmp_path)
+    source = tmp_path / "Module/Private/Survivors/Weapons/Weapon.cpp"
+    header = tmp_path / "Module/Public/Survivors/Weapons/Weapon.h"
+    leaf = tmp_path / "Module/Public/Survivors/Weapons/Leaf.h"
+    source.write_text(
+        "#include <Survivors/Weapons/Weapon.h>", encoding="utf-8"
+    )
+    header.write_text(
+        "#include <Survivors/Weapons/Leaf.h>", encoding="utf-8"
+    )
+    leaf.write_text("one", encoding="utf-8")
+
+    first = _resolve(tmp_path, spec)
+    assert first.headers == (
+        "Module/Public/Survivors/Weapons/Leaf.h",
+        "Module/Public/Survivors/Weapons/Weapon.h",
+    )
+    leaf.write_text("two", encoding="utf-8")
+    assert first.identity_hash != _resolve(tmp_path, spec).identity_hash
+
+
+@pytest.mark.parametrize(
+    ("directive", "message"),
+    [
+        ("#include <MissingLocal.h>", "missing repo-local angle include"),
+        ("#include SURVIVORS_HEADER", r"unsupported C\+\+ include directive"),
+        (
+            "#if WITH_EDITOR\n#include CONDITIONAL_HEADER\n#endif",
+            r"unsupported C\+\+ include directive",
+        ),
+    ],
+)
+def test_unresolved_angle_macro_and_conditional_include_fail_closed(
+    tmp_path: Path, directive: str, message: str
+) -> None:
+    """Unresolved non-literal include syntax cannot silently leave the closure."""
+    spec = _fixture(tmp_path)
+    source = tmp_path / "Module/Private/Survivors/Weapons/Weapon.cpp"
+    source.write_text(directive, encoding="utf-8")
+
+    with pytest.raises(ContractValidationError, match=message):
+        _resolve(tmp_path, spec)
+
+
+def test_external_angle_include_requires_exact_manifest_allowlist(
+    tmp_path: Path,
+) -> None:
+    """External angle headers use the same exact reasoned allowlist as quotes."""
+    spec = _fixture(tmp_path)
+    source = tmp_path / "Module/Private/Survivors/Weapons/Weapon.cpp"
+    source.write_text("#include <algorithm>", encoding="utf-8")
+
+    with pytest.raises(
+        ContractValidationError, match="missing repo-local angle include"
+    ):
+        _resolve(tmp_path, spec)
+
+    closure = _resolve(
+        tmp_path,
+        spec,
+        allowed_external_quote_includes=("algorithm",),
+    )
+    assert closure.headers == ()
+
+
 def test_missing_ambiguous_include_fails_and_generated_header_is_excluded(tmp_path: Path) -> None:
     """repo-local include のmissing/ambiguousを拒否し、generated.hだけ除外する。"""
     spec = _fixture(tmp_path)

@@ -49,7 +49,13 @@ class CppProducerClosure:
     identity_hash: str
 
 
-_QUOTE_INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"\r\n]+)"', re.MULTILINE)
+_INCLUDE_DIRECTIVE = re.compile(
+    r"^\s*#\s*include(?P<body>[^\r\n]*)$", re.MULTILINE
+)
+_LITERAL_INCLUDE = re.compile(
+    r'^\s*(?:"(?P<quote>[^"\r\n]+)"|<(?P<angle>[^>\r\n]+)>)'
+    r"\s*(?://[^\r\n]*)?$"
+)
 
 
 def _repo_relative_path(value: Any, label: str) -> str:
@@ -67,13 +73,19 @@ def _is_below(relative: str, root: str) -> bool:
     return path_parts[: len(root_parts)] == root_parts
 
 
-def _read_quote_includes(path: Path) -> tuple[str, ...]:
-    """source/header の quote include token を source 順で返す。"""
+def _read_includes(path: Path) -> tuple[tuple[str, str], ...]:
+    """Literal quote/angle includesを返し、macro等はfail-closedにする。"""
     try:
         source = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise ContractValidationError(f"cannot read C++ include source: {path}") from exc
-    return tuple(match.group(1) for match in _QUOTE_INCLUDE.finditer(source))
+    includes: list[tuple[str, str]] = []
+    for directive in _INCLUDE_DIRECTIVE.finditer(source):
+        match = _LITERAL_INCLUDE.fullmatch(directive.group("body"))
+        ensure(match is not None, f"unsupported C++ include directive: {directive.group(0).strip()}")
+        quote = match.group("quote")
+        includes.append(("quote", quote) if quote is not None else ("angle", match.group("angle")))
+    return tuple(includes)
 
 
 def _resolve_header_closure(
@@ -82,7 +94,7 @@ def _resolve_header_closure(
     header_roots: Sequence[str],
     allowed_external_quote_includes: Sequence[str],
 ) -> tuple[str, ...]:
-    """compiled TU を起点に repo-local quote include を再帰解決する。"""
+    """compiled TU を起点に repo-local literal include を再帰解決する。"""
     root_paths = [repo_root / relative for relative in header_roots]
     for relative, path in zip(header_roots, root_paths):
         ensure(path.is_dir(), f"missing header root: {relative}")
@@ -112,12 +124,12 @@ def _resolve_header_closure(
             continue
         processed.add(including_relative)
         including_path = repo_root / including_relative
-        for token in _read_quote_includes(including_path):
-            ensure("\\" not in token, f"quote include must use POSIX separators: {token}")
+        for include_kind, token in _read_includes(including_path):
+            ensure("\\" not in token, f"{include_kind} include must use POSIX separators: {token}")
             if token.endswith(".generated.h"):
                 continue
             token_path = PurePosixPath(token)
-            ensure(not token_path.is_absolute() and ".." not in token_path.parts, f"quote include escapes repository: {token}")
+            ensure(not token_path.is_absolute() and ".." not in token_path.parts, f"{include_kind} include escapes repository: {token}")
             candidates: set[Path] = set()
             adjacent = including_path.parent.joinpath(*token_path.parts)
             if adjacent.is_file():
@@ -136,20 +148,20 @@ def _resolve_header_closure(
                 )
             }
             candidates.update(repo_candidates)
-            ensure(len(candidates) <= 1, f"ambiguous repo-local quote include {token}: {sorted(str(path) for path in candidates)}")
+            ensure(len(candidates) <= 1, f"ambiguous repo-local {include_kind} include {token}: {sorted(str(path) for path in candidates)}")
             if not candidates:
                 ensure(
                     token in allowed_external_quote_includes,
-                    f"missing repo-local quote include: {token}",
+                    f"missing repo-local {include_kind} include: {token}",
                 )
                 continue
             resolved = next(iter(candidates))
             try:
                 relative = resolved.relative_to(repo_root).as_posix()
             except ValueError as exc:
-                raise ContractValidationError(f"quote include escapes repository: {token}") from exc
-            ensure(any(_is_below(relative, root) for root in header_roots), f"repo-local quote include is outside declared header roots: {relative}")
-            ensure(relative.endswith((".h", ".hpp", ".inl")), f"repo-local quote include is not a header: {relative}")
+                raise ContractValidationError(f"{include_kind} include escapes repository: {token}") from exc
+            ensure(any(_is_below(relative, root) for root in header_roots), f"repo-local {include_kind} include is outside declared header roots: {relative}")
+            ensure(relative.endswith((".h", ".hpp", ".inl")), f"repo-local {include_kind} include is not a header: {relative}")
             if relative not in discovered:
                 discovered.add(relative)
                 pending.append(relative)

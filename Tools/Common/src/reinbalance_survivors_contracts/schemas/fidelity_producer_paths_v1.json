@@ -38,7 +38,8 @@
     {"include": "Serialization/JsonSerializer.h", "reason": "Unreal Engine header"},
     {"include": "Serialization/JsonWriter.h", "reason": "Unreal Engine header"},
     {"include": "UObject/ConstructorHelpers.h", "reason": "Unreal Engine header"},
-    {"include": "UObject/NoExportTypes.h", "reason": "Unreal Engine header"}
+    {"include": "UObject/NoExportTypes.h", "reason": "Unreal Engine header"},
+    {"include": "algorithm", "reason": "C++ standard library header"}
   ],
   "producers": {
     "logic_public": {

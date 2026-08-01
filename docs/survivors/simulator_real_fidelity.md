@@ -58,11 +58,12 @@ UBT attestation の subject は `ReinBalanceEditor / Win64 / Development` と
 `.uplugin` の current hash、UBT binary identity、sorted unique repo-local `.cpp` action set、
 canonical identity のいずれかが異なれば stale とする。C++ producer は各 primary/dependency
 source root の filesystem TU set とこの action set を exact 比較し、compiled TU から
-repo-local quote include を再帰解決する。Public/Private header と dependency module header
+repo-local quote/angle include を再帰解決する。Public/Private header と dependency module header
 （`PythonTrainingComm/Public` を含む）を hash し、missing/ambiguous include を拒否する。
-未解決の外部 quote include は producer manifest の理由付き `external_quote_includes` と完全一致
-する Unreal Engine header だけを許可する。UE が生成する `*.generated.h` だけは source header
-bytes で担保されるため除外する。
+未解決の外部 literal include は producer manifest の理由付き `external_quote_includes` と完全一致
+する Unreal Engine/C++標準headerだけを許可し、macro includeは拒否する。条件分岐内のincludeも
+全branchを保守的に解決する。UE が生成する `*.generated.h` だけは source header bytesで担保
+されるため除外する。
 
 current attestation は次で実 UBT `GenerateClangDatabase` から生成する。失敗、空 action set、
 subject/build input 差がある場合、exporter は attestation を発行しない。

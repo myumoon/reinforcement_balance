@@ -392,7 +392,7 @@ def test_logical_index_publish_uses_durable_replace_before_revalidation(
 
     monkeypatch.setattr(
         artifact_store,
-        "_replace_index",
+        "_durable_replace",
         tracked_replace,
         raising=False,
     )
@@ -407,9 +407,34 @@ def test_logical_index_publish_uses_durable_replace_before_revalidation(
     ]
 
 
-def test_replace_index_fsyncs_parent_directory_on_posix(monkeypatch):
-    source_path = Path("store/index/logical/pending.tmp")
-    index_path = Path("store/index/logical/id.json")
+def test_object_durability_completes_before_logical_index_publish(
+    tmp_path, monkeypatch
+):
+    """object directory entry is durable before its logical index can appear."""
+    store = ArtifactStore(tmp_path / "store")
+    events = []
+
+    def tracked_replace(source, destination):
+        artifact_store.os.replace(source, destination)
+        events.append(Path(destination))
+
+    monkeypatch.setattr(artifact_store, "_durable_replace", tracked_replace)
+
+    ref = store.put_bytes(
+        logical_id="models/object-before-index.onnx",
+        data=b"durable-object-bytes",
+        media_type="application/onnx",
+    )
+
+    assert events == [
+        store.object_path(ref.store_uri),
+        store._logical_index_path(ref.logical_id),
+    ]
+
+
+def test_durable_replace_fsyncs_object_parent_directory_on_posix(monkeypatch):
+    source_path = Path("store/objects/sha256/aa/pending.tmp")
+    object_path = Path("store/objects/sha256/aa/aa-object")
     calls = []
     flags = artifact_store.os.O_RDONLY | getattr(
         artifact_store.os, "O_DIRECTORY", 0
@@ -441,17 +466,17 @@ def test_replace_index_fsyncs_parent_directory_on_posix(monkeypatch):
         lambda descriptor: calls.append(("close", descriptor)),
     )
 
-    artifact_store._replace_index(source_path, index_path, platform="posix")
+    artifact_store._durable_replace(source_path, object_path, platform="posix")
 
     assert calls == [
-        ("replace", source_path, index_path),
-        ("open", index_path.parent, flags),
+        ("replace", source_path, object_path),
+        ("open", object_path.parent, flags),
         ("fsync", 71),
         ("close", 71),
     ]
 
 
-def test_replace_index_uses_windows_write_through_flags(monkeypatch):
+def test_durable_replace_uses_windows_write_through_flags(monkeypatch):
     source_path = Path("not-a-real-windows-directory/pending.tmp")
     index_path = Path("not-a-real-windows-directory/id.json")
     calls = []
@@ -479,7 +504,7 @@ def test_replace_index_uses_windows_write_through_flags(monkeypatch):
         raising=False,
     )
 
-    artifact_store._replace_index(source_path, index_path, platform="nt")
+    artifact_store._durable_replace(source_path, index_path, platform="nt")
 
     assert calls == [(str(source_path), str(index_path), 0x1 | 0x8)]
     assert fake_move_file_ex.argtypes == [
@@ -490,7 +515,7 @@ def test_replace_index_uses_windows_write_through_flags(monkeypatch):
     assert fake_move_file_ex.restype is fake_ctypes.c_int
 
 
-def test_replace_index_propagates_windows_error(monkeypatch):
+def test_durable_replace_propagates_windows_error(monkeypatch):
     source_path = Path("not-a-real-windows-directory/pending.tmp")
     index_path = Path("not-a-real-windows-directory/id.json")
     expected_error = OSError("MoveFileExW failed")
@@ -525,7 +550,7 @@ def test_replace_index_propagates_windows_error(monkeypatch):
     )
 
     with pytest.raises(OSError) as caught:
-        artifact_store._replace_index(source_path, index_path, platform="nt")
+        artifact_store._durable_replace(source_path, index_path, platform="nt")
 
     assert caught.value is expected_error
     assert calls == [
@@ -535,7 +560,7 @@ def test_replace_index_propagates_windows_error(monkeypatch):
 
 
 @pytest.mark.skipif(artifact_store.os.name != "nt", reason="Windows contract")
-def test_replace_index_moves_exact_full_index_bytes_on_windows(tmp_path):
+def test_durable_replace_moves_exact_full_bytes_on_windows(tmp_path):
     ref = _object_ref(
         "models/windows-durable.onnx",
         "b" * 64,
@@ -548,11 +573,38 @@ def test_replace_index_moves_exact_full_index_bytes_on_windows(tmp_path):
     source_path.write_bytes(expected)
     index_path.write_bytes(b"old-index")
 
-    artifact_store._replace_index(source_path, index_path, platform="nt")
+    artifact_store._durable_replace(source_path, index_path, platform="nt")
 
     assert not source_path.exists()
     assert index_path.read_bytes() == expected
     assert json.loads(index_path.read_text(encoding="utf-8")) == ref.to_wire()
+
+
+@pytest.mark.skipif(artifact_store.os.name != "nt", reason="Windows contract")
+def test_put_bytes_uses_real_windows_write_through_for_object_then_index(
+    tmp_path, monkeypatch
+):
+    """Both published paths pass through the real MoveFileExW helper in order."""
+    store = ArtifactStore(tmp_path / "store")
+    destinations = []
+    real_replace = artifact_store._durable_replace
+
+    def tracked_replace(source, destination):
+        destinations.append(Path(destination))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(artifact_store, "_durable_replace", tracked_replace)
+
+    ref = store.put_bytes(
+        logical_id="models/windows-object-before-index.onnx",
+        data=b"windows-durable-object",
+        media_type="application/onnx",
+    )
+
+    assert destinations == [
+        store.object_path(ref.store_uri),
+        store._logical_index_path(ref.logical_id),
+    ]
 
 
 def test_materialize_rejects_root_escape(tmp_path):

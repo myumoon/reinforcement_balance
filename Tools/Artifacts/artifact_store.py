@@ -96,12 +96,13 @@ def _exclusive_file_lock(path: Path):
                     msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def _replace_index(
+def _durable_replace(
     source: Path,
     destination: Path,
     *,
     platform: str | None = None,
 ) -> None:
+    """Atomically publish one fsynced file and durably commit its directory entry."""
     platform = os.name if platform is None else platform
     if platform == "nt":
         move_file_ex = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
@@ -124,7 +125,7 @@ def _replace_index(
         finally:
             os.close(descriptor)
         return
-    raise OSError(f"unsupported index durability platform: {platform}")
+    raise OSError(f"unsupported durability platform: {platform}")
 
 
 @dataclass(frozen=True)
@@ -307,7 +308,7 @@ class ArtifactStore:
                 temp_bytes = temp_path.read_bytes()
                 if sha256_hex(temp_bytes) != sha256 or len(temp_bytes) != len(data):
                     raise ArtifactStoreError("temporary object failed hash/size verification")
-                os.replace(temp_path, destination)
+                _durable_replace(temp_path, destination)
             finally:
                 if temp_path.exists():
                     temp_path.unlink()
@@ -347,7 +348,7 @@ class ArtifactStore:
                     handle.write(canonical_json_bytes(expected))
                     handle.flush()
                     os.fsync(handle.fileno())
-                _replace_index(temp_path, index_path)
+                _durable_replace(temp_path, index_path)
                 if self._read_logical_index(index_path) != expected:
                     raise ArtifactStoreError(
                         f"logical id {ref.logical_id!r} publish revalidation failed"
