@@ -3,4 +3,8 @@
 #include "ReinBalance.h"
 #include "Modules/ModuleManager.h"
 
-IMPLEMENT_PRIMARY_GAME_MODULE( FDefaultGameModuleImpl, ReinBalance, "ReinBalance" );
+#if IS_PROGRAM
+IMPLEMENT_GAME_MODULE(FDefaultGameModuleImpl, ReinBalance);
+#else
+IMPLEMENT_PRIMARY_GAME_MODULE(FDefaultGameModuleImpl, ReinBalance, "ReinBalance");
+#endif

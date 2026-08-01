@@ -4,14 +4,18 @@
  */
 #include "TestHarness.h"
 
-#include "HAL/PlatformFileManager.h"
-#include "Misc/FileHelper.h"
-#include "Misc/MD5.h"
+#include "HAL/PlatformProcess.h"
+#include "Containers/StringConv.h"
+#include "Misc/SecureHash.h"
 #include "Misc/Paths.h"
 #include "Survivors/Game/SurvivorsGame.h"
 #include "Survivors/SurvivorsGameConstants.h"
 #include "Survivors/SurvivorsGameLogic.h"
 #include "UObject/UObjectGlobals.h"
+
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 
 /**
  * JSON の構造を変えず formatting whitespace だけを除去する。
@@ -38,11 +42,14 @@ TEST_CASE("Survivors live content schema equals committed capture", "[unit][surv
 	Logic.Initialize(Config);
 
 	const FString CapturePath = FPaths::ConvertRelativePathToFull(
-		FPaths::ProjectDir(),
-		TEXT("../Tools/Training/configs/survivors_content_schema_capture_v1.json"));
-	FString Captured;
-	REQUIRE(FPlatformFileManager::Get().GetPlatformFile().FileExists(*CapturePath));
-	REQUIRE(FFileHelper::LoadFileToString(Captured, *CapturePath));
+		FPaths::Combine(FPlatformProcess::BaseDir(), TEXT("../../../../Tools/Training/configs/survivors_content_schema_capture_v1.json")));
+	std::ifstream CaptureFile(std::filesystem::path(*CapturePath), std::ios::binary);
+	REQUIRE(CaptureFile.is_open());
+	const std::string CaptureBytes{
+		std::istreambuf_iterator<char>(CaptureFile), std::istreambuf_iterator<char>()};
+	REQUIRE(!CaptureBytes.empty());
+	const FUTF8ToTCHAR CaptureText(CaptureBytes.c_str(), CaptureBytes.length());
+	const FString Captured(CaptureText.Length(), CaptureText.Get());
 
 	const FString Live = FString::Printf(
 		TEXT("{\"schema_version\":\"survivors.content_schema.v1\",\"content\":%s,\"action_time\":%s}"),
