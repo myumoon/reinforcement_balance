@@ -50,7 +50,12 @@ def auth(tmp_path,attempt="attempt"):
     save=save_verdict(tmp_path,attempt,target)
     audit=audit_verdict(attempt,target,save.pre_run_hash)
     config=tmp_path/"launch_gate.json"
-    config.write_text('{"schema_version":"launch_gate.v1","lifecycle_root":"'+str(Path(save.lifecycle_record_path).parent)+'","canonical_save_path":"'+save.canonical_save_path+'","original_backup_path":"'+save.original_backup_path+'"}')
+    config.write_text(json.dumps({
+        "schema_version":"launch_gate.v1",
+        "lifecycle_root":str(Path(save.lifecycle_record_path).parent),
+        "canonical_save_path":save.canonical_save_path,
+        "original_backup_path":save.original_backup_path,
+    }), encoding="utf-8")
     launch_lifecycle.LAUNCH_GATE_CONFIG_PATH=config
     platform=PlatformGate(True,True,True,True,True,True,True)
     return LaunchAuthorization.issue(audit,platform.verified(attempt,target),save)
@@ -84,7 +89,12 @@ def test_handwritten_save_jsonl_has_no_verdict_path(tmp_path):
 
 def store(tmp_path, campaign):
     config=tmp_path/"launch_store.json"
-    config.write_text('{"schema_version":"launch_store.v1","root":"'+str(tmp_path/'fixed')+'","local_fixed_volume":true,"ntfs":true}')
+    config.write_text(json.dumps({
+        "schema_version":"launch_store.v1",
+        "root":str(tmp_path/"fixed"),
+        "local_fixed_volume":True,
+        "ntfs":True,
+    }), encoding="utf-8")
     launch_lifecycle.LAUNCH_STORE_CONFIG_PATH=config
     return LaunchIntentStore.for_campaign(campaign)
 
@@ -92,7 +102,12 @@ def store(tmp_path, campaign):
 @pytest.mark.parametrize("campaign_id", ["..", "../escape", "/absolute", r"C:\\escape", "has/slash", r"has\\slash"])
 def test_campaign_identity_cannot_escape_fixed_store_root(tmp_path, campaign_id):
     config=tmp_path/"launch_store.json"
-    config.write_text('{"schema_version":"launch_store.v1","root":"'+str(tmp_path/'fixed')+'","local_fixed_volume":true,"ntfs":true}')
+    config.write_text(json.dumps({
+        "schema_version":"launch_store.v1",
+        "root":str(tmp_path/"fixed"),
+        "local_fixed_volume":True,
+        "ntfs":True,
+    }), encoding="utf-8")
     launch_lifecycle.LAUNCH_STORE_CONFIG_PATH=config
     with pytest.raises(ValueError, match="campaign identity"):
         LaunchIntentStore.for_campaign(campaign_id)
@@ -314,7 +329,8 @@ def test_authorization_rejects_save_evidence_on_unsupported_volume(tmp_path,monk
     config=tmp_path/"launch_gate.json"
     config.write_text(json.dumps({
         "schema_version":"launch_gate.v1","lifecycle_root":str(paths[0].parent),
-        "canonical_save_path":str(paths[1]),"original_backup_path":str(paths[2])}))
+        "canonical_save_path":str(paths[1]),"original_backup_path":str(paths[2])
+    }), encoding="utf-8")
     monkeypatch.setattr(launch_lifecycle,"LAUNCH_GATE_CONFIG_PATH",config)
     checked=[]
     def reject_unsupported(path):
@@ -347,7 +363,12 @@ def test_win64_lock_uses_nonblocking_byte_zero_region(tmp_path,monkeypatch):
 
 def test_non_supported_fixed_store_rejects_commit(tmp_path):
     config=tmp_path/"launch_store.json"
-    config.write_text('{"schema_version":"launch_store.v1","root":"'+str(tmp_path/'fixed')+'","local_fixed_volume":true,"ntfs":false}')
+    config.write_text(json.dumps({
+        "schema_version":"launch_store.v1",
+        "root":str(tmp_path/"fixed"),
+        "local_fixed_volume":True,
+        "ntfs":False,
+    }), encoding="utf-8")
     launch_lifecycle.LAUNCH_STORE_CONFIG_PATH=config
     ledger=LaunchIntentStore.for_campaign("unsupported")
     with pytest.raises(ValueError, match="support envelope"):
@@ -390,14 +411,28 @@ def test_launch_intent_requires_successful_durable_commit(tmp_path):
     with pytest.raises(ValueError):
         LaunchLifecycle.begin("a").reserve("r","g","n",authorization=auth(tmp_path,"a"),store=None)
 
-@pytest.mark.parametrize(("platform","expected"), [("nt", True), ("posix", True), ("unsupported", False)])
-def test_launch_intent_durability_platform_contract(tmp_path, monkeypatch, platform, expected):
-    path=tmp_path/f"{platform}.jsonl"; path.write_bytes(b"intent")
+@pytest.mark.skipif(os.name != "nt", reason="requires a real Windows file handle")
+def test_windows_launch_intent_sync_uses_a_writable_handle(tmp_path):
+    path=tmp_path/"intent.jsonl"
+    path.write_bytes(b"intent")
+
+    _sync_launch_intent(path, platform="nt")
+
+    assert path.read_bytes()==b"intent"
+
+def test_posix_launch_intent_sync_fsyncs_and_closes_parent_directory(tmp_path, monkeypatch):
+    path=tmp_path/"intent.jsonl"; path.write_bytes(b"intent")
     calls=[]
-    monkeypatch.setattr(os,"fsync",lambda fd:calls.append(fd))
-    if expected:
-        _sync_launch_intent(path, platform=platform)
-        assert calls
-    else:
-        with pytest.raises(OSError, match="unsupported"):
-            _sync_launch_intent(path, platform=platform)
+    monkeypatch.setattr(os,"open",lambda candidate, flags: calls.append(("open", candidate, flags)) or 41)
+    monkeypatch.setattr(os,"fsync",lambda descriptor: calls.append(("fsync", descriptor)))
+    monkeypatch.setattr(os,"close",lambda descriptor: calls.append(("close", descriptor)))
+
+    _sync_launch_intent(path, platform="posix")
+
+    assert calls==[("open",path.parent,os.O_RDONLY),("fsync",41),("close",41)]
+
+def test_launch_intent_sync_rejects_unsupported_platform(tmp_path):
+    path=tmp_path/"unsupported.jsonl"; path.write_bytes(b"intent")
+
+    with pytest.raises(OSError, match="unsupported"):
+        _sync_launch_intent(path, platform="unsupported")
