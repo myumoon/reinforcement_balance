@@ -31,9 +31,11 @@
 - subagentへ会話全履歴を渡さず、[`scoped_agent_brief.md`](scoped_agent_brief.md) を使って対象file、受入条件、base/head、既知のtest結果だけを渡します。通常は `fork_turns="none"` を使います。
 - reviewerは1 PRにつき1人とし、追加reviewはユーザー承認制とします。specialist調査には実装・commit権限を与えません。
 - agentへdiff全文を貼らず、base/headを共有します。100 KBを超えるdiffはfile単位に分割し、sizeを確認してから渡します。
-- focused testは実装中、full suiteは最終時に1回実行します。同一commitの成功suiteを別agentが再実行しません。
+- [`verification_budget.md`](verification_budget.md) に従い、focused testは実装中、変更領域のfull suiteは最終時に1回実行します。同一commitの成功suiteを別agentが再実行しません。
+- full Common／Artifacts／Trainingの結果は、commit hash、command、passed／failed／skipped件数とともに共有します。
+- pytestは通常 `-q --tb=short --maxfail=1` を使い、原因確定後だけ対象testをverboseで実行します。
 - review fixは2 roundsで停止し、新しいImportantが残る場合はscopeまたは設計をユーザーと再確認します。
-- recursive scan、full traceback、diff全文は先に件数・サイズを確認し、1回300行または20,000文字を上限にします。
+- recursive scanは対象directory、depth、除外directoryを固定し、一覧の前にcountだけを取得します。full traceback、diff全文、logも先に件数・sizeを確認し、1回300行または20,000文字を上限にします。
 - 品質ゲートは削除せず、変更に応じて実行範囲と実行タイミングを段階化します。
 
 ## 消費量の代理指標
