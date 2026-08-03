@@ -28,7 +28,9 @@
 ## 標準運用
 
 - 通常はinline実装とPR単位の独立review 1回を使います。taskごとのsubagent reviewは明示承認がある場合だけ使います。
-- subagentへ会話全履歴を渡さず、対象file、受入条件、base/head、既知のtest結果だけを渡します。
+- subagentへ会話全履歴を渡さず、[`scoped_agent_brief.md`](scoped_agent_brief.md) を使って対象file、受入条件、base/head、既知のtest結果だけを渡します。通常は `fork_turns="none"` を使います。
+- reviewerは1 PRにつき1人とし、追加reviewはユーザー承認制とします。specialist調査には実装・commit権限を与えません。
+- agentへdiff全文を貼らず、base/headを共有します。100 KBを超えるdiffはfile単位に分割し、sizeを確認してから渡します。
 - focused testは実装中、full suiteは最終時に1回実行します。同一commitの成功suiteを別agentが再実行しません。
 - review fixは2 roundsで停止し、新しいImportantが残る場合はscopeまたは設計をユーザーと再確認します。
 - recursive scan、full traceback、diff全文は先に件数・サイズを確認し、1回300行または20,000文字を上限にします。
