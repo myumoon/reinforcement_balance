@@ -62,6 +62,7 @@ python train.py --game survivors --total-steps 500000
   ```
 - ソースコードを変更した場合は worktree 上でビルドが成功することを確認してください
 - 実装が完了した場合はプルリクエストを作成して、レビュワーを指定してください
+- AI作業量・コンテキスト予算は [`docs/agent_workflow/token_budget_policy.md`](docs/agent_workflow/token_budget_policy.md) を参照してください。
 - プラン作成時のみローカルに直接作成してください
   - プランは .claude/docs/plans/{日時}_{タスク名}.md で出力してください
   - プランはコミットしないでください、ローカル管理のファイルです
