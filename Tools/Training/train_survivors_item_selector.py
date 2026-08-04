@@ -94,12 +94,21 @@ def _load_development_rows(
         raise ItemSelectorCliError("no rows found in dataset shards")
     train: list[dict[str, Any]] = []
     validation: list[dict[str, Any]] = []
-    for row in all_rows:
+    for index, row in enumerate(all_rows):
         split = row.get("split", row.get("partition"))
         if split == "train":
             train.append(row)
         elif split == "validation":
             validation.append(row)
+        elif split == "test":
+            # ponytail: fail-closed — test rows must never reach the trainer
+            raise ItemSelectorCliError(
+                f"row {index}: test partition must not be loaded in training CLI"
+            )
+        else:
+            raise ItemSelectorCliError(
+                f"row {index}: unknown split {split!r}; expected train or validation"
+            )
     if not train or not validation:
         raise ItemSelectorCliError("dataset must contain train and validation splits")
     return train, validation
