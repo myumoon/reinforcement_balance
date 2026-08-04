@@ -294,6 +294,20 @@ UE5 build / LLT: 未実行（Windows 専用）。実データによる promotion
 reliability calibration、raw critic 比較、label release verdict は後続 revalidation
 フェーズで実施する。
 
+## Survivors ItemSelector training
+
+`games/survivors/item_selector_model.py` は context MLP と candidate MLP を分離し、全 card に
+同じ scorer を適用する。候補 index は入力に含めず、padding slot は logits を `-inf` にする。
+`item_selector_loss.py` は teacher soft target の cross entropy、非 tie pair ranking、soft Brier
+を `CE + 0.5 * Pair + 0.05 * Brier` で合成する。train-only class weight と reliability は完成した
+row loss へ一度だけ適用される。
+
+`item_selector_trainer.py` は共有 `ItemDecisionFeatures.to_wire()` から model feature を encode し、
+dataset の target/mask/reliability を raw teacher score から再計算しない。optimizer は AdamW
+(`lr=3e-4`, `weight_decay=1e-4`)、batch 512、最大100 epoch、patience 12で、development
+validation NDCG が最良の checkpoint を選ぶ。resume は target capability hash と Nmax の両方が
+一致する場合だけ許可し、trainer の partition reader は train/validation だけを要求する。
+
 ## 関連ドキュメント
 
 - UE5 との通信仕様: [`ue5_env.md`](ue5_env.md)

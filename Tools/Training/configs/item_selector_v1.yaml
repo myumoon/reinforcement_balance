@@ -1,0 +1,40 @@
+# ItemSelector v1 学習設定
+# train_survivors_item_selector.py --context-dim/--candidate-dim は feature schema から手動計算する
+# context_only_v1 + max_item_cards=3 の場合: context_dim=25, candidate_dim=9
+
+# モデル構造設定（feature schema / Nmax と一致させること）
+model:
+  # context MLP: context_dim -> 128 -> 64
+  # candidate MLP: candidate_dim -> 64 -> 32
+  # scorer: 96 -> 64 -> 1
+  # param count < 100k で固定
+
+# Optimizer・学習設定（プラン 02-02 契約値）
+optimizer:
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  batch_size: 512
+  max_epochs: 100
+  patience: 12
+
+# 再現性（seed は checkpoint に保存、runtime 確定前に変更しない）
+reproducibility:
+  torch_seed: 0
+  numpy_seed: 0
+  python_seed: 0
+  deterministic: true
+
+# Checkpoint 基準（validation NDCG のみ）
+checkpoint:
+  criterion: validation_ndcg
+  save_best: true
+  save_last: true
+
+# 補助 metrics（ログのみ、checkpoint 選択に使わない）
+metrics:
+  auxiliary:
+    - top1_accuracy
+    - regret
+    - ece
+    - brier
+    - ceiling_gap
