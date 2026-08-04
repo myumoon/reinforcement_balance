@@ -77,21 +77,50 @@ def _load_jsonl_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _manifest_shard_paths(dataset_dir: Path) -> list[Path]:
+    """manifest.json に列挙された shard path だけを返す。
+
+    manifest を経由することで test/unknown shard を開かず、
+    dataset builder が公開した development 行だけを読む。
+    """
+    manifest_path = dataset_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise ItemSelectorCliError(f"manifest.json not found: {manifest_path}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ItemSelectorCliError(f"cannot read manifest: {exc}") from exc
+    shards = manifest.get("shards")
+    if not isinstance(shards, list) or not shards:
+        raise ItemSelectorCliError("manifest has no shard entries")
+    paths: list[Path] = []
+    for entry in shards:
+        logical_id = entry.get("logical_id") if isinstance(entry, dict) else None
+        if not isinstance(logical_id, str) or not logical_id:
+            raise ItemSelectorCliError("manifest shard entry has no logical_id")
+        shard_path = (dataset_dir / logical_id).resolve()
+        try:
+            shard_path.relative_to(dataset_dir.resolve())
+        except ValueError as exc:
+            raise ItemSelectorCliError(f"shard path escapes dataset dir: {logical_id}") from exc
+        paths.append(shard_path)
+    return paths
+
+
 def _load_development_rows(
     dataset_dir: Path,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """dataset_dir の shards から train/validation rows を分けて返す。
+    """manifest 経由で development shard だけを開き train/validation を返す。
 
-    split field で振り分け、test rows を development loader へ渡さない。
+    test shard は manifest に含まれないため一切 open せず、
+    test row が訓練結果へ影響しない。
     """
-    shard_dir = dataset_dir / "shards"
-    if not shard_dir.is_dir():
-        raise ItemSelectorCliError(f"shards directory not found: {shard_dir}")
+    shard_paths = _manifest_shard_paths(dataset_dir)
     all_rows: list[dict[str, Any]] = []
-    for shard in sorted(shard_dir.glob("*.jsonl")):
-        all_rows.extend(_load_jsonl_rows(shard))
+    for shard_path in shard_paths:
+        all_rows.extend(_load_jsonl_rows(shard_path))
     if not all_rows:
-        raise ItemSelectorCliError("no rows found in dataset shards")
+        raise ItemSelectorCliError("no rows found in manifest shards")
     train: list[dict[str, Any]] = []
     validation: list[dict[str, Any]] = []
     for index, row in enumerate(all_rows):
@@ -100,14 +129,9 @@ def _load_development_rows(
             train.append(row)
         elif split == "validation":
             validation.append(row)
-        elif split == "test":
-            # ponytail: fail-closed — test rows must never reach the trainer
-            raise ItemSelectorCliError(
-                f"row {index}: test partition must not be loaded in training CLI"
-            )
         else:
             raise ItemSelectorCliError(
-                f"row {index}: unknown split {split!r}; expected train or validation"
+                f"row {index}: unexpected split {split!r} in manifest shard"
             )
     if not train or not validation:
         raise ItemSelectorCliError("dataset must contain train and validation splits")
