@@ -433,6 +433,11 @@ class NonModelUiPolicyConfigV1:
         )
         return cls.from_wire(json.loads(text))
 
+    @classmethod
+    def load_default(cls) -> "NonModelUiPolicyConfigV1":
+        """install済みpackage resourceから既定configを読み込む互換API。"""
+        return cls.default_config()
+
 
 def _intent(
     kind: UiIntentKind,
