@@ -157,7 +157,7 @@ def _sync_launch_intent(path:Path, *, platform:str|None=None)->None:
     """Flush a replaced intent; Win64 directory-entry durability relies on NTFS journaling."""
     platform=os.name if platform is None else platform
     if platform=="nt":
-        with path.open("rb") as stream: os.fsync(stream.fileno())
+        with path.open("rb+") as stream: os.fsync(stream.fileno())
         return
     if platform=="posix":
         descriptor=os.open(path.parent,os.O_RDONLY)

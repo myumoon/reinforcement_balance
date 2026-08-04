@@ -13,6 +13,7 @@ from reinbalance_survivors_contracts.fidelity_producer_paths import (
     resolve_gating_producer_hashes,
 )
 from reinbalance_survivors_contracts.fidelity_verdict import GATING_KEYS
+from reinbalance_survivors_contracts.ubt_action_graph import make_ubt_action_graph_attestation
 from reinbalance_survivors_contracts.ui_intent import ContractValidationError
 
 
@@ -37,6 +38,7 @@ def _cpp_closure() -> dict:
         "module_name": "Module",
         "build_cs": "Module/Module.Build.cs",
         "private_source_roots": ["Module/Private"],
+        "header_roots": ["Module/Public", "Module/Private"],
         "compiled_tu_include_glob": "Module/Private/**/*.cpp",
         "repo_local_module_dependency_edges": [],
         "allowed_non_behavior_excludes": [],
@@ -64,6 +66,26 @@ def _empty_producers() -> dict:
     return producers
 
 
+def _external_quote_entries(manifest) -> list[dict[str, str]]:
+    """検証済み token 列を loader 用の理由付き JSON entry に戻す。"""
+    return [
+        {"include": token, "reason": "test fixture external header"}
+        for token in manifest.external_quote_includes
+    ]
+
+
+def _attestation(root):
+    """fixture repo の current build inputs と全 .cpp から fresh attestation を作る。"""
+    (root / "ReinBalance").mkdir(exist_ok=True)
+    (root / "ReinBalance/ReinBalance.uproject").write_text("{}", encoding="utf-8")
+    (root / "ReinBalance/Source").mkdir(exist_ok=True)
+    (root / "ReinBalance/Source/ReinBalanceEditor.Target.cs").write_text("target", encoding="utf-8")
+    (root / "ReinBalance/Source/Fixture").mkdir(exist_ok=True)
+    (root / "ReinBalance/Source/Fixture/Fixture.Build.cs").write_text("module", encoding="utf-8")
+    sources = sorted(path.relative_to(root).as_posix() for path in root.rglob("*.cpp"))
+    return make_ubt_action_graph_attestation(root, sources, ubt_identity="a" * 64)
+
+
 def test_packaged_manifest_has_exact_keys_and_hash() -> None:
     """package 内 manifest が13 key と identity hash を持つことを検証する。
 
@@ -72,6 +94,7 @@ def test_packaged_manifest_has_exact_keys_and_hash() -> None:
     manifest = load_producer_path_manifest()
     assert set(manifest.producers) == set(GATING_KEYS)
     assert len(manifest.manifest_hash) == 64
+    assert "CoreMinimal.h" in manifest.external_quote_includes
 
 
 def test_loaded_manifest_is_deeply_immutable_and_resolver_revalidates(tmp_path) -> None:
@@ -99,8 +122,34 @@ def test_unknown_or_missing_producer_is_rejected(tmp_path) -> None:
     typo や新 producer の黙認を防ぎます。
     """
     original = load_producer_path_manifest()
-    data = {"schema_version": original.schema_version, "producers": _mutable(original.producers)}
+    data = {
+        "schema_version": original.schema_version,
+        "external_quote_includes": _external_quote_entries(original),
+        "producers": _mutable(original.producers),
+    }
     data["producers"]["unknown"] = data["producers"]["logic_public"]
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ContractValidationError):
+        load_producer_path_manifest(path)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"include": "CoreMinimal.h"},
+        {"include": "../Engine/CoreMinimal.h", "reason": "escape"},
+        {"include": "Generated.generated.h", "reason": "generated headers are implicit"},
+    ],
+)
+def test_external_quote_include_allowlist_is_strict(tmp_path, entry) -> None:
+    """外部 include allowlist の未知形・traversal・generated header を拒否する。"""
+    original = load_producer_path_manifest()
+    data = {
+        "schema_version": original.schema_version,
+        "external_quote_includes": [entry],
+        "producers": _mutable(original.producers),
+    }
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ContractValidationError):
@@ -119,7 +168,11 @@ def test_cpp_dependency_mode_is_fixed_at_load_and_use(tmp_path, key, mode) -> No
     producers[key]["transitive_dependency_mode"] = mode
     path = tmp_path / f"{key}-{mode}.json"
     path.write_text(
-        json.dumps({"schema_version": original.schema_version, "producers": producers}),
+        json.dumps({
+            "schema_version": original.schema_version,
+            "external_quote_includes": _external_quote_entries(original),
+            "producers": producers,
+        }),
         encoding="utf-8",
     )
     with pytest.raises(ContractValidationError):
@@ -138,20 +191,23 @@ def test_compiled_closure_bytes_are_bound_to_gating_hash(tmp_path) -> None:
     build = tmp_path / "Module/Module.Build.cs"
     private = tmp_path / "Module/Private/Survivors/Weapons"
     private.mkdir(parents=True)
+    (tmp_path / "Module/Public").mkdir()
     build.write_text("module", encoding="utf-8")
     weapon = private / "Weapon.cpp"
     weapon.write_text("one", encoding="utf-8")
     producers = _empty_producers()
     manifest = type(load_producer_path_manifest())("v", producers, "f" * 64)
-    first = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    with pytest.raises(ContractValidationError, match="action graph"):
+        resolve_gating_producer_hashes(tmp_path, manifest, {})
+    first = resolve_gating_producer_hashes(tmp_path, manifest, {}, _attestation(tmp_path))
     weapon.write_text("two", encoding="utf-8")
-    second = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    second = resolve_gating_producer_hashes(tmp_path, manifest, {}, _attestation(tmp_path))
     assert first["logic_private"] != second["logic_private"]
     (private / "NewWeapon.cpp").write_text("new", encoding="utf-8")
-    third = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    third = resolve_gating_producer_hashes(tmp_path, manifest, {}, _attestation(tmp_path))
     assert second["logic_private"] != third["logic_private"]
     weapon.unlink()
-    fourth = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    fourth = resolve_gating_producer_hashes(tmp_path, manifest, {}, _attestation(tmp_path))
     assert third["logic_private"] != fourth["logic_private"]
 
 
@@ -172,13 +228,13 @@ def test_recursive_header_set_is_bound_to_each_cpp_gating_hash(tmp_path, key) ->
     producers = _empty_producers()
     producers[key]["recursive_roots"] = [{"path": "Module/Public", "include_globs": ["**/*.h"]}]
     manifest = type(load_producer_path_manifest())("v", producers, "f" * 64)
-    first = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    first = resolve_gating_producer_hashes(tmp_path, manifest, {}, _attestation(tmp_path))
     header.write_text("two", encoding="utf-8")
-    second = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    second = resolve_gating_producer_hashes(tmp_path, manifest, {}, _attestation(tmp_path))
     assert first[key] != second[key]
     (root / "Added.h").write_text("added", encoding="utf-8")
-    third = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    third = resolve_gating_producer_hashes(tmp_path, manifest, {}, _attestation(tmp_path))
     assert second[key] != third[key]
     header.unlink()
-    fourth = resolve_gating_producer_hashes(tmp_path, manifest, {})
+    fourth = resolve_gating_producer_hashes(tmp_path, manifest, {}, _attestation(tmp_path))
     assert third[key] != fourth[key]

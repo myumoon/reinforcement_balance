@@ -4,6 +4,7 @@
 """
 
 import copy
+import os
 import yaml
 import pytest
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
@@ -188,6 +189,15 @@ def test_durable_backup_restore_hashes_and_verdict(tmp_path):
     target.write_bytes(b"post-run"); life.record_post_run(target,"a1")
     life.restore_original(backup,target,"a1")
     assert target.read_bytes()==b"original" and {r["stage"] for r in life.records}>={"ORIGINAL_BACKUP","CANONICAL_RESTORE","PRE_RUN_AUDIT","POST_RUN","ORIGINAL_RESTORE"}
+
+@pytest.mark.skipif(os.name != "nt", reason="requires a real Windows file handle")
+def test_windows_atomic_copy_syncs_replaced_target_with_writable_handle(tmp_path):
+    source=tmp_path/"source.save"; source.write_bytes(b"intent")
+    target=tmp_path/"target.save"
+
+    SaveLifecycle._atomic_copy(source,target,file_hash(b"intent"))
+
+    assert target.read_bytes()==b"intent"
 
 def test_interruption_conflict_and_restore_gate_fail_closed(tmp_path,monkeypatch):
     target=tmp_path/"save"; target.write_bytes(b"original"); backup=tmp_path/"backup"; backup.write_bytes(b"exists")

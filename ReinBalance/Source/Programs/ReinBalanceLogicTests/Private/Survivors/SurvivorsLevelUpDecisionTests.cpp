@@ -128,6 +128,7 @@ TEST_CASE("Survivors external overflow advances one level and freezes simulation
 	REQUIRE(Logic.IsLevelUpPending());
 	CHECK(Logic.GetPlayerLevel() == 2);
 	CHECK(Logic.GetLevelUpBacklog() > 0);
+	CHECK(Logic.GetActionTimeSchema().Contains(TEXT("\"pause_during_level_up\":true")));
 	const float TimeBefore = Logic.GetElapsedTime();
 	const int32 StepsBefore = Logic.GetEpisodeStepCount();
 	const TArray<float> ObsBefore = Logic.GetObservation();

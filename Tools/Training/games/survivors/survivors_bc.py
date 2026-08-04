@@ -286,7 +286,14 @@ def rule_policy(obs: np.ndarray, offsets: dict, rng: np.random.Generator | None 
     if wall is not None:
         unblocked = [a for a in range(8) if a not in blocked]
         if unblocked:
-            return max(unblocked, key=lambda a: wall[_ACTION9_TO_WALL_RAY[a]])
+            max_clearance = max(wall[_ACTION9_TO_WALL_RAY[a]] for a in unblocked)
+            candidates = [
+                a
+                for a in unblocked
+                if max_clearance - wall[_ACTION9_TO_WALL_RAY[a]] <= 1e-6
+            ]
+            _rng = rng if rng is not None else _RNG
+            return int(_rng.choice(candidates))
 
     # ── 8. Idle ──
     return 8

@@ -408,7 +408,7 @@ public:
 
 private:
 	friend class ASurvivorsGame;
-#if WITH_AUTOMATION_TESTS
+#if (defined(WITH_AUTOMATION_TESTS) && WITH_AUTOMATION_TESTS) || (defined(WITH_REINBALANCE_LOGIC_TESTS) && WITH_REINBALANCE_LOGIC_TESTS)
 	friend struct FSurvivorsGameTestAccess;
 #endif
 
@@ -493,7 +493,7 @@ private:
 	 */
 	TUniquePtr<FSurvivorsGameLogic> CloneForPreview() const;
 
-#if WITH_AUTOMATION_TESTS
+#if (defined(WITH_AUTOMATION_TESTS) && WITH_AUTOMATION_TESTS) || (defined(WITH_REINBALANCE_LOGIC_TESTS) && WITH_REINBALANCE_LOGIC_TESTS)
 	friend struct FSurvivorsGameTestAccess;
 	friend struct FSurvivorsChoiceProjectionTestAccess;
 #endif

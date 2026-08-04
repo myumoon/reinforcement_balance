@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import shutil
 import tempfile
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,9 +28,104 @@ from reinbalance_survivors_contracts.artifact_identity import (
     parse_artifact_uri,
 )
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    fcntl = None
+    import msvcrt
+
+
+_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+class _ThreadLockEntry:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.users = 0
+
+
+_THREAD_LOCKS: dict[str, _ThreadLockEntry] = {}
+_MOVEFILE_REPLACE_EXISTING = 0x1
+_MOVEFILE_WRITE_THROUGH = 0x8
+
 
 class ArtifactStoreError(RuntimeError):
     """Raised when the artifact store cannot safely complete an operation."""
+
+
+@contextmanager
+def _thread_lock(path: Path):
+    lock_key = str(path.resolve())
+    with _THREAD_LOCKS_GUARD:
+        entry = _THREAD_LOCKS.get(lock_key)
+        if entry is None:
+            entry = _ThreadLockEntry()
+            _THREAD_LOCKS[lock_key] = entry
+        entry.users += 1
+
+    try:
+        with entry.lock:
+            yield
+    finally:
+        with _THREAD_LOCKS_GUARD:
+            entry.users -= 1
+            if entry.users == 0 and _THREAD_LOCKS.get(lock_key) is entry:
+                del _THREAD_LOCKS[lock_key]
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path):
+    with _thread_lock(path):
+        with path.open("a+b") as stream:
+            if fcntl is not None:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            else:
+                if os.fstat(stream.fileno()).st_size == 0:
+                    stream.write(b"\0")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                else:
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def _durable_replace(
+    source: Path,
+    destination: Path,
+    *,
+    platform: str | None = None,
+) -> None:
+    """Atomically publish one fsynced file and durably commit its directory entry."""
+    platform = os.name if platform is None else platform
+    if platform == "nt":
+        move_file_ex = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+        move_file_ex.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+        ]
+        move_file_ex.restype = ctypes.c_int
+        flags = _MOVEFILE_REPLACE_EXISTING | _MOVEFILE_WRITE_THROUGH
+        if not move_file_ex(str(source), str(destination), flags):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return
+    if platform == "posix":
+        os.replace(source, destination)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        descriptor = os.open(destination.parent, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return
+    raise OSError(f"unsupported durability platform: {platform}")
 
 
 @dataclass(frozen=True)
@@ -130,6 +228,37 @@ class ArtifactStore:
         key = sha256_hex(logical_id.encode("utf-8"))
         return self.logical_root / f"{key}.json"
 
+    def _logical_lock_path(self, logical_id: str) -> Path:
+        key = sha256_hex(logical_id.encode("utf-8"))
+        return self.logical_root / f"{key}.lock"
+
+    def _read_logical_index(self, index_path: Path) -> dict[str, Any]:
+        def reject_duplicate_keys(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"duplicate key: {key}")
+                result[key] = value
+            return result
+
+        try:
+            existing = json.loads(
+                index_path.read_text(encoding="utf-8"),
+                object_pairs_hook=reject_duplicate_keys,
+            )
+            ArtifactRef.from_wire(existing)
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            raise ArtifactStoreError(
+                f"invalid logical id index: {index_path}"
+            ) from exc
+        return existing
+
     def put(
         self,
         *,
@@ -179,7 +308,7 @@ class ArtifactStore:
                 temp_bytes = temp_path.read_bytes()
                 if sha256_hex(temp_bytes) != sha256 or len(temp_bytes) != len(data):
                     raise ArtifactStoreError("temporary object failed hash/size verification")
-                os.replace(temp_path, destination)
+                _durable_replace(temp_path, destination)
             finally:
                 if temp_path.exists():
                     temp_path.unlink()
@@ -189,31 +318,44 @@ class ArtifactStore:
 
     def _ensure_logical_id_available(self, ref: ArtifactRef) -> None:
         index_path = self._logical_index_path(ref.logical_id)
-        if not index_path.exists():
-            return
-        existing = json.loads(index_path.read_text(encoding="utf-8"))
-        if existing["sha256"] != ref.sha256:
-            raise ArtifactStoreError(
-                f"logical id {ref.logical_id!r} already points to a different hash"
-            )
+        with _exclusive_file_lock(self._logical_lock_path(ref.logical_id)):
+            if not index_path.exists():
+                return
+            existing = self._read_logical_index(index_path)
+            if existing != ref.to_wire():
+                raise ArtifactStoreError(
+                    f"logical id {ref.logical_id!r} already points to different metadata"
+                )
 
     def _record_logical_id(self, ref: ArtifactRef) -> None:
         index_path = self._logical_index_path(ref.logical_id)
-        if index_path.exists():
-            return
-        fd, temp_name = tempfile.mkstemp(
-            prefix=".logical.", suffix=".tmp", dir=str(index_path.parent)
-        )
-        temp_path = Path(temp_name)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(canonical_json_bytes(ref.to_wire()))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, index_path)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
+        expected = ref.to_wire()
+        with _exclusive_file_lock(self._logical_lock_path(ref.logical_id)):
+            if index_path.exists():
+                existing = self._read_logical_index(index_path)
+                if existing == expected:
+                    return
+                raise ArtifactStoreError(
+                    f"logical id {ref.logical_id!r} already points to different metadata"
+                )
+
+            fd, temp_name = tempfile.mkstemp(
+                prefix=".logical.", suffix=".tmp", dir=str(index_path.parent)
+            )
+            temp_path = Path(temp_name)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(canonical_json_bytes(expected))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                _durable_replace(temp_path, index_path)
+                if self._read_logical_index(index_path) != expected:
+                    raise ArtifactStoreError(
+                        f"logical id {ref.logical_id!r} publish revalidation failed"
+                    )
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink()
 
     def verify(
         self,

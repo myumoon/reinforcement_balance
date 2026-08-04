@@ -16,6 +16,7 @@ from typing import Any, Mapping
 from .canonical_json import canonical_hash, sha256_hex
 from .cpp_producer_closure import resolve_cpp_producer_closure
 from .fidelity_verdict import GATING_KEYS, PRODUCER_ALLOWLIST_VERSION
+from .ubt_action_graph import UbtActionGraphAttestation
 from .ui_intent import ContractValidationError, ensure
 
 _ENTRY_KEYS = {"ordered_exact_paths", "recursive_roots", "explicit_excludes", "generated_inputs", "transitive_dependency_mode"}
@@ -32,6 +33,7 @@ class ProducerPathManifest:
     schema_version: str
     producers: Mapping[str, Mapping[str, Any]]
     manifest_hash: str
+    external_quote_includes: tuple[str, ...] = ()
 
 
 def _repo_path(value: Any, label: str) -> str:
@@ -77,22 +79,28 @@ def _validate_producers(producers: Any) -> None:
             )
         if "compiled_module_closure" in entry:
             closure = entry["compiled_module_closure"]
-            closure_keys = {"module_name", "build_cs", "private_source_roots", "compiled_tu_include_glob", "repo_local_module_dependency_edges", "allowed_non_behavior_excludes"}
+            closure_keys = {"module_name", "build_cs", "private_source_roots", "header_roots", "compiled_tu_include_glob", "repo_local_module_dependency_edges", "allowed_non_behavior_excludes"}
             ensure(isinstance(closure, Mapping) and set(closure) == closure_keys, f"{key}.compiled_module_closure keys mismatch")
             ensure(isinstance(closure["module_name"], str) and closure["module_name"], f"{key}.module_name required")
             _repo_path(closure["build_cs"], f"{key}.build_cs")
             ensure(isinstance(closure["private_source_roots"], (list, tuple)) and closure["private_source_roots"], f"{key}.private_source_roots required")
             for root in closure["private_source_roots"]:
                 _repo_path(root, f"{key}.private_source_root")
+            ensure(isinstance(closure["header_roots"], (list, tuple)) and closure["header_roots"], f"{key}.header_roots required")
+            for root in closure["header_roots"]:
+                _repo_path(root, f"{key}.header_root")
             ensure(isinstance(closure["compiled_tu_include_glob"], str) and closure["compiled_tu_include_glob"].endswith(".cpp"), f"{key}.compiled_tu_include_glob invalid")
             ensure(isinstance(closure["repo_local_module_dependency_edges"], (list, tuple)), f"{key}.dependency_edges invalid")
             for edge in closure["repo_local_module_dependency_edges"]:
-                ensure(isinstance(edge, Mapping) and set(edge) == {"module_name", "build_cs", "private_source_roots"}, f"{key}.dependency edge keys mismatch")
+                ensure(isinstance(edge, Mapping) and set(edge) == {"module_name", "build_cs", "private_source_roots", "header_roots"}, f"{key}.dependency edge keys mismatch")
                 ensure(isinstance(edge["module_name"], str) and edge["module_name"], f"{key}.dependency module_name required")
                 _repo_path(edge["build_cs"], f"{key}.dependency build_cs")
                 ensure(isinstance(edge["private_source_roots"], (list, tuple)), f"{key}.dependency roots invalid")
                 for root in edge["private_source_roots"]:
                     _repo_path(root, f"{key}.dependency root")
+                ensure(isinstance(edge["header_roots"], (list, tuple)) and edge["header_roots"], f"{key}.dependency header roots invalid")
+                for root in edge["header_roots"]:
+                    _repo_path(root, f"{key}.dependency header root")
             ensure(isinstance(closure["allowed_non_behavior_excludes"], (list, tuple)), f"{key}.closure excludes invalid")
             for excluded in closure["allowed_non_behavior_excludes"]:
                 ensure(isinstance(excluded, Mapping) and set(excluded) == {"path", "reason"}, f"{key}.closure exclude keys mismatch")
@@ -113,6 +121,23 @@ def _deep_freeze(value: Any) -> Any:
     return value
 
 
+def _validate_external_quote_includes(value: Any) -> tuple[str, ...]:
+    """理由付きの外部 quote include allowlist を検証して token 列へ正規化する。"""
+    ensure(isinstance(value, (list, tuple)), "external_quote_includes must be an array")
+    tokens: list[str] = []
+    for entry in value:
+        ensure(
+            isinstance(entry, Mapping) and set(entry) == {"include", "reason"},
+            "external quote include entry keys mismatch",
+        )
+        token = _repo_path(entry["include"], "external quote include")
+        ensure(not token.endswith(".generated.h"), "generated header cannot be an external quote include")
+        ensure(isinstance(entry["reason"], str) and entry["reason"], "external quote include reason required")
+        tokens.append(token)
+    ensure(len(tokens) == len(set(tokens)), "duplicate external quote include")
+    return tuple(sorted(tokens))
+
+
 def load_producer_path_manifest(path: Path | None = None) -> ProducerPathManifest:
     """JSON manifest を検証し、全 nested 階層を immutable 化して読み込む。
 
@@ -124,13 +149,28 @@ def load_producer_path_manifest(path: Path | None = None) -> ProducerPathManifes
         data = json.loads(raw_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ContractValidationError(f"invalid producer manifest JSON: {exc}") from exc
-    ensure(isinstance(data, Mapping) and set(data) == {"schema_version", "producers"}, "producer manifest top-level keys mismatch")
+    ensure(
+        isinstance(data, Mapping)
+        and set(data) == {"schema_version", "producers", "external_quote_includes"},
+        "producer manifest top-level keys mismatch",
+    )
     ensure(data["schema_version"] == PRODUCER_ALLOWLIST_VERSION, "unsupported producer manifest schema_version")
     _validate_producers(data["producers"])
-    return ProducerPathManifest(data["schema_version"], _deep_freeze(data["producers"]), sha256_hex(raw_bytes))
+    external_quote_includes = _validate_external_quote_includes(data["external_quote_includes"])
+    return ProducerPathManifest(
+        data["schema_version"],
+        _deep_freeze(data["producers"]),
+        sha256_hex(raw_bytes),
+        external_quote_includes,
+    )
 
 
-def resolve_gating_producer_hashes(repo_root: Path, manifest: ProducerPathManifest, generated_inputs: Mapping[str, Any]) -> dict[str, str]:
+def resolve_gating_producer_hashes(
+    repo_root: Path,
+    manifest: ProducerPathManifest,
+    generated_inputs: Mapping[str, Any],
+    action_graph: UbtActionGraphAttestation | None = None,
+) -> dict[str, str]:
     """manifest の exact file bytes と generated canonical bytes から gating map を作る。
 
     absent は明示入力に限って認め、欠落 file や未指定 generated input を推測で補いません。
@@ -140,6 +180,15 @@ def resolve_gating_producer_hashes(repo_root: Path, manifest: ProducerPathManife
     ensure(isinstance(manifest.schema_version, str) and manifest.schema_version, "manifest schema_version required")
     ensure(isinstance(manifest.manifest_hash, str) and len(manifest.manifest_hash) == 64, "manifest_hash invalid")
     _validate_producers(manifest.producers)
+    ensure(
+        isinstance(manifest.external_quote_includes, tuple)
+        and all(isinstance(token, str) and token for token in manifest.external_quote_includes)
+        and len(manifest.external_quote_includes) == len(set(manifest.external_quote_includes)),
+        "external_quote_includes invalid",
+    )
+    ensure(isinstance(action_graph, UbtActionGraphAttestation), "fresh UBT action graph is required")
+    repo_root = Path(repo_root).resolve()
+    action_graph.validate_current(repo_root)
     result: dict[str, str] = {}
     for key in GATING_KEYS:
         entry = manifest.producers[key]
@@ -174,9 +223,15 @@ def resolve_gating_producer_hashes(repo_root: Path, manifest: ProducerPathManife
             generated[name] = generated_inputs[name]
         closure_identity = None
         if entry["transitive_dependency_mode"] == "compiled_module_closure":
-            closure = resolve_cpp_producer_closure(repo_root, entry["compiled_module_closure"])
+            closure = resolve_cpp_producer_closure(
+                repo_root,
+                entry["compiled_module_closure"],
+                action_graph_sources=action_graph.compiled_sources,
+                action_graph_subject_identity=action_graph.identity_sha256,
+                allowed_external_quote_includes=manifest.external_quote_includes,
+            )
             closure_identity = closure.identity_hash
-            for relative in (*closure.build_files, *(source.path for source in closure.sources)):
+            for relative in (*closure.build_files, *(source.path for source in closure.sources), *closure.headers):
                 if relative not in known_paths:
                     records.append({"path": relative, "sha256": sha256_hex((repo_root / relative).read_bytes())})
                     known_paths.add(relative)

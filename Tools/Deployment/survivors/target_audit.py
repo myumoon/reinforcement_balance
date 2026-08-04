@@ -207,7 +207,7 @@ class SaveLifecycle:
             with temp.open("rb+") as stream: os.fsync(stream.fileno())
             if _file_hash(temp)!=expected:raise AuditError("temporary copy hash mismatch")
             os.replace(temp,target)
-            with target.open("rb") as stream: os.fsync(stream.fileno())
+            with target.open("rb+") as stream: os.fsync(stream.fileno())
             if _file_hash(target)!=expected:raise AuditError("atomic replacement hash mismatch")
             if os.name!="nt":
                 dfd=os.open(target.parent,os.O_RDONLY)

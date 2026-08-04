@@ -393,12 +393,12 @@ FString FSurvivorsGameLogic::GetObsSchemaHash() const
 FString FSurvivorsGameLogic::GetContentSchema() const
 {
 	using namespace SurvivorsGameConstants;
-	FString Weapons;
+	FString WeaponRows;
 	for (int32 Id = 1; Id <= static_cast<int32>(EWeaponType::Vandalier); ++Id)
 	{
-		if (!Weapons.IsEmpty()) Weapons += TEXT(",");
+		if (!WeaponRows.IsEmpty()) WeaponRows += TEXT(",");
 		const EWeaponType Type = static_cast<EWeaponType>(Id);
-		Weapons += FString::Printf(TEXT("{\"id\":\"%d\",\"max_level\":%d}"), Id, GetWeaponMaxLevel(Type));
+		WeaponRows += FString::Printf(TEXT("{\"id\":\"%d\",\"max_level\":%d}"), Id, GetWeaponMaxLevel(Type));
 	}
 	FString Passives;
 	for (int32 Id = 1; Id <= static_cast<int32>(EPassiveItemType::TorronasBox); ++Id)
@@ -412,13 +412,13 @@ FString FSurvivorsGameLogic::GetContentSchema() const
 		if (!XP.IsEmpty()) XP += TEXT(",");
 		XP += FString::Printf(TEXT("%.0f"), SurvivorsWikiSpec::XPRequiredForLevel(Level));
 	}
-	FString Gems;
+	FString GemRows;
 	const TCHAR* const GemIds[] = { TEXT("blue"), TEXT("green"), TEXT("red") };
 	static_assert(UE_ARRAY_COUNT(GemIds) == UE_ARRAY_COUNT(GemXPValues));
 	for (int32 Id = 0; Id < UE_ARRAY_COUNT(GemIds); ++Id)
 	{
-		if (!Gems.IsEmpty()) Gems += TEXT(",");
-		Gems += FString::Printf(TEXT("{\"id\":\"%s\",\"xp\":%.9g}"), GemIds[Id], GemXPValues[Id]);
+		if (!GemRows.IsEmpty()) GemRows += TEXT(",");
+		GemRows += FString::Printf(TEXT("{\"id\":\"%s\",\"xp\":%.9g}"), GemIds[Id], GemXPValues[Id]);
 	}
 	FString Evolutions;
 	for (const FEvolutionRule& Rule : EvolutionTable)
@@ -433,7 +433,7 @@ FString FSurvivorsGameLogic::GetContentSchema() const
 		TEXT("{\"max_level\":%d,\"weapons\":[%s],\"passives\":[%s],\"gems\":[%s],")
 		TEXT("\"xp_curve\":[%s],\"level_cadence\":\"xp_threshold\",\"offer\":{\"count\":%d,\"fallback\":\"none_when_pool_empty\"},")
 		TEXT("\"slots\":{\"weapon\":%d,\"passive\":%d},\"evolutions\":[%s],\"chest\":{\"boss_drop\":true,\"evolution_enabled_by_config\":%s}}"),
-		MaxPlayerLevel, *Weapons, *Passives, *Gems, *XP, MaxLevelUpOfferCount, MaxWeaponSlots, MaxPassiveSlots, *Evolutions,
+		MaxPlayerLevel, *WeaponRows, *Passives, *GemRows, *XP, MaxLevelUpOfferCount, MaxWeaponSlots, MaxPassiveSlots, *Evolutions,
 		CurrentConfig.bEnableEvolutions ? TEXT("true") : TEXT("false"));
 }
 
@@ -452,7 +452,7 @@ FString FSurvivorsGameLogic::GetActionTimeSchema() const
 	}
 	return FString::Printf(
 		TEXT("{\"physics_dt\":%.9g,\"decision_steps\":1,\"directions\":[%s],\"move_speed\":%.9g,")
-		TEXT("\"screen_displacement_per_step\":%.9g,\"pause_during_level_up\":false,\"level_up_timing\":\"same_physics_step\"}"),
+		TEXT("\"screen_displacement_per_step\":%.9g,\"pause_during_level_up\":true,\"level_up_timing\":\"same_physics_step\"}"),
 		PhysicsDt, *Actions, CurrentConfig.MoveSpeed, CurrentConfig.MoveSpeed * PhysicsDt);
 }
 

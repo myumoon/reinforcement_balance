@@ -122,11 +122,43 @@ stale、missing、blocking verdict では起動しない。behavior は既定
 field に保存する。propensity は候補数を `K` として、teacher best は
 `1-epsilon+epsilon/K`、その他は `epsilon/K` を記録する。
 
+最初にfixed subject (`ReinBalanceEditor / Win64 / Development`) のfresh UBT action graphを
+current checkoutから発行する。UBTまたはbuild inputが不整合ならoutputは発行されない。
+
+```powershell
+Set-Location "<PROJECT_ROOT>\Tools\Training"
+python export_survivors_ubt_action_graph.py `
+  --engine-root "C:\UnrealEngine\UE_5.4" `
+  --output D:\repo\ue5_reinforcement_balance\FidelityInputs\current\ubt-action-graph.json
+```
+
+`generated-inputs.json` は次のexact-key schemaをcanonical JSONで保存する。各`path`は
+current checkout内に実在するrepo-relative POSIX pathでなければならず、絶対path、`..`、
+checkout外のartifact、旧checkoutのcopyは拒否される。次の`FidelityInputs/current/*.json`は
+operatorがcurrent HTTP/schema captureからcheckout内へ発行したsnapshotの配置例である。
+DeployObsが未導入のbaseline/integrationでは、指定の2入力だけ`"absent"`にする。
+
+```json
+{
+  "inputs": {
+    "action_time_schema": {"format": "json", "path": "FidelityInputs/current/action_time_schema.json"},
+    "content_schema": {"format": "json", "path": "FidelityInputs/current/content_schema.json"},
+    "deploy_obs_schema": "absent",
+    "deploy_release_adapter": "absent",
+    "external_decision_schema": {"format": "json", "path": "FidelityInputs/current/external_decision_schema.json"},
+    "preview_schema": {"format": "json", "path": "FidelityInputs/current/preview_schema.json"},
+    "target_profile": {"format": "yaml", "path": "Tools/Deployment/configs/mad_forest_standard_v1.yaml"}
+  },
+  "schema_version": "survivors.generated_fidelity_inputs.v1"
+}
+```
+
 ```bash
 python collect_survivors_value_choices.py \
   --manifest /artifact/value-source/result/value_source_descriptor.json \
   --fidelity-verdict /artifact/fidelity/integration-verdict.json \
-  --current-producer-hashes /artifact/fidelity/current-producer-hashes.json \
+  --generated-input-descriptor /path/to/ue5_reinforcement_balance/FidelityInputs/current/generated-inputs.json \
+  --ubt-action-graph /path/to/ue5_reinforcement_balance/FidelityInputs/current/ubt-action-graph.json \
   --artifact-store /artifact/survivors-choice-datasets \
   --seed-start 1000 --seed-end 1099 --episode-count 100 \
   --shard-size 100 --ue5-ports 8767 8777 --epsilon 0.20
@@ -159,7 +191,8 @@ HTTP retry と episode 再実行は deduplicate される。manifest histogram �
 
 artifact store の backup/retention は dataset directory 全体（manifest、`shards/`、
 `journals/`、`quarantine/`）を同じ世代として扱う。NPZ/JSONL は Git に追加しない。
-formal collection 前に current producer hashes で integration fidelity verdict を再検証
+formal collection 前にcurrent checkout、generated input descriptor、fresh UBT action graphから
+再解決したproducer hashesでintegration fidelity verdictを再検証
 し、source descriptor と fidelity verdict は dataset と同じ artifact store の immutable
 親として保持する。
 
@@ -181,6 +214,8 @@ python validate_survivors_value_teacher.py `
   --corpus <ARTIFACTS_DIR>\paired-rollout-corpus.json `
   --source-descriptor <ARTIFACTS_DIR>\value_source_descriptor.json `
   --integration-fidelity-verdict <ARTIFACTS_DIR>\integration-fidelity-verdict.json `
+  --generated-input-descriptor D:\repo\ue5_reinforcement_balance\FidelityInputs\current\generated-inputs.json `
+  --ubt-action-graph D:\repo\ue5_reinforcement_balance\FidelityInputs\current\ubt-action-graph.json `
   --output-dir <ARTIFACTS_DIR>\teacher-validation
 ```
 

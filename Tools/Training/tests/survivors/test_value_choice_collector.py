@@ -658,14 +658,22 @@ def test_collection_cli_exposes_seed_shard_manifest_ports_and_epsilon() -> None:
 
     from collect_survivors_value_choices import _parser
 
-    args = _parser().parse_args(
+    parser = _parser()
+    help_text = parser.format_help()
+    assert "--current-producer-hashes" not in help_text
+    assert "--generated-input-descriptor" in help_text
+    assert "--ubt-action-graph" in help_text
+
+    args = parser.parse_args(
         [
             "--manifest",
             "source.json",
             "--fidelity-verdict",
             "fidelity.json",
-            "--current-producer-hashes",
-            "current.json",
+            "--generated-input-descriptor",
+            "generated-inputs.json",
+            "--ubt-action-graph",
+            "ubt-action-graph.json",
             "--artifact-store",
             "/artifact/store",
             "--seed-start",
@@ -687,5 +695,7 @@ def test_collection_cli_exposes_seed_shard_manifest_ports_and_epsilon() -> None:
     assert (args.seed_start, args.seed_end, args.episode_count) == (10, 19, 8)
     assert args.shard_size == 4
     assert args.manifest == Path("source.json")
+    assert args.generated_input_descriptor == Path("generated-inputs.json")
+    assert args.ubt_action_graph == Path("ubt-action-graph.json")
     assert args.ue5_ports == [8767, 8777]
     assert args.epsilon == 0.25

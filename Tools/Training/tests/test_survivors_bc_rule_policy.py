@@ -170,6 +170,11 @@ class TestRulePolicyTieBreaking(unittest.TestCase):
         results = set(_run_n(obs, n=200, seed=0))
         self.assertGreater(len(results), 1, f"Expected diverse results, got {results}")
 
+    def test_all_zero_sequence_is_reproducible_for_same_seed(self):
+        """同じ seed では同点 wall-ray の選択列を再現する。"""
+        obs = _make_obs()   # wall_rays=1, enemy_nd=1, それ以外0
+        self.assertEqual(_run_n(obs, n=50, seed=7), _run_n(obs, n=50, seed=7))
+
     def test_uniform_gem_not_fixed_to_west(self):
         """全方向 gem が同じ場合、dir16=0 対応の West(6) に固定されない。"""
         # v794: gem_density_all_16dir は 48次元（near+mid+dist 各16）

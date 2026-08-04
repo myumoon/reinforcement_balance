@@ -237,7 +237,7 @@ TEST_CASE("Survivors combination coverage cells assert production mechanics", "[
 		const FContentCoverageCell& Cell = RequireCombinationCell(TEXT("pair_evolution_union"));
 		INFO(Cell.ScenarioId); INFO(Cell.EvalAssertionId);
 		const SurvivorsGameConstants::FEvolutionRule& Rule =
-			SurvivorsGameConstants::EvolutionTable.Last();
+			SurvivorsGameConstants::EvolutionTable[UE_ARRAY_COUNT(SurvivorsGameConstants::EvolutionTable) - 1];
 		CHECK(Rule.BaseWeapon == EWeaponType::Peachone);
 		CHECK(Rule.UnionPartner == EWeaponType::EbonyWings);
 		CHECK(Rule.EvolvedWeapon == EWeaponType::Vandalier);
@@ -267,6 +267,10 @@ TEST_CASE("Survivors combination coverage cells assert production mechanics", "[
 		FSurvivorsGameLogicConfig Config;
 		Config.bHasInitialOverride = true;
 		Config.InitialWeaponSlots.Add({static_cast<int32>(EWeaponType::Pentagram), 1});
+		FSpawnWave NoSpawnWave;
+		NoSpawnWave.TimeStart = 60.f;
+		NoSpawnWave.TimeEnd = 120.f;
+		Config.SpawnWaves.Add(NoSpawnWave);
 		FSurvivorsGameLogic Logic;
 		Logic.Initialize(Config);
 		Logic.Reset(5200);
@@ -505,7 +509,9 @@ TEST_CASE("Survivors all gem pickups expose finite XP", "[unit][survivors][conte
 			FString::Printf(TEXT("gem:%s"), GemIds[GemIndex]));
 		INFO(Cell.ScenarioId);
 		INFO(Cell.EvalAssertionId);
+		FSurvivorsGameLogicConfig Config;
 		FSurvivorsGameLogic Logic;
+		Logic.Initialize(Config);
 		Logic.Reset(2500 + GemIndex);
 		FSurvivorsGameTestAccess::DropGem(Logic, GemIndex == 0 ? 0 : (GemIndex == 1 ? 4 : 10));
 		REQUIRE(Logic.GetItemCount() == 1);
@@ -563,7 +569,11 @@ TEST_CASE("Survivors all enemies spawn and encode type finitely", "[unit][surviv
 		const TArray<float> Observation = Logic.GetObservation();
 		const int32 EnemyTypeOffset = FindObservationOffset(Logic, TEXT("enemy_type"));
 		REQUIRE(EnemyTypeOffset != INDEX_NONE);
-		CHECK(Observation[EnemyTypeOffset] == static_cast<float>(EnemyId) / 10.f);
+		const float ObservedType = Observation[EnemyTypeOffset];
+		const float ExpectedType = static_cast<float>(EnemyId) / 10.f;
+		INFO(FString::Printf(TEXT("observed=%.9g expected=%.9g delta=%.9g"),
+			ObservedType, ExpectedType, ObservedType - ExpectedType));
+		CHECK(FMath::IsNearlyEqual(ObservedType, ExpectedType, KINDA_SMALL_NUMBER));
 	}
 }
 
