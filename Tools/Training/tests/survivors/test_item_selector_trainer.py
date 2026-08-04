@@ -30,6 +30,24 @@ from games.survivors.item_selector_trainer import (
 CAPABILITY = "a" * 64
 
 
+def _candidate(item_id: str) -> CandidateFeatures:
+    """テスト用の weapon カード候補を返す。
+
+    kind/owned などは最小有効値で固定し、item_id だけで識別する。
+    """
+    return CandidateFeatures(
+        kind="weapon",
+        item_id=item_id,
+        new_level=1,
+        owned=False,
+        is_new=True,
+        is_evolve=False,
+        is_union=False,
+        has_prerequisite=False,
+        slot_capacity=1,
+    )
+
+
 def _row(
     decision: str,
     target: tuple[float, float],
@@ -37,17 +55,29 @@ def _row(
     reliability: float = 0.75,
     split: str = "train",
 ) -> dict:
-    """scaffold の共有 wire 型を使った二候補 training row を返す。
+    """context_only_v1 の 2 候補 development row を返す。
 
     raw teacher score は入力に置くが、encoder の feature vector へ含まれないことを別途検証する。
+    weapon_slots=(1,0,0,0,0,0) + passive_slots=(0,0,0,0,0,0) → empty_slot_count=11。
     """
     features = ItemDecisionFeatures(
         decision_id=decision,
-        context_features=(1.0, 2.0, 3.0),
-        candidates=(
-            CandidateFeatures("wand", (1.0, 0.0, 0.5)),
-            CandidateFeatures("knife", (0.0, 1.0, 0.25)),
-        ),
+        feature_schema="context_only_v1",
+        elapsed_time=60.0,
+        level=2,
+        hp_ratio=1.0,
+        xp_ratio=0.5,
+        weapon_slots=(1, 0, 0, 0, 0, 0),
+        passive_slots=(0, 0, 0, 0, 0, 0),
+        empty_slot_count=11,
+        evolution_readiness=0.0,
+        choice_count=2,
+        card_mask=(True, True),
+        fallback_kind="none",
+        ui_state_validity=1.0,
+        ui_state_age=0.1,
+        candidates=(_candidate("wand"), _candidate("knife")),
+        max_item_cards=2,
     )
     return {
         "decision_id": decision,
@@ -70,13 +100,13 @@ def test_encoder_consumes_released_fields_without_raw_score_or_preweighting() ->
     """
     first = _row("d-1", (0.8, 0.2), reliability=0.25)
     second = {**first, "teacher_scores": [-1e30, 1e30]}
-    encoded = encode_item_selector_row(first, nmax=3)
-    changed = encode_item_selector_row(second, nmax=3)
+    encoded = encode_item_selector_row(first, nmax=2)
+    changed = encode_item_selector_row(second, nmax=2)
 
     th.testing.assert_close(encoded.context_features, changed.context_features)
     th.testing.assert_close(encoded.candidate_features, changed.candidate_features)
-    th.testing.assert_close(encoded.teacher_soft_target, th.tensor([0.8, 0.2, 0.0]))
-    assert encoded.candidate_mask.tolist() == [True, True, False]
+    th.testing.assert_close(encoded.teacher_soft_target, th.tensor([0.8, 0.2]))
+    assert encoded.candidate_mask.tolist() == [True, True]
     assert encoded.reliability_weight == 0.25
 
 
@@ -184,7 +214,8 @@ def test_fit_checkpoints_and_restores_best_validation_ndcg(tmp_path: Path) -> No
     fit 後の model state は checkpoint の best epoch と一致し、最終 epoch state を返さない。
     """
     th.manual_seed(3)
-    model = ItemSelector(context_dim=3, candidate_dim=3)
+    # context_only_v1 + max_item_cards=2: context_dim=24, candidate_dim=9
+    model = ItemSelector(context_dim=24, candidate_dim=9)
     trainer = ItemSelectorTrainer(
         model,
         target_capability_hash=CAPABILITY,
