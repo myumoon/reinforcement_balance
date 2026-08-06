@@ -30,5 +30,9 @@ if [ -z "$PYTHON" ]; then
 fi
 
 echo "Using: $PYTHON"
-"$PYTHON" -m pip install -e Tools/Common -q
-"$PYTHON" -m pytest "$@"
+# build-system の固定 setuptools は環境構築時に導入済みのものを使う。
+# 読み取り専用の共有 conda 環境を変更せず、current worktree の editable package を一時 user base へ置く。
+PYTEST_USER_BASE="${TMPDIR:-/tmp}/reinbalance-pytest-userbase-${UID}"
+PYTHONUSERBASE="$PYTEST_USER_BASE" "$PYTHON" -m pip install \
+  --user -e Tools/Common --no-build-isolation -q
+PYTHONUSERBASE="$PYTEST_USER_BASE" "$PYTHON" -m pytest "$@"

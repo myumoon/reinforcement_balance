@@ -128,8 +128,17 @@ TSharedRef<FJsonObject> BuildLevelUpInfoObject(
 	Info->SetNumberField(
 		TEXT("kills"), Game ? Game->GetLogic()->GetEpisodeKillCount() : 0);
 	Info->SetBoolField(TEXT("alive"), Game ? Game->GetLogic()->IsAlive() : false);
-	Info->SetBoolField(
-		TEXT("stage_clear"), Game ? Game->GetLogic()->IsStageClear() : false);
+	const bool bStageCleared = Game ? Game->GetLogic()->IsStageClear() : false;
+	const bool bTimedOut = Game ? Game->GetLogic()->IsTimedOut() : false;
+	const bool bDeath = Game ? !Game->GetLogic()->IsAlive() : false;
+	Info->SetBoolField(TEXT("stage_clear"), bStageCleared);  // 旧 consumer 互換
+	Info->SetBoolField(TEXT("stage_cleared"), bStageCleared);
+	Info->SetBoolField(TEXT("timed_out"), bTimedOut);
+	Info->SetBoolField(TEXT("death"), bDeath);
+	Info->SetStringField(
+		TEXT("terminal_reason"),
+		bStageCleared ? TEXT("stage_cleared")
+			: (bDeath ? TEXT("death") : (bTimedOut ? TEXT("timeout") : TEXT("none"))));
 
 	TArray<TSharedPtr<FJsonValue>> ChoicesJson;
 	ChoicesJson.Reserve(Pending.Choices.Num());
@@ -1375,6 +1384,8 @@ FString ASurvivorsHttpEnvService::BuildInfoJson() const
 			"\"level_up_decision_id\":\"\",\"level_up_player_level\":0,"
 			"\"level_up_backlog\":0,\"elapsed\":0,\"level\":0,"
 			"\"gems\":0,\"kills\":0,\"alive\":false,\"stage_clear\":false,"
+			"\"stage_cleared\":false,\"timed_out\":false,\"death\":false,"
+			"\"terminal_reason\":\"none\","
 			"\"level_up_choices\":[]}");
 	}
 	const FString SpawnDebug = SurvivorsGame->GetSpawnDebugJson();
