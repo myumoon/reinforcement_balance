@@ -214,8 +214,8 @@ python validate_survivors_value_teacher.py `
   --corpus <ARTIFACTS_DIR>\paired-rollout-corpus.json `
   --source-descriptor <ARTIFACTS_DIR>\value_source_descriptor.json `
   --integration-fidelity-verdict <ARTIFACTS_DIR>\integration-fidelity-verdict.json `
-  --generated-input-descriptor D:\repo\ue5_reinforcement_balance\FidelityInputs\current\generated-inputs.json `
-  --ubt-action-graph D:\repo\ue5_reinforcement_balance\FidelityInputs\current\ubt-action-graph.json `
+  --generated-input-descriptor <PROJECT_ROOT>/FidelityInputs/current/generated-inputs.json `
+  --ubt-action-graph <PROJECT_ROOT>/FidelityInputs/current/ubt-action-graph.json `
   --output-dir <ARTIFACTS_DIR>\teacher-validation
 ```
 
