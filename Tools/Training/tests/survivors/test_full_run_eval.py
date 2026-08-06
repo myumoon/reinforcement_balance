@@ -7,6 +7,7 @@ hash の違う成果物で長時間訓練を始められないことを確認し
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -125,6 +126,30 @@ def test_exact_target_uses_30_fixed_holdout_seeds_and_both_gates() -> None:
         evaluator.evaluate(_outcomes()[:-1], bindings=_BINDINGS)
 
 
+def test_exact_target_rejects_weakened_or_invalid_thresholds() -> None:
+    """exact gate は80%未満や非有限・非数値 threshold を拒否する。
+
+    初心者向け: 評価呼出側が必須 gate を弱めたり bool を数値として渡す余地を塞ぎます。
+    """
+    for invalid in (0.79, True, "0.80", math.nan, math.inf, -math.inf, 1.01):
+        with pytest.raises(ValueError, match="min_clear_rate"):
+            ExactTargetFullRunEvaluator(min_clear_rate=invalid)
+    for invalid in (True, "2250", math.nan, math.inf, -math.inf, -0.01):
+        with pytest.raises(ValueError, match="min_active_score_p10"):
+            ExactTargetFullRunEvaluator(min_active_score_p10=invalid)
+
+
+def test_exact_target_clear_rate_boundary_and_all_deaths_fail() -> None:
+    """既定 gate は24/30だけを通し、23/30以下と全 death を不合格にする。
+
+    初心者向け: 固定30 seed に対する80%境界を件数レベルで固定します。
+    """
+    evaluator = ExactTargetFullRunEvaluator()
+    assert evaluator.evaluate(_outcomes(clears=24), bindings=_BINDINGS).passed
+    assert not evaluator.evaluate(_outcomes(clears=23), bindings=_BINDINGS).passed
+    assert not evaluator.evaluate(_outcomes(clears=0), bindings=_BINDINGS).passed
+
+
 def test_exact_verdict_json_contains_all_artifact_hashes() -> None:
     """verdict wire に policy/selector/source/schema/profile hash が保存されることを確認する。
 
@@ -196,6 +221,60 @@ def test_full_run_config_template_is_structural_but_not_launchable() -> None:
         validate_full_run_config(template, require_bound=True)
 
 
+@pytest.mark.parametrize(
+    ("section", "field", "invalid"),
+    [
+        *[
+            ("sample_mix", field, invalid)
+            for field in ("short_skill", "late_rsi", "full_run")
+            for invalid in (
+                True, "0.25", math.nan, math.inf, -math.inf, -0.01, 1.01
+            )
+        ],
+        ("exact_eval", "min_clear_rate", True),
+        ("exact_eval", "min_clear_rate", "0.80"),
+        ("exact_eval", "min_clear_rate", math.nan),
+        ("exact_eval", "min_clear_rate", math.inf),
+        ("exact_eval", "min_clear_rate", -math.inf),
+        ("exact_eval", "min_clear_rate", 0.79),
+        ("exact_eval", "min_clear_rate", 1.01),
+        ("exact_eval", "min_active_score_p10", True),
+        ("exact_eval", "min_active_score_p10", "2250"),
+        ("exact_eval", "min_active_score_p10", math.nan),
+        ("exact_eval", "min_active_score_p10", math.inf),
+        ("exact_eval", "min_active_score_p10", -math.inf),
+        ("exact_eval", "min_active_score_p10", -0.01),
+    ],
+)
+def test_full_run_config_rejects_invalid_numeric_gates(
+    section: str,
+    field: str,
+    invalid: object,
+) -> None:
+    """sample mix と exact gate の全実数 field を fail-closed で検証する。
+
+    初心者向け: bool・文字列・非有限値・範囲外を config 段階で一律に止めます。
+    """
+    template = build_full_run_config_template()
+    template[section][field] = invalid
+    with pytest.raises(ValueError):
+        validate_full_run_config(template, require_bound=False)
+
+
+@pytest.mark.parametrize(
+    "invalid", [True, 30.0, "30", math.nan, math.inf, -math.inf, -1, 31]
+)
+def test_full_run_config_requires_integer_holdout_count(invalid: object) -> None:
+    """holdout 件数は bool や同値 float ではなく固定整数30だけを受理する。
+
+    初心者向け: seed 集合の個数を曖昧な数値型から読み込まないようにします。
+    """
+    template = build_full_run_config_template()
+    template["exact_eval"]["holdout_seed_count"] = invalid
+    with pytest.raises(ValueError, match="30 seeds"):
+        validate_full_run_config(template, require_bound=False)
+
+
 def test_train_cli_generates_and_validates_full_run_config(tmp_path, monkeypatch) -> None:
     """train.py が template 生成と binding 済み config 検証 option を提供する。
 
@@ -220,3 +299,10 @@ def test_train_cli_generates_and_validates_full_run_config(tmp_path, monkeypatch
     payload["bindings"] = dict(_BINDINGS)
     output.write_text(json.dumps(payload), encoding="utf-8")
     assert validate_full_run_config_file(output)["band"] == "FR4"
+
+    monkeypatch.setattr(
+        sys, "argv", ["train.py", "--validate-full-run-config", str(output)]
+    )
+    args = parse_args()
+    assert args.generate_full_run_config is None
+    assert args.validate_full_run_config == output

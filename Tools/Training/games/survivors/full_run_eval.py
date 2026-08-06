@@ -26,6 +26,27 @@ _BINDING_KEYS = frozenset({
 _TERMINAL_REASONS = frozenset({"stage_cleared", "death", "timeout"})
 
 
+def _finite_number(
+    value: Any,
+    label: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    """bool を除く有限な実数を範囲付きで検証する。
+
+    初心者向け: Python では bool も int の一種なので、gate 閾値として明示的に拒否します。
+    """
+    if type(value) not in (int, float) or not math.isfinite(value):
+        raise ValueError(f"{label} must be a finite number")
+    checked = float(value)
+    if minimum is not None and checked < minimum:
+        raise ValueError(f"{label} must be >= {minimum}")
+    if maximum is not None and checked > maximum:
+        raise ValueError(f"{label} must be <= {maximum}")
+    return checked
+
+
 def _sha256(value: Any, label: str) -> str:
     """lowercase SHA-256 文字列だけを受け付ける。
 
@@ -153,12 +174,17 @@ class ExactTargetFullRunEvaluator:
 
         初心者向け: clear率は80%以上を標準とし、score p10 は明示的に上書きできます。
         """
-        if not (0.0 <= min_clear_rate <= 1.0):
-            raise ValueError("min_clear_rate must be in [0, 1]")
-        if not math.isfinite(min_active_score_p10):
-            raise ValueError("min_active_score_p10 must be finite")
-        self.min_clear_rate = float(min_clear_rate)
-        self.min_active_score_p10 = float(min_active_score_p10)
+        self.min_clear_rate = _finite_number(
+            min_clear_rate,
+            "min_clear_rate",
+            minimum=0.80,
+            maximum=1.0,
+        )
+        self.min_active_score_p10 = _finite_number(
+            min_active_score_p10,
+            "min_active_score_p10",
+            minimum=0.0,
+        )
 
     def evaluate(
         self,
@@ -264,4 +290,3 @@ class GeneralizationFullRunEvaluator:
         return FullRunVerdict(
             "generalization", True, len(outcomes), clear_rate, score_p10, metrics, _bindings(bindings)
         )
-
