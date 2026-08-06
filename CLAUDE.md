@@ -49,15 +49,23 @@ python train.py --game survivors --total-steps 500000
 
 ### テスト実行
 
-Python テストは以下の conda 環境を使用して実行してください。
+Python テストは以下のいずれかの環境を使用して実行してください。
 
+**WSL native conda（推奨 — Codex/自動化フローでも動作）:**
+```bash
+/home/neko/miniconda-wsl/envs/reinbalance/bin/python -m pip install -e Tools/Common -q
+/home/neko/miniconda-wsl/envs/reinbalance/bin/python -m pytest Tools/Training/tests -q -rs
+```
+
+**Windows conda（Claude Code セッションから直接実行する場合）:**
 ```bash
 /mnt/c/Users/neko/anaconda3/envs/reinbalance/python.exe -m pytest Tools/Training/tests -q -rs
 ```
 
 `/usr/bin/python3` には pytest / torch / sb3 がインストールされていないため、使用できません。
 
-`review-contract.md` の M12 を記載する際は、上記 conda 環境パスを使用してください。`/usr/bin/python3 使用` と書いてはいけません。
+Codex implementer / reviewer は WSL サンドボックス内で Windows `.exe` を実行できない（vsock 制限）ため、
+`review-contract.md` の M11/M12 には WSL native conda パスを使用してください。
 
 ### ブランチ名のルール
 
