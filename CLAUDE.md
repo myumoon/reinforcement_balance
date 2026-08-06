@@ -49,15 +49,18 @@ python train.py --game survivors --total-steps 500000
 
 ### テスト実行
 
-Python テストは以下の conda 環境を使用して実行してください。
+Python テストは以下のコマンドを使用してください。
 
 ```bash
-/mnt/c/Users/neko/anaconda3/envs/reinbalance/python.exe -m pytest Tools/Training/tests -q -rs
+bash Tools/run-pytest.sh Tools/Training/tests -q -rs
 ```
+
+`Tools/run-pytest.sh` は WSL native conda → Windows conda の順に Python 環境を自動検出します。
+Codex / 自動化フローを含め環境を問わず同じコマンドで実行できます。
 
 `/usr/bin/python3` には pytest / torch / sb3 がインストールされていないため、使用できません。
 
-`review-contract.md` の M12 を記載する際は、上記 conda 環境パスを使用してください。`/usr/bin/python3 使用` と書いてはいけません。
+`review-contract.md` の M11/M12 を記載する際も上記コマンドを使用してください。
 
 ### ブランチ名のルール
 

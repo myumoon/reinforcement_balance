@@ -308,6 +308,21 @@ dataset の target/mask/reliability を raw teacher score から再計算しな�
 validation NDCG が最良の checkpoint を選ぶ。resume は target capability hash と Nmax の両方が
 一致する場合だけ許可し、trainer の partition reader は train/validation だけを要求する。
 
+artifact packaging と sealed evaluation の入口は次のとおり。
+
+| モジュール | 責務 |
+|---|---|
+| `evaluate_survivors_item_selector.py` | ItemSelector test-set evaluation + verdict generation |
+| `export_survivors_item_selector.py` | ItemSelector artifact packaging (TorchScript + ONNX) |
+| `games/survivors/item_selector_artifact.py` | manifest/model/dataset/feature/UI policy bindingを検証するruntime loader |
+
+export はvalidation splitだけでstudent output temperatureを固定してから、sealed test readerを
+ONNX/TorchScript parity確認のために一度だけ開く。packageにはteacher/source binaryを含めず、
+lineage identityだけを記録する。runtime load時には全file hash、埋め込みmodel binding、dynamic
+ONNX signature、install済み`NonModelUiPolicyV1`のconfig/schema/implementation hashを照合する。
+evaluatorはseed 42・2000 resampleのbootstrap CIとoverall/per-slice/calibration gateを
+`item_selector_verdict.json`へ保存する。
+
 ## Survivors ItemSelector closed-loop evaluation
 
 `games/survivors/item_selection_strategy.py` は release 済み `ItemDecisionFeatures` を model
