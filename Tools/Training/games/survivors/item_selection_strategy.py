@@ -1,152 +1,178 @@
-"""Survivors ItemSelector を live card choice へ束縛する推論戦略を定義する。
-
-学習用の teacher target や split を使わず、画面から得た ``ItemDecisionFeatures`` の候補だけを
-同じ feature encoder で採点して、UE5 が受け付ける item/choice ID を返す。
-"""
+"""Item card scorer と UI intent を結ぶ、評価専用の選択戦略。"""
 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+import random
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import torch as th
 
 from reinbalance_survivors_contracts.item_decision import ItemDecisionFeatures
+from reinbalance_survivors_contracts.ui_intent import DecisionOwner, UiIntentKind, UiIntentV1
 
 from games.survivors.item_selector_model import ItemSelector
-from games.survivors.item_selector_trainer import (
-    _candidate_vector,
-    _flatten_feature,
-    _wire_candidate_identity,
-)
+from games.survivors.item_selector_trainer import _candidate_vector, _flatten_feature, _wire_candidate_identity
 
 
 class ItemSelectionError(ValueError):
-    """live choice feature と選択結果の束縛違反を表す。
-
-    不完全な UI payload や model shape の不一致を fallback 選択へ変換せず、その decision を停止する。
-    """
+    """カード候補と選択の binding が満たせないことを表す。"""
 
 
 @dataclass(frozen=True, slots=True)
-class ItemSelectionDecision:
-    """一つの level-up decision に対する model 選択を保持する。
-
-    ``choice_id`` は candidate wire の identity からのみ取り、index は監査用で endpoint の入力には使わない。
-    """
+class CardTargetRef:
+    """一つの feature snapshot 内の card id/index を不可分に保持する参照。"""
 
     decision_id: str
-    choice_id: str
+    card_id: str
     candidate_index: int
-    candidate_logits: tuple[float, ...]
+
+    @classmethod
+    def from_features(cls, features: ItemDecisionFeatures, candidate_index: int) -> "CardTargetRef":
+        if type(candidate_index) is not int or candidate_index < 0 or candidate_index >= features.max_item_cards:
+            raise ItemSelectionError("candidate_index is outside card slots")
+        if not features.card_mask[candidate_index]:
+            raise ItemSelectionError("candidate_index is not a valid card")
+        candidate = features.padded_candidates[candidate_index]
+        return cls(features.decision_id, candidate.item_id, candidate_index)
+
+    def validate(self, features: ItemDecisionFeatures) -> None:
+        expected = CardTargetRef.from_features(features, self.candidate_index)
+        if expected != self:
+            raise ItemSelectionError("card id/index does not identify the same candidate")
 
 
-class ItemSelectionStrategy:
-    """固定済み ItemSelector を一つの live card choice へ適用する。
+def _features(value: ItemDecisionFeatures | Mapping[str, Any]) -> ItemDecisionFeatures:
+    try:
+        return value if isinstance(value, ItemDecisionFeatures) else ItemDecisionFeatures.from_wire(value)
+    except (TypeError, ValueError) as exc:
+        raise ItemSelectionError(f"invalid item decision features: {exc}") from exc
 
-    candidate index を tie break に使わず choice ID の辞書順で決めるため、UI の候補表示順が変わっても同じ card を選ぶ。
-    """
 
-    def __init__(self, model: ItemSelector, *, device: th.device | str = "cpu") -> None:
-        """推論専用 model と device を保持する。
+def card_target_from_intent(features: ItemDecisionFeatures | Mapping[str, Any], intent: UiIntentV1) -> CardTargetRef:
+    """CHOOSE_CARD intent の index を live candidate へ fail-closed で再束縛する。"""
+    decision = _features(features)
+    if intent.kind is not UiIntentKind.CHOOSE_CARD or intent.target_index is None:
+        raise ItemSelectionError("selector intent must be choose_card with target_index")
+    target = CardTargetRef.from_features(decision, intent.target_index)
+    if intent.candidate_set_hash != decision.decision_hash:
+        raise ItemSelectionError("selector intent candidate_set_hash does not match features")
+    return target
 
-        学習中の任意 module や checkpoint path は受け取らず、binding 済み ``ItemSelector`` だけを採点器にする。
-        """
-        if not isinstance(model, ItemSelector):
-            raise TypeError("model must be an ItemSelector")
-        self.model = model.to(device)
-        self.device = th.device(device)
 
-    def _encode(
-        self, features: ItemDecisionFeatures | Mapping[str, Any]
-    ) -> tuple[str, tuple[str, ...], th.Tensor, th.Tensor, th.Tensor]:
-        """共有 item decision wire を model 入力 tensor と choice identity へ変換する。
+class CardSelectionStrategy(Protocol):
+    """generic UI ではなく card scorer が返す唯一の契約。"""
+    strategy_id: str
 
-        teacher soft target や reliability を作らず、feature wire の card mask と candidate identity だけを閉ループ入力として使う。
-        """
-        try:
-            decision = (
-                features
-                if isinstance(features, ItemDecisionFeatures)
-                else ItemDecisionFeatures.from_wire(features)
-            )
-            wire = decision.to_wire()
-        except (TypeError, ValueError) as exc:
-            raise ItemSelectionError(f"invalid item decision features: {exc}") from exc
-        raw_context = wire.get("context_features")
-        raw_candidates = wire.get("candidates")
-        if not isinstance(raw_context, Mapping) or not isinstance(raw_candidates, list):
-            raise ItemSelectionError("item decision feature wire is malformed")
-        if not raw_candidates or any(not isinstance(row, Mapping) for row in raw_candidates):
-            raise ItemSelectionError("item decision candidates must be a non-empty object list")
-        if len(raw_candidates) > decision.max_item_cards:
-            raise ItemSelectionError("candidate count exceeds max_item_cards")
-        raw_mask = raw_context.get("card_mask")
-        if (
-            not isinstance(raw_mask, (list, tuple))
-            or len(raw_mask) != len(raw_candidates)
-            or any(type(value) is not bool for value in raw_mask)
-            or not any(raw_mask)
-        ):
-            raise ItemSelectionError("candidate card_mask is invalid")
-        identities = tuple(_wire_candidate_identity(candidate)[0] for candidate in raw_candidates)
-        valid_ids = [item_id for item_id, valid in zip(identities, raw_mask, strict=True) if valid]
-        if len(valid_ids) != len(set(valid_ids)):
-            raise ItemSelectionError("valid candidate choice IDs must be unique")
-        try:
-            context_vector = _flatten_feature(raw_context, label="context_features")
-            candidate_vectors = [
-                _candidate_vector(candidate, index=index)
-                for index, candidate in enumerate(raw_candidates)
-            ]
-        except ValueError as exc:
-            raise ItemSelectionError(str(exc)) from exc
-        candidate_dim = len(candidate_vectors[0])
-        if (
-            not context_vector
-            or len(context_vector) != self.model.context_dim
-            or candidate_dim != self.model.candidate_dim
-            or any(len(vector) != candidate_dim for vector in candidate_vectors)
-        ):
-            raise ItemSelectionError("live feature dimensions do not match ItemSelector")
-        padding = decision.max_item_cards - len(candidate_vectors)
-        candidate_vectors.extend([[0.0] * candidate_dim for _ in range(padding)])
-        mask = list(raw_mask) + [False] * padding
-        padded_ids = identities + ("__padding__",) * padding
-        return (
-            decision.decision_id,
-            padded_ids,
-            th.tensor(context_vector, dtype=th.float32, device=self.device).unsqueeze(0),
-            th.tensor(candidate_vectors, dtype=th.float32, device=self.device).unsqueeze(0),
-            th.tensor(mask, dtype=th.bool, device=self.device).unsqueeze(0),
+    def select(self, features: ItemDecisionFeatures) -> UiIntentV1: ...
+
+
+class _BaseCardStrategy:
+    strategy_id = "card_strategy"
+
+    def _intent(self, features: ItemDecisionFeatures, target: CardTargetRef) -> UiIntentV1:
+        target.validate(features)
+        digest = features.decision_hash
+        return UiIntentV1(
+            kind=UiIntentKind.CHOOSE_CARD,
+            semantic_action="choose_card",
+            decision_owner=DecisionOwner.ITEM_SELECTOR_SESSION,
+            source_snapshot_hash=digest,
+            source_frame_hash=digest,
+            source_content_hash=digest,
+            ui_state_key="level_up",
+            target_index=target.candidate_index,
+            candidate_set_hash=digest,
+            decision_policy_id=self.strategy_id,
+            decision_rule_id="card_score",
+            decision_config_hash=digest,
         )
 
-    def select(self, features: ItemDecisionFeatures | Mapping[str, Any]) -> ItemSelectionDecision:
-        """live feature の valid card から最大 logit の choice を返す。
 
-        評価時だけ一時的に eval mode にし、元の train/eval mode は呼出し後に戻して共有 model の状態を驚かせない。
-        """
-        decision_id, choice_ids, context, candidates, mask = self._encode(features)
+class RandomCardStrategy(_BaseCardStrategy):
+    strategy_id = "random"
+
+    def __init__(self, *, seed: int = 0) -> None:
+        self._random = random.Random(seed)
+
+    def select(self, features: ItemDecisionFeatures | Mapping[str, Any]) -> UiIntentV1:
+        decision = _features(features)
+        indices = [i for i, valid in enumerate(decision.card_mask) if valid]
+        return self._intent(decision, CardTargetRef.from_features(decision, self._random.choice(indices)))
+
+
+class CardHeuristicV1Strategy(_BaseCardStrategy):
+    strategy_id = "card_heuristic_v1"
+
+    @staticmethod
+    def _score(features: ItemDecisionFeatures, index: int) -> tuple[int, int, int, str]:
+        card = features.padded_candidates[index]
+        # evolutionary cards and upgrades are deliberately preferred; the ID makes ties stable.
+        return (int(card.is_evolve or card.is_union), int(card.has_prerequisite), card.new_level, card.item_id)
+
+    def select(self, features: ItemDecisionFeatures | Mapping[str, Any]) -> UiIntentV1:
+        decision = _features(features)
+        indices = [i for i, valid in enumerate(decision.card_mask) if valid]
+        selected = min(indices, key=lambda i: tuple(-x if isinstance(x, int) else x for x in self._score(decision, i)))
+        return self._intent(decision, CardTargetRef.from_features(decision, selected))
+
+
+class TeacherOracleStrategy(CardHeuristicV1Strategy):
+    """比較専用 oracle。正式 item_selector run からは注入しない。"""
+    strategy_id = "teacher_oracle"
+
+    def __init__(self, teacher: Callable[[ItemDecisionFeatures], int] | None = None) -> None:
+        self._teacher = teacher
+
+    def select(self, features: ItemDecisionFeatures | Mapping[str, Any]) -> UiIntentV1:
+        decision = _features(features)
+        if self._teacher is None:
+            return super().select(decision)
+        index = self._teacher(decision)
+        return self._intent(decision, CardTargetRef.from_features(decision, index))
+
+
+class ItemSelectionStrategy(_BaseCardStrategy):
+    """checkpoint 済み ItemSelector の scorer。teacher fallback は一切持たない。"""
+    strategy_id = "item_selector"
+
+    def __init__(self, model: ItemSelector, *, device: th.device | str = "cpu") -> None:
+        if not isinstance(model, ItemSelector):
+            raise TypeError("model must be an ItemSelector")
+        self.model, self.device = model.to(device), th.device(device)
+
+    def select(self, features: ItemDecisionFeatures | Mapping[str, Any]) -> UiIntentV1:
+        decision = _features(features)
+        wire = decision.to_wire()
+        raw_context, raw_candidates = wire["context_features"], wire["candidates"]
+        try:
+            context = _flatten_feature(raw_context, label="context_features")
+            vectors = [_candidate_vector(candidate, index=i) for i, candidate in enumerate(raw_candidates)]
+        except ValueError as exc:
+            raise ItemSelectionError(str(exc)) from exc
+        if len(context) != self.model.context_dim or any(len(v) != self.model.candidate_dim for v in vectors):
+            raise ItemSelectionError("live feature dimensions do not match ItemSelector")
+        mask = list(decision.card_mask)
         was_training = self.model.training
         self.model.eval()
         try:
             with th.no_grad():
-                logits = self.model(context, candidates, mask)[0].detach().cpu()
+                logits = self.model(th.tensor(context, dtype=th.float32, device=self.device).unsqueeze(0), th.tensor(vectors, dtype=th.float32, device=self.device).unsqueeze(0), th.tensor(mask, dtype=th.bool, device=self.device).unsqueeze(0))[0].detach().cpu()
         finally:
             self.model.train(was_training)
-        valid_indices = [index for index, valid in enumerate(mask[0].tolist()) if valid]
-        valid_logits = tuple(float(logits[index]) for index in valid_indices)
-        if any(not math.isfinite(value) for value in valid_logits):
+        valid = [i for i, ok in enumerate(mask) if ok]
+        if any(not math.isfinite(float(logits[i])) for i in valid):
             raise ItemSelectionError("ItemSelector returned a non-finite valid logit")
-        selected_index = min(
-            valid_indices,
-            key=lambda index: (-float(logits[index]), choice_ids[index]),
-        )
-        return ItemSelectionDecision(
-            decision_id=decision_id,
-            choice_id=choice_ids[selected_index],
-            candidate_index=selected_index,
-            candidate_logits=valid_logits,
-        )
+        selected = min(valid, key=lambda i: (-float(logits[i]), decision.padded_candidates[i].item_id))
+        return self._intent(decision, CardTargetRef.from_features(decision, selected))
+
+
+def create_strategy(name: str, **kwargs: Any) -> CardSelectionStrategy:
+    """正式な四戦略だけを名前から生成する。"""
+    factories = {"random": RandomCardStrategy, "card_heuristic_v1": CardHeuristicV1Strategy, "teacher_oracle": TeacherOracleStrategy, "item_selector": ItemSelectionStrategy}
+    try:
+        return factories[name](**kwargs)
+    except KeyError as exc:
+        raise ValueError(f"unknown item selection strategy: {name}") from exc

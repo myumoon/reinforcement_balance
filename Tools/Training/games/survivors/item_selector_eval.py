@@ -1,236 +1,193 @@
-"""Survivors ItemSelector の level-up 閉ループ評価を定義する。
-
-movement と pending choice の順序を制御し、選択・UE5 acknowledgement・episode outcome を一つの
-評価記録に残す。学習用 split や teacher label はこの経路へ入れない。
-"""
-
+"""Survivors item selector の再開可能な paired closed-loop evaluator。"""
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import random
+import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
+from reinbalance_survivors_contracts.item_decision import ItemDecisionFeatures
+from reinbalance_survivors_contracts.ui_intent import DecisionOwner, UiIntentKind, UiIntentV1
 
-class ClosedLoopEvaluationError(RuntimeError):
-    """閉ループの pending、choice、ack 契約違反を表す。
+from games.survivors.item_selection_strategy import CardTargetRef, card_target_from_intent
 
-    実際に適用された choice が確認できない episode を成功サンプルとして集計しないための例外。
-    """
 
+class ClosedLoopEvaluationError(RuntimeError): pass
 
 class ItemSelectionProtocol(Protocol):
-    """閉ループ evaluator が必要とする selector の最小 interface を表す。
-
-    model 実装の代わりに小さな戦略モックも渡せるため、環境 transaction を unit test で検証できる。
-    """
-
-    def select(self, features: object) -> Any:
-        """feature に対応する decision ID と choice ID を持つ選択結果を返す。
-
-        返却値の具体型は固定せず、evaluator が identity 属性だけを検証する。
-        """
-        ...
-
+    def select(self, features: object) -> Any: ...
 
 @dataclass(frozen=True, slots=True)
 class ClosedLoopSelection:
-    """ack 済みの一回の item choice を記録する。
-
-    choice は strategy output ではなく endpoint acknowledgement 照合後にだけ episode 結果へ入る。
-    """
-
     decision_id: str
     choice_id: str
 
-
 @dataclass(frozen=True, slots=True)
 class ClosedLoopEpisodeResult:
-    """一 episode の movement reward と ack 済み選択を保持する。
-
-    ``terminated`` と ``truncated`` は別に保存し、終了理由を success/failed の二値へ潰さない。
-    """
-
     seed: int
     total_reward: float
     movement_steps: int
     terminated: bool
     truncated: bool
     selections: tuple[ClosedLoopSelection, ...]
-
+    scenario: str = "default"
+    survival: float = 0.0
+    level: int = 0
+    gems: int = 0
+    kills: int = 0
+    choices: int = 0
+    evolution_count: int = 0
+    union_count: int = 0
+    fallback_count: int = 0
+    card_abstention_count: int = 0
+    latency_ms: float = 0.0
 
 @dataclass(frozen=True, slots=True)
 class ClosedLoopEvaluationReport:
-    """複数 episode の immutable 結果と集計値を保持する。
-
-    summary は JSON 化可能な primitive だけに限定して CLI 出力と後続比較へ渡す。
-    """
-
     episodes: tuple[ClosedLoopEpisodeResult, ...]
     summary: Mapping[str, Any]
 
+@dataclass(frozen=True, slots=True)
+class EvaluationCell:
+    seed: int
+    scenario: str = "default"
+    stratum: str = "default"
+    cluster: str = "default"
+
+def canonical_hash(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
 
 class ItemSelectorClosedLoopEvaluator:
-    """movement rollout 中の pending level-up を selector で一度だけ解決する。
-
-    pending response を受けた直後に choice endpoint を呼び、ack が一致するまで次の movement step を実行しない。
-    """
-
-    def __init__(
-        self,
-        *,
-        strategy: ItemSelectionProtocol,
-        movement_policy: Callable[[Any], Any],
-        max_movement_steps: int = 100_000,
-    ) -> None:
-        """選択戦略、movement policy、episode 上限を固定する。
-
-        上限は壊れた environment が terminal を返さない場合に、無限の UE5 評価 run を防ぐ。
-        """
-        if not callable(getattr(strategy, "select", None)):
-            raise TypeError("strategy must provide select(features)")
-        if not callable(movement_policy):
-            raise TypeError("movement_policy must be callable")
-        if type(max_movement_steps) is not int or max_movement_steps <= 0:
-            raise ValueError("max_movement_steps must be a positive integer")
-        self.strategy = strategy
-        self.movement_policy = movement_policy
-        self.max_movement_steps = max_movement_steps
+    def __init__(self, *, strategy: ItemSelectionProtocol, movement_policy: Callable[[Any], Any], max_movement_steps: int = 100_000) -> None:
+        if not callable(getattr(strategy, "select", None)) or not callable(movement_policy): raise TypeError("strategy.select and movement_policy must be callable")
+        if type(max_movement_steps) is not int or max_movement_steps <= 0: raise ValueError("max_movement_steps must be positive")
+        self.strategy, self.movement_policy, self.max_movement_steps = strategy, movement_policy, max_movement_steps
 
     @staticmethod
     def _pending(info: Any) -> tuple[str, object, frozenset[str]] | None:
-        """step info から完全な item pending payload を検証して返す。
-
-        item feature、decision ID、choice ID 集合の三つが揃わない info は pending でないものとして黙認せず停止する。
-        """
-        if not isinstance(info, Mapping):
-            raise ClosedLoopEvaluationError("step info must be an object")
-        has_pending_field = "item_decision_features" in info
-        pending_flag = info.get("level_up_pending", has_pending_field)
-        if type(pending_flag) is not bool:
-            raise ClosedLoopEvaluationError("level_up_pending must be bool")
-        if not pending_flag:
-            if has_pending_field or "decision_id" in info or "choice_ids" in info:
-                raise ClosedLoopEvaluationError("non-pending step contains item choice fields")
+        if not isinstance(info, Mapping): raise ClosedLoopEvaluationError("step info must be an object")
+        pending = info.get("level_up_pending", "item_decision_features" in info)
+        if type(pending) is not bool: raise ClosedLoopEvaluationError("level_up_pending must be bool")
+        if not pending:
+            if any(k in info for k in ("item_decision_features", "decision_id", "choice_ids")): raise ClosedLoopEvaluationError("non-pending step contains item choice fields")
             return None
-        features = info.get("item_decision_features")
-        decision_id = info.get("decision_id")
-        choices = info.get("choice_ids")
-        if not isinstance(decision_id, str) or not decision_id:
-            raise ClosedLoopEvaluationError("pending decision_id must be non-empty")
-        if features is None:
-            raise ClosedLoopEvaluationError("pending item_decision_features are required")
-        if (
-            not isinstance(choices, Sequence)
-            or isinstance(choices, (str, bytes))
-            or not choices
-            or any(not isinstance(choice, str) or not choice for choice in choices)
-            or len(set(choices)) != len(choices)
-        ):
-            raise ClosedLoopEvaluationError("pending choice_ids must be unique non-empty strings")
-        return decision_id, features, frozenset(choices)
+        did, features, choices = info.get("decision_id"), info.get("item_decision_features"), info.get("choice_ids")
+        if not isinstance(did, str) or not did or features is None or not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)) or not choices or any(not isinstance(x,str) or not x for x in choices) or len(set(choices)) != len(choices): raise ClosedLoopEvaluationError("invalid pending item choice")
+        return did, features, frozenset(choices)
+
+    @staticmethod
+    def _metric(info: Mapping[str, Any], names: tuple[str, ...], default: Any) -> Any:
+        for name in names:
+            if name in info: return info[name]
+        return default
 
     @staticmethod
     def _validate_ack(ack: Any, *, decision_id: str, choice_id: str) -> None:
-        """choice endpoint acknowledgement を request identity に照合する。
+        if not isinstance(ack, Mapping) or ack.get("decision_id") != decision_id or ack.get("choice_id") != choice_id: raise ClosedLoopEvaluationError("choice acknowledgement does not match request")
 
-        timeout/retry の別 response や選択の取り違えを、次 movement 前に fail-closed で検出する。
-        """
-        if not isinstance(ack, Mapping):
-            raise ClosedLoopEvaluationError("choice acknowledgement must be an object")
-        if ack.get("decision_id") != decision_id or ack.get("choice_id") != choice_id:
-            raise ClosedLoopEvaluationError("choice acknowledgement does not match request")
+    def _choice(self, features: object, selected: Any, decision_id: str) -> tuple[str, int]:
+        # UiIntent is the production boundary. Legacy minimal mocks remain accepted for transaction tests only.
+        if isinstance(selected, UiIntentV1):
+            if selected.kind is not UiIntentKind.CHOOSE_CARD or selected.decision_owner is not DecisionOwner.ITEM_SELECTOR_SESSION: raise ClosedLoopEvaluationError("strategy must return item-selector choose_card intent")
+            try: target = card_target_from_intent(features, selected)
+            except (TypeError, ValueError) as exc: raise ClosedLoopEvaluationError(str(exc)) from exc
+            if target.decision_id != decision_id: raise ClosedLoopEvaluationError("strategy decision_id does not match pending decision")
+            return target.card_id, target.candidate_index
+        if getattr(selected, "decision_id", None) != decision_id: raise ClosedLoopEvaluationError("strategy decision_id does not match pending decision")
+        return getattr(selected, "choice_id", None), -1
 
-    def _run_episode(self, environment: Any, *, seed: int) -> ClosedLoopEpisodeResult:
-        """一つの reset から terminal/truncated まで閉ループを実行する。
-
-        choice endpoint が返す post-choice observation を次 movement policy に渡し、pending observation を通常 action に再利用しない。
-        """
-        reset = environment.reset(seed=seed)
-        if not isinstance(reset, tuple) or len(reset) != 2:
-            raise ClosedLoopEvaluationError("environment reset must return (observation, info)")
-        observation, reset_info = reset
-        if not isinstance(reset_info, Mapping):
-            raise ClosedLoopEvaluationError("environment reset info must be an object")
-        total_reward = 0.0
-        movement_steps = 0
-        selections: list[ClosedLoopSelection] = []
-        seen_decisions: set[str] = set()
-        while movement_steps < self.max_movement_steps:
-            action = self.movement_policy(observation)
-            transition = environment.step(action)
-            if not isinstance(transition, tuple) or len(transition) != 5:
-                raise ClosedLoopEvaluationError("environment step must return five values")
-            observation, reward, terminated, truncated, info = transition
-            if isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(float(reward)):
-                raise ClosedLoopEvaluationError("environment reward must be finite")
-            if type(terminated) is not bool or type(truncated) is not bool:
-                raise ClosedLoopEvaluationError("environment done flags must be bool")
-            total_reward += float(reward)
-            movement_steps += 1
+    def _run_episode(self, environment: Any, *, seed: int, scenario: str = "default") -> ClosedLoopEpisodeResult:
+        try: reset = environment.reset(seed=seed, options={"scenario": scenario})
+        except TypeError: reset = environment.reset(seed=seed)
+        if not isinstance(reset, tuple) or len(reset) != 2 or not isinstance(reset[1], Mapping): raise ClosedLoopEvaluationError("environment reset must return (observation, info)")
+        observation, latest = reset; reward = 0.0; steps = 0; selections: list[ClosedLoopSelection] = []; latency = 0.; seen: set[str] = set(); abstentions = 0; fallbacks = 0
+        while steps < self.max_movement_steps:
+            observation, value, terminated, truncated, info = environment.step(self.movement_policy(observation))
+            if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(float(value)) or type(terminated) is not bool or type(truncated) is not bool: raise ClosedLoopEvaluationError("invalid environment transition")
+            reward += float(value); steps += 1; latest = info
+            fallbacks += int(self._metric(info, ("fallback_count", "fallback"), 0))
+            nonmodel_step = self._metric(info, ("non_model_ui_actions", "card_abstentions"), 0)
+            if isinstance(nonmodel_step, Sequence) and not isinstance(nonmodel_step,(str,bytes)): abstentions += sum(1 for x in nonmodel_step if str(x) in {"choose_fallback","reroll","skip","banish","ack_chest","confirm"})
+            elif isinstance(nonmodel_step, int): abstentions += nonmodel_step
             pending = self._pending(info)
-            if pending is not None:
-                decision_id, features, choice_ids = pending
-                if terminated or truncated:
-                    raise ClosedLoopEvaluationError("terminal step cannot contain a pending item choice")
-                if decision_id in seen_decisions:
-                    raise ClosedLoopEvaluationError("item decision was emitted more than once")
-                selected = self.strategy.select(features)
-                selected_decision = getattr(selected, "decision_id", None)
-                selected_choice = getattr(selected, "choice_id", None)
-                if selected_decision != decision_id:
-                    raise ClosedLoopEvaluationError("strategy decision_id does not match pending decision")
-                if selected_choice not in choice_ids:
-                    raise ClosedLoopEvaluationError("strategy choice_id is not pending")
-                applied = environment.choose_level_up(decision_id, selected_choice)
-                if not isinstance(applied, tuple) or len(applied) != 2:
-                    raise ClosedLoopEvaluationError("choice endpoint must return (observation, acknowledgement)")
-                observation, acknowledgement = applied
-                self._validate_ack(acknowledgement, decision_id=decision_id, choice_id=selected_choice)
-                seen_decisions.add(decision_id)
-                selections.append(ClosedLoopSelection(decision_id, selected_choice))
+            if pending:
+                did, features, allowed = pending
+                if terminated or truncated or did in seen: raise ClosedLoopEvaluationError("invalid repeated or terminal item decision")
+                began = time.perf_counter(); selected = self.strategy.select(features); latency += (time.perf_counter()-began)*1000
+                choice, _ = self._choice(features, selected, did)
+                if choice not in allowed: raise ClosedLoopEvaluationError("strategy choice_id is not pending")
+                observation, ack = environment.choose_level_up(did, choice); self._validate_ack(ack, decision_id=did, choice_id=choice)
+                seen.add(did); selections.append(ClosedLoopSelection(did, choice))
+                if isinstance(ack, Mapping):
+                    latest = ack
+                    fallbacks += int(self._metric(ack, ("fallback_count", "fallback"), 0))
+                    nonmodel_ack = self._metric(ack, ("non_model_ui_actions", "card_abstentions"), 0)
+                    if isinstance(nonmodel_ack, Sequence) and not isinstance(nonmodel_ack,(str,bytes)): abstentions += sum(1 for x in nonmodel_ack if str(x) in {"choose_fallback","reroll","skip","banish","ack_chest","confirm"})
+                    elif isinstance(nonmodel_ack, int): abstentions += nonmodel_ack
             if terminated or truncated:
-                return ClosedLoopEpisodeResult(
-                    seed=seed,
-                    total_reward=total_reward,
-                    movement_steps=movement_steps,
-                    terminated=terminated,
-                    truncated=truncated,
-                    selections=tuple(selections),
-                )
+                return ClosedLoopEpisodeResult(seed, reward, steps, terminated, truncated, tuple(selections), scenario, float(self._metric(latest,("survival","survival_time","elapsed_time"),steps)), int(self._metric(latest,("level",),0)), int(self._metric(latest,("gems","gems_collected"),0)), int(self._metric(latest,("kills",),0)), len(selections), int(self._metric(latest,("evolution_count","evolutions"),0)), int(self._metric(latest,("union_count","unions"),0)), fallbacks, abstentions, latency)
         raise ClosedLoopEvaluationError("episode exceeded max_movement_steps")
 
     @staticmethod
     def _summary(episodes: Sequence[ClosedLoopEpisodeResult]) -> dict[str, Any]:
-        """ack 済み episode 結果を JSON 向けの比較指標へ集約する。
+        n=len(episodes)
+        if not n: return {"episodes":0,"mean_return":0.0,"mean_movement_steps":0.0,"decision_count":0,"choice_counts":{}}
+        choices=Counter(x.choice_id for e in episodes for x in e.selections)
+        means={name: sum(getattr(e,name) for e in episodes)/n for name in ("total_reward","movement_steps","survival","level","gems","kills","choices","evolution_count","union_count","fallback_count","card_abstention_count","latency_ms")}
+        return {"episodes":n,"mean_return":means.pop("total_reward"),"mean_movement_steps":means.pop("movement_steps"),"decision_count":sum(len(e.selections) for e in episodes),"choice_counts":dict(sorted(choices.items())), **{"mean_"+k:v for k,v in means.items()}}
 
-        selection histogram は choice ID を明示し、平均だけでは見えない model collapse を診断できるようにする。
-        """
-        if not episodes:
-            return {"episodes": 0, "mean_return": 0.0, "mean_movement_steps": 0.0, "decision_count": 0, "choice_counts": {}}
-        choices = Counter(choice.choice_id for episode in episodes for choice in episode.selections)
-        return {
-            "episodes": len(episodes),
-            "mean_return": sum(item.total_reward for item in episodes) / len(episodes),
-            "mean_movement_steps": sum(item.movement_steps for item in episodes) / len(episodes),
-            "decision_count": sum(len(item.selections) for item in episodes),
-            "choice_counts": dict(sorted(choices.items())),
-        }
+    def evaluate(self, environment: Any, *, episode_count: int, seed_start: int=0) -> ClosedLoopEvaluationReport:
+        if type(episode_count) is not int or episode_count<=0 or type(seed_start) is not int: raise ValueError("episode_count must be positive and seed_start must be int")
+        episodes=tuple(self._run_episode(environment, seed=seed_start+i) for i in range(episode_count)); return ClosedLoopEvaluationReport(episodes,self._summary(episodes))
 
-    def evaluate(
-        self, environment: Any, *, episode_count: int, seed_start: int = 0
-    ) -> ClosedLoopEvaluationReport:
-        """連続 seed の episode を実行して selection/outcome report を返す。
 
-        episode count と seed は明示的に固定し、再現不能なランダム評価を CLI の既定にしない。
-        """
-        if type(episode_count) is not int or episode_count <= 0:
-            raise ValueError("episode_count must be a positive integer")
-        if type(seed_start) is not int:
-            raise ValueError("seed_start must be an integer")
-        episodes = tuple(
-            self._run_episode(environment, seed=seed_start + index)
-            for index in range(episode_count)
-        )
-        return ClosedLoopEvaluationReport(episodes=episodes, summary=self._summary(episodes))
+class PairedItemSelectorEvaluator:
+    """freeze 済み matrix を strategy ごとに同一 cell で実行・resume する evaluator。"""
+    def __init__(self, *, environment_factory: Callable[[EvaluationCell], Any], movement_policy: Callable[[Any], Any], max_movement_steps: int=100_000, bootstrap_resamples: int=10_000) -> None:
+        self.environment_factory, self.movement_policy, self.max_movement_steps, self.bootstrap_resamples = environment_factory, movement_policy, max_movement_steps, bootstrap_resamples
+
+    @staticmethod
+    def freeze_manifest(cells: Sequence[EvaluationCell]) -> dict[str, Any]:
+        if not cells or len({(x.seed,x.scenario) for x in cells}) != len(cells): raise ValueError("manifest cells must be non-empty and unique")
+        payload={"cells":[asdict(x) for x in cells]}; return {**payload,"manifest_hash":canonical_hash(payload)}
+
+    def evaluate(self, *, strategies: Mapping[str, ItemSelectionProtocol], manifest: Mapping[str, Any], existing_result: Mapping[str, Any] | None=None, required_episodes: int | None=None) -> dict[str, Any]:
+        cells=tuple(EvaluationCell(**x) for x in manifest.get("cells", [])); frozen=self.freeze_manifest(cells)
+        if manifest.get("manifest_hash") != frozen["manifest_hash"]: raise ClosedLoopEvaluationError("manifest hash mismatch")
+        names=tuple(strategies)
+        if not names: raise ValueError("at least one strategy is required")
+        previous: dict[tuple[str,int,str],dict[str,Any]]={}
+        if existing_result is not None:
+            body={k:v for k,v in existing_result.items() if k!="result_hash"}
+            if existing_result.get("result_hash") != canonical_hash(body) or existing_result.get("manifest_hash") != frozen["manifest_hash"]: raise ClosedLoopEvaluationError("existing result hash or manifest does not match")
+            previous={(r["strategy"],r["seed"],r["scenario"]):r for r in existing_result.get("episodes",[])}
+        records=[]
+        for name, strategy in strategies.items():
+            for cell in cells:
+                key=(name,cell.seed,cell.scenario)
+                if key in previous: records.append(previous[key]); continue
+                episode=ItemSelectorClosedLoopEvaluator(strategy=strategy,movement_policy=self.movement_policy,max_movement_steps=self.max_movement_steps)._run_episode(self.environment_factory(cell),seed=cell.seed,scenario=cell.scenario)
+                records.append({"strategy":name,"stratum":cell.stratum,"cluster":cell.cluster,**asdict(episode),"selections":[asdict(x) for x in episode.selections]})
+        required=required_episodes if required_episodes is not None else len(cells)
+        executed=min(sum(1 for x in records if x["strategy"]==name) for name in names)
+        comparisons={f"{name}-vs-{names[0]}":self._bootstrap(records,names[0],name) for name in names[1:]}
+        body={"manifest_hash":frozen["manifest_hash"],"strategies":list(names),"episodes":records,"comparisons":comparisons,"n_required":required,"n_executed":executed,"promotion":executed>=required}
+        return {**body,"result_hash":canonical_hash(body)}
+
+    def _bootstrap(self, records: Sequence[Mapping[str,Any]], base: str, other: str) -> dict[str, Any]:
+        # resample clusters inside each stratum, always retaining paired strategy records.
+        paired: dict[str,dict[str,dict[str,float]]]={}
+        for row in records:
+            if row["strategy"] in (base,other): paired.setdefault(str(row["stratum"]),{}).setdefault(str(row["cluster"]),{})[str(row["strategy"])]=float(row["total_reward"])
+        usable={s:[v[other]-v[base] for v in clusters.values() if base in v and other in v] for s,clusters in paired.items()}; usable={s:v for s,v in usable.items() if v}
+        observed=sum(sum(v) for v in usable.values())/sum(len(v) for v in usable.values()) if usable else 0.0
+        rng=random.Random(0); samples=[]
+        for _ in range(self.bootstrap_resamples):
+            vals=[rng.choice(values) for values in usable.values() for _ in range(len(values))]; samples.append(sum(vals)/len(vals) if vals else 0.0)
+        samples.sort(); lo=samples[int(.025*(len(samples)-1))] if samples else 0.; hi=samples[int(.975*(len(samples)-1))] if samples else 0.
+        return {"metric":"total_reward","difference":observed,"ci_95":[lo,hi],"resamples":self.bootstrap_resamples,"stratified_by":"stratum","clustered_by":"cluster"}

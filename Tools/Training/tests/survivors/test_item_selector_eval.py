@@ -11,7 +11,9 @@ import pytest
 
 from games.survivors.item_selector_eval import (
     ClosedLoopEvaluationError,
+    EvaluationCell,
     ItemSelectorClosedLoopEvaluator,
+    PairedItemSelectorEvaluator,
 )
 
 
@@ -124,3 +126,17 @@ def test_closed_loop_evaluator_rejects_mismatched_choice_ack() -> None:
 
     with pytest.raises(ClosedLoopEvaluationError, match="acknowledgement"):
         evaluator.evaluate(environment, episode_count=1, seed_start=10)
+
+
+def test_paired_evaluator_is_deterministic_resumable_and_requires_all_episodes() -> None:
+    cells = (EvaluationCell(seed=3, scenario="a", stratum="early", cluster="c1"), EvaluationCell(seed=4, scenario="b", stratum="late", cluster="c2"))
+    manifest = PairedItemSelectorEvaluator.freeze_manifest(cells)
+    make = lambda cell: _Environment()
+    evaluator = PairedItemSelectorEvaluator(environment_factory=make, movement_policy=lambda _: 0, bootstrap_resamples=10)
+    strategies = {"baseline": _Strategy(), "candidate": _Strategy()}
+    first = evaluator.evaluate(strategies=strategies, manifest=manifest, required_episodes=3)
+    resumed = evaluator.evaluate(strategies=strategies, manifest=manifest, existing_result=first, required_episodes=3)
+    assert first == resumed
+    assert first["comparisons"]["candidate-vs-baseline"]["resamples"] == 10
+    assert first["n_executed"] == 2
+    assert first["promotion"] is False

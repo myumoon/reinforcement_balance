@@ -12,7 +12,12 @@ from reinbalance_survivors_contracts.item_decision import (
     ItemDecisionFeatures,
 )
 
-from games.survivors.item_selection_strategy import ItemSelectionStrategy
+import pytest
+from reinbalance_survivors_contracts.ui_intent import DecisionOwner, UiIntentKind, UiIntentV1
+from games.survivors.item_selection_strategy import (
+    CardHeuristicV1Strategy, CardTargetRef, ItemSelectionError, ItemSelectionStrategy,
+    RandomCardStrategy, TeacherOracleStrategy, card_target_from_intent,
+)
 from games.survivors.item_selector_model import ItemSelector
 
 
@@ -74,10 +79,10 @@ def test_strategy_selects_highest_logit_and_keeps_item_id_bound_to_candidate() -
 
     decision = strategy.select(_features(candidates=(_candidate("wand"), _candidate("knife"))))
 
-    assert decision.decision_id == "decision-1"
-    assert decision.choice_id == "knife"
-    assert decision.candidate_index == 1
-    assert decision.candidate_logits == (1.0, 1.0)
+    assert decision.kind is UiIntentKind.CHOOSE_CARD
+    assert decision.decision_owner is DecisionOwner.ITEM_SELECTOR_SESSION
+    assert decision.target_index == 1
+    assert card_target_from_intent(_features(candidates=(_candidate("wand"), _candidate("knife"))), decision).card_id == "knife"
 
 
 def test_strategy_uses_choice_id_tie_breaker_not_live_candidate_order() -> None:
@@ -94,4 +99,21 @@ def test_strategy_uses_choice_id_tie_breaker_not_live_candidate_order() -> None:
     first = strategy.select(_features(candidates=(_candidate("wand"), _candidate("knife"))))
     second = strategy.select(_features(candidates=(_candidate("knife"), _candidate("wand"))))
 
-    assert first.choice_id == second.choice_id == "knife"
+    assert card_target_from_intent(_features(candidates=(_candidate("wand"), _candidate("knife"))), first).card_id == "knife"
+    assert card_target_from_intent(_features(candidates=(_candidate("knife"), _candidate("wand"))), second).card_id == "knife"
+
+
+@pytest.mark.parametrize("strategy", [RandomCardStrategy(seed=1), CardHeuristicV1Strategy(), TeacherOracleStrategy(),])
+def test_non_model_card_strategies_return_valid_item_selector_intent(strategy) -> None:
+    features = _features(candidates=(_candidate("wand"), _candidate("knife")))
+    intent = strategy.select(features)
+    assert UiIntentV1.from_wire(intent.to_wire()) == intent
+    assert intent.kind is UiIntentKind.CHOOSE_CARD
+    assert intent.decision_owner is DecisionOwner.ITEM_SELECTOR_SESSION
+    assert card_target_from_intent(features, intent).card_id in {"wand", "knife"}
+
+
+def test_card_target_ref_rejects_mixed_id_and_index() -> None:
+    features = _features(candidates=(_candidate("wand"), _candidate("knife")))
+    with pytest.raises(ItemSelectionError, match="same candidate"):
+        CardTargetRef("decision-1", "wand", 1).validate(features)

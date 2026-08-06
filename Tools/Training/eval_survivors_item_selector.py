@@ -9,11 +9,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import importlib
 from pathlib import Path
 from typing import Any, Callable
 
-from games.survivors.item_selection_strategy import ItemSelectionStrategy
-from games.survivors.item_selector_eval import ItemSelectorClosedLoopEvaluator
+from games.survivors.item_selection_strategy import CardHeuristicV1Strategy, ItemSelectionStrategy, RandomCardStrategy
+from games.survivors.item_selector_eval import EvaluationCell, ItemSelectorClosedLoopEvaluator, PairedItemSelectorEvaluator
 from games.survivors.item_selector_model import ItemSelector
 from games.survivors.item_selector_trainer import ItemSelectorTrainer
 
@@ -91,7 +92,7 @@ def _parser() -> argparse.ArgumentParser:
 
     live UE5 adapter はプロジェクト固有の movement/feature producer を必要とするため、この CLI は checkpoint 検証までを提供する。
     """
-    parser = argparse.ArgumentParser(description="Validate a Survivors ItemSelector checkpoint binding.")
+    parser = argparse.ArgumentParser(description="Run a paired Survivors ItemSelector closed-loop evaluation.")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--context-dim", type=int, required=True)
     parser.add_argument("--candidate-dim", type=int, required=True)
@@ -99,14 +100,28 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-capability-hash", required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--environment-factory", required=True, help="module:callable accepting EvaluationCell")
+    parser.add_argument("--movement-policy", required=True, help="module:callable accepting an observation")
+    parser.add_argument("--manifest", type=Path, required=True, help="frozen seed/scenario manifest JSON")
+    parser.add_argument("--resume", type=Path)
+    parser.add_argument("--required-episodes", type=int)
+    parser.add_argument("--max-movement-steps", type=int, default=100000)
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    """checkpoint binding を検証し、live adapter 接続前の descriptor を出力する。
+def _load_callable(spec: str) -> Callable[..., Any]:
+    """明示 adapter を import する。CLI 自身は UE5 接続を暗黙生成しない。"""
+    module, separator, name = spec.partition(":")
+    if not separator or not module or not name:
+        raise ItemSelectorEvaluationCliError("adapter must be module:callable")
+    value = getattr(importlib.import_module(module), name)
+    if not callable(value):
+        raise ItemSelectorEvaluationCliError("adapter must be callable")
+    return value
 
-    live environment の生成を暗黙に行わず、未実装の feature producer へ接続したように見せない。
-    """
+
+def main(argv: list[str] | None = None) -> int:
+    """checkpoint を含む三戦略を、明示 adapter と frozen manifest で実行する。"""
     args = _parser().parse_args(argv)
     try:
         selector = load_item_selector(
@@ -117,12 +132,24 @@ def main(argv: list[str] | None = None) -> int:
             target_capability_hash=args.target_capability_hash,
             device=args.device,
         )
-        payload = {
-            "status": "checkpoint_verified",
-            "context_dim": selector.model.context_dim,
-            "candidate_dim": selector.model.candidate_dim,
-            "nmax": args.nmax,
-        }
+        raw_manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+        cells = tuple(EvaluationCell(**cell) for cell in raw_manifest["cells"])
+        manifest = PairedItemSelectorEvaluator.freeze_manifest(cells)
+        # A provided manifest must already be frozen; accepting altered seed matrices would leak evaluation data.
+        if raw_manifest.get("manifest_hash") != manifest["manifest_hash"]:
+            raise ItemSelectorEvaluationCliError("manifest hash mismatch")
+        previous = json.loads(args.resume.read_text(encoding="utf-8")) if args.resume else None
+        evaluator = PairedItemSelectorEvaluator(
+            environment_factory=_load_callable(args.environment_factory),
+            movement_policy=_load_callable(args.movement_policy),
+            max_movement_steps=args.max_movement_steps,
+        )
+        payload = evaluator.evaluate(
+            strategies={"random": RandomCardStrategy(), "card_heuristic_v1": CardHeuristicV1Strategy(), "item_selector": selector},
+            manifest=manifest,
+            existing_result=previous,
+            required_episodes=args.required_episodes,
+        )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
     except (OSError, RuntimeError, ValueError) as exc:
