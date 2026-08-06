@@ -323,6 +323,24 @@ ONNX signature、install済み`NonModelUiPolicyV1`のconfig/schema/implementatio
 evaluatorはseed 42・2000 resampleのbootstrap CIとoverall/per-slice/calibration gateを
 `item_selector_verdict.json`へ保存する。
 
+## Survivors ItemSelector closed-loop evaluation
+
+`games/survivors/item_selection_strategy.py` は release 済み `ItemDecisionFeatures` を model
+tensor に変換し、valid card の最大 logit を live choice ID として返す。teacher target、
+reliability、split は推論入力に含めない。同点は candidate index ではなく choice ID の辞書順で
+解決するため、UI の表示順が変わっても同じ card を選ぶ。
+
+`games/survivors/item_selector_eval.py` は movement step の pending item decision を検出すると、
+次の movement より先に選択を一度だけ `/level_up_choice` 相当の endpoint へ適用する。response の
+decision ID と choice ID が request と一致しない場合は episode を fail-closed で停止する。評価
+adapter は step info に `item_decision_features`、`decision_id`、`choice_ids` をセットし、choice
+endpoint は `(post_choice_observation, acknowledgement)` を返す必要がある。
+
+`eval_survivors_item_selector.py` の `load_item_selector()` は checkpoint の target capability hash、
+Nmax、context/candidate feature 次元を検証して strategy を復元する。`run_closed_loop_evaluation()`
+へ UE5 adapter と既存 movement policy を渡すと、episode return、movement step、ack 済み choice
+履歴を JSON 化できる。
+
 ## 関連ドキュメント
 
 - UE5 との通信仕様: [`ue5_env.md`](ue5_env.md)
