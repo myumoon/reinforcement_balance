@@ -112,8 +112,15 @@ class ItemSelectorClosedLoopEvaluator:
             reward += float(value); steps += 1; latest = info
             fallbacks += int(self._metric(info, ("fallback_count", "fallback"), 0))
             nonmodel_step = self._metric(info, ("non_model_ui_actions", "card_abstentions"), 0)
-            if isinstance(nonmodel_step, Sequence) and not isinstance(nonmodel_step,(str,bytes)): abstentions += sum(1 for x in nonmodel_step if str(x) in {"choose_fallback","reroll","skip","banish","ack_chest","confirm"})
-            elif isinstance(nonmodel_step, int): abstentions += nonmodel_step
+            if isinstance(nonmodel_step, Sequence) and not isinstance(nonmodel_step, (str, bytes)):
+                for x in nonmodel_step:
+                    if isinstance(x, UiIntentV1):
+                        if x.decision_owner is DecisionOwner.NON_MODEL_UI_POLICY:
+                            abstentions += 1
+                    elif isinstance(x, str) and x in {"choose_fallback", "reroll", "skip", "banish", "ack_chest", "confirm"}:
+                        abstentions += 1
+            elif isinstance(nonmodel_step, int):
+                abstentions += nonmodel_step
             pending = self._pending(info)
             if pending:
                 did, features, allowed = pending
@@ -127,8 +134,15 @@ class ItemSelectorClosedLoopEvaluator:
                     latest = ack
                     fallbacks += int(self._metric(ack, ("fallback_count", "fallback"), 0))
                     nonmodel_ack = self._metric(ack, ("non_model_ui_actions", "card_abstentions"), 0)
-                    if isinstance(nonmodel_ack, Sequence) and not isinstance(nonmodel_ack,(str,bytes)): abstentions += sum(1 for x in nonmodel_ack if str(x) in {"choose_fallback","reroll","skip","banish","ack_chest","confirm"})
-                    elif isinstance(nonmodel_ack, int): abstentions += nonmodel_ack
+                    if isinstance(nonmodel_ack, Sequence) and not isinstance(nonmodel_ack, (str, bytes)):
+                        for x in nonmodel_ack:
+                            if isinstance(x, UiIntentV1):
+                                if x.decision_owner is DecisionOwner.NON_MODEL_UI_POLICY:
+                                    abstentions += 1
+                            elif isinstance(x, str) and x in {"choose_fallback", "reroll", "skip", "banish", "ack_chest", "confirm"}:
+                                abstentions += 1
+                    elif isinstance(nonmodel_ack, int):
+                        abstentions += nonmodel_ack
             if terminated or truncated:
                 return ClosedLoopEpisodeResult(seed, reward, steps, terminated, truncated, tuple(selections), scenario, float(self._metric(latest,("survival","survival_time","elapsed_time"),steps)), int(self._metric(latest,("level",),0)), int(self._metric(latest,("gems","gems_collected"),0)), int(self._metric(latest,("kills",),0)), len(selections), int(self._metric(latest,("evolution_count","evolutions"),0)), int(self._metric(latest,("union_count","unions"),0)), fallbacks, abstentions, latency)
         raise ClosedLoopEvaluationError("episode exceeded max_movement_steps")
@@ -181,10 +195,21 @@ class PairedItemSelectorEvaluator:
 
     def _bootstrap(self, records: Sequence[Mapping[str,Any]], base: str, other: str) -> dict[str, Any]:
         # resample clusters inside each stratum, always retaining paired strategy records.
-        paired: dict[str,dict[str,dict[str,float]]]={}
+        # M3 fix: accumulate into lists — dict assignment loses multiple seeds in the same cluster.
+        paired: dict[str, dict[str, dict[str, list[float]]]] = {}
         for row in records:
-            if row["strategy"] in (base,other): paired.setdefault(str(row["stratum"]),{}).setdefault(str(row["cluster"]),{})[str(row["strategy"])]=float(row["total_reward"])
-        usable={s:[v[other]-v[base] for v in clusters.values() if base in v and other in v] for s,clusters in paired.items()}; usable={s:v for s,v in usable.items() if v}
+            if row["strategy"] in (base, other):
+                paired.setdefault(str(row["stratum"]), {}).setdefault(str(row["cluster"]), {}).setdefault(str(row["strategy"]), []).append(float(row["total_reward"]))
+        # Per-cluster difference: mean(other) − mean(base) across all seeds in the cluster.
+        usable = {
+            s: [
+                sum(v[other]) / len(v[other]) - sum(v[base]) / len(v[base])
+                for v in clusters.values()
+                if base in v and other in v
+            ]
+            for s, clusters in paired.items()
+        }
+        usable = {s: v for s, v in usable.items() if v}
         observed=sum(sum(v) for v in usable.values())/sum(len(v) for v in usable.values()) if usable else 0.0
         rng=random.Random(0); samples=[]
         for _ in range(self.bootstrap_resamples):

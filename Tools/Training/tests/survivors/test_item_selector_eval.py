@@ -9,12 +9,44 @@ from dataclasses import dataclass
 
 import pytest
 
+import pytest
+
+from reinbalance_survivors_contracts.ui_intent import (
+    DecisionOwner,
+    UiIntentKind,
+    UiIntentV1,
+)
 from games.survivors.item_selector_eval import (
     ClosedLoopEvaluationError,
     EvaluationCell,
     ItemSelectorClosedLoopEvaluator,
     PairedItemSelectorEvaluator,
 )
+
+
+def _nonmodel_intent(kind: UiIntentKind) -> UiIntentV1:
+    """NON_MODEL_UI_POLICY が生成する最小有効 UiIntentV1 を返す。
+
+    decision_owner と kind を固定して abstention 集計の型チェックを検証する。
+    """
+    extra: dict = {}
+    semantic = kind.value
+    if kind is UiIntentKind.CHOOSE_FALLBACK:
+        extra = {"target_id": "gold-1", "target_index": 0}
+        semantic = "gold"
+    return UiIntentV1(
+        kind=kind,
+        semantic_action=semantic,
+        decision_owner=DecisionOwner.NON_MODEL_UI_POLICY,
+        source_snapshot_hash="h1",
+        source_frame_hash="h2",
+        source_content_hash="h3",
+        ui_state_key="level_up",
+        decision_policy_id="non_model_ui_policy_v1",
+        decision_rule_id="fallback_heuristic_v1",
+        decision_config_hash="hc",
+        **extra,
+    )
 
 
 @dataclass(frozen=True)
@@ -126,6 +158,63 @@ def test_closed_loop_evaluator_rejects_mismatched_choice_ack() -> None:
 
     with pytest.raises(ClosedLoopEvaluationError, match="acknowledgement"):
         evaluator.evaluate(environment, episode_count=1, seed_start=10)
+
+
+@pytest.mark.parametrize("kind", [
+    UiIntentKind.CHOOSE_FALLBACK,
+    UiIntentKind.REROLL,
+    UiIntentKind.SKIP,
+    UiIntentKind.BANISH,
+    UiIntentKind.ACK_CHEST,
+    UiIntentKind.CONFIRM,
+])
+def test_nonmodel_ui_intent_counted_in_card_abstention(kind: UiIntentKind) -> None:
+    """NON_MODEL_UI_POLICY UiIntentV1 が card_abstention_count に計上される。
+
+    文字列名ではなく decision_owner フィールドで判定するため、kind ごとに UiIntentV1 オブジェクトを
+    そのまま渡し、abstention が正確に 1 になることを確認する。
+    """
+    intent = _nonmodel_intent(kind)
+
+    class IntentEnv(_Environment):
+        def step(self, action: int):
+            obs, reward, terminated, truncated, info = super().step(action)
+            return obs, reward, terminated, truncated, {**info, "non_model_ui_actions": [intent]}
+
+    evaluator = ItemSelectorClosedLoopEvaluator(strategy=_Strategy(), movement_policy=lambda _: 0)
+    result = evaluator.evaluate(IntentEnv(), episode_count=1, seed_start=0)
+    assert result.summary["mean_card_abstention_count"] >= 1
+
+
+def test_bootstrap_paired_difference_uses_all_seeds_in_cluster() -> None:
+    """同一 cluster の複数 seed が平均化されて CI に寄与する（上書きされない）。
+
+    _bootstrap に同一 (stratum, cluster) で2件のレコードを直接渡す。
+    seed=1: base=0,   candidate=10   → diff=10
+    seed=2: base=100, candidate=100  → diff=0
+    cluster 平均差 = 5。dict 代入バグがあると最後の seed だけ残り diff=0 になる。
+    """
+    cells = (
+        EvaluationCell(seed=1, scenario="x", stratum="s", cluster="c"),
+        EvaluationCell(seed=2, scenario="y", stratum="s", cluster="c"),
+    )
+    manifest = PairedItemSelectorEvaluator.freeze_manifest(cells)
+    evaluator = PairedItemSelectorEvaluator(
+        environment_factory=lambda cell: _Environment(),
+        movement_policy=lambda _: 0,
+        bootstrap_resamples=200,
+    )
+
+    # _bootstrap に直接レコードを渡して環境依存を排除する。
+    records = [
+        {"strategy": "baseline", "stratum": "s", "cluster": "c", "seed": 1, "total_reward": 0.0},
+        {"strategy": "candidate", "stratum": "s", "cluster": "c", "seed": 1, "total_reward": 10.0},
+        {"strategy": "baseline", "stratum": "s", "cluster": "c", "seed": 2, "total_reward": 100.0},
+        {"strategy": "candidate", "stratum": "s", "cluster": "c", "seed": 2, "total_reward": 100.0},
+    ]
+    ci = evaluator._bootstrap(records, base="baseline", other="candidate")
+    diff = ci["difference"]
+    assert abs(diff - 5.0) < 0.1, f"expected mean diff ≈5, got {diff}"
 
 
 def test_paired_evaluator_is_deterministic_resumable_and_requires_all_episodes() -> None:
