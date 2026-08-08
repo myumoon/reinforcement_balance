@@ -89,6 +89,7 @@ def run_dry_run_helper_for_test(
         focused=True, armed=True, operations=operations,
     )
     runtime = HelperRuntime(
-        LeaseValidator(session_nonce, target_hash, action_hash), backend, AuditLog(audit_path)
+        LeaseValidator(session_nonce, target_hash, action_hash, target_pid, target_hwnd),
+        backend, AuditLog(audit_path),
     )
     run_helper_loop(connection, runtime, session_nonce)

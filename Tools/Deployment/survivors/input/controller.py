@@ -38,7 +38,7 @@ class InputLeaseController:
         self._process = multiprocessing.Process(
             target=process_target,
             args=(child, str(audit_path), self._nonce, target_hash, action_hash, target_pid, target_hwnd),
-            daemon=True,
+            daemon=False,  # ponytail: daemon=False で controller exit 後も helper が cleanup できる。全プロセス強制 kill (SIGKILL) は非保証、runbook 参照
         )
         self._process.start()
         child.close()

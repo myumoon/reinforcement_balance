@@ -29,7 +29,11 @@ class HelperRuntime:
         """
         now = time.monotonic_ns() if now_ns is None else now_ns
         event_timestamp = time.time_ns()
-        self._validator.accept(lease, now)
+        try:
+            self._validator.accept(lease, now)
+        except ValueError as exc:
+            # protocol/binding 違反は gate と区別してそのまま rejected で返し状態を変えない
+            return {"kind": "rejected", "sequence": lease.sequence, "error": str(exc)}
         self._backend.poll_arm_toggle()
         safe = self._backend.armed and self._backend.target_is_safe(lease.target_pid, lease.target_hwnd)
         if safe:
@@ -118,7 +122,7 @@ def helper_main(
     """
     from .win32_backend import Win32InputBackend
     runtime = HelperRuntime(
-        LeaseValidator(session_nonce, target_hash, action_hash),
+        LeaseValidator(session_nonce, target_hash, action_hash, target_pid, target_hwnd),
         Win32InputBackend(), AuditLog(audit_path),
     )
     run_helper_loop(connection, runtime, session_nonce)

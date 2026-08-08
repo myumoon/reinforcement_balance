@@ -14,7 +14,7 @@ def _runtime(tmp_path, *, armed: bool, focused: bool, pid: int = 42, hwnd: int =
     backend = DryRunBackend(foreground_pid=pid, foreground_hwnd=hwnd,
                             focused=focused, armed=armed)
     runtime = HelperRuntime(
-        validator=LeaseValidator("1" * 32, "a" * 64, "b" * 64),
+        validator=LeaseValidator("1" * 32, "a" * 64, "b" * 64, 42, 84),
         backend=backend,
         audit=AuditLog(tmp_path / "audit.jsonl"),
     )

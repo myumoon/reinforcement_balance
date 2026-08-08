@@ -49,7 +49,7 @@ def test_audit_jsonl_records_event_ack_and_release_timestamps(tmp_path) -> None:
         foreground_pid=42, foreground_hwnd=84, focused=True, armed=True
     )
     runtime = HelperRuntime(
-        LeaseValidator("1" * 32, "a" * 64, "b" * 64), backend, AuditLog(path)
+        LeaseValidator("1" * 32, "a" * 64, "b" * 64, 42, 84), backend, AuditLog(path)
     )
     lease = Lease(
         session_nonce="1" * 32,

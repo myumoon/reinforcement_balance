@@ -32,6 +32,8 @@ def _lease(**changes: object) -> Lease:
         (None, {"expires_monotonic_ns": 1_000_000_000}, 1_000_000_000),
         (None, {"target_hash": "c" * 64}, 1_001_000_000),
         (None, {"action_hash": "d" * 64}, 1_001_000_000),
+        (None, {"target_pid": 43}, 1_001_000_000),
+        (None, {"target_hwnd": 85}, 1_001_000_000),
     ],
 )
 def test_rejects_every_lease_binding_failure(
@@ -40,7 +42,7 @@ def test_rejects_every_lease_binding_failure(
     """nonce・順序・期限・2種類の hash の不一致を fail-closed にする。
     M1 の5つの反例を個別に与え、どれも検証を通過しないことを確認します。
     """
-    validator = LeaseValidator("1" * 32, "a" * 64, "b" * 64)
+    validator = LeaseValidator("1" * 32, "a" * 64, "b" * 64, 42, 84)
     if first is not None:
         validator.accept(first, 1_001_000_000)
     with pytest.raises(ValueError):

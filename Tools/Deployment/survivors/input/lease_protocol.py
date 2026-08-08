@@ -77,19 +77,27 @@ class LeaseValidator:
     """session binding と strictly increasing sequence を保持する validator。
     すべての binding が通った後だけ sequence を進め、拒否 payload が状態を汚染しないようにします。
     """
-    def __init__(self, session_nonce: str, target_hash: str, action_hash: str) -> None:
-        """期待する session・target・action identity を固定する。
+    def __init__(self, session_nonce: str, target_hash: str, action_hash: str,
+                 target_pid: int, target_hwnd: int) -> None:
+        """期待する session・target・action identity と PID/HWND を固定する。
         起動時に controller と共有した値以外を後から受理しません。
         """
         if not _NONCE.fullmatch(session_nonce) or not _HASH.fullmatch(target_hash) or not _HASH.fullmatch(action_hash):
             raise ValueError("invalid validator binding")
+        if type(target_pid) is not int or target_pid <= 0:
+            raise ValueError("invalid validator target_pid")
+        if type(target_hwnd) is not int or target_hwnd <= 0:
+            raise ValueError("invalid validator target_hwnd")
         self._nonce = session_nonce
         self._target_hash = target_hash
         self._action_hash = action_hash
+        self._target_pid = target_pid
+        self._target_hwnd = target_hwnd
         self._last_sequence = 0
     def accept(self, lease: Lease, now_ns: int) -> None:
-        """nonce・sequence・時刻・両 hash を対称に検査して受理する。
-        stale/replay/expired/wrong-target/wrong-action のどれか1つでも一致しなければ状態変更前に拒否します。
+        """nonce・sequence・時刻・両 hash・PID/HWND を対称に検査して受理する。
+        stale/replay/expired/wrong-target/wrong-action/wrong-pid/wrong-hwnd のどれか1つでも
+        一致しなければ状態変更前に拒否します。
         """
         if type(now_ns) is not int or now_ns <= 0:
             raise ValueError("invalid validation time")
@@ -100,6 +108,8 @@ class LeaseValidator:
             lease.expires_monotonic_ns <= now_ns,
             lease.target_hash != self._target_hash,
             lease.action_hash != self._action_hash,
+            lease.target_pid != self._target_pid,
+            lease.target_hwnd != self._target_hwnd,
         )
         if any(failures):
             raise ValueError("lease binding, order, or lifetime rejected")

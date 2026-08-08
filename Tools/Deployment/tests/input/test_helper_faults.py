@@ -70,7 +70,7 @@ def test_dry_run_10k_random_actions_has_no_pressed_without_release(tmp_path) -> 
         foreground_pid=42, foreground_hwnd=84, focused=True, armed=True
     )
     runtime = HelperRuntime(
-        LeaseValidator("1" * 32, "a" * 64, "b" * 64),
+        LeaseValidator("1" * 32, "a" * 64, "b" * 64, 42, 84),
         backend,
         AuditLog(tmp_path / "random-audit.jsonl"),
     )
