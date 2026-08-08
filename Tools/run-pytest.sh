@@ -35,4 +35,5 @@ echo "Using: $PYTHON"
 PYTEST_USER_BASE="${TMPDIR:-/tmp}/reinbalance-pytest-userbase-${UID}"
 PYTHONUSERBASE="$PYTEST_USER_BASE" "$PYTHON" -m pip install \
   --user -e Tools/Common --no-build-isolation -q
+PYTHONPATH="${PWD}/Tools/Deployment${PYTHONPATH:+:${PYTHONPATH}}" \
 PYTHONUSERBASE="$PYTEST_USER_BASE" "$PYTHON" -m pytest "$@"
