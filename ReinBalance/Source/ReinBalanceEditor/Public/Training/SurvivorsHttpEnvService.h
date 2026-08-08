@@ -67,6 +67,11 @@ public:
 	FString ApplyParams(const FString& Json);
 	void CompleteParams(const FString& ResponseJson, FHttpResultCallback Callback);
 
+#if WITH_AUTOMATION_TESTS
+	/** HTTP /params の game-thread 境界を transport なしで検証する test seam。 */
+	static FString ApplyParamsToGameForTesting(ASurvivorsGame* Game, const FString& Json);
+#endif
+
 	/** ASurvivorsParallelSetupActor が並列 Tick 時に使用するゲームロジックポインタ */
 	FSurvivorsGameLogic* GetGameLogic();
 

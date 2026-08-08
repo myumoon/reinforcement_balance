@@ -266,15 +266,31 @@ class SurvivorsEnv(BaseUE5Env):
             else 0
         )
         alive = bool(ue_info.get("alive", not done))
+        elapsed = float(ue_info.get("elapsed", fallback_elapsed))
+        stage_cleared = bool(
+            ue_info.get("stage_cleared", ue_info.get("stage_clear", truncated and alive))
+        ) and elapsed >= 1800.0
+        terminal_reason = ue_info.get("terminal_reason")
+        if terminal_reason not in {"stage_cleared", "death", "timeout", "none"}:
+            terminal_reason = None
+        if terminal_reason is None or (terminal_reason == "stage_cleared" and not stage_cleared):
+            terminal_reason = (
+                "stage_cleared" if stage_cleared
+                else "death" if done and not alive
+                else "timeout" if truncated
+                else "none"
+            )
         return {
-            "elapsed": float(ue_info.get("elapsed", fallback_elapsed)),
+            "elapsed": elapsed,
             "level": int(ue_info.get("level", fallback_level)),
             "gems": int(ue_info.get("gems", 0)),
             "kills": int(ue_info.get("kills", 0)),
             "alive": alive,
-            "stage_clear": bool(
-                ue_info.get("stage_clear", truncated and alive)
-            ),
+            "stage_clear": stage_cleared,
+            "stage_cleared": stage_cleared,
+            "terminal_reason": terminal_reason,
+            "timed_out": terminal_reason == "timeout",
+            "death": terminal_reason == "death",
         }
 
     def get_obs_schema(self) -> list:

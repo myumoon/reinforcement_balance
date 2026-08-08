@@ -97,16 +97,19 @@ namespace
 FSurvivorsGameLogic::FSurvivorsGameLogic() = default;
 FSurvivorsGameLogic::~FSurvivorsGameLogic() = default;
 
-void FSurvivorsGameLogic::Initialize(const FSurvivorsGameLogicConfig& Config)
+bool FSurvivorsGameLogic::Initialize(const FSurvivorsGameLogicConfig& Config)
 {
+	if (!IsValidInitialLoadout(Config)) return false;
 	CurrentConfig = Config;
 	CachedObsDim  = -1;
 	if (CurrentConfig.EnemyTypeTable.IsEmpty()) InitDefaultEnemyTable();
 	if (CurrentConfig.SpawnWaves.IsEmpty())     InitDefaultSpawnWaves();
+	return true;
 }
 
-void FSurvivorsGameLogic::ApplyConfig(const FSurvivorsGameLogicConfig& Config)
+bool FSurvivorsGameLogic::ApplyConfig(const FSurvivorsGameLogicConfig& Config)
 {
+	if (!IsValidInitialLoadout(Config)) return false;
 	TArray<FBox2D>           Walls = MoveTemp(CurrentConfig.WallBounds);
 	TArray<FSpawnWave>       Waves = MoveTemp(CurrentConfig.SpawnWaves);
 	TArray<FEnemyTypeParams> Table = MoveTemp(CurrentConfig.EnemyTypeTable);
@@ -117,6 +120,53 @@ void FSurvivorsGameLogic::ApplyConfig(const FSurvivorsGameLogicConfig& Config)
 	if (CurrentConfig.EnemyTypeTable.IsEmpty()) InitDefaultEnemyTable();
 	if (CurrentConfig.SpawnWaves.IsEmpty())     InitDefaultSpawnWaves();
 	CachedObsDim = -1;
+	return true;
+}
+
+/**
+ * RSI loadout を mutation 前に完全検証する。
+ * 初心者向け: Logic 初期化と runtime config 更新のどちらも同じ ID・level・重複規則を使う。
+ */
+bool FSurvivorsGameLogic::IsValidInitialLoadout(const FSurvivorsGameLogicConfig& Config)
+{
+	if (!Config.bHasInitialOverride) return true;
+	if (!FMath::IsFinite(Config.InitialElapsedTime)
+		|| Config.InitialElapsedTime < 0.f
+		|| Config.InitialElapsedTime > MaxGameTime
+		|| Config.InitialWeaponSlots.Num() > MaxWeaponSlots
+		|| Config.InitialPassiveSlots.Num() > MaxPassiveSlots)
+	{
+		return false;
+	}
+
+	TSet<int32> WeaponIds;
+	for (const FSurvivorsGameLogicConfig::FWeaponSlotOverride& Slot : Config.InitialWeaponSlots)
+	{
+		if (Slot.WeaponId <= static_cast<int32>(EWeaponType::None)
+			|| Slot.WeaponId > static_cast<int32>(EWeaponType::Vandalier)
+			|| Slot.Level < 1
+			|| Slot.Level > SurvivorsGameConstants::GetWeaponMaxLevel(static_cast<EWeaponType>(Slot.WeaponId))
+			|| WeaponIds.Contains(Slot.WeaponId))
+		{
+			return false;
+		}
+		WeaponIds.Add(Slot.WeaponId);
+	}
+
+	TSet<int32> PassiveIds;
+	for (const FSurvivorsGameLogicConfig::FPassiveSlotOverride& Slot : Config.InitialPassiveSlots)
+	{
+		if (Slot.PassiveId <= static_cast<int32>(EPassiveItemType::None)
+			|| Slot.PassiveId >= UE_ARRAY_COUNT(SurvivorsGameConstants::PassiveMaxLevel)
+			|| Slot.Level < 1
+			|| Slot.Level > SurvivorsGameConstants::PassiveMaxLevel[Slot.PassiveId]
+			|| PassiveIds.Contains(Slot.PassiveId))
+		{
+			return false;
+		}
+		PassiveIds.Add(Slot.PassiveId);
+	}
+	return true;
 }
 
 // ============================================================================
@@ -197,7 +247,7 @@ void FSurvivorsGameLogic::Reset(TOptional<int32> Seed)
 	ElapsedTime = 0.f; GlobalFreezeUntilTime = -1.f;
 	LastReward = 0.f; EpisodeBaseReward = 0.f; EpisodeStepCount = 0;
 	EpisodeGemCount = 0; EpisodeKillCount = 0;
-	bDone = false; bTruncated = false;
+	bDone = false; bTruncated = false; bStageCleared = false; bTimedOut = false;
 
 	// RSI オーバーライド
 	if (CurrentConfig.bHasInitialOverride)
@@ -272,8 +322,16 @@ void FSurvivorsGameLogic::PhysicsStep(int32 ActionIdx)
 	EpisodeBaseReward += LastReward;
 	EpisodeStepCount++;
 
-	if (CurrentConfig.MaxEpisodeTime > 0.f && ElapsedTime >= CurrentConfig.MaxEpisodeTime)
-	{ bTruncated = true; LastSpawnDebug.bTruncated = true; }
+	if (ElapsedTime >= MaxGameTime)
+	{
+		bTruncated = true; bStageCleared = true; bTimedOut = false;
+		LastSpawnDebug.bTruncated = true;
+	}
+	else if (CurrentConfig.MaxEpisodeTime > 0.f && ElapsedTime >= CurrentConfig.MaxEpisodeTime)
+	{
+		bTruncated = true; bStageCleared = false; bTimedOut = true;
+		LastSpawnDebug.bTruncated = true;
+	}
 }
 
 // ============================================================================
@@ -291,7 +349,13 @@ FSurvivorsStepResult FSurvivorsGameLogic::ExecStep(const TArray<float>& Action, 
 		AccReward += GetReward();
 		if (IsLevelUpPending()) break;
 		if (bDone)     { Result.bDone      = true; break; }
-		if (bTruncated){ Result.bTruncated = true; break; }
+		if (bTruncated)
+		{
+			Result.bTruncated = true;
+			Result.bStageCleared = bStageCleared;
+			Result.bTimedOut = bTimedOut;
+			break;
+		}
 	}
 	Result.Obs            = GetObservation();
 	Result.Reward         = AccReward;
@@ -473,7 +537,8 @@ FString FSurvivorsGameLogic::GetSpawnDebugJson() const
 		TEXT("{\"elapsed_time\":%.3f,\"max_episode_time\":%.3f,\"enemy_count\":%d,\"current_wave_index\":%d,"
 		     "\"min_active_enemies\":%d,\"max_active_enemies\":%d,\"effective_min_enemies\":%d,\"effective_max_enemies\":%d,"
 		     "\"max_enemy_type_id\":%d,\"allowed_spawn_type_count\":%d,\"spawn_accumulator\":%.3f,"
-		     "\"has_current_wave\":%s,\"used_curriculum_enemy_pool\":%s,\"spawn_blocked\":%s,\"truncated\":%s}"),
+		     "\"has_current_wave\":%s,\"used_curriculum_enemy_pool\":%s,\"spawn_blocked\":%s,\"truncated\":%s,"
+		     "\"stage_cleared\":%s,\"timed_out\":%s,\"terminal_reason\":\"%s\"}"),
 		LastSpawnDebug.ElapsedTime,LastSpawnDebug.MaxEpisodeTime,LastSpawnDebug.EnemyCount,
 		LastSpawnDebug.CurrentWaveIndex,LastSpawnDebug.MinActiveEnemies,LastSpawnDebug.MaxActiveEnemies,
 		LastSpawnDebug.EffectiveMinEnemies,LastSpawnDebug.EffectiveMaxEnemies,LastSpawnDebug.MaxEnemyTypeId,
@@ -481,7 +546,10 @@ FString FSurvivorsGameLogic::GetSpawnDebugJson() const
 		LastSpawnDebug.bHasCurrentWave?TEXT("true"):TEXT("false"),
 		LastSpawnDebug.bUsedCurriculumEnemyPool?TEXT("true"):TEXT("false"),
 		LastSpawnDebug.bSpawnBlocked?TEXT("true"):TEXT("false"),
-		LastSpawnDebug.bTruncated?TEXT("true"):TEXT("false"));
+		LastSpawnDebug.bTruncated?TEXT("true"):TEXT("false"),
+		bStageCleared?TEXT("true"):TEXT("false"),
+		bTimedOut?TEXT("true"):TEXT("false"),
+		bStageCleared?TEXT("stage_cleared"):(bDone?TEXT("death"):(bTimedOut?TEXT("timeout"):TEXT("none"))));
 }
 
 TArray<float> FSurvivorsGameLogic::GetObservation() const

@@ -537,9 +537,9 @@ public:
 
 	/**
 	 * 全 UPROPERTY フィールドを FSurvivorsGameLogicConfig に変換して Logic に同期する。
-	 * /params 適用後・ResetState() 前に呼ぶ（ゲームスレッド専用）。
+	 * /params 適用後・ResetState() 前に呼び、不正 loadout は false で通知する（ゲームスレッド専用）。
 	 */
-	void SyncConfigToLogic();
+	bool SyncConfigToLogic();
 
 private:
 	FSurvivorsGameLogic Logic;

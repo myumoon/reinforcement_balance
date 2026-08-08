@@ -4,8 +4,15 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 from games.survivors.run_event_logger import JsonlEventLogger
 
+_FULL_RUN_CLEAR_SECONDS = 1800.0
+
 
 class SurvivorsRunSupervisorCallback(BaseCallback):
+    """Survivors 長期 run の進捗停止と episode terminal を監視する。
+
+    初心者向け: bootstrap の停滞に加え、30分完走・死亡・短い timeout を別々に記録します。
+    """
+
     def __init__(
         self,
         *,
@@ -40,6 +47,55 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
         self._last_progress_step = 0
         self._last_progress_signature: tuple | None = None
         self._last_progress_snapshot: dict | None = None
+        self._last_terminal_kind: str | None = None
+        self._last_terminal_success: bool | None = None
+        self._stage_cleared_terminal_count = 0
+        self._death_terminal_count = 0
+        self._timeout_terminal_count = 0
+
+    def _observe_episode_terminals(self) -> None:
+        """SB3 locals の terminal rows を success/death/timeout に分類する。
+
+        初心者向け: 旧 stage_clear field は互換のため読みますが、1800秒到達かつ alive の
+        場合だけ成功とし、短い curriculum の TimeLimit は timeout にします。
+        """
+        infos = self.locals.get("infos", []) if isinstance(self.locals, dict) else []
+        dones = self.locals.get("dones", []) if isinstance(self.locals, dict) else []
+        for index, info in enumerate(infos):
+            if not isinstance(info, dict):
+                continue
+            done = bool(dones[index]) if index < len(dones) else False
+            explicit_reason = info.get("terminal_reason")
+            terminal_signal = done or explicit_reason in {"stage_cleared", "death", "timeout"}
+            if not terminal_signal:
+                continue
+            elapsed = float(info.get("elapsed", 0.0) or 0.0)
+            alive = bool(info.get("alive", explicit_reason != "death"))
+            clear_signal = bool(
+                info.get("stage_cleared", info.get("stage_clear", False))
+            ) or explicit_reason == "stage_cleared"
+            if clear_signal and alive and elapsed >= _FULL_RUN_CLEAR_SECONDS:
+                kind = "stage_cleared"
+                self._stage_cleared_terminal_count += 1
+                success = True
+            elif explicit_reason == "death" or (done and not alive):
+                kind = "death"
+                self._death_terminal_count += 1
+                success = False
+            else:
+                kind = "timeout"
+                self._timeout_terminal_count += 1
+                success = False
+            self._last_terminal_kind = kind
+            self._last_terminal_success = success
+            self._write_event(
+                "episode_terminal",
+                {
+                    "terminal_kind": kind,
+                    "success": success,
+                    "elapsed_seconds": elapsed,
+                },
+            )
 
     def _build_progress_snapshot(self, current_stage: str) -> dict:
         snapshot = self._weapon_bootstrap.get_unfinished_progress_snapshot(self._target_stage_key)
@@ -91,6 +147,7 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
         self._mark_progress(self._last_stage_key)
 
     def _on_step(self) -> bool:
+        self._observe_episode_terminals()
         # n_calls は _on_step() 呼び出し回数のため VecEnv の n_envs 増分に依存しない
         if self.n_calls % self._check_freq != 0:
             return True
@@ -194,4 +251,9 @@ class SurvivorsRunSupervisorCallback(BaseCallback):
             "last_progress_step": self._last_progress_step,
             "no_progress_steps": self.num_timesteps - self._last_progress_step,
             "last_progress_snapshot": self._last_progress_snapshot,
+            "last_terminal_kind": self._last_terminal_kind,
+            "last_terminal_success": self._last_terminal_success,
+            "stage_cleared_terminal_count": self._stage_cleared_terminal_count,
+            "death_terminal_count": self._death_terminal_count,
+            "timeout_terminal_count": self._timeout_terminal_count,
         }

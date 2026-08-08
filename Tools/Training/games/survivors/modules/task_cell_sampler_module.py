@@ -5,6 +5,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+from collections.abc import Mapping, Sequence
+import math
 import numpy as np
 from games.survivors.modules.state_modules import BaseStateModule
 from games.survivors.survivors_weapon_table import (
@@ -14,8 +16,38 @@ from games.survivors.survivors_weapon_table import (
 )
 
 if TYPE_CHECKING:
+    from games.survivors.full_run_cells import FullRunCellSpec
     from games.survivors.modules.weapon_unlock_module import WeaponUnlockAdvanceEvent
     from games.survivors.modules.weapon_bootstrap_module import WeaponBootstrapStateModule
+
+
+DEFAULT_FULL_RUN_SAMPLE_MIX: dict[str, float] = {
+    "short_skill": 0.45,
+    "late_rsi": 0.25,
+    "full_run": 0.30,
+}
+
+
+def _validate_full_run_sample_mix(value: Mapping[str, float]) -> dict[str, float]:
+    """full-run の三レーン比率を厳密に検証してコピーする。
+
+    初心者向け: 未知レーン、欠落、負値、全ゼロを訓練開始前に拒否します。
+    """
+    expected = set(DEFAULT_FULL_RUN_SAMPLE_MIX)
+    if set(value) != expected:
+        raise ValueError(f"full_run_sample_mix keys must be {sorted(expected)}")
+    checked = dict(value)
+    if any(
+        isinstance(weight, bool)
+        or not isinstance(weight, (int, float))
+        or not math.isfinite(float(weight))
+        or float(weight) < 0.0
+        for weight in checked.values()
+    ):
+        raise ValueError("full_run_sample_mix weights must be finite non-negative numbers")
+    if sum(float(weight) for weight in checked.values()) <= 0.0:
+        raise ValueError("full_run_sample_mix must contain a positive weight")
+    return {key: float(weight) for key, weight in checked.items()}
 
 
 @dataclass(frozen=True)
@@ -116,6 +148,7 @@ class TaskCellSamplerStateModule(BaseStateModule):
         short_episode_steps: int = 600,
         integration_target_p10: float = 300.0,
         maintenance_regression_ratio: float = 0.35,
+        full_run_sample_mix: Mapping[str, float] | None = None,
     ) -> None:
         self._min_episodes = min_episodes_per_cell
         self._target_p10 = target_p10
@@ -131,6 +164,11 @@ class TaskCellSamplerStateModule(BaseStateModule):
         self._short_episode_steps = short_episode_steps
         self._integration_target_p10 = integration_target_p10
         self._maintenance_regression_ratio = maintenance_regression_ratio
+        self._full_run_sample_mix = _validate_full_run_sample_mix(
+            DEFAULT_FULL_RUN_SAMPLE_MIX
+            if full_run_sample_mix is None
+            else full_run_sample_mix
+        )
 
         self._current_stage_key: str = "WU0"
         self._max_unlocked_enemy_phase_idx: int = 0
@@ -144,6 +182,44 @@ class TaskCellSamplerStateModule(BaseStateModule):
         self._readiness_cap_phase: int | None = None
         # 直近の sample_cell_with_lane_mix() の lane 選択内訳（selected lane logging 用）
         self._last_sample_decision: TaskCellSampleDecision | None = None
+
+    @property
+    def full_run_sample_mix(self) -> dict[str, float]:
+        """検証済み full-run sample mix のコピーを返す。
+
+        初心者向け: 呼び出し側が sampler 内部の既定比率を後から書き換えないようにします。
+        """
+        return dict(self._full_run_sample_mix)
+
+    def sample_full_run_cell(
+        self,
+        cells: Sequence["FullRunCellSpec"],
+        sample_mix: Mapping[str, float] | None = None,
+    ) -> "FullRunCellSpec":
+        """FR spec を lane mix で選び、lane 内は一様に sampling する。
+
+        初心者向け: 既存 TaskCell の統計・保存形式に手を加えず、full-run 専用の
+        時間帯 metadata を持つ外側の spec だけを選択します。
+        """
+        if not cells:
+            raise ValueError("full-run cells must not be empty")
+        mix = self._full_run_sample_mix if sample_mix is None else _validate_full_run_sample_mix(sample_mix)
+        lanes: dict[str, list[FullRunCellSpec]] = {
+            key: [] for key in DEFAULT_FULL_RUN_SAMPLE_MIX
+        }
+        for spec in cells:
+            if spec.lane not in lanes:
+                raise ValueError(f"unknown full-run lane: {spec.lane!r}")
+            lanes[spec.lane].append(spec)
+        active = [lane for lane, lane_cells in lanes.items() if lane_cells and mix[lane] > 0.0]
+        if not active:
+            raise ValueError("full-run sample mix has no active lane")
+        weights = np.asarray([mix[lane] for lane in active], dtype=float)
+        weights /= weights.sum()
+        selected_lane = active[int(np.random.choice(len(active), p=weights))]
+        lane_cells = lanes[selected_lane]
+        selected_index = int(np.random.choice(len(lane_cells), p=np.full(len(lane_cells), 1.0 / len(lane_cells))))
+        return lane_cells[selected_index]
 
     @property
     def last_sample_decision(self) -> "TaskCellSampleDecision | None":

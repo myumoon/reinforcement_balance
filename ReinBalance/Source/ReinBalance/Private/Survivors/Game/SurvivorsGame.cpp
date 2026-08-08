@@ -137,8 +137,12 @@ int32 ASurvivorsGame::GetObsDim() const
 
 void ASurvivorsGame::ResetState(TOptional<int32> Seed)
 {
-
-	SyncConfigToLogic();
+	if (!SyncConfigToLogic())
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("ASurvivorsGame::ResetState rejected invalid initial loadout"));
+		return;
+	}
 	Logic.Reset(Seed);
 	if (Seed.IsSet()) RandStream.Initialize(Seed.GetValue());
 	else              RandStream.GenerateNewSeed();
@@ -478,7 +482,7 @@ bool ASurvivorsGame::IsOnScreen(FVector2D WorldPos) const
 
 // ---- FSurvivorsGameLogic ファサード -----------------------------------------
 
-void ASurvivorsGame::SyncConfigToLogic()
+bool ASurvivorsGame::SyncConfigToLogic()
 {
 	FSurvivorsGameLogicConfig Cfg;
 
@@ -543,5 +547,5 @@ void ASurvivorsGame::SyncConfigToLogic()
 	// WallBounds は BeginPlay 時に一度だけ設定する（ここでは更新しない）
 	// WallActors → FBox2D 変換は BeginPlay 時に Logic.Initialize() で行う
 
-	Logic.ApplyConfig(Cfg);
+	return Logic.ApplyConfig(Cfg);
 }

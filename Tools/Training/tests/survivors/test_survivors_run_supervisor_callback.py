@@ -431,3 +431,67 @@ def test_supervisor_allows_late_integration_gate_result_like_wu5_santa_water():
     assert state["exit_reason"] is None
     assert state["last_progress_step"] == 12_410_880
     assert state["no_progress_steps"] == 0
+
+
+def test_supervisor_records_1800_second_stage_clear_as_success_terminal():
+    """1800秒の stage_cleared を success terminal として記録する。
+
+    death や短い timeout と同じ done flag でも、明示 field と時間で区別します。
+    """
+    cb = make_supervisor_for_unit_tests()
+    _setup(cb, step=1)
+    cb.locals = {
+        "infos": [{"stage_cleared": True, "elapsed": 1800.0, "alive": True}],
+        "dones": [True],
+    }
+
+    assert cb._on_step() is True
+    state = cb.export_state()
+    assert state["last_terminal_kind"] == "stage_cleared"
+    assert state["last_terminal_success"] is True
+    assert state["stage_cleared_terminal_count"] == 1
+    assert state["death_terminal_count"] == 0
+    assert state["timeout_terminal_count"] == 0
+
+
+def test_supervisor_records_death_separately_from_stage_clear():
+    """死亡 terminal を stage clear と別 counter に記録する。
+
+    初心者向け: 30分未満で HP が尽きた episode を成功率へ混ぜません。
+    """
+    cb = make_supervisor_for_unit_tests()
+    _setup(cb, step=1)
+    cb.locals = {
+        "infos": [{"terminal_reason": "death", "elapsed": 700.0, "alive": False}],
+        "dones": [True],
+    }
+
+    cb._on_step()
+    state = cb.export_state()
+    assert state["last_terminal_kind"] == "death"
+    assert state["last_terminal_success"] is False
+    assert state["death_terminal_count"] == 1
+
+
+def test_supervisor_rejects_short_stage_clear_alias_as_timeout():
+    """1800秒未満の旧 stage_clear alias を success にせず timeout とする。
+
+    初心者向け: 短時間 curriculum の TimeLimit を30分完走と誤認しません。
+    """
+    cb = make_supervisor_for_unit_tests()
+    _setup(cb, step=1)
+    cb.locals = {
+        "infos": [{
+            "stage_clear": True,
+            "elapsed": 300.0,
+            "alive": True,
+            "TimeLimit.truncated": True,
+        }],
+        "dones": [True],
+    }
+
+    cb._on_step()
+    state = cb.export_state()
+    assert state["last_terminal_kind"] == "timeout"
+    assert state["last_terminal_success"] is False
+    assert state["timeout_terminal_count"] == 1

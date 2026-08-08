@@ -25,6 +25,8 @@ struct FSurvivorsStepResult
 	float Reward     = 0.f;
 	bool  bDone      = false;
 	bool  bTruncated = false;
+	bool  bStageCleared = false;
+	bool  bTimedOut     = false;
 	FString SpawnDebugJson;  // info_json 構築用
 };
 
@@ -154,10 +156,16 @@ public:
 	// ---- 初期化 ----
 
 	/** 設定を適用して内部テーブルを初期化する */
-	void Initialize(const FSurvivorsGameLogicConfig& Config);
+	bool Initialize(const FSurvivorsGameLogicConfig& Config);
 
 	/** Apply runtime config. Missing static arrays keep the previous values. */
-	void ApplyConfig(const FSurvivorsGameLogicConfig& Config);
+	bool ApplyConfig(const FSurvivorsGameLogicConfig& Config);
+
+	/**
+	 * RSI 初期装備の slot 数、ID、level、一意性を検証する。
+	 * 初心者向け: 不正な loadout を state へ適用する前に全入口で同じ規則により拒否する。
+	 */
+	static bool IsValidInitialLoadout(const FSurvivorsGameLogicConfig& Config);
 
 	// ---- 訓練 API ----
 
@@ -278,7 +286,8 @@ public:
 	int32     GetEpisodeGemCount()    const { return EpisodeGemCount; }
 	int32     GetEpisodeKillCount()   const { return EpisodeKillCount; }
 	bool      IsAlive()               const { return !bDone; }
-	bool      IsStageClear()          const { return bTruncated && !bDone; }
+	bool      IsStageClear()          const { return bStageCleared; }
+	bool      IsTimedOut()            const { return bTimedOut; }
 	bool      IsShieldActive() const { return bShieldActive; }
 	float     GetPlayerShieldTimer() const { return PlayerShieldTimer; }
 
@@ -388,6 +397,8 @@ public:
 	int32                 EpisodeKillCount  = 0;
 	bool                  bDone             = false;
 	bool                  bTruncated        = false;
+	bool                  bStageCleared     = false;
+	bool                  bTimedOut         = false;
 	FRandomStream         RandStream;
 	FSurvivorsValidationBranchRngState ValidationBranchRngState;
 	FSurvivorsSpawnDebug  LastSpawnDebug;

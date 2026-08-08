@@ -128,8 +128,17 @@ TSharedRef<FJsonObject> BuildLevelUpInfoObject(
 	Info->SetNumberField(
 		TEXT("kills"), Game ? Game->GetLogic()->GetEpisodeKillCount() : 0);
 	Info->SetBoolField(TEXT("alive"), Game ? Game->GetLogic()->IsAlive() : false);
-	Info->SetBoolField(
-		TEXT("stage_clear"), Game ? Game->GetLogic()->IsStageClear() : false);
+	const bool bStageCleared = Game ? Game->GetLogic()->IsStageClear() : false;
+	const bool bTimedOut = Game ? Game->GetLogic()->IsTimedOut() : false;
+	const bool bDeath = Game ? !Game->GetLogic()->IsAlive() : false;
+	Info->SetBoolField(TEXT("stage_clear"), bStageCleared);  // 旧 consumer 互換
+	Info->SetBoolField(TEXT("stage_cleared"), bStageCleared);
+	Info->SetBoolField(TEXT("timed_out"), bTimedOut);
+	Info->SetBoolField(TEXT("death"), bDeath);
+	Info->SetStringField(
+		TEXT("terminal_reason"),
+		bStageCleared ? TEXT("stage_cleared")
+			: (bDeath ? TEXT("death") : (bTimedOut ? TEXT("timeout") : TEXT("none"))));
 
 	TArray<TSharedPtr<FJsonValue>> ChoicesJson;
 	ChoicesJson.Reserve(Pending.Choices.Num());
@@ -756,6 +765,160 @@ private:
 // 旧 HandleParams から移植。SyncConfigToLogic() を末尾で必ず呼ぶ。
 // ============================================================
 
+/** mutation 前に検証済みの RSI loadout facade 値。 */
+struct FValidatedInitialLoadout
+{
+	float InitialElapsedTime = 0.f;
+	TArray<ASurvivorsGame::FWeaponSlotOverride> WeaponSlots;
+	TArray<ASurvivorsGame::FPassiveSlotOverride> PassiveSlots;
+	bool bHasInitialOverride = false;
+};
+
+/** JSON number を有限な int32 として厳密に読む。 */
+static bool TryReadIntegralField(
+	const FJsonObject& Object, const TCHAR* Field, int32& OutValue)
+{
+	double Number = 0.0;
+	if (!Object.TryGetNumberField(Field, Number)
+		|| !FMath::IsFinite(Number)
+		|| FMath::FloorToDouble(Number) != Number
+		|| Number < static_cast<double>(MIN_int32)
+		|| Number > static_cast<double>(MAX_int32))
+	{
+		return false;
+	}
+	OutValue = static_cast<int32>(Number);
+	return true;
+}
+
+/**
+ * HTTP loadout field を canonical Logic config へ写し、mutation 前に一括検証する。
+ * 初心者向け: weapon/passive の全兄弟経路で ID・level・重複・slot 上限を同じ規則に通す。
+ */
+static bool TryBuildValidatedInitialLoadout(
+	const FJsonObject& JsonObj,
+	const ASurvivorsGame& Game,
+	FValidatedInitialLoadout& OutLoadout)
+{
+	OutLoadout.InitialElapsedTime = Game.InitialElapsedTime;
+	OutLoadout.WeaponSlots = Game.InitialWeaponSlots;
+	OutLoadout.PassiveSlots = Game.InitialPassiveSlots;
+	OutLoadout.bHasInitialOverride = Game.bHasInitialOverride;
+
+	if (JsonObj.Values.Contains(TEXT("initial_elapsed_time")))
+	{
+		double Elapsed = 0.0;
+		if (!JsonObj.TryGetNumberField(TEXT("initial_elapsed_time"), Elapsed)
+			|| !FMath::IsFinite(Elapsed)
+			|| Elapsed < 0.0
+			|| Elapsed > SurvivorsGameConstants::MaxGameTime)
+		{
+			return false;
+		}
+		OutLoadout.InitialElapsedTime = static_cast<float>(Elapsed);
+		OutLoadout.bHasInitialOverride = true;
+	}
+
+	if (JsonObj.Values.Contains(TEXT("initial_weapon_slots")))
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Slots = nullptr;
+		if (!JsonObj.TryGetArrayField(TEXT("initial_weapon_slots"), Slots) || !Slots)
+		{
+			return false;
+		}
+		OutLoadout.WeaponSlots.Empty();
+		for (const TSharedPtr<FJsonValue>& Value : *Slots)
+		{
+			const TSharedPtr<FJsonObject>* Slot = nullptr;
+			int32 WeaponId = 0;
+			int32 Level = 0;
+			if (!Value.IsValid()
+				|| !Value->TryGetObject(Slot)
+				|| !Slot
+				|| !Slot->IsValid()
+				|| (*Slot)->Values.Num() != 2
+				|| !(*Slot)->Values.Contains(TEXT("weapon_id"))
+				|| !(*Slot)->Values.Contains(TEXT("level"))
+				|| !TryReadIntegralField(*(*Slot), TEXT("weapon_id"), WeaponId)
+				|| !TryReadIntegralField(*(*Slot), TEXT("level"), Level))
+			{
+				return false;
+			}
+			OutLoadout.WeaponSlots.Add({WeaponId, Level});
+		}
+		if (!OutLoadout.WeaponSlots.IsEmpty())
+		{
+			OutLoadout.bHasInitialOverride = true;
+		}
+	}
+
+	if (JsonObj.Values.Contains(TEXT("initial_passive_slots")))
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Slots = nullptr;
+		if (!JsonObj.TryGetArrayField(TEXT("initial_passive_slots"), Slots) || !Slots)
+		{
+			return false;
+		}
+		OutLoadout.PassiveSlots.Empty();
+		for (const TSharedPtr<FJsonValue>& Value : *Slots)
+		{
+			const TSharedPtr<FJsonObject>* Slot = nullptr;
+			int32 PassiveId = 0;
+			int32 Level = 0;
+			if (!Value.IsValid()
+				|| !Value->TryGetObject(Slot)
+				|| !Slot
+				|| !Slot->IsValid()
+				|| (*Slot)->Values.Num() != 2
+				|| !(*Slot)->Values.Contains(TEXT("passive_id"))
+				|| !(*Slot)->Values.Contains(TEXT("level"))
+				|| !TryReadIntegralField(*(*Slot), TEXT("passive_id"), PassiveId)
+				|| !TryReadIntegralField(*(*Slot), TEXT("level"), Level))
+			{
+				return false;
+			}
+			OutLoadout.PassiveSlots.Add({PassiveId, Level});
+		}
+		if (!OutLoadout.PassiveSlots.IsEmpty())
+		{
+			OutLoadout.bHasInitialOverride = true;
+		}
+	}
+
+	FSurvivorsGameLogicConfig Candidate;
+	Candidate.InitialElapsedTime = OutLoadout.InitialElapsedTime;
+	Candidate.bHasInitialOverride = OutLoadout.bHasInitialOverride;
+	for (const ASurvivorsGame::FWeaponSlotOverride& Slot : OutLoadout.WeaponSlots)
+	{
+		Candidate.InitialWeaponSlots.Add({Slot.WeaponId, Slot.Level});
+	}
+	for (const ASurvivorsGame::FPassiveSlotOverride& Slot : OutLoadout.PassiveSlots)
+	{
+		Candidate.InitialPassiveSlots.Add({Slot.PassiveId, Slot.Level});
+	}
+	if (!FSurvivorsGameLogic::IsValidInitialLoadout(Candidate))
+	{
+		return false;
+	}
+
+	if (JsonObj.Values.Contains(TEXT("clear_initial_override")))
+	{
+		bool bClearOverride = false;
+		if (!JsonObj.TryGetBoolField(TEXT("clear_initial_override"), bClearOverride))
+		{
+			return false;
+		}
+		if (bClearOverride)
+		{
+			OutLoadout.bHasInitialOverride = false;
+			OutLoadout.InitialElapsedTime = 0.f;
+			OutLoadout.WeaponSlots.Empty();
+			OutLoadout.PassiveSlots.Empty();
+		}
+	}
+	return true;
+}
+
 static FString ApplyParamsToGame(ASurvivorsGame* Game, const FString& BodyStr)
 {
 	if (!Game)
@@ -811,6 +974,12 @@ static FString ApplyParamsToGame(ASurvivorsGame* Game, const FString& BodyStr)
 		&& ItemSelectionMode != Game->ItemSelectionMode)
 	{
 		return TEXT("{\"error\":\"cannot change item_selection_mode while pending\"}");
+	}
+
+	FValidatedInitialLoadout ValidatedLoadout;
+	if (!TryBuildValidatedInitialLoadout(*JsonObj, *Game, ValidatedLoadout))
+	{
+		return TEXT("{\"error\":\"invalid initial loadout\"}");
 	}
 
 	// 各パラメータを上書き（存在するフィールドのみ）
@@ -928,72 +1097,17 @@ static FString ApplyParamsToGame(ASurvivorsGame* Game, const FString& BodyStr)
 	if (!ItemSelectionMode.IsEmpty())
 		Game->ItemSelectionMode = ItemSelectionMode;
 
-	// RSI: initial_elapsed_time
-	double InitialElapsedTime = 0.0;
-	if (JsonObj->TryGetNumberField(TEXT("initial_elapsed_time"), InitialElapsedTime))
-	{
-		Game->InitialElapsedTime = FMath::Clamp(static_cast<float>(InitialElapsedTime), 0.f, 1800.f);
-		Game->bHasInitialOverride = true;
-	}
-
-	// RSI: initial_weapon_slots
-	const TArray<TSharedPtr<FJsonValue>>* WSlots;
-	if (JsonObj->TryGetArrayField(TEXT("initial_weapon_slots"), WSlots))
-	{
-		Game->InitialWeaponSlots.Empty();
-		for (const TSharedPtr<FJsonValue>& Val : *WSlots)
-		{
-			const TSharedPtr<FJsonObject>* SlotObj;
-			if (!Val->TryGetObject(SlotObj)) continue;
-			int32 WId = 0, WLv = 1;
-			double TmpId = 0, TmpLv = 0;
-			if ((*SlotObj)->TryGetNumberField(TEXT("weapon_id"), TmpId)) WId = static_cast<int32>(TmpId);
-			if ((*SlotObj)->TryGetNumberField(TEXT("level"),     TmpLv)) WLv = static_cast<int32>(TmpLv);
-			Game->InitialWeaponSlots.Add({WId, FMath::Clamp(WLv, 1, 8)});
-		}
-		if (!Game->InitialWeaponSlots.IsEmpty())
-			Game->bHasInitialOverride = true;
-	}
-
-	// RSI: initial_passive_slots
-	const TArray<TSharedPtr<FJsonValue>>* PSlots;
-	if (JsonObj->TryGetArrayField(TEXT("initial_passive_slots"), PSlots))
-	{
-		Game->InitialPassiveSlots.Empty();
-		for (const TSharedPtr<FJsonValue>& Val : *PSlots)
-		{
-			const TSharedPtr<FJsonObject>* SlotObj;
-			if (!Val->TryGetObject(SlotObj)) continue;
-			int32 PId = 0, PLv = 1;
-			double TmpId = 0, TmpLv = 0;
-			if ((*SlotObj)->TryGetNumberField(TEXT("passive_id"), TmpId)) PId = static_cast<int32>(TmpId);
-			if ((*SlotObj)->TryGetNumberField(TEXT("level"),      TmpLv)) PLv = static_cast<int32>(TmpLv);
-
-			if (PId <= 0 || PId >= SurvivorsGameConstants::MaxPassiveTypeCountReserved)
-				continue;
-
-			const EPassiveItemType PType  = static_cast<EPassiveItemType>(PId);
-			const int32            MaxLv  = Game->GetPassiveItemMaxLevel(PType);
-			if (MaxLv <= 0) continue;
-
-			Game->InitialPassiveSlots.Add({PId, FMath::Clamp(PLv, 1, MaxLv)});
-		}
-		if (!Game->InitialPassiveSlots.IsEmpty())
-			Game->bHasInitialOverride = true;
-	}
-
-	// RSI: clear_initial_override
-	bool bClearOverride = false;
-	if (JsonObj->TryGetBoolField(TEXT("clear_initial_override"), bClearOverride) && bClearOverride)
-	{
-		Game->bHasInitialOverride = false;
-		Game->InitialWeaponSlots.Empty();
-		Game->InitialPassiveSlots.Empty();
-		Game->InitialElapsedTime = 0.f;
-	}
+	// mutation 前に canonical Logic validator を通過した RSI 値だけを facade へ反映する。
+	Game->InitialElapsedTime = ValidatedLoadout.InitialElapsedTime;
+	Game->InitialWeaponSlots = MoveTemp(ValidatedLoadout.WeaponSlots);
+	Game->InitialPassiveSlots = MoveTemp(ValidatedLoadout.PassiveSlots);
+	Game->bHasInitialOverride = ValidatedLoadout.bHasInitialOverride;
 
 	// UPROPERTY 更新後に Logic に同期（必須）
-	Game->SyncConfigToLogic();
+	if (!Game->SyncConfigToLogic())
+	{
+		return TEXT("{\"error\":\"invalid initial loadout\"}");
+	}
 
 	return TEXT("{\"status\":\"ok\"}");
 }
@@ -1139,6 +1253,14 @@ FString ASurvivorsHttpEnvService::ApplyParams(const FString& Json)
 {
 	return ApplyParamsToGame(SurvivorsGame.Get(), Json);
 }
+
+#if WITH_AUTOMATION_TESTS
+FString ASurvivorsHttpEnvService::ApplyParamsToGameForTesting(
+	ASurvivorsGame* Game, const FString& Json)
+{
+	return ApplyParamsToGame(Game, Json);
+}
+#endif
 
 void ASurvivorsHttpEnvService::CompleteParams(
 	const FString& ResponseJson, FHttpResultCallback Callback)
@@ -1375,6 +1497,8 @@ FString ASurvivorsHttpEnvService::BuildInfoJson() const
 			"\"level_up_decision_id\":\"\",\"level_up_player_level\":0,"
 			"\"level_up_backlog\":0,\"elapsed\":0,\"level\":0,"
 			"\"gems\":0,\"kills\":0,\"alive\":false,\"stage_clear\":false,"
+			"\"stage_cleared\":false,\"timed_out\":false,\"death\":false,"
+			"\"terminal_reason\":\"none\","
 			"\"level_up_choices\":[]}");
 	}
 	const FString SpawnDebug = SurvivorsGame->GetSpawnDebugJson();

@@ -1297,6 +1297,30 @@ def _load_policy_weights_from_model(
     print("[INFO] --init-model: policy weights のみを移植しました (strict=True)")
     print("[INFO] PPO ハイパーパラメータは BC zip ではなく現在の config を使用します")
 
+
+def generate_full_run_config_template(path: Path) -> None:
+    """seed を含まない FR4 config template を指定 path へ生成する。
+
+    初心者向け: 実 run 設定をリポジトリへ置かず、ローカル出力へ必要な hash を埋めます。
+    """
+    from games.survivors.full_run_launcher import write_full_run_config_template
+
+    write_full_run_config_template(path)
+
+
+def validate_full_run_config_file(path: Path) -> dict[str, Any]:
+    """ローカル FR4 config JSON を読み、launch 可能な binding まで検証する。
+
+    初心者向け: JSON 構文、固定30分条件、未記入 hash を訓練接続前にまとめて確認します。
+    """
+    from games.survivors.full_run_launcher import validate_full_run_config
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read full-run config: {path}: {exc}") from exc
+    return validate_full_run_config(payload, require_bound=True)
+
 def parse_args() -> argparse.Namespace:
     """全ゲーム共通とゲーム固有の CLI 引数を解決する。
 
@@ -1311,6 +1335,14 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--config", type=Path, default=None,
                    help="YAML 設定ファイルのパス（CLI 引数で上書き可能）")
+    p.add_argument(
+        "--generate-full-run-config", type=Path, default=None,
+        help="seed を含まない FR4 config template を生成して終了する",
+    )
+    p.add_argument(
+        "--validate-full-run-config", type=Path, default=None,
+        help="binding 済み FR4 config JSON を検証して終了する",
+    )
     p.add_argument("--game", choices=["balance", "coin", "survivors"], default="balance",
                    help="訓練対象のゲーム (default: balance)")
     p.add_argument("--dry-run", action="store_true", help="UE5 なしでスタブ環境を使用")
@@ -1639,6 +1671,19 @@ def main() -> None:
     _use_wandb = False
     wandb_logger = WandbLogger(enabled=False)
     args = parse_args()
+
+    if args.generate_full_run_config is not None and args.validate_full_run_config is not None:
+        raise ValueError(
+            "--generate-full-run-config と --validate-full-run-config は同時に指定できません"
+        )
+    if args.generate_full_run_config is not None:
+        generate_full_run_config_template(args.generate_full_run_config)
+        print(f"[INFO] full-run config template を生成しました: {args.generate_full_run_config}")
+        return
+    if args.validate_full_run_config is not None:
+        validate_full_run_config_file(args.validate_full_run_config)
+        print(f"[INFO] full-run config を検証しました: {args.validate_full_run_config}")
+        return
 
     args.perception_error_profile_hash = None
     if args.perception_error_profile is not None:
