@@ -2,6 +2,7 @@
 SendInput を所有せず、helper 死亡を検出した後は通常 action を永久に fail-closed にします。
 """
 from __future__ import annotations
+import atexit
 import multiprocessing
 from pathlib import Path
 import secrets
@@ -34,6 +35,7 @@ class InputLeaseController:
         self._failed = False
         self._audit_path = str(audit_path)
         self._emergency_process_target = emergency_process_target
+        self._pipe_closed = False
         self._connection, child = multiprocessing.Pipe()
         self._process = multiprocessing.Process(
             target=process_target,
@@ -42,6 +44,9 @@ class InputLeaseController:
         )
         self._process.start()
         child.close()
+        # atexit は LIFO なので multiprocessing の non-daemon join より先に実行され、
+        # pipe を閉じることで helper が EOF を受けて cleanup できる
+        atexit.register(self._atexit_close_pipe)
     def send_action(self, action_index: int) -> bool:
         """0〜8 の semantic action を75ms lease として helper へ送る。
         helper が死んだ・応答しない・reject した場合は controller を sealing し、再送を禁止します。
@@ -109,12 +114,27 @@ class InputLeaseController:
             raise HelperUnavailable("input helper IPC failed") from exc
         self._failed = True
         raise HelperUnavailable("input helper response timed out")
+    def _atexit_close_pipe(self) -> None:
+        """atexit と _shutdown 共用の pipe close。LIFO により multiprocessing join より先に実行される。
+        fork で parent fd が引き継がれると EOF が届かないため shutdown sentinel を先送りしてから閉じる。
+        既に閉じていれば何もしない。
+        """
+        if not self._pipe_closed:
+            try:
+                self._connection.send({"kind": "shutdown"})
+            except Exception:
+                pass
+            try:
+                self._connection.close()
+            except Exception:
+                pass
+            self._pipe_closed = True
     def _shutdown(self) -> None:
         """内部 lifecycle cleanup として release・EOF・join を順に行う。
         public input API を増やさず、launcher/context manager 終了時だけ使用します。
         """
         self.emergency_release()
-        self._connection.close()
+        self._atexit_close_pipe()
         self._process.join(timeout=0.3)
         if self._process.is_alive():
             self._process.terminate()

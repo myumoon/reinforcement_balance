@@ -98,6 +98,9 @@ def run_helper_loop(connection: Connection, runtime: HelperRuntime, session_nonc
                 message = connection.recv()
             except EOFError:
                 break
+            # fork で parent fd を継承した場合 EOF が届かないため sentinel で終了する
+            if isinstance(message, dict) and message.get("kind") == "shutdown":
+                break
             if isinstance(message, dict) and set(message) == {"kind", "session_nonce"} and message.get("kind") == "emergency_release":
                 if message["session_nonce"] != session_nonce:
                     connection.send({"kind": "error", "error": "wrong session nonce"})
