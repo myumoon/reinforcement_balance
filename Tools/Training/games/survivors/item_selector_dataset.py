@@ -454,7 +454,7 @@ class SplitManifest:
         destination.parent.mkdir(parents=True, exist_ok=True)
         encoded = canonical_json_bytes(self.to_wire()) + b"\n"
         try:
-            descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o644)
         except FileExistsError:
             if destination.read_bytes() != encoded:
                 raise SplitSealedError("frozen split manifest cannot overwrite existing content")
