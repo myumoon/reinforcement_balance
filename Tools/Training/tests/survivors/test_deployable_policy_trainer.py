@@ -187,3 +187,140 @@ def test_formal_dependencies_reject_stale_fidelity_and_profile() -> None:
         FormalDependencies(verdict, stale_hashes, profile, profile.profile_hash).validate()
     with pytest.raises(ValueError, match="profile is stale"):
         FormalDependencies(verdict, hashes, profile, "0" * 64).validate()
+
+
+def _make_formal_deps() -> FormalDependencies:
+    """テスト用の valid FormalDependencies を返す。
+    verify_current_fidelity が通る verdict を一か所で構築し、複数 test から参照します。
+    """
+    digits = "abcdef0123456789"
+    hashes = {name: digits[index % len(digits)] * 64 for index, name in enumerate(GATING_KEYS)}
+    verdict = FidelityVerdict(
+        "integration",
+        {
+            "target_profile_hash": "1" * 64, "target_build_attestation_hash": "2" * 64,
+            "report_scope": "exact_target", "producer_allowlist_version": "fidelity_producer_paths.v1",
+            "producer_manifest_hash": "3" * 64,
+            "resolved_producers": {name: [{"path": name, "sha256": digest}] for name, digest in hashes.items()},
+        },
+        (FidelityMetric("deploy_obs_visibility", 1., "ratio", True, None, True),), (),
+        {
+            "git_commit": "abc", "workspace_dirty_summary": "clean", "audit_tool_version": "test",
+            "dependency_versions": {}, "operator": "pytest", "timestamp": "2026-08-09T00:00:00Z",
+        }, hashes,
+    )
+    profile = PerceptionErrorProfile(calibration_session_ids=["cal-1"])
+    return FormalDependencies(verdict, hashes, profile, profile.profile_hash)
+
+
+def test_curriculum_corruption_scale_applied_in_train_step() -> None:
+    """train_step が curriculum stage の corruption_scale を corrupt_fn へ渡す。
+    clean stage では scale=0.0 で corrupt_fn が呼ばれず、full stage では scale=1.0 で呼ばれる。
+    """
+    recorded_scales: list[float] = []
+
+    def track_corrupt(obs: np.ndarray, scale: float) -> np.ndarray:
+        recorded_scales.append(scale)
+        return obs
+
+    config = CurriculumConfig(stage_start_updates=(0, 1, 2, 3), dagger_add_updates=(1, 2))
+    model = DeployableCombatPolicy(SCHEMA.dim * 3, 2, hidden_dim=4)
+    trainer = DeployablePolicyTrainer(model, curriculum_config=config, corrupt_fn=track_corrupt)
+
+    # 4 steps: clean(0.0) → light(1/3) → measured(2/3) → full(1.0)
+    # clean step では scale=0.0 なので corrupt_fn は呼ばれない
+    for _ in range(4):
+        trainer.train_step(_dataset())
+
+    assert len(recorded_scales) == 3  # clean 以外の 3 stage で呼ばれる
+    assert recorded_scales[0] == pytest.approx(1 / 3)   # light
+    assert recorded_scales[1] == pytest.approx(2 / 3)   # measured
+    assert recorded_scales[2] == pytest.approx(1.0)     # full
+
+
+def test_dagger_datasets_mixed_in_compute_loss() -> None:
+    """compute_loss が dagger_datasets をバッチへ連結して loss を変化させる。
+    main dataset のみと DAgger 混合で total loss が変化することを確認する。
+    """
+    model = DeployableCombatPolicy(SCHEMA.dim * 3, 2, hidden_dim=4)
+    trainer = DeployablePolicyTrainer(model)
+    dataset = _dataset()
+    # DAgger shard: teacher logits を main dataset と意図的に逆転させて loss を変化させる
+    dagger_logits = np.array([[[[-0.9, 0.9], [-0.9, 0.9], [-0.9, 0.9], [0., 0.]]]], np.float32).squeeze(0)
+    dagger = CombatDistillationDataset(
+        np.array(dataset.observations), dagger_logits, np.array(dataset.teacher_values),
+        np.array(dataset.valid_mask), np.array(dataset.burn_in_mask),
+        np.array(dataset.episode_reset_mask), ("ep-d",), ("train",),
+        SCHEMA.schema_hash, 1,
+        ("hud_inventory", "screen_world_observed", "temporal_inferred", "constant"),
+    )
+    loss_no_dagger = trainer.compute_loss(dataset)
+    loss_with_dagger = trainer.compute_loss(dataset, dagger_datasets=[dagger])
+    assert not th.isclose(loss_no_dagger["total"], loss_with_dagger["total"])
+
+
+def test_formal_resume_requires_current_dependencies(tmp_path: Path) -> None:
+    """formal trainer が formal_dependencies=None で formal checkpoint を load_checkpoint すると
+    validate_formal_dependencies が ValueError を送出して resume を拒否する。
+    """
+    formal_deps = _make_formal_deps()
+    model = DeployableCombatPolicy(SCHEMA.dim * 3, 2, hidden_dim=4)
+    saver = DeployablePolicyTrainer(model, formal_mode=True, formal_dependencies=formal_deps)
+    # train_step を経由せず直接 save して formal checkpoint を作成する
+    saver.training_steps = 0
+    checkpoint = tmp_path / "formal.pt"
+    saver.save_checkpoint(checkpoint)
+    # formal_dependencies=None の formal trainer は resume 時に ValueError
+    resuming = DeployablePolicyTrainer(
+        DeployableCombatPolicy(SCHEMA.dim * 3, 2, hidden_dim=4),
+        formal_mode=True, formal_dependencies=None,
+    )
+    with pytest.raises(ValueError):
+        resuming.load_checkpoint(checkpoint)
+
+
+def test_load_formal_deps_cli_reads_all_required_fields(tmp_path: Path) -> None:
+    """CLI _load_formal_deps が current_gating_producer_hashes を含む valid JSON から
+    FormalDependencies を構築し、キー欠落は ValueError で拒否する。
+    """
+    import json
+    import sys
+    sys.path.insert(0, str(Path(__file__).parents[3]))
+    from train_survivors_deployable_policy import _load_formal_deps
+
+    formal_deps = _make_formal_deps()
+    digits = "abcdef0123456789"
+    hashes = {name: digits[index % len(digits)] * 64 for index, name in enumerate(GATING_KEYS)}
+    verdict = FidelityVerdict(
+        "integration",
+        {
+            "target_profile_hash": "1" * 64, "target_build_attestation_hash": "2" * 64,
+            "report_scope": "exact_target", "producer_allowlist_version": "fidelity_producer_paths.v1",
+            "producer_manifest_hash": "3" * 64,
+            "resolved_producers": {name: [{"path": name, "sha256": digest}] for name, digest in hashes.items()},
+        },
+        (FidelityMetric("deploy_obs_visibility", 1., "ratio", True, None, True),), (),
+        {
+            "git_commit": "abc", "workspace_dirty_summary": "clean", "audit_tool_version": "test",
+            "dependency_versions": {}, "operator": "pytest", "timestamp": "2026-08-09T00:00:00Z",
+        }, hashes,
+    )
+    profile = PerceptionErrorProfile(calibration_session_ids=["cal-1"])
+    valid_data = {
+        "fidelity_verdict": verdict.to_wire(),
+        "perception_profile": profile.to_wire(),
+        "required_perception_profile_hash": profile.profile_hash,
+        "current_gating_producer_hashes": hashes,
+        "profile_source": "measured",
+    }
+    deps_path = tmp_path / "formal_deps.json"
+    deps_path.write_text(json.dumps(valid_data), encoding="utf-8")
+    result = _load_formal_deps(deps_path)
+    assert isinstance(result, FormalDependencies)
+    # current_gating_producer_hashes が欠落すると ValueError
+    for missing_key in ("current_gating_producer_hashes", "profile_source"):
+        incomplete = {k: v for k, v in valid_data.items() if k != missing_key}
+        incomplete_path = tmp_path / f"missing_{missing_key}.json"
+        incomplete_path.write_text(json.dumps(incomplete), encoding="utf-8")
+        with pytest.raises(ValueError):
+            _load_formal_deps(incomplete_path)

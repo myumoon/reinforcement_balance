@@ -251,8 +251,11 @@ class DeployablePolicyTrainer:
         self, model: DeployableCombatPolicy, *, formal_mode: bool = False,
         formal_dependencies: FormalDependencies | None = None,
         curriculum_config: CurriculumConfig | None = None, learning_rate: float = 3e-4,
+        corrupt_fn: Any | None = None,
     ) -> None:
         """model、AdamW、frozen curriculum と formal dependency 候補を初期化する。
+        corrupt_fn は (obs_flat: ndarray, scale: float) -> ndarray の callable で、
+        curriculum stage の corruption_scale を学習観測へ反映するために使います。
         dependency の鮮度検証自体は dataset と同じ training step 0 boundary まで遅延します。
         """
         if not isinstance(model, DeployableCombatPolicy) or type(formal_mode) is not bool:
@@ -262,6 +265,7 @@ class DeployablePolicyTrainer:
         self.curriculum = CurriculumState(curriculum_config or CurriculumConfig())
         self.training_steps, self._formal_identities = 0, None
         self.schema = DeployObsSchema.default_v1()
+        self.corrupt_fn = corrupt_fn
     def _step_zero_gate(self, dataset: CombatDistillationDataset) -> None:
         """全 release leakage と formal dependency を最初の optimizer 呼出し前に検証する。
         development run も raw/action/split leakage は許さず、formal run だけ外部監査も要求します。
@@ -269,22 +273,80 @@ class DeployablePolicyTrainer:
         dataset.assert_release_training_ready(self.schema)
         if self.formal_mode and self._formal_identities is None:
             self._formal_identities = validate_formal_dependencies(self.formal_dependencies)
-    def compute_loss(self, dataset: CombatDistillationDataset) -> dict[str, th.Tensor]:
-        """episode reset を model へ渡して distillation loss を計算する。
-        public helper と同じ mask semantics を trainer の実際の forward 経路へ接続します。
+    def compute_loss(
+        self,
+        dataset: CombatDistillationDataset,
+        *,
+        corruption_scale: float = 0.0,
+        dagger_datasets: Sequence[CombatDistillationDataset] = (),
+    ) -> dict[str, th.Tensor]:
+        """curriculum corruption と DAgger shard を反映した distillation loss を計算する。
+        dagger_datasets はバッチ次元へ連結して扱い、corruption_scale は corrupt_fn に渡します。
         """
+        if dagger_datasets:
+            for dagger in dagger_datasets:
+                if dagger.deploy_schema_hash != dataset.deploy_schema_hash:
+                    raise ValueError("DAgger dataset deploy schema hash mismatch")
+            observations = np.concatenate(
+                [np.array(dataset.observations)] + [np.array(d.observations) for d in dagger_datasets]
+            )
+            teacher_logits_np = np.concatenate(
+                [np.array(dataset.action_logits)] + [np.array(d.action_logits) for d in dagger_datasets]
+            )
+            teacher_values_np = np.concatenate(
+                [np.array(dataset.teacher_values)] + [np.array(d.teacher_values) for d in dagger_datasets]
+            )
+            valid_mask = np.concatenate(
+                [np.array(dataset.valid_mask)] + [np.array(d.valid_mask) for d in dagger_datasets]
+            )
+            burn_mask = np.concatenate(
+                [np.array(dataset.burn_in_mask)] + [np.array(d.burn_in_mask) for d in dagger_datasets]
+            )
+            resets = np.concatenate(
+                [np.array(dataset.episode_reset_mask)] + [np.array(d.episode_reset_mask) for d in dagger_datasets]
+            )
+        else:
+            observations = np.array(dataset.observations)
+            teacher_logits_np = np.array(dataset.action_logits)
+            teacher_values_np = np.array(dataset.teacher_values)
+            valid_mask = np.array(dataset.valid_mask)
+            burn_mask = np.array(dataset.burn_in_mask)
+            resets = np.array(dataset.episode_reset_mask)
+        if self.corrupt_fn is not None and corruption_scale > 0.0:
+            shape = observations.shape
+            observations = np.asarray(
+                self.corrupt_fn(observations.reshape(-1, shape[-1]), corruption_scale),
+                dtype=np.float32,
+            ).reshape(shape)
         device = next(self.model.parameters()).device
-        observations = th.as_tensor(np.array(dataset.observations), device=device)
-        resets = th.as_tensor(np.array(dataset.episode_reset_mask), device=device).bool()
-        logits, values = self.model.forward_sequence(observations, resets)
-        return sequence_distillation_loss(logits, values, dataset)
-    def train_step(self, dataset: CombatDistillationDataset) -> dict[str, float]:
-        """step-0 gate 後に一回の actor/value optimizer update を行う。
+        obs_t = th.as_tensor(observations, device=device)
+        resets_t = th.as_tensor(resets, device=device).bool()
+        logits, values = self.model.forward_sequence(obs_t, resets_t)
+        mask = th.as_tensor(valid_mask & ~burn_mask, device=device).bool()
+        if not bool(mask.any()):
+            raise ValueError("distillation mask has no valid non-burn timesteps")
+        teacher_logits_t = th.as_tensor(teacher_logits_np, device=device)
+        teacher_values_t = th.as_tensor(teacher_values_np, device=device)
+        actor = F.kl_div(
+            F.log_softmax(logits[mask], dim=-1),
+            F.softmax(teacher_logits_t[mask], dim=-1),
+            reduction="batchmean",
+        )
+        value = F.huber_loss(values[mask], teacher_values_t[mask], delta=1.0)
+        return {"actor_kl": actor, "value_huber": value, "total": actor + value}
+    def train_step(
+        self,
+        dataset: CombatDistillationDataset,
+        *,
+        dagger_datasets: Sequence[CombatDistillationDataset] = (),
+    ) -> dict[str, float]:
+        """step-0 gate 後に corruption と DAgger shard を反映した optimizer update を行う。
         gate または loss が失敗した場合は counter を進めず resume 上の成功として扱いません。
         """
         self._step_zero_gate(dataset)
+        scale = self.curriculum.current_stage.corruption_scale
         self.optimizer.zero_grad(set_to_none=True)
-        losses = self.compute_loss(dataset)
+        losses = self.compute_loss(dataset, corruption_scale=scale, dagger_datasets=dagger_datasets)
         losses["total"].backward()
         self.optimizer.step()
         self.training_steps += 1
@@ -345,4 +407,13 @@ class DeployablePolicyTrainer:
         for wrapper, state in zip(error_wrappers, states, strict=True):
             wrapper.set_corruption_state(deepcopy(state))
         self.training_steps = payload["training_steps"]
-        self._formal_identities = dict(payload["formal_dependency_identities"]) or None
+        # formal resume は saved cache を信用せず、current dependencies を毎 process 検証する。
+        # formal_dependencies=None のまま formal checkpoint を resume しようとすると gate で失敗する。
+        if self.formal_mode:
+            fresh = validate_formal_dependencies(self.formal_dependencies)
+            checkpoint_ids = dict(payload["formal_dependency_identities"])
+            if fresh != checkpoint_ids:
+                raise ValueError("formal dependency identities mismatch with checkpoint")
+            self._formal_identities = fresh
+        else:
+            self._formal_identities = None

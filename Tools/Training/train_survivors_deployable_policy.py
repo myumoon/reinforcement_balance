@@ -78,16 +78,29 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
     from reinbalance_survivors_contracts.perception_error import PerceptionErrorProfile
     if not isinstance(data, dict):
         raise ValueError("formal dependencies must be a JSON object")
+    _REQUIRED_KEYS = frozenset(
+        {"fidelity_verdict", "perception_profile", "required_perception_profile_hash",
+         "current_gating_producer_hashes", "profile_source"}
+    )
+    missing = _REQUIRED_KEYS - set(data)
+    if missing:
+        raise ValueError(f"formal dependencies missing keys: {sorted(missing)}")
     try:
         verdict = FidelityVerdict.from_wire(data["fidelity_verdict"])
         profile = PerceptionErrorProfile.from_wire(data["perception_profile"])
         required_hash = data["required_perception_profile_hash"]
+        current_hashes = data["current_gating_producer_hashes"]
+        profile_source = data["profile_source"]
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"formal dependencies schema error: {exc}") from exc
+    if not isinstance(current_hashes, dict):
+        raise ValueError("current_gating_producer_hashes must be a JSON object")
     return FormalDependencies(
         fidelity_verdict=verdict,
+        current_gating_producer_hashes=current_hashes,
         perception_profile=profile,
         required_perception_profile_hash=required_hash,
+        profile_source=profile_source,
     )
 
 
