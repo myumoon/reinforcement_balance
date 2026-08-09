@@ -341,6 +341,51 @@ Nmax、context/candidate feature 次元を検証して strategy を復元する�
 へ UE5 adapter と既存 movement policy を渡すと、episode return、movement step、ack 済み choice
 履歴を JSON 化できる。
 
+## Survivors Deploy可能 Student Policy (03-05)
+
+`games/survivors/combat_distillation_dataset.py` は teacher trajectory から固定長 sequence dataset を
+構築する。各 sequence は `valid_mask`・`burn_in_mask`・`episode_reset_mask` を保持し、
+`action_logits`・`teacher_values` を `deploy_schema_hash` へ束縛して NPZ + manifest として保存する。
+`unobservable` source class、teacher actions、train 以外の split を `assert_release_training_ready()`
+で拒否し、release training への漏洩を step 0 で止める。
+
+`games/survivors/deployable_policy_trainer.py` は GRU ベースの `DeployableCombatPolicy` に対し
+actor KL + value Huber distillation loss を `burn_in_mask` と `valid_mask` で制御しながら学習する。
+4 段階の corruption curriculum (clean → light → measured → full) と DAgger shard 追加境界を
+`CurriculumConfig` に固定し、model / VecNormalize / error wrapper RNG / curriculum / DAgger state を
+まとめて checkpoint resume できる。`FormalDependencies.validate()` は fidelity verdict の
+`gating_producer_hashes` と measured perception profile hash を step 0 で照合し、
+missing/stale な場合は `ValueError` で fail closed にする。development run は常に
+`development_only=true`・`formal_student_eligible=false` の checkpoint を生成する。
+
+`games/survivors/deployable_policy_package.py` は eligible checkpoint から model-only runtime
+package を原子的に構築する。`development_only` または `formal_student_eligible` が不正なら
+package 前に `ValueError` を送出し、load 側でも同じ gate を繰り返す。
+
+`collect_survivors_combat_distillation.py` は development 用の synthetic dataset を生成する CLI。
+`--source-descriptor` を省略すると synthetic fixture を `development_only` として保存し、
+正式収集は 04-07 `D04-PERCEPTION-CALIBRATION` 到着後に実装する。
+
+`train_survivors_deployable_policy.py` は distillation 訓練の CLI エントリポイント。
+`--formal-deps` を省略すると development mode で動作し、生成 checkpoint は正式 package に昇格できない。
+
+`eval_survivors_deployable_policy.py` は packaged policy を synthetic dataset で再評価して
+actor KL / value Huber を JSON report として保存する evaluation CLI。
+
+```bash
+# 開発用: synthetic dataset 生成
+python collect_survivors_combat_distillation.py --output /tmp/dev_dataset
+
+# 開発用: distillation 訓練 (development_only)
+python train_survivors_deployable_policy.py \
+  --dataset /tmp/dev_dataset \
+  --output-dir /tmp/dev_checkpoints \
+  --updates 10
+```
+
+正式 student 訓練 (`D03-DEPLOY-STUDENT-RELEASE`) は 04-07 measured calibration profile と
+03-04 post-curriculum fidelity verdict が揃うまで開始しない。
+
 ## 関連ドキュメント
 
 - UE5 との通信仕様: [`ue5_env.md`](ue5_env.md)
