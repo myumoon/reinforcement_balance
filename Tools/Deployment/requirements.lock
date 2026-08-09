@@ -5,9 +5,11 @@
 #
 # 共有 contracts パッケージは Tools/Common から editable でインストールする：
 #   pip install -e Tools/Common
-# runtime の capture／推論依存（dxcam・opencv-python・onnxruntime・torch）は
-# 後続の deployment プラン（04-*/05-*）で pin する。この lock は contract の基盤を pin する。
+# capture の直接依存は 04-01、推論依存（onnxruntime・torch）は後続フェーズで pin する。
+# 本家画面の取得に必要な DXcam と画像処理 ABI を、訓練環境とは分離して固定する。
 reinbalance-survivors-contracts==0.1.0
+dxcam==0.3.0
 numpy==1.26.4
+opencv-python==4.10.0.84
 pytest==9.0.3
 PyYAML==6.0.2
