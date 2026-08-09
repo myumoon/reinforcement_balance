@@ -74,6 +74,7 @@ def test_locator_rejects_wrong_resolution_and_cross_monitor_window(
         rect_screen_px=monitor_rect,
         device_name=target_window.monitor.device_name,
         primary=True,
+        dxgi_output_idx=0,
     )
 
     with pytest.raises(TargetWindowStateError):
@@ -133,6 +134,7 @@ def test_revalidation_fails_closed_after_window_state_changes(
             rect_screen_px=(1920, 0, 3840, 1080),
             device_name=r"\\.\DISPLAY2",
             primary=False,
+            dxgi_output_idx=1,
         )
 
     with pytest.raises(TargetWindowStateError):

@@ -38,30 +38,60 @@ class CaptureBackend(Protocol):
 
 
 class DxcamCaptureBackend:
-    def __init__(self, camera: object) -> None:
+    """DXGI output と client rect に一意に束縛された DXcam capture backend。
+
+    output_idx と expected_client_rect を生成時に固定し、
+    start() でその exact region 以外を拒否して誤 output capture を防ぎます。
+    """
+
+    def __init__(self, camera: object, expected_client_rect: ScreenRect) -> None:
         self._camera = camera
+        self._expected_client_rect = expected_client_rect
 
     @classmethod
-    def create(cls, *, dxcam_module=None) -> "DxcamCaptureBackend":
+    def create(
+        cls,
+        output_idx: int,
+        expected_client_rect: ScreenRect,
+        *,
+        dxcam_module=None,
+    ) -> "DxcamCaptureBackend":
+        """output_idx と expected_client_rect を bundle した backend を生成する。
+
+        output_idx は WindowLocator が解決した MonitorInfo.dxgi_output_idx を渡す。
+        expected_client_rect と異なる region を start() に渡すと例外になります。
+        """
+        if not isinstance(output_idx, int) or output_idx < 0:
+            raise ValueError("output_idx must be a non-negative integer")
+        if (
+            not isinstance(expected_client_rect, tuple)
+            or len(expected_client_rect) != 4
+            or not all(type(v) is int for v in expected_client_rect)
+            or (
+                expected_client_rect[2] - expected_client_rect[0],
+                expected_client_rect[3] - expected_client_rect[1],
+            )
+            != (1920, 1080)
+        ):
+            raise ValueError("expected_client_rect must be a 1920x1080 screen rect")
         module = dxcam_module or importlib.import_module("dxcam")
         camera = module.create(
+            output_idx=output_idx,
             backend="dxgi",
             processor_backend="numpy",
             output_color="BGRA",
             max_buffer_len=1,
         )
-        return cls(camera)
+        return cls(camera, expected_client_rect)
 
     def start(self, *, region: ScreenRect, target_fps: int) -> None:
         if target_fps != TARGET_FPS:
             raise ValueError("DXcam target_fps must be 30")
-        if (
-            not isinstance(region, tuple)
-            or len(region) != 4
-            or not all(type(value) is int for value in region)
-            or (region[2] - region[0], region[3] - region[1]) != (1920, 1080)
-        ):
-            raise ValueError("DXcam requires an explicit target region")
+        if region != self._expected_client_rect:
+            raise ValueError(
+                f"capture region {region!r} does not match bound client rect "
+                f"{self._expected_client_rect!r}"
+            )
         self._camera.start(region=region, target_fps=TARGET_FPS)
 
     def get_latest_frame(self) -> NDArray[np.uint8] | None:

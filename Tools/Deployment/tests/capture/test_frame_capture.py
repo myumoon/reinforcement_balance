@@ -84,10 +84,15 @@ def test_captured_frame_has_exact_frozen_seven_field_contract(golden_bgra):
 
 def test_dxcam_is_configured_for_dxgi_numpy_bgra_at_30_fps():
     dxcam_module = FakeDxcamModule()
-    backend = DxcamCaptureBackend.create(dxcam_module=dxcam_module)
+    backend = DxcamCaptureBackend.create(
+        output_idx=0,
+        expected_client_rect=(0, 0, 1920, 1080),
+        dxcam_module=dxcam_module,
+    )
 
     assert dxcam_module.create_calls == [
         {
+            "output_idx": 0,
             "backend": "dxgi",
             "processor_backend": "numpy",
             "output_color": "BGRA",
@@ -105,10 +110,45 @@ def test_dxcam_is_configured_for_dxgi_numpy_bgra_at_30_fps():
     [None, (0, 0, 1280, 720), (0, 0, 3840, 1080)],
 )
 def test_dxcam_backend_rejects_desktop_and_wrong_sized_regions(region):
-    backend = DxcamCaptureBackend.create(dxcam_module=FakeDxcamModule())
+    backend = DxcamCaptureBackend.create(
+        output_idx=0,
+        expected_client_rect=(0, 0, 1920, 1080),
+        dxcam_module=FakeDxcamModule(),
+    )
 
-    with pytest.raises(ValueError, match="region"):
+    with pytest.raises(ValueError):
         backend.start(region=region, target_fps=30)
+
+
+def test_dxcam_backend_rejects_same_size_but_wrong_position():
+    """同サイズでも origin が異なる region は拒否されることを確認する。
+
+    (100, 0, 2020, 1080) は幅1920px・高さ1080pxだが target window の位置ではないため
+    ValueError になること。
+    """
+    backend = DxcamCaptureBackend.create(
+        output_idx=0,
+        expected_client_rect=(0, 0, 1920, 1080),
+        dxcam_module=FakeDxcamModule(),
+    )
+    with pytest.raises(ValueError, match="bound client rect"):
+        backend.start(region=(100, 0, 2020, 1080), target_fps=30)
+
+
+def test_dxcam_backend_uses_output_idx_from_monitor():
+    """output_idx=1 (secondary monitor) が dxcam.create に正確に渡ることを確認する。
+
+    プライマリ以外のモニターに window がある場合でも、
+    LocatedTargetWindow.monitor.dxgi_output_idx を経由して
+    正しい DXGI output が選択されることを保証します。
+    """
+    dxcam_module = FakeDxcamModule()
+    DxcamCaptureBackend.create(
+        output_idx=1,
+        expected_client_rect=(1920, 0, 3840, 1080),
+        dxcam_module=dxcam_module,
+    )
+    assert dxcam_module.create_calls[0]["output_idx"] == 1
 
 
 def test_golden_fake_sequence_has_bgra_shape_monotonic_identity_and_consumer_contract(

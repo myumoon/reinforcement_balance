@@ -49,6 +49,7 @@ class MonitorInfo:
     rect_screen_px: ScreenRect
     device_name: str
     primary: bool
+    dxgi_output_idx: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +320,13 @@ class CtypesWin32Api:
         self._user32.GetMonitorInfoW.restype = wintypes.BOOL
         self._user32.GetForegroundWindow.argtypes = []
         self._user32.GetForegroundWindow.restype = wintypes.HWND
+        self._user32.EnumDisplayMonitors.argtypes = [
+            wintypes.HDC,
+            ctypes.POINTER(_Rect),
+            ctypes.c_void_p,
+            wintypes.LPARAM,
+        ]
+        self._user32.EnumDisplayMonitors.restype = wintypes.BOOL
         self._kernel32.OpenProcess.argtypes = [
             wintypes.DWORD,
             wintypes.BOOL,
@@ -411,11 +419,47 @@ class CtypesWin32Api:
         if not self._user32.GetMonitorInfoW(monitor_handle, ctypes.byref(info)):
             self._raise_last_error("GetMonitorInfoW")
         rect = info.rcMonitor
+        device_name = info.szDevice
+        output_idx = self._dxgi_output_idx(device_name)
         return MonitorInfo(
             rect_screen_px=(rect.left, rect.top, rect.right, rect.bottom),
-            device_name=info.szDevice,
+            device_name=device_name,
             primary=bool(info.dwFlags & 1),
+            dxgi_output_idx=output_idx,
         )
+
+    def _dxgi_output_idx(self, device_name: str) -> int:
+        """EnumDisplayMonitors でモニターを列挙し、device_name の位置インデックスを返す。
+
+        left,top でソートした安定順で各 DXGI output_idx を割り当て、
+        呼び出し元が正確な output に DXcam を向けられるようにします。
+        unknown device_name は fail-closed で例外を返します。
+        """
+        monitors: list[tuple[int, int, str]] = []
+
+        _MonitorEnumProc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL,
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+            ctypes.POINTER(_Rect),
+            wintypes.LPARAM,
+        )
+
+        def _collect(hmon: int, _hdc: int, _rect_ptr, _lparam: int) -> bool:
+            mi = _MonitorInfoEx()
+            mi.cbSize = ctypes.sizeof(mi)
+            if self._user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                r = mi.rcMonitor
+                monitors.append((r.left, r.top, mi.szDevice))
+            return True
+
+        cb = _MonitorEnumProc(_collect)
+        self._user32.EnumDisplayMonitors(None, None, cb, 0)
+        monitors.sort()
+        for idx, (_, _, name) in enumerate(monitors):
+            if name == device_name:
+                return idx
+        raise OSError(f"monitor {device_name!r} not found in EnumDisplayMonitors result")
 
     def foreground_window(self) -> int | None:
         hwnd = self._user32.GetForegroundWindow()

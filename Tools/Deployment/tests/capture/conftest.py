@@ -112,6 +112,7 @@ def monitor():
         rect_screen_px=(0, 0, 1920, 1080),
         device_name=r"\\.\DISPLAY1",
         primary=True,
+        dxgi_output_idx=0,
     )
 
 
