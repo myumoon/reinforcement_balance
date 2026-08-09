@@ -269,12 +269,146 @@ class _MonitorInfoEx(ctypes.Structure):
     ]
 
 
+class _DxgiOutputDesc(ctypes.Structure):
+    """DXGI_OUTPUT_DESC — DeviceName で Win32 szDevice と照合するための最小構造体。
+
+    IDXGIOutput::GetDesc() の戻り値から DeviceName だけを使います。
+    """
+
+    _fields_ = [
+        ("DeviceName", ctypes.c_wchar * 32),
+        ("DesktopCoordinates", _Rect),
+        ("AttachedToDesktop", wintypes.BOOL),
+        ("Rotation", ctypes.c_uint),
+        ("Monitor", wintypes.HANDLE),
+    ]
+
+
+@runtime_checkable
+class DxgiEnumerator(Protocol):
+    """DXGI output 列挙プロトコル。Win32Api とは独立して差し替え可能にする。"""
+
+    def output_idx_for(self, device_name: str) -> int:
+        """device_name (例: r'\\\\.\\ DISPLAY1') に対応する global DXGI output_idx を返す。"""
+        ...
+
+
+class CtypesDxgiEnumerator:
+    """IDXGIFactory → adapter → output 列挙で device_name を一意解決する実装。
+
+    Win32 座標ソート順ではなく DXGI の列挙順を使うため、
+    負座標モニターや複数 adapter 構成でも正確な output_idx が得られます。
+    """
+
+    # COM GUID: IDXGIFactory = {7b7166ec-21c7-44ae-b21a-c9ae321ae369}
+    _IID_IDXGIFactory = (ctypes.c_byte * 16)(
+        0xEC, 0x66, 0x71, 0x7B,  # Data1 little-endian
+        0xC7, 0x21,              # Data2 little-endian
+        0xAE, 0x44,              # Data3 little-endian
+        0xB2, 0x1A, 0xC9, 0xAE, 0x32, 0x1A, 0xE3, 0x69,
+    )
+    # DXGI_ERROR_NOT_FOUND = 0x887A0002 (signed int32 = -2005270526)
+    _DXGI_ERROR_NOT_FOUND = ctypes.c_int(0x887A0002).value
+
+    def output_idx_for(self, device_name: str) -> int:
+        """DXGI COM を使って adapter/output を列挙し device_name の global index を返す。"""
+        try:
+            dxgi = ctypes.windll.dxgi
+        except (AttributeError, OSError) as exc:
+            raise OSError("dxgi.dll not available") from exc
+
+        factory_ptr = ctypes.c_void_p(0)
+        hr = dxgi.CreateDXGIFactory(
+            ctypes.byref(self._IID_IDXGIFactory), ctypes.byref(factory_ptr)
+        )
+        if hr != 0 or not factory_ptr.value:
+            raise OSError(f"CreateDXGIFactory failed: 0x{hr & 0xFFFFFFFF:08x}")
+
+        result = self._scan(factory_ptr.value, device_name)
+        self._release(factory_ptr.value)
+        if result is None:
+            raise OSError(f"DXGI output for {device_name!r} not found")
+        return result
+
+    def _scan(self, factory: int, target: str) -> int | None:
+        """factory からすべての adapter/output を走査し target の global idx を返す。"""
+        global_idx = 0
+        adapter_idx = 0
+        while True:
+            adapter_ptr = ctypes.c_void_p(0)
+            # IDXGIFactory vtable[7] = EnumAdapters(UINT, IDXGIAdapter**)
+            hr = self._call(factory, 7, ctypes.c_long, ctypes.c_uint,
+                            ctypes.POINTER(ctypes.c_void_p))(
+                factory, adapter_idx, ctypes.byref(adapter_ptr)
+            )
+            if hr == self._DXGI_ERROR_NOT_FOUND:
+                break
+            if hr != 0:
+                raise OSError(f"EnumAdapters({adapter_idx}) failed: 0x{hr & 0xFFFFFFFF:08x}")
+            adapter = adapter_ptr.value
+            try:
+                output_sub_idx = 0
+                while True:
+                    output_ptr = ctypes.c_void_p(0)
+                    # IDXGIAdapter vtable[7] = EnumOutputs(UINT, IDXGIOutput**)
+                    hr2 = self._call(adapter, 7, ctypes.c_long, ctypes.c_uint,
+                                     ctypes.POINTER(ctypes.c_void_p))(
+                        adapter, output_sub_idx, ctypes.byref(output_ptr)
+                    )
+                    if hr2 == self._DXGI_ERROR_NOT_FOUND:
+                        break
+                    if hr2 != 0:
+                        raise OSError(
+                            f"EnumOutputs({output_sub_idx}) failed: 0x{hr2 & 0xFFFFFFFF:08x}"
+                        )
+                    output = output_ptr.value
+                    try:
+                        desc = _DxgiOutputDesc()
+                        # IDXGIOutput vtable[7] = GetDesc(DXGI_OUTPUT_DESC*)
+                        hr3 = self._call(output, 7, ctypes.c_long,
+                                         ctypes.POINTER(_DxgiOutputDesc))(
+                            output, ctypes.byref(desc)
+                        )
+                        if hr3 == 0 and desc.DeviceName == target:
+                            return global_idx
+                    finally:
+                        self._release(output)
+                    global_idx += 1
+                    output_sub_idx += 1
+            finally:
+                self._release(adapter)
+            adapter_idx += 1
+        return None
+
+    @staticmethod
+    def _release(obj: int) -> None:
+        """IUnknown::Release — vtable[2]。"""
+        vtbl = ctypes.cast(
+            ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p))[0],
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+        fn = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])
+        fn(obj)
+
+    @staticmethod
+    def _call(obj: int, vtbl_idx: int, restype, *argtypes):
+        """vtable[vtbl_idx] の COM メソッドを呼び出す thunk を返す。"""
+        vtbl = ctypes.cast(
+            ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p))[0],
+            ctypes.POINTER(ctypes.c_void_p),
+        )
+        fn_ptr = vtbl[vtbl_idx]
+        fn_type = ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)
+        return fn_type(fn_ptr)
+
+
 class CtypesWin32Api:
-    def __init__(self) -> None:
+    def __init__(self, dxgi: DxgiEnumerator | None = None) -> None:
         if sys.platform != "win32":
             raise OSError("CtypesWin32Api is available only on Windows")
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
         self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._dxgi: DxgiEnumerator = dxgi if dxgi is not None else CtypesDxgiEnumerator()
         self._configure_signatures()
 
     def _configure_signatures(self) -> None:
@@ -320,13 +454,6 @@ class CtypesWin32Api:
         self._user32.GetMonitorInfoW.restype = wintypes.BOOL
         self._user32.GetForegroundWindow.argtypes = []
         self._user32.GetForegroundWindow.restype = wintypes.HWND
-        self._user32.EnumDisplayMonitors.argtypes = [
-            wintypes.HDC,
-            ctypes.POINTER(_Rect),
-            ctypes.c_void_p,
-            wintypes.LPARAM,
-        ]
-        self._user32.EnumDisplayMonitors.restype = wintypes.BOOL
         self._kernel32.OpenProcess.argtypes = [
             wintypes.DWORD,
             wintypes.BOOL,
@@ -420,46 +547,14 @@ class CtypesWin32Api:
             self._raise_last_error("GetMonitorInfoW")
         rect = info.rcMonitor
         device_name = info.szDevice
-        output_idx = self._dxgi_output_idx(device_name)
+        # Win32 座標ソート順ではなく DXGI 列挙順で output_idx を解決する
+        output_idx = self._dxgi.output_idx_for(device_name)
         return MonitorInfo(
             rect_screen_px=(rect.left, rect.top, rect.right, rect.bottom),
             device_name=device_name,
             primary=bool(info.dwFlags & 1),
             dxgi_output_idx=output_idx,
         )
-
-    def _dxgi_output_idx(self, device_name: str) -> int:
-        """EnumDisplayMonitors でモニターを列挙し、device_name の位置インデックスを返す。
-
-        left,top でソートした安定順で各 DXGI output_idx を割り当て、
-        呼び出し元が正確な output に DXcam を向けられるようにします。
-        unknown device_name は fail-closed で例外を返します。
-        """
-        monitors: list[tuple[int, int, str]] = []
-
-        _MonitorEnumProc = ctypes.WINFUNCTYPE(
-            wintypes.BOOL,
-            wintypes.HANDLE,
-            wintypes.HANDLE,
-            ctypes.POINTER(_Rect),
-            wintypes.LPARAM,
-        )
-
-        def _collect(hmon: int, _hdc: int, _rect_ptr, _lparam: int) -> bool:
-            mi = _MonitorInfoEx()
-            mi.cbSize = ctypes.sizeof(mi)
-            if self._user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
-                r = mi.rcMonitor
-                monitors.append((r.left, r.top, mi.szDevice))
-            return True
-
-        cb = _MonitorEnumProc(_collect)
-        self._user32.EnumDisplayMonitors(None, None, cb, 0)
-        monitors.sort()
-        for idx, (_, _, name) in enumerate(monitors):
-            if name == device_name:
-                return idx
-        raise OSError(f"monitor {device_name!r} not found in EnumDisplayMonitors result")
 
     def foreground_window(self) -> int | None:
         hwnd = self._user32.GetForegroundWindow()
