@@ -163,7 +163,7 @@ def test_dxgi_output_idx_for_offset_primary_differs_from_coordinate_sort(
     """
     from survivors.capture.frame_capture import DxcamCaptureBackend
     from survivors.capture.window_locator import MonitorInfo
-    from Tools.Deployment.tests.capture.test_frame_capture import FakeDxcamModule
+    from conftest import FakeDxcamModule
 
     # target window は DISPLAY1 (0,0,1920,1080) — primary
     # DXGI 順: DISPLAY1=output[0]、DISPLAY2=output[1]

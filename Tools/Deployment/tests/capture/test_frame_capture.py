@@ -18,34 +18,9 @@ from survivors.capture.frame_capture import (
     DxcamCaptureBackend,
     LatestFrameQueue,
 )
+from conftest import FakeDxcamCamera, FakeDxcamModule  # noqa: F401 — re-exported for test_window_locator
 from survivors.capture.window_locator import TargetWindowStateError, WindowLocator
 
-
-class FakeDxcamCamera:
-    def __init__(self):
-        self.start_calls = []
-
-    def start(self, **kwargs):
-        self.start_calls.append(kwargs)
-
-    def get_latest_frame(self):
-        return None
-
-    def stop(self):
-        pass
-
-    def release(self):
-        pass
-
-
-class FakeDxcamModule:
-    def __init__(self):
-        self.create_calls = []
-        self.camera = FakeDxcamCamera()
-
-    def create(self, **kwargs):
-        self.create_calls.append(kwargs)
-        return self.camera
 
 
 def _session(profile, policy, fake_api, backend, clock_values):

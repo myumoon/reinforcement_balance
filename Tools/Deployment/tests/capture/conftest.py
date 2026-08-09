@@ -15,6 +15,37 @@ from survivors.capture.window_locator import MonitorInfo, TargetWindowPolicy
 from survivors.target_profile import load_target_profile
 
 
+class FakeDxcamCamera:
+    """dxcam camera オブジェクトの test double。start/stop/release 呼び出しを記録します。"""
+
+    def __init__(self):
+        self.start_calls: list[dict] = []
+
+    def start(self, **kwargs):
+        self.start_calls.append(kwargs)
+
+    def get_latest_frame(self):
+        return None
+
+    def stop(self):
+        pass
+
+    def release(self):
+        pass
+
+
+class FakeDxcamModule:
+    """dxcam モジュールの test double。create() の引数を記録し FakeDxcamCamera を返します。"""
+
+    def __init__(self):
+        self.create_calls: list[dict] = []
+        self.camera = FakeDxcamCamera()
+
+    def create(self, **kwargs):
+        self.create_calls.append(kwargs)
+        return self.camera
+
+
 @dataclass
 class FakeWindow:
     hwnd: int
