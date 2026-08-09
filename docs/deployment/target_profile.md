@@ -10,7 +10,7 @@ repository の `mad_forest_standard_v1.yaml` は `provenance: test-fixture` で�
 
 ## 実機MachineInfoの採取と利用
 
-`Tools/Utility/MachineInfo/MachineInfoGetter.ps1` は、実機の GPU、VRAM、ドライバー、OS build、Windows のディスプレイ拡大縮小を採取し、同じディレクトリの `output/machine_info_YYYYMMDD_HHMMSS.json` に保存する。この JSON は通常の UE5 シミュレータ訓練（`Tools/Training/train.py`）の入力ではなく、Vampire Survivors 実機の feasibility、capture、model/runtime、campaign を開始するための TargetProfile 証跡である。
+`Tools/Utility/MachineInfo/GetMachineInfo.ps1` は、実機の GPU、VRAM、ドライバー、OS build、Windows のディスプレイ拡大縮小を採取し、同じディレクトリの `output/machine_info_YYYYMMDD_HHMMSS.json` に保存する。この JSON は通常の UE5 シミュレータ訓練（`Tools/Training/train.py`）の入力ではなく、Vampire Survivors 実機の feasibility、capture、model/runtime、campaign を開始するための TargetProfile 証跡である。
 
 ### 採取手順
 
@@ -19,7 +19,7 @@ repository の `mad_forest_standard_v1.yaml` は `provenance: test-fixture` で�
 
    ```powershell
    powershell.exe -NoProfile -ExecutionPolicy Bypass `
-     -File ".\Tools\Utility\MachineInfo\MachineInfoGetter.ps1"
+     -File ".\Tools\Utility\MachineInfo\GetMachineInfo.ps1"
    ```
 
 3. `Tools/Utility/MachineInfo/output/machine_info_*.json` が生成されたことを確認する。

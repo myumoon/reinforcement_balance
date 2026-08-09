@@ -8,20 +8,25 @@ $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $outputDir = Join-Path $scriptDir 'output'
 New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+Import-Module -Name (Join-Path $scriptDir 'MachineInfo.psm1') -Force
 
 $errors = [System.Collections.Generic.List[string]]::new()
 
 try {
-    $gpu = @(
-        Get-CimInstance -ClassName Win32_VideoController |
-            Select-Object Name,
-                @{Name = 'VRAM_GiB'; Expression = {
-                    if ($null -eq $_.AdapterRAM) { $null }
-                    else { [math]::Round($_.AdapterRAM / 1GB, 2) }
-                }},
-                DriverVersion,
-                DriverDate
-    )
+    $gpu = @(Get-NvidiaGpuInfo)
+    if ($gpu.Count -eq 0) {
+        $gpu = @(
+            Get-CimInstance -ClassName Win32_VideoController |
+                Select-Object Name,
+                    @{Name = 'VRAM_GiB'; Expression = {
+                        if ($null -eq $_.AdapterRAM -or [uint64]$_.AdapterRAM -ge ([uint64]::Parse('4294967295'))) { $null }
+                        else { [math]::Round($_.AdapterRAM / 1GB, 2) }
+                    }},
+                    DriverVersion,
+                    DriverDate,
+                    @{Name = 'Source'; Expression = { 'Win32_VideoController' }}
+        )
+    }
 }
 catch {
     $gpu = @()
