@@ -59,6 +59,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--lr", type=float, default=3e-4, help="AdamW learning rate."
     )
+    parser.add_argument(
+        "--dagger-shard-dirs", type=Path, nargs="*", default=[],
+        help="Paths to DAgger shard dataset directories to mix into training.",
+    )
     return parser
 
 
@@ -82,6 +86,9 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
         {"fidelity_verdict", "perception_profile", "required_perception_profile_hash",
          "current_gating_producer_hashes", "profile_source"}
     )
+    extra = set(data) - _REQUIRED_KEYS
+    if extra:
+        raise ValueError(f"formal dependencies unknown keys: {sorted(extra)}")
     missing = _REQUIRED_KEYS - set(data)
     if missing:
         raise ValueError(f"formal dependencies missing keys: {sorted(missing)}")
@@ -104,6 +111,24 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
     )
 
 
+def _make_corrupt_fn(
+    seed: int = 0,
+) -> Any:
+    """curriculum stage の corruption_scale に比例した Gaussian noise を観測へ加える。
+
+    perception profile が到着するまでの development 訓練に使うシンプルな noise wrapper です。
+    正式訓練では PerceptionErrorWrapper を使うため、このままでは formal eligibility にならない。
+    """
+    import numpy as _np
+
+    rng = _np.random.default_rng(seed=seed)
+
+    def corrupt(obs: _np.ndarray, scale: float) -> _np.ndarray:
+        return obs + rng.standard_normal(obs.shape).astype(_np.float32) * scale * 0.1
+
+    return corrupt
+
+
 def _run_training(
     dataset: CombatDistillationDataset,
     output_dir: Path,
@@ -114,10 +139,13 @@ def _run_training(
     action_dim: int,
     hidden_dim: int,
     lr: float,
+    dagger_shard_dirs: list[Path] | None = None,
 ) -> None:
     """dataset を読んで指定 update 数の distillation を実行し、最終 checkpoint を保存する。
 
-    formal_deps が None の場合は development mode (formal_mode=False) で動作し、
+    corrupt_fn を trainer へ渡して curriculum stage に応じた corruption を観測へ適用する。
+    DAgger shard は dagger_shard_dirs から読み込んで各 update で train_step へ渡す。
+    formal_deps が None の場合は development mode で動作し、
     生成 checkpoint は development_only=true・formal_student_eligible=false になります。
     """
     formal_mode = formal_deps is not None
@@ -132,14 +160,21 @@ def _run_training(
         formal_mode=formal_mode,
         formal_dependencies=formal_deps,
         learning_rate=lr,
+        corrupt_fn=_make_corrupt_fn(),
     )
     if resume is not None:
         trainer.load_checkpoint(resume)
 
+    dagger_datasets = (
+        [CombatDistillationDataset.load(p) for p in dagger_shard_dirs]
+        if dagger_shard_dirs
+        else []
+    )
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for step in range(updates):
-        losses = trainer.train_step(dataset)
+        losses = trainer.train_step(dataset, dagger_datasets=dagger_datasets)
         if step % max(1, updates // 10) == 0 or step == updates - 1:
             print(
                 f"step {trainer.training_steps}: "
@@ -182,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
             action_dim=args.action_dim,
             hidden_dim=args.hidden_dim,
             lr=args.lr,
+            dagger_shard_dirs=args.dagger_shard_dirs or [],
         )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"training failed: {exc}", file=sys.stderr)

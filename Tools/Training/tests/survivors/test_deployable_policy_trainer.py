@@ -279,6 +279,55 @@ def test_formal_resume_requires_current_dependencies(tmp_path: Path) -> None:
         resuming.load_checkpoint(checkpoint)
 
 
+def test_dagger_release_gate_rejects_unobservable_and_teacher_actions() -> None:
+    """compute_loss が DAgger shard に対しても release gate を適用する。
+    unobservable source class や teacher_actions を含む DAgger dataset は ValueError になる。
+    """
+    model = DeployableCombatPolicy(SCHEMA.dim * 3, 2, hidden_dim=4)
+    trainer = DeployablePolicyTrainer(model)
+    dataset = _dataset()
+    # unobservable source class を含む DAgger dataset
+    with pytest.raises(ValueError, match="unobservable"):
+        bad_dagger = CombatDistillationDataset(
+            np.array(dataset.observations), np.array(dataset.action_logits),
+            np.array(dataset.teacher_values), np.array(dataset.valid_mask),
+            np.array(dataset.burn_in_mask), np.array(dataset.episode_reset_mask),
+            ("ep-bad",), ("train",),
+            SCHEMA.schema_hash, 1,
+            # unobservable が含まれるため release gate で拒否される
+            ("unobservable",),
+        )
+        trainer.compute_loss(dataset, dagger_datasets=[bad_dagger])
+
+
+def test_formal_resume_does_not_mutate_state_on_failure(tmp_path: Path) -> None:
+    """load_checkpoint が formal gate で失敗した場合、model/optimizer/training_steps を変更しない。
+    失敗後のパラメータが元の初期値と一致することを確認する。
+    """
+    formal_deps = _make_formal_deps()
+    model = DeployableCombatPolicy(SCHEMA.dim * 3, 2, hidden_dim=4)
+    saver = DeployablePolicyTrainer(model, formal_mode=True, formal_dependencies=formal_deps)
+    saver.training_steps = 0
+    checkpoint = tmp_path / "formal.pt"
+    saver.save_checkpoint(checkpoint)
+
+    # 元の model パラメータを記録
+    fresh_model = DeployableCombatPolicy(SCHEMA.dim * 3, 2, hidden_dim=4)
+    original_params = {k: v.detach().clone() for k, v in fresh_model.state_dict().items()}
+    resuming = DeployablePolicyTrainer(
+        fresh_model, formal_mode=True, formal_dependencies=None,
+    )
+    assert resuming.training_steps == 0
+
+    with pytest.raises(ValueError):
+        resuming.load_checkpoint(checkpoint)
+
+    # 失敗後も training_steps が 0 のまま（state 変更なし）
+    assert resuming.training_steps == 0
+    for key, original in original_params.items():
+        th.testing.assert_close(fresh_model.state_dict()[key], original)
+
+
 def test_load_formal_deps_cli_reads_all_required_fields(tmp_path: Path) -> None:
     """CLI _load_formal_deps が current_gating_producer_hashes を含む valid JSON から
     FormalDependencies を構築し、キー欠落は ValueError で拒否する。
@@ -324,3 +373,9 @@ def test_load_formal_deps_cli_reads_all_required_fields(tmp_path: Path) -> None:
         incomplete_path.write_text(json.dumps(incomplete), encoding="utf-8")
         with pytest.raises(ValueError):
             _load_formal_deps(incomplete_path)
+    # 未知 field を含む JSON も ValueError
+    extra_json = {**valid_data, "extra_unexpected_field": "value"}
+    extra_path = tmp_path / "extra_field.json"
+    extra_path.write_text(json.dumps(extra_json), encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown"):
+        _load_formal_deps(extra_path)

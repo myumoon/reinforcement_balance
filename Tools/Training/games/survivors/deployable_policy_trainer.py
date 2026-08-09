@@ -287,6 +287,8 @@ class DeployablePolicyTrainer:
             for dagger in dagger_datasets:
                 if dagger.deploy_schema_hash != dataset.deploy_schema_hash:
                     raise ValueError("DAgger dataset deploy schema hash mismatch")
+                # DAgger dataset も main dataset と同じ release gate を通す
+                dagger.assert_release_training_ready(self.schema)
             observations = np.concatenate(
                 [np.array(dataset.observations)] + [np.array(d.observations) for d in dagger_datasets]
             )
@@ -400,6 +402,17 @@ class DeployablePolicyTrainer:
             raise ValueError("error wrapper checkpoint count mismatch")
         if payload["curriculum_state"]["completed_updates"] != payload["training_steps"]:
             raise ValueError("curriculum/training step checkpoint mismatch")
+        # formal resume は state mutation 前に current dependencies を検証し、
+        # missing・stale・identity mismatch の場合は model/optimizer/curriculum を変更しない。
+        if self.formal_mode:
+            fresh = validate_formal_dependencies(self.formal_dependencies)
+            checkpoint_ids = dict(payload["formal_dependency_identities"])
+            if fresh != checkpoint_ids:
+                raise ValueError("formal dependency identities mismatch with checkpoint")
+            pending_identities: dict[str, str] | None = fresh
+        else:
+            pending_identities = None
+        # 全 preflight 検証完了後にのみ state を変更する
         _restore_vec(vec_normalize, payload["vec_normalize_state"])
         self.curriculum.load_state_dict(payload["curriculum_state"], payload["dagger_state"])
         self.model.load_state_dict(payload["model_state_dict"], strict=True)
@@ -407,13 +420,4 @@ class DeployablePolicyTrainer:
         for wrapper, state in zip(error_wrappers, states, strict=True):
             wrapper.set_corruption_state(deepcopy(state))
         self.training_steps = payload["training_steps"]
-        # formal resume は saved cache を信用せず、current dependencies を毎 process 検証する。
-        # formal_dependencies=None のまま formal checkpoint を resume しようとすると gate で失敗する。
-        if self.formal_mode:
-            fresh = validate_formal_dependencies(self.formal_dependencies)
-            checkpoint_ids = dict(payload["formal_dependency_identities"])
-            if fresh != checkpoint_ids:
-                raise ValueError("formal dependency identities mismatch with checkpoint")
-            self._formal_identities = fresh
-        else:
-            self._formal_identities = None
+        self._formal_identities = pending_identities
