@@ -24,7 +24,7 @@ class FakeDxcamCamera:
     def start(self, **kwargs):
         self.start_calls.append(kwargs)
 
-    def get_latest_frame(self):
+    def get_latest_frame(self, with_timestamp=False):
         return None
 
     def stop(self):
@@ -59,9 +59,10 @@ class FakeWindow:
 
 
 class FakeWin32Api:
-    def __init__(self, windows: list[FakeWindow], foreground_hwnd: int | None):
+    def __init__(self, windows: list[FakeWindow], foreground_hwnd: int | None, *, exe_hash: str = ""):
         self.windows = {window.hwnd: window for window in windows}
         self.foreground_hwnd = foreground_hwnd
+        self._exe_hash = exe_hash
 
     def enum_windows(self):
         return tuple(self.windows)
@@ -96,6 +97,9 @@ class FakeWin32Api:
     def foreground_window(self):
         return self.foreground_hwnd
 
+    def executable_hash_sha256(self, path: str) -> str:
+        return self._exe_hash
+
 
 class FakeCaptureBackend:
     def __init__(self, frames, after_read=None):
@@ -110,11 +114,12 @@ class FakeCaptureBackend:
         self.started.append({"region": region, "target_fps": target_fps})
 
     def get_latest_frame(self):
+        """(frame_bgra, timestamp_ns) または None を返す。"""
         self.read_count += 1
-        frame = self.frames.popleft() if self.frames else None
+        item = self.frames.popleft() if self.frames else None
         if self.after_read is not None:
             self.after_read()
-        return frame
+        return item  # None か (NDArray, int)
 
     def stop(self):
         self.stopped = True
@@ -125,7 +130,9 @@ class FakeCaptureBackend:
 
 @pytest.fixture
 def profile():
-    return load_target_profile()
+    p = load_target_profile()
+    object.__setattr__(p, "provenance", "operator-attested")  # frozen bypass: テスト用
+    return p
 
 
 @pytest.fixture
@@ -161,8 +168,12 @@ def target_window(monitor):
 
 
 @pytest.fixture
-def fake_api(target_window):
-    return FakeWin32Api([target_window], foreground_hwnd=target_window.hwnd)
+def fake_api(target_window, profile):
+    return FakeWin32Api(
+        [target_window],
+        foreground_hwnd=target_window.hwnd,
+        exe_hash=profile.sections["build"]["executable_hash"],
+    )
 
 
 @pytest.fixture

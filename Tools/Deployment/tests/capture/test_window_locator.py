@@ -14,6 +14,17 @@ from survivors.capture.window_locator import (
 )
 
 
+def test_locator_rejects_test_fixture_provenance(profile, policy, fake_api):
+    """test-fixture provenance のプロファイルは capture を開始できないことを確認する。
+
+    operator-attested でないプロファイルで本番ターゲットを capture できないよう fail-closed する。
+    """
+    object.__setattr__(profile, "provenance", "test-fixture")  # frozen bypass
+
+    with pytest.raises(TargetWindowStateError):
+        WindowLocator(fake_api, profile, policy).locate()
+
+
 def test_locator_records_pid_build_and_profile_identity(profile, policy, fake_api):
     target = WindowLocator(fake_api, profile, policy).locate()
 

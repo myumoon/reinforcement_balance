@@ -8,7 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import ctypes
 from ctypes import wintypes
+import hashlib
 import ntpath
+from pathlib import Path
 import sys
 from typing import Iterable, Protocol, runtime_checkable
 
@@ -49,7 +51,8 @@ class MonitorInfo:
     rect_screen_px: ScreenRect
     device_name: str
     primary: bool
-    dxgi_output_idx: int
+    dxgi_output_idx: int        # DXcam device 内での per-device output index
+    dxgi_device_idx: int = 0    # DXcam device (adapter) index
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +90,8 @@ class Win32Api(Protocol):
 
     def foreground_window(self) -> int | None: ...
 
+    def executable_hash_sha256(self, path: str) -> str: ...
+
 
 class WindowLocator:
     def __init__(
@@ -110,7 +115,15 @@ class WindowLocator:
             raise TargetWindowNotFound("target window was not found")
         if len(matches) != 1:
             raise TargetWindowStateError("ambiguous exact target windows")
-        return self._observe(matches[0])
+        located = self._observe(matches[0])
+        # operator-attested profile の executable_hash と実行中プロセスを突き合わせる
+        expected_hash = self._profile.sections["build"]["executable_hash"]
+        actual_hash = self._api.executable_hash_sha256(located.process_executable_path)
+        if actual_hash != expected_hash:
+            raise TargetWindowStateError(
+                "executable hash mismatch: process does not match target profile"
+            )
+        return located
 
     def validate(
         self,
@@ -124,6 +137,36 @@ class WindowLocator:
         if require_foreground and self._api.foreground_window() != target.hwnd:
             raise TargetWindowStateError("target window lost foreground")
         return current
+
+    def validate_lightweight(
+        self,
+        target: LocatedTargetWindow,
+        *,
+        require_foreground: bool,
+    ) -> None:
+        """HWND/PID/class/title/rect のみを確認する per-frame 軽量検証。DXGI 再列挙は行わない。
+
+        monitor_info() を呼ばないため 30fps でも DXGI factory 列挙が発生しません。
+        validate() と異なり monitor 変化は検出しませんが、frame ごとの呼び出しに適します。
+        """
+        if not self._api.is_window(target.hwnd) or not self._api.is_window_visible(target.hwnd):
+            raise TargetWindowStateError("target window is no longer available")
+        pid = self._api.window_process_id(target.hwnd)
+        executable = self._api.process_executable(pid)
+        if (
+            type(pid) is not int
+            or pid <= 0
+            or pid != target.pid
+            or not self._executable_matches(executable)
+            or self._api.window_class(target.hwnd) != target.window_class
+            or self._api.window_title(target.hwnd) != target.window_title
+        ):
+            raise TargetWindowStateError("target window process/class/title changed")
+        client_rect = self._api.client_rect_screen_px(target.hwnd)
+        if client_rect != target.client_rect_screen_px:
+            raise TargetWindowStateError("target client rect changed")
+        if require_foreground and self._api.foreground_window() != target.hwnd:
+            raise TargetWindowStateError("target window lost foreground")
 
     def _identity_matches(self, hwnd: int) -> bool:
         try:
@@ -200,6 +243,8 @@ class WindowLocator:
         return resolution[0], resolution[1]
 
     def _validate_capture_profile(self) -> None:
+        if self._profile.provenance != "operator-attested":
+            raise TargetWindowStateError("capture requires an operator-attested target profile")
         base = self._profile.sections["base"]
         hardware = self._profile.sections["hardware"]
         if base["platform"] != "windows_win64":
@@ -288,8 +333,11 @@ class _DxgiOutputDesc(ctypes.Structure):
 class DxgiEnumerator(Protocol):
     """DXGI output 列挙プロトコル。Win32Api とは独立して差し替え可能にする。"""
 
-    def output_idx_for(self, device_name: str) -> int:
-        """device_name (例: r'\\\\.\\ DISPLAY1') に対応する global DXGI output_idx を返す。"""
+    def output_idx_for(self, device_name: str) -> tuple[int, int]:
+        """device_name に対応する (device_idx, per_device_output_idx) を返す。
+
+        DXcam の create(device_idx=..., output_idx=...) に直接渡せる形式です。
+        """
         ...
 
 
@@ -310,8 +358,11 @@ class CtypesDxgiEnumerator:
     # DXGI_ERROR_NOT_FOUND = 0x887A0002 (signed int32 = -2005270526)
     _DXGI_ERROR_NOT_FOUND = ctypes.c_int(0x887A0002).value
 
-    def output_idx_for(self, device_name: str) -> int:
-        """DXGI COM を使って adapter/output を列挙し device_name の global index を返す。"""
+    def output_idx_for(self, device_name: str) -> tuple[int, int]:
+        """DXGI COM を使って adapter/output を列挙し device_name の (device_idx, output_idx) を返す。
+
+        DXcam の create(device_idx=..., output_idx=...) に直接渡せる per-device index です。
+        """
         try:
             dxgi = ctypes.windll.dxgi
         except (AttributeError, OSError) as exc:
@@ -330,9 +381,8 @@ class CtypesDxgiEnumerator:
             raise OSError(f"DXGI output for {device_name!r} not found")
         return result
 
-    def _scan(self, factory: int, target: str) -> int | None:
-        """factory からすべての adapter/output を走査し target の global idx を返す。"""
-        global_idx = 0
+    def _scan(self, factory: int, target: str) -> tuple[int, int] | None:
+        """factory からすべての adapter/output を走査し target の (adapter_idx, output_sub_idx) を返す。"""
         adapter_idx = 0
         while True:
             adapter_ptr = ctypes.c_void_p(0)
@@ -370,10 +420,9 @@ class CtypesDxgiEnumerator:
                             output, ctypes.byref(desc)
                         )
                         if hr3 == 0 and desc.DeviceName == target:
-                            return global_idx
+                            return adapter_idx, output_sub_idx
                     finally:
                         self._release(output)
-                    global_idx += 1
                     output_sub_idx += 1
             finally:
                 self._release(adapter)
@@ -547,18 +596,26 @@ class CtypesWin32Api:
             self._raise_last_error("GetMonitorInfoW")
         rect = info.rcMonitor
         device_name = info.szDevice
-        # Win32 座標ソート順ではなく DXGI 列挙順で output_idx を解決する
-        output_idx = self._dxgi.output_idx_for(device_name)
+        # Win32 座標ソート順ではなく DXGI 列挙順で (device_idx, per-device output_idx) を解決する
+        device_idx, output_idx = self._dxgi.output_idx_for(device_name)
         return MonitorInfo(
             rect_screen_px=(rect.left, rect.top, rect.right, rect.bottom),
             device_name=device_name,
             primary=bool(info.dwFlags & 1),
             dxgi_output_idx=output_idx,
+            dxgi_device_idx=device_idx,
         )
 
     def foreground_window(self) -> int | None:
         hwnd = self._user32.GetForegroundWindow()
         return int(hwnd) if hwnd else None
+
+    def executable_hash_sha256(self, path: str) -> str:
+        """実行ファイルの SHA-256 ハッシュを返す。
+
+        target profile の build.executable_hash と照合するために使います。
+        """
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
     @staticmethod
     def _raise_last_error(operation: str) -> None:

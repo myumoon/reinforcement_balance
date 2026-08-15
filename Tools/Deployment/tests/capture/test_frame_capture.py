@@ -23,14 +23,10 @@ from survivors.capture.window_locator import TargetWindowStateError, WindowLocat
 
 
 
-def _session(profile, policy, fake_api, backend, clock_values):
+def _session(profile, policy, fake_api, backend):
+    """timestamp は FakeCaptureBackend の (frame, ts) タプルから取得するため clock 注入不要。"""
     locator = WindowLocator(fake_api, profile, policy)
-    return CaptureSession(
-        locator,
-        locator.locate(),
-        backend,
-        monotonic_ns=lambda: next(clock_values),
-    )
+    return CaptureSession(locator, locator.locate(), backend)
 
 
 def test_captured_frame_has_exact_frozen_seven_field_contract(golden_bgra):
@@ -67,6 +63,7 @@ def test_dxcam_is_configured_for_dxgi_numpy_bgra_at_30_fps():
 
     assert dxcam_module.create_calls == [
         {
+            "device_idx": 0,
             "output_idx": 0,
             "backend": "dxgi",
             "processor_backend": "numpy",
@@ -131,8 +128,8 @@ def test_golden_fake_sequence_has_bgra_shape_monotonic_identity_and_consumer_con
 ):
     from conftest import FakeCaptureBackend
 
-    backend = FakeCaptureBackend([golden_bgra.copy(), golden_bgra.copy()])
-    session = _session(profile, policy, fake_api, backend, iter([100, 200]))
+    backend = FakeCaptureBackend([(golden_bgra.copy(), 100), (golden_bgra.copy(), 200)])
+    session = _session(profile, policy, fake_api, backend)
     session.start()
     produced = [session.capture_next(), session.capture_next()]
 
@@ -168,16 +165,10 @@ def test_latest_only_queue_discards_stale_frames(
 ):
     from conftest import FakeCaptureBackend
 
-    backend = FakeCaptureBackend([golden_bgra.copy() for _ in range(3)])
+    backend = FakeCaptureBackend([(golden_bgra.copy(), ts) for ts in [100, 200, 300]])
     queue = LatestFrameQueue()
     locator = WindowLocator(fake_api, profile, policy)
-    session = CaptureSession(
-        locator,
-        locator.locate(),
-        backend,
-        frame_queue=queue,
-        monotonic_ns=iter([100, 200, 300]).__next__,
-    )
+    session = CaptureSession(locator, locator.locate(), backend, frame_queue=queue)
     session.start()
     for _ in range(3):
         session.capture_next()
@@ -200,8 +191,8 @@ def test_capture_rejects_wrong_resolution_channels_and_dtype(
 ):
     from conftest import FakeCaptureBackend
 
-    backend = FakeCaptureBackend([bad_frame])
-    session = _session(profile, policy, fake_api, backend, iter([100]))
+    backend = FakeCaptureBackend([(bad_frame, 100)])
+    session = _session(profile, policy, fake_api, backend)
     session.start()
 
     with pytest.raises(CaptureFrameError):
@@ -220,8 +211,8 @@ def test_capture_revalidates_after_read_and_emits_nothing_on_state_loss(
         else:
             target_window.client_rect = (0, 0, 1280, 720)
 
-    backend = FakeCaptureBackend([golden_bgra], after_read=mutate_state)
-    session = _session(profile, policy, fake_api, backend, iter([100]))
+    backend = FakeCaptureBackend([(golden_bgra, 100)], after_read=mutate_state)
+    session = _session(profile, policy, fake_api, backend)
     session.start()
 
     with pytest.raises(TargetWindowStateError):
@@ -235,8 +226,8 @@ def test_capture_rejects_non_increasing_monotonic_timestamp(
 ):
     from conftest import FakeCaptureBackend
 
-    backend = FakeCaptureBackend([golden_bgra.copy(), golden_bgra.copy()])
-    session = _session(profile, policy, fake_api, backend, iter([100, 100]))
+    backend = FakeCaptureBackend([(golden_bgra.copy(), 100), (golden_bgra.copy(), 100)])
+    session = _session(profile, policy, fake_api, backend)
     session.start()
     session.capture_next()
 
@@ -249,8 +240,8 @@ def test_capture_start_never_requests_whole_desktop(
 ):
     from conftest import FakeCaptureBackend
 
-    backend = FakeCaptureBackend([golden_bgra])
-    session = _session(profile, policy, fake_api, backend, iter([100]))
+    backend = FakeCaptureBackend([(golden_bgra, 100)])
+    session = _session(profile, policy, fake_api, backend)
     session.start()
 
     assert backend.started[0]["region"] == session.target.client_rect_screen_px
@@ -261,7 +252,7 @@ def test_close_stops_and_releases_backend(profile, policy, fake_api):
     from conftest import FakeCaptureBackend
 
     backend = FakeCaptureBackend([])
-    session = _session(profile, policy, fake_api, backend, iter([]))
+    session = _session(profile, policy, fake_api, backend)
     session.start()
     session.close()
 

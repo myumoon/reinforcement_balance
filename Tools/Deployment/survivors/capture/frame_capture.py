@@ -8,8 +8,7 @@ from __future__ import annotations
 import importlib
 from queue import Empty, Full, Queue
 import threading
-import time
-from typing import Callable, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -30,7 +29,7 @@ class CaptureFrameError(RuntimeError):
 class CaptureBackend(Protocol):
     def start(self, *, region: ScreenRect, target_fps: int) -> None: ...
 
-    def get_latest_frame(self) -> NDArray[np.uint8] | None: ...
+    def get_latest_frame(self) -> tuple[NDArray[np.uint8], int] | None: ...
 
     def stop(self) -> None: ...
 
@@ -54,15 +53,19 @@ class DxcamCaptureBackend:
         output_idx: int,
         expected_client_rect: ScreenRect,
         *,
+        device_idx: int = 0,
         dxcam_module=None,
     ) -> "DxcamCaptureBackend":
-        """output_idx と expected_client_rect を bundle した backend を生成する。
+        """device_idx/output_idx と expected_client_rect を bundle した backend を生成する。
 
-        output_idx は WindowLocator が解決した MonitorInfo.dxgi_output_idx を渡す。
+        output_idx は MonitorInfo.dxgi_output_idx (per-device index)、
+        device_idx は MonitorInfo.dxgi_device_idx を渡す。
         expected_client_rect と異なる region を start() に渡すと例外になります。
         """
         if not isinstance(output_idx, int) or output_idx < 0:
             raise ValueError("output_idx must be a non-negative integer")
+        if not isinstance(device_idx, int) or device_idx < 0:
+            raise ValueError("device_idx must be a non-negative integer")
         if (
             not isinstance(expected_client_rect, tuple)
             or len(expected_client_rect) != 4
@@ -76,6 +79,7 @@ class DxcamCaptureBackend:
             raise ValueError("expected_client_rect must be a 1920x1080 screen rect")
         module = dxcam_module or importlib.import_module("dxcam")
         camera = module.create(
+            device_idx=device_idx,
             output_idx=output_idx,
             backend="dxgi",
             processor_backend="numpy",
@@ -94,8 +98,12 @@ class DxcamCaptureBackend:
             )
         self._camera.start(region=region, target_fps=TARGET_FPS)
 
-    def get_latest_frame(self) -> NDArray[np.uint8] | None:
-        return self._camera.get_latest_frame()
+    def get_latest_frame(self) -> tuple[NDArray[np.uint8], int] | None:
+        result = self._camera.get_latest_frame(with_timestamp=True)
+        if result is None:
+            return None
+        frame, ts = result
+        return frame, ts
 
     def stop(self) -> None:
         self._camera.stop()
@@ -131,6 +139,14 @@ class LatestFrameQueue:
     def get_latest(self, timeout: float | None = None) -> CapturedFrame:
         return self._queue.get(timeout=timeout)
 
+    def clear(self) -> None:
+        """queue 内の未消費 frame を全て破棄する。close 後に stale frame が読まれるのを防ぐ。"""
+        while True:
+            try:
+                self._queue.get_nowait()
+            except Empty:
+                return
+
 
 class CaptureSession:
     def __init__(
@@ -140,13 +156,11 @@ class CaptureSession:
         backend: CaptureBackend,
         *,
         frame_queue: LatestFrameQueue | None = None,
-        monotonic_ns: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         self._locator = locator
         self.target = target
         self._backend = backend
         self.frames = frame_queue or LatestFrameQueue()
-        self._monotonic_ns = monotonic_ns
         self._started = False
         self._closed = False
         self._next_frame_index = 0
@@ -165,21 +179,26 @@ class CaptureSession:
         try:
             self._locator.validate(self.target, require_foreground=True)
         except Exception:
-            self._backend.stop()
+            self._closed = True  # close() による二重 release を防ぐ
+            try:
+                self._backend.stop()
+            finally:
+                self._backend.release()
             raise
         self._started = True
 
     def capture_next(self) -> CapturedFrame | None:
         if not self._started or self._closed:
             raise CaptureFrameError("capture session is not active")
-        self._locator.validate(self.target, require_foreground=True)
-        frame_bgra = self._backend.get_latest_frame()
-        self._locator.validate(self.target, require_foreground=True)
-        if frame_bgra is None:
+        # P2-1: DXGI 再列挙を避ける軽量検証を frame ごとに使う
+        self._locator.validate_lightweight(self.target, require_foreground=True)
+        backend_result = self._backend.get_latest_frame()
+        self._locator.validate_lightweight(self.target, require_foreground=True)
+        if backend_result is None:
             return None
+        frame_bgra, captured_ns = backend_result  # P2-3: backend が capture 時刻を持つ
         self._validate_frame(frame_bgra)
 
-        captured_ns = self._monotonic_ns()
         if (
             type(captured_ns) is not int
             or captured_ns < 0
@@ -206,11 +225,15 @@ class CaptureSession:
     def close(self) -> None:
         if self._closed:
             return
-        if self._started:
-            self._backend.stop()
-        self._backend.release()
+        was_started = self._started
         self._closed = True
         self._started = False
+        self.frames.clear()  # P1-2: stale frame を consumer が読めないよう破棄
+        try:
+            if was_started:
+                self._backend.stop()
+        finally:
+            self._backend.release()
 
     @staticmethod
     def _validate_frame(frame_bgra: object) -> None:
