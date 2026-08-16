@@ -181,6 +181,13 @@ try {
     $invalidExe = Invoke-Workflow -ScriptPath (Join-Path $scriptRoot '03_CollectTargetEvidence.ps1') -RepositoryRoot $tempRoot
     Assert-True ($invalidExe.ExitCode -ne 0) '03 workflow must reject a configured directory as the executable'
     Assert-True ($invalidExe.Output -notmatch [regex]::Escape($tempRoot)) '03 workflow must not print configured path values'
+    Write-TestEnv -RepositoryRoot $tempRoot -Values @{
+        SURVIVORS_ARTIFACT_PRIMARY_ROOT = $primaryRoot
+        SURVIVORS_EVIDENCE_ROOT = $evidenceRoot
+        VAMPIRE_SURVIVORS_EXE = 'relative\path\VampireSurvivors.exe'
+    }
+    $relativeExe = Invoke-Workflow -ScriptPath (Join-Path $scriptRoot '03_CollectTargetEvidence.ps1') -RepositoryRoot $tempRoot
+    Assert-True ($relativeExe.ExitCode -ne 0) '03 workflow must reject a relative path for VAMPIRE_SURVIVORS_EXE'
 
     $repoEnvPath = Join-Path $repoRoot '.env\survivors_deployment.env'
     $repoEnvDirectory = Split-Path -Parent $repoEnvPath

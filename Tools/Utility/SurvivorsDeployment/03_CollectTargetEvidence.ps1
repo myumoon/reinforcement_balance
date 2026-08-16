@@ -94,7 +94,7 @@ try {
     $settings = Read-DeploymentEnv -Path (Join-Path $RepositoryRoot '.env\survivors_deployment.env')
     $primary = Assert-PathOutsideRepository -Path (Get-RequiredDeploymentSetting -Settings $settings -Name 'SURVIVORS_ARTIFACT_PRIMARY_ROOT') -RepositoryRoot $RepositoryRoot
     $evidence = Assert-PathOutsideRepository -Path (Get-RequiredDeploymentSetting -Settings $settings -Name 'SURVIVORS_EVIDENCE_ROOT') -RepositoryRoot $RepositoryRoot
-    $exe = Get-RequiredDeploymentSetting -Settings $settings -Name 'VAMPIRE_SURVIVORS_EXE'
+    $exe = Get-NormalizedDeploymentPath (Get-RequiredDeploymentSetting -Settings $settings -Name 'VAMPIRE_SURVIVORS_EXE')
     if (-not (Test-Path -LiteralPath $primary -PathType Container)) {
         throw 'Primary artifact store does not exist. Run 02_PrepareArtifactStore first.'
     }
