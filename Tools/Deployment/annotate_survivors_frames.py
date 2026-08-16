@@ -16,7 +16,7 @@ def _parser() -> argparse.ArgumentParser:
             "[--annotator-id ANNOTATOR_ID] [--resume] [--second-review]"
         ),
         epilog=(
-            "stdin: FRAME_ID CLASS LEFT TOP RIGHT BOTTOM; commands: undo, skip, done"
+            "stdin: FRAME_ID CLASS LEFT TOP RIGHT BOTTOM; commands: undo, skip FRAME_ID, done"
         ),
     )
     parser.add_argument("--store-root", required=True)
@@ -50,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
                     writer.write_skip(int(parts[1]))
                 except (ValueError, TypeError) as exc:
                     print(f"error: {exc}", file=sys.stderr)
+            else:
+                print("error: skip requires FRAME_ID — use: skip FRAME_ID", file=sys.stderr)
             continue
         if command == "undo":
             removed = writer.undo()

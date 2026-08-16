@@ -90,8 +90,10 @@ def _capture_live(session: CaptureSession, duration_sec: float):
     try:
         while time.monotonic() < deadline:
             frame = session.capture_next()
-            if frame is not None:
-                yield frame
+            if frame is None:
+                time.sleep(1 / 60)  # ponytail: 60fps上限ポーリング — busy loopを防ぐ
+                continue
+            yield frame
     finally:
         session.close()
 

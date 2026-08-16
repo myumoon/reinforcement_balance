@@ -204,6 +204,26 @@ def test_writer_context_manager_cleans_up_temp_on_exception(tmp_path):
     assert not temp_root.exists() or list(temp_root.iterdir()) == []
 
 
+def test_writer_context_manager_cleans_up_temp_on_publish_rename_failure(tmp_path, monkeypatch):
+    """publish()中のos.replace失敗後も（_sealed=True後でも）tempを削除する。"""
+    import os as _os
+
+    def _fail_replace(src, dst):
+        raise OSError("injected rename failure")
+
+    monkeypatch.setattr(_os, "replace", _fail_replace)
+
+    try:
+        with DatasetWriter(tmp_path, "session-001", PROFILE_HASH, BUILD_ID) as writer:
+            writer.write_frame(_frame(0, 100))
+            writer.publish()
+    except (OSError, ValueError):
+        pass
+
+    temp_root = tmp_path / ".capture-tmp"
+    assert not temp_root.exists() or list(temp_root.iterdir()) == []
+
+
 def test_mp4_is_never_a_formal_pixel_source(tmp_path):
     with pytest.raises(Mp4NotAPixelSourceError, match="review-only"):
         load_mp4_as_pixel_source(tmp_path / "review.real.mp4")

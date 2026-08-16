@@ -320,8 +320,8 @@ class DatasetWriter:
         return self
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
-        """publish()未到達の場合にtempディレクトリを自動削除する。"""
-        if not self._sealed:
+        """publish()未到達またはrename失敗時にtempディレクトリを自動削除する。"""
+        if not self._sealed or self._temp_path.exists():
             try:
                 if not self._metadata_stream.closed:
                     self._metadata_stream.close()
@@ -826,19 +826,32 @@ class AnnotationWriter:
             raise ValueError("annotations already exist; use resume=True")
         self._annotations = list(self.read_annotations(self.store_root, self.session_id))
         self._keys = {(item.frame_id, item.class_name) for item in self._annotations}
-        # 公開済みセッションの有効なframe_idセットを読み込む (P1-5)
+        # 公開済みセッションの有効なframe_idセットを読み込む（metadata hash改ざん検証付き）
         manifest_wire = json.loads((self.session_path / "session_manifest.json").read_bytes())
         metadata_path = _resolve_relative(
             self.session_path, manifest_wire.get("metadata_path", "frames.jsonl"), "metadata_path"
         )
         _valid: set[int] = set()
         if metadata_path.is_file():
-            with metadata_path.open("r", encoding="utf-8") as _f:
-                for _line in _f:
-                    _line = _line.strip()
-                    if _line:
-                        _valid.add(json.loads(_line)["frame_id"])
+            _metadata_bytes = metadata_path.read_bytes()
+            _expected_hash = manifest_wire.get("metadata_sha256", "")
+            if hashlib.sha256(_metadata_bytes).hexdigest() != _expected_hash:
+                raise ValueError("frames.jsonl integrity check failed; metadata may be tampered")
+            for _line in _metadata_bytes.decode("utf-8").splitlines():
+                _line = _line.strip()
+                if _line:
+                    _valid.add(json.loads(_line)["frame_id"])
         self._valid_frame_ids: frozenset[int] = frozenset(_valid)
+        # skips.jsonlをロードしてresume時にスキップ済みframe_idを把握する
+        _skipped: set[int] = set()
+        _skip_path = self.session_path / "skips.jsonl"
+        if _skip_path.is_file():
+            with _skip_path.open("r", encoding="utf-8") as _sf:
+                for _sl in _sf:
+                    _sl = _sl.strip()
+                    if _sl:
+                        _skipped.add(json.loads(_sl)["frame_id"])
+        self._skipped_frame_ids: frozenset[int] = frozenset(_skipped)
 
     def write_annotation(
         self,
@@ -869,17 +882,14 @@ class AnnotationWriter:
                 raise ValueError(
                     f"duplicate annotation for frame_id/class: {record.frame_id}/{record.class_name}"
                 )
-            # second_review=True: 既存レコードを更新してJSONLを書き直す (P1-4)
-            updated = [r for r in self._annotations if (r.frame_id, r.class_name) != key]
-            temp_path = self.session_path / ".annotations.jsonl.tmp"
-            with temp_path.open("wb") as stream:
-                for r in updated:
-                    stream.write(_canonical_json(_annotation_to_wire(r)))
+            # second_review=True: 既存レコードを残したまま追記し監査証跡を保持する
+            # read_annotations()はlast-winsでlatest recordを返す
+            with self.annotation_path.open("ab") as stream:
                 stream.write(_canonical_json(_annotation_to_wire(record)))
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temp_path, self.annotation_path)
-            self._annotations = updated + [record]
+            self._annotations = [r for r in self._annotations if (r.frame_id, r.class_name) != key]
+            self._annotations.append(record)
             return record
         with self.annotation_path.open("ab") as stream:
             stream.write(_canonical_json(_annotation_to_wire(record)))
@@ -927,20 +937,16 @@ class AnnotationWriter:
         path = session_path / "annotations.jsonl"
         if not path.exists():
             return ()
-        records: list[AnnotationRecord] = []
-        keys: set[tuple[int, str]] = set()
+        # second_reviewの重複キーはlast-wins — JSONLには初回・レビュー両方が残り監査証跡を保持する
+        seen: dict[tuple[int, str], AnnotationRecord] = {}
         with path.open("r", encoding="utf-8") as stream:
             for line_number, line in enumerate(stream, start=1):
                 try:
                     record = _annotation_from_wire(json.loads(line))
                 except (json.JSONDecodeError, TypeError, KeyError) as exc:
                     raise ValueError(f"invalid annotation at line {line_number}") from exc
-                key = record.frame_id, record.class_name
-                if key in keys:
-                    raise ValueError("duplicate annotation in JSONL")
-                keys.add(key)
-                records.append(record)
-        return tuple(records)
+                seen[record.frame_id, record.class_name] = record
+        return tuple(seen.values())
 
 
 @dataclass(frozen=True, slots=True)

@@ -114,18 +114,23 @@ def test_write_annotation_rejects_unknown_frame_id(tmp_path):
         writer.write_annotation(99, (0, 0, 10, 10), "enemy", "operator")
 
 
-def test_second_review_updates_existing_annotation(tmp_path):
-    """second_review=Trueで既存レコードを上書きできる。"""
+def test_second_review_appends_and_keeps_audit_trail(tmp_path):
+    """second_review=Trueで追記され、JSONLには両方のレコードが残る。"""
     _publish_session(tmp_path, "session-a")
     writer = AnnotationWriter(tmp_path, "session-a")
     writer.write_annotation(0, (0, 0, 10, 10), "enemy", "operator")
     updated = writer.write_annotation(0, (5, 5, 15, 15), "enemy", "reviewer", second_review=True)
 
     records = AnnotationWriter.read_annotations(tmp_path, "session-a")
+    jsonl_lines = [
+        ln for ln in (writer.session_path / "annotations.jsonl").read_text().splitlines()
+        if ln.strip()
+    ]
 
     assert len(records) == 1
     assert records[0].bbox == updated.bbox
     assert records[0].second_review is True
+    assert len(jsonl_lines) == 2  # 初回 + second_review の両レコードが保持される
 
 
 def test_write_skip_persists_to_jsonl(tmp_path):
@@ -136,6 +141,27 @@ def test_write_skip_persists_to_jsonl(tmp_path):
     skip_path = writer.session_path / "skips.jsonl"
     assert skip_path.is_file()
     assert b'"frame_id"' in skip_path.read_bytes()
+
+
+def test_annotation_writer_loads_skipped_frame_ids_on_resume(tmp_path):
+    """resume時にskips.jsonlからスキップ済みframe_idをロードする。"""
+    _publish_session(tmp_path, "session-a")
+    writer = AnnotationWriter(tmp_path, "session-a")
+    writer.write_skip(0)
+
+    resumed = AnnotationWriter(tmp_path, "session-a", resume=True)
+
+    assert 0 in resumed._skipped_frame_ids
+
+
+def test_annotation_writer_rejects_tampered_metadata(tmp_path):
+    """frames.jsonlが改ざんされていたらAnnotationWriter初期化で拒否される。"""
+    session = _publish_session(tmp_path, "session-a")
+    frames_path = session.session_path / "frames.jsonl"
+    frames_path.write_bytes(frames_path.read_bytes() + b"\n{tampered}")
+
+    with pytest.raises(ValueError, match="integrity"):
+        AnnotationWriter(tmp_path, "session-a")
 
 
 def test_split_assigns_four_uses_then_freezes_with_matching_hash(tmp_path):
