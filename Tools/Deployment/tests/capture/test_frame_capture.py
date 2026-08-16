@@ -199,11 +199,11 @@ def test_capture_rejects_wrong_resolution_channels_and_dtype(
         session.capture_next()
 
 
-@pytest.mark.parametrize("failure_mode", ["bad_frame", "state_loss", "stale_timestamp"])
+@pytest.mark.parametrize("failure_mode", ["bad_frame", "state_loss"])
 def test_capture_releases_backend_on_validation_failure_without_close(
     failure_mode, profile, policy, fake_api, target_window, golden_bgra
 ):
-    """frame/state/timestamp 検証失敗後に close() なしでも release() されることを確認する。
+    """frame/state 検証失敗後に close() なしでも release() されることを確認する。
 
     capture_next() 例外後に呼び出し側が close() を呼ばなくても
     DXcam リソースがリークしないことを保証します。
@@ -214,20 +214,14 @@ def test_capture_releases_backend_on_validation_failure_without_close(
         bad = np.zeros((720, 1280, 4), dtype=np.uint8)
         backend = FakeCaptureBackend([(bad, 100)])
         exc_type = CaptureFrameError
-    elif failure_mode == "state_loss":
+    else:  # state_loss
         def on_read():
             target_window.client_rect = (0, 0, 1280, 720)
         backend = FakeCaptureBackend([(golden_bgra.copy(), 100)], after_read=on_read)
         exc_type = TargetWindowStateError
-    else:  # stale_timestamp — 1 枚目成功後に同 ts で失敗
-        backend = FakeCaptureBackend([(golden_bgra.copy(), 100), (golden_bgra.copy(), 100)])
-        exc_type = CaptureFrameError
 
     session = _session(profile, policy, fake_api, backend)
     session.start()
-
-    if failure_mode == "stale_timestamp":
-        session.capture_next()  # 1 枚目は成功
 
     with pytest.raises(exc_type):
         session.capture_next()
@@ -235,6 +229,28 @@ def test_capture_releases_backend_on_validation_failure_without_close(
     # close() を呼ばずとも stop と release が保証される
     assert backend.stopped is True
     assert backend.released is True
+
+
+def test_stale_timestamp_returns_none_and_keeps_session_active(
+    profile, policy, fake_api, golden_bgra
+):
+    """同一timestampのフレームはNoneを返し、セッションを閉じない。
+
+    latest_only=True モードでは同じフレームが返ることがあり、
+    これは致命的エラーではなく「まだ新フレームなし」を意味する。
+    """
+    from conftest import FakeCaptureBackend
+
+    backend = FakeCaptureBackend([(golden_bgra.copy(), 100), (golden_bgra.copy(), 100)])
+    session = _session(profile, policy, fake_api, backend)
+    session.start()
+
+    first = session.capture_next()   # ts=100 → フレーム取得成功
+    second = session.capture_next()  # ts=100 (同一) → None
+
+    assert first is not None
+    assert second is None
+    assert session._started is True  # セッションは有効なまま
 
 
 def test_capture_clears_queue_and_stops_on_frame_validation_failure(
@@ -338,17 +354,22 @@ def test_capture_revalidates_after_read_and_emits_nothing_on_state_loss(
         session.frames.get_latest_nowait()
 
 
-def test_capture_rejects_non_increasing_monotonic_timestamp(
+def test_capture_rejects_regressing_monotonic_timestamp(
     profile, policy, fake_api, golden_bgra
 ):
+    """timestampが後退した場合（50 < 100）はCaptureFrameErrorになる。
+
+    同一timestampはNoneを返す（エラーではない）が、
+    後退（単調減少）はバックエンドの不正データとして致命的エラーとする。
+    """
     from conftest import FakeCaptureBackend
 
-    backend = FakeCaptureBackend([(golden_bgra.copy(), 100), (golden_bgra.copy(), 100)])
+    backend = FakeCaptureBackend([(golden_bgra.copy(), 100), (golden_bgra.copy(), 50)])
     session = _session(profile, policy, fake_api, backend)
     session.start()
     session.capture_next()
 
-    with pytest.raises(CaptureFrameError, match="monotonic"):
+    with pytest.raises(CaptureFrameError, match="regression"):
         session.capture_next()
 
 
