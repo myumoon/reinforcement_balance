@@ -199,6 +199,52 @@ def test_capture_rejects_wrong_resolution_channels_and_dtype(
         session.capture_next()
 
 
+def test_capture_clears_queue_and_stops_on_frame_validation_failure(
+    profile, policy, fake_api, golden_bgra
+):
+    """frame 検証失敗後に queue が clear され session が停止することを確認する。
+
+    正常 frame を1件 queue した後に不正 frame が来た場合、CaptureFrameError 後も
+    古い frame が取れてしまうバグを防ぎます。
+    """
+    from conftest import FakeCaptureBackend
+
+    bad_frame = np.zeros((720, 1280, 4), dtype=np.uint8)
+    backend = FakeCaptureBackend([(golden_bgra.copy(), 100), (bad_frame, 200)])
+    session = _session(profile, policy, fake_api, backend)
+    session.start()
+
+    session.capture_next()  # frame 0: 成功 → queue に残る（consumer はまだ読まない）
+
+    with pytest.raises(CaptureFrameError):
+        session.capture_next()  # frame 1: shape 不正
+
+    assert not session._started  # session は停止済み
+    with pytest.raises(Empty):
+        session.frames.get_latest_nowait()  # frame 0 も queue から消えている
+
+
+def test_start_releases_backend_if_pre_start_validation_fails(
+    profile, policy, fake_api
+):
+    """start() の初回 validate 失敗時に backend が release されることを確認する。
+
+    backend.start() が呼ばれる前の focus loss 等でも release() を保証します。
+    """
+    from conftest import FakeCaptureBackend
+
+    backend = FakeCaptureBackend([])
+    locator = WindowLocator(fake_api, profile, policy)
+    session = CaptureSession(locator, locator.locate(), backend)
+
+    fake_api.foreground_hwnd = 999  # focus lost before start
+
+    with pytest.raises(TargetWindowStateError):
+        session.start()
+
+    assert backend.released is True
+
+
 def test_capture_clears_queue_on_state_loss_even_with_prior_frames(
     profile, policy, fake_api, target_window, golden_bgra
 ):
