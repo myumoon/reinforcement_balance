@@ -200,15 +200,13 @@ class CaptureSession:
                 return None
             frame_bgra, captured_ns = backend_result  # P2-3: backend が capture 時刻を持つ
             self._validate_frame(frame_bgra)
-            if (
-                type(captured_ns) is not int
-                or captured_ns < 0
-                or (
-                    self._last_monotonic_ns is not None
-                    and captured_ns <= self._last_monotonic_ns
-                )
-            ):
-                raise CaptureFrameError("captured monotonic timestamp did not increase")
+            if type(captured_ns) is not int or captured_ns < 0:
+                raise CaptureFrameError("invalid backend timestamp")
+            if self._last_monotonic_ns is not None:
+                if captured_ns < self._last_monotonic_ns:
+                    raise CaptureFrameError("backend timestamp regression")
+                if captured_ns == self._last_monotonic_ns:
+                    return None  # ponytail: same frame (latest_only mode), not a fatal error
         except Exception:
             # 状態異常/検証失敗時: stale frame を破棄し backend を停止・解放して session を完全無効化する
             self.frames.clear()

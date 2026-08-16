@@ -45,6 +45,11 @@ def main(argv: list[str] | None = None) -> int:
         if command in {"done", "quit", "exit"}:
             break
         if command == "skip":
+            if len(parts) >= 2:
+                try:
+                    writer.write_skip(int(parts[1]))
+                except (ValueError, TypeError) as exc:
+                    print(f"error: {exc}", file=sys.stderr)
             continue
         if command == "undo":
             removed = writer.undo()

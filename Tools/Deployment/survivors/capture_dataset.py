@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import struct
 from typing import Any, Iterable
 import uuid
@@ -269,6 +270,7 @@ class DatasetWriter:
         self._last_timestamp: int | None = None
         self._frame_count = 0
         self._sealed = False
+        self._frame_records: list[FrameRecord] = []
 
     def write_frame(self, frame: CapturedFrame) -> FrameRecord:
         if self._sealed:
@@ -311,11 +313,27 @@ class DatasetWriter:
         self._frame_ids.add(frame_id)
         self._last_timestamp = frame.captured_monotonic_ns
         self._frame_count += 1
+        self._frame_records.append(record)
         return record
+
+    def __enter__(self) -> "DatasetWriter":
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """publish()未到達の場合にtempディレクトリを自動削除する。"""
+        if not self._sealed:
+            try:
+                if not self._metadata_stream.closed:
+                    self._metadata_stream.close()
+            except Exception:
+                pass
+            shutil.rmtree(self._temp_path, ignore_errors=True)
 
     def publish(self, operator_checkpoint: str = "") -> SessionManifest:
         if self._sealed:
             raise ValueError("dataset writer is already sealed")
+        if self._frame_count == 0:
+            raise ValueError("no frames written; empty session cannot be published")
         if not isinstance(operator_checkpoint, str):
             raise ValueError("operator_checkpoint must be a string")
         self._metadata_stream.flush()
@@ -335,15 +353,30 @@ class DatasetWriter:
             "metadata_sha256": metadata_hash,
             "frame_count": self._frame_count,
         }
-        (self._temp_path / "session_manifest.json").write_bytes(
-            _canonical_json(manifest_wire)
-        )
+        manifest_bytes = _canonical_json(manifest_wire)
+        (self._temp_path / "session_manifest.json").write_bytes(manifest_bytes)
         self._before_atomic_publish()
         self._published_path.parent.mkdir(parents=True, exist_ok=True)
         if self._published_path.exists():
             raise ValueError(f"session already exists: {self.session_id}")
         os.replace(self._temp_path, self._published_path)
-        return self.restore(self.store_root, self.session_id)
+        # ponytail: メタデータのみ返す。frames=() — 全PNG復号はrestore()で遅延実行
+        return SessionManifest(
+            schema_version=manifest_wire["schema_version"],
+            session_id=manifest_wire["session_id"],
+            target_profile_hash=manifest_wire["target_profile_hash"],
+            game_build_id=manifest_wire["game_build_id"],
+            formal_dataset_eligible=manifest_wire["formal_dataset_eligible"],
+            operator_checkpoint=manifest_wire["operator_checkpoint"],
+            pixel_source=manifest_wire["pixel_source"],
+            metadata_path=manifest_wire["metadata_path"],
+            metadata_sha256=manifest_wire["metadata_sha256"],
+            frame_count=manifest_wire["frame_count"],
+            session_path=self._published_path,
+            manifest_sha256=_sha256_bytes(manifest_bytes),
+            frame_records=tuple(self._frame_records),
+            frames=(),
+        )
 
     def _before_atomic_publish(self) -> None:
         """Test injection point after all temp writes and before the only publish rename."""
@@ -793,6 +826,19 @@ class AnnotationWriter:
             raise ValueError("annotations already exist; use resume=True")
         self._annotations = list(self.read_annotations(self.store_root, self.session_id))
         self._keys = {(item.frame_id, item.class_name) for item in self._annotations}
+        # 公開済みセッションの有効なframe_idセットを読み込む (P1-5)
+        manifest_wire = json.loads((self.session_path / "session_manifest.json").read_bytes())
+        metadata_path = _resolve_relative(
+            self.session_path, manifest_wire.get("metadata_path", "frames.jsonl"), "metadata_path"
+        )
+        _valid: set[int] = set()
+        if metadata_path.is_file():
+            with metadata_path.open("r", encoding="utf-8") as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if _line:
+                        _valid.add(json.loads(_line)["frame_id"])
+        self._valid_frame_ids: frozenset[int] = frozenset(_valid)
 
     def write_annotation(
         self,
@@ -815,11 +861,26 @@ class AnnotationWriter:
                 "second_review": second_review,
             }
         )
+        if record.frame_id not in self._valid_frame_ids:
+            raise ValueError(f"frame_id {record.frame_id} is not in published session")
         key = record.frame_id, record.class_name
         if key in self._keys:
-            raise ValueError(
-                f"duplicate annotation for frame_id/class: {record.frame_id}/{record.class_name}"
-            )
+            if not second_review:
+                raise ValueError(
+                    f"duplicate annotation for frame_id/class: {record.frame_id}/{record.class_name}"
+                )
+            # second_review=True: 既存レコードを更新してJSONLを書き直す (P1-4)
+            updated = [r for r in self._annotations if (r.frame_id, r.class_name) != key]
+            temp_path = self.session_path / ".annotations.jsonl.tmp"
+            with temp_path.open("wb") as stream:
+                for r in updated:
+                    stream.write(_canonical_json(_annotation_to_wire(r)))
+                stream.write(_canonical_json(_annotation_to_wire(record)))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_path, self.annotation_path)
+            self._annotations = updated + [record]
+            return record
         with self.annotation_path.open("ab") as stream:
             stream.write(_canonical_json(_annotation_to_wire(record)))
             stream.flush()
@@ -827,6 +888,18 @@ class AnnotationWriter:
         self._annotations.append(record)
         self._keys.add(key)
         return record
+
+    def write_skip(self, frame_id: int) -> None:
+        """スキップしたframe_idをskips.jsonlに記録してresumeで区別できるようにする。"""
+        if type(frame_id) is not int or frame_id < 0:
+            raise ValueError("skip frame_id must be a non-negative integer")
+        if frame_id not in self._valid_frame_ids:
+            raise ValueError(f"frame_id {frame_id} is not in published session")
+        skip_path = self.session_path / "skips.jsonl"
+        with skip_path.open("ab") as stream:
+            stream.write(_canonical_json({"frame_id": frame_id}))
+            stream.flush()
+            os.fsync(stream.fileno())
 
     def undo(self) -> AnnotationRecord | None:
         if not self._annotations:

@@ -125,10 +125,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("capture produced no frame")
             print(json.dumps({"status": "DRY_RUN_OK", "session_id": args.session_id}))
             return 0
-        writer = DatasetWriter(Path(args.store_root), args.session_id, *identity)
-        for frame in frames:
-            writer.write_frame(frame)
-        manifest = writer.publish(operator_checkpoint="synthetic" if args.synthetic else "live-pilot")
+        with DatasetWriter(Path(args.store_root), args.session_id, *identity) as writer:
+            for frame in frames:
+                writer.write_frame(frame)
+            manifest = writer.publish(operator_checkpoint="synthetic" if args.synthetic else "live-pilot")
         print(
             json.dumps(
                 {

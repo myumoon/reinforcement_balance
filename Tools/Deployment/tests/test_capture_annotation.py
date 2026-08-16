@@ -1,3 +1,7 @@
+"""アノテーション・スプリット・CLIに関するテスト。
+
+DatasetWriter / AnnotationWriter / SplitFreezer の主要な挙動を検証する。
+"""
 from __future__ import annotations
 
 import hashlib
@@ -5,8 +9,10 @@ from pathlib import Path
 import subprocess
 import sys
 
+import numpy as np
 import pytest
 
+from survivors.capture.captured_frame import CapturedFrame
 from survivors.capture_dataset import (
     AnnotationWriter,
     DatasetWriter,
@@ -19,16 +25,31 @@ from survivors.capture_dataset import (
 PROFILE_HASH = "c" * 64
 
 
-def _publish_empty_session(tmp_path, session_id: str, build_id: str = "build-1"):
-    return DatasetWriter(tmp_path, session_id, PROFILE_HASH, build_id).publish()
+def _publish_session(tmp_path, session_id: str, build_id: str = "build-1"):
+    """1フレームを書き込んで公開済みセッションを作成するヘルパー。"""
+    writer = DatasetWriter(tmp_path, session_id, PROFILE_HASH, build_id)
+    pixels = np.zeros((1080, 1920, 4), dtype=np.uint8)
+    pixels[..., 3] = 255
+    writer.write_frame(
+        CapturedFrame(
+            frame_bgra=pixels,
+            captured_monotonic_ns=1,
+            session_frame_index=0,
+            client_rect_screen_px=(0, 0, 1920, 1080),
+            foreground=True,
+            target_profile_hash=PROFILE_HASH,
+            game_build_id=build_id,
+        )
+    )
+    return writer.publish()
 
 
 def test_bbox_class_annotation_round_trip(tmp_path):
-    _publish_empty_session(tmp_path, "session-a")
+    _publish_session(tmp_path, "session-a")
     writer = AnnotationWriter(tmp_path, "session-a")
 
     expected = writer.write_annotation(
-        frame_id=3,
+        frame_id=0,
         bbox=(10, 20, 110, 220),
         class_name="enemy",
         annotator_id="operator-1",
@@ -41,7 +62,7 @@ def test_bbox_class_annotation_round_trip(tmp_path):
 
 
 def test_unknown_semantic_class_is_rejected(tmp_path):
-    _publish_empty_session(tmp_path, "session-a")
+    _publish_session(tmp_path, "session-a")
     writer = AnnotationWriter(tmp_path, "session-a")
 
     with pytest.raises(ValueError, match="semantic class"):
@@ -49,7 +70,7 @@ def test_unknown_semantic_class_is_rejected(tmp_path):
 
 
 def test_duplicate_frame_and_class_annotation_is_rejected(tmp_path):
-    _publish_empty_session(tmp_path, "session-a")
+    _publish_session(tmp_path, "session-a")
     writer = AnnotationWriter(tmp_path, "session-a")
     writer.write_annotation(0, (0, 0, 10, 10), "enemy", "operator")
 
@@ -58,7 +79,7 @@ def test_duplicate_frame_and_class_annotation_is_rejected(tmp_path):
 
 
 def test_undo_removes_last_annotation(tmp_path):
-    _publish_empty_session(tmp_path, "session-a")
+    _publish_session(tmp_path, "session-a")
     writer = AnnotationWriter(tmp_path, "session-a")
     first = writer.write_annotation(0, (0, 0, 10, 10), "player", "operator")
     writer.write_annotation(0, (20, 20, 30, 30), "enemy", "operator")
@@ -70,7 +91,7 @@ def test_undo_removes_last_annotation(tmp_path):
 
 
 def test_annotation_write_autosaves_jsonl(tmp_path):
-    session = _publish_empty_session(tmp_path, "session-a")
+    session = _publish_session(tmp_path, "session-a")
     writer = AnnotationWriter(tmp_path, "session-a")
 
     writer.write_annotation(0, (0, 0, 10, 10), "xp_gem", "operator")
@@ -78,9 +99,48 @@ def test_annotation_write_autosaves_jsonl(tmp_path):
     assert (session.session_path / "annotations.jsonl").is_file()
 
 
+def test_publish_empty_session_is_rejected(tmp_path):
+    """フレームなしでpublishしようとするとエラーになる。"""
+    writer = DatasetWriter(tmp_path, "session-a", PROFILE_HASH, "build-1")
+    with pytest.raises(ValueError, match="no frames"):
+        writer.publish()
+
+
+def test_write_annotation_rejects_unknown_frame_id(tmp_path):
+    """公開セッションに存在しないframe_idへのアノテーションは拒否される。"""
+    _publish_session(tmp_path, "session-a")
+    writer = AnnotationWriter(tmp_path, "session-a")
+    with pytest.raises(ValueError, match="frame_id"):
+        writer.write_annotation(99, (0, 0, 10, 10), "enemy", "operator")
+
+
+def test_second_review_updates_existing_annotation(tmp_path):
+    """second_review=Trueで既存レコードを上書きできる。"""
+    _publish_session(tmp_path, "session-a")
+    writer = AnnotationWriter(tmp_path, "session-a")
+    writer.write_annotation(0, (0, 0, 10, 10), "enemy", "operator")
+    updated = writer.write_annotation(0, (5, 5, 15, 15), "enemy", "reviewer", second_review=True)
+
+    records = AnnotationWriter.read_annotations(tmp_path, "session-a")
+
+    assert len(records) == 1
+    assert records[0].bbox == updated.bbox
+    assert records[0].second_review is True
+
+
+def test_write_skip_persists_to_jsonl(tmp_path):
+    """write_skip()がskips.jsonlに記録を保存する。"""
+    _publish_session(tmp_path, "session-a")
+    writer = AnnotationWriter(tmp_path, "session-a")
+    writer.write_skip(0)
+    skip_path = writer.session_path / "skips.jsonl"
+    assert skip_path.is_file()
+    assert b'"frame_id"' in skip_path.read_bytes()
+
+
 def test_split_assigns_four_uses_then_freezes_with_matching_hash(tmp_path):
     for index, session_id in enumerate(("train", "validation", "calibration", "final")):
-        _publish_empty_session(tmp_path, session_id, f"build-{index}")
+        _publish_session(tmp_path, session_id, f"build-{index}")
     freezer = SplitFreezer(tmp_path)
     freezer.assign("model_train", ["train"])
     freezer.assign("model_validation", ["validation"])
@@ -100,7 +160,7 @@ def test_split_assigns_four_uses_then_freezes_with_matching_hash(tmp_path):
 
 
 def test_split_rejects_append_after_freeze(tmp_path):
-    _publish_empty_session(tmp_path, "train")
+    _publish_session(tmp_path, "train")
     freezer = SplitFreezer(tmp_path)
     freezer.assign("model_train", ["train"])
     freezer.freeze()
@@ -110,7 +170,7 @@ def test_split_rejects_append_after_freeze(tmp_path):
 
 
 def test_split_rejects_session_overlap_between_uses(tmp_path):
-    _publish_empty_session(tmp_path, "shared")
+    _publish_session(tmp_path, "shared")
     freezer = SplitFreezer(tmp_path)
     freezer.assign("model_train", ["shared"])
 
@@ -120,7 +180,7 @@ def test_split_rejects_session_overlap_between_uses(tmp_path):
 
 @pytest.mark.parametrize("earlier_split", ["model_train", "error_calibration"])
 def test_final_session_cannot_appear_in_train_or_calibration(tmp_path, earlier_split):
-    _publish_empty_session(tmp_path, "held-out")
+    _publish_session(tmp_path, "held-out")
     freezer = SplitFreezer(tmp_path)
     freezer.assign("final_e2e_test", ["held-out"])
 

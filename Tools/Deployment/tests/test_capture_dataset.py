@@ -177,11 +177,31 @@ def test_png_round_trip_has_zero_pixel_mae(tmp_path):
     expected = _frame(0, 100)
     expected.frame_bgra[100:110, 200:210] = [9, 80, 177, 255]
     writer.write_frame(expected)
+    writer.publish()
 
-    actual = writer.publish().frames[0].frame_bgra
+    actual = DatasetWriter.restore(tmp_path, "session-001").frames[0].frame_bgra
 
     mae = np.abs(actual.astype(np.int16) - expected.frame_bgra.astype(np.int16)).mean()
     assert mae == 0
+
+
+def test_publish_rejects_empty_session(tmp_path):
+    """フレームなしでpublishを呼ぶとValueErrorになる。"""
+    writer = _writer(tmp_path)
+    with pytest.raises(ValueError, match="no frames"):
+        writer.publish()
+
+
+def test_writer_context_manager_cleans_up_temp_on_exception(tmp_path):
+    """capture失敗時にcontextmanagerがtempディレクトリを削除する。"""
+    try:
+        with DatasetWriter(tmp_path, "session-001", PROFILE_HASH, BUILD_ID) as writer:
+            writer.write_frame(_frame(0, 100))
+            raise RuntimeError("injected failure")
+    except RuntimeError:
+        pass
+    temp_root = tmp_path / ".capture-tmp"
+    assert not temp_root.exists() or list(temp_root.iterdir()) == []
 
 
 def test_mp4_is_never_a_formal_pixel_source(tmp_path):
