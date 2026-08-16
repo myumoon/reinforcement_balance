@@ -16,6 +16,30 @@ function Assert-Equal {
     if ($Actual -ne $Expected) { throw "$Message. Expected '$Expected', got '$Actual'." }
 }
 
+function Get-TestPythonPath {
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:CONDA_PREFIX)) {
+        $candidates += Join-Path $env:CONDA_PREFIX 'python.exe'
+    }
+    $condaCommand = Get-Command conda -ErrorAction SilentlyContinue
+    if ($null -ne $condaCommand) {
+        $candidates += @(& $condaCommand.Source run -n reinbalance python -c 'import sys; print(sys.executable)' 2>$null)
+    }
+    $candidates += Join-Path ([Environment]::GetFolderPath('UserProfile')) 'anaconda3\envs\reinbalance\python.exe'
+    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -ne $pythonCommand) {
+        $candidates += $pythonCommand.Source
+    }
+    foreach ($candidate in ($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        $probe = @(& $candidate -c 'import sys; print(sys.version_info >= (3, 11))' 2>$null)
+        if ($LASTEXITCODE -eq 0 -and ($probe -join '').Trim() -eq 'True') {
+            return $candidate
+        }
+    }
+    throw 'A Python 3.11+ interpreter is required for the deployment workflow integration test.'
+}
+
 function Invoke-Workflow {
     param(
         [Parameter(Mandatory)][string]$ScriptPath,
@@ -143,6 +167,9 @@ try {
     $evidenceText = Get-Content -LiteralPath (Join-Path $scriptRoot '03_CollectTargetEvidence.ps1') -Raw
     Assert-True ($evidenceText -match 'GetMachineInfo\.ps1' -and $evidenceText -match 'GetVampireSurvivorsExecutableMetadata\.ps1' -and $evidenceText -match 'Get-CanonicalHash') '03 workflow must call existing evidence utilities and shared canonical hashing'
     Assert-True ($evidenceText -notmatch 'Get-FileHash') '03 workflow must not implement canonical hashing with raw Get-FileHash'
+    Assert-True ($evidenceText -match 'artifact_ref' -and $evidenceText -match 'store_uri' -and $evidenceText -match 'machine-info' -and $evidenceText -match 'executable-metadata') '03 workflow must register generated evidence files and record their artifact references'
+    $commonText = Get-Content -LiteralPath (Join-Path $scriptRoot 'SurvivorsDeployment.Common.ps1') -Raw
+    Assert-True ($commonText -match 'IsPathRooted') 'Deployment path normalization must reject relative paths'
     $evidenceRoot = Join-Path $tempRoot 'evidence'
     $primaryRoot = Join-Path $tempRoot 'primary'
     New-Item -ItemType Directory -Path $evidenceRoot, $primaryRoot -Force | Out-Null
@@ -154,6 +181,62 @@ try {
     $invalidExe = Invoke-Workflow -ScriptPath (Join-Path $scriptRoot '03_CollectTargetEvidence.ps1') -RepositoryRoot $tempRoot
     Assert-True ($invalidExe.ExitCode -ne 0) '03 workflow must reject a configured directory as the executable'
     Assert-True ($invalidExe.Output -notmatch [regex]::Escape($tempRoot)) '03 workflow must not print configured path values'
+
+    $repoEnvPath = Join-Path $repoRoot '.env\survivors_deployment.env'
+    $repoEnvDirectory = Split-Path -Parent $repoEnvPath
+    $savedRepoEnv = $null
+    if (Test-Path -LiteralPath $repoEnvPath -PathType Leaf) {
+        $savedRepoEnv = Get-Content -LiteralPath $repoEnvPath -Raw
+    }
+    $artifactRunRoot = Join-Path ([IO.Path]::GetTempPath()) ('survivors-deployment-artifact-run-' + [guid]::NewGuid().ToString('N'))
+    $artifactPrimary = Join-Path $artifactRunRoot 'primary'
+    $artifactEvidence = Join-Path $artifactRunRoot 'evidence'
+    $fakeExe = Join-Path $artifactRunRoot 'VampireSurvivors.exe'
+    $testPython = Get-TestPythonPath
+    New-Item -ItemType Directory -Path $artifactPrimary, $artifactEvidence -Force | Out-Null
+    [IO.File]::WriteAllBytes($fakeExe, [byte[]](1, 2, 3, 4))
+    try {
+        New-Item -ItemType Directory -Path $repoEnvDirectory -Force | Out-Null
+        @(
+            "REINBALANCE_PYTHON=$testPython",
+            "SURVIVORS_ARTIFACT_PRIMARY_ROOT=$artifactPrimary",
+            'SURVIVORS_ARTIFACT_BACKUP_ROOT=',
+            "SURVIVORS_EVIDENCE_ROOT=$artifactEvidence",
+            "VAMPIRE_SURVIVORS_EXE=$fakeExe",
+            'SURVIVORS_CANONICAL_SAVE=',
+            'SURVIVORS_TARGET_PROFILE='
+        ) | Set-Content -LiteralPath $repoEnvPath -Encoding UTF8
+        $oldPythonPath = $env:PYTHONPATH
+        $env:PYTHONPATH = Join-Path $repoRoot 'Tools\Common\src'
+        try {
+            $evidenceRun = Invoke-Workflow -ScriptPath (Join-Path $scriptRoot '03_CollectTargetEvidence.ps1') -RepositoryRoot $repoRoot
+        }
+        finally {
+            $env:PYTHONPATH = $oldPythonPath
+        }
+        Assert-Equal $evidenceRun.ExitCode 0 '03 workflow should register all generated evidence files'
+        $manifest = @(Get-ChildItem -LiteralPath $artifactEvidence -Filter 'target-evidence-*.json' -File)
+        Assert-Equal $manifest.Count 1 '03 workflow must create one target evidence manifest'
+        $manifestJson = Get-Content -LiteralPath $manifest[0].FullName -Raw | ConvertFrom-Json
+        foreach ($record in @($manifestJson.machine_info, $manifestJson.executable_metadata)) {
+            Assert-True (-not [string]::IsNullOrWhiteSpace([string]$record.canonical_hash)) 'Evidence record must include a canonical hash'
+            Assert-True (-not [string]::IsNullOrWhiteSpace([string]$record.artifact_ref.store_uri)) 'Evidence record must include an artifact URI'
+            Assert-True (([string]$record.artifact_ref.sha256).Length -eq 64) 'Evidence record must include an artifact content hash'
+        }
+        $primaryObjects = @(Get-ChildItem -LiteralPath (Join-Path $artifactPrimary 'objects\sha256') -Recurse -File)
+        Assert-True ($primaryObjects.Count -ge 3) '03 workflow must publish manifest and generated evidence objects'
+    }
+    finally {
+        if ($null -eq $savedRepoEnv) {
+            if (Test-Path -LiteralPath $repoEnvPath) { Remove-Item -LiteralPath $repoEnvPath -Force }
+        }
+        else {
+            Set-Content -LiteralPath $repoEnvPath -Value $savedRepoEnv -Encoding UTF8
+        }
+        if (Test-Path -LiteralPath $artifactRunRoot) {
+            Remove-Item -LiteralPath $artifactRunRoot -Recurse -Force
+        }
+    }
 
     $smokeText = Get-Content -LiteralPath (Join-Path $scriptRoot '04_VerifyDeploymentSmoke.ps1') -Raw
     Assert-True ($smokeText -match '--synthetic' -and $smokeText -match '--duration-sec' -and $smokeText -match '--store-root') '04 workflow must use the safe synthetic CLI'

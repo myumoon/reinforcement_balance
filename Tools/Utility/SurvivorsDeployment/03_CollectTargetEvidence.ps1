@@ -37,7 +37,7 @@ function Invoke-IsolatedUtility {
         if ($LASTEXITCODE -ne 0) {
             throw 'Existing evidence utility returned a failure.'
         }
-        $generated = @(Get-ChildItem -LiteralPath $runRoot -File -Filter $OutputPattern)
+        $generated = @(Get-ChildItem -LiteralPath $runRoot -File -Filter $OutputPattern -Recurse)
         if ($generated.Count -ne 1) {
             throw 'Existing evidence utility did not produce its expected output.'
         }
@@ -50,6 +50,43 @@ function Invoke-IsolatedUtility {
             Remove-Item -LiteralPath $runRoot -Recurse -Force
         }
     }
+}
+
+function Publish-EvidenceArtifact {
+    param(
+        [Parameter(Mandatory)][string]$PythonPath,
+        [Parameter(Mandatory)][string]$ManageScript,
+        [Parameter(Mandatory)][string]$StoreRoot,
+        [Parameter(Mandatory)][string]$LogicalId,
+        [Parameter(Mandatory)][string]$SourcePath,
+        [Parameter(Mandatory)][string]$MediaType,
+        [Parameter(Mandatory)][string]$RepositoryRoot
+    )
+
+    $output = @(Invoke-ConfiguredPython -PythonPath $PythonPath -WorkingDirectory $RepositoryRoot -CaptureOutput -Arguments @(
+            $ManageScript,
+            '--store-root', $StoreRoot,
+            'put',
+            '--logical-id', $LogicalId,
+            '--source', $SourcePath,
+            '--media-type', $MediaType
+        ))
+    $references = foreach ($line in $output) {
+        try {
+            $candidate = ([string]$line).Trim() | ConvertFrom-Json
+        }
+        catch {
+            continue
+        }
+        if ($null -ne $candidate -and $candidate.PSObject.Properties.Name -contains 'store_uri') {
+            $candidate
+        }
+    }
+    $reference = $references | Select-Object -Last 1
+    if ($null -eq $reference -or [string]$reference.store_uri -notmatch '^artifact://sha256/[0-9a-f]{64}$') {
+        throw 'Artifact registration did not return a valid artifact reference.'
+    }
+    return $reference
 }
 
 $logLines = @('workflow=03_CollectTargetEvidence', 'status=failed')
@@ -78,7 +115,7 @@ try {
         }
     }
 
-    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
     $machineInfoOutput = Invoke-IsolatedUtility `
         -SourceScript $machineInfoScript `
         -CopyNames @('GetMachineInfo.ps1', 'MachineInfo.psm1') `
@@ -97,6 +134,33 @@ try {
         [string]$settings['REINBALANCE_PYTHON']
     }
     else { $null }
+    $manageScript = Join-Path $RepositoryRoot 'Tools\Artifacts\manage_artifacts.py'
+    if (-not (Test-Path -LiteralPath $manageScript -PathType Leaf)) {
+        throw 'Tools/Artifacts/manage_artifacts.py is missing.'
+    }
+    if ([string]::IsNullOrWhiteSpace($python)) {
+        $command = Get-Command python -ErrorAction SilentlyContinue
+        if ($null -eq $command) { throw 'Python is required to register evidence.' }
+        $python = $command.Source
+    }
+
+    $machineInfoRef = Publish-EvidenceArtifact `
+        -PythonPath $python `
+        -ManageScript $manageScript `
+        -StoreRoot $primary `
+        -LogicalId "target-evidence/$stamp/machine-info" `
+        -SourcePath $machineInfoOutput `
+        -MediaType 'application/json' `
+        -RepositoryRoot $RepositoryRoot
+    $metadataRef = Publish-EvidenceArtifact `
+        -PythonPath $python `
+        -ManageScript $manageScript `
+        -StoreRoot $primary `
+        -LogicalId "target-evidence/$stamp/executable-metadata" `
+        -SourcePath $metadataOutput `
+        -MediaType 'application/json' `
+        -RepositoryRoot $RepositoryRoot
+
     $records = [ordered]@{
         schema_version = 'survivors.target-evidence.v1'
         collected_at_utc = (Get-Date).ToUniversalTime().ToString('o')
@@ -104,8 +168,16 @@ try {
             basename = Split-Path -Leaf $exe
             canonical_hash = Get-CanonicalHash -Path $exe -PythonPath $python
         }
-        machine_info = [ordered]@{ basename = Split-Path -Leaf $machineInfoOutput }
-        executable_metadata = [ordered]@{ basename = Split-Path -Leaf $metadataOutput }
+        machine_info = [ordered]@{
+            basename = Split-Path -Leaf $machineInfoOutput
+            canonical_hash = Get-CanonicalHash -Path $machineInfoOutput -PythonPath $python
+            artifact_ref = $machineInfoRef
+        }
+        executable_metadata = [ordered]@{
+            basename = Split-Path -Leaf $metadataOutput
+            canonical_hash = Get-CanonicalHash -Path $metadataOutput -PythonPath $python
+            artifact_ref = $metadataRef
+        }
     }
 
     foreach ($optional in @(
@@ -125,25 +197,15 @@ try {
     }
 
     $manifestPath = Join-Path $evidence "target-evidence-$stamp.json"
-    $records | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
-    $manageScript = Join-Path $RepositoryRoot 'Tools\Artifacts\manage_artifacts.py'
-    if (-not (Test-Path -LiteralPath $manageScript -PathType Leaf)) {
-        throw 'Tools/Artifacts/manage_artifacts.py is missing.'
-    }
-    if ([string]::IsNullOrWhiteSpace($python)) {
-        $command = Get-Command python -ErrorAction SilentlyContinue
-        if ($null -eq $command) { throw 'Python is required to register evidence.' }
-        $python = $command.Source
-    }
-    $logicalId = "target-evidence-$stamp"
-    Invoke-ConfiguredPython -PythonPath $python -WorkingDirectory $RepositoryRoot -Arguments @(
-        $manageScript,
-        '--store-root', $primary,
-        'put',
-        '--logical-id', $logicalId,
-        '--source', $manifestPath,
-        '--media-type', 'application/json'
-    ) | Out-Null
+    $records | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+    $manifestRef = Publish-EvidenceArtifact `
+        -PythonPath $python `
+        -ManageScript $manageScript `
+        -StoreRoot $primary `
+        -LogicalId "target-evidence/$stamp/manifest" `
+        -SourcePath $manifestPath `
+        -MediaType 'application/json' `
+        -RepositoryRoot $RepositoryRoot
 
     & git -C $RepositoryRoot diff --quiet -- Tools/Deployment/configs
     if ($LASTEXITCODE -ne 0) {
@@ -155,7 +217,9 @@ try {
         "evidence_basename=$(Split-Path -Leaf $manifestPath)",
         "executable_basename=$(Split-Path -Leaf $exe)",
         'canonical_hash=passed',
-        'artifact_registration=passed',
+        'machine_info_artifact=passed',
+        'executable_metadata_artifact=passed',
+        "manifest_artifact_uri=$($manifestRef.store_uri)",
         'tracked_config_check=passed'
     )
     Write-OperatorLog -Name 'collect-target-evidence' -Lines $logLines | Out-Null

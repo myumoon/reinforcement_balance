@@ -90,6 +90,9 @@ function Get-NormalizedDeploymentPath {
     if ([string]::IsNullOrWhiteSpace($Path)) {
         throw 'Deployment path must not be empty.'
     }
+    if (-not [IO.Path]::IsPathRooted($Path)) {
+        throw 'Deployment paths must be absolute.'
+    }
     $fullPath = [IO.Path]::GetFullPath($Path)
     $pathRoot = [IO.Path]::GetPathRoot($fullPath)
     if ($fullPath.Equals($pathRoot, [StringComparison]::OrdinalIgnoreCase)) {
@@ -281,18 +284,11 @@ function Get-CanonicalHash {
     $env:PYTHONPATH = $commonSource
     try {
         $code = @'
-import hashlib
-import json
 import sys
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
 
-path = sys.argv[1]
-data = open(path, "rb").read()
-try:
-    value = json.loads(data.decode("utf-8-sig"))
-except (UnicodeDecodeError, json.JSONDecodeError):
-    value = {"sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)}
-print(canonical_hash(value))
+data = open(sys.argv[1], 'rb').read()
+print(canonical_hash({'bytes_hex': data.hex()}))
 '@
         $result = @(Invoke-ConfiguredPython -PythonPath $PythonPath -Arguments @('-c', $code, $Path) -WorkingDirectory (Get-RepositoryRoot) -CaptureOutput)
     }

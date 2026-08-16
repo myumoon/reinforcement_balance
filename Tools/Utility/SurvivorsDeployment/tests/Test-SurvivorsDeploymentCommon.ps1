@@ -45,6 +45,30 @@ function Assert-Throws {
     Assert-True $thrown $Message
 }
 
+function Get-TestPythonPath {
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:CONDA_PREFIX)) {
+        $candidates += Join-Path $env:CONDA_PREFIX 'python.exe'
+    }
+    $condaCommand = Get-Command conda -ErrorAction SilentlyContinue
+    if ($null -ne $condaCommand) {
+        $candidates += @(& $condaCommand.Source run -n reinbalance python -c 'import sys; print(sys.executable)' 2>$null)
+    }
+    $candidates += Join-Path ([Environment]::GetFolderPath('UserProfile')) 'anaconda3\envs\reinbalance\python.exe'
+    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -ne $pythonCommand) {
+        $candidates += $pythonCommand.Source
+    }
+    foreach ($candidate in ($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        $probe = @(& $candidate -c 'import sys; print(sys.version_info >= (3, 11))' 2>$null)
+        if ($LASTEXITCODE -eq 0 -and ($probe -join '').Trim() -eq 'True') {
+            return $candidate
+        }
+    }
+    throw 'A Python 3.11+ interpreter is required for the canonical hash regression test.'
+}
+
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\..'))
 $commonPath = Join-Path $PSScriptRoot '..\SurvivorsDeployment.Common.ps1'
 Assert-True (Test-Path -LiteralPath $commonPath -PathType Leaf) 'Common helper is missing.'
@@ -119,6 +143,23 @@ REINBALANCE_PYTHON
         Assert-PathOutsideRepository -Path (Join-Path $repoRoot 'Tools') -RepositoryRoot $repoRoot
     } 'Repository paths must be rejected as artifact destinations'
     Assert-PathOutsideRepository -Path (Join-Path $tempRoot 'external') -RepositoryRoot $repoRoot
+    Assert-Throws {
+        Get-NormalizedDeploymentPath -Path 'relative-external-store'
+    } 'Deployment paths must reject relative values'
+
+    $binaryPath = Join-Path $tempRoot 'hash-fixture.bin'
+    [IO.File]::WriteAllBytes($binaryPath, [byte[]](0, 1, 2, 255))
+    $binaryHex = (([IO.File]::ReadAllBytes($binaryPath) | ForEach-Object { '{0:x2}' -f $_ }) -join '')
+    $canonicalJson = '{"bytes_hex":"' + $binaryHex + '"}'
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $expectedHash = ([BitConverter]::ToString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonicalJson)))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+    $configuredPython = Get-TestPythonPath
+    Assert-Equal (Get-CanonicalHash -Path $binaryPath -PythonPath $configuredPython) $expectedHash 'Canonical file hash must match target_audit byte hashing'
 
     $fakeVolumeResolver = {
         param([string]$Path)

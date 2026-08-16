@@ -35,6 +35,8 @@ PR #308 が `main` にマージされた後だけ、最後に次を実行しま�
 
 save と profile の本体はコピーしません。設定されたファイルが存在することを確認し、外部 evidence に basename と canonical hash だけを記録します。空欄の save/profile を自動探索して canonical 扱いすることもありません。
 
+MachineInfo JSON と executable metadata JSON は、収集後にそれぞれ primary artifact store へ登録します。target-evidence manifest には各ファイルの canonical hash と `artifact_ref`（content SHA-256、サイズ、`artifact://sha256/...` URI）を記録します。対象ゲーム exe 本体はコピーせず、basename と canonical hash のみを記録します。
+
 ## artifact store の安全境界
 
 primary、backup、evidence はすべてリポジトリ外でなければなりません。`02` は通常実行でも次を必ず検証します。
