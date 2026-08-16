@@ -193,6 +193,19 @@ def test_undo_after_second_review_restores_original_annotation(tmp_path):
     assert records[0].bbox == orig.bbox
 
 
+def test_annotation_writer_resume_rejects_corrupted_jsonl(tmp_path):
+    """resume=True時も破損JSONL（non-second_review重複）をValueErrorで拒否する。"""
+    _publish_session(tmp_path, "session-a")
+    writer = AnnotationWriter(tmp_path, "session-a")
+    writer.write_annotation(0, (0, 0, 10, 10), "enemy", "operator")
+    ann_path = writer.session_path / "annotations.jsonl"
+    first_line = ann_path.read_bytes().splitlines()[0]
+    ann_path.write_bytes(ann_path.read_bytes() + first_line + b"\n")
+
+    with pytest.raises(ValueError, match="duplicate"):
+        AnnotationWriter(tmp_path, "session-a", resume=True)
+
+
 def test_read_annotations_rejects_non_second_review_duplicate(tmp_path):
     """second_reviewフラグなしの重複はJSONL破損とみなしValueErrorになる。"""
     _publish_session(tmp_path, "session-a")

@@ -825,13 +825,27 @@ class AnnotationWriter:
         if self.annotation_path.exists() and not resume:
             raise ValueError("annotations already exist; use resume=True")
         # 全ログ履歴をJSONL順序のまま保持 — undo()が_historyから書き直して監査証跡を維持する
+        # read_annotations()と同じ重複検証を適用してresume時にも破損JSONLを拒否する
         self._history: list[AnnotationRecord] = []
         if self.annotation_path.exists():
-            with self.annotation_path.open("r", encoding="utf-8") as _af:
-                for _al in _af:
-                    _al = _al.strip()
-                    if _al:
-                        self._history.append(_annotation_from_wire(json.loads(_al)))
+            _seen_keys: dict[tuple[int, str], bool] = {}
+            for _line_no, _al in enumerate(
+                self.annotation_path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                _al = _al.strip()
+                if not _al:
+                    continue
+                try:
+                    _rec = _annotation_from_wire(json.loads(_al))
+                except (json.JSONDecodeError, TypeError, KeyError) as exc:
+                    raise ValueError(f"invalid annotation at line {_line_no}") from exc
+                _key = _rec.frame_id, _rec.class_name
+                if _key in _seen_keys and not _rec.second_review:
+                    raise ValueError(
+                        f"duplicate annotation at line {_line_no} without second_review flag"
+                    )
+                _seen_keys[_key] = True
+                self._history.append(_rec)
         _seen_init: dict[tuple[int, str], AnnotationRecord] = {}
         for _r in self._history:
             _seen_init[_r.frame_id, _r.class_name] = _r

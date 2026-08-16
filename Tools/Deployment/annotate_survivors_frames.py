@@ -16,7 +16,7 @@ def _parser() -> argparse.ArgumentParser:
             "[--annotator-id ANNOTATOR_ID] [--resume] [--second-review]"
         ),
         epilog=(
-            "stdin: FRAME_ID CLASS LEFT TOP RIGHT BOTTOM; commands: undo, skip FRAME_ID, done"
+            "stdin: FRAME_ID CLASS LEFT TOP RIGHT BOTTOM; commands: undo, skip FRAME_ID, unskip FRAME_ID, done"
         ),
     )
     parser.add_argument("--store-root", required=True)
@@ -36,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if sys.stdin.isatty():
         print("classes: " + ", ".join(SEMANTIC_CLASSES))
-        print("enter FRAME_ID CLASS LEFT TOP RIGHT BOTTOM, undo, skip FRAME_ID, or done")
+        print("enter FRAME_ID CLASS LEFT TOP RIGHT BOTTOM, undo, skip FRAME_ID, unskip FRAME_ID, or done")
     for raw_line in sys.stdin:
         parts = raw_line.strip().split()
         if not parts:
@@ -52,6 +52,15 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"error: {exc}", file=sys.stderr)
             else:
                 print("error: skip requires FRAME_ID — use: skip FRAME_ID", file=sys.stderr)
+            continue
+        if command == "unskip":
+            if len(parts) >= 2:
+                try:
+                    writer.write_unskip(int(parts[1]))
+                except (ValueError, TypeError) as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+            else:
+                print("error: unskip requires FRAME_ID — use: unskip FRAME_ID", file=sys.stderr)
             continue
         if command == "undo":
             removed = writer.undo()
