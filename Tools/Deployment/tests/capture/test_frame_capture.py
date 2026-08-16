@@ -199,6 +199,44 @@ def test_capture_rejects_wrong_resolution_channels_and_dtype(
         session.capture_next()
 
 
+@pytest.mark.parametrize("failure_mode", ["bad_frame", "state_loss", "stale_timestamp"])
+def test_capture_releases_backend_on_validation_failure_without_close(
+    failure_mode, profile, policy, fake_api, target_window, golden_bgra
+):
+    """frame/state/timestamp 検証失敗後に close() なしでも release() されることを確認する。
+
+    capture_next() 例外後に呼び出し側が close() を呼ばなくても
+    DXcam リソースがリークしないことを保証します。
+    """
+    from conftest import FakeCaptureBackend
+
+    if failure_mode == "bad_frame":
+        bad = np.zeros((720, 1280, 4), dtype=np.uint8)
+        backend = FakeCaptureBackend([(bad, 100)])
+        exc_type = CaptureFrameError
+    elif failure_mode == "state_loss":
+        def on_read():
+            target_window.client_rect = (0, 0, 1280, 720)
+        backend = FakeCaptureBackend([(golden_bgra.copy(), 100)], after_read=on_read)
+        exc_type = TargetWindowStateError
+    else:  # stale_timestamp — 1 枚目成功後に同 ts で失敗
+        backend = FakeCaptureBackend([(golden_bgra.copy(), 100), (golden_bgra.copy(), 100)])
+        exc_type = CaptureFrameError
+
+    session = _session(profile, policy, fake_api, backend)
+    session.start()
+
+    if failure_mode == "stale_timestamp":
+        session.capture_next()  # 1 枚目は成功
+
+    with pytest.raises(exc_type):
+        session.capture_next()
+
+    # close() を呼ばずとも stop と release が保証される
+    assert backend.stopped is True
+    assert backend.released is True
+
+
 def test_capture_clears_queue_and_stops_on_frame_validation_failure(
     profile, policy, fake_api, golden_bgra
 ):

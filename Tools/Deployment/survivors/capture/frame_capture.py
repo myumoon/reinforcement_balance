@@ -210,13 +210,18 @@ class CaptureSession:
             ):
                 raise CaptureFrameError("captured monotonic timestamp did not increase")
         except Exception:
-            # 状態異常/検証失敗時: stale frame を破棄し backend を停止して以降の capture を無効化する
+            # 状態異常/検証失敗時: stale frame を破棄し backend を停止・解放して session を完全無効化する
             self.frames.clear()
             self._started = False
+            self._closed = True  # close() による二重 stop/release を防ぐ
             try:
                 self._backend.stop()
             except Exception:
-                pass  # ベストエフォート — close() で release() は保証される
+                pass
+            try:
+                self._backend.release()
+            except Exception:
+                pass
             raise
         captured = CapturedFrame(
             frame_bgra=frame_bgra,

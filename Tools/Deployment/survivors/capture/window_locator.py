@@ -375,8 +375,10 @@ class CtypesDxgiEnumerator:
         if hr != 0 or not factory_ptr.value:
             raise OSError(f"CreateDXGIFactory failed: 0x{hr & 0xFFFFFFFF:08x}")
 
-        result = self._scan(factory_ptr.value, device_name)
-        self._release(factory_ptr.value)
+        try:
+            result = self._scan(factory_ptr.value, device_name)
+        finally:
+            self._release(factory_ptr.value)  # 例外の有無にかかわらず COM factory を解放する
         if result is None:
             raise OSError(f"DXGI output for {device_name!r} not found")
         return result
