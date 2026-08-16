@@ -8,12 +8,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import ctypes
 from ctypes import wintypes
-import hashlib
 import ntpath
 from pathlib import Path
 import sys
 from typing import Iterable, Protocol, runtime_checkable
 
+from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from survivors.target_profile import TargetProfile
 
 
@@ -382,8 +382,13 @@ class CtypesDxgiEnumerator:
         return result
 
     def _scan(self, factory: int, target: str) -> tuple[int, int] | None:
-        """factory からすべての adapter/output を走査し target の (adapter_idx, output_sub_idx) を返す。"""
+        """factory からすべての adapter/output を走査し target の (dxcam_device_idx, output_sub_idx) を返す。
+
+        dxcam_device_idx は output を持つ adapter のみを DXcam と同じ方式でカウントします。
+        output がない headless adapter は DXcam が除外するため、raw adapter_idx とは異なります。
+        """
         adapter_idx = 0
+        dxcam_device_idx = 0  # output を持つ adapter だけをカウント（DXcam の device 体系に合わせる）
         while True:
             adapter_ptr = ctypes.c_void_p(0)
             # IDXGIFactory vtable[7] = EnumAdapters(UINT, IDXGIAdapter**)
@@ -396,6 +401,7 @@ class CtypesDxgiEnumerator:
             if hr != 0:
                 raise OSError(f"EnumAdapters({adapter_idx}) failed: 0x{hr & 0xFFFFFFFF:08x}")
             adapter = adapter_ptr.value
+            adapter_has_outputs = False
             try:
                 output_sub_idx = 0
                 while True:
@@ -411,6 +417,7 @@ class CtypesDxgiEnumerator:
                         raise OSError(
                             f"EnumOutputs({output_sub_idx}) failed: 0x{hr2 & 0xFFFFFFFF:08x}"
                         )
+                    adapter_has_outputs = True
                     output = output_ptr.value
                     try:
                         desc = _DxgiOutputDesc()
@@ -420,12 +427,14 @@ class CtypesDxgiEnumerator:
                             output, ctypes.byref(desc)
                         )
                         if hr3 == 0 and desc.DeviceName == target:
-                            return adapter_idx, output_sub_idx
+                            return dxcam_device_idx, output_sub_idx
                     finally:
                         self._release(output)
                     output_sub_idx += 1
             finally:
                 self._release(adapter)
+            if adapter_has_outputs:
+                dxcam_device_idx += 1  # output を持つ adapter のみ device として数える
             adapter_idx += 1
         return None
 
@@ -611,11 +620,12 @@ class CtypesWin32Api:
         return int(hwnd) if hwnd else None
 
     def executable_hash_sha256(self, path: str) -> str:
-        """実行ファイルの SHA-256 ハッシュを返す。
+        """実行ファイルの canonical_hash を返す。
 
-        target profile の build.executable_hash と照合するために使います。
+        target_audit.py と同じ canonical_hash({"bytes_hex": ...}) 方式を使い、
+        target profile の build.executable_hash と一致形式を揃えます。
         """
-        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        return canonical_hash({"bytes_hex": Path(path).read_bytes().hex()})
 
     @staticmethod
     def _raise_last_error(operation: str) -> None:

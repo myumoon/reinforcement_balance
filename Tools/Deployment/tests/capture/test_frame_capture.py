@@ -199,6 +199,39 @@ def test_capture_rejects_wrong_resolution_channels_and_dtype(
         session.capture_next()
 
 
+def test_capture_clears_queue_on_state_loss_even_with_prior_frames(
+    profile, policy, fake_api, target_window, golden_bgra
+):
+    """状態異常前に成功した frame も queue から破棄されることを確認する。
+
+    正常な capture の後に状態異常が起きた場合、直前の stale frame が consumer に渡らないことを保証します。
+    """
+    from conftest import FakeCaptureBackend
+
+    calls = [0]
+
+    def mutate_on_second():
+        calls[0] += 1
+        if calls[0] >= 2:
+            target_window.client_rect = (0, 0, 1280, 720)
+
+    backend = FakeCaptureBackend(
+        [(golden_bgra.copy(), 100), (golden_bgra.copy(), 200)],
+        after_read=mutate_on_second,
+    )
+    session = _session(profile, policy, fake_api, backend)
+    session.start()
+
+    session.capture_next()  # 成功 → frame A が queue に残る（consumer はまだ読んでいない）
+
+    with pytest.raises(TargetWindowStateError):
+        session.capture_next()  # 2 枚目 read 後に resize → 状態異常
+
+    # queue は clear されており frame A も含まれない
+    with pytest.raises(Empty):
+        session.frames.get_latest_nowait()
+
+
 @pytest.mark.parametrize("state_change", ["focus", "resize"])
 def test_capture_revalidates_after_read_and_emits_nothing_on_state_loss(
     profile, policy, fake_api, target_window, golden_bgra, state_change

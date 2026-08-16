@@ -102,8 +102,9 @@ class DxcamCaptureBackend:
         result = self._camera.get_latest_frame(with_timestamp=True)
         if result is None:
             return None
-        frame, ts = result
-        return frame, ts
+        frame, ts_sec = result
+        # DXcam v0.3.0 は float 秒(time.perf_counter)で返すためナノ秒へ変換する
+        return frame, int(ts_sec * 1_000_000_000)
 
     def stop(self) -> None:
         self._camera.stop()
@@ -172,16 +173,16 @@ class CaptureSession:
         if self._started:
             raise CaptureFrameError("capture session is already started")
         self._locator.validate(self.target, require_foreground=True)
-        self._backend.start(
-            region=self.target.client_rect_screen_px,
-            target_fps=TARGET_FPS,
-        )
+        backend_started = False
         try:
+            self._backend.start(region=self.target.client_rect_screen_px, target_fps=TARGET_FPS)
+            backend_started = True
             self._locator.validate(self.target, require_foreground=True)
         except Exception:
             self._closed = True  # close() による二重 release を防ぐ
             try:
-                self._backend.stop()
+                if backend_started:
+                    self._backend.stop()
             finally:
                 self._backend.release()
             raise
@@ -190,10 +191,20 @@ class CaptureSession:
     def capture_next(self) -> CapturedFrame | None:
         if not self._started or self._closed:
             raise CaptureFrameError("capture session is not active")
-        # P2-1: DXGI 再列挙を避ける軽量検証を frame ごとに使う
-        self._locator.validate_lightweight(self.target, require_foreground=True)
-        backend_result = self._backend.get_latest_frame()
-        self._locator.validate_lightweight(self.target, require_foreground=True)
+        try:
+            # P2-1: DXGI 再列挙を避ける軽量検証を frame ごとに使う
+            self._locator.validate_lightweight(self.target, require_foreground=True)
+            backend_result = self._backend.get_latest_frame()
+            self._locator.validate_lightweight(self.target, require_foreground=True)
+        except Exception:
+            # 状態異常時: stale frame を破棄し backend を停止して以降の capture を無効化する
+            self.frames.clear()
+            self._started = False
+            try:
+                self._backend.stop()
+            except Exception:
+                pass  # ベストエフォート — close() で release() は保証される
+            raise
         if backend_result is None:
             return None
         frame_bgra, captured_ns = backend_result  # P2-3: backend が capture 時刻を持つ
