@@ -85,3 +85,9 @@ Thumbs.db
 .claude/review-*.json
 .claude/snapshot-*.txt
 *.back
+
+# 本家VS キャプチャ実データ (Git外 artifact store へ)
+Tools/Deployment/capture_store/
+*.real.png
+*.real.mp4
+capture_sessions/
