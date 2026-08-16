@@ -36,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if sys.stdin.isatty():
         print("classes: " + ", ".join(SEMANTIC_CLASSES))
-        print("enter FRAME_ID CLASS LEFT TOP RIGHT BOTTOM, undo, skip, or done")
+        print("enter FRAME_ID CLASS LEFT TOP RIGHT BOTTOM, undo, skip FRAME_ID, or done")
     for raw_line in sys.stdin:
         parts = raw_line.strip().split()
         if not parts:

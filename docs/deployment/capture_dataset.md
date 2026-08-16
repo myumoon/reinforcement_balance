@@ -42,7 +42,7 @@ python Tools/Deployment/annotate_survivors_frames.py \
   --annotator-id operator-01 --resume
 ```
 
-stdin へ `FRAME_ID CLASS LEFT TOP RIGHT BOTTOM` を入力する。`undo` は最後の annotation を削除、`skip` は現在の入力を保存せず進み、`done` は終了する。second review は `--second-review` を付ける。各 annotation は即時 `annotations.jsonl` へ autosave される。
+stdin へ `FRAME_ID CLASS LEFT TOP RIGHT BOTTOM` を入力する。`undo` は最後の annotation を削除、`skip FRAME_ID` は指定フレームをスキップとして記録して進む（再アノテーションするには `write_unskip()` が必要）、`done` は終了する。second review は `--second-review` を付ける（初回レコードは JSONL に残り監査証跡として保持される）。各 annotation は即時 `annotations.jsonl` へ autosave される。
 
 ## Split freeze workflow
 

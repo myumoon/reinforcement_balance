@@ -824,8 +824,19 @@ class AnnotationWriter:
         self.annotation_path = self.session_path / "annotations.jsonl"
         if self.annotation_path.exists() and not resume:
             raise ValueError("annotations already exist; use resume=True")
-        self._annotations = list(self.read_annotations(self.store_root, self.session_id))
-        self._keys = {(item.frame_id, item.class_name) for item in self._annotations}
+        # 全ログ履歴をJSONL順序のまま保持 — undo()が_historyから書き直して監査証跡を維持する
+        self._history: list[AnnotationRecord] = []
+        if self.annotation_path.exists():
+            with self.annotation_path.open("r", encoding="utf-8") as _af:
+                for _al in _af:
+                    _al = _al.strip()
+                    if _al:
+                        self._history.append(_annotation_from_wire(json.loads(_al)))
+        _seen_init: dict[tuple[int, str], AnnotationRecord] = {}
+        for _r in self._history:
+            _seen_init[_r.frame_id, _r.class_name] = _r
+        self._annotations: list[AnnotationRecord] = list(_seen_init.values())
+        self._keys: set[tuple[int, str]] = set(_seen_init.keys())
         # 公開済みセッションの有効なframe_idセットを読み込む（metadata hash改ざん検証付き）
         manifest_wire = json.loads((self.session_path / "session_manifest.json").read_bytes())
         metadata_path = _resolve_relative(
@@ -876,6 +887,8 @@ class AnnotationWriter:
         )
         if record.frame_id not in self._valid_frame_ids:
             raise ValueError(f"frame_id {record.frame_id} is not in published session")
+        if record.frame_id in self._skipped_frame_ids:
+            raise ValueError(f"frame_id {record.frame_id} was skipped; call write_unskip() first")
         key = record.frame_id, record.class_name
         if key in self._keys:
             if not second_review:
@@ -883,11 +896,11 @@ class AnnotationWriter:
                     f"duplicate annotation for frame_id/class: {record.frame_id}/{record.class_name}"
                 )
             # second_review=True: 既存レコードを残したまま追記し監査証跡を保持する
-            # read_annotations()はlast-winsでlatest recordを返す
             with self.annotation_path.open("ab") as stream:
                 stream.write(_canonical_json(_annotation_to_wire(record)))
                 stream.flush()
                 os.fsync(stream.fileno())
+            self._history.append(record)
             self._annotations = [r for r in self._annotations if (r.frame_id, r.class_name) != key]
             self._annotations.append(record)
             return record
@@ -895,6 +908,7 @@ class AnnotationWriter:
             stream.write(_canonical_json(_annotation_to_wire(record)))
             stream.flush()
             os.fsync(stream.fileno())
+        self._history.append(record)
         self._annotations.append(record)
         self._keys.add(key)
         return record
@@ -910,19 +924,47 @@ class AnnotationWriter:
             stream.write(_canonical_json({"frame_id": frame_id}))
             stream.flush()
             os.fsync(stream.fileno())
+        self._skipped_frame_ids = frozenset(self._skipped_frame_ids | {frame_id})
+
+    def write_unskip(self, frame_id: int) -> None:
+        """スキップを解除してwrite_annotation()で再度アノテーション可能にする。"""
+        if type(frame_id) is not int or frame_id < 0:
+            raise ValueError("frame_id must be a non-negative integer")
+        if frame_id not in self._skipped_frame_ids:
+            return
+        remaining = self._skipped_frame_ids - {frame_id}
+        skip_path = self.session_path / "skips.jsonl"
+        temp_path = self.session_path / ".skips.jsonl.tmp"
+        with temp_path.open("wb") as stream:
+            for fid in sorted(remaining):
+                stream.write(_canonical_json({"frame_id": fid}))
+            stream.flush()
+            os.fsync(stream.fileno())
+        if remaining:
+            os.replace(temp_path, skip_path)
+        else:
+            temp_path.unlink()
+            skip_path.unlink(missing_ok=True)
+        self._skipped_frame_ids = frozenset(remaining)
 
     def undo(self) -> AnnotationRecord | None:
-        if not self._annotations:
+        """最後に書き込んだレコードを取り消す。second_review後のundoは初回アノテーションに戻る。"""
+        if not self._history:
             return None
-        removed = self._annotations.pop()
-        self._keys.remove((removed.frame_id, removed.class_name))
+        removed = self._history.pop()
         temp_path = self.session_path / ".annotations.jsonl.tmp"
         with temp_path.open("wb") as stream:
-            for record in self._annotations:
+            for record in self._history:
                 stream.write(_canonical_json(_annotation_to_wire(record)))
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temp_path, self.annotation_path)
+        # _historyからlast-wins viewを再構築
+        _seen: dict[tuple[int, str], AnnotationRecord] = {}
+        for r in self._history:
+            _seen[r.frame_id, r.class_name] = r
+        self._annotations = list(_seen.values())
+        self._keys = set(_seen.keys())
         return removed
 
     @classmethod
@@ -937,15 +979,23 @@ class AnnotationWriter:
         path = session_path / "annotations.jsonl"
         if not path.exists():
             return ()
-        # second_reviewの重複キーはlast-wins — JSONLには初回・レビュー両方が残り監査証跡を保持する
+        # second_reviewフラグを持つ重複はlast-wins; それ以外の重複はJSONL破損とみなしエラー
         seen: dict[tuple[int, str], AnnotationRecord] = {}
         with path.open("r", encoding="utf-8") as stream:
             for line_number, line in enumerate(stream, start=1):
+                line = line.strip()
+                if not line:
+                    continue
                 try:
                     record = _annotation_from_wire(json.loads(line))
                 except (json.JSONDecodeError, TypeError, KeyError) as exc:
                     raise ValueError(f"invalid annotation at line {line_number}") from exc
-                seen[record.frame_id, record.class_name] = record
+                key = record.frame_id, record.class_name
+                if key in seen and not record.second_review:
+                    raise ValueError(
+                        f"duplicate annotation at line {line_number} without second_review flag"
+                    )
+                seen[key] = record
         return tuple(seen.values())
 
 

@@ -134,13 +134,14 @@ def test_second_review_appends_and_keeps_audit_trail(tmp_path):
 
 
 def test_write_skip_persists_to_jsonl(tmp_path):
-    """write_skip()がskips.jsonlに記録を保存する。"""
+    """write_skip()がskips.jsonlに記録を保存し_skipped_frame_idsも更新する。"""
     _publish_session(tmp_path, "session-a")
     writer = AnnotationWriter(tmp_path, "session-a")
     writer.write_skip(0)
     skip_path = writer.session_path / "skips.jsonl"
     assert skip_path.is_file()
     assert b'"frame_id"' in skip_path.read_bytes()
+    assert 0 in writer._skipped_frame_ids
 
 
 def test_annotation_writer_loads_skipped_frame_ids_on_resume(tmp_path):
@@ -152,6 +153,58 @@ def test_annotation_writer_loads_skipped_frame_ids_on_resume(tmp_path):
     resumed = AnnotationWriter(tmp_path, "session-a", resume=True)
 
     assert 0 in resumed._skipped_frame_ids
+
+
+def test_write_annotation_rejects_skipped_frame_id(tmp_path):
+    """skip済みframe_idへのアノテーションはwrite_unskip()なしでは拒否される。"""
+    _publish_session(tmp_path, "session-a")
+    writer = AnnotationWriter(tmp_path, "session-a")
+    writer.write_skip(0)
+
+    with pytest.raises(ValueError, match="skipped"):
+        writer.write_annotation(0, (0, 0, 10, 10), "enemy", "operator")
+
+
+def test_write_unskip_allows_annotation(tmp_path):
+    """write_unskip()後はskip済みframe_idへのアノテーションが可能になる。"""
+    _publish_session(tmp_path, "session-a")
+    writer = AnnotationWriter(tmp_path, "session-a")
+    writer.write_skip(0)
+    writer.write_unskip(0)
+
+    record = writer.write_annotation(0, (0, 0, 10, 10), "enemy", "operator")
+
+    assert record.frame_id == 0
+    assert 0 not in writer._skipped_frame_ids
+
+
+def test_undo_after_second_review_restores_original_annotation(tmp_path):
+    """second_review後のundoは初回アノテーションへ戻し、監査証跡を消失しない。"""
+    _publish_session(tmp_path, "session-a")
+    writer = AnnotationWriter(tmp_path, "session-a")
+    orig = writer.write_annotation(0, (0, 0, 10, 10), "enemy", "operator")
+    writer.write_annotation(0, (5, 5, 15, 15), "enemy", "reviewer", second_review=True)
+
+    removed = writer.undo()
+    records = AnnotationWriter.read_annotations(tmp_path, "session-a")
+
+    assert removed.second_review is True
+    assert len(records) == 1
+    assert records[0].bbox == orig.bbox
+
+
+def test_read_annotations_rejects_non_second_review_duplicate(tmp_path):
+    """second_reviewフラグなしの重複はJSONL破損とみなしValueErrorになる。"""
+    _publish_session(tmp_path, "session-a")
+    writer = AnnotationWriter(tmp_path, "session-a")
+    writer.write_annotation(0, (0, 0, 10, 10), "enemy", "operator")
+    # 同一レコードをsecond_review=Falseのまま直接追記（破損シミュレーション）
+    ann_path = writer.session_path / "annotations.jsonl"
+    first_line = ann_path.read_bytes().splitlines()[0]
+    ann_path.write_bytes(ann_path.read_bytes() + first_line + b"\n")
+
+    with pytest.raises(ValueError, match="duplicate"):
+        AnnotationWriter.read_annotations(tmp_path, "session-a")
 
 
 def test_annotation_writer_rejects_tampered_metadata(tmp_path):
