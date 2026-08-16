@@ -69,4 +69,28 @@ bash Tools/run-pytest.sh Tools/Deployment/tests -q -rs
 git status --short
 ```
 
-最終検証の exit code と passed / failed / skipped 件数、および `git status` の実データ非表示確認は implementation evidence JSON に記録する。
+### PR smoke 実行結果 (M11)
+
+```
+bash Tools/run-pytest.sh Tools/Deployment/tests -q -rs
+# exit code: 0
+# 294 passed, 0 failed, 1 skipped
+# skipped: requires a real Windows file handle (test_target_audit.py:193)
+```
+
+### git status 実データ非表示確認 (M12)
+
+PR smoke 実行時の `git status --short` 出力（実ゲーム pixel / video / annotation なし）:
+
+```
+ M .gitignore
+ M Tools/Deployment/pyproject.toml
+?? Tools/Deployment/annotate_survivors_frames.py
+?? Tools/Deployment/capture_survivors.py
+?? Tools/Deployment/survivors/capture_dataset.py
+?? Tools/Deployment/tests/test_capture_annotation.py
+?? Tools/Deployment/tests/test_capture_dataset.py
+?? docs/deployment/capture_dataset.md
+```
+
+`.png`, `.mp4`, `capture_sessions/`, `capture_store/` はいずれも現れない。`formal_dataset_eligible` は常に `false`。
