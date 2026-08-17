@@ -350,14 +350,12 @@ def _detect_screen_state(
     full_brightness = float(np.mean(frame_bgra[..., :3])) / 255.0
 
     if layout_score > 0.3:
-        # HUD 要素が存在 → gameplay 系
-        if brightness < _LEVELUP_OVERLAY_BRIGHTNESS_THRESHOLD:
-            # 中央が暗い: カード ROI に前景があればレベルアップ画面
-            for norm in CARD_ROIS[3]:
+        # カード ROI に前景があれば level_up_items (3枚・4枚両レイアウトを確認)
+        for norms in (CARD_ROIS[3], CARD_ROIS[4]):
+            for norm in norms:
                 crop = norm_to_pixels(norm, width, height).crop(frame_bgra)
                 if crop.size > 0 and float(np.mean(crop[..., :3] >= 32)) > 0.20:
-                    return ("level_up_items", 0.50, "hud_dark_card_fg")
-            return ("gameplay", 0.55, "hud_dark_no_card")
+                    return ("level_up_items", 0.55, "hud_card_fg")
         return ("gameplay", 0.60, f"hud_present:{layout_score:.2f}")
 
     # HUD なし
