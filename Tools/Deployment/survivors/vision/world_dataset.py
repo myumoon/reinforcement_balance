@@ -1,0 +1,294 @@
+"""WorldDetector 用 COCO dataset ローダーと preflight チェック。
+
+本家 Vampire Survivors のアノテーション済み COCO JSON を読み込み、
+session 単位での split 管理と preflight 品質チェックを提供する。
+学習ハーネスと評価ハーネスの両方からインポートされる共通 dataset 層。
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import pathlib
+from dataclasses import dataclass, field
+from typing import Any
+
+import yaml
+
+
+# ---- 例外 ----
+
+class DatasetPreflightError(ValueError):
+    """preflight の最小要件を満たさないときに送出される。"""
+
+
+# ---- class map ----
+
+@dataclass(frozen=True)
+class WorldClassMap:
+    """background 0 + foreground 11 の合計 12 クラス固定マップ。
+
+    ID ↔ 名前の変換を提供し、未知ラベルへのアクセスは KeyError を返す。
+    04-07 / 04-08 / 04-09 が同一 hash で参照する。
+    """
+
+    schema_version: str
+    class_map_version: int
+    background_label: int
+    background_name: str
+    foreground_classes: tuple[dict, ...]
+    num_classes: int
+
+    # 内部 lookup table（frozen dataclass なので __post_init__ で構築）
+    _id_to_name: dict[int, str] = field(default_factory=dict, compare=False, hash=False, repr=False)
+    _name_to_id: dict[str, int] = field(default_factory=dict, compare=False, hash=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # frozen なので object.__setattr__ で初期化する
+        id_map: dict[int, str] = {self.background_label: self.background_name}
+        name_map: dict[str, int] = {self.background_name: self.background_label}
+        for fc in self.foreground_classes:
+            id_map[fc["id"]] = fc["name"]
+            name_map[fc["name"]] = fc["id"]
+        object.__setattr__(self, "_id_to_name", id_map)
+        object.__setattr__(self, "_name_to_id", name_map)
+
+    def id_to_name(self, class_id: int) -> str:
+        """class_id → 名前。未知 ID は KeyError。"""
+        if class_id not in self._id_to_name:
+            raise KeyError(f"未知 class_id: {class_id}")
+        return self._id_to_name[class_id]
+
+    def name_to_id(self, name: str) -> int:
+        """名前 → class_id。未知名は KeyError。"""
+        if name not in self._name_to_id:
+            raise KeyError(f"未知 class name: {name}")
+        return self._name_to_id[name]
+
+    @property
+    def all_class_names(self) -> list[str]:
+        """background を含む全クラス名を ID 順に返す。"""
+        return [self._id_to_name[i] for i in range(self.num_classes)]
+
+
+def load_class_map(path: pathlib.Path | str) -> WorldClassMap:
+    """YAML ファイルから WorldClassMap を読み込む。
+
+    スキーマバージョンが一致しない場合は ValueError。
+    """
+    path = pathlib.Path(path)
+    with path.open(encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    if data.get("schema_version") != "world_class_map.v1":
+        raise ValueError(f"未知の schema_version: {data.get('schema_version')}")
+
+    return WorldClassMap(
+        schema_version=data["schema_version"],
+        class_map_version=data["class_map_version"],
+        background_label=data["background_label"],
+        background_name=data["background_name"],
+        foreground_classes=tuple(data["foreground_classes"]),
+        num_classes=data["num_classes"],
+    )
+
+
+# ---- annotation contract ----
+
+@dataclass(frozen=True)
+class COCOAnnotation:
+    """1 エンティティのアノテーション。COCO bbox [x, y, w, h] 形式。
+
+    category_id は WorldClassMap の foreground ID (1..11)。
+    """
+
+    annotation_id: int
+    image_id: int
+    category_id: int
+    bbox_xywh: tuple[float, float, float, float]
+    session_id: str
+
+
+@dataclass
+class DatasetSample:
+    """1 フレーム分のサンプル（アノテーションリスト付き）。
+
+    image_id と file_name を保持し、loader が PNG を開けるよう準備する。
+    """
+
+    image_id: int
+    file_name: str
+    image_width: int
+    image_height: int
+    annotations: list[COCOAnnotation]
+
+
+# ---- split ----
+
+@dataclass(frozen=True)
+class SessionSplit:
+    """session 単位の用途別 split。
+
+    一度構築した後は変更不可（frozen）。
+    同一 session が複数用途に割り当てられると ValueError。
+    """
+
+    train: tuple[str, ...]
+    validation: tuple[str, ...]
+    error_calibration: tuple[str, ...]
+    final_e2e_test: tuple[str, ...]
+
+    def __init__(
+        self,
+        train: list[str],
+        validation: list[str],
+        error_calibration: list[str],
+        final_e2e_test: list[str],
+    ) -> None:
+        # frozen なので object.__setattr__ で代入
+        object.__setattr__(self, "train", tuple(train))
+        object.__setattr__(self, "validation", tuple(validation))
+        object.__setattr__(self, "error_calibration", tuple(error_calibration))
+        object.__setattr__(self, "final_e2e_test", tuple(final_e2e_test))
+        self._validate_no_overlap()
+
+    def _validate_no_overlap(self) -> None:
+        all_lists = [self.train, self.validation, self.error_calibration, self.final_e2e_test]
+        seen: set[str] = set()
+        for lst in all_lists:
+            for s in lst:
+                if s in seen:
+                    raise ValueError(f"session '{s}' が複数用途に割り当てられています（overlap）。")
+                seen.add(s)
+
+    def canonical_hash(self) -> str:
+        """split 内容を確定的に SHA-256 ハッシュ化する。"""
+        payload = json.dumps(
+            {
+                "train": sorted(self.train),
+                "validation": sorted(self.validation),
+                "error_calibration": sorted(self.error_calibration),
+                "final_e2e_test": sorted(self.final_e2e_test),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(payload).hexdigest()
+
+
+# ---- dataset ----
+
+class WorldDataset:
+    """COCO JSON を読み込み、フレームごとにサンプルを提供する dataset。
+
+    class map 整合性と bbox bounds を検証し、不正なアノテーションを拒否する。
+    session_id フィールドを持たないアノテーションは session_id="" として扱う。
+    """
+
+    def __init__(
+        self,
+        annotation_path: pathlib.Path | str,
+        class_map_path: pathlib.Path | str,
+        *,
+        validate_bounds: bool = False,
+    ) -> None:
+        self._class_map = load_class_map(class_map_path)
+        self._samples = self._load(pathlib.Path(annotation_path), validate_bounds=validate_bounds)
+
+    # ---- public API ----
+
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    def __getitem__(self, idx: int) -> DatasetSample:
+        return self._samples[idx]
+
+    def run_preflight(
+        self,
+        min_frames: int,
+        min_entities: int,
+        min_classes: int,
+        min_time_bands: int,
+    ) -> None:
+        """学習開始前の品質チェック。条件不足なら DatasetPreflightError を送出する。
+
+        不足があっても training step 0 のまま停止する（学習ループには入らない）。
+        """
+        n_frames = len(self._samples)
+        if n_frames < min_frames:
+            raise DatasetPreflightError(
+                f"min_frames 不足: {n_frames} < {min_frames}"
+            )
+
+        all_annotations = [a for s in self._samples for a in s.annotations]
+        if len(all_annotations) < min_entities:
+            raise DatasetPreflightError(
+                f"min_entities 不足: {len(all_annotations)} < {min_entities}"
+            )
+
+        n_classes = len({a.category_id for a in all_annotations})
+        if n_classes < min_classes:
+            raise DatasetPreflightError(
+                f"min_classes 不足: {n_classes} < {min_classes}"
+            )
+
+        n_bands = len({a.session_id for a in all_annotations if a.session_id})
+        if n_bands < min_time_bands:
+            raise DatasetPreflightError(
+                f"min_time_bands 不足: {n_bands} < {min_time_bands}"
+            )
+
+    # ---- internal ----
+
+    def _load(
+        self, path: pathlib.Path, *, validate_bounds: bool
+    ) -> list[DatasetSample]:
+        data = json.loads(path.read_text(encoding="utf-8"))
+
+        # image index
+        images: dict[int, dict] = {img["id"]: img for img in data.get("images", [])}
+
+        # annotation → sample
+        ann_by_image: dict[int, list[COCOAnnotation]] = {iid: [] for iid in images}
+        for raw in data.get("annotations", []):
+            cat_id = raw["category_id"]
+            if cat_id == self._class_map.background_label:
+                raise ValueError(
+                    f"background (id={cat_id}) はアノテーションに使用できません。"
+                )
+            try:
+                self._class_map.id_to_name(cat_id)
+            except KeyError:
+                raise ValueError(
+                    f"未知 category_id={cat_id} がアノテーションに含まれています。"
+                )
+
+            bbox = tuple(float(v) for v in raw["bbox"])
+            if validate_bounds:
+                img = images[raw["image_id"]]
+                x, y, w, h = bbox
+                if x < 0 or y < 0 or x + w > img["width"] or y + h > img["height"]:
+                    raise ValueError(
+                        f"bbox {bbox} が画像 ({img['width']}x{img['height']}) の外へはみ出しています。"
+                    )
+
+            ann = COCOAnnotation(
+                annotation_id=raw.get("id", 0),
+                image_id=raw["image_id"],
+                category_id=cat_id,
+                bbox_xywh=bbox,  # type: ignore[arg-type]
+                session_id=raw.get("session_id", ""),
+            )
+            if ann.image_id in ann_by_image:
+                ann_by_image[ann.image_id].append(ann)
+
+        samples = [
+            DatasetSample(
+                image_id=iid,
+                file_name=img["file_name"],
+                image_width=img["width"],
+                image_height=img["height"],
+                annotations=ann_by_image.get(iid, []),
+            )
+            for iid, img in sorted(images.items())
+        ]
+        return samples

@@ -1,5 +1,6 @@
-"""Survivors HUD・inventory・choice parser パッケージ。
+"""Survivors vision サブパッケージ。
 
-実ゲーム画面から HUD 値・レベルアップ選択肢・UI 状態を読み取るパーサー群です。
-文字 OCR に依存せず、テンプレート距離とバー領域解析で値を抽出します。
+HUD・inventory・choice parser と world entity 検出・トラッキングの両モジュール群を含む。
+実ゲーム画面から HUD 値・選択肢・UI 状態を読み取るパーサー群、および
+world 上のエンティティ（敵・宝石・プレイヤーなど）を検出して deploy obs へ渡すモジュール群。
 """
