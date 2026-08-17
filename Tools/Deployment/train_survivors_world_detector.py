@@ -76,12 +76,15 @@ def main(argv: list[str] | None = None) -> int:
     # -- preflight
     preflight_cfg = cfg.get("training", {}).get("preflight", {})
     try:
-        ds = WorldDataset(ann_path, cm_path)
+        # 学習では bbox bounds 検証を必須とする
+        ds = WorldDataset(ann_path, cm_path, validate_bounds=True)
         ds.run_preflight(
             min_frames=preflight_cfg.get("min_frames", 300),
             min_entities=preflight_cfg.get("min_entities", 500),
             min_classes=preflight_cfg.get("min_classes", 6),
             min_time_bands=preflight_cfg.get("min_time_bands", 4),
+            iou_duplicate_threshold=preflight_cfg.get("iou_duplicate_threshold", 0.80),
+            class_agreement_threshold=preflight_cfg.get("class_agreement_threshold", 0.95),
         )
     except DatasetPreflightError as e:
         print(f"[PREFLIGHT FAIL] {e}", file=sys.stderr)
@@ -109,12 +112,16 @@ def main(argv: list[str] | None = None) -> int:
     _run_training(detector, ds, cfg, max_epochs=max_epochs)
 
     # -- checkpoint manifest
+    # model_hash: weight なし開発 stub なので config hash で代用。04-08 が実 weight hash を設定する。
+    # build_hash: 実行環境 (sys.version) の hash で開発 build を識別する。
+    import sys as _sys
+    _build_hash = hashlib.sha256(f"dev-python:{_sys.version}".encode()).hexdigest()
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = CheckpointManifest(
-        model_hash=_sha256_file(cfg_path),  # weight なしなので config hash で代用
+        model_hash=_sha256_file(cfg_path),  # weight なし stub: config hash で代用
         data_hash=_sha256_file(ann_path),
         config_hash=_sha256_file(cfg_path),
-        build_hash=_sha256_file(cm_path),
+        build_hash=_build_hash,
         class_map_hash=_sha256_file(cm_path),
         formal_detector_eligible=False,  # development のみ
     )

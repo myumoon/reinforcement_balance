@@ -26,19 +26,29 @@ import yaml
 
 # ---- metric ----
 
+# track_id_switches は静的 eval では計算不能。None で unsupported を明示する。
+_UNSUPPORTED = "unsupported"
+
+
 @dataclass
 class EvalMetrics:
     """評価メトリクスの集計結果。
 
     synthetic prediction でも exact テストできる形式で保持する。
+    未実装指標は "unsupported" を出力し、0 と区別する。
     """
 
     map50_95: float = 0.0
     class_recall: dict[int, float] = field(default_factory=dict)
+    # density_error: エンティティ密度誤差（count_error と同じ集計軸）
     density_error: float = 0.0
     count_error: float = 0.0
+    # nearest_distance_error: GT と予測の最近傍中心距離（正規化 px）
     nearest_distance_error: float = 0.0
-    track_id_switches: int = 0
+    # track_id_switches: 静的 eval では計算不能。CLI は "unsupported" を出力する。
+    track_id_switches: str | int = _UNSUPPORTED
+    # mean_latency_ms: metric 集計処理時間（検出器推論時間ではない）。
+    # 推論レイテンシは 04-08 の benchmark で計測する。
     mean_latency_ms: float = 0.0
 
     def to_json(self) -> str:
@@ -50,7 +60,7 @@ class EvalMetrics:
                 "count_error": self.count_error,
                 "nearest_distance_error": self.nearest_distance_error,
                 "track_id_switches": self.track_id_switches,
-                "mean_latency_ms": self.mean_latency_ms,
+                "mean_latency_ms_metric_only": self.mean_latency_ms,
             },
             indent=2,
         )
@@ -125,6 +135,12 @@ def compute_ap50_95(
     return float(np.mean(aps)) if aps else 0.0
 
 
+def _box_center(box_xyxy: np.ndarray) -> np.ndarray:
+    """(N,4) box → (N,2) 中心座標。"""
+    return np.stack([(box_xyxy[:, 0] + box_xyxy[:, 2]) / 2,
+                     (box_xyxy[:, 1] + box_xyxy[:, 3]) / 2], axis=1)
+
+
 def evaluate_from_predictions(
     gt_annotations: list[dict],
     pred_annotations: list[dict],
@@ -134,6 +150,10 @@ def evaluate_from_predictions(
 
     synthetic fixture でも動作する。
     gt_annotations / pred_annotations は COCO annotation dict のリスト。
+
+    class recall は confidence 降順・一対一 matching で集計し、
+    同一予測 box を複数 GT に対応付けない。
+    track_id_switches は静的 eval で計算不能なため "unsupported" を返す。
     """
     gt_by_image: dict[int, list[dict]] = {}
     for ann in gt_annotations:
@@ -149,6 +169,7 @@ def evaluate_from_predictions(
     class_tp: dict[int, int] = {c: 0 for c in range(1, num_classes)}
     class_gt: dict[int, int] = {c: 0 for c in range(1, num_classes)}
     count_errors: list[float] = []
+    nearest_dist_errors: list[float] = []
 
     for iid in all_image_ids:
         gts = gt_by_image.get(iid, [])
@@ -168,16 +189,35 @@ def evaluate_from_predictions(
         ap_scores.append(ap)
         count_errors.append(abs(len(gts) - len(preds)))
 
+        # nearest_distance_error: GT ごとに最近傍の予測中心との距離を集計する
+        if len(gt_boxes) > 0 and len(pred_boxes) > 0:
+            gt_centers = _box_center(gt_boxes)  # (G, 2)
+            pred_centers = _box_center(pred_boxes)  # (P, 2)
+            # (G, P) 距離行列
+            diff = gt_centers[:, None, :] - pred_centers[None, :, :]
+            dists = np.sqrt((diff ** 2).sum(axis=2))  # (G, P)
+            nearest_dist_errors.append(float(dists.min(axis=1).mean()))
+        elif len(gt_boxes) > 0:
+            # GT があるが予測がない → 最大距離を誤差として記録
+            nearest_dist_errors.append(float(np.hypot(1920, 1080)))
+
+        # class recall: confidence 降順・一対一 matching（使用済み予測を再利用しない）
         for c in range(1, num_classes):
             class_gt[c] += int((gt_classes == c).sum())
             if len(gt_boxes) > 0 and len(pred_boxes) > 0:
                 iou_mat = compute_iou_matrix(gt_boxes, pred_boxes)
+                # confidence 降順でソートした予測インデックス（class=c のみ）
+                pred_c_idxs = [pi for pi in np.argsort(-pred_scores) if pred_classes[pi] == c]
+                used_pred: set[int] = set()
                 for gi, gc in enumerate(gt_classes):
                     if gc != c:
                         continue
-                    for pi, pc in enumerate(pred_classes):
-                        if pc == c and iou_mat[gi, pi] >= 0.5:
+                    for pi in pred_c_idxs:
+                        if pi in used_pred:
+                            continue
+                        if iou_mat[gi, pi] >= 0.5:
                             class_tp[c] += 1
+                            used_pred.add(pi)
                             break
 
     class_recall = {
@@ -185,10 +225,15 @@ def evaluate_from_predictions(
         for c in range(1, num_classes)
     }
 
+    density_error = float(np.mean(count_errors)) if count_errors else 0.0
+
     return EvalMetrics(
         map50_95=float(np.mean(ap_scores)) if ap_scores else 0.0,
         class_recall=class_recall,
-        count_error=float(np.mean(count_errors)) if count_errors else 0.0,
+        density_error=density_error,
+        count_error=density_error,
+        nearest_distance_error=float(np.mean(nearest_dist_errors)) if nearest_dist_errors else 0.0,
+        track_id_switches=_UNSUPPORTED,  # 静的 eval では計算不能
     )
 
 

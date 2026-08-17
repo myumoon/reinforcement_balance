@@ -191,3 +191,42 @@ class TestCheckpointManifest:
         loaded = CheckpointManifest.load(path)
         assert loaded.model_hash == manifest.model_hash
         assert loaded.formal_detector_eligible is False
+
+    def test_load_rejects_invalid_hash_format(self, tmp_path):
+        """SHA-256 形式でないハッシュを持つ manifest の load を拒否する。"""
+        bad = {
+            "model_hash": "bad_hash",  # 64 hex chars でない
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "formal_detector_eligible": False,
+        }
+        path = tmp_path / "bad_manifest.json"
+        path.write_text(json.dumps(bad), encoding="utf-8")
+        with pytest.raises(ValueError, match="model_hash"):
+            CheckpointManifest.load(path)
+
+
+class TestArchitectureDispatchP1:
+    """P1 指摘: feasibility 既知でも未実装 architecture は拒否される。"""
+
+    def test_tile_2x2_raises_not_fallback_to_ssdlite320(self):
+        """tile_2x2 は feasibility 既知だが未実装 → silent fallback せず拒否する。"""
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["model"]["architecture"] = "tile_2x2"
+        with pytest.raises(UnknownArchitectureError):
+            WorldDetector.from_config(cfg, CLASS_MAP_PATH)
+
+    def test_ssdlite640_multiscale_raises(self):
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["model"]["architecture"] = "ssdlite640_multiscale"
+        with pytest.raises(UnknownArchitectureError):
+            WorldDetector.from_config(cfg, CLASS_MAP_PATH)
+
+    def test_num_classes_mismatch_raises(self, tmp_path):
+        """class map の num_classes と config が不一致なら拒否する。"""
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["model"]["num_classes"] = 5  # class map は 12
+        with pytest.raises(ValueError, match="num_classes"):
+            WorldDetector.from_config(cfg, CLASS_MAP_PATH)

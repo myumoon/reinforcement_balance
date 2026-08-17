@@ -266,13 +266,23 @@ class TestTrackedWorldStateV1:
         assert actual_fields == expected_track_fields
 
     def test_on_screen_flag(self):
-        """画面内の検出は on_screen=True、画面外（クリップ）は clipped=True。"""
+        """画面内の検出は on_screen=True。"""
         tracker = _make_tracker()
         det = _make_detection([[0, 0, 100, 100]], [0.9], [1])
         state = tracker.update(det, frame_index=0, timestamp_ns=0)
         v1 = TrackedWorldStateV1.from_state(state, frame_index=0, timestamp_ns=0)
-        # 画面内
         assert v1.tracks[0].on_screen is True
+
+    def test_partially_visible_entity_is_on_screen(self):
+        """画面と部分的に交差する box（左上が画面外でも）は on_screen=True。"""
+        tracker = _make_tracker()
+        # box が x=-10 から x=20（画面内に 20px 見えている）
+        det = _make_detection([[-10, 100, 20, 200]], [0.9], [1])
+        state = tracker.update(det, frame_index=0, timestamp_ns=0)
+        v1 = TrackedWorldStateV1.from_state(state, frame_index=0, timestamp_ns=0)
+        # 矩形交差: x2=20 > 0, y2=200 > 0, x1=-10 < 1920, y1=100 < 1080
+        assert v1.tracks[0].on_screen is True
+        assert v1.tracks[0].clipped is True  # 画面外にはみ出しているので clipped
 
     def test_player_anchor_state_included(self):
         tracker = _make_tracker()

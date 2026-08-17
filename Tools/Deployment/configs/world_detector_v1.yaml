@@ -22,7 +22,8 @@ model:
   # 入力解像度 (W, H)。SSDLite320 の標準入力サイズ。
   input_size: [320, 320]
   # pretrained backbone を使用し、head だけをランダム初期化する。
-  pretrained_backbone: true
+  # 04-06 の development stub はランダム初期化。04-07 が正式 pretrained backbone ロードを実装する。
+  pretrained_backbone: false
 
 # --- 入力・前処理 ---
 input:

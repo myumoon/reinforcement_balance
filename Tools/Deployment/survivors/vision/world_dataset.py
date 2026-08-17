@@ -208,10 +208,14 @@ class WorldDataset:
         min_entities: int,
         min_classes: int,
         min_time_bands: int,
+        iou_duplicate_threshold: float = 0.80,
+        class_agreement_threshold: float = 0.95,
     ) -> None:
         """学習開始前の品質チェック。条件不足なら DatasetPreflightError を送出する。
 
         不足があっても training step 0 のまま停止する（学習ループには入らない）。
+        iou_duplicate_threshold と class_agreement_threshold は設定値を受け取り、
+        将来の実装（04-07）が使用できるようシグネチャに含める。
         """
         n_frames = len(self._samples)
         if n_frames < min_frames:

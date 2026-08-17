@@ -164,10 +164,13 @@ class TrackedWorldStateV1:
         for t in state.tracks:
             cx = (t.box_xyxy[0] + t.box_xyxy[2]) / 2.0 / state.image_width
             cy = (t.box_xyxy[1] + t.box_xyxy[3]) / 2.0 / state.image_height
+            # 矩形交差判定: 左上だけでなく「任意の部分が画面と重なるか」で on_screen を決める
             # numpy 比較は numpy.bool_ を返すので Python bool へキャストする
             on_screen = bool(
-                0 <= t.box_xyxy[0] < state.image_width
-                and 0 <= t.box_xyxy[1] < state.image_height
+                t.box_xyxy[2] > 0  # x2 > 0
+                and t.box_xyxy[3] > 0  # y2 > 0
+                and t.box_xyxy[0] < state.image_width
+                and t.box_xyxy[1] < state.image_height
             )
             clipped = bool(
                 t.box_xyxy[0] < 0 or t.box_xyxy[1] < 0

@@ -13,11 +13,14 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import yaml
+
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 try:
     import torch
@@ -103,13 +106,28 @@ class CheckpointManifest:
     class_map_hash: str
     formal_detector_eligible: bool
 
+    _HASH_FIELDS = ("model_hash", "data_hash", "config_hash", "build_hash", "class_map_hash")
+
     def assert_formal_eligible(self) -> None:
-        """formal 昇格していない checkpoint をロードしようとすると拒否する。"""
+        """formal 昇格していない checkpoint をロードしようとすると拒否する。
+
+        formal_detector_eligible=false のほか、SHA-256 形式不正も拒否する。
+        """
         if not self.formal_detector_eligible:
             raise FormalDetectorRejectedError(
                 "development checkpoint は formal detector として使用できません。"
                 " formal_detector_eligible=true の checkpoint を 04-08 で作成してください。"
             )
+        # formal 昇格済みでもハッシュ形式を検証する
+        self._validate_hash_format()
+
+    def _validate_hash_format(self) -> None:
+        for fname in self._HASH_FIELDS:
+            h = getattr(self, fname)
+            if not _SHA256_RE.fullmatch(h):
+                raise ValueError(
+                    f"{fname} は SHA-256 hex 64 文字が必要です: {h!r}"
+                )
 
     def save(self, path: pathlib.Path | str) -> None:
         """JSON として保存する。"""
@@ -126,10 +144,10 @@ class CheckpointManifest:
 
     @classmethod
     def load(cls, path: pathlib.Path | str) -> "CheckpointManifest":
-        """JSON から読み込む。"""
+        """JSON から読み込む。ハッシュ形式が不正な場合は ValueError。"""
         path = pathlib.Path(path)
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return cls(
+        manifest = cls(
             model_hash=payload["model_hash"],
             data_hash=payload["data_hash"],
             config_hash=payload["config_hash"],
@@ -137,6 +155,8 @@ class CheckpointManifest:
             class_map_hash=payload["class_map_hash"],
             formal_detector_eligible=payload["formal_detector_eligible"],
         )
+        manifest._validate_hash_format()
+        return manifest
 
 
 # ---- detector ----
@@ -171,20 +191,36 @@ class WorldDetector:
     ) -> "WorldDetector":
         """config dict から detector を組み立てる。
 
-        未実装 architecture は UnknownArchitectureError。
+        ssdlite320 のみ実装済み。それ以外は（feasibility 既知候補でも）UnknownArchitectureError。
+        class map の num_classes と config の num_classes が一致しない場合も拒否する。
         """
+        from survivors.vision.world_dataset import load_class_map
+
         arch = config["model"]["architecture"]
-        if arch not in _KNOWN_ARCHITECTURES:
-            raise UnknownArchitectureError(
-                f"未実装 architecture '{arch}'。silent fallback は禁止されています。"
-                f" 既知: {sorted(_KNOWN_ARCHITECTURES)}"
+        num_classes = config["model"]["num_classes"]
+
+        # class map との一致を検証する
+        cm = load_class_map(pathlib.Path(class_map_path))
+        if cm.num_classes != num_classes:
+            raise ValueError(
+                f"config num_classes={num_classes} が class_map num_classes={cm.num_classes} と不一致。"
             )
 
-        num_classes = config["model"]["num_classes"]
-        w, h = config["model"].get("input_size", [320, 320])
+        # 明示的な architecture dispatch。未実装は silent fallback せず拒否する。
+        if arch == "ssdlite320":
+            w, h = config["model"].get("input_size", [320, 320])
+            model = _build_ssdlite320(num_classes=num_classes)
+            return cls(model=model, num_classes=num_classes, image_width=w, image_height=h)
 
-        model = _build_ssdlite320(num_classes=num_classes)
-        return cls(model=model, num_classes=num_classes, image_width=w, image_height=h)
+        # feasibility 既知の候補も含め、実装されていなければ拒否する
+        raise UnknownArchitectureError(
+            f"architecture '{arch}' は未実装です。silent fallback は禁止されています。"
+            f" 実装済み: ['ssdlite320']"
+            + (
+                f" (feasibility 既知だが未実装: {sorted(_KNOWN_ARCHITECTURES - {'ssdlite320'})})"
+                if arch in _KNOWN_ARCHITECTURES else ""
+            )
+        )
 
     def infer(
         self,
