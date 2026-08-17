@@ -48,9 +48,9 @@ try {
     Invoke-ConfiguredPython -PythonPath $python -WorkingDirectory $RepositoryRoot -Arguments @('-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '-e', $commonPath)
     Invoke-ConfiguredPython -PythonPath $python -WorkingDirectory $RepositoryRoot -Arguments @('-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '-e', $deploymentPath)
     Invoke-ConfiguredPython -PythonPath $python -WorkingDirectory $RepositoryRoot -Arguments @('-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '--requirement', $lockPath)
-    Invoke-ConfiguredPython -PythonPath $python -WorkingDirectory $RepositoryRoot -Arguments @('-c', 'from reinbalance_survivors_contracts.canonical_json import canonical_hash; print("reinbalance_survivors_contracts import ok")')
+    Invoke-ConfiguredPython -PythonPath $python -WorkingDirectory $RepositoryRoot -Arguments @('-c', "from reinbalance_survivors_contracts.canonical_json import canonical_hash; print('reinbalance_survivors_contracts import ok')")
     Invoke-ConfiguredPython -PythonPath $python -WorkingDirectory $RepositoryRoot -Arguments @('--version')
-    Invoke-ConfiguredPython -PythonPath $python -WorkingDirectory $RepositoryRoot -Arguments @('-c', 'import pytest; print("pytest " + pytest.__version__)')
+    Invoke-ConfiguredPython -PythonPath $python -WorkingDirectory $RepositoryRoot -Arguments @('-c', "import pytest; print('pytest ' + pytest.__version__)")
 
     $logLines = @(
         'workflow=01_SetupDeploymentEnvironment',
