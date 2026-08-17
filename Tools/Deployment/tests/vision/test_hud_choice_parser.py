@@ -509,6 +509,24 @@ class TestDetectScreenState:
         state, _, _ = _detect_screen_state(frame, width=self._W, height=self._H)
         assert state == "gameplay", f"Expected 'gameplay', got '{state}'"
 
+    def test_hud_nonblack_uniform_bg_is_gameplay(self):
+        """HUD + 一様な暗灰色背景 RGB(40,40,40) (カードなし) → gameplay。"""
+        frame = self._hud_frame()
+        # カード y 範囲全体を一様な暗灰色にする (>=32 を満たすが構造なし)
+        frame[175:939, :, :3] = 40
+        frame[175:939, :, 3] = 255
+        state, _, _ = _detect_screen_state(frame, width=self._W, height=self._H)
+        assert state == "gameplay", f"Expected 'gameplay', got '{state}'"
+
+    def test_hud_crossing_bright_band_is_gameplay(self):
+        """HUD + 画面横断の明るい帯 (カードとギャップを均等に照らす) → gameplay。"""
+        frame = self._hud_frame()
+        # 全横幅の明るい帯 (カード ROI もギャップ ROI も同じ輝度になる)
+        frame[400:600, :, :3] = 200
+        frame[400:600, :, 3] = 255
+        state, _, _ = _detect_screen_state(frame, width=self._W, height=self._H)
+        assert state == "gameplay", f"Expected 'gameplay', got '{state}'"
+
     def test_hud_3card_layout_is_level_up_items(self):
         """HUD + 3枚カード全スロット明るい → level_up_items。"""
         frame = self._fill_cards(self._hud_frame(), 3)

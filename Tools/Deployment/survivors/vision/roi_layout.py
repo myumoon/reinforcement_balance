@@ -62,6 +62,19 @@ _CARD4_ROIS: tuple[_N, ...] = (
 )
 CARD_ROIS: dict[int, tuple[_N, ...]] = {3: _CARD3_ROIS, 4: _CARD4_ROIS}
 
+# カード間ギャップ – レベルアップオーバーレイ背景確認用 (カードより暗いはず)
+CARD_GAP_ROIS: dict[int, tuple[_N, ...]] = {
+    3: (
+        _N(0.345, 0.162, 0.375, 0.870),  # card1-card2 間
+        _N(0.625, 0.162, 0.655, 0.870),  # card2-card3 間
+    ),
+    4: (
+        _N(0.265, 0.162, 0.285, 0.870),  # card1-card2 間
+        _N(0.490, 0.162, 0.510, 0.870),  # card2-card3 間
+        _N(0.715, 0.162, 0.735, 0.870),  # card3-card4 間
+    ),
+}
+
 # ボタン (reroll / skip / banish) – カード下部
 BUTTON_ROIS: dict[str, _N] = {
     "reroll": _N(0.060, 0.882, 0.265, 0.950),

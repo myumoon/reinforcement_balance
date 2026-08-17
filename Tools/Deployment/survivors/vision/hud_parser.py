@@ -25,6 +25,7 @@ from .roi_layout import (
     INV_SLOT_ROIS,
     SCREEN_CENTER_ROI,
     CARD_ROIS,
+    CARD_GAP_ROIS,
     norm_to_pixels,
     layout_validity_score,
 )
@@ -320,6 +321,36 @@ def _compute_candidate_set_hash(screen_state: str, cards: tuple[ParsedCard, ...]
     return canonical_hash({"screen_state": screen_state, "card_ids": card_ids})
 
 
+def _mean_roi_brightness(
+    frame_bgra: NDArray[np.uint8],
+    norms: tuple,
+    width: int,
+    height: int,
+) -> float:
+    """指定 ROI 群の平均輝度 (0.0..1.0) を返す。"""
+    vals: list[float] = []
+    for norm in norms:
+        crop = norm_to_pixels(norm, width, height).crop(frame_bgra)
+        if crop.size > 0:
+            vals.append(float(np.mean(crop[..., :3])) / 255.0)
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _min_roi_brightness(
+    frame_bgra: NDArray[np.uint8],
+    norms: tuple,
+    width: int,
+    height: int,
+) -> float:
+    """指定 ROI 群の最小スロット輝度 (0.0..1.0) を返す。"""
+    vals: list[float] = []
+    for norm in norms:
+        crop = norm_to_pixels(norm, width, height).crop(frame_bgra)
+        if crop.size > 0:
+            vals.append(float(np.mean(crop[..., :3])) / 255.0)
+    return min(vals) if vals else 0.0
+
+
 def _detect_screen_state(
     frame_bgra: NDArray[np.uint8],
     *,
@@ -350,15 +381,15 @@ def _detect_screen_state(
     full_brightness = float(np.mean(frame_bgra[..., :3])) / 255.0
 
     if layout_score > 0.3:
-        # 3枚・4枚の各レイアウトで全スロットに前景があれば level_up_items
+        # カード固有の構造証拠:
+        #   1) 全スロットが一定輝度以上 (min > 0.08) → 未描画スロットを除外
+        #   2) カード平均輝度がギャップより有意に高い (contrast > 0.10) → 均一背景・帯を除外
         for cnt in (3, 4):
-            norms = CARD_ROIS[cnt]
-            if all(
-                (crop := norm_to_pixels(norm, width, height).crop(frame_bgra)).size > 0
-                and float(np.mean(crop[..., :3] >= 32)) > 0.20
-                for norm in norms
-            ):
-                return ("level_up_items", 0.55, f"hud_card_layout_{cnt}")
+            min_card = _min_roi_brightness(frame_bgra, CARD_ROIS[cnt], width, height)
+            mean_card = _mean_roi_brightness(frame_bgra, CARD_ROIS[cnt], width, height)
+            mean_gap = _mean_roi_brightness(frame_bgra, CARD_GAP_ROIS[cnt], width, height)
+            if min_card > 0.08 and mean_card - mean_gap > 0.10:
+                return ("level_up_items", 0.55, f"hud_card_contrast_{cnt}")
         return ("gameplay", 0.60, f"hud_present:{layout_score:.2f}")
 
     # HUD なし
