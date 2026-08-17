@@ -23,6 +23,7 @@ from survivors.vision.hud_parser import (
     HudParser,
     _compute_inventory_hash,
     _compute_candidate_set_hash,
+    _detect_screen_state,
 )
 from survivors.vision.choice_parser import ChoiceParser, ChoiceParseResult
 from survivors.vision.icon_matcher import (
@@ -466,3 +467,56 @@ class TestFormalParserEligibility:
         profile = load_target_profile()
         caps = set(profile.sections["choice_taxonomy"]["capabilities"])
         assert caps == set(_CAPABILITY_BUTTONS)
+
+
+# ── screen-state confusion regression (04-03 contract) ──────────────
+class TestDetectScreenState:
+    """_detect_screen_state の gameplay/level_up_items 誤判定回帰テスト。
+
+    HUD（HP/XP バー）あり + カードレイアウトの有無で正しく分類されることを検証します。
+    """
+
+    _W, _H = 1920, 1080
+
+    def _hud_frame(self) -> np.ndarray:
+        """HP/XP バーのみの合成フレーム (カードなし、layout_score > 0.3 になる)。"""
+        from survivors.vision.roi_layout import HP_BAR_ROI, XP_BAR_ROI, norm_to_pixels
+        frame = np.zeros((self._H, self._W, 4), dtype=np.uint8)
+        for roi_norm, bgr in ((HP_BAR_ROI, (0, 0, 200)), (XP_BAR_ROI, (200, 0, 0))):
+            roi = norm_to_pixels(roi_norm, self._W, self._H)
+            frame[roi.y0:roi.y1, roi.x0:roi.x1, :3] = bgr
+            frame[roi.y0:roi.y1, roi.x0:roi.x1, 3] = 255
+        return frame
+
+    def _fill_cards(self, frame: np.ndarray, count: int) -> np.ndarray:
+        """指定枚数の全カード ROI を明るい灰色で塗りつぶす。"""
+        from survivors.vision.roi_layout import CARD_ROIS, norm_to_pixels
+        frame = frame.copy()
+        for norm in CARD_ROIS[count]:
+            roi = norm_to_pixels(norm, self._W, self._H)
+            frame[roi.y0:roi.y1, roi.x0:roi.x1, :3] = 128
+            frame[roi.y0:roi.y1, roi.x0:roi.x1, 3] = 255
+        return frame
+
+    def test_hud_single_bright_object_is_gameplay(self):
+        """HUD + 1枚のカード ROI のみ明るい (非カード物体) → gameplay。"""
+        from survivors.vision.roi_layout import CARD_ROIS, norm_to_pixels
+        frame = self._hud_frame()
+        # 1スロットだけ明るくする (完全なカードレイアウトではない)
+        roi = norm_to_pixels(CARD_ROIS[3][0], self._W, self._H)
+        frame[roi.y0:roi.y1, roi.x0:roi.x1, :3] = 128
+        frame[roi.y0:roi.y1, roi.x0:roi.x1, 3] = 255
+        state, _, _ = _detect_screen_state(frame, width=self._W, height=self._H)
+        assert state == "gameplay", f"Expected 'gameplay', got '{state}'"
+
+    def test_hud_3card_layout_is_level_up_items(self):
+        """HUD + 3枚カード全スロット明るい → level_up_items。"""
+        frame = self._fill_cards(self._hud_frame(), 3)
+        state, _, _ = _detect_screen_state(frame, width=self._W, height=self._H)
+        assert state == "level_up_items", f"Expected 'level_up_items', got '{state}'"
+
+    def test_hud_4card_layout_is_level_up_items(self):
+        """HUD + 4枚カード全スロット明るい → level_up_items。"""
+        frame = self._fill_cards(self._hud_frame(), 4)
+        state, _, _ = _detect_screen_state(frame, width=self._W, height=self._H)
+        assert state == "level_up_items", f"Expected 'level_up_items', got '{state}'"

@@ -350,12 +350,15 @@ def _detect_screen_state(
     full_brightness = float(np.mean(frame_bgra[..., :3])) / 255.0
 
     if layout_score > 0.3:
-        # カード ROI に前景があれば level_up_items (3枚・4枚両レイアウトを確認)
-        for norms in (CARD_ROIS[3], CARD_ROIS[4]):
-            for norm in norms:
-                crop = norm_to_pixels(norm, width, height).crop(frame_bgra)
-                if crop.size > 0 and float(np.mean(crop[..., :3] >= 32)) > 0.20:
-                    return ("level_up_items", 0.55, "hud_card_fg")
+        # 3枚・4枚の各レイアウトで全スロットに前景があれば level_up_items
+        for cnt in (3, 4):
+            norms = CARD_ROIS[cnt]
+            if all(
+                (crop := norm_to_pixels(norm, width, height).crop(frame_bgra)).size > 0
+                and float(np.mean(crop[..., :3] >= 32)) > 0.20
+                for norm in norms
+            ):
+                return ("level_up_items", 0.55, f"hud_card_layout_{cnt}")
         return ("gameplay", 0.60, f"hud_present:{layout_score:.2f}")
 
     # HUD なし
