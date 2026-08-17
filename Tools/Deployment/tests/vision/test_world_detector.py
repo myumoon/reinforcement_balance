@@ -207,6 +207,59 @@ class TestCheckpointManifest:
         with pytest.raises(ValueError, match="model_hash"):
             CheckpointManifest.load(path)
 
+    def test_load_rejects_string_formal_flag(self, tmp_path):
+        """formal_detector_eligible が文字列 'false' の manifest は load で拒否する。"""
+        bad = {
+            "model_hash": "a" * 64,
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "formal_detector_eligible": "false",  # bool でない
+        }
+        path = tmp_path / "bad_formal.json"
+        path.write_text(json.dumps(bad), encoding="utf-8")
+        with pytest.raises(ValueError, match="bool"):
+            CheckpointManifest.load(path)
+
+    def test_assert_formal_eligible_rejects_non_bool_true(self):
+        """formal_detector_eligible=True (bool) でないと assert_formal_eligible() は拒否する。"""
+        manifest = CheckpointManifest(
+            model_hash="a" * 64,
+            data_hash="b" * 64,
+            config_hash="c" * 64,
+            build_hash="d" * 64,
+            class_map_hash="e" * 64,
+            formal_detector_eligible=False,
+        )
+        with pytest.raises(FormalDetectorRejectedError):
+            manifest.assert_formal_eligible()
+
+    def test_verify_identity_passes_on_match(self):
+        """verify_identity() は期待 hash と一致すれば例外を送出しない。"""
+        manifest = CheckpointManifest(
+            model_hash="a" * 64,
+            data_hash="b" * 64,
+            config_hash="c" * 64,
+            build_hash="d" * 64,
+            class_map_hash="e" * 64,
+            formal_detector_eligible=False,
+        )
+        manifest.verify_identity({"model_hash": "a" * 64, "data_hash": "b" * 64})
+
+    def test_verify_identity_fails_on_mismatch(self):
+        """verify_identity() は期待 hash と不一致なら ValueError を送出する。"""
+        manifest = CheckpointManifest(
+            model_hash="a" * 64,
+            data_hash="b" * 64,
+            config_hash="c" * 64,
+            build_hash="d" * 64,
+            class_map_hash="e" * 64,
+            formal_detector_eligible=False,
+        )
+        with pytest.raises(ValueError, match="identity 不一致"):
+            manifest.verify_identity({"model_hash": "0" * 64})
+
 
 class TestArchitectureDispatchP1:
     """P1 指摘: feasibility 既知でも未実装 architecture は拒否される。"""

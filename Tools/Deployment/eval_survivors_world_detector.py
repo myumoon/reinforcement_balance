@@ -38,7 +38,8 @@ class EvalMetrics:
     未実装指標は "unsupported" を出力し、0 と区別する。
     """
 
-    map50_95: float = 0.0
+    # ponytail: precision*recall 積の平均。正式 PR 曲線積分は 04-07 で実装予定。
+    proxy_ap50_95: float = 0.0
     class_recall: dict[int, float] = field(default_factory=dict)
     # density_error: エンティティ密度誤差（count_error と同じ集計軸）
     density_error: float = 0.0
@@ -54,7 +55,7 @@ class EvalMetrics:
     def to_json(self) -> str:
         return json.dumps(
             {
-                "map50_95": self.map50_95,
+                "proxy_ap50_95": self.proxy_ap50_95,
                 "class_recall": {str(k): v for k, v in self.class_recall.items()},
                 "density_error": self.density_error,
                 "count_error": self.count_error,
@@ -201,24 +202,25 @@ def evaluate_from_predictions(
             # GT があるが予測がない → 最大距離を誤差として記録
             nearest_dist_errors.append(float(np.hypot(1920, 1080)))
 
-        # class recall: confidence 降順・一対一 matching（使用済み予測を再利用しない）
+        # class recall: confidence 降順・一対一 matching（予測を外側に走査してGT入力順依存を排除）
         for c in range(1, num_classes):
             class_gt[c] += int((gt_classes == c).sum())
             if len(gt_boxes) > 0 and len(pred_boxes) > 0:
                 iou_mat = compute_iou_matrix(gt_boxes, pred_boxes)
                 # confidence 降順でソートした予測インデックス（class=c のみ）
                 pred_c_idxs = [pi for pi in np.argsort(-pred_scores) if pred_classes[pi] == c]
-                used_pred: set[int] = set()
-                for gi, gc in enumerate(gt_classes):
-                    if gc != c:
-                        continue
-                    for pi in pred_c_idxs:
-                        if pi in used_pred:
+                matched_gt: set[int] = set()
+                for pi in pred_c_idxs:  # 予測が外側（confidence 優先でGTを割り当て）
+                    best_gi, best_iou = -1, 0.5 - 1e-9
+                    for gi in range(len(gt_boxes)):
+                        if gi in matched_gt or gt_classes[gi] != c:
                             continue
-                        if iou_mat[gi, pi] >= 0.5:
-                            class_tp[c] += 1
-                            used_pred.add(pi)
-                            break
+                        if iou_mat[gi, pi] > best_iou:
+                            best_iou = iou_mat[gi, pi]
+                            best_gi = gi
+                    if best_gi >= 0:
+                        matched_gt.add(best_gi)
+                        class_tp[c] += 1
 
     class_recall = {
         c: class_tp[c] / class_gt[c] if class_gt[c] > 0 else 0.0
@@ -228,7 +230,7 @@ def evaluate_from_predictions(
     density_error = float(np.mean(count_errors)) if count_errors else 0.0
 
     return EvalMetrics(
-        map50_95=float(np.mean(ap_scores)) if ap_scores else 0.0,
+        proxy_ap50_95=float(np.mean(ap_scores)) if ap_scores else 0.0,
         class_recall=class_recall,
         density_error=density_error,
         count_error=density_error,
@@ -265,8 +267,18 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_detector_config(cfg_path)
     num_classes = cfg["model"]["num_classes"]
 
+    cm = load_class_map(cm_path)
+    if cm.num_classes != num_classes:
+        raise ValueError(
+            f"config num_classes={num_classes} と class_map num_classes={cm.num_classes} が不一致。"
+        )
+
     gt_data = json.loads(ann_path.read_text(encoding="utf-8"))
     gt_annotations = gt_data.get("annotations", [])
+    valid_cat_ids = set(range(cm.num_classes))
+    invalid_cats = {ann["category_id"] for ann in gt_annotations} - valid_cat_ids
+    if invalid_cats:
+        raise ValueError(f"GT に未知の category_id があります: {sorted(invalid_cats)}")
 
     if args.predictions:
         pred_data = json.loads(pathlib.Path(args.predictions).read_text(encoding="utf-8"))

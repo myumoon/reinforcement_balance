@@ -83,8 +83,6 @@ def main(argv: list[str] | None = None) -> int:
             min_entities=preflight_cfg.get("min_entities", 500),
             min_classes=preflight_cfg.get("min_classes", 6),
             min_time_bands=preflight_cfg.get("min_time_bands", 4),
-            iou_duplicate_threshold=preflight_cfg.get("iou_duplicate_threshold", 0.80),
-            class_agreement_threshold=preflight_cfg.get("class_agreement_threshold", 0.95),
         )
     except DatasetPreflightError as e:
         print(f"[PREFLIGHT FAIL] {e}", file=sys.stderr)

@@ -53,9 +53,6 @@ training:
     min_entities: 500
     min_classes: 6
     min_time_bands: 4
-    # duplicate annotation の IoU しきい値。
-    iou_duplicate_threshold: 0.80
-    class_agreement_threshold: 0.95
 
 # --- tracker パラメータ ---
 tracker:

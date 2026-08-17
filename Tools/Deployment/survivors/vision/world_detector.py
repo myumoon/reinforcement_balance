@@ -111,9 +111,10 @@ class CheckpointManifest:
     def assert_formal_eligible(self) -> None:
         """formal 昇格していない checkpoint をロードしようとすると拒否する。
 
-        formal_detector_eligible=false のほか、SHA-256 形式不正も拒否する。
+        formal_detector_eligible が bool の True でない場合（型不正・False 含む）は拒否する。
+        SHA-256 形式不正も拒否する。
         """
-        if not self.formal_detector_eligible:
+        if not (type(self.formal_detector_eligible) is bool and self.formal_detector_eligible is True):
             raise FormalDetectorRejectedError(
                 "development checkpoint は formal detector として使用できません。"
                 " formal_detector_eligible=true の checkpoint を 04-08 で作成してください。"
@@ -127,6 +128,21 @@ class CheckpointManifest:
             if not _SHA256_RE.fullmatch(h):
                 raise ValueError(
                     f"{fname} は SHA-256 hex 64 文字が必要です: {h!r}"
+                )
+
+    def verify_identity(self, expected: dict[str, str]) -> None:
+        """期待ハッシュと manifest の値が完全一致しない場合に ValueError を送出する。
+
+        expected のキーは _HASH_FIELDS の部分集合。
+        全フィールドを渡して identity を完全に確認することを推奨する。
+        """
+        for field, exp in expected.items():
+            if field not in self._HASH_FIELDS:
+                raise ValueError(f"未知のフィールド: {field!r}")
+            actual = getattr(self, field)
+            if actual != exp:
+                raise ValueError(
+                    f"identity 不一致: {field}: manifest={actual!r}, expected={exp!r}"
                 )
 
     def save(self, path: pathlib.Path | str) -> None:
@@ -144,16 +160,21 @@ class CheckpointManifest:
 
     @classmethod
     def load(cls, path: pathlib.Path | str) -> "CheckpointManifest":
-        """JSON から読み込む。ハッシュ形式が不正な場合は ValueError。"""
+        """JSON から読み込む。ハッシュ形式・型が不正な場合は ValueError。"""
         path = pathlib.Path(path)
         payload = json.loads(path.read_text(encoding="utf-8"))
+        elig = payload["formal_detector_eligible"]
+        if not isinstance(elig, bool):
+            raise ValueError(
+                f"formal_detector_eligible は bool 型が必要です。got: {type(elig).__name__!r}"
+            )
         manifest = cls(
             model_hash=payload["model_hash"],
             data_hash=payload["data_hash"],
             config_hash=payload["config_hash"],
             build_hash=payload["build_hash"],
             class_map_hash=payload["class_map_hash"],
-            formal_detector_eligible=payload["formal_detector_eligible"],
+            formal_detector_eligible=elig,
         )
         manifest._validate_hash_format()
         return manifest
