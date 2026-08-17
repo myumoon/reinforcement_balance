@@ -348,13 +348,9 @@ def _detect_screen_state(
     # 画面全体の平均輝度
     full_brightness = float(np.mean(frame_bgra[..., :3])) / 255.0
 
-    # 中央領域の支配色解析
-    # レベルアップオーバーレイは暗い背景が多い
-    if brightness < 0.15 and full_brightness < 0.20:
-        return ("death", 0.55, "dark_screen")
-
     if layout_score > 0.3:
         # HUD 要素が存在 → gameplay 系
+        # レベルアップオーバーレイは中央が暗い背景が多い
         if brightness < _LEVELUP_OVERLAY_BRIGHTNESS_THRESHOLD:
             # 中央が暗い + HUD あり → レベルアップ or chest
             return ("level_up_items", 0.50, "hud_present_dark_center")
@@ -363,7 +359,9 @@ def _detect_screen_state(
     # HUD なし
     if full_brightness > 0.70:
         return ("result", 0.50, "bright_full_screen")
-
+    # ponytail: 死亡固有 ROI なし; 暗さだけでは death 確定不可なので unknown を返す
+    if brightness < 0.15 and full_brightness < 0.20:
+        return ("unknown", 0.35, "dark_no_hud")
     return ("unknown", 0.30, f"layout_score_low:{layout_score:.2f}")
 
 

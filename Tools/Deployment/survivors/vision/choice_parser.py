@@ -139,6 +139,7 @@ class ChoiceParser:
         """
         best_cards: tuple[ParsedCard, ...] = ()
         best_count = 0
+        best_avg_fg = 0.0
         inferred_state = screen_state
 
         # 3 枚・4 枚の両方を試し、前景ピクセル率が高い方を採用
@@ -158,9 +159,10 @@ class ChoiceParser:
 
             avg_fg = total_fg / count if count > 0 else 0.0
 
-            if avg_fg > 0.20 and (best_count == 0 or avg_fg > 0.20):
+            if avg_fg > 0.20 and avg_fg > best_avg_fg:
                 best_cards = tuple(cards_for_count)
                 best_count = count
+                best_avg_fg = avg_fg
 
         if not best_cards:
             return (), screen_state

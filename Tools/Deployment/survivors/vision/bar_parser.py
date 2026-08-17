@@ -174,7 +174,7 @@ def _parse_bar(
     fg_ratio = foreground_fn(hsv)
 
     if fg_ratio < _MIN_FOREGROUND_RATIO:
-        return BarResult(0.0, 0.4, "empty_or_occluded")
+        return BarResult(None, 0.4, "empty_or_occluded")
 
     col_fg = _compute_column_fg(hsv, foreground_fn)
 
