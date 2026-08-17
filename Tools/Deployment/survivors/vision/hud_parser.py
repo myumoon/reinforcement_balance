@@ -24,6 +24,7 @@ from .roi_layout import (
     LEVEL_ROI,
     INV_SLOT_ROIS,
     SCREEN_CENTER_ROI,
+    CARD_ROIS,
     norm_to_pixels,
     layout_validity_score,
 )
@@ -350,10 +351,13 @@ def _detect_screen_state(
 
     if layout_score > 0.3:
         # HUD 要素が存在 → gameplay 系
-        # レベルアップオーバーレイは中央が暗い背景が多い
         if brightness < _LEVELUP_OVERLAY_BRIGHTNESS_THRESHOLD:
-            # 中央が暗い + HUD あり → レベルアップ or chest
-            return ("level_up_items", 0.50, "hud_present_dark_center")
+            # 中央が暗い: カード ROI に前景があればレベルアップ画面
+            for norm in CARD_ROIS[3]:
+                crop = norm_to_pixels(norm, width, height).crop(frame_bgra)
+                if crop.size > 0 and float(np.mean(crop[..., :3] >= 32)) > 0.20:
+                    return ("level_up_items", 0.50, "hud_dark_card_fg")
+            return ("gameplay", 0.55, "hud_dark_no_card")
         return ("gameplay", 0.60, f"hud_present:{layout_score:.2f}")
 
     # HUD なし
