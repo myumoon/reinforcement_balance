@@ -199,9 +199,12 @@ try {
     $artifactPrimary = Join-Path $artifactRunRoot 'primary'
     $artifactEvidence = Join-Path $artifactRunRoot 'evidence'
     $fakeExe = Join-Path $artifactRunRoot 'VampireSurvivors.exe'
+    $relativeExeFixtureName = 'survivors-relative-exe-fixture.exe'
+    $relativeExeFixturePath = Join-Path $repoRoot $relativeExeFixtureName
     $testPython = Get-TestPythonPath
     New-Item -ItemType Directory -Path $artifactPrimary, $artifactEvidence -Force | Out-Null
     [IO.File]::WriteAllBytes($fakeExe, [byte[]](1, 2, 3, 4))
+    [IO.File]::WriteAllBytes($relativeExeFixturePath, [byte[]](5, 6, 7, 8))
     try {
         New-Item -ItemType Directory -Path $repoEnvDirectory -Force | Out-Null
         @(
@@ -209,13 +212,24 @@ try {
             "SURVIVORS_ARTIFACT_PRIMARY_ROOT=$artifactPrimary",
             'SURVIVORS_ARTIFACT_BACKUP_ROOT=',
             "SURVIVORS_EVIDENCE_ROOT=$artifactEvidence",
-            "VAMPIRE_SURVIVORS_EXE=$fakeExe",
+            "VAMPIRE_SURVIVORS_EXE=$relativeExeFixtureName",
             'SURVIVORS_CANONICAL_SAVE=',
             'SURVIVORS_TARGET_PROFILE='
         ) | Set-Content -LiteralPath $repoEnvPath -Encoding UTF8
         $oldPythonPath = $env:PYTHONPATH
         $env:PYTHONPATH = Join-Path $repoRoot 'Tools\Common\src'
         try {
+            $relativeConfiguredExe = Invoke-Workflow -ScriptPath (Join-Path $scriptRoot '03_CollectTargetEvidence.ps1') -RepositoryRoot $repoRoot
+            Assert-True ($relativeConfiguredExe.ExitCode -ne 0) '03 workflow must reject a relative executable path even when the file exists in the working directory'
+            @(
+                "REINBALANCE_PYTHON=$testPython",
+                "SURVIVORS_ARTIFACT_PRIMARY_ROOT=$artifactPrimary",
+                'SURVIVORS_ARTIFACT_BACKUP_ROOT=',
+                "SURVIVORS_EVIDENCE_ROOT=$artifactEvidence",
+                "VAMPIRE_SURVIVORS_EXE=$fakeExe",
+                'SURVIVORS_CANONICAL_SAVE=',
+                'SURVIVORS_TARGET_PROFILE='
+            ) | Set-Content -LiteralPath $repoEnvPath -Encoding UTF8
             $evidenceRun = Invoke-Workflow -ScriptPath (Join-Path $scriptRoot '03_CollectTargetEvidence.ps1') -RepositoryRoot $repoRoot
         }
         finally {
@@ -242,6 +256,9 @@ try {
         }
         if (Test-Path -LiteralPath $artifactRunRoot) {
             Remove-Item -LiteralPath $artifactRunRoot -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $relativeExeFixturePath) {
+            Remove-Item -LiteralPath $relativeExeFixturePath -Force
         }
     }
 
