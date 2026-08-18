@@ -42,7 +42,8 @@ top-level と各要素の型を検査し、不完全な入力を model 層へ渡
 def main(argv: list[str] | None = None) -> int:
     """注釈を calibration して parser package を発行する。
 
-development は atomic publish し、formal 指定時は未実装 publisher で明示的に停止します。
+gate 合格時のみ atomic publish し、gate 失敗は exit code 2、入力エラーは exit code 1 を返します。
+formal 指定時は未実装 publisher で明示的に停止します。
     """
     args = _build_arg_parser().parse_args(argv)
     try:
@@ -56,11 +57,14 @@ development は atomic publish し、formal 指定時は未実装 publisher で�
         )
         if args.formal:
             PackageWriter.publish_formal(args.output_package, train_result, report)
+        if not report.all_passed:
+            print(json.dumps({"all_gates_passed": False, "gates": report.to_wire()["gates"]}), file=sys.stderr)
+            return 2
         meta = PackageWriter.publish_development(args.output_package, train_result, report)
     except (OSError, TypeError, ValueError, NotImplementedError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
-    print(json.dumps({"package_hash": meta.package_hash, "all_gates_passed": report.all_passed}))
+    print(json.dumps({"package_hash": meta.package_hash, "all_gates_passed": True}))
     return 0
 
 if __name__ == "__main__":

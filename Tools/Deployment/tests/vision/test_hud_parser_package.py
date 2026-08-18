@@ -16,7 +16,7 @@ from survivors.vision.hud_calibration import (
 from survivors.vision.hud_parser import HudParser, HudStateV1
 
 def _annotation(split: str) -> HudCalibrationAnnotation:
-    """package test 用の完全一致注釈を返す。
+    """package test 用の完全一致注釈を返す（正例 ROI 付き）。
 
 train と validation の違いを split だけに限定します。
     """
@@ -26,13 +26,26 @@ train と validation の違いを split だけに限定します。
         (0.0, 0.0, 10.0, 10.0), (0.0, 0.0, 10.0, 10.0),
     )
 
+def _annotation_negative(split: str) -> HudCalibrationAnnotation:
+    """ROI 陰性例（expected=None, predicted=None）の注釈を返す。
+
+roi_false_positive gate を合格させるためには陰性例が最低1件必要です。
+    """
+    return HudCalibrationAnnotation(
+        f"{split}-neg", split, 1.0, 1.0, 1, 1, 1.0, 1.0, 0.0, 0.0,
+        (None,), (None,), "whip", "whip", "gameplay", "gameplay", 1.0,
+        None, None,
+    )
+
 def _publish(path: Path) -> ParserPackageMeta:
     """決定的な development package を発行する。
 
-最小の fit と validation 成果物を全 package test で共有します。
+正例 + 陰性例（ROI なし）を含む最小 validation セットで roi_false_positive gate を合格させます。
     """
     return PackageWriter.publish_development(
-        path, fit([_annotation("model_train")]), validate([_annotation("model_validation")])
+        path,
+        fit([_annotation("model_train")]),
+        validate([_annotation("model_validation"), _annotation_negative("model_validation")]),
     )
 
 def test_package_publish_load_tamper_and_formal_guards(tmp_path: Path) -> None:
@@ -107,6 +120,56 @@ def test_calibration_cli_rejects_missing_split_in_each_input(tmp_path: Path) -> 
         )
         assert completed.returncode == 1
         assert "split" in completed.stderr
+
+def test_calibration_cli_exits_2_on_gate_failure(tmp_path: Path) -> None:
+    """calibrate CLI は gate 失敗時に exit code 2 を返しパッケージを発行しない。
+
+timer_exact gate が落ちる故意の不一致 (expected=1.0, predicted=999.0) を与え、
+exit code 2 と package ファイルの未生成を確認します。
+    """
+    root = Path(__file__).resolve().parents[2]
+    script = root / "calibrate_survivors_hud_parser.py"
+    train_path = tmp_path / "train.json"
+    validation_path = tmp_path / "validation.json"
+    pkg_path = tmp_path / "pkg.json"
+    train_path.write_text(
+        json.dumps([
+            {"sample_id": "t1", "split": "model_train", "expected_timer_seconds": 1.0,
+             "predicted_timer_seconds": 1.0, "expected_level": 1, "predicted_level": 1,
+             "expected_hp_ratio": 1.0, "predicted_hp_ratio": 1.0,
+             "expected_xp_ratio": 0.0, "predicted_xp_ratio": 0.0,
+             "expected_roi": [0.0, 0.0, 10.0, 10.0], "predicted_roi": [0.0, 0.0, 10.0, 10.0]},
+        ]),
+        encoding="utf-8",
+    )
+    # timer 大幅不一致 → timer_exact gate 失敗
+    validation_path.write_text(
+        json.dumps([
+            {"sample_id": "v1", "split": "model_validation", "expected_timer_seconds": 1.0,
+             "predicted_timer_seconds": 999.0, "expected_level": 1, "predicted_level": 1,
+             "expected_hp_ratio": 1.0, "predicted_hp_ratio": 1.0,
+             "expected_xp_ratio": 0.0, "predicted_xp_ratio": 0.0},
+            # 陰性例（roi_false_positive gate を合格させるため）
+            {"sample_id": "v2", "split": "model_validation", "expected_timer_seconds": 1.0,
+             "predicted_timer_seconds": 999.0, "expected_level": 1, "predicted_level": 1,
+             "expected_hp_ratio": 1.0, "predicted_hp_ratio": 1.0,
+             "expected_xp_ratio": 0.0, "predicted_xp_ratio": 0.0,
+             "expected_roi": None, "predicted_roi": None},
+        ]),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            sys.executable, str(script),
+            "--train-annotations", str(train_path),
+            "--validation-annotations", str(validation_path),
+            "--output-package", str(pkg_path),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 2, f"expected exit 2, got {completed.returncode}: {completed.stderr}"
+    assert not pkg_path.exists(), "package must not be published when gates fail"
+
 
 def test_eval_cli_rejects_missing_split(tmp_path: Path) -> None:
     """eval CLI が split 欠測 annotation を拒否する。

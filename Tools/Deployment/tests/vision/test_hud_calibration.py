@@ -92,6 +92,51 @@ ROI 陰性例を含む report と floor/ceiling の内包境界を確認しま�
     assert GateResult.ceiling_gate("ceiling", value=0.2, ceiling=0.2).passed
     assert not GateResult.ceiling_gate("ceiling", value=0.201, ceiling=0.2).passed
 
+def test_invalid_annotation_types_rejected_before_gate_computation() -> None:
+    """型・値域違反の annotation を gate 計算前に拒否する（P1）。
+
+文字列 timer、範囲外 ratio、非整数 level で ValueError を送出することを確認します。
+    """
+    from dataclasses import asdict
+    for bad_field, bad_value in [
+        ("expected_timer_seconds", "hello"),
+        ("expected_hp_ratio", 2.0),
+        ("expected_xp_ratio", -1.0),
+        ("expected_level", 0),
+        ("expected_screen_state", 42),
+        ("predicted_items", "not-a-list"),
+    ]:
+        rec = asdict(_sample())
+        rec[bad_field] = bad_value
+        with pytest.raises(ValueError, match=bad_field):
+            validate([rec], split="model_validation")
+
+
+def test_roi_false_positive_fails_when_no_negative_examples() -> None:
+    """陰性 ROI 例がない dataset では roi_false_positive gate を合格させない（P2a）。
+
+陰性例なしで false_positive_rate=1.0 となり ceiling gate が不合格になることを確認します。
+    """
+    # 正例のみ（expected_roi あり）
+    positive_only = _sample()
+    report = validate([positive_only])
+    gate = report.gates_by_name["roi_false_positive"]
+    assert not gate.passed, "roi_false_positive must fail when dataset has no negative ROI examples"
+    assert gate.value == 1.0
+
+
+def test_fit_is_deterministic_regardless_of_input_order() -> None:
+    """fit の ROI 平均が入力順に依存しない（P2c）。
+
+3 件の異なる ROI を逆順に並べても fit_canonical_hash が一致することを確認します。
+    """
+    from dataclasses import replace
+    a = replace(_sample("model_train", "s1"), expected_roi=(10.0, 20.0, 30.0, 40.0))
+    b = replace(_sample("model_train", "s2"), expected_roi=(11.0, 21.0, 31.0, 41.0))
+    c = replace(_sample("model_train", "s3"), expected_roi=(12.0, 22.0, 32.0, 42.0))
+    assert fit([a, b, c]).fit_canonical_hash == fit([c, b, a]).fit_canonical_hash
+
+
 def test_validate_requires_proven_validation_split_and_sweeps_reserved_splits() -> None:
     """validate の全 split 指定経路を fail-closed で検証する。
 

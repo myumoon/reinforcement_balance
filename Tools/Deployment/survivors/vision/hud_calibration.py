@@ -363,8 +363,9 @@ def fit(
         if roi is not None:
             grouped.setdefault(name, []).append(roi)
     identities.sort(key=canonical_hash)
+    # canonical_hash で ROI をソートしてから fsum で集計し、入力順非依存にする。
     anchors = tuple(
-        (name, tuple(sum(roi[i] for roi in values) / len(values) for i in range(4)))
+        (name, tuple(math.fsum(roi[i] for roi in sorted(values, key=canonical_hash)) / len(values) for i in range(4)))
         for name, values in sorted(grouped.items())
     )
     identity = {
@@ -439,6 +440,55 @@ def _macro_f1(records: Sequence[object]) -> float:
         scores.append(0.0 if 2 * tp + fp + fn == 0 else 2 * tp / (2 * tp + fp + fn))
     return sum(scores) / len(scores) if scores else 0.0
 
+def _validate_annotation(item: object) -> None:
+    """gate 計算前に annotation の field 型と値域を一括検証する。
+
+文字列 timer、範囲外 ratio、非整数 level、非シーケンス items が gate を通過しないよう、
+型と範囲を計算前に fail-closed で拒否します。
+    """
+    # timer: 非負の有限数
+    for name in ("expected_timer_seconds", "predicted_timer_seconds"):
+        value = _field(item, name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be non-negative finite number, got {value!r}")
+    # ratio: 0..1 の有限数
+    for name in ("expected_hp_ratio", "predicted_hp_ratio", "expected_xp_ratio", "predicted_xp_ratio"):
+        value = _field(item, name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError(f"{name} must be float in [0, 1], got {value!r}")
+    # level: 1以上の正整数
+    for name in ("expected_level", "predicted_level"):
+        value = _field(item, name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be positive integer, got {value!r}")
+    # screen_state, choice: 文字列
+    for name in ("expected_screen_state", "predicted_screen_state", "expected_choice", "predicted_choice"):
+        value = _field(item, name)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{name} must be str or None, got {type(value).__name__}")
+    # items: str|None 要素のシーケンス
+    for name in ("expected_items", "predicted_items"):
+        value = _field(item, name)
+        if value is None:
+            continue
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"{name} must be list or tuple or None")
+        for elem in value:
+            if elem is not None and not isinstance(elem, str):
+                raise ValueError(f"{name} elements must be str or None, got {type(elem).__name__}")
+    # latency: 非負の有限数
+    latency = _field(item, "latency_ms")
+    if latency is not None:
+        if isinstance(latency, bool) or not isinstance(latency, (int, float)) or not math.isfinite(latency) or latency < 0:
+            raise ValueError(f"latency_ms must be non-negative finite number, got {latency!r}")
+
+
 def _roi_metrics(records: Sequence[object]) -> tuple[float, float, float]:
     """ROI center error、inside rate、false-positive rate を返す。
 
@@ -462,7 +512,9 @@ def _roi_metrics(records: Sequence[object]) -> tuple[float, float, float]:
         inside.append(expected[0] <= px[0] <= expected[2] and expected[1] <= px[1] <= expected[3])
     center_error = sum(errors) / len(errors) if errors else 1.0e9
     inside_rate = sum(inside) / len(inside) if inside else 0.0
-    false_positive_rate = sum(false_positives) / len(false_positives) if false_positives else 0.0
+    # 陰性例が存在しない場合は 1.0 にして gate を fail-closed にする。
+    # 陰性例がないと false-positive 抑制を検証できていないため。
+    false_positive_rate = sum(false_positives) / len(false_positives) if false_positives else 1.0
     return center_error, inside_rate, false_positive_rate
 
 def validate(
@@ -486,6 +538,8 @@ def validate(
     for item in records:
         _effective_split(item, split, "model_validation")
     records.sort(key=lambda item: str(_field(item, "sample_id", _field(item, "frame_id", ""))))
+    for item in records:
+        _validate_annotation(item)
     latency_values = [
         1.0e9 if _field(item, "latency_ms") is None else _require_finite(_field(item, "latency_ms"), "latency_ms")
         for item in records
