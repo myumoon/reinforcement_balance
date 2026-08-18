@@ -16,6 +16,34 @@ else {
     $RepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
 }
 
+function Invoke-DeploymentPytest {
+    param(
+        [Parameter(Mandatory)][string]$PythonPath,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory
+    )
+
+    Push-Location $WorkingDirectory
+    try {
+        $previousErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = @(& $PythonPath @Arguments 2>&1)
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorAction
+        }
+    }
+    finally {
+        Pop-Location
+    }
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Output   = @($output | ForEach-Object { [string]$_ })
+    }
+}
+
 $logLines = @('workflow=04_VerifyDeploymentSmoke', 'status=failed')
 try {
     $captureScript = Join-Path $RepositoryRoot 'Tools\Deployment\capture_survivors.py'
@@ -55,8 +83,42 @@ try {
         throw 'Synthetic dry-run did not report DRY_RUN_OK.'
     }
 
-    Invoke-ConfiguredPython -PythonPath $python -WorkingDirectory $RepositoryRoot -Arguments @('-m', 'pytest', 'Tools/Deployment/tests/test_capture_dataset.py', 'Tools/Deployment/tests/test_capture_annotation.py', '-q') | Out-Null
-    Invoke-ConfiguredPython -PythonPath $python -WorkingDirectory $RepositoryRoot -Arguments @('-m', 'pytest', 'Tools/Deployment/tests', '-q') | Out-Null
+    $deploymentPath = Join-Path $RepositoryRoot 'Tools\Deployment'
+    $oldPythonPath = $env:PYTHONPATH
+    $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($oldPythonPath)) {
+        $deploymentPath
+    }
+    else {
+        $deploymentPath + [IO.Path]::PathSeparator + $oldPythonPath
+    }
+    try {
+        $pytestStages = @(
+            @{
+                Name = 'capture_annotation_tests'
+                Arguments = @('-m', 'pytest', 'Tools/Deployment/tests/test_capture_dataset.py', 'Tools/Deployment/tests/test_capture_annotation.py', '-q')
+            },
+            @{
+                Name = 'deployment_tests'
+                Arguments = @('-m', 'pytest', 'Tools/Deployment/tests', '-q')
+            }
+        )
+        foreach ($stage in $pytestStages) {
+            $pytestResult = Invoke-DeploymentPytest -PythonPath $python -Arguments $stage.Arguments -WorkingDirectory $RepositoryRoot
+            if ($pytestResult.ExitCode -ne 0) {
+                $logLines += @(
+                    "failure_stage=$($stage.Name)",
+                    "pytest_exit_code=$($pytestResult.ExitCode)",
+                    'pytest_output_begin'
+                )
+                $logLines += $pytestResult.Output
+                $logLines += 'pytest_output_end'
+                throw "Deployment pytest failed at stage '$($stage.Name)' with exit code $($pytestResult.ExitCode)."
+            }
+        }
+    }
+    finally {
+        $env:PYTHONPATH = $oldPythonPath
+    }
 
     $logLines = @(
         'workflow=04_VerifyDeploymentSmoke',
