@@ -308,19 +308,88 @@ class PerformanceGateResult:
         }
 
 
+def _compute_slice_recall(
+    gt_annotations: list[dict],
+    pred_annotations: list[dict],
+    iou_threshold: float = 0.5,
+) -> float:
+    """slice の GT / prediction リストから recall を計算する（一対一 matching）。
+
+    GT が 0 件のとき recall=1.0（定義の通り）。
+    predict が 0 件のとき recall=0.0。
+    GT と prediction は {"image_id", "category_id", "bbox": [x,y,w,h]} を持つ dict。
+    """
+    if not gt_annotations:
+        return 1.0
+    if not pred_annotations:
+        return 0.0
+
+    gt_by_image: dict[int, list[dict]] = {}
+    for a in gt_annotations:
+        gt_by_image.setdefault(a["image_id"], []).append(a)
+
+    pred_by_image: dict[int, list[dict]] = {}
+    for a in pred_annotations:
+        pred_by_image.setdefault(a["image_id"], []).append(a)
+
+    total_gt = 0
+    total_tp = 0
+
+    for iid, gts in gt_by_image.items():
+        preds = pred_by_image.get(iid, [])
+        total_gt += len(gts)
+
+        if not preds:
+            continue
+
+        gt_boxes = np.array(
+            [[g["bbox"][0], g["bbox"][1], g["bbox"][0] + g["bbox"][2], g["bbox"][1] + g["bbox"][3]]
+             for g in gts], dtype=np.float32
+        )
+        pred_boxes = np.array(
+            [[p["bbox"][0], p["bbox"][1], p["bbox"][0] + p["bbox"][2], p["bbox"][1] + p["bbox"][3]]
+             for p in preds], dtype=np.float32
+        )
+        pred_scores = np.array([p.get("score", 1.0) for p in preds], dtype=np.float32)
+
+        iou_mat = compute_iou_matrix(gt_boxes, pred_boxes)
+        sorted_pred = np.argsort(-pred_scores)
+        matched_gt: set[int] = set()
+
+        for pi in sorted_pred:
+            best_iou = 0.0
+            best_gi = -1
+            for gi in range(len(gts)):
+                if gi in matched_gt:
+                    continue
+                if gts[gi].get("category_id") != preds[pi].get("category_id"):
+                    continue
+                if iou_mat[gi, pi] > best_iou:
+                    best_iou = iou_mat[gi, pi]
+                    best_gi = gi
+            if best_gi >= 0 and best_iou >= iou_threshold:
+                matched_gt.add(best_gi)
+                total_tp += 1
+
+    return float(total_tp / total_gt) if total_gt > 0 else 1.0
+
+
 def check_performance_gate(
     metrics: EvalMetrics,
     gate_cfg: dict,
     class_name_by_id: dict[int, str],
     *,
     slice_annotations: dict[str, list[dict]] | None = None,
+    slice_predictions: dict[str, list[dict]] | None = None,
     gpu_p95_latency_ms: float | None = None,
+    num_classes: int = 12,
 ) -> PerformanceGateResult:
     """EvalMetrics と gate_cfg を照合してパス / フェイルを判定する。
 
     全ゲートを実行して個別結果を返す。1 つでも FAIL なら全体 passed=False。
-    slice_annotations は {slice_name: annotations} の dict で、
-    heavy_effect / late_game 等の slice ごとの recall チェックに使う。
+    slice_annotations は {slice_name: gt_annotations} の dict。
+    slice_predictions は {slice_name: pred_annotations} の dict（省略時は空予測）。
+    slice recall は一対一 IoU matching で計算する。
     synthetic 値でゲートロジック自体を検証できるよう設計する。
     """
     all_passed = True
@@ -377,10 +446,10 @@ def check_performance_gate(
         n_instances = len(s_anns)
         n_sessions = len({a.get("session_id", "") for a in s_anns if a.get("session_id")})
 
-        # recall はインスタンスが十分にある場合のみ計算する
+        # recall は instance / session が十分にある場合のみ一対一 matching で計算する
         if n_instances >= s_min_instances and n_sessions >= s_min_sessions:
-            # synthetic: GT = s_anns, pred = [] なので recall = 0
-            s_recall: float | None = 0.0
+            s_preds = (slice_predictions or {}).get(slice_name, [])
+            s_recall: float | None = _compute_slice_recall(s_anns, s_preds)
         else:
             s_recall = None  # インスタンス/セッション不足 → gate 自体を FAIL
 

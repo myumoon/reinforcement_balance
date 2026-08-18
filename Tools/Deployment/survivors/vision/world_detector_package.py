@@ -1,18 +1,23 @@
 """WorldDetector development package writer / loader。
 
-development weight、threshold、resolved config、class map、tracker config、
+development weight、resolved config、class map、tracker config、
 metrics、dataset/target/build/contract hash を
 content-addressed temp store へ atomic publish する。
 
+package ディレクトリ内に manifest.json / world_detector_v1.yaml /
+world_class_map_v1.yaml を格納するため、別環境でも restore できる。
+
 restore 後に 04-06 golden fixture と同じ TrackedWorldStateV1 schema を返し、
-schema 差をrejectする。
+schema 差を PackageSchemaError で拒否する。
 
 development package は formal_detector_eligible=false とし、
 formal publish は全 parent と validation PASS がなければ出力しない。
+formal publish では checkpoint_manifest.assert_formal_eligible() を呼び
+parent hash を検証する。
 
 使用例:
     from survivors.vision.world_detector_package import publish_development_package, restore_package
-    pkg_path = publish_development_package(manifest, metrics, cfg, out_store)
+    pkg_path = publish_development_package(manifest, metrics, cfg, cm_path, cfg_path, out_store)
     state = restore_package(pkg_path, frame_bgr)
 """
 from __future__ import annotations
@@ -32,6 +37,12 @@ import numpy as np
 
 PACKAGE_SCHEMA_VERSION = "world_detector_package.v1"
 
+# package 内のファイル名（固定）
+_MANIFEST_NAME = "manifest.json"
+_CONFIG_NAME = "world_detector_v1.yaml"
+_CLASS_MAP_NAME = "world_class_map_v1.yaml"
+_WEIGHT_NAME = "model.pt"
+
 
 @dataclass(frozen=True)
 class PackageManifest:
@@ -39,6 +50,7 @@ class PackageManifest:
 
     content-addressed store のキーは manifest の SHA-256。
     formal_detector_eligible=false のパッケージは正式ローダーに拒否される。
+    weight_included はパッケージ内に weight ファイルがあるかを示す。
     """
 
     schema_version: str
@@ -51,6 +63,7 @@ class PackageManifest:
     contract_hash: str          # 04-06 TrackedWorldStateV1 フィールド定義の hash
     metrics: dict               # EvalMetrics.to_json() の dict
     checkpoint_selection: dict  # CheckpointSelector.to_dict()
+    weight_included: bool       # package 内に model.pt があるか
 
     def to_dict(self) -> dict:
         """JSON シリアライズ用 dict。"""
@@ -65,6 +78,7 @@ class PackageManifest:
             "contract_hash": self.contract_hash,
             "metrics": self.metrics,
             "checkpoint_selection": self.checkpoint_selection,
+            "weight_included": self.weight_included,
         }
 
     @staticmethod
@@ -85,6 +99,7 @@ class PackageManifest:
             contract_hash=d["contract_hash"],
             metrics=d.get("metrics", {}),
             checkpoint_selection=d.get("checkpoint_selection", {}),
+            weight_included=d.get("weight_included", False),
         )
 
     def assert_formal_eligible(self) -> None:
@@ -125,21 +140,79 @@ def _content_key(manifest: PackageManifest) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _sha256_file(path: pathlib.Path) -> str:
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return h.hexdigest()
+
+
 # ---- publish ----
+
+def _write_package(
+    pkg_manifest: PackageManifest,
+    store_dir: pathlib.Path,
+    cfg_path: pathlib.Path,
+    cm_path: pathlib.Path,
+    weight_path: pathlib.Path | None,
+) -> pathlib.Path:
+    """package を content-addressed store へ atomic write する。
+
+    store_dir/<content_hash>/ に manifest.json / config / class_map を配置する。
+    weight_path が指定されている場合は model.pt としてコピーする。
+    既存 package は冪等（内容が同じなら再書き込みしない）。
+    """
+    content_key = _content_key(pkg_manifest)
+    pkg_dir = store_dir / content_key
+
+    if pkg_dir.exists():
+        return pkg_dir / _MANIFEST_NAME
+
+    # atomic: tmp dir に書いてから rename
+    with tempfile.TemporaryDirectory(dir=store_dir) as tmp:
+        tmp_dir = pathlib.Path(tmp) / "package"
+        tmp_dir.mkdir()
+
+        # manifest
+        (tmp_dir / _MANIFEST_NAME).write_text(
+            json.dumps(pkg_manifest.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        # config（内容をコピーし hash 検証）
+        shutil.copy2(cfg_path, tmp_dir / _CONFIG_NAME)
+        if _sha256_file(tmp_dir / _CONFIG_NAME) != pkg_manifest.config_hash:
+            raise ValueError("config ファイルの hash が manifest と一致しません。")
+
+        # class_map
+        shutil.copy2(cm_path, tmp_dir / _CLASS_MAP_NAME)
+        if _sha256_file(tmp_dir / _CLASS_MAP_NAME) != pkg_manifest.class_map_hash:
+            raise ValueError("class_map ファイルの hash が manifest と一致しません。")
+
+        # weight（任意）
+        if weight_path is not None and weight_path.exists():
+            shutil.copy2(weight_path, tmp_dir / _WEIGHT_NAME)
+
+        shutil.move(str(tmp_dir), str(pkg_dir))
+
+    return pkg_dir / _MANIFEST_NAME
+
 
 def publish_development_package(
     checkpoint_manifest: Any,   # CheckpointManifest
     metrics_dict: dict,
     checkpoint_selection: dict,
     store_dir: pathlib.Path,
+    *,
+    cfg_path: pathlib.Path,
+    cm_path: pathlib.Path,
+    weight_path: pathlib.Path | None = None,
 ) -> pathlib.Path:
     """development package を content-addressed store へ atomic publish する。
 
-    store_dir/<content_hash>/manifest.json として保存する。
+    store_dir/<content_hash>/ に manifest.json / config / class_map を配置する。
     formal_detector_eligible は常に False（04-08 が差し替える）。
     contract_hash は TrackedWorldStateV1 フィールド定義から計算する。
 
-    atomic: temp dir に書いてから rename する。
+    weight_path が指定されている場合は model.pt としてコピーし model_hash を検証する。
     """
     contract_hash = _compute_contract_hash()
 
@@ -154,26 +227,11 @@ def publish_development_package(
         contract_hash=contract_hash,
         metrics=metrics_dict,
         checkpoint_selection=checkpoint_selection,
+        weight_included=(weight_path is not None and weight_path.exists()),
     )
 
-    content_key = _content_key(pkg_manifest)
-    pkg_dir = store_dir / content_key
-
-    # atomic publish: temp -> rename
-    with tempfile.TemporaryDirectory(dir=store_dir) as tmp:
-        tmp_path = pathlib.Path(tmp) / "manifest.json"
-        tmp_path.write_text(
-            json.dumps(pkg_manifest.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        # rename は同一ファイルシステム内なら atomic
-        if not pkg_dir.exists():
-            shutil.move(str(tmp_path.parent), str(pkg_dir))
-        else:
-            # 既存 package は冪等（内容が同じなら再書き込みしない）
-            pass
-
-    return pkg_dir / "manifest.json"
+    store_dir.mkdir(parents=True, exist_ok=True)
+    return _write_package(pkg_manifest, store_dir, cfg_path, cm_path, weight_path)
 
 
 def publish_formal_package(
@@ -182,11 +240,15 @@ def publish_formal_package(
     checkpoint_selection: dict,
     store_dir: pathlib.Path,
     *,
+    cfg_path: pathlib.Path,
+    cm_path: pathlib.Path,
+    weight_path: pathlib.Path | None = None,
     validation_passed: bool,
 ) -> pathlib.Path:
     """formal package を publish する。
 
     全 parent ハッシュと validation PASS が必要。
+    checkpoint_manifest.assert_formal_eligible() で parent hash を検証する。
     validation_passed=False の場合は ValueError を送出する。
     """
     if not validation_passed:
@@ -194,12 +256,8 @@ def publish_formal_package(
             "formal publish には validation PASS が必要です。"
             " performance gate を全て通過してから再実行してください。"
         )
-    if not (type(checkpoint_manifest.formal_detector_eligible) is bool
-            and checkpoint_manifest.formal_detector_eligible):
-        raise ValueError(
-            "formal publish には CheckpointManifest.formal_detector_eligible=True が必要です。"
-            " 04-08 で正式 weight をロードしてから再実行してください。"
-        )
+    # parent hash 検証（assert_formal_eligible は型 / SHA-256 形式も確認する）
+    checkpoint_manifest.assert_formal_eligible()
 
     contract_hash = _compute_contract_hash()
 
@@ -214,21 +272,11 @@ def publish_formal_package(
         contract_hash=contract_hash,
         metrics=metrics_dict,
         checkpoint_selection=checkpoint_selection,
+        weight_included=(weight_path is not None and weight_path.exists()),
     )
 
-    content_key = _content_key(pkg_manifest)
-    pkg_dir = store_dir / content_key
-
-    with tempfile.TemporaryDirectory(dir=store_dir) as tmp:
-        tmp_path = pathlib.Path(tmp) / "manifest.json"
-        tmp_path.write_text(
-            json.dumps(pkg_manifest.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        if not pkg_dir.exists():
-            shutil.move(str(tmp_path.parent), str(pkg_dir))
-
-    return pkg_dir / "manifest.json"
+    store_dir.mkdir(parents=True, exist_ok=True)
+    return _write_package(pkg_manifest, store_dir, cfg_path, cm_path, weight_path)
 
 
 # ---- restore ----
@@ -242,11 +290,18 @@ def restore_package(
 ) -> "TrackedWorldStateV1":
     """package manifest から detector を復元し、1 フレームを推論して TrackedWorldStateV1 を返す。
 
-    schema が TrackedWorldStateV1 フィールド定義と一致しない場合は PackageSchemaError を送出する。
+    package ディレクトリ内の config / class_map から detector を構築する。
+    weight_included=True のとき model.pt を load する（torch 不在時は stub）。
+    schema が TrackedWorldStateV1 フィールド定義と一致しない場合は PackageSchemaError。
     require_formal=True のとき、development package は FormalPackageRejectedError で拒否する。
     """
     from survivors.vision.entity_tracker import EntityTracker, TrackedWorldStateV1
     from survivors.vision.world_detector import WorldDetector
+    from survivors.vision.world_dataset import load_class_map
+
+    import yaml
+
+    pkg_dir = manifest_path.parent
 
     # -- manifest load
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -264,29 +319,49 @@ def restore_package(
             " TrackedWorldStateV1 のフィールド定義が変更されています。"
         )
 
-    # -- detector（config from manifest dir; stub model）
-    manifest_dir = manifest_path.parent.parent.parent.parent  # store_dir/../..
-    cfg_path = manifest_dir / "configs" / "world_detector_v1.yaml"
-    cm_path = manifest_dir / "configs" / "world_class_map_v1.yaml"
+    # -- package 内 config / class_map を使う
+    cfg_path = pkg_dir / _CONFIG_NAME
+    cm_path = pkg_dir / _CLASS_MAP_NAME
 
-    import yaml
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"package 内に config が見つかりません: {cfg_path}")
+    if not cm_path.exists():
+        raise FileNotFoundError(f"package 内に class_map が見つかりません: {cm_path}")
+
+    # hash 検証
+    if _sha256_file(cfg_path) != pkg_manifest.config_hash:
+        raise PackageSchemaError("config_hash が manifest と一致しません。")
+    if _sha256_file(cm_path) != pkg_manifest.class_map_hash:
+        raise PackageSchemaError("class_map_hash が manifest と一致しません。")
+
     with cfg_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     detector = WorldDetector.from_config(cfg, cm_path)
 
+    # -- weight ロード（torch 利用可能かつ weight が含まれている場合）
+    weight_file = pkg_dir / _WEIGHT_NAME
+    if pkg_manifest.weight_included and weight_file.exists():
+        try:
+            import torch
+            state_dict = torch.load(weight_file, map_location="cpu")
+            detector._model.load_state_dict(state_dict)
+        except ImportError:
+            pass  # torch 不在: stub model のまま推論する
+
     # -- infer
     result = detector.infer(frame_bgr, score_threshold=score_threshold)
 
-    # -- tracker （config から構築）
+    # -- tracker（config から構築）
     tracker_cfg = cfg.get("tracker", {})
-    from survivors.vision.world_dataset import load_class_map
     cm = load_class_map(cm_path)
     max_age_raw: dict = tracker_cfg.get("max_age_by_class", {})
-    max_age_by_class: dict[int, int] = {
-        cm.name_to_id(name): age for name, age in max_age_raw.items()
-        if _safe_name_to_id(cm, name) is not None
-    }
+    max_age_by_class: dict[int, int] = {}
+    for name, age in max_age_raw.items():
+        try:
+            max_age_by_class[cm.name_to_id(name)] = age
+        except KeyError:
+            pass
 
     tracker = EntityTracker(
         max_age_by_class=max_age_by_class,
@@ -298,10 +373,10 @@ def restore_package(
     state = tracker.update(result, frame_index=0, timestamp_ns=0)
     v1 = TrackedWorldStateV1.from_state(state, frame_index=0, timestamp_ns=0)
 
-    # -- schema 検証: フィールド名が golden fixture と一致するか
-    expected_fields = set(TrackedWorldStateV1.track_field_names())
+    # -- schema 検証
     from dataclasses import fields as dc_fields
     from survivors.vision.entity_tracker import TrackedEntityV1
+    expected_fields = set(TrackedWorldStateV1.track_field_names())
     actual_fields = {f.name for f in dc_fields(TrackedEntityV1)}
     if expected_fields != actual_fields:
         raise PackageSchemaError(
@@ -310,11 +385,3 @@ def restore_package(
         )
 
     return v1
-
-
-def _safe_name_to_id(cm: Any, name: str) -> int | None:
-    """name_to_id を KeyError なしで呼び出すヘルパー。"""
-    try:
-        return cm.name_to_id(name)
-    except KeyError:
-        return None

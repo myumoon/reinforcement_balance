@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import pathlib
-import tempfile
-from dataclasses import dataclass
+import shutil
+from dataclasses import asdict
 
 import numpy as np
 import pytest
@@ -55,6 +55,26 @@ def _write_coco(tmp_path: pathlib.Path, data: dict) -> pathlib.Path:
     p = tmp_path / "annotations.json"
     p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return p
+
+
+def _make_checkpoint_manifest(formal: bool = False):
+    """ダミー CheckpointManifest を生成する。"""
+    from survivors.vision.world_detector import CheckpointManifest
+    return CheckpointManifest(
+        model_hash="a" * 64,
+        data_hash="b" * 64,
+        config_hash=_sha256_file(DETECTOR_CONFIG_PATH),  # 実 config hash（package の検証に通る）
+        build_hash="d" * 64,
+        class_map_hash=_sha256_file(CLASS_MAP_PATH),
+        formal_detector_eligible=formal,
+    )
+
+
+def _sha256_file(path: pathlib.Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return h.hexdigest()
 
 
 # ---- Task 1: formal preflight / session rejection ----
@@ -161,9 +181,9 @@ class TestCheckpointSelector:
         from train_survivors_world_detector import CheckpointSelector, CheckpointRecord
 
         sel = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
-        sel.record(CheckpointRecord(1, 0.1, pathlib.Path("e1.pt")))
-        sel.record(CheckpointRecord(2, 0.3, pathlib.Path("e2.pt")))
-        sel.record(CheckpointRecord(3, 0.2, pathlib.Path("e3.pt")))
+        sel.record(CheckpointRecord(1, 0.1, "e1.pt"))
+        sel.record(CheckpointRecord(2, 0.3, "e2.pt"))
+        sel.record(CheckpointRecord(3, 0.2, "e3.pt"))
         assert sel.best is not None
         assert sel.best.epoch == 2
         assert sel.best.val_map50_95 == pytest.approx(0.3)
@@ -174,7 +194,7 @@ class TestCheckpointSelector:
 
         sel = CheckpointSelector(metric="val_map50_95", keep_top_k=2)
         for ep in range(5):
-            sel.record(CheckpointRecord(ep, float(ep) * 0.1, pathlib.Path(f"e{ep}.pt")))
+            sel.record(CheckpointRecord(ep, float(ep) * 0.1, f"e{ep}.pt"))
         assert len(sel._records) <= 2
 
     def test_to_dict_contains_selection_rules(self):
@@ -182,7 +202,7 @@ class TestCheckpointSelector:
         from train_survivors_world_detector import CheckpointSelector, CheckpointRecord
 
         sel = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
-        sel.record(CheckpointRecord(5, 0.42, pathlib.Path("e5.pt")))
+        sel.record(CheckpointRecord(5, 0.42, "e5.pt"))
         d = sel.to_dict()
         assert d["metric"] == "val_map50_95"
         assert d["keep_top_k"] == 3
@@ -196,19 +216,73 @@ class TestCheckpointSelector:
         sel = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
         assert sel.best is None
 
-    def test_resume_epoch_increments(self, tmp_path):
-        """resume manifest から start_epoch を引き継ぐ。"""
+    def test_from_dict_restores_records(self, tmp_path):
+        """from_dict は records を正しく復元する（resume 用）。"""
         from train_survivors_world_detector import CheckpointSelector, CheckpointRecord
 
-        manifest_data = {
-            "checkpoint_selection": {"metric": "val_map50_95", "best_epoch": 10, "best_val_map50_95": 0.5}
-        }
-        (tmp_path / "manifest.json").write_text(json.dumps(manifest_data), encoding="utf-8")
-
-        # resume 後は epoch 11 から開始するはずだが、CheckpointSelector はステートレス
         sel = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
-        sel.record(CheckpointRecord(11, 0.6, tmp_path / "e11.pt"))
-        assert sel.best.epoch == 11
+        sel.record(CheckpointRecord(10, 0.5, "e10.pt"))
+        d = sel.to_dict()
+
+        restored = CheckpointSelector.from_dict(d)
+        assert restored.best is not None
+        assert restored.best.epoch == 10
+        assert restored.best.val_map50_95 == pytest.approx(0.5)
+
+    def test_resume_raises_on_missing_state_file(self, tmp_path):
+        """training_state.json が存在しない resume_dir は ValueError。"""
+        from train_survivors_world_detector import (
+            CheckpointSelector, _load_resume_state, _RESUME_STATE_NAME
+        )
+
+        sel = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        with pytest.raises(ValueError, match="training_state.json"):
+            _load_resume_state(tmp_path, sel, None, None)
+
+    def test_resume_raises_on_invalid_last_epoch(self, tmp_path):
+        """last_epoch が不正な training_state.json は ValueError。"""
+        from train_survivors_world_detector import (
+            CheckpointSelector, _load_resume_state, _RESUME_STATE_NAME
+        )
+
+        bad_state = {"last_epoch": "not_an_int", "selector": {}}
+        (tmp_path / _RESUME_STATE_NAME).write_text(json.dumps(bad_state), encoding="utf-8")
+
+        sel = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        with pytest.raises(ValueError, match="last_epoch"):
+            _load_resume_state(tmp_path, sel, None, None)
+
+
+class TestSessionBalancedStep:
+    """_session_balanced_step が実 DatasetSample から target を構築することを確認する。"""
+
+    def test_step_uses_dataset_targets(self, tmp_path):
+        """DatasetSample の annotation から実 target が構築されることを確認する。
+
+        SSDLite320（stub）は list を返すが、例外なしで完了することを検証する。
+        torch が不在（_StubModel 環境）ではスキップする。
+        """
+        # torch が不在ならこのテストはスキップ
+        torch = pytest.importorskip("torch")
+        import torch.optim as optim
+
+        from survivors.vision.world_dataset import WorldDataset
+        from survivors.vision.world_detector import WorldDetector, load_detector_config, _TORCH_AVAILABLE
+        from train_survivors_world_detector import _session_balanced_step
+
+        if not _TORCH_AVAILABLE:
+            pytest.skip("torch 不在環境では _StubModel なので skip")
+
+        data = _make_coco(n_images=5, sessions=["s1", "s2"])
+        ann_path = _write_coco(tmp_path, data)
+        ds = WorldDataset(ann_path, CLASS_MAP_PATH)
+
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        detector = WorldDetector.from_config(cfg, CLASS_MAP_PATH)
+        optimizer = optim.SGD(detector._model.parameters(), lr=0.001)
+
+        # torch と DatasetSample がある状態で step を実行し、例外がないことを確認
+        _session_balanced_step(detector, ds, optimizer, cfg)
 
 
 # ---- Task 3: performance gate boundary values ----
@@ -312,8 +386,9 @@ class TestPerformanceGateBoundary:
         # heavy_effect slice に 3 件しかない（min_instances=4）
         slice_annotations = {
             "heavy_effect": [
-                {"session_id": "s1"}, {"session_id": "s2"},
-                {"session_id": "s3"},  # 3 件、4 件必要
+                {"image_id": 0, "category_id": 2, "bbox": [10, 10, 50, 50], "session_id": "s1"},
+                {"image_id": 1, "category_id": 2, "bbox": [10, 10, 50, 50], "session_id": "s2"},
+                {"image_id": 2, "category_id": 2, "bbox": [10, 10, 50, 50], "session_id": "s3"},
             ],
         }
         result = check_performance_gate(
@@ -321,6 +396,67 @@ class TestPerformanceGateBoundary:
             slice_annotations=slice_annotations,
         )
         heavy = next(r for r in result.slice_results if r.slice_name == "heavy_effect")
+        assert not heavy.passed
+
+    def test_slice_recall_computed_from_predictions(self):
+        """slice recall は prediction との一対一 matching で計算される。"""
+        from eval_survivors_world_detector import check_performance_gate
+
+        m = self._base_metrics()
+        gate_cfg = {
+            "map50_95_min": 0.0,
+            "class_recall_min": {},
+            "density_correlation_min": 0.0,
+            "nearest_distance_median_max": 1.0,
+            "gpu_p95_latency_max_ms": 1000.0,
+            "slice_gate": {
+                "boss": {"recall_min": 0.98, "min_instances": 3, "min_sessions": 3},
+            },
+        }
+        # GT: 3 件 / 3 session、pred: 完全一致する 3 件
+        gt_anns = [
+            {"image_id": i, "category_id": 4, "bbox": [10, 10, 50, 50], "session_id": f"s{i+1}"}
+            for i in range(3)
+        ]
+        pred_anns = [
+            {"image_id": i, "category_id": 4, "bbox": [10, 10, 50, 50], "score": 0.9}
+            for i in range(3)
+        ]
+        result = check_performance_gate(
+            m, gate_cfg, {4: "enemy_boss"},
+            slice_annotations={"boss": gt_anns},
+            slice_predictions={"boss": pred_anns},
+        )
+        boss = next(r for r in result.slice_results if r.slice_name == "boss")
+        assert boss.recall == pytest.approx(1.0)
+        assert boss.passed
+
+    def test_slice_recall_zero_when_no_predictions(self):
+        """prediction が空のとき recall=0.0、閾値 > 0 ならば FAIL。"""
+        from eval_survivors_world_detector import check_performance_gate
+
+        m = self._base_metrics()
+        gate_cfg = {
+            "map50_95_min": 0.0,
+            "class_recall_min": {},
+            "density_correlation_min": 0.0,
+            "nearest_distance_median_max": 1.0,
+            "gpu_p95_latency_max_ms": 1000.0,
+            "slice_gate": {
+                "heavy_effect": {"recall_min": 0.80, "min_instances": 4, "min_sessions": 4},
+            },
+        }
+        gt_anns = [
+            {"image_id": i, "category_id": 2, "bbox": [10, 10, 50, 50], "session_id": f"s{i+1}"}
+            for i in range(4)
+        ]
+        result = check_performance_gate(
+            m, gate_cfg, {},
+            slice_annotations={"heavy_effect": gt_anns},
+            slice_predictions={"heavy_effect": []},  # 空予測
+        )
+        heavy = next(r for r in result.slice_results if r.slice_name == "heavy_effect")
+        assert heavy.recall == pytest.approx(0.0)
         assert not heavy.passed
 
     def test_latency_above_max_fails(self):
@@ -339,7 +475,6 @@ class TestPerformanceGateBoundary:
         from eval_survivors_world_detector import check_performance_gate
 
         m = self._base_metrics()
-        # slice に十分なインスタンス（recall は 0 だが min 設定が 0 のケース）
         gate_cfg = {
             "map50_95_min": 0.0,
             "class_recall_min": {},
@@ -357,18 +492,6 @@ class TestPerformanceGateBoundary:
 class TestPackagePublish:
     """package publish / restore / schema 検証を synthetic fixture で確認する。"""
 
-    def _dummy_checkpoint_manifest(self):
-        """ダミー CheckpointManifest を生成する。"""
-        from survivors.vision.world_detector import CheckpointManifest
-        return CheckpointManifest(
-            model_hash="a" * 64,
-            data_hash="b" * 64,
-            config_hash="c" * 64,
-            build_hash="d" * 64,
-            class_map_hash="e" * 64,
-            formal_detector_eligible=False,
-        )
-
     def test_publish_creates_manifest_json(self, tmp_path):
         """publish_development_package が manifest.json を作成する。"""
         from survivors.vision.world_detector_package import publish_development_package
@@ -376,13 +499,33 @@ class TestPackagePublish:
         store = tmp_path / "store"
         store.mkdir()
         pkg_path = publish_development_package(
-            self._dummy_checkpoint_manifest(),
+            _make_checkpoint_manifest(),
             metrics_dict={"proxy_ap50_95": 0.0},
             checkpoint_selection={"metric": "val_map50_95", "keep_top_k": 3},
             store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
         )
         assert pkg_path.exists()
         assert pkg_path.name == "manifest.json"
+
+    def test_package_contains_config_and_class_map(self, tmp_path):
+        """package ディレクトリに config / class_map がコピーされている。"""
+        from survivors.vision.world_detector_package import publish_development_package
+
+        store = tmp_path / "store"
+        store.mkdir()
+        pkg_path = publish_development_package(
+            _make_checkpoint_manifest(),
+            metrics_dict={},
+            checkpoint_selection={},
+            store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
+        )
+        pkg_dir = pkg_path.parent
+        assert (pkg_dir / "world_detector_v1.yaml").exists()
+        assert (pkg_dir / "world_class_map_v1.yaml").exists()
 
     def test_published_package_is_formal_ineligible(self, tmp_path):
         """開発 package の formal_detector_eligible は常に False。"""
@@ -391,10 +534,12 @@ class TestPackagePublish:
         store = tmp_path / "store"
         store.mkdir()
         pkg_path = publish_development_package(
-            self._dummy_checkpoint_manifest(),
+            _make_checkpoint_manifest(),
             metrics_dict={},
             checkpoint_selection={},
             store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
         )
         raw = json.loads(pkg_path.read_text(encoding="utf-8"))
         pm = PackageManifest.from_dict(raw)
@@ -409,10 +554,12 @@ class TestPackagePublish:
         store = tmp_path / "store"
         store.mkdir()
         pkg_path = publish_development_package(
-            self._dummy_checkpoint_manifest(),
+            _make_checkpoint_manifest(),
             metrics_dict={},
             checkpoint_selection={},
             store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
         )
         raw = json.loads(pkg_path.read_text(encoding="utf-8"))
         pm = PackageManifest.from_dict(raw)
@@ -422,34 +569,66 @@ class TestPackagePublish:
     def test_formal_publish_requires_validation_pass(self, tmp_path):
         """formal publish は validation_passed=False のとき ValueError。"""
         from survivors.vision.world_detector_package import publish_formal_package
-        from survivors.vision.world_detector import CheckpointManifest
 
         store = tmp_path / "store"
         store.mkdir()
-        cm = CheckpointManifest(
-            model_hash="a" * 64,
+        with pytest.raises(ValueError, match="validation PASS"):
+            publish_formal_package(
+                _make_checkpoint_manifest(formal=True),
+                {}, {}, store,
+                cfg_path=DETECTOR_CONFIG_PATH,
+                cm_path=CLASS_MAP_PATH,
+                validation_passed=False,
+            )
+
+    def test_formal_publish_calls_assert_formal_eligible(self, tmp_path):
+        """formal publish は assert_formal_eligible() を呼び parent hash を検証する。
+
+        formal_detector_eligible=False の checkpoint は FormalDetectorRejectedError で拒否される。
+        CheckpointManifest.assert_formal_eligible() は FormalDetectorRejectedError を送出し、
+        publish_formal_package はそれを伝播させる。
+        """
+        from survivors.vision.world_detector import FormalDetectorRejectedError
+        from survivors.vision.world_detector_package import publish_formal_package
+
+        store = tmp_path / "store"
+        store.mkdir()
+        # formal_detector_eligible=False の checkpoint を渡す
+        with pytest.raises(FormalDetectorRejectedError):
+            publish_formal_package(
+                _make_checkpoint_manifest(formal=False),   # development checkpoint
+                {}, {}, store,
+                cfg_path=DETECTOR_CONFIG_PATH,
+                cm_path=CLASS_MAP_PATH,
+                validation_passed=True,
+            )
+
+    def test_formal_publish_requires_valid_hashes(self, tmp_path):
+        """assert_formal_eligible は SHA-256 形式不正も拒否する。
+
+        model_hash="" → _validate_hash_format() が ValueError を送出する。
+        publish_formal_package はこれを伝播させる。
+        """
+        from survivors.vision.world_detector import CheckpointManifest, FormalDetectorRejectedError
+        from survivors.vision.world_detector_package import publish_formal_package
+
+        store = tmp_path / "store"
+        store.mkdir()
+        # model_hash が SHA-256 形式不正（64 hex 文字でない）の formal manifest
+        bad_cm = CheckpointManifest(
+            model_hash="",     # 不正
             data_hash="b" * 64,
             config_hash="c" * 64,
             build_hash="d" * 64,
             class_map_hash="e" * 64,
             formal_detector_eligible=True,
         )
-        with pytest.raises(ValueError, match="validation PASS"):
+        # assert_formal_eligible → _validate_hash_format → ValueError
+        with pytest.raises(ValueError):
             publish_formal_package(
-                cm, {}, {}, store,
-                validation_passed=False,
-            )
-
-    def test_formal_publish_requires_formal_checkpoint(self, tmp_path):
-        """formal publish には formal_detector_eligible=True の checkpoint が必要。"""
-        from survivors.vision.world_detector_package import publish_formal_package
-
-        store = tmp_path / "store"
-        store.mkdir()
-        with pytest.raises(ValueError, match="formal_detector_eligible"):
-            publish_formal_package(
-                self._dummy_checkpoint_manifest(),  # formal_detector_eligible=False
-                {}, {}, store,
+                bad_cm, {}, {}, store,
+                cfg_path=DETECTOR_CONFIG_PATH,
+                cm_path=CLASS_MAP_PATH,
                 validation_passed=True,
             )
 
@@ -459,16 +638,18 @@ class TestPackagePublish:
 
         store = tmp_path / "store"
         store.mkdir()
-        args = (
-            self._dummy_checkpoint_manifest(),
-            {"proxy_ap50_95": 0.0},
-            {},
+        kwargs = dict(
+            metrics_dict={"proxy_ap50_95": 0.0},
+            checkpoint_selection={},
+            store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
         )
-        p1 = publish_development_package(*args, store_dir=store)
-        p2 = publish_development_package(*args, store_dir=store)
+        p1 = publish_development_package(_make_checkpoint_manifest(), **kwargs)
+        p2 = publish_development_package(_make_checkpoint_manifest(), **kwargs)
         assert p1 == p2
 
-    def test_schema_version_mismatch_raises(self, tmp_path):
+    def test_schema_version_mismatch_raises(self):
         """schema_version が一致しない manifest は from_dict で拒否される。"""
         from survivors.vision.world_detector_package import PackageManifest
 
@@ -478,32 +659,31 @@ class TestPackagePublish:
 
 
 class TestPackageRestore:
-    """restore_package が TrackedWorldStateV1 を返すことを確認する。"""
+    """restore_package が package 内 config を使って TrackedWorldStateV1 を返す。"""
 
-    def _publish(self, tmp_path):
-        """テスト用 development package を publish して path を返す。"""
+    def _publish(self, tmp_path) -> pathlib.Path:
+        """テスト用 development package を publish して manifest_path を返す。"""
         from survivors.vision.world_detector_package import publish_development_package
-        from survivors.vision.world_detector import CheckpointManifest
 
         store = tmp_path / "store"
         store.mkdir()
-        cm = CheckpointManifest(
-            model_hash="a" * 64,
-            data_hash="b" * 64,
-            config_hash="c" * 64,
-            build_hash="d" * 64,
-            class_map_hash="e" * 64,
-            formal_detector_eligible=False,
+        return publish_development_package(
+            _make_checkpoint_manifest(),
+            metrics_dict={},
+            checkpoint_selection={},
+            store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
         )
-        return publish_development_package(cm, {}, {}, store_dir=store)
 
     def test_restore_returns_tracked_world_state_v1(self, tmp_path):
-        """restore_package は TrackedWorldStateV1 を返す。"""
+        """restore_package は package 内 config を使って TrackedWorldStateV1 を返す。"""
+        from survivors.vision.world_detector_package import restore_package
         from survivors.vision.entity_tracker import TrackedWorldStateV1
 
         pkg_path = self._publish(tmp_path)
         frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
-        state = _restore_with_wt_configs(pkg_path, frame)
+        state = restore_package(pkg_path, frame)
 
         assert isinstance(state, TrackedWorldStateV1)
         assert state.frame_index == 0
@@ -516,65 +696,18 @@ class TestPackageRestore:
         pkg_path = self._publish(tmp_path)
         frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
         with pytest.raises(FormalPackageRejectedError):
-            _restore_with_wt_configs(pkg_path, frame, require_formal=True)
+            restore_package(pkg_path, frame, require_formal=True)
 
+    def test_restore_detects_config_hash_mismatch(self, tmp_path):
+        """package 内の config を改ざんすると PackageSchemaError。"""
+        from survivors.vision.world_detector_package import restore_package, PackageSchemaError
 
-def _restore_with_wt_configs(
-    manifest_path: pathlib.Path,
-    frame_bgr: np.ndarray,
-    *,
-    require_formal: bool = False,
-) -> "TrackedWorldStateV1":
-    """worktree の configs を使って restore_package を呼ぶテスト専用ヘルパー。
+        pkg_path = self._publish(tmp_path)
+        # config を改ざん
+        cfg_in_pkg = pkg_path.parent / "world_detector_v1.yaml"
+        original = cfg_in_pkg.read_text(encoding="utf-8")
+        cfg_in_pkg.write_text(original + "\n# tampered", encoding="utf-8")
 
-    world_detector_package.restore_package の cfg/cm パス解決を
-    worktree configs ディレクトリに差し替える。
-    """
-    import yaml
-    from survivors.vision.world_detector import WorldDetector
-    from survivors.vision.entity_tracker import EntityTracker, TrackedWorldStateV1
-    from survivors.vision.world_dataset import load_class_map
-    from survivors.vision.world_detector_package import (
-        PackageManifest, FormalPackageRejectedError, PackageSchemaError, _compute_contract_hash
-    )
-
-    wt_configs = pathlib.Path(__file__).parents[2] / "configs"
-    cfg_path = wt_configs / "world_detector_v1.yaml"
-    cm_path = wt_configs / "world_class_map_v1.yaml"
-
-    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-    pkg_manifest = PackageManifest.from_dict(raw)
-
-    if require_formal:
-        pkg_manifest.assert_formal_eligible()
-
-    current_contract_hash = _compute_contract_hash()
-    if pkg_manifest.contract_hash != current_contract_hash:
-        raise PackageSchemaError(
-            f"contract_hash 不一致: {pkg_manifest.contract_hash!r} vs {current_contract_hash!r}"
-        )
-
-    with cfg_path.open(encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    detector = WorldDetector.from_config(cfg, cm_path)
-    result = detector.infer(frame_bgr, score_threshold=0.5)
-
-    tracker_cfg = cfg.get("tracker", {})
-    cm = load_class_map(cm_path)
-    max_age_raw: dict = tracker_cfg.get("max_age_by_class", {})
-    max_age_by_class: dict[int, int] = {}
-    for name, age in max_age_raw.items():
-        try:
-            max_age_by_class[cm.name_to_id(name)] = age
-        except KeyError:
-            pass
-
-    tracker = EntityTracker(
-        max_age_by_class=max_age_by_class,
-        max_match_cost=tracker_cfg.get("max_match_cost", 0.7),
-        velocity_ema_alpha=tracker_cfg.get("velocity_ema_alpha", 0.6),
-        confidence_decay_per_frame=tracker_cfg.get("confidence_decay_per_frame", 0.9),
-    )
-    state = tracker.update(result, frame_index=0, timestamp_ns=0)
-    return TrackedWorldStateV1.from_state(state, frame_index=0, timestamp_ns=0)
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        with pytest.raises(PackageSchemaError, match="config_hash"):
+            restore_package(pkg_path, frame)
