@@ -239,6 +239,186 @@ def evaluate_from_predictions(
     )
 
 
+# ---- performance gate ----
+
+@dataclass
+class SliceGateResult:
+    """1 slice の performance gate 結果。
+
+    recall や instance 数が基準を満たさない場合は passed=False となる。
+    """
+
+    slice_name: str
+    recall: float | None
+    recall_min: float
+    n_instances: int
+    min_instances: int
+    n_sessions: int
+    min_sessions: int
+    passed: bool
+
+    def to_dict(self) -> dict:
+        """JSON 出力用 dict。"""
+        return {
+            "slice": self.slice_name,
+            "recall": self.recall,
+            "recall_min": self.recall_min,
+            "n_instances": self.n_instances,
+            "min_instances": self.min_instances,
+            "n_sessions": self.n_sessions,
+            "min_sessions": self.min_sessions,
+            "passed": self.passed,
+        }
+
+
+@dataclass
+class PerformanceGateResult:
+    """全体 performance gate の合否とその根拠。
+
+    synthetic metrics でゲートロジックを検証できる。
+    actual weight での合格は 04-08 に委譲する。
+    """
+
+    passed: bool
+    map50_95: float
+    map50_95_min: float
+    class_recall_results: dict[str, dict]  # class_name -> {recall, min, passed}
+    density_correlation: float
+    density_correlation_min: float
+    nearest_distance_median: float
+    nearest_distance_median_max: float
+    gpu_p95_latency_ms: float | None
+    gpu_p95_latency_max_ms: float
+    slice_results: list[SliceGateResult]
+
+    def to_dict(self) -> dict:
+        """JSON 出力用 dict。"""
+        return {
+            "passed": self.passed,
+            "map50_95": self.map50_95,
+            "map50_95_min": self.map50_95_min,
+            "class_recall_results": self.class_recall_results,
+            "density_correlation": self.density_correlation,
+            "density_correlation_min": self.density_correlation_min,
+            "nearest_distance_median": self.nearest_distance_median,
+            "nearest_distance_median_max": self.nearest_distance_median_max,
+            "gpu_p95_latency_ms": self.gpu_p95_latency_ms,
+            "gpu_p95_latency_max_ms": self.gpu_p95_latency_max_ms,
+            "slice_results": [s.to_dict() for s in self.slice_results],
+        }
+
+
+def check_performance_gate(
+    metrics: EvalMetrics,
+    gate_cfg: dict,
+    class_name_by_id: dict[int, str],
+    *,
+    slice_annotations: dict[str, list[dict]] | None = None,
+    gpu_p95_latency_ms: float | None = None,
+) -> PerformanceGateResult:
+    """EvalMetrics と gate_cfg を照合してパス / フェイルを判定する。
+
+    全ゲートを実行して個別結果を返す。1 つでも FAIL なら全体 passed=False。
+    slice_annotations は {slice_name: annotations} の dict で、
+    heavy_effect / late_game 等の slice ごとの recall チェックに使う。
+    synthetic 値でゲートロジック自体を検証できるよう設計する。
+    """
+    all_passed = True
+
+    # --- overall mAP50:95 ---
+    map_min = gate_cfg.get("map50_95_min", 0.0)
+    if metrics.proxy_ap50_95 < map_min:
+        all_passed = False
+
+    # --- class recall ---
+    recall_cfg: dict[str, float] = gate_cfg.get("class_recall_min", {})
+    class_recall_results: dict[str, dict] = {}
+    for class_name, recall_min in recall_cfg.items():
+        # class_id を class_name から逆引きする
+        cid = next((k for k, v in class_name_by_id.items() if v == class_name), None)
+        recall = metrics.class_recall.get(cid, 0.0) if cid is not None else 0.0
+        passed = recall >= recall_min
+        if not passed:
+            all_passed = False
+        class_recall_results[class_name] = {
+            "recall": recall,
+            "recall_min": recall_min,
+            "passed": passed,
+        }
+
+    # --- density correlation (proxy: 1 - density_error / max_error) ---
+    # ponytail: directional-density correlation は full tracker 実行が必要; ここでは
+    # 1 - density_error をプロキシとして使う。実値は 04-08 で差し替える。
+    density_corr = max(0.0, 1.0 - metrics.density_error)
+    density_min = gate_cfg.get("density_correlation_min", 0.85)
+    if density_corr < density_min:
+        all_passed = False
+
+    # --- nearest-distance median error ---
+    nd_median = metrics.nearest_distance_error  # mean; median は full dataset で計算
+    nd_max = gate_cfg.get("nearest_distance_median_max", 0.04)
+    if nd_median > nd_max:
+        all_passed = False
+
+    # --- GPU p95 latency ---
+    latency_max = gate_cfg.get("gpu_p95_latency_max_ms", 25.0)
+    if gpu_p95_latency_ms is not None and gpu_p95_latency_ms > latency_max:
+        all_passed = False
+
+    # --- slice gates ---
+    slice_cfg: dict[str, dict] = gate_cfg.get("slice_gate", {})
+    slice_results: list[SliceGateResult] = []
+    for slice_name, s_cfg in slice_cfg.items():
+        s_recall_min = s_cfg.get("recall_min", 0.80)
+        s_min_instances = s_cfg.get("min_instances", 4)
+        s_min_sessions = s_cfg.get("min_sessions", 4)
+
+        s_anns = (slice_annotations or {}).get(slice_name, [])
+        n_instances = len(s_anns)
+        n_sessions = len({a.get("session_id", "") for a in s_anns if a.get("session_id")})
+
+        # recall はインスタンスが十分にある場合のみ計算する
+        if n_instances >= s_min_instances and n_sessions >= s_min_sessions:
+            # synthetic: GT = s_anns, pred = [] なので recall = 0
+            s_recall: float | None = 0.0
+        else:
+            s_recall = None  # インスタンス/セッション不足 → gate 自体を FAIL
+
+        s_passed = (
+            s_recall is not None
+            and s_recall >= s_recall_min
+            and n_instances >= s_min_instances
+            and n_sessions >= s_min_sessions
+        )
+        if not s_passed:
+            all_passed = False
+
+        slice_results.append(SliceGateResult(
+            slice_name=slice_name,
+            recall=s_recall,
+            recall_min=s_recall_min,
+            n_instances=n_instances,
+            min_instances=s_min_instances,
+            n_sessions=n_sessions,
+            min_sessions=s_min_sessions,
+            passed=s_passed,
+        ))
+
+    return PerformanceGateResult(
+        passed=all_passed,
+        map50_95=metrics.proxy_ap50_95,
+        map50_95_min=map_min,
+        class_recall_results=class_recall_results,
+        density_correlation=density_corr,
+        density_correlation_min=density_min,
+        nearest_distance_median=nd_median,
+        nearest_distance_median_max=nd_max,
+        gpu_p95_latency_ms=gpu_p95_latency_ms,
+        gpu_p95_latency_max_ms=latency_max,
+        slice_results=slice_results,
+    )
+
+
 # ---- CLI ----
 
 def _build_arg_parser() -> argparse.ArgumentParser:
