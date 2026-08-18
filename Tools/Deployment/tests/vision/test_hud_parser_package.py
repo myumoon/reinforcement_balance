@@ -81,3 +81,44 @@ def test_cli_help_exits_zero(script: str) -> None:
         text=True, check=False,
     )
     assert completed.returncode == 0 and "usage:" in completed.stdout.lower()
+
+def test_calibration_cli_rejects_missing_split_in_each_input(tmp_path: Path) -> None:
+    """calibration CLI が train/validation の split 欠測を拒否する。
+
+2つの入力役割を入れ替えて実行し、どちらも package 発行前に終了コード1となることを確認します。
+    """
+    root = Path(__file__).resolve().parents[2]
+    script = root / "calibrate_survivors_hud_parser.py"
+    train = {"sample_id": "train-1", "split": "model_train", "expected_roi": [0, 0, 10, 10]}
+    validation = {"sample_id": "validation-1", "split": "model_validation"}
+    for missing_role in ("train", "validation"):
+        train_path, validation_path = tmp_path / "train.json", tmp_path / "validation.json"
+        train_wire, validation_wire = dict(train), dict(validation)
+        (train_wire if missing_role == "train" else validation_wire).pop("split")
+        train_path.write_text(json.dumps([train_wire]), encoding="utf-8")
+        validation_path.write_text(json.dumps([validation_wire]), encoding="utf-8")
+        completed = subprocess.run(
+            [
+                sys.executable, str(script), "--train-annotations", str(train_path),
+                "--validation-annotations", str(validation_path), "--output-package",
+                str(tmp_path / f"{missing_role}.json"),
+            ],
+            capture_output=True, text=True, check=False,
+        )
+        assert completed.returncode == 1
+        assert "split" in completed.stderr
+
+def test_eval_cli_rejects_missing_split(tmp_path: Path) -> None:
+    """eval CLI が split 欠測 annotation を拒否する。
+
+用途が証明されていない JSON を validation と推定せず、終了コード1で停止することを確認します。
+    """
+    root = Path(__file__).resolve().parents[2]
+    annotation_path = tmp_path / "annotations.json"
+    annotation_path.write_text(json.dumps([{"sample_id": "validation-1"}]), encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(root / "eval_survivors_hud_parser.py"), "--annotations", str(annotation_path)],
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 1
+    assert "split" in completed.stderr

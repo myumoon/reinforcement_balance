@@ -324,12 +324,14 @@ formal mode で未昇格 dataset を使う場合だけ FormalDatasetRequired を
 def _effective_split(record: object, explicit: str | None, expected: str) -> str:
     """record と呼び出し引数から矛盾のない split を決定する。
 
-両方が指定されて食い違う場合も用途混在として拒否し、未指定時だけ用途既定値を使います。
+どちらにも用途証明がない場合と、両方が指定されて食い違う場合を用途混在として拒否します。
     """
     record_split = _field(record, "split")
+    if explicit is None and record_split is None:
+        raise SplitViolationError("annotation split or explicit split is required")
     if explicit is not None and record_split is not None and explicit != record_split:
         raise SplitViolationError("annotation split conflicts with explicit split")
-    split = explicit if explicit is not None else (record_split if record_split is not None else expected)
+    split = explicit if explicit is not None else record_split
     validate_split_eligibility(split)
     if split != expected:
         raise SplitViolationError(f"expected {expected!r}, got {split!r}")

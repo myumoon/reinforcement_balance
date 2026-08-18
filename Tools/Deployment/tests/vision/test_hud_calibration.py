@@ -3,7 +3,7 @@
 合成注釈だけで用途分離、gate 境界、fit/report hash の再現性を確認します。
 """
 from __future__ import annotations
-from dataclasses import replace
+from dataclasses import asdict, replace
 import pytest
 from survivors.vision.hud_calibration import (
     CalibrationConfig, FormalDatasetRequired, GateResult, HudCalibrationAnnotation,
@@ -50,6 +50,24 @@ def test_fit_is_train_only_non_empty_and_deterministic() -> None:
     with pytest.raises(ValueError):
         fit([])
 
+def test_fit_requires_proven_train_split_and_sweeps_reserved_splits() -> None:
+    """fit の全 split 指定経路を fail-closed で検証する。
+
+record または明示引数による train 証明だけを受け入れ、欠測・不一致・予約 split を拒否します。
+    """
+    without_split = {"sample_id": "frame-1", "expected_roi": [10.0, 20.0, 30.0, 40.0]}
+    assert fit([without_split], split="model_train").annotation_count == 1
+    assert fit([_sample("model_train")], split="model_train").annotation_count == 1
+    with pytest.raises(SplitViolationError):
+        fit([without_split])
+    with pytest.raises(SplitViolationError):
+        fit([_sample("model_train")], split="model_validation")
+    for reserved in ("error_calibration", "final_e2e_test"):
+        with pytest.raises(SplitViolationError):
+            fit([_sample(reserved)])
+        with pytest.raises(SplitViolationError):
+            fit([without_split], split=reserved)
+
 def test_validate_gates_hash_split_and_boundaries() -> None:
     """validation の11 gate、hash、split、境界比較をまとめて検証する。
 
@@ -73,3 +91,22 @@ ROI 陰性例を含む report と floor/ceiling の内包境界を確認しま�
     assert not GateResult.floor_gate("floor", value=0.799, floor=0.8).passed
     assert GateResult.ceiling_gate("ceiling", value=0.2, ceiling=0.2).passed
     assert not GateResult.ceiling_gate("ceiling", value=0.201, ceiling=0.2).passed
+
+def test_validate_requires_proven_validation_split_and_sweeps_reserved_splits() -> None:
+    """validate の全 split 指定経路を fail-closed で検証する。
+
+record または明示引数による validation 証明だけを受け入れ、欠測・不一致・予約 split を拒否します。
+    """
+    without_split = asdict(_sample())
+    without_split.pop("split")
+    assert validate([without_split], split="model_validation").sample_count == 1
+    assert validate([_sample()], split="model_validation").sample_count == 1
+    with pytest.raises(SplitViolationError):
+        validate([without_split])
+    with pytest.raises(SplitViolationError):
+        validate([_sample()], split="model_train")
+    for reserved in ("error_calibration", "final_e2e_test"):
+        with pytest.raises(SplitViolationError):
+            validate([_sample(reserved)])
+        with pytest.raises(SplitViolationError):
+            validate([without_split], split=reserved)
