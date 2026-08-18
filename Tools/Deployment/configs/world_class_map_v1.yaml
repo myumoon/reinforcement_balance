@@ -1,0 +1,55 @@
+# world_class_map_v1 — WorldDetector クラスラベル定義。
+#
+# background=0 固定 + foreground 11 クラスで合計 12 クラス。
+# このマップは 04-07 / 04-08 / 04-09 がすべて同一 hash で参照する。
+# クラス ID の追加・削除・並べ替えは class_map_version を上げる。
+schema_version: world_class_map.v1
+
+# クラスマップのスキーマバージョン識別子。
+# consumer はこの値と schema_version を照合し、古いマップを拒否する。
+class_map_version: 1
+
+# 背景クラス。torchvision SSD 系が必要とする予約 ID。
+background_label: 0
+background_name: __background__
+
+# 前景 11 クラス。ID は 1 始まりで連番。
+# deploy obs が使う coarse category (anchor / enemy / gem / pickup / hazard) を優先し、
+# exact sprite identity は含めない。
+foreground_classes:
+  - id: 1
+    name: player_anchor
+    coarse_category: anchor
+  - id: 2
+    name: enemy_normal
+    coarse_category: enemy
+  - id: 3
+    name: enemy_elite
+    coarse_category: enemy
+  - id: 4
+    name: enemy_boss
+    coarse_category: enemy
+  - id: 5
+    name: gem_blue
+    coarse_category: gem
+  - id: 6
+    name: gem_green
+    coarse_category: gem
+  - id: 7
+    name: gem_red
+    coarse_category: gem
+  - id: 8
+    name: pickup_heal
+    coarse_category: pickup
+  - id: 9
+    name: pickup_special
+    coarse_category: pickup
+  - id: 10
+    name: hazard_projectile
+    coarse_category: hazard
+  - id: 11
+    name: hazard_area
+    coarse_category: hazard
+
+# 合計クラス数（background + foreground）。モデルヘッドの num_classes と一致する必要がある。
+num_classes: 12

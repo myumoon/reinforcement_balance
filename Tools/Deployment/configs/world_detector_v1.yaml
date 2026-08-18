@@ -1,0 +1,84 @@
+# world_detector_v1 — WorldDetector 学習・推論設定。
+#
+# feasibility_config の architecture/budget と整合した初期設定。
+# formal_detector_eligible=false のため、このままでは正式パッケージへ昇格できない。
+# 04-07 / 04-08 が weight / threshold / resolved config を差し替える。
+schema_version: world_detector.v1
+
+# 開発用フラグ。false のまま配布したモデルは正式ローダーに拒否される。
+formal_detector_eligible: false
+
+# 参照するクラスマップ設定ファイル。
+class_map_config: configs/world_class_map_v1.yaml
+
+# --- モデルアーキテクチャ ---
+# perception_feasibility_v1.yaml の architectures リストから選択する。
+# 未実装 architecture を指定したときは silent fallback せず即エラーとする。
+model:
+  architecture: ssdlite320
+  # torchvision の SSDLite320_MobileNet_V3_Large を使用し、head の num_classes を 12 へ置換する。
+  backbone: mobilenet_v3_large
+  num_classes: 12
+  # 入力解像度 (W, H)。SSDLite320 の標準入力サイズ。
+  input_size: [320, 320]
+  # pretrained backbone を使用し、head だけをランダム初期化する。
+  # 04-06 の development stub はランダム初期化。04-07 が正式 pretrained backbone ロードを実装する。
+  pretrained_backbone: false
+
+# --- 入力・前処理 ---
+input:
+  # 学習時 tile / multi-scale 拡張の設定。
+  # feasibility の ssdlite320_p10_short_side_px=4.0 に合わせて小物体を保持する。
+  augmentation:
+    random_horizontal_flip: true
+    color_jitter: {brightness: 0.3, contrast: 0.3, saturation: 0.2, hue: 0.05}
+    random_crop_min_iou: 0.5
+  normalize:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+
+# --- 学習ハイパーパラメータ ---
+training:
+  batch_size: 8
+  optimizer: sgd
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 0.0005
+  lr_scheduler: cosine
+  max_epochs: 50
+  # 学習開始前の preflight で必要な最小件数チェック。
+  # 不足時は training step 0 のまま停止する。
+  preflight:
+    min_frames: 300
+    min_entities: 500
+    min_classes: 6
+    min_time_bands: 4
+
+# --- tracker パラメータ ---
+tracker:
+  # class ごとの最大 age（フレーム数）。超えたトラックを削除する。
+  max_age_by_class:
+    player_anchor: 10
+    enemy_normal: 5
+    enemy_elite: 5
+    enemy_boss: 8
+    gem_blue: 4
+    gem_green: 4
+    gem_red: 4
+    pickup_heal: 4
+    pickup_special: 4
+    hazard_projectile: 3
+    hazard_area: 4
+  # greedy マッチングのコスト上限。超えた検出とトラックは非対応とする。
+  max_match_cost: 0.7
+  # velocity EMA の減衰係数。
+  velocity_ema_alpha: 0.6
+  # confidence decay（フレームごとの乗数）。
+  confidence_decay_per_frame: 0.9
+
+# --- 評価メトリクスしきい値 ---
+evaluation:
+  # holdout mAP50:95 の合格下限。04-07 が正式しきい値を更新する。
+  min_map50_95: 0.0
+  # クラスごとの recall 下限。
+  min_class_recall: 0.0
