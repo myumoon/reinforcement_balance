@@ -75,7 +75,7 @@ class InputLeaseController:
             self._failed = True
             process = multiprocessing.Process(target=self._emergency_process_target, args=(self._audit_path,))
             process.start()
-            process.join(timeout=0.2)
+            process.join(timeout=2.0)
             if process.is_alive():
                 process.terminate(); process.join(timeout=0.2)
                 return False
