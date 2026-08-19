@@ -9,8 +9,8 @@ session を dataset loader に渡して自動除外する。
 session-balanced sampler で DatasetSample の実画像・target を構築して optimizer step する。
 torch が不在の場合だけ stub ループにフォールバックする（例外の握り潰しなし）。
 
-チェックポイント選択規則は学習開始前に manifest へ固定し、
-best checkpoint の state_dict / optimizer state / selector records を保存して resume できる。
+チェックポイント選択規則は学習開始前に manifest へ固定する。
+best checkpoint は選択専用、model / optimizer / epoch を含む last checkpoint は resume 専用とする。
 
 使用例:
     python train_survivors_world_detector.py \\
@@ -27,6 +27,7 @@ import hashlib
 import json
 import pathlib
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -51,11 +52,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--annotations", required=True, help="COCO JSON アノテーションファイル")
     p.add_argument(
         "--split",
-        required=False,
+        required=True,
         help=(
             "SessionSplit JSON ファイル。train/validation/error_calibration/final_e2e_test"
-            " の session ID を列挙する。指定すると error_calibration / final_e2e_test が"
-            " 自動除外され、run_split_preflight が実行される。"
+            " の session ID を列挙する。error_calibration / final_e2e_test は自動除外され、"
+            " train / validation は独立した Dataset view に分割される。"
         ),
     )
     p.add_argument("--config", default="configs/world_detector_v1.yaml", help="detector config YAML")
@@ -129,7 +130,7 @@ class CheckpointSelector:
 # ---- resume state ----
 
 _RESUME_STATE_NAME = "training_state.json"
-_RESUME_OPTIM_NAME = "optimizer_state.pt"
+_LAST_CHECKPOINT_NAME = "last_checkpoint.pt"
 
 
 def _save_resume_state(
@@ -139,23 +140,46 @@ def _save_resume_state(
     model: Any,
     optimizer: Any,
 ) -> None:
-    """epoch / selector state / optimizer state を保存する。
+    """model / optimizer / epoch / selector を単一 last checkpoint に保存する。
 
-    model weight はエポックごとの .pt ファイルに保存済みなので別途保存しない。
-    optimizer state は _RESUME_OPTIM_NAME に保存する。
+    best checkpoint は選択・publish 専用であり、resume には使用しない。
+    last checkpoint の SHA-256 は metadata に保存し、復元前に検証する。
     """
-    state = {
-        "last_epoch": epoch,
+    import torch
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
         "selector": selector.to_dict(),
     }
-    (out_dir / _RESUME_STATE_NAME).write_text(
-        json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+
+    checkpoint_path = out_dir / _LAST_CHECKPOINT_NAME
+    tmp_checkpoint: pathlib.Path | None = None
     try:
-        import torch
-        torch.save(optimizer.state_dict(), out_dir / _RESUME_OPTIM_NAME)
-    except (ImportError, Exception):
-        pass
+        with tempfile.NamedTemporaryFile(
+            dir=out_dir, prefix=f".{_LAST_CHECKPOINT_NAME}.", delete=False
+        ) as tmp_file:
+            tmp_checkpoint = pathlib.Path(tmp_file.name)
+        torch.save(checkpoint, tmp_checkpoint)
+        tmp_checkpoint.replace(checkpoint_path)
+    finally:
+        if tmp_checkpoint is not None and tmp_checkpoint.exists():
+            tmp_checkpoint.unlink()
+
+    metadata = {
+        "schema_version": 1,
+        "last_epoch": epoch,
+        "last_checkpoint": _LAST_CHECKPOINT_NAME,
+        "last_checkpoint_hash": _sha256_file(checkpoint_path),
+    }
+    metadata_path = out_dir / _RESUME_STATE_NAME
+    tmp_metadata = metadata_path.with_suffix(".json.tmp")
+    tmp_metadata.write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    tmp_metadata.replace(metadata_path)
 
 
 def _load_resume_state(
@@ -166,7 +190,8 @@ def _load_resume_state(
 ) -> int:
     """resume_dir から training state を復元し、次の epoch 番号を返す。
 
-    不正・欠落 manifest は ValueError を送出する（黙殺しない）。
+    metadata / last checkpoint の欠落・hash 不一致・state 欠落は ValueError。
+    best checkpoint は参照せず、単一 last checkpoint だけを復元する。
     """
     state_path = resume_dir / _RESUME_STATE_NAME
     if not state_path.exists():
@@ -186,42 +211,128 @@ def _load_resume_state(
             f"[RESUME] training_state.json の last_epoch が不正です: {last_epoch!r}"
         )
 
-    # selector records を復元
-    saved_sel = state.get("selector", {})
-    for r in saved_sel.get("records", []):
-        selector._records.append(CheckpointRecord(**r))
-    selector._records.sort(key=lambda r: r.val_map50_95, reverse=True)
+    if state.get("schema_version") != 1:
+        raise ValueError(
+            f"[RESUME] training_state.json の schema_version が不正です: "
+            f"{state.get('schema_version')!r}"
+        )
+    if state.get("last_checkpoint") != _LAST_CHECKPOINT_NAME:
+        raise ValueError("[RESUME] last checkpoint path が不正です。")
+    expected_hash = state.get("last_checkpoint_hash")
+    if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+        raise ValueError("[RESUME] last_checkpoint_hash が不正です。")
 
-    # best checkpoint の model weight を復元
-    if selector.best:
-        best_path = pathlib.Path(selector.best.checkpoint_path)
-        if best_path.exists():
-            try:
-                import torch
-                sd = torch.load(best_path, map_location="cpu")
-                model.load_state_dict(sd)
-                print(f"[RESUME] model weight を {best_path} から復元しました。")
-            except (ImportError, Exception) as e:
-                print(f"[RESUME] model weight 復元スキップ: {e}", file=sys.stderr)
+    checkpoint_path = resume_dir / _LAST_CHECKPOINT_NAME
+    if not checkpoint_path.is_file():
+        raise ValueError(f"[RESUME] last checkpoint が見つかりません: {checkpoint_path}")
+    actual_hash = _sha256_file(checkpoint_path)
+    if actual_hash != expected_hash:
+        raise ValueError(
+            f"[RESUME] last checkpoint hash が一致しません: "
+            f"expected={expected_hash}, actual={actual_hash}"
+        )
 
-    # optimizer state を復元
-    optim_path = resume_dir / _RESUME_OPTIM_NAME
-    if optim_path.exists():
-        try:
-            import torch
-            optimizer.load_state_dict(torch.load(optim_path, map_location="cpu"))
-            print("[RESUME] optimizer state を復元しました。")
-        except (ImportError, Exception) as e:
-            print(f"[RESUME] optimizer state 復元スキップ: {e}", file=sys.stderr)
+    try:
+        import torch
+    except ImportError as e:
+        raise RuntimeError("[RESUME] last checkpoint の復元には torch が必要です。") from e
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+    if not isinstance(checkpoint, dict):
+        raise ValueError("[RESUME] last checkpoint state が dict ではありません。")
+    required_keys = {"epoch", "model_state_dict", "optimizer_state_dict", "selector"}
+    missing = sorted(required_keys - checkpoint.keys())
+    if missing:
+        raise ValueError(f"[RESUME] last checkpoint state に {', '.join(missing)} がありません。")
+    if checkpoint["epoch"] != last_epoch:
+        raise ValueError(
+            f"[RESUME] metadata/checkpoint epoch が一致しません: "
+            f"{last_epoch} != {checkpoint['epoch']!r}"
+        )
+
+    saved_selector = CheckpointSelector.from_dict(checkpoint["selector"])
+    if saved_selector.metric != selector.metric or saved_selector.keep_top_k != selector.keep_top_k:
+        raise ValueError("[RESUME] checkpoint selection rule が現在の config と一致しません。")
+
+    try:
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    except Exception as e:
+        raise ValueError(f"[RESUME] model/optimizer state の復元に失敗しました: {e}") from e
+    selector._records = list(saved_selector._records)
+    print(f"[RESUME] model/optimizer state を {checkpoint_path} から復元しました。")
 
     return last_epoch + 1
+
+
+# ---- dataset split views ----
+
+class _DatasetView:
+    """WorldDataset の sample index を固定した読み取り専用 view。"""
+
+    def __init__(self, dataset: Any, indices: list[int]) -> None:
+        self._dataset = dataset
+        self._indices = tuple(indices)
+
+    def __len__(self) -> int:
+        return len(self._indices)
+
+    def __getitem__(self, index: int) -> Any:
+        return self._dataset[self._indices[index]]
+
+    def __iter__(self):
+        for index in self._indices:
+            yield self._dataset[index]
+
+
+def _create_split_views(ds: Any, split: Any) -> tuple[_DatasetView, _DatasetView]:
+    """session assignment から互いに素な train / validation view を作る。
+
+    空フレームは session を特定できないため view から除外する。未知 session や
+    train/validation が同一フレームに混在するデータは fail-closed で拒否する。
+    """
+    from survivors.vision.world_dataset import DatasetPreflightError
+
+    train_sessions = set(split.train)
+    validation_sessions = set(split.validation)
+    allowed_sessions = train_sessions | validation_sessions
+    train_indices: list[int] = []
+    validation_indices: list[int] = []
+
+    for index in range(len(ds)):
+        sample = ds[index]
+        sample_sessions = {ann.session_id for ann in sample.annotations if ann.session_id}
+        if not sample_sessions:
+            continue
+        unknown_sessions = sample_sessions - allowed_sessions
+        if unknown_sessions:
+            raise DatasetPreflightError(
+                f"split に未割当の session {sorted(unknown_sessions)} が image_id="
+                f"{sample.image_id} に含まれています。"
+            )
+        if sample_sessions <= train_sessions:
+            train_indices.append(index)
+        elif sample_sessions <= validation_sessions:
+            validation_indices.append(index)
+        else:
+            raise DatasetPreflightError(
+                f"train/validation session が image_id={sample.image_id} に混在しています。"
+            )
+
+    if not train_indices or not validation_indices:
+        raise DatasetPreflightError("train/validation Dataset view の一方が空です。")
+    return _DatasetView(ds, train_indices), _DatasetView(ds, validation_indices)
 
 
 # ---- training loop ----
 
 def _run_training(
     detector: Any,
-    ds: Any,
+    train_ds: Any,
+    validation_ds: Any,
     cfg: dict,
     max_epochs: int,
     selector: CheckpointSelector,
@@ -252,24 +363,28 @@ def _run_training(
             print(f"[RESUME] epoch {start_epoch} から再開します。")
 
         _run_training_torch(
-            detector, ds, cfg, max_epochs, selector, out_dir, optimizer, start_epoch
+            detector,
+            train_ds,
+            validation_ds,
+            cfg,
+            max_epochs,
+            selector,
+            out_dir,
+            optimizer,
+            start_epoch,
         )
 
     except ImportError:
         start_epoch = 1
         if resume_dir is not None:
-            # torch 不在でも training_state.json が必要
-            state_path = resume_dir / _RESUME_STATE_NAME
-            if not state_path.exists():
-                raise ValueError(f"[RESUME] training_state.json が見つかりません: {state_path}")
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            start_epoch = state.get("last_epoch", 0) + 1
+            raise RuntimeError("[RESUME] model/optimizer state の復元には torch が必要です。")
         _run_training_stub(max_epochs, selector, out_dir, start_epoch)
 
 
 def _run_training_torch(
     detector: Any,
-    ds: Any,
+    train_ds: Any,
+    validation_ds: Any,
     cfg: dict,
     max_epochs: int,
     selector: CheckpointSelector,
@@ -287,94 +402,131 @@ def _run_training_torch(
     save_every = cfg.get("checkpoint_selection", {}).get("save_every_n_epochs", 5)
 
     for epoch in range(start_epoch, max_epochs + 1):
-        # session-balanced sampler: 実サンプルから target を構築して step
-        _session_balanced_step(detector, ds, optimizer, cfg)
+        # session-balanced sampler: train view の実サンプルだけで optimizer step
+        _train_epoch(detector, train_ds, optimizer, cfg)
 
-        # validation stub: val_map50_95 = 0.0
-        # ponytail: real val は 04-08 で実施
-        val_score = 0.0
+        # selector の score は独立した validation view だけから得る
+        val_score = _evaluate_validation(detector, validation_ds, cfg)
 
         if epoch % save_every == 0 or epoch == max_epochs:
             ckpt_path = out_dir / f"epoch_{epoch:04d}.pt"
             torch.save(detector._model.state_dict(), ckpt_path)
             selector.record(CheckpointRecord(epoch, val_score, str(ckpt_path)))
-            _save_resume_state(out_dir, epoch, selector, detector._model, optimizer)
             print(f"  epoch {epoch}/{max_epochs}: val_map50_95={val_score:.4f} → saved {ckpt_path.name}")
+        # resume 用 last は best 候補の保存間隔に関係なく毎 epoch 更新する
+        _save_resume_state(out_dir, epoch, selector, detector._model, optimizer)
 
     print(f"[INFO] best checkpoint: epoch={selector.best.epoch if selector.best else None}")
 
 
-def _session_balanced_step(
+def _load_training_sample(sample: Any) -> tuple[Any, dict[str, Any]]:
+    """DatasetSample を torchvision detection model の image/target へ変換する。"""
+    import torch
+
+    img_path = pathlib.Path(sample.file_name)
+    frame: Any = None
+    if img_path.exists():
+        try:
+            import cv2
+            bgr = cv2.imread(str(img_path))
+            if bgr is not None:
+                import torchvision.transforms.functional as TF
+                rgb = bgr[..., ::-1].copy()
+                frame = TF.to_tensor(rgb)
+        except Exception:
+            pass  # 画像ロード失敗は合成にフォールバック
+
+    if frame is None:
+        frame = torch.zeros(3, sample.image_height, sample.image_width)
+
+    boxes_list = []
+    labels_list = []
+    for ann in sample.annotations:
+        x, y, w, h = ann.bbox_xywh
+        boxes_list.append([x, y, x + w, y + h])
+        labels_list.append(ann.category_id)
+
+    if boxes_list:
+        target = {
+            "boxes": torch.tensor(boxes_list, dtype=torch.float32),
+            "labels": torch.tensor(labels_list, dtype=torch.long),
+        }
+    else:
+        target = {
+            "boxes": torch.zeros(0, 4),
+            "labels": torch.zeros(0, dtype=torch.long),
+        }
+    return frame, target
+
+
+def _session_balanced_indices(ds: Any) -> list[int]:
+    """各 session を round-robin する 1 epoch 分の sample index を返す。"""
+    session_groups: dict[str, list[int]] = {}
+    for index in range(len(ds)):
+        sample = ds[index]
+        session_ids = sorted({ann.session_id for ann in sample.annotations if ann.session_id})
+        session_id = session_ids[0] if session_ids else ""
+        session_groups.setdefault(session_id, []).append(index)
+
+    ordered: list[int] = []
+    offset = 0
+    while True:
+        appended = False
+        for indices in session_groups.values():
+            if offset < len(indices):
+                ordered.append(indices[offset])
+                appended = True
+        if not appended:
+            return ordered
+        offset += 1
+
+
+def _train_epoch(
     detector: Any, ds: Any, optimizer: Any, cfg: dict
 ) -> None:
-    """session-balanced sampler の 1 ステップ。
+    """session-balanced sampler で config batch_size 単位の 1 epoch を学習する。
 
-    session ごとにサンプルをグループ化し、各 session から 1 サンプルを選んで
-    optimizer step を実行する。
-    クラスウェイトは num_entities の逆数比（長尾補正）として近似する。
+    複数 session を round-robin して batch を作り、SSDLite BatchNorm が
+    batch=1 にならないよう singleton remainder は学習へ渡さない。
     画像ファイルが不在の場合は合成画像（ゼロ）にフォールバックする。
     例外を握り潰さない（FileNotFoundError のみ合成画像でリカバー）。
     """
-    import torch
-
     if len(ds) == 0:
         return
 
-    # session 別グループ化
-    session_groups: dict[str, list[int]] = {}
-    for idx in range(len(ds)):
-        sample = ds[idx]
-        sid = sample.annotations[0].session_id if sample.annotations else ""
-        session_groups.setdefault(sid, []).append(idx)
+    batch_size = cfg.get("training", {}).get("batch_size")
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 2:
+        raise ValueError("training.batch_size は 2 以上の整数である必要があります。")
 
-    # 各 session から 1 サンプルを順に処理
-    for session_id, indices in session_groups.items():
-        sample_idx = indices[0]
-        sample = ds[sample_idx]
+    ordered_indices = _session_balanced_indices(ds)
+    for start in range(0, len(ordered_indices), batch_size):
+        batch_indices = ordered_indices[start:start + batch_size]
+        if len(batch_indices) == 1:
+            print("[WARN] BatchNorm 保護のため singleton training batch をスキップします。")
+            continue
+        images = []
+        targets = []
+        for sample_index in batch_indices:
+            image, target = _load_training_sample(ds[sample_index])
+            images.append(image)
+            targets.append(target)
 
-        # 画像読み込み（ファイル不在時は合成画像）
-        img_path = pathlib.Path(sample.file_name)
-        frame: Any = None
-        if img_path.exists():
-            try:
-                import cv2
-                bgr = cv2.imread(str(img_path))
-                if bgr is not None:
-                    import torchvision.transforms.functional as TF
-                    rgb = bgr[..., ::-1].copy()
-                    frame = TF.to_tensor(rgb).unsqueeze(0)
-            except Exception:
-                pass  # 画像ロード失敗は合成にフォールバック
-
-        if frame is None:
-            # smoke / annotation-only モード: 実サイズの合成画像を使う
-            frame = torch.zeros(1, 3, sample.image_height, sample.image_width)
-
-        # target: annotation から bbox / label を構築
-        boxes_list = []
-        labels_list = []
-        for ann in sample.annotations:
-            x, y, w, h = ann.bbox_xywh
-            boxes_list.append([x, y, x + w, y + h])
-            labels_list.append(ann.category_id)
-
-        if boxes_list:
-            targets = [{
-                "boxes": torch.tensor(boxes_list, dtype=torch.float32),
-                "labels": torch.tensor(labels_list, dtype=torch.long),
-            }]
-        else:
-            targets = [{"boxes": torch.zeros(0, 4), "labels": torch.zeros(0, dtype=torch.long)}]
-
-        # optimizer step（stub model は例外を送出しないが、実 model は伝播させる）
         optimizer.zero_grad()
         detector._model.train()
-        loss_dict = detector._model(frame, targets)
+        loss_dict = detector._model(images, targets)
         if isinstance(loss_dict, dict):
             total_loss = sum(loss_dict.values())  # type: ignore[arg-type]
             total_loss.backward()
             optimizer.step()
         # stub model が list を返す場合はスキップ（smoke: 推論のみ）
+
+
+def _evaluate_validation(detector: Any, validation_ds: Any, cfg: dict) -> float:
+    """validation 専用 view の評価値を返す（実 metric は 04-08 で実装）。"""
+    if len(validation_ds) == 0:
+        raise ValueError("validation Dataset view が空です。")
+    detector._model.eval()
+    return 0.0
 
 
 def _run_training_stub(
@@ -388,11 +540,6 @@ def _run_training_stub(
         val_score = 0.0
         ckpt_path = out_dir / f"epoch_{epoch:04d}.ckpt"
         selector.record(CheckpointRecord(epoch, val_score, str(ckpt_path)))
-        # resume state を JSON で保存（torch 不在でも記録）
-        state = {"last_epoch": epoch, "selector": selector.to_dict()}
-        (out_dir / _RESUME_STATE_NAME).write_text(
-            json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
         print(f"  epoch {epoch}/{max_epochs} ... (stub: weight 更新なし)")
 
 
@@ -425,20 +572,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ERROR] config 読み込み失敗: {e}", file=sys.stderr)
         return 1
 
-    # -- split manifest 読み込み（error_calibration / final_e2e_test を自動除外）
-    split: SessionSplit | None = None
-    rejected: set[str] = set()
-    if args.split:
-        split_data = json.loads(pathlib.Path(args.split).read_text(encoding="utf-8"))
-        split = SessionSplit(
-            train=split_data.get("train", []),
-            validation=split_data.get("validation", []),
-            error_calibration=split_data.get("error_calibration", []),
-            final_e2e_test=split_data.get("final_e2e_test", []),
-        )
-        rejected = set(split.error_calibration) | set(split.final_e2e_test)
-        print(f"[INFO] split: train={len(split.train)}, val={len(split.validation)}"
-              f", rejected={len(rejected)} session")
+    # -- 必須 split manifest 読み込み（error_calibration / final_e2e_test を自動除外）
+    split_data = json.loads(pathlib.Path(args.split).read_text(encoding="utf-8"))
+    split = SessionSplit(
+        train=split_data.get("train", []),
+        validation=split_data.get("validation", []),
+        error_calibration=split_data.get("error_calibration", []),
+        final_e2e_test=split_data.get("final_e2e_test", []),
+    )
+    rejected = set(split.error_calibration) | set(split.final_e2e_test)
+    print(f"[INFO] split: train={len(split.train)}, val={len(split.validation)}"
+          f", rejected={len(rejected)} session")
 
     # -- preflight
     preflight_cfg = cfg.get("training", {}).get("preflight", {})
@@ -454,19 +598,22 @@ def main(argv: list[str] | None = None) -> int:
             min_classes=preflight_cfg.get("min_classes", 6),
             min_time_bands=preflight_cfg.get("min_time_bands", 4),
         )
-        if split is not None:
-            ds.run_split_preflight(
-                split,
-                min_frames_per_split=preflight_cfg.get("min_frames_per_split", 50),
-                min_entities_per_split=preflight_cfg.get("min_entities_per_split", 100),
-                min_classes_per_split=preflight_cfg.get("min_classes_per_split", 4),
-            )
+        ds.run_split_preflight(
+            split,
+            min_frames_per_split=preflight_cfg.get("min_frames_per_split", 50),
+            min_entities_per_split=preflight_cfg.get("min_entities_per_split", 100),
+            min_classes_per_split=preflight_cfg.get("min_classes_per_split", 4),
+        )
+        train_ds, validation_ds = _create_split_views(ds, split)
     except DatasetPreflightError as e:
         print(f"[PREFLIGHT FAIL] {e}", file=sys.stderr)
         print("[INFO] training step 0 のまま停止します。", file=sys.stderr)
         return 1
 
-    print(f"[PREFLIGHT OK] {len(ds)} フレーム読み込み完了。")
+    print(
+        f"[PREFLIGHT OK] train={len(train_ds)}, validation={len(validation_ds)} "
+        "フレームへ分離しました。"
+    )
 
     if args.dry_run:
         print("[DRY-RUN] --dry-run が指定されたため学習をスキップします。")
@@ -495,7 +642,7 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     resume_dir: pathlib.Path | None = pathlib.Path(args.resume) if args.resume else None
     _run_training(
-        detector, ds, cfg,
+        detector, train_ds, validation_ds, cfg,
         max_epochs=max_epochs,
         selector=selector,
         out_dir=out_dir,

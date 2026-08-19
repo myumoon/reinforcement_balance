@@ -167,7 +167,13 @@ gate_result = check_performance_gate(
 from survivors.vision.world_detector_package import publish_development_package, restore_package
 
 pkg_path = publish_development_package(
-    checkpoint_manifest, metrics_dict, checkpoint_selection, store_dir
+    checkpoint_manifest,
+    metrics_dict,
+    checkpoint_selection,
+    store_dir,
+    cfg_path=cfg_path,
+    cm_path=cm_path,
+    weight_path=weight_path,
 )
 state = restore_package(pkg_path, frame_bgr)  # TrackedWorldStateV1 を返す
 ```
@@ -175,4 +181,4 @@ state = restore_package(pkg_path, frame_bgr)  # TrackedWorldStateV1 を返す
 - `formal_detector_eligible=false` の package は `assert_formal_eligible()` で拒否される。
 - `contract_hash` が TrackedWorldStateV1 フィールド定義と一致しない場合は `PackageSchemaError`。
 - formal publish は `validation_passed=True` かつ `formal_detector_eligible=True` の
-  `CheckpointManifest` が必要（04-08 で発行）。
+  `CheckpointManifest` と、`model_hash` が一致する必須の `weight_path` が必要（04-08 で発行）。

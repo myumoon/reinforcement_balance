@@ -11,6 +11,7 @@ import json
 import pathlib
 import shutil
 from dataclasses import asdict
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -252,9 +253,82 @@ class TestCheckpointSelector:
         with pytest.raises(ValueError, match="last_epoch"):
             _load_resume_state(tmp_path, sel, None, None)
 
+    def test_resume_round_trip_uses_unified_last_checkpoint(self, tmp_path):
+        """resume は best ではなく model/optimizer/epoch を含む last state を復元する。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import (
+            CheckpointRecord,
+            CheckpointSelector,
+            _LAST_CHECKPOINT_NAME,
+            _load_resume_state,
+            _save_resume_state,
+        )
 
-class TestSessionBalancedStep:
-    """_session_balanced_step が実 DatasetSample から target を構築することを確認する。"""
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+        selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        selector.record(CheckpointRecord(1, 0.9, str(tmp_path / "best.pt")))
+
+        expected = {name: value.detach().clone() for name, value in model.state_dict().items()}
+        _save_resume_state(tmp_path, 4, selector, model, optimizer)
+        assert (tmp_path / _LAST_CHECKPOINT_NAME).exists()
+
+        with torch.no_grad():
+            for parameter in model.parameters():
+                parameter.add_(10)
+        restored_selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        assert _load_resume_state(tmp_path, restored_selector, model, optimizer) == 5
+        for name, value in model.state_dict().items():
+            assert torch.equal(value, expected[name])
+        assert restored_selector.best is not None
+        assert restored_selector.best.epoch == 1
+
+    def test_resume_rejects_last_checkpoint_hash_mismatch(self, tmp_path):
+        """last checkpoint 改ざん時は warning 継続せず例外にする。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import (
+            CheckpointSelector,
+            _LAST_CHECKPOINT_NAME,
+            _load_resume_state,
+            _save_resume_state,
+        )
+
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        _save_resume_state(tmp_path, 2, selector, model, optimizer)
+        (tmp_path / _LAST_CHECKPOINT_NAME).write_bytes(b"tampered")
+
+        with pytest.raises(ValueError, match="hash"):
+            _load_resume_state(tmp_path, selector, model, optimizer)
+
+    def test_resume_rejects_missing_optimizer_state(self, tmp_path):
+        """last checkpoint 内の optimizer 欠落を拒否する。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import (
+            CheckpointSelector,
+            _LAST_CHECKPOINT_NAME,
+            _RESUME_STATE_NAME,
+            _load_resume_state,
+        )
+
+        checkpoint_path = tmp_path / _LAST_CHECKPOINT_NAME
+        torch.save({"epoch": 2, "model_state_dict": {}, "selector": {}}, checkpoint_path)
+        metadata = {
+            "schema_version": 1,
+            "last_epoch": 2,
+            "last_checkpoint": _LAST_CHECKPOINT_NAME,
+            "last_checkpoint_hash": _sha256_file(checkpoint_path),
+        }
+        (tmp_path / _RESUME_STATE_NAME).write_text(json.dumps(metadata), encoding="utf-8")
+
+        selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        with pytest.raises(ValueError, match="optimizer_state_dict"):
+            _load_resume_state(tmp_path, selector, SimpleNamespace(load_state_dict=lambda _: None), None)
+
+
+class TestTrainEpoch:
+    """_train_epoch が実 DatasetSample から target を構築することを確認する。"""
 
     def test_step_uses_dataset_targets(self, tmp_path):
         """DatasetSample の annotation から実 target が構築されることを確認する。
@@ -268,7 +342,7 @@ class TestSessionBalancedStep:
 
         from survivors.vision.world_dataset import WorldDataset
         from survivors.vision.world_detector import WorldDetector, load_detector_config, _TORCH_AVAILABLE
-        from train_survivors_world_detector import _session_balanced_step
+        from train_survivors_world_detector import _train_epoch
 
         if not _TORCH_AVAILABLE:
             pytest.skip("torch 不在環境では _StubModel なので skip")
@@ -282,7 +356,140 @@ class TestSessionBalancedStep:
         optimizer = optim.SGD(detector._model.parameters(), lr=0.001)
 
         # torch と DatasetSample がある状態で step を実行し、例外がないことを確認
-        _session_balanced_step(detector, ds, optimizer, cfg)
+        _train_epoch(detector, ds, optimizer, cfg)
+
+    def test_train_epoch_uses_configured_batch_size(self):
+        """複数 session の sample を config batch_size ごとに model へ渡す。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import _train_epoch
+        from survivors.vision.world_dataset import COCOAnnotation, DatasetSample
+
+        samples = []
+        for index in range(8):
+            samples.append(DatasetSample(
+                image_id=index,
+                file_name=f"missing-{index}.png",
+                image_width=32,
+                image_height=32,
+                annotations=[COCOAnnotation(index, index, 1, (1, 1, 4, 4), f"s{index % 2}")],
+            ))
+
+        class RecordingModel:
+            def __init__(self):
+                self.batch_sizes = []
+
+            def train(self):
+                return self
+
+            def __call__(self, images, targets):
+                self.batch_sizes.append((len(images), len(targets)))
+                loss = torch.tensor(1.0, requires_grad=True)
+                return {"loss": loss}
+
+        class RecordingOptimizer:
+            def zero_grad(self):
+                pass
+
+            def step(self):
+                pass
+
+        model = RecordingModel()
+        detector = SimpleNamespace(_model=model)
+        _train_epoch(
+            detector,
+            samples,
+            RecordingOptimizer(),
+            {"training": {"batch_size": 4}},
+        )
+        assert model.batch_sizes == [(4, 4), (4, 4)]
+
+    def test_train_epoch_drops_singleton_remainder(self):
+        """最終 batch が 1 件だけの場合は BatchNorm へ渡さない。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import _train_epoch
+        from survivors.vision.world_dataset import COCOAnnotation, DatasetSample
+
+        samples = [
+            DatasetSample(
+                image_id=index,
+                file_name=f"missing-{index}.png",
+                image_width=32,
+                image_height=32,
+                annotations=[COCOAnnotation(index, index, 1, (1, 1, 4, 4), f"s{index % 2}")],
+            )
+            for index in range(4)
+        ]
+        batch_sizes = []
+
+        class Model:
+            def train(self):
+                return self
+
+            def __call__(self, images, targets):
+                batch_sizes.append(len(images))
+                return {"loss": torch.tensor(1.0, requires_grad=True)}
+
+        optimizer = SimpleNamespace(zero_grad=lambda: None, step=lambda: None)
+        _train_epoch(
+            SimpleNamespace(_model=Model()), samples, optimizer,
+            {"training": {"batch_size": 3}},
+        )
+        assert batch_sizes == [3]
+
+
+class TestTrainingSplitViews:
+    """train/validation の Dataset view が独立し、caller が混在させないことを確認する。"""
+
+    def test_split_is_required_cli_argument(self):
+        from train_survivors_world_detector import _build_arg_parser
+
+        with pytest.raises(SystemExit):
+            _build_arg_parser().parse_args(["--annotations", "a.json", "--output", "out"])
+
+    def test_split_views_are_disjoint(self, tmp_path):
+        from survivors.vision.world_dataset import SessionSplit, WorldDataset
+        from train_survivors_world_detector import _create_split_views
+
+        data = _make_coco(n_images=8, sessions=["train-a", "val-a"])
+        ds = WorldDataset(_write_coco(tmp_path, data), CLASS_MAP_PATH)
+        split = SessionSplit(
+            train=["train-a"], validation=["val-a"], error_calibration=[], final_e2e_test=[]
+        )
+        train_ds, validation_ds = _create_split_views(ds, split)
+
+        assert {sample.image_id for sample in train_ds} == {0, 2, 4, 6}
+        assert {sample.image_id for sample in validation_ds} == {1, 3, 5, 7}
+        assert not ({sample.image_id for sample in train_ds} & {sample.image_id for sample in validation_ds})
+
+    def test_training_loop_routes_train_and_validation_views_separately(self, tmp_path, monkeypatch):
+        import train_survivors_world_detector as training
+
+        train_view = object()
+        validation_view = object()
+        routed = {}
+        monkeypatch.setattr(
+            training, "_train_epoch",
+            lambda detector, ds, optimizer, cfg: routed.setdefault("train", ds),
+        )
+        monkeypatch.setattr(
+            training, "_evaluate_validation",
+            lambda detector, ds, cfg: routed.setdefault("validation", ds) and 0.25,
+        )
+        monkeypatch.setattr(training, "_save_resume_state", lambda *args: None)
+        detector = SimpleNamespace(_model=SimpleNamespace(state_dict=lambda: {}))
+        selector = training.CheckpointSelector(metric="val_map50_95", keep_top_k=1)
+
+        training._run_training_torch(
+            detector, train_view, validation_view,
+            {"checkpoint_selection": {"save_every_n_epochs": 1}},
+            max_epochs=1,
+            selector=selector,
+            out_dir=tmp_path,
+            optimizer=object(),
+            start_epoch=1,
+        )
+
+        assert routed == {"train": train_view, "validation": validation_view}
 
 
 # ---- Task 3: performance gate boundary values ----
@@ -578,6 +785,7 @@ class TestPackagePublish:
                 {}, {}, store,
                 cfg_path=DETECTOR_CONFIG_PATH,
                 cm_path=CLASS_MAP_PATH,
+                weight_path=tmp_path / "missing.pt",
                 validation_passed=False,
             )
 
@@ -600,6 +808,7 @@ class TestPackagePublish:
                 {}, {}, store,
                 cfg_path=DETECTOR_CONFIG_PATH,
                 cm_path=CLASS_MAP_PATH,
+                weight_path=tmp_path / "missing.pt",
                 validation_passed=True,
             )
 
@@ -629,8 +838,70 @@ class TestPackagePublish:
                 bad_cm, {}, {}, store,
                 cfg_path=DETECTOR_CONFIG_PATH,
                 cm_path=CLASS_MAP_PATH,
+                weight_path=tmp_path / "missing.pt",
                 validation_passed=True,
             )
+
+    def test_formal_publish_requires_weight(self, tmp_path):
+        """formal package は validation 済みでも weight なしでは作成できない。"""
+        from survivors.vision.world_detector_package import publish_formal_package
+
+        store = tmp_path / "store"
+        store.mkdir()
+        with pytest.raises((TypeError, ValueError), match="weight"):
+            publish_formal_package(
+                _make_checkpoint_manifest(formal=True), {}, {}, store,
+                cfg_path=DETECTOR_CONFIG_PATH,
+                cm_path=CLASS_MAP_PATH,
+                validation_passed=True,
+            )
+
+    def test_formal_publish_rejects_weight_hash_mismatch_before_copy(self, tmp_path):
+        """formal publish は copy 前の weight/model_hash 不一致を拒否する。"""
+        from survivors.vision.world_detector_package import publish_formal_package
+
+        store = tmp_path / "store"
+        store.mkdir()
+        weight_path = tmp_path / "model.pt"
+        weight_path.write_bytes(b"actual weight")
+
+        with pytest.raises(ValueError, match="model_hash"):
+            publish_formal_package(
+                _make_checkpoint_manifest(formal=True), {}, {}, store,
+                cfg_path=DETECTOR_CONFIG_PATH,
+                cm_path=CLASS_MAP_PATH,
+                weight_path=weight_path,
+                validation_passed=True,
+            )
+
+    def test_formal_publish_includes_hash_verified_weight(self, tmp_path):
+        """model_hash が一致する formal weight を package へコピーする。"""
+        from survivors.vision.world_detector import CheckpointManifest
+        from survivors.vision.world_detector_package import publish_formal_package
+
+        store = tmp_path / "store"
+        store.mkdir()
+        weight_path = tmp_path / "model.pt"
+        weight_path.write_bytes(b"actual weight")
+        manifest = CheckpointManifest(
+            model_hash=_sha256_file(weight_path),
+            data_hash="b" * 64,
+            config_hash=_sha256_file(DETECTOR_CONFIG_PATH),
+            build_hash="d" * 64,
+            class_map_hash=_sha256_file(CLASS_MAP_PATH),
+            formal_detector_eligible=True,
+        )
+
+        pkg_path = publish_formal_package(
+            manifest, {}, {}, store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
+            weight_path=weight_path,
+            validation_passed=True,
+        )
+        copied_weight = pkg_path.parent / "model.pt"
+        assert copied_weight.exists()
+        assert _sha256_file(copied_weight) == manifest.model_hash
 
     def test_idempotent_publish(self, tmp_path):
         """同じ内容を 2 回 publish しても同じ path が返る。"""
@@ -656,6 +927,13 @@ class TestPackagePublish:
         bad = {"schema_version": "unknown.v99", "formal_detector_eligible": False}
         with pytest.raises(ValueError, match="schema_version"):
             PackageManifest.from_dict(bad)
+
+    def test_documented_package_api_uses_keyword_only_paths(self):
+        """package API 例が current cfg_path/cm_path signature と一致する。"""
+        docs_path = pathlib.Path(__file__).parents[4] / "docs/deployment/world_detector.md"
+        docs = docs_path.read_text(encoding="utf-8")
+        assert "cfg_path=cfg_path" in docs
+        assert "cm_path=cm_path" in docs
 
 
 class TestPackageRestore:
@@ -710,4 +988,37 @@ class TestPackageRestore:
 
         frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
         with pytest.raises(PackageSchemaError, match="config_hash"):
+            restore_package(pkg_path, frame)
+
+    def test_restore_detects_model_hash_mismatch(self, tmp_path):
+        """package 内の weight を改ざんすると推論前に拒否する。"""
+        from survivors.vision.world_detector import CheckpointManifest
+        from survivors.vision.world_detector_package import (
+            PackageSchemaError,
+            publish_development_package,
+            restore_package,
+        )
+
+        store = tmp_path / "store"
+        store.mkdir()
+        weight_path = tmp_path / "model.pt"
+        weight_path.write_bytes(b"original weight")
+        checkpoint_manifest = CheckpointManifest(
+            model_hash=_sha256_file(weight_path),
+            data_hash="b" * 64,
+            config_hash=_sha256_file(DETECTOR_CONFIG_PATH),
+            build_hash="d" * 64,
+            class_map_hash=_sha256_file(CLASS_MAP_PATH),
+            formal_detector_eligible=False,
+        )
+        pkg_path = publish_development_package(
+            checkpoint_manifest, {}, {}, store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
+            weight_path=weight_path,
+        )
+        (pkg_path.parent / "model.pt").write_bytes(b"tampered weight")
+
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        with pytest.raises(PackageSchemaError, match="model_hash"):
             restore_package(pkg_path, frame)

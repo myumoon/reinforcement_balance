@@ -17,7 +17,10 @@ parent hash を検証する。
 
 使用例:
     from survivors.vision.world_detector_package import publish_development_package, restore_package
-    pkg_path = publish_development_package(manifest, metrics, cfg, cm_path, cfg_path, out_store)
+    pkg_path = publish_development_package(
+        manifest, metrics, checkpoint_selection, out_store,
+        cfg_path=cfg_path, cm_path=cm_path, weight_path=weight_path,
+    )
     state = restore_package(pkg_path, frame_bgr)
 """
 from __future__ import annotations
@@ -146,6 +149,18 @@ def _sha256_file(path: pathlib.Path) -> str:
     return h.hexdigest()
 
 
+def _verify_weight_hash(weight_path: pathlib.Path, expected_hash: str) -> None:
+    """weight の存在と model_hash 一致を fail-closed で検証する。"""
+    if not weight_path.is_file():
+        raise ValueError(f"weight ファイルが見つかりません: {weight_path}")
+    actual_hash = _sha256_file(weight_path)
+    if actual_hash != expected_hash:
+        raise ValueError(
+            f"weight の model_hash が manifest と一致しません: "
+            f"expected={expected_hash}, actual={actual_hash}"
+        )
+
+
 # ---- publish ----
 
 def _write_package(
@@ -158,13 +173,21 @@ def _write_package(
     """package を content-addressed store へ atomic write する。
 
     store_dir/<content_hash>/ に manifest.json / config / class_map を配置する。
-    weight_path が指定されている場合は model.pt としてコピーする。
+    weight_path が指定されている場合は copy 前後に model_hash を検証する。
     既存 package は冪等（内容が同じなら再書き込みしない）。
     """
+    if weight_path is not None:
+        weight_path = pathlib.Path(weight_path)
+        _verify_weight_hash(weight_path, pkg_manifest.model_hash)
+    if pkg_manifest.weight_included != (weight_path is not None):
+        raise ValueError("manifest の weight_included と weight_path が一致しません。")
+
     content_key = _content_key(pkg_manifest)
     pkg_dir = store_dir / content_key
 
     if pkg_dir.exists():
+        if pkg_manifest.weight_included:
+            _verify_weight_hash(pkg_dir / _WEIGHT_NAME, pkg_manifest.model_hash)
         return pkg_dir / _MANIFEST_NAME
 
     # atomic: tmp dir に書いてから rename
@@ -187,9 +210,12 @@ def _write_package(
         if _sha256_file(tmp_dir / _CLASS_MAP_NAME) != pkg_manifest.class_map_hash:
             raise ValueError("class_map ファイルの hash が manifest と一致しません。")
 
-        # weight（任意）
-        if weight_path is not None and weight_path.exists():
-            shutil.copy2(weight_path, tmp_dir / _WEIGHT_NAME)
+        # weight（指定時は copy 前後で同じ model_hash を要求）
+        if weight_path is not None:
+            _verify_weight_hash(weight_path, pkg_manifest.model_hash)
+            copied_weight = tmp_dir / _WEIGHT_NAME
+            shutil.copy2(weight_path, copied_weight)
+            _verify_weight_hash(copied_weight, pkg_manifest.model_hash)
 
         shutil.move(str(tmp_dir), str(pkg_dir))
 
@@ -212,7 +238,8 @@ def publish_development_package(
     formal_detector_eligible は常に False（04-08 が差し替える）。
     contract_hash は TrackedWorldStateV1 フィールド定義から計算する。
 
-    weight_path が指定されている場合は model.pt としてコピーし model_hash を検証する。
+    weight_path が指定されている場合は model.pt としてコピーし、copy 前後で
+    model_hash を検証する。指定した path の欠落や不一致は publish を失敗させる。
     """
     contract_hash = _compute_contract_hash()
 
@@ -227,7 +254,7 @@ def publish_development_package(
         contract_hash=contract_hash,
         metrics=metrics_dict,
         checkpoint_selection=checkpoint_selection,
-        weight_included=(weight_path is not None and weight_path.exists()),
+        weight_included=(weight_path is not None),
     )
 
     store_dir.mkdir(parents=True, exist_ok=True)
@@ -242,12 +269,12 @@ def publish_formal_package(
     *,
     cfg_path: pathlib.Path,
     cm_path: pathlib.Path,
-    weight_path: pathlib.Path | None = None,
+    weight_path: pathlib.Path,
     validation_passed: bool,
 ) -> pathlib.Path:
     """formal package を publish する。
 
-    全 parent ハッシュと validation PASS が必要。
+    全 parent ハッシュ、validation PASS、model_hash が一致する weight が必要。
     checkpoint_manifest.assert_formal_eligible() で parent hash を検証する。
     validation_passed=False の場合は ValueError を送出する。
     """
@@ -258,6 +285,8 @@ def publish_formal_package(
         )
     # parent hash 検証（assert_formal_eligible は型 / SHA-256 形式も確認する）
     checkpoint_manifest.assert_formal_eligible()
+    weight_path = pathlib.Path(weight_path)
+    _verify_weight_hash(weight_path, checkpoint_manifest.model_hash)
 
     contract_hash = _compute_contract_hash()
 
@@ -272,7 +301,7 @@ def publish_formal_package(
         contract_hash=contract_hash,
         metrics=metrics_dict,
         checkpoint_selection=checkpoint_selection,
-        weight_included=(weight_path is not None and weight_path.exists()),
+        weight_included=True,
     )
 
     store_dir.mkdir(parents=True, exist_ok=True)
@@ -309,6 +338,8 @@ def restore_package(
 
     if require_formal:
         pkg_manifest.assert_formal_eligible()
+    if pkg_manifest.formal_detector_eligible and not pkg_manifest.weight_included:
+        raise PackageSchemaError("formal package に必須の weight が含まれていません。")
 
     # -- contract hash 検証
     current_contract_hash = _compute_contract_hash()
@@ -339,12 +370,19 @@ def restore_package(
 
     detector = WorldDetector.from_config(cfg, cm_path)
 
-    # -- weight ロード（torch 利用可能かつ weight が含まれている場合）
+    # -- weight hash 検証・ロード（hash は torch の有無にかかわらず必須）
     weight_file = pkg_dir / _WEIGHT_NAME
-    if pkg_manifest.weight_included and weight_file.exists():
+    if pkg_manifest.weight_included:
+        if not weight_file.is_file():
+            raise PackageSchemaError(f"package 内に weight が見つかりません: {weight_file}")
+        if _sha256_file(weight_file) != pkg_manifest.model_hash:
+            raise PackageSchemaError("weight の model_hash が manifest と一致しません。")
         try:
             import torch
-            state_dict = torch.load(weight_file, map_location="cpu")
+            try:
+                state_dict = torch.load(weight_file, map_location="cpu", weights_only=True)
+            except TypeError:
+                state_dict = torch.load(weight_file, map_location="cpu")
             detector._model.load_state_dict(state_dict)
         except ImportError:
             pass  # torch 不在: stub model のまま推論する
