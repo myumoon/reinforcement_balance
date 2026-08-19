@@ -105,3 +105,29 @@ def test_fallback_cards_and_buttons_have_unique_semantics() -> None:
     assert [target.semantic_kind for target in snapshot.candidates] == ["fallback_reward", "fallback_reward", "item_card"]
     assert [target.semantic_action for target in snapshot.buttons] == ["reroll", "skip", "banish", "ack_chest", "confirm"]
     assert snapshot.buttons[0].confidence == .9
+
+
+def test_ui_presentation_is_not_mapping_so_cannot_leak_into_tensor_builder() -> None:
+    """UiPresentationSnapshotV1 が Mapping でないことを静的に確認する。
+
+    deploy_obs_adapter の型チェックが緩んでも ROI が tensor に混入しない
+    ことをクラス階層レベルで保証します。
+    """
+    from collections.abc import Mapping
+    snapshot = build_ui_presentation_from_hud(_hud(), (1000, 1000))
+    assert not isinstance(snapshot, Mapping)
+    assert not isinstance(snapshot, dict)
+
+
+def test_source_hash_absorbs_sub_quantum_confidence_at_same_timestamp() -> None:
+    """量子化が 1e-4 未満の confidence 揺れを吸収することを明示的に確認する。
+
+    同一タイムスタンプで confidence が 5e-5 しか違わない 2 枚の HUD が
+    同じ source_content_hash を持つことで parser ノイズが identity を壊しません。
+    """
+    hud_a = _hud(cards=(ParsedCard(0, "whip", "weapon", 2, 0.80000, "ok", (100, 100, 500, 500)),))
+    hud_b = _hud(cards=(ParsedCard(0, "whip", "weapon", 2, 0.80003, "ok", (100, 100, 500, 500)),))
+    a = build_ui_presentation_from_hud(hud_a, (1000, 1000), snapshot_id="s", frame_id="f")
+    b = build_ui_presentation_from_hud(hud_b, (1000, 1000), snapshot_id="s", frame_id="f")
+    assert a.source_content_hash == b.source_content_hash  # both round to 0.8000
+    assert a.ui_state_key == b.ui_state_key
