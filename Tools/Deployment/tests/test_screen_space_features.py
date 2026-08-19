@@ -8,7 +8,6 @@ import pytest
 from survivors.screen_space_features import build_screen_space_estimates, directional_bin
 from survivors.vision.entity_tracker import PlayerAnchorState, TrackedEntityV1, TrackedWorldStateV1
 
-
 def _track(track_id: int, coarse: str, x: float, y: float, *, on_screen=True, clipped=False) -> TrackedEntityV1:
     """指定した player-relative 座標の track を作る。
 
@@ -19,7 +18,6 @@ def _track(track_id: int, coarse: str, x: float, y: float, *, on_screen=True, cl
         0., 0., on_screen, clipped,
     )
 
-
 def test_directional_bin_matches_cpp_atan2_plus_pi_mapping() -> None:
     """八方位 bin を C++ の atan2 + PI 式へ一致させる。
 
@@ -29,7 +27,6 @@ def test_directional_bin_matches_cpp_atan2_plus_pi_mapping() -> None:
     assert directional_bin(0., 1., 8) == 6
     assert directional_bin(0., -1., 8) == 2
     assert directional_bin(-1., 0., 8) in {0, 7}
-
 
 def test_only_unclipped_on_screen_tracks_affect_counts_and_nearest() -> None:
     """release estimate から画面外・clipped track を除く。
@@ -64,4 +61,3 @@ def test_no_visible_enemy_omits_nearest_but_returns_zero_densities() -> None:
     assert "nearest_enemy_offset" not in estimates
     assert estimates["visible_enemy_count"].value == (0.,)
     assert estimates["gem_density"].value == (0.,)
-

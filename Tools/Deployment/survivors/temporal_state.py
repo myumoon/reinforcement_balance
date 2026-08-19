@@ -2,19 +2,12 @@
 
 進行状態を後退させず、skew・stale・画面状態から用途別 validity を算出します。
 """
-
 from __future__ import annotations
-
 from dataclasses import dataclass, replace
-
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
-
 from .vision.entity_tracker import TrackedWorldStateV1
 from .vision.hud_parser import HudStateV1
-
 _ITEM_STATES = frozenset({"level_up_items", "level_up_fallback", "chest"})
-
-
 @dataclass(frozen=True)
 class TemporalJoin:
     """一回の policy tick で束縛した HUD/world と validity を保持する。
@@ -24,8 +17,6 @@ class TemporalJoin:
     hud: HudStateV1; world: TrackedWorldStateV1; captured_ns: int
     hud_validity: float; world_validity: float
     combat_validity: float; item_validity: float
-
-
 class TemporalAssembler:
     """最新 HUD/world を monotonic filter 後に join する stateful assembler。
 

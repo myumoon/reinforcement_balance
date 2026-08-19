@@ -2,19 +2,18 @@
 
 release tensor、item context、操作用 UI snapshot の境界をまとめて確認します。
 """
-
 import dataclasses
-
+import json
+from pathlib import Path
 import numpy as np
 import pytest
-
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
+from reinbalance_survivors_contracts.item_decision import ItemDecisionFeatures
 from survivors.deploy_obs_adapter import build_deploy_observation
 from survivors.perception_snapshot import UiPresentationSnapshotV1
 from survivors.real_obs_assembler import RealObsAssembler
 from survivors.vision.entity_tracker import PlayerAnchorState, TrackedEntityV1, TrackedWorldStateV1
 from survivors.vision.hud_parser import HudStateV1, ParsedCard
-
 
 def _inputs(state="gameplay") -> tuple[HudStateV1, TrackedWorldStateV1]:
     """assembler test 用の同時刻 HUD/world を返す。
@@ -33,7 +32,6 @@ def _inputs(state="gameplay") -> tuple[HudStateV1, TrackedWorldStateV1]:
     world = TrackedWorldStateV1(4, 1_000_000_000, [visible, leaked], PlayerAnchorState(.5, .5, .9, False))
     return hud, world
 
-
 def test_assemble_builds_release_observation_without_offscreen_leak() -> None:
     """visible track だけを DeployObservation へ組み立てる。
 
@@ -48,7 +46,6 @@ def test_assemble_builds_release_observation_without_offscreen_leak() -> None:
     assert snapshot.deploy_obs.provenance == "release"
     assert np.isfinite(snapshot.deploy_obs.as_policy_tensor(schema)).all()
 
-
 def test_ui_snapshot_is_atomic_and_diagnostics_have_no_roi() -> None:
     """操作用 presentation を PerceptionSnapshot 内へ一体化する。
 
@@ -62,7 +59,10 @@ def test_ui_snapshot_is_atomic_and_diagnostics_have_no_roi() -> None:
     assert "hud" not in {field.name for field in dataclasses.fields(type(snapshot))}
     assert all("roi" not in str(key).lower() for key in snapshot.diagnostics)
     assert snapshot.item_context is not None and len(snapshot.choices) == 1
-
+    with pytest.raises(ValueError):
+        dataclasses.replace(snapshot, diagnostics={"nested": {"roi": [0., 0., 1., 1.]}})
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "ui_presentation_v1.json").read_text(encoding="utf-8"))
+    assert fixture["fixture_scope"] == "development-only" and fixture["formal_perception_verdict_eligible"] is False
 
 def test_ui_presentation_cannot_enter_tensor_builder() -> None:
     """ROI を持つ UI presentation を model builder が拒否する。
@@ -74,4 +74,5 @@ def test_ui_presentation_cannot_enter_tensor_builder() -> None:
     assert isinstance(snapshot.ui_presentation, UiPresentationSnapshotV1)
     with pytest.raises(ValueError):
         build_deploy_observation(schema, snapshot.ui_presentation, snapshot.captured_ns)
-
+    with pytest.raises(ValueError):
+        ItemDecisionFeatures.from_wire(snapshot.ui_presentation)

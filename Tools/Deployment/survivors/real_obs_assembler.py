@@ -2,21 +2,16 @@
 
 モデル特徴と操作 ROI を別経路で生成し、最後に同一 identity へ atomic に束縛します。
 """
-
 from __future__ import annotations
-
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from reinbalance_survivors_contracts.item_decision import CandidateFeatures, ItemDecisionFeatures
-
 from .deploy_obs_adapter import NamedEstimate, build_deploy_observation, normalized_category
 from .perception_snapshot import PerceptionSnapshot, build_ui_presentation_from_hud
 from .screen_space_features import build_screen_space_estimates
 from .temporal_state import TemporalAssembler, TemporalJoin
 from .vision.entity_tracker import TrackedEntityV1, TrackedWorldStateV1
 from .vision.hud_parser import HudStateV1, ParsedCard
-
-
 def _weapon_category(item_id: str | None) -> str:
     """先頭 weapon identity を DeployObs の粗いカテゴリへ写す。
 
@@ -33,7 +28,6 @@ def _weapon_category(item_id: str | None) -> str:
         return "projectile"
     return "unknown"
 
-
 def _candidate(card: ParsedCard, used_ids: set[str], inventory: tuple[str | None, ...]) -> CandidateFeatures:
     """画面 card 一件を ROI なしの model candidate へ変換する。
 
@@ -49,7 +43,6 @@ def _candidate(card: ParsedCard, used_ids: set[str], inventory: tuple[str | None
         owned=owned, is_new=not owned, is_evolve=card.kind == "evolved",
         is_union=False, has_prerequisite=False, slot_capacity=6,
     )
-
 
 def _item_context(
     joined: TemporalJoin, snapshot_id: str, screen: dict[str, NamedEstimate],
@@ -94,7 +87,6 @@ def _item_context(
         world_validity=joined.world_validity, world_age=0., last_gameplay_snapshot_age=0.,
     )
     return context, choices
-
 
 class RealObsAssembler:
     """実 parser/tracker 出力から一貫した policy snapshot を生成する。

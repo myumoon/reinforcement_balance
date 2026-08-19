@@ -2,20 +2,15 @@
 
 ROI はクリック対象だけに保持し、release tensor や diagnostics へ流れない境界を提供します。
 """
-
 from __future__ import annotations
-
 import math
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
-
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from reinbalance_survivors_contracts.deploy_obs import DeployObservation
 from reinbalance_survivors_contracts.item_decision import CandidateFeatures, ItemDecisionFeatures
-
 from .vision.hud_parser import HudStateV1, ParsedCard
-
 UI_PRESENTATION_SCHEMA_VERSION = "ui_presentation_snapshot.v1"
 UI_PROFILE_VERSION = "survivors_ui_profile.v1"
 UI_PRESENTATION_SCHEMA_HASH = canonical_hash(
@@ -26,8 +21,6 @@ UI_PRESENTATION_SCHEMA_HASH = canonical_hash(
     }
 )
 _BUTTON_ACTIONS = frozenset({"ack_chest", "confirm", "reroll", "skip", "banish"})
-
-
 def _finite_ratio(value: Any, label: str) -> float:
     """有限な [0,1] 比率を検証して float 化する。
 
@@ -39,17 +32,13 @@ def _finite_ratio(value: Any, label: str) -> float:
     if not 0.0 <= result <= 1.0:
         raise ValueError(f"{label} must be in [0, 1]")
     return result
-
-
 @dataclass(frozen=True)
 class NormalizedRoi:
     """viewport 正規化済みの UI 矩形を表す。
 
     無効 target のゼロ矩形を許しつつ、画面外や反転した矩形は拒否します。
     """
-
     left: float; top: float; right: float; bottom: float
-
     def __post_init__(self) -> None:
         """四辺の範囲と向きを検証する。
 
@@ -60,19 +49,15 @@ class NormalizedRoi:
             raise ValueError("roi edges must be ordered")
         for name, value in zip(("left", "top", "right", "bottom"), values, strict=True):
             object.__setattr__(self, name, value)
-
-
 @dataclass(frozen=True)
 class UiCandidateTargetV1:
     """候補カード一件の semantic identity と操作矩形を保持する。
 
     model candidate と ROI を同一型にせず、入力実行側だけが座標へ触れられるようにします。
     """
-
     choice_id: str; choice_index: int
     semantic_kind: Literal["item_card", "fallback_reward"]
     roi: NormalizedRoi; validity: bool; confidence: float
-
     def __post_init__(self) -> None:
         """候補 identity・型・信頼度を検証する。
 
@@ -87,18 +72,14 @@ class UiCandidateTargetV1:
         if not isinstance(self.roi, NormalizedRoi) or type(self.validity) is not bool:
             raise ValueError("invalid candidate target")
         object.__setattr__(self, "confidence", _finite_ratio(self.confidence, "candidate confidence"))
-
-
 @dataclass(frozen=True)
 class UiButtonTargetV1:
     """非カード UI button の semantic action と操作矩形を保持する。
 
     capability と検出 validity を分け、表示されても実行不能な操作を区別します。
     """
-
     semantic_action: Literal["ack_chest", "confirm", "reroll", "skip", "banish"]
     roi: NormalizedRoi; validity: bool; capability: bool; confidence: float
-
     def __post_init__(self) -> None:
         """button semantic・型・信頼度を検証する。
 
@@ -109,20 +90,16 @@ class UiButtonTargetV1:
         if not isinstance(self.roi, NormalizedRoi) or type(self.validity) is not bool or type(self.capability) is not bool:
             raise ValueError("invalid button target")
         object.__setattr__(self, "confidence", _finite_ratio(self.confidence, "button confidence"))
-
-
 @dataclass(frozen=True)
 class UiPresentationSnapshotV1:
     """一フレーム分の UI presentation を immutable に保持する。
 
     semantic hash と連続値込み source hash を分離し、安全な cross-frame 比較を可能にします。
     """
-
     schema_hash: str; snapshot_id: str; frame_id: str; parser_artifact_hash: str
     screen_state: str; candidate_set_hash: str; inventory_hash: str
     source_content_hash: str; ui_state_key: str
     candidates: tuple[UiCandidateTargetV1, ...]; buttons: tuple[UiButtonTargetV1, ...]
-
     def __post_init__(self) -> None:
         """identity と target tuple の整合性・一意性を検証する。
 
@@ -143,8 +120,6 @@ class UiPresentationSnapshotV1:
         actions = [button.semantic_action for button in self.buttons]
         if len(actions) != len(set(actions)):
             raise ValueError("button semantics must be unique")
-
-
 def _diagnostics_has_roi(value: Any) -> bool:
     """diagnostics 内に ROI 型や ROI 名のキーがあるか調べる。
 
@@ -157,21 +132,17 @@ def _diagnostics_has_roi(value: Any) -> bool:
     if isinstance(value, (tuple, list)):
         return any(_diagnostics_has_roi(item) for item in value)
     return False
-
-
 @dataclass(frozen=True)
 class PerceptionSnapshot:
     """policy 観測と操作用 UI を atomic に束縛する perception 結果。
 
     呼び出し側は別 HudState を参照せず、この一オブジェクトから同じ frame の情報を取得します。
     """
-
     snapshot_id: str; frame_id: str; captured_ns: int; parser_artifact_hash: str
     source_content_hash: str; ui_state_key: str; screen_state: str
     deploy_obs: DeployObservation; item_context: ItemDecisionFeatures | None
     choices: tuple[CandidateFeatures, ...]; ui_presentation: UiPresentationSnapshotV1
     diagnostics: Mapping[str, Any]
-
     def __post_init__(self) -> None:
         """atomic identity と ROI leakage 禁止を検証する。
 
@@ -199,8 +170,6 @@ class PerceptionSnapshot:
         if not isinstance(self.diagnostics, Mapping) or _diagnostics_has_roi(self.diagnostics):
             raise ValueError("diagnostics must not contain ROI")
         object.__setattr__(self, "diagnostics", MappingProxyType(dict(self.diagnostics)))
-
-
 def _normalized_roi(roi_xyxy: tuple[int, int, int, int] | None, viewport: tuple[int, int]) -> tuple[NormalizedRoi, bool]:
     """pixel ROI を viewport 正規化して geometry validity も返す。
 
@@ -219,8 +188,6 @@ def _normalized_roi(roi_xyxy: tuple[int, int, int, int] | None, viewport: tuple[
     if clipped[2] <= clipped[0] or clipped[3] <= clipped[1]:
         return NormalizedRoi(0., 0., 0., 0.), False
     return NormalizedRoi(*clipped), True
-
-
 def _candidate_semantic(card: ParsedCard) -> Literal["item_card", "fallback_reward"]:
     """card を item または fallback reward へ分類する。
 
@@ -228,8 +195,6 @@ def _candidate_semantic(card: ParsedCard) -> Literal["item_card", "fallback_rewa
     """
     identity = (card.item_id or "").casefold()
     return "fallback_reward" if card.kind == "fallback" or "gold" in identity or "chicken" in identity else "item_card"
-
-
 def _quantized_target(target: UiCandidateTargetV1 | UiButtonTargetV1) -> dict[str, Any]:
     """UI target を 1e-4 量子化済み hash payload にする。
 
@@ -240,8 +205,6 @@ def _quantized_target(target: UiCandidateTargetV1 | UiButtonTargetV1) -> dict[st
     if isinstance(target, UiCandidateTargetV1):
         return {"choice_id": target.choice_id, "choice_index": target.choice_index, "semantic_kind": target.semantic_kind, **common}
     return {"semantic_action": target.semantic_action, "capability": target.capability, **common}
-
-
 def build_ui_presentation_from_hud(
     hud: HudStateV1,
     viewport: tuple[int, int],
@@ -318,8 +281,6 @@ def build_ui_presentation_from_hud(
         hud.screen_state, hud.candidate_set_hash, hud.inventory_hash,
         canonical_hash(source_payload), canonical_hash(state_payload), candidate_tuple, buttons,
     )
-
-
 def _target_identity(target: UiCandidateTargetV1 | UiButtonTargetV1) -> tuple[Any, ...]:
     """同値比較に使う semantic identity を返す。
 
@@ -330,8 +291,6 @@ def _target_identity(target: UiCandidateTargetV1 | UiButtonTargetV1) -> tuple[An
     if isinstance(target, UiButtonTargetV1):
         return ("button", target.semantic_action)
     raise TypeError("unsupported UI target")
-
-
 def is_equivalent_ui_target(
     old: UiCandidateTargetV1 | UiButtonTargetV1,
     new: UiCandidateTargetV1 | UiButtonTargetV1,

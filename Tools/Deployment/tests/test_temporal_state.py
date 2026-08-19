@@ -9,7 +9,6 @@ from survivors.temporal_state import TemporalAssembler
 from survivors.vision.entity_tracker import PlayerAnchorState, TrackedWorldStateV1
 from survivors.vision.hud_parser import HudStateV1
 
-
 def _hud(timestamp: int, state: str = "gameplay", **changes) -> HudStateV1:
     """temporal test 用 HUD state を作る。
 
@@ -23,14 +22,12 @@ def _hud(timestamp: int, state: str = "gameplay", **changes) -> HudStateV1:
     )
     return replace(base, **changes)
 
-
 def _world(timestamp: int) -> TrackedWorldStateV1:
     """track なしの world state を作る。
 
     join の鮮度と skew だけを検証するため最小の状態を返します。
     """
     return TrackedWorldStateV1(1, timestamp, [], PlayerAnchorState(.5, .5, .9, False))
-
 
 def test_join_applies_monotonic_and_bounded_filters() -> None:
     """timer・level・inventory の後退を防ぎ HP/XP を範囲内に保つ。
@@ -48,7 +45,7 @@ def test_join_applies_monotonic_and_bounded_filters() -> None:
     assert joined.hud.inventory[0] == "whip"
     assert joined.hud.hp_ratio == .875
     assert joined.hud.xp_ratio == .225
-
+    assert assembler.join(_hud(1_500), _world(1_500)).hud.captured_monotonic_ns == 2_000
 
 def test_skew_and_staleness_fail_closed() -> None:
     """50ms skew と source stale age を超えた combat を無効化する。
@@ -60,7 +57,6 @@ def test_skew_and_staleness_fail_closed() -> None:
     assert skewed.combat_validity == 0.
     stale = assembler.join(_hud(1_000_000_000), _world(1_000_000_000), now_ns=1_300_000_002)
     assert stale.hud_validity == stale.world_validity == stale.combat_validity == 0.
-
 
 def test_screen_state_routes_combat_and_item_validity() -> None:
     """gameplay・item UI・停止画面の用途別 validity を切り替える。

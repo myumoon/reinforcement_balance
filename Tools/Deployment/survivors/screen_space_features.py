@@ -2,15 +2,10 @@
 
 画面外・clipped track を最初に捨て、C++ と同じ方位規則で release 特徴を作ります。
 """
-
 from __future__ import annotations
-
 import math
-
 from .deploy_obs_adapter import NamedEstimate
 from .vision.entity_tracker import TrackedEntityV1, TrackedWorldStateV1
-
-
 def directional_bin(dx: float, dy: float, bin_count: int = 8) -> int:
     """相対ベクトルを C++ BuildDirectionalDensityFeatures と同じ bin へ写す。
 
@@ -22,16 +17,12 @@ def directional_bin(dx: float, dy: float, bin_count: int = 8) -> int:
         raise ValueError("bin_count must be positive int")
     angle01 = (math.atan2(float(dy), float(dx)) + math.pi) / (2.0 * math.pi)
     return max(0, min(bin_count - 1, math.floor(angle01 * bin_count)))
-
-
 def _visible(tracks: list[TrackedEntityV1], coarse_class: str, threshold: float) -> list[TrackedEntityV1]:
     """指定 class の安全に可視な track だけを返す。
 
     all-state count を使わず on_screen・clipped・confidence を同じ入口で検査します。
     """
     return [track for track in tracks if track.coarse_class == coarse_class and track.on_screen and not track.clipped and track.confidence >= threshold]
-
-
 def build_screen_space_estimates(
     world: TrackedWorldStateV1,
     *,
