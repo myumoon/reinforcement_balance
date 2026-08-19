@@ -1,0 +1,6 @@
+{
+  "fixture_scope": "development-only",
+  "formal_perception_verdict_eligible": false,
+  "schema_version": "ui_presentation_snapshot.v1",
+  "description": "synthetic hash and ROI boundary fixture"
+}

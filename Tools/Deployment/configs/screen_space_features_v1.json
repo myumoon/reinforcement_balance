@@ -1,0 +1,9 @@
+{
+  "schema_version": "screen_space_features.v1",
+  "directional_bins": 8,
+  "max_enemy_count_for_density": 20,
+  "max_gem_count_for_density": 20,
+  "min_confidence_threshold": 0.35,
+  "max_skew_ms": 50,
+  "max_stale_age_ms": {"hud": 200, "world": 200}
+}
