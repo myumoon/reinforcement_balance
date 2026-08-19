@@ -171,6 +171,22 @@ exit code 2 と package ファイルの未生成を確認します。
     assert not pkg_path.exists(), "package must not be published when gates fail"
 
 
+def test_publish_development_rejects_failing_report(tmp_path: Path) -> None:
+    """gate 不合格の ValidationReport を publish_development へ直接渡すと ValueError を送出する（P2 publish guard）。
+
+CLI を経由せず API を直接呼ぶ経路でも不合格 package が発行されないことを確認します。
+    """
+    # timer gate を落とす：expected=1.0, predicted=0.0
+    failing = {"sample_id": "v1", "split": "model_validation", "expected_timer_seconds": 1.0, "predicted_timer_seconds": 0.0}
+    # roi_false_positive gate のために陰性例を含める（expected_roi=None）
+    neg = {"sample_id": "v2", "split": "model_validation", "expected_roi": None, "predicted_roi": None}
+    report = validate([failing, neg])
+    assert not report.all_passed, "テスト前提: gate が不合格であること"
+    with pytest.raises(ValueError, match="all gates"):
+        PackageWriter.publish_development(tmp_path / "pkg.json", fit([_annotation("model_train")]), report)
+    assert not (tmp_path / "pkg.json").exists(), "不合格 package が発行されていてはいけない"
+
+
 def test_eval_cli_rejects_missing_split(tmp_path: Path) -> None:
     """eval CLI が split 欠測 annotation を拒否する。
 

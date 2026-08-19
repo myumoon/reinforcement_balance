@@ -113,16 +113,18 @@ def test_invalid_annotation_types_rejected_before_gate_computation() -> None:
 
 
 def test_roi_false_positive_fails_when_no_negative_examples() -> None:
-    """陰性 ROI 例がない dataset では roi_false_positive gate を合格させない（P2a）。
+    """陰性 ROI 例がない dataset では roi_false_positive gate を ceiling に依存せず失敗させる（P2a）。
 
-陰性例なしで false_positive_rate=1.0 となり ceiling gate が不合格になることを確認します。
+sentinel 2.0 を返し、roi_false_positive_ceiling=1.0 でも必ず不合格になることを確認します。
     """
-    # 正例のみ（expected_roi あり）
-    positive_only = _sample()
-    report = validate([positive_only])
-    gate = report.gates_by_name["roi_false_positive"]
-    assert not gate.passed, "roi_false_positive must fail when dataset has no negative ROI examples"
-    assert gate.value == 1.0
+    # 正例のみ（expected_roi あり）。ceiling=0.05 と ceiling=1.0 の両方でテスト
+    for ceiling in (0.05, 1.0):
+        from survivors.vision.hud_calibration import CalibrationConfig
+        positive_only = _sample()
+        report = validate([positive_only], CalibrationConfig(roi_false_positive_ceiling=ceiling))
+        gate = report.gates_by_name["roi_false_positive"]
+        assert not gate.passed, f"roi_false_positive must fail with no negatives (ceiling={ceiling})"
+        assert gate.value == 2.0
 
 
 def test_fit_is_deterministic_regardless_of_input_order() -> None:

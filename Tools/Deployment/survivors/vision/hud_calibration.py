@@ -352,13 +352,20 @@ def fit(
     )
     grouped: dict[str, list[tuple[float, float, float, float]]] = {}
     identities: list[dict[str, object]] = []
-    for index, annotation in enumerate(annotations):
+    seen_ids: set[str] = set()
+    for annotation in annotations:
         _effective_split(annotation, split, "model_train")
         roi = _roi(annotation, expected=True)
         name = _field(annotation, "roi_name", _field(annotation, "class_name", "hud"))
         if not isinstance(name, str) or not name:
             raise ValueError("roi_name must be non-empty")
-        sample_id = str(_field(annotation, "sample_id", _field(annotation, "frame_id", index)))
+        raw_id = _field(annotation, "sample_id", _field(annotation, "frame_id"))
+        if not raw_id:
+            raise ValueError("fit annotation must have a non-empty sample_id or frame_id")
+        sample_id = str(raw_id)
+        if sample_id in seen_ids:
+            raise ValueError(f"duplicate sample_id in fit annotations: {sample_id!r}")
+        seen_ids.add(sample_id)
         identities.append({"sample_id": sample_id, "roi_name": name, "roi": roi})
         if roi is not None:
             grouped.setdefault(name, []).append(roi)
@@ -512,9 +519,9 @@ def _roi_metrics(records: Sequence[object]) -> tuple[float, float, float]:
         inside.append(expected[0] <= px[0] <= expected[2] and expected[1] <= px[1] <= expected[3])
     center_error = sum(errors) / len(errors) if errors else 1.0e9
     inside_rate = sum(inside) / len(inside) if inside else 0.0
-    # 陰性例が存在しない場合は 1.0 にして gate を fail-closed にする。
-    # 陰性例がないと false-positive 抑制を検証できていないため。
-    false_positive_rate = sum(false_positives) / len(false_positives) if false_positives else 1.0
+    # 陰性例がない場合は 2.0（比率の最大値 1.0 を超える sentinel）で ceiling を必ず失敗させる。
+    # roi_false_positive_ceiling=1.0 でも gate が通過しないよう、閾値範囲外の値を使う。
+    false_positive_rate = sum(false_positives) / len(false_positives) if false_positives else 2.0
     return center_error, inside_rate, false_positive_rate
 
 def validate(
@@ -535,8 +542,16 @@ def validate(
     if not isinstance(cfg, CalibrationConfig):
         raise TypeError("config must be CalibrationConfig")
     records = list(annotations)
+    seen_ids: set[str] = set()
     for item in records:
         _effective_split(item, split, "model_validation")
+        raw_id = _field(item, "sample_id", _field(item, "frame_id"))
+        if not raw_id:
+            raise ValueError("validate annotation must have a non-empty sample_id or frame_id")
+        sid = str(raw_id)
+        if sid in seen_ids:
+            raise ValueError(f"duplicate sample_id in validate annotations: {sid!r}")
+        seen_ids.add(sid)
     records.sort(key=lambda item: str(_field(item, "sample_id", _field(item, "frame_id", ""))))
     for item in records:
         _validate_annotation(item)
@@ -630,6 +645,8 @@ class PackageWriter:
         """
         if not isinstance(fit_result, FitResult) or not isinstance(validation_report, ValidationReport):
             raise TypeError("fit_result and validation_report have invalid types")
+        if not validation_report.all_passed:
+            raise ValueError("cannot publish: validation report did not pass all gates")
         path = Path(package_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         identity = _package_identity(
