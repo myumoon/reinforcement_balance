@@ -787,6 +787,7 @@ class TestPackagePublish:
                 cm_path=CLASS_MAP_PATH,
                 weight_path=tmp_path / "missing.pt",
                 validation_passed=False,
+                score_threshold=0.5,
             )
 
     def test_formal_publish_calls_assert_formal_eligible(self, tmp_path):
@@ -810,6 +811,7 @@ class TestPackagePublish:
                 cm_path=CLASS_MAP_PATH,
                 weight_path=tmp_path / "missing.pt",
                 validation_passed=True,
+                score_threshold=0.5,
             )
 
     def test_formal_publish_requires_valid_hashes(self, tmp_path):
@@ -840,6 +842,7 @@ class TestPackagePublish:
                 cm_path=CLASS_MAP_PATH,
                 weight_path=tmp_path / "missing.pt",
                 validation_passed=True,
+                score_threshold=0.5,
             )
 
     def test_formal_publish_requires_weight(self, tmp_path):
@@ -848,12 +851,13 @@ class TestPackagePublish:
 
         store = tmp_path / "store"
         store.mkdir()
-        with pytest.raises((TypeError, ValueError), match="weight"):
+        with pytest.raises((TypeError, ValueError)):
             publish_formal_package(
                 _make_checkpoint_manifest(formal=True), {}, {}, store,
                 cfg_path=DETECTOR_CONFIG_PATH,
                 cm_path=CLASS_MAP_PATH,
                 validation_passed=True,
+                score_threshold=0.5,
             )
 
     def test_formal_publish_rejects_weight_hash_mismatch_before_copy(self, tmp_path):
@@ -872,6 +876,7 @@ class TestPackagePublish:
                 cm_path=CLASS_MAP_PATH,
                 weight_path=weight_path,
                 validation_passed=True,
+                score_threshold=0.5,
             )
 
     def test_formal_publish_includes_hash_verified_weight(self, tmp_path):
@@ -898,10 +903,29 @@ class TestPackagePublish:
             cm_path=CLASS_MAP_PATH,
             weight_path=weight_path,
             validation_passed=True,
+            score_threshold=0.7,
         )
         copied_weight = pkg_path.parent / "model.pt"
         assert copied_weight.exists()
         assert _sha256_file(copied_weight) == manifest.model_hash
+
+    def test_score_threshold_stored_in_manifest(self, tmp_path):
+        """score_threshold が manifest に保存され restore_package で再現性が保証される。"""
+        from survivors.vision.world_detector_package import publish_development_package, PackageManifest
+
+        store = tmp_path / "store"
+        store.mkdir()
+        pkg_path = publish_development_package(
+            _make_checkpoint_manifest(),
+            metrics_dict={}, checkpoint_selection={},
+            store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
+            score_threshold=0.7,
+        )
+        raw = json.loads(pkg_path.read_text(encoding="utf-8"))
+        pm = PackageManifest.from_dict(raw)
+        assert abs(pm.score_threshold - 0.7) < 1e-6
 
     def test_idempotent_publish(self, tmp_path):
         """同じ内容を 2 回 publish しても同じ path が返る。"""

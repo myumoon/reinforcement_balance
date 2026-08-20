@@ -38,7 +38,7 @@ class EvalMetrics:
     未実装指標は "unsupported" を出力し、0 と区別する。
     """
 
-    # ponytail: precision*recall 積の平均。正式 PR 曲線積分は 04-07 で実装予定。
+    # AP50:95: PR 曲線台形積分の IoU 閾値平均（COCO 定義）。
     proxy_ap50_95: float = 0.0
     class_recall: dict[int, float] = field(default_factory=dict)
     # density_error: エンティティ密度誤差（count_error と同じ集計軸）
@@ -93,9 +93,10 @@ def compute_ap50_95(
     pred_scores: np.ndarray,
     pred_classes: np.ndarray,
 ) -> float:
-    """AP50:95 を簡易計算する（COCO 定義の iou_thresholds=[0.5,...,0.95,step=0.05]）。
+    """AP50:95 を PR 曲線台形積分で計算する（COCO 定義: iou_thresholds=[0.5,...,0.95,step=0.05]）。
 
-    ponytail: per-class AP の mean として実装。precision-recall curve の正式実装は 04-07。
+    各 IoU 閾値で precision-recall 曲線を作り台形積分し、その平均を返す。
+    class 0 は背景として無視する。1 GT + 1 TP(高 conf) + 1 FP(低 conf) → AP=1.0。
     """
     iou_thresholds = np.arange(0.50, 1.00, 0.05)
     aps: list[float] = []
@@ -110,28 +111,40 @@ def compute_ap50_95(
 
         iou_mat = compute_iou_matrix(gt_boxes, pred_boxes)
         sorted_idx = np.argsort(-pred_scores)
-        tp = 0
+        n_gt = len(gt_boxes)
+        tp_list: list[float] = []
+        fp_list: list[float] = []
         matched_gt: set[int] = set()
         for pi in sorted_idx:
             if pred_classes[pi] == 0:
-                continue
-            best_iou = 0.0
-            best_gi = -1
-            for gi in range(len(gt_boxes)):
-                if gi in matched_gt:
-                    continue
-                if gt_classes[gi] != pred_classes[pi]:
-                    continue
-                if iou_mat[gi, pi] > best_iou:
-                    best_iou = iou_mat[gi, pi]
-                    best_gi = gi
-            if best_iou >= iou_thr and best_gi >= 0:
-                tp += 1
+                continue  # 背景クラスは TP/FP に含めない
+            best_gi, best_iou = -1, iou_thr - 1e-9
+            for gi in range(n_gt):
+                if gi not in matched_gt and gt_classes[gi] == pred_classes[pi]:
+                    if iou_mat[gi, pi] > best_iou:
+                        best_iou, best_gi = iou_mat[gi, pi], gi
+            if best_gi >= 0:
+                tp_list.append(1.0)
+                fp_list.append(0.0)
                 matched_gt.add(best_gi)
+            else:
+                tp_list.append(0.0)
+                fp_list.append(1.0)
 
-        precision = tp / max(len(pred_boxes), 1)
-        recall = tp / max(len(gt_boxes), 1)
-        aps.append(precision * recall)  # 簡易 AP（正式は PR 曲線積分）
+        if not tp_list:
+            aps.append(0.0)
+            continue
+
+        cum_tp = np.cumsum(tp_list)
+        cum_fp = np.cumsum(fp_list)
+        prec = cum_tp / np.maximum(cum_tp + cum_fp, 1e-9)
+        rec = cum_tp / n_gt
+        # sentinel を追加して単調減少 precision で台形積分
+        prec = np.concatenate([[1.0], prec, [0.0]])
+        rec = np.concatenate([[0.0], rec, [rec[-1]]])
+        for i in range(len(prec) - 2, -1, -1):
+            prec[i] = max(prec[i], prec[i + 1])
+        aps.append(float(np.trapz(prec, rec)))
 
     return float(np.mean(aps)) if aps else 0.0
 
@@ -146,6 +159,8 @@ def evaluate_from_predictions(
     gt_annotations: list[dict],
     pred_annotations: list[dict],
     num_classes: int,
+    *,
+    viewport_diagonal: float = float(np.hypot(1920, 1080)),
 ) -> EvalMetrics:
     """GT と予測から EvalMetrics を計算する。
 
@@ -154,6 +169,7 @@ def evaluate_from_predictions(
 
     class recall は confidence 降順・一対一 matching で集計し、
     同一予測 box を複数 GT に対応付けない。
+    nearest_distance_error は viewport_diagonal で正規化した値（0〜1）を返す。
     track_id_switches は静的 eval で計算不能なため "unsupported" を返す。
     """
     gt_by_image: dict[int, list[dict]] = {}
@@ -197,10 +213,10 @@ def evaluate_from_predictions(
             # (G, P) 距離行列
             diff = gt_centers[:, None, :] - pred_centers[None, :, :]
             dists = np.sqrt((diff ** 2).sum(axis=2))  # (G, P)
-            nearest_dist_errors.append(float(dists.min(axis=1).mean()))
+            nearest_dist_errors.append(float(dists.min(axis=1).mean()) / viewport_diagonal)
         elif len(gt_boxes) > 0:
-            # GT があるが予測がない → 最大距離を誤差として記録
-            nearest_dist_errors.append(float(np.hypot(1920, 1080)))
+            # GT があるが予測がない → 正規化後の最大誤差 1.0 を記録
+            nearest_dist_errors.append(1.0)
 
         # class recall: confidence 降順・一対一 matching（予測を外側に走査してGT入力順依存を排除）
         for c in range(1, num_classes):

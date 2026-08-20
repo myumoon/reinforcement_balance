@@ -67,6 +67,7 @@ class PackageManifest:
     metrics: dict               # EvalMetrics.to_json() の dict
     checkpoint_selection: dict  # CheckpointSelector.to_dict()
     weight_included: bool       # package 内に model.pt があるか
+    score_threshold: float      # restore_package の推論スコア閾値（再現性保証）
 
     def to_dict(self) -> dict:
         """JSON シリアライズ用 dict。"""
@@ -82,6 +83,7 @@ class PackageManifest:
             "metrics": self.metrics,
             "checkpoint_selection": self.checkpoint_selection,
             "weight_included": self.weight_included,
+            "score_threshold": self.score_threshold,
         }
 
     @staticmethod
@@ -103,6 +105,7 @@ class PackageManifest:
             metrics=d.get("metrics", {}),
             checkpoint_selection=d.get("checkpoint_selection", {}),
             weight_included=d.get("weight_included", False),
+            score_threshold=float(d.get("score_threshold", 0.5)),
         )
 
     def assert_formal_eligible(self) -> None:
@@ -231,6 +234,7 @@ def publish_development_package(
     cfg_path: pathlib.Path,
     cm_path: pathlib.Path,
     weight_path: pathlib.Path | None = None,
+    score_threshold: float = 0.5,
 ) -> pathlib.Path:
     """development package を content-addressed store へ atomic publish する。
 
@@ -240,6 +244,7 @@ def publish_development_package(
 
     weight_path が指定されている場合は model.pt としてコピーし、copy 前後で
     model_hash を検証する。指定した path の欠落や不一致は publish を失敗させる。
+    score_threshold は restore_package での推論スコア閾値として manifest に保存する。
     """
     contract_hash = _compute_contract_hash()
 
@@ -255,6 +260,7 @@ def publish_development_package(
         metrics=metrics_dict,
         checkpoint_selection=checkpoint_selection,
         weight_included=(weight_path is not None),
+        score_threshold=score_threshold,
     )
 
     store_dir.mkdir(parents=True, exist_ok=True)
@@ -271,12 +277,15 @@ def publish_formal_package(
     cm_path: pathlib.Path,
     weight_path: pathlib.Path,
     validation_passed: bool,
+    score_threshold: float,
 ) -> pathlib.Path:
     """formal package を publish する。
 
     全 parent ハッシュ、validation PASS、model_hash が一致する weight が必要。
     checkpoint_manifest.assert_formal_eligible() で parent hash を検証する。
     validation_passed=False の場合は ValueError を送出する。
+    score_threshold は restore_package での推論スコア閾値として manifest に保存し、
+    validation 時の閾値と restore 時の閾値を一致させることで再現性を保証する。
     """
     if not validation_passed:
         raise ValueError(
@@ -302,6 +311,7 @@ def publish_formal_package(
         metrics=metrics_dict,
         checkpoint_selection=checkpoint_selection,
         weight_included=True,
+        score_threshold=score_threshold,
     )
 
     store_dir.mkdir(parents=True, exist_ok=True)
@@ -314,7 +324,6 @@ def restore_package(
     manifest_path: pathlib.Path,
     frame_bgr: np.ndarray,
     *,
-    score_threshold: float = 0.5,
     require_formal: bool = False,
 ) -> "TrackedWorldStateV1":
     """package manifest から detector を復元し、1 フレームを推論して TrackedWorldStateV1 を返す。
@@ -323,6 +332,7 @@ def restore_package(
     weight_included=True のとき model.pt を load する（torch 不在時は stub）。
     schema が TrackedWorldStateV1 フィールド定義と一致しない場合は PackageSchemaError。
     require_formal=True のとき、development package は FormalPackageRejectedError で拒否する。
+    推論スコア閾値は manifest の score_threshold を使用する（呼び出し側引数不可）。
     """
     from survivors.vision.entity_tracker import EntityTracker, TrackedWorldStateV1
     from survivors.vision.world_detector import WorldDetector
@@ -387,8 +397,8 @@ def restore_package(
         except ImportError:
             pass  # torch 不在: stub model のまま推論する
 
-    # -- infer
-    result = detector.infer(frame_bgr, score_threshold=score_threshold)
+    # -- infer（manifest の score_threshold で再現性を保証）
+    result = detector.infer(frame_bgr, score_threshold=pkg_manifest.score_threshold)
 
     # -- tracker（config から構築）
     tracker_cfg = cfg.get("tracker", {})

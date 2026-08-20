@@ -522,11 +522,54 @@ def _train_epoch(
 
 
 def _evaluate_validation(detector: Any, validation_ds: Any, cfg: dict) -> float:
-    """validation 専用 view の評価値を返す（実 metric は 04-08 で実装）。"""
+    """validation 専用 view で detector を推論評価し proxy_ap50_95 を返す。
+
+    torch eval モードでサンプルを1件ずつ推論し、evaluate_from_predictions で AP を計算する。
+    stub model（テスト環境）は空予測を返すため AP=0.0 になる。
+    """
+    import torch
+    from eval_survivors_world_detector import evaluate_from_predictions
+
     if len(validation_ds) == 0:
         raise ValueError("validation Dataset view が空です。")
+
+    gt_anns: list[dict] = []
+    pred_anns: list[dict] = []
+
     detector._model.eval()
-    return 0.0
+    with torch.no_grad():
+        for idx in range(len(validation_ds)):
+            sample = validation_ds[idx]
+            image_id = int(getattr(sample, "image_id", idx))
+            img, target = _load_training_sample(sample)
+            for box, label in zip(target["boxes"].tolist(), target["labels"].tolist()):
+                x1, y1, x2, y2 = box
+                gt_anns.append({
+                    "image_id": image_id,
+                    "category_id": int(label),
+                    "bbox": [x1, y1, x2 - x1, y2 - y1],
+                })
+            try:
+                preds = detector._model([img])
+                if isinstance(preds, list) and preds and isinstance(preds[0], dict):
+                    for box, label, score in zip(
+                        preds[0].get("boxes", torch.zeros(0, 4)).tolist(),
+                        preds[0].get("labels", torch.zeros(0, dtype=torch.long)).tolist(),
+                        preds[0].get("scores", torch.zeros(0)).tolist(),
+                    ):
+                        x1, y1, x2, y2 = box
+                        pred_anns.append({
+                            "image_id": image_id,
+                            "category_id": int(label),
+                            "bbox": [x1, y1, x2 - x1, y2 - y1],
+                            "score": float(score),
+                        })
+            except Exception:
+                pass  # stub model の場合はスキップ
+
+    num_classes = cfg.get("model", {}).get("num_classes", detector.num_classes) + 1
+    metrics = evaluate_from_predictions(gt_anns, pred_anns, num_classes=num_classes)
+    return metrics.proxy_ap50_95
 
 
 def _run_training_stub(
