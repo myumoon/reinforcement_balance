@@ -35,21 +35,23 @@ world エンティティを検出し、フレーム間でトラック ID を維�
 ```
 Tools/Deployment/
 ├── survivors/vision/
-│   ├── world_dataset.py        # COCO dataset loader + preflight + session split
-│   ├── world_detector.py       # SSDLite320 adapter + DetectionResult + CheckpointManifest
-│   └── entity_tracker.py       # greedy tracker + TrackedWorldStateV1
+│   ├── world_dataset.py          # COCO dataset loader + preflight + session split
+│   ├── world_detector.py         # SSDLite320 adapter + DetectionResult + CheckpointManifest
+│   ├── entity_tracker.py         # greedy tracker + TrackedWorldStateV1
+│   └── world_detector_package.py # 開発 package writer / restore (04-07)
 ├── configs/
-│   ├── world_class_map_v1.yaml # 12 クラス固定 class map
-│   └── world_detector_v1.yaml  # 学習・推論設定（formal_detector_eligible=false）
-├── train_survivors_world_detector.py   # 学習 CLI
-├── eval_survivors_world_detector.py    # 評価 CLI（mAP50:95 等）
+│   ├── world_class_map_v1.yaml   # 12 クラス固定 class map
+│   └── world_detector_v1.yaml    # 学習・推論設定（formal_detector_eligible=false）
+├── train_survivors_world_detector.py   # 学習 CLI（DataLoader / optimizer / checkpoint selection）
+├── eval_survivors_world_detector.py    # 評価 CLI（mAP50:95 / performance gate）
 └── mine_survivors_active_learning.py   # active learning マイニング CLI
 docs/deployment/
 └── world_detector.md           # 本ドキュメント
 Tools/Deployment/tests/vision/
 ├── test_world_dataset.py
 ├── test_world_detector.py
-└── test_entity_tracker.py
+├── test_entity_tracker.py
+└── test_world_detector_package.py  # 04-07 tooling テスト
 ```
 
 ## 使い方
@@ -111,7 +113,72 @@ synthetic fixture のみ使用。GPU・実画像・実 weight 不要。
 
 | 責務 | 担当 PR |
 |------|---------|
-| class map / schema / tracker / dataset loader | **04-06 (本 PR)** |
-| DataLoader / optimizer / augmentation 本格実装 | 04-07 |
+| class map / schema / tracker / dataset loader | 04-06 |
+| DataLoader / optimizer / augmentation / checkpoint selection / package writer | **04-07 (本 PR)** |
 | formal weight / threshold / formal_detector_eligible=true | 04-08 |
 | deploy obs への変換 | 04-09 |
+
+## 04-07 tooling — session 拒否 / checkpoint selection / package writer
+
+### session 拒否（error_calibration / final_e2e_test）
+
+`WorldDataset` に `rejected_sessions` を渡すと、
+指定セッションを含むフレームが dataset loader へ入った時点で `DatasetPreflightError` を送出する。
+
+```python
+ds = WorldDataset(
+    ann_path, cm_path,
+    validate_bounds=True,
+    rejected_sessions={"error_cal_01", "final_test_01"},
+)
+```
+
+`run_split_preflight(split)` は `SessionSplit` の `error_calibration` / `final_e2e_test`
+がデータ内に混入していないことを確認する。
+
+### checkpoint selection
+
+学習前に `CheckpointSelector` にルールを固定する:
+
+```python
+selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+```
+
+validation 後に `selector.record(CheckpointRecord(...))` を呼ぶと、
+`keep_top_k` 内の best が `selector.best` で取得できる。
+`selector.to_dict()` は `manifest.json` に追記される。
+
+### performance gate
+
+```python
+gate_result = check_performance_gate(
+    metrics, gate_cfg, class_name_by_id,
+    slice_annotations=slice_annotations,
+)
+# gate_result.passed が False なら全体 FAIL
+```
+
+`world_detector_v1.yaml` の `performance_gate` セクションに閾値を定義する。
+実 weight での合格は 04-08 に委譲する。
+
+### package writer
+
+```python
+from survivors.vision.world_detector_package import publish_development_package, restore_package
+
+pkg_path = publish_development_package(
+    checkpoint_manifest,
+    metrics_dict,
+    checkpoint_selection,
+    store_dir,
+    cfg_path=cfg_path,
+    cm_path=cm_path,
+    weight_path=weight_path,
+)
+state = restore_package(pkg_path, frame_bgr)  # TrackedWorldStateV1 を返す
+```
+
+- `formal_detector_eligible=false` の package は `assert_formal_eligible()` で拒否される。
+- `contract_hash` が TrackedWorldStateV1 フィールド定義と一致しない場合は `PackageSchemaError`。
+- formal publish は `validation_passed=True` かつ `formal_detector_eligible=True` の
+  `CheckpointManifest` と、`model_hash` が一致する必須の `weight_path` が必要（04-08 で発行）。

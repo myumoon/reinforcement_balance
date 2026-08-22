@@ -182,6 +182,7 @@ class WorldDataset:
 
     class map 整合性と bbox bounds を検証し、不正なアノテーションを拒否する。
     session_id フィールドを持たないアノテーションは session_id="" として扱う。
+    rejected_sessions に含まれる session_id のフレームは DatasetPreflightError を送出する。
     """
 
     def __init__(
@@ -190,8 +191,10 @@ class WorldDataset:
         class_map_path: pathlib.Path | str,
         *,
         validate_bounds: bool = False,
+        rejected_sessions: set[str] | None = None,
     ) -> None:
         self._class_map = load_class_map(class_map_path)
+        self._rejected_sessions: set[str] = rejected_sessions or set()
         self._samples = self._load(pathlib.Path(annotation_path), validate_bounds=validate_bounds)
 
     # ---- public API ----
@@ -238,6 +241,56 @@ class WorldDataset:
                 f"min_time_bands 不足: {n_bands} < {min_time_bands}"
             )
 
+    def run_split_preflight(
+        self,
+        split: "SessionSplit",
+        *,
+        min_frames_per_split: int = 50,
+        min_entities_per_split: int = 100,
+        min_classes_per_split: int = 4,
+    ) -> None:
+        """SessionSplit 整合性と split ごとの最小要件チェック。
+
+        train / validation 各 split が最小 frame / entity / class を満たすか確認する。
+        0 件 slice は DatasetPreflightError で失敗する。
+        error_calibration / final_e2e_test の session ID がサンプル側に存在しないことも確認する。
+        """
+        forbidden = set(split.error_calibration) | set(split.final_e2e_test)
+        seen_in_data = {a.session_id for s in self._samples for a in s.annotations if a.session_id}
+        overlap = forbidden & seen_in_data
+        if overlap:
+            raise DatasetPreflightError(
+                f"error_calibration/final_e2e_test セッション {sorted(overlap)} がデータセットに含まれています。"
+            )
+
+        split_ids: dict[str, tuple[str, ...]] = {
+            "train": split.train,
+            "validation": split.validation,
+        }
+        for split_name, session_ids in split_ids.items():
+            session_set = set(session_ids)
+            if not session_set:
+                raise DatasetPreflightError(f"split '{split_name}' のセッションが 0 件です。")
+            samples_in_split = [
+                s for s in self._samples
+                if any(a.session_id in session_set for a in s.annotations)
+            ]
+            n_frames = len(samples_in_split)
+            if n_frames < min_frames_per_split:
+                raise DatasetPreflightError(
+                    f"split '{split_name}' の min_frames 不足: {n_frames} < {min_frames_per_split}"
+                )
+            anns = [a for s in samples_in_split for a in s.annotations]
+            if len(anns) < min_entities_per_split:
+                raise DatasetPreflightError(
+                    f"split '{split_name}' の min_entities 不足: {len(anns)} < {min_entities_per_split}"
+                )
+            n_classes = len({a.category_id for a in anns})
+            if n_classes < min_classes_per_split:
+                raise DatasetPreflightError(
+                    f"split '{split_name}' の min_classes 不足: {n_classes} < {min_classes_per_split}"
+                )
+
     # ---- internal ----
 
     def _load(
@@ -272,12 +325,18 @@ class WorldDataset:
                         f"bbox {bbox} が画像 ({img['width']}x{img['height']}) の外へはみ出しています。"
                     )
 
+            session_id = raw.get("session_id", "")
+            if session_id and session_id in self._rejected_sessions:
+                raise DatasetPreflightError(
+                    f"拒否セッション '{session_id}' のフレーム (image_id={raw['image_id']}) が"
+                    " dataset に含まれています。error_calibration / final_e2e_test を分離してください。"
+                )
             ann = COCOAnnotation(
                 annotation_id=raw.get("id", 0),
                 image_id=raw["image_id"],
                 category_id=cat_id,
                 bbox_xywh=bbox,  # type: ignore[arg-type]
-                session_id=raw.get("session_id", ""),
+                session_id=session_id,
             )
             if ann.image_id in ann_by_image:
                 ann_by_image[ann.image_id].append(ann)

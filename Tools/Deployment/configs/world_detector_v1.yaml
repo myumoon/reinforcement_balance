@@ -37,26 +37,36 @@ input:
     mean: [0.485, 0.456, 0.406]
     std: [0.229, 0.224, 0.225]
 
-# --- 学習ハイパーパラメータ ---
+# --- 学習・オプティマイザー ---
 training:
   batch_size: 8
-  optimizer: sgd
-  lr: 0.01
-  momentum: 0.9
-  weight_decay: 0.0005
+  optimizer:
+    sgd:
+      lr: 0.01
+      momentum: 0.9
+      weight_decay: 0.0005
   lr_scheduler: cosine
   max_epochs: 50
-  # 学習開始前の preflight で必要な最小件数チェック。
-  # 不足時は training step 0 のまま停止する。
+  # preflight チェックの最小要件。満たさなければ training step 0 のまま停止する。
   preflight:
     min_frames: 300
     min_entities: 500
     min_classes: 6
     min_time_bands: 4
 
-# --- tracker パラメータ ---
+# --- チェックポイント選択規則 ---
+# 学習開始前に manifest へ固定し、validation で best checkpoint を一度だけ選択する。
+checkpoint_selection:
+  # 選択基準メトリクス（高いほど良い）。
+  metric: val_map50_95
+  # best checkpoint 選択後に候補を保持する最大数。
+  keep_top_k: 3
+  # 保存インターバル（epoch 単位）。
+  save_every_n_epochs: 5
+
+# --- tracker 設定 ---
 tracker:
-  # class ごとの最大 age（フレーム数）。超えたトラックを削除する。
+  # class ごとの最大 age（フレーム）。超えたトラックは削除される。
   max_age_by_class:
     player_anchor: 10
     enemy_normal: 5
@@ -69,16 +79,48 @@ tracker:
     pickup_special: 4
     hazard_projectile: 3
     hazard_area: 4
-  # greedy マッチングのコスト上限。超えた検出とトラックは非対応とする。
+  # greedy マッチングのコスト上限。この値を超えた割り当ては棄却する。
   max_match_cost: 0.7
-  # velocity EMA の減衰係数。
+  # EMA の平滑化係数。velocity の更新に使用する。
   velocity_ema_alpha: 0.6
-  # confidence decay（フレームごとの乗数）。
+  # decay（フレームごとの confidence 減衰率）。
   confidence_decay_per_frame: 0.9
 
-# --- 評価メトリクスしきい値 ---
-evaluation:
-  # holdout mAP50:95 の合格下限。04-07 が正式しきい値を更新する。
-  min_map50_95: 0.0
-  # クラスごとの recall 下限。
-  min_class_recall: 0.0
+# --- 性能ゲート ---
+# 各メトリクスの合格下限。synthetic 値でゲートロジックを検証できる。
+# actual weight での合格は 04-08 に委譲する（現在の下限は 0.0）。
+performance_gate:
+  # 全体 mAP50:95 の合格下限。04-07 はゲートロジックのみ実装する。
+  map50_95_min: 0.0
+  # クラス別 recall 合格下限。
+  class_recall_min:
+    enemy_normal: 0.90
+    enemy_elite: 0.90
+    enemy_boss: 0.98
+    gem_blue: 0.92
+    gem_green: 0.92
+    gem_red: 0.92
+  # directional-density correlation 合格下限。
+  density_correlation_min: 0.85
+  # nearest-distance median error 合格上限（viewport 正規化）。
+  nearest_distance_median_max: 0.04
+  # GPU p95 latency 合格上限 (ms)。CPU smoke では無視される。
+  gpu_p95_latency_max_ms: 25.0
+  # heavy-effect / late-game slice 別ゲート（全体平均で代用しない）。
+  slice_gate:
+    heavy_effect:
+      recall_min: 0.80
+      min_instances: 4
+      min_sessions: 4
+    late_game:
+      recall_min: 0.80
+      min_instances: 4
+      min_sessions: 4
+    boss:
+      recall_min: 0.98
+      min_instances: 3
+      min_sessions: 3
+    hazard:
+      recall_min: 0.80
+      min_instances: 4
+      min_sessions: 4
