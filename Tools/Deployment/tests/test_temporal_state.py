@@ -70,3 +70,36 @@ def test_screen_state_routes_combat_and_item_validity() -> None:
     assert (gameplay.combat_validity, gameplay.item_validity) == (1., 0.)
     assert (level_up.combat_validity, level_up.item_validity) == (0., 1.)
     assert (paused.combat_validity, paused.item_validity) == (0., 0.)
+
+def test_join_uses_accepted_state_for_now_ns() -> None:
+    """遅延 frame を破棄しても now_ns が保持済み state の時刻から計算される。
+
+    破棄した古い frame の timestamp を使うと hud_age が負になり ContractValidationError が起きます。
+    """
+    assembler = TemporalAssembler()
+    assembler.join(_hud(2_000), _world(2_000))
+    joined = assembler.join(_hud(1_500), _world(1_500))
+    assert joined.hud.captured_monotonic_ns == 2_000
+    assert joined.captured_ns == 2_000
+
+def test_session_change_resets_monotonic_state() -> None:
+    """新 session では旧 session の timer/level が引き継がれない。
+
+    session_id 変更で HUD/world/tick state をリセットし、新 session の観測値を素直に採用します。
+    """
+    assembler = TemporalAssembler()
+    assembler.join(_hud(1_000, timer_seconds=100., level=10), _world(1_000))
+    joined = assembler.join(_hud(1_001, timer_seconds=1., level=1, session_id="s2"), _world(1_001))
+    assert joined.hud.timer_seconds == 1.
+    assert joined.hud.level == 1
+
+def test_low_screen_state_confidence_fails_validity() -> None:
+    """screen_state_confidence が閾値未満のとき combat/item validity をゼロに落とす。
+
+    誤分類された画面の操作を防ぐため、信頼度が低ければ fail-closed にします。
+    """
+    assembler = TemporalAssembler()
+    low = assembler.join(_hud(1_000, "level_up_items", screen_state_confidence=0.1), _world(1_000))
+    high = assembler.join(_hud(2_000, "level_up_items", screen_state_confidence=0.9), _world(2_000))
+    assert low.item_validity == 0.
+    assert high.item_validity == 1.

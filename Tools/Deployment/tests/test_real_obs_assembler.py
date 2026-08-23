@@ -76,3 +76,44 @@ def test_ui_presentation_cannot_enter_tensor_builder() -> None:
         build_deploy_observation(schema, snapshot.ui_presentation, snapshot.captured_ns)
     with pytest.raises(ValueError):
         ItemDecisionFeatures.from_wire(snapshot.ui_presentation)
+
+def test_item_context_uses_cached_gameplay_danger() -> None:
+    """level_up 画面では直前の gameplay world の enemy_density を保持する。
+
+    level_up overlay は enemy tracks が空なので、gameplay snapshot を参照しないと density=0 になります。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud_gp, world_gp = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot.item_context is not None
+    assert snapshot.item_context.enemy_density > 0.
+    assert snapshot.item_context.world_age > 0.
+
+def test_duplicate_card_ids_fail_closed() -> None:
+    """重複 item_id を持つカードがある場合 item_context と choices を返さない。
+
+    model と UI で identity が対応しない状態を作らないよう fail-closed にします。
+    """
+    schema = DeployObsSchema.default_v1()
+    card_a = ParsedCard(0, "whip", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    card_b = ParsedCard(1, "whip", "weapon", 3, .99, "ok", (500, 100, 800, 500))
+    hud = HudStateV1(
+        "hud_state.v1", "session", 4, 1_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card_a, card_b), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world = TrackedWorldStateV1(4, 1_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snapshot = RealObsAssembler().assemble(hud, world, schema, (1000, 1000))
+    assert snapshot.item_context is None
+    assert snapshot.choices == ()

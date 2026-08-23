@@ -46,15 +46,20 @@ def _candidate(card: ParsedCard, used_ids: set[str], inventory: tuple[str | None
 
 def _item_context(
     joined: TemporalJoin, snapshot_id: str, screen: dict[str, NamedEstimate],
+    gameplay_world: TrackedWorldStateV1 | None, last_gameplay_ns: int | None, now_ns: int | None,
 ) -> tuple[ItemDecisionFeatures | None, tuple[CandidateFeatures, ...]]:
     """item UI 用 context と候補を visible feature だけから構築する。
 
     gameplay/停止画面では None を返し、fallback と chest も semantic choice として保持します。
+    danger 特徴は直前の gameplay snapshot から取得し、item UI 中も正確な鮮度を算出します。
     """
     if joined.item_validity == 0:
         return None, ()
     used: set[str] = set()
     cards = sorted(joined.hud.cards, key=lambda value: value.slot_index)
+    raw_ids = [card.item_id or f"unknown:{card.slot_index}" for card in cards]
+    if len(raw_ids) != len(set(raw_ids)):
+        return None, ()
     choices = tuple(_candidate(card, used, joined.hud.inventory) for card in cards)
     if not choices and joined.hud.screen_state == "chest":
         choices = (CandidateFeatures("chest", "ack_chest", 0, False, False, False, False, False, 0),)
@@ -65,12 +70,14 @@ def _item_context(
     radius = screen.get("nearest_enemy_screen_radius")
     enemy_density = screen["enemy_density"].value[0]
     gem_density = screen["gem_density"].value[0]
-    visible = [track for track in joined.world.tracks if track.on_screen and not track.clipped and track.confidence >= .35]
+    effective_world = gameplay_world if gameplay_world is not None else joined.world
+    visible = [track for track in effective_world.tracks if track.on_screen and not track.clipped and track.confidence >= .35]
     fallback = next(
         (choice.item_id for choice in choices if choice.kind == "fallback" or "gold" in choice.item_id.casefold() or "chicken" in choice.item_id.casefold()),
         "none",
     )
     max_cards = max(3, len(choices))
+    world_age = (now_ns - last_gameplay_ns) / 1_000_000_000 if now_ns is not None and last_gameplay_ns is not None else 0.
     context = ItemDecisionFeatures(
         decision_id=snapshot_id, feature_schema="context_danger_v1",
         elapsed_time=joined.hud.timer_seconds or 0., level=joined.hud.level or 1,
@@ -84,7 +91,7 @@ def _item_context(
         nearest_enemy_screen_dir=nearest.value if nearest else (0., 0.),
         boss_flag=any(track.coarse_class == "enemy" and "boss" in track.class_name for track in visible),
         hazard_flag=any(track.coarse_class == "hazard" for track in visible),
-        world_validity=joined.world_validity, world_age=0., last_gameplay_snapshot_age=0.,
+        world_validity=joined.world_validity, world_age=world_age, last_gameplay_snapshot_age=world_age,
     )
     return context, choices
 
@@ -100,6 +107,9 @@ class RealObsAssembler:
         test と runtime が同じ assembly 経路のまま cadence 設定だけを差し替えられます。
         """
         self.temporal = temporal or TemporalAssembler()
+        self._last_gameplay_world: TrackedWorldStateV1 | None = None
+        self._last_gameplay_screen: dict[str, NamedEstimate] | None = None
+        self._last_gameplay_ns: int | None = None
 
     def assemble(
         self, hud: HudStateV1, world: TrackedWorldStateV1,
@@ -121,6 +131,10 @@ class RealObsAssembler:
             "parser_artifact_hash": hud.parser_artifact_hash,
         })
         screen = build_screen_space_estimates(joined.world)
+        if joined.hud.screen_state == "gameplay" and joined.world_validity > 0:
+            self._last_gameplay_world = joined.world
+            self._last_gameplay_screen = screen
+            self._last_gameplay_ns = joined.captured_ns
         estimates: dict[str, NamedEstimate] = {}
         combat = joined.combat_validity
         if joined.hud.hp_ratio is not None:
@@ -137,7 +151,11 @@ class RealObsAssembler:
                 estimates[name] = NamedEstimate(value.value, value.timestamp_ns, value.validity * combat)
         deploy_obs = build_deploy_observation(schema, estimates, joined.captured_ns)
         ui = build_ui_presentation_from_hud(joined.hud, viewport, snapshot_id=snapshot_id, frame_id=frame_id)
-        item_context, choices = _item_context(joined, snapshot_id, screen)
+        gameplay_screen = self._last_gameplay_screen if self._last_gameplay_screen is not None else screen
+        item_context, choices = _item_context(
+            joined, snapshot_id, gameplay_screen,
+            self._last_gameplay_world, self._last_gameplay_ns, joined.captured_ns,
+        )
         diagnostics = {
             "hud_world_skew_ms": abs(hud.captured_monotonic_ns - world.timestamp_ns) / 1_000_000,
             "hud_validity": joined.hud_validity, "world_validity": joined.world_validity,

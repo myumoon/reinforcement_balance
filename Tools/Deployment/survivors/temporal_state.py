@@ -8,6 +8,7 @@ from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from .vision.entity_tracker import TrackedWorldStateV1
 from .vision.hud_parser import HudStateV1
 _ITEM_STATES = frozenset({"level_up_items", "level_up_fallback", "chest"})
+_SCREEN_CONFIDENCE_THRESHOLD = 0.5
 @dataclass(frozen=True)
 class TemporalJoin:
     """一回の policy tick で束縛した HUD/world と validity を保持する。
@@ -41,6 +42,7 @@ class TemporalAssembler:
         self._hud: HudStateV1 | None = None
         self._world: TrackedWorldStateV1 | None = None
         self._last_tick_ns: int | None = None
+        self._session_id: str | None = None
 
     def observe_hud(self, hud: HudStateV1) -> None:
         """最新 HUD を monotonic・bounded filter へ取り込む。
@@ -49,6 +51,11 @@ class TemporalAssembler:
         """
         if not isinstance(hud, HudStateV1):
             raise TypeError("hud must be HudStateV1")
+        if self._session_id is not None and hud.session_id != self._session_id:
+            self._hud = None
+            self._world = None
+            self._last_tick_ns = None
+        self._session_id = hud.session_id
         previous = self._hud
         if previous is None:
             self._hud = hud
@@ -93,7 +100,7 @@ class TemporalAssembler:
         """
         self.observe_hud(hud)
         self.observe_world(world)
-        return self._current_join(max(hud.captured_monotonic_ns, world.timestamp_ns) if now_ns is None else now_ns)
+        return self._current_join(max(self._hud.captured_monotonic_ns, self._world.timestamp_ns) if now_ns is None else now_ns)
 
     def tick(self, now_ns: int) -> TemporalJoin | None:
         """15 Hz cadence を満たす時だけ最新 producer 結果を join する。
@@ -119,6 +126,7 @@ class TemporalAssembler:
         hud_valid = float(0 <= hud_age <= self.max_stale_ns["hud"])
         world_valid = float(0 <= world_age <= self.max_stale_ns["world"])
         joined_valid = float(hud_valid == world_valid == 1. and abs(self._hud.captured_monotonic_ns - self._world.timestamp_ns) <= self.max_skew_ns)
-        combat = joined_valid if self._hud.screen_state == "gameplay" else 0.
-        item = joined_valid if self._hud.screen_state in _ITEM_STATES else 0.
+        confident = self._hud.screen_state_confidence >= _SCREEN_CONFIDENCE_THRESHOLD
+        combat = joined_valid if self._hud.screen_state == "gameplay" and confident else 0.
+        item = joined_valid if self._hud.screen_state in _ITEM_STATES and confident else 0.
         return TemporalJoin(self._hud, self._world, now_ns, hud_valid, world_valid, combat, item)
