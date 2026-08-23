@@ -710,7 +710,8 @@ class TestPerformanceGateBoundary:
         assert not result.passed
 
     def test_all_pass_returns_passed_true(self):
-        """全 gate を通過したとき passed=True。"""
+        """全 gate を通過したとき passed=True。gpu_p95_latency_max_ms が gate に含まれる場合は
+        gpu_p95_latency_ms を渡さないと fail-closed になるため値を渡す。"""
         from eval_survivors_world_detector import check_performance_gate
 
         m = self._base_metrics()
@@ -722,7 +723,7 @@ class TestPerformanceGateBoundary:
             "gpu_p95_latency_max_ms": 1000.0,
             "slice_gate": {},
         }
-        result = check_performance_gate(m, gate_cfg, {})
+        result = check_performance_gate(m, gate_cfg, {}, gpu_p95_latency_ms=10.0)
         assert result.passed
 
 

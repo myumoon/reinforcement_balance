@@ -65,6 +65,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--epochs", type=int, default=None, help="学習エポック数（config 優先）")
     p.add_argument("--dry-run", action="store_true", help="preflight チェックのみ実行して終了")
     p.add_argument("--resume", help="resume する checkpoint ディレクトリ")
+    p.add_argument(
+        "--feasibility",
+        help="feasibility JSON ファイル（04-06 の verdict=pass を要求する formal preflight 用）",
+    )
     return p
 
 
@@ -291,8 +295,8 @@ class _DatasetView:
 def _create_split_views(ds: Any, split: Any) -> tuple[_DatasetView, _DatasetView]:
     """session assignment から互いに素な train / validation view を作る。
 
-    空フレームは session を特定できないため view から除外する。未知 session や
-    train/validation が同一フレームに混在するデータは fail-closed で拒否する。
+    アノテーション無しフレーム（負例）は画像レベルの session_id で split に振り分ける。
+    未知 session や train/validation が同一フレームに混在するデータは fail-closed で拒否する。
     """
     from survivors.vision.world_dataset import DatasetPreflightError
 
@@ -306,7 +310,11 @@ def _create_split_views(ds: Any, split: Any) -> tuple[_DatasetView, _DatasetView
         sample = ds[index]
         sample_sessions = {ann.session_id for ann in sample.annotations if ann.session_id}
         if not sample_sessions:
-            continue
+            # 負例フレーム: 画像レベルの session_id で振り分ける
+            img_session = getattr(sample, "session_id", "")
+            if not img_session:
+                continue
+            sample_sessions = {img_session}
         unknown_sessions = sample_sessions - allowed_sessions
         if unknown_sessions:
             raise DatasetPreflightError(
@@ -325,6 +333,49 @@ def _create_split_views(ds: Any, split: Any) -> tuple[_DatasetView, _DatasetView
     if not train_indices or not validation_indices:
         raise DatasetPreflightError("train/validation Dataset view の一方が空です。")
     return _DatasetView(ds, train_indices), _DatasetView(ds, validation_indices)
+
+
+# ---- config guard ----
+
+def _run_formal_preflight(feasibility_path: pathlib.Path, cfg: dict) -> None:
+    """feasibility JSON を読み込み、formal 学習に必要な条件を検証する。
+
+    04-06 フェーズの verdict が pass でなければ ValueError を送出する。
+    architecture が config と一致しなければ ValueError を送出する。
+    """
+    raw = json.loads(feasibility_path.read_text(encoding="utf-8"))
+    verdict = raw.get("verdict")
+    if verdict != "pass":
+        raise ValueError(
+            f"feasibility verdict が 'pass' ではありません: {verdict!r}。"
+            " 04-06 の feasibility チェックを通過してから再実行してください。"
+        )
+    # architecture 一致確認
+    feas_arch = raw.get("architecture")
+    cfg_arch = cfg.get("model", {}).get("architecture")
+    if feas_arch and cfg_arch and feas_arch != cfg_arch:
+        raise ValueError(
+            f"feasibility の architecture {feas_arch!r} が config {cfg_arch!r} と一致しません。"
+        )
+
+
+def _reject_unimplemented_config(cfg: dict) -> None:
+    """未実装の config キーが設定されていれば ValueError を送出する。
+
+    config hash と実際の学習条件が乖離しないよう、未実装設定を早期に拒否する。
+    """
+    checks = [
+        ("input.augmentation", cfg.get("input", {}).get("augmentation")),
+        ("training.lr_scheduler", cfg.get("training", {}).get("lr_scheduler")),
+        ("training.class_weights", cfg.get("training", {}).get("class_weights")),
+        ("training.near_duplicate_suppression",
+         cfg.get("training", {}).get("near_duplicate_suppression")),
+    ]
+    for key, val in checks:
+        if val is not None:
+            raise ValueError(
+                f"config '{key}' は未実装です。このバージョンでは設定を除去してください。"
+            )
 
 
 # ---- training loop ----
@@ -346,39 +397,40 @@ def _run_training(
     resume_dir が指定された場合は model / optimizer / selector を復元する。
     """
     try:
-        import torch
+        import torch as _torch
         import torch.optim as optim
-
-        opt_cfg = cfg.get("training", {}).get("optimizer", {}).get("sgd", {})
-        optimizer = optim.SGD(
-            detector._model.parameters(),
-            lr=opt_cfg.get("lr", 0.01),
-            momentum=opt_cfg.get("momentum", 0.9),
-            weight_decay=opt_cfg.get("weight_decay", 0.0005),
-        )
-
-        start_epoch = 1
-        if resume_dir is not None:
-            start_epoch = _load_resume_state(resume_dir, selector, detector._model, optimizer)
-            print(f"[RESUME] epoch {start_epoch} から再開します。")
-
-        _run_training_torch(
-            detector,
-            train_ds,
-            validation_ds,
-            cfg,
-            max_epochs,
-            selector,
-            out_dir,
-            optimizer,
-            start_epoch,
-        )
-
     except ImportError:
-        start_epoch = 1
+        # torch 不在: stub ループ。resume は torch 必須なので即 RuntimeError。
         if resume_dir is not None:
             raise RuntimeError("[RESUME] model/optimizer state の復元には torch が必要です。")
-        _run_training_stub(max_epochs, selector, out_dir, start_epoch)
+        _run_training_stub(max_epochs, selector, out_dir, start_epoch=1)
+        return
+
+    # torch 利用可能。以降の ImportError（cv2・torchvision 等）は伝播させる。
+    opt_cfg = cfg.get("training", {}).get("optimizer", {}).get("sgd", {})
+    optimizer = optim.SGD(
+        detector._model.parameters(),
+        lr=opt_cfg.get("lr", 0.01),
+        momentum=opt_cfg.get("momentum", 0.9),
+        weight_decay=opt_cfg.get("weight_decay", 0.0005),
+    )
+
+    start_epoch = 1
+    if resume_dir is not None:
+        start_epoch = _load_resume_state(resume_dir, selector, detector._model, optimizer)
+        print(f"[RESUME] epoch {start_epoch} から再開します。")
+
+    _run_training_torch(
+        detector,
+        train_ds,
+        validation_ds,
+        cfg,
+        max_epochs,
+        selector,
+        out_dir,
+        optimizer,
+        start_epoch,
+    )
 
 
 def _run_training_torch(
@@ -426,15 +478,13 @@ def _load_training_sample(sample: Any) -> tuple[Any, dict[str, Any]]:
     img_path = pathlib.Path(sample.file_name)
     frame: Any = None
     if img_path.exists():
-        try:
-            import cv2
-            bgr = cv2.imread(str(img_path))
-            if bgr is not None:
-                import torchvision.transforms.functional as TF
-                rgb = bgr[..., ::-1].copy()
-                frame = TF.to_tensor(rgb)
-        except Exception:
-            pass  # 画像ロード失敗は合成にフォールバック
+        # ファイルが存在する場合は ImportError・デコード失敗を伝播させる（smoke モード用ゼロ画像不可）
+        import cv2
+        import torchvision.transforms.functional as TF
+        bgr = cv2.imread(str(img_path))
+        if bgr is None:
+            raise OSError(f"cv2.imread デコード失敗: {img_path}")
+        frame = TF.to_tensor(bgr[..., ::-1].copy())
 
     if frame is None:
         frame = torch.zeros(3, sample.image_height, sample.image_width)
@@ -460,7 +510,12 @@ def _load_training_sample(sample: Any) -> tuple[Any, dict[str, Any]]:
 
 
 def _session_balanced_indices(ds: Any) -> list[int]:
-    """各 session を round-robin する 1 epoch 分の sample index を返す。"""
+    """各 session から等数ずつサンプルを取り session 間不均衡を抑える。
+
+    最短 session の長さを quota として全 session を上限制限し round-robin で並べる。
+    長期 session が 1 epoch を独占しなくなる。
+    # ponytail: min-quota。サンプル量が問題になるなら per-session weight sampling へ移行。
+    """
     session_groups: dict[str, list[int]] = {}
     for index in range(len(ds)):
         sample = ds[index]
@@ -468,17 +523,12 @@ def _session_balanced_indices(ds: Any) -> list[int]:
         session_id = session_ids[0] if session_ids else ""
         session_groups.setdefault(session_id, []).append(index)
 
+    quota = min(len(indices) for indices in session_groups.values())
     ordered: list[int] = []
-    offset = 0
-    while True:
-        appended = False
+    for offset in range(quota):
         for indices in session_groups.values():
-            if offset < len(indices):
-                ordered.append(indices[offset])
-                appended = True
-        if not appended:
-            return ordered
-        offset += 1
+            ordered.append(indices[offset])
+    return ordered
 
 
 def _train_epoch(
@@ -655,6 +705,21 @@ def main(argv: list[str] | None = None) -> int:
         "フレームへ分離しました。"
     )
 
+    # formal preflight（--feasibility が指定された場合のみ）
+    if args.feasibility:
+        try:
+            _run_formal_preflight(pathlib.Path(args.feasibility), cfg)
+        except (ValueError, OSError) as e:
+            print(f"[FORMAL PREFLIGHT ERROR] {e}", file=sys.stderr)
+            return 1
+
+    # 未実装設定の早期拒否（config hash と学習条件の乖離を防ぐ）
+    try:
+        _reject_unimplemented_config(cfg)
+    except ValueError as e:
+        print(f"[CONFIG ERROR] {e}", file=sys.stderr)
+        return 1
+
     if args.dry_run:
         print("[DRY-RUN] --dry-run が指定されたため学習をスキップします。")
         return 0
@@ -692,6 +757,15 @@ def main(argv: list[str] | None = None) -> int:
     # -- build hash
     _build_hash = _sha256_str(f"dev-python:{sys.version}")
 
+    # split hash: split JSON ファイルの内容 SHA-256
+    _split_hash = _sha256_file(pathlib.Path(args.split))
+
+    # resolved config hash: CLI override 適用後の config dict を正規化してハッシュ
+    _resolved_cfg = dict(cfg)
+    if args.epochs:
+        _resolved_cfg.setdefault("training", {})["max_epochs"] = args.epochs
+    _resolved_config_hash = _sha256_str(json.dumps(_resolved_cfg, sort_keys=True, ensure_ascii=False))
+
     # best checkpoint hash: 実ファイルがあれば hash、なければ config hash で代用
     best = selector.best
     weight_path: pathlib.Path | None = None
@@ -708,6 +782,8 @@ def main(argv: list[str] | None = None) -> int:
         build_hash=_build_hash,
         class_map_hash=_sha256_file(cm_path),
         formal_detector_eligible=False,
+        split_hash=_split_hash,
+        resolved_config_hash=_resolved_config_hash,
     )
     manifest.save(out_dir / "manifest.json")
 

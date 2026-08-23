@@ -142,12 +142,18 @@ class TrackedWorldStateV1:
         state: TrackedWorldState,
         frame_index: int,
         timestamp_ns: int,
+        class_map_path: "pathlib.Path | None" = None,
     ) -> "TrackedWorldStateV1":
-        """TrackedWorldState → V1 schema へ変換する。"""
+        """TrackedWorldState → V1 schema へ変換する。
+
+        class_map_path が指定されない場合はモジュール相対のデフォルトを使用する。
+        package から restore する場合は package 内の class_map を渡すこと。
+        """
         from survivors.vision.world_dataset import load_class_map
         import pathlib
-        configs = pathlib.Path(__file__).parents[2] / "configs" / "world_class_map_v1.yaml"
-        cm = load_class_map(configs)
+        if class_map_path is None:
+            class_map_path = pathlib.Path(__file__).parents[2] / "configs" / "world_class_map_v1.yaml"
+        cm = load_class_map(class_map_path)
 
         _COARSE = {
             "player_anchor": "anchor",

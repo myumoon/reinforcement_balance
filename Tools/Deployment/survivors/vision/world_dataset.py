@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pathlib
 from dataclasses import dataclass, field
 from typing import Any
@@ -113,6 +114,8 @@ class DatasetSample:
     """1 フレーム分のサンプル（アノテーションリスト付き）。
 
     image_id と file_name を保持し、loader が PNG を開けるよう準備する。
+    session_id は画像レベルの session 識別子で、アノテーション無し（負例）フレームの
+    split 割り当てに使用する。
     """
 
     image_id: int
@@ -120,6 +123,7 @@ class DatasetSample:
     image_width: int
     image_height: int
     annotations: list[COCOAnnotation]
+    session_id: str = ""
 
 
 # ---- split ----
@@ -317,9 +321,13 @@ class WorldDataset:
                 )
 
             bbox = tuple(float(v) for v in raw["bbox"])
+            x, y, w, h = bbox
+            if not all(math.isfinite(v) for v in bbox):
+                raise ValueError(f"bbox {bbox} に非有限値が含まれています。")
+            if w <= 0 or h <= 0:
+                raise ValueError(f"bbox {bbox} の幅・高さは正でなければなりません。")
             if validate_bounds:
                 img = images[raw["image_id"]]
-                x, y, w, h = bbox
                 if x < 0 or y < 0 or x + w > img["width"] or y + h > img["height"]:
                     raise ValueError(
                         f"bbox {bbox} が画像 ({img['width']}x{img['height']}) の外へはみ出しています。"
@@ -341,13 +349,19 @@ class WorldDataset:
             if ann.image_id in ann_by_image:
                 ann_by_image[ann.image_id].append(ann)
 
+        ann_dir = path.parent
         samples = [
             DatasetSample(
                 image_id=iid,
-                file_name=img["file_name"],
+                file_name=str(
+                    ann_dir / img["file_name"]
+                    if not pathlib.Path(img["file_name"]).is_absolute()
+                    else img["file_name"]
+                ),
                 image_width=img["width"],
                 image_height=img["height"],
                 annotations=ann_by_image.get(iid, []),
+                session_id=img.get("session_id", ""),
             )
             for iid, img in sorted(images.items())
         ]

@@ -287,7 +287,12 @@ def publish_formal_package(
     score_threshold は restore_package での推論スコア閾値として manifest に保存し、
     validation 時の閾値と restore 時の閾値を一致させることで再現性を保証する。
     """
-    if not validation_passed:
+    if not isinstance(validation_passed, bool):
+        raise TypeError(
+            f"validation_passed は bool 型が必要です。got: {type(validation_passed).__name__!r}。"
+            " check_performance_gate() の result.passed を渡してください。"
+        )
+    if validation_passed is not True:
         raise ValueError(
             "formal publish には validation PASS が必要です。"
             " performance gate を全て通過してから再実行してください。"
@@ -345,6 +350,15 @@ def restore_package(
     # -- manifest load
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     pkg_manifest = PackageManifest.from_dict(raw)
+
+    # content-addressed ディレクトリ名が manifest 内容と一致するか検証（改ざん検知）
+    expected_content_key = _content_key(pkg_manifest)
+    actual_dir_name = manifest_path.parent.name
+    if actual_dir_name != expected_content_key:
+        raise PackageSchemaError(
+            f"package ディレクトリ名 {actual_dir_name!r} が manifest の content key と一致しません。"
+            " manifest が改ざんされている可能性があります。"
+        )
 
     if require_formal:
         pkg_manifest.assert_formal_eligible()
@@ -419,7 +433,7 @@ def restore_package(
     )
 
     state = tracker.update(result, frame_index=0, timestamp_ns=0)
-    v1 = TrackedWorldStateV1.from_state(state, frame_index=0, timestamp_ns=0)
+    v1 = TrackedWorldStateV1.from_state(state, frame_index=0, timestamp_ns=0, class_map_path=cm_path)
 
     # -- schema 検証
     from dataclasses import fields as dc_fields

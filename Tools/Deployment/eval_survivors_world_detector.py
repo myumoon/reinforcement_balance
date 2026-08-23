@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import pathlib
 import sys
 import time
@@ -163,10 +164,11 @@ def _compute_class_ap_coco(
     pred_by_image: dict[int, list[dict]],
     class_id: int,
 ) -> float:
-    """COCO mAP50:95 を 1 クラス分計算する（confidence降順・同一image内GTのみ1:1マッチ）。
+    """1 クラス分の AP50:95 を台形積分で計算する（confidence降順・同一image内GTのみ1:1マッチ）。
 
     全画像の予測を confidence 降順で走査し、各予測は同じ画像の GT のみとマッチできる。
-    画像をまたいだ誤 TP を防ぎ、COCO 公式定義に準拠する。
+    画像をまたいだ誤 TP を防ぐ。
+    注意: 台形積分（np.trapz）を使用。COCO 公式の 101 点補間とは値が僅かに異なる。
     """
     n_gt = sum(
         1 for gts in gt_by_image.values()
@@ -534,6 +536,50 @@ def _compute_slice_recall(
     return float(total_tp / total_gt) if total_gt > 0 else 1.0
 
 
+def _compute_session_ci_recall(
+    gt_annotations: list[dict],
+    pred_annotations: list[dict],
+    iou_threshold: float = 0.5,
+    z: float = 1.645,
+) -> float | None:
+    """セッション単位の recall 分布から cluster CI 下限を返す。
+
+    全インスタンスを pool した recall ではなく、セッションごとの recall 平均の
+    信頼区間下限（z=1.645 で 90% 片側）を返す。1 つのセッションだけが好成績で
+    他が全滅するモデルでも gate を通過できなくなる。
+    セッションが 1 件のみの場合は recall をそのまま返す。
+    """
+    # session ごとに GT をグループ化（image_id でもインデックス化）
+    session_gts: dict[str, list[dict]] = {}
+    session_images: dict[str, set[int]] = {}
+    for a in gt_annotations:
+        sid = a.get("session_id", "")
+        session_gts.setdefault(sid, []).append(a)
+        session_images.setdefault(sid, set()).add(a["image_id"])
+
+    if not session_gts:
+        return None
+
+    # per-session recall: prediction は session 内 image_id でマッチ（session_id 不要）
+    recalls: list[float] = []
+    for sid, s_gts in session_gts.items():
+        s_img_ids = session_images[sid]
+        s_preds = [a for a in pred_annotations if a.get("image_id") in s_img_ids]
+        r = _compute_slice_recall(s_gts, s_preds, iou_threshold)
+        recalls.append(r)
+
+    n = len(recalls)
+    if n == 1:
+        return recalls[0]
+
+    mean_r = sum(recalls) / n
+    # 不偏標本分散 → SE → t/z 近似 CI 下限
+    variance = sum((r - mean_r) ** 2 for r in recalls) / (n - 1)
+    se = (variance / n) ** 0.5
+    # ponytail: z 近似（n>=4 前提）。n<4 なら min_sessions 条件で gate 自体が FAIL する。
+    return max(0.0, mean_r - z * se)
+
+
 def check_performance_gate(
     metrics: EvalMetrics,
     gate_cfg: dict,
@@ -554,6 +600,23 @@ def check_performance_gate(
     """
     all_passed = True
 
+    # --- 必須 metric の存在・有限値チェック（fail-closed） ---
+    _required_finite = [
+        ("proxy_ap50_95", metrics.proxy_ap50_95),
+        ("density_correlation", metrics.density_correlation),
+        ("nearest_distance_error", metrics.nearest_distance_error),
+    ]
+    for _name, _val in _required_finite:
+        if not math.isfinite(_val):
+            all_passed = False
+
+    # GPU latency が gate で要求される場合は None も FAIL
+    latency_max = gate_cfg.get("gpu_p95_latency_max_ms", 25.0)
+    if "gpu_p95_latency_max_ms" in gate_cfg and gpu_p95_latency_ms is None:
+        all_passed = False
+    elif gpu_p95_latency_ms is not None and not math.isfinite(gpu_p95_latency_ms):
+        all_passed = False
+
     # --- overall mAP50:95 ---
     map_min = gate_cfg.get("map50_95_min", 0.0)
     if metrics.proxy_ap50_95 < map_min:
@@ -566,7 +629,7 @@ def check_performance_gate(
         # class_id を class_name から逆引きする
         cid = next((k for k, v in class_name_by_id.items() if v == class_name), None)
         recall = metrics.class_recall.get(cid, 0.0) if cid is not None else 0.0
-        passed = recall >= recall_min
+        passed = math.isfinite(recall) and recall >= recall_min
         if not passed:
             all_passed = False
         class_recall_results[class_name] = {
@@ -587,9 +650,9 @@ def check_performance_gate(
     if nd_median > nd_max:
         all_passed = False
 
-    # --- GPU p95 latency ---
-    latency_max = gate_cfg.get("gpu_p95_latency_max_ms", 25.0)
-    if gpu_p95_latency_ms is not None and gpu_p95_latency_ms > latency_max:
+    # --- GPU p95 latency （NaN チェックは冒頭で実施済み）---
+    if gpu_p95_latency_ms is not None and math.isfinite(gpu_p95_latency_ms) \
+            and gpu_p95_latency_ms > latency_max:
         all_passed = False
 
     # --- slice gates ---
@@ -604,10 +667,10 @@ def check_performance_gate(
         n_instances = len(s_anns)
         n_sessions = len({a.get("session_id", "") for a in s_anns if a.get("session_id")})
 
-        # recall は instance / session が十分にある場合のみ一対一 matching で計算する
+        # recall はセッション分布の CI 下限で判定する（pooled recall では大規模 session が支配的）
         if n_instances >= s_min_instances and n_sessions >= s_min_sessions:
             s_preds = (slice_predictions or {}).get(slice_name, [])
-            s_recall: float | None = _compute_slice_recall(s_anns, s_preds)
+            s_recall: float | None = _compute_session_ci_recall(s_anns, s_preds)
         else:
             s_recall = None  # インスタンス/セッション不足 → gate 自体を FAIL
 

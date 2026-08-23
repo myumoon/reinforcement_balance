@@ -105,6 +105,8 @@ class CheckpointManifest:
     build_hash: str
     class_map_hash: str
     formal_detector_eligible: bool
+    split_hash: str = ""           # split JSON の SHA-256。空文字は旧 manifest との互換用。
+    resolved_config_hash: str = "" # CLI override 適用後の config dict SHA-256。
 
     _HASH_FIELDS = ("model_hash", "data_hash", "config_hash", "build_hash", "class_map_hash")
 
@@ -155,6 +157,8 @@ class CheckpointManifest:
             "build_hash": self.build_hash,
             "class_map_hash": self.class_map_hash,
             "formal_detector_eligible": self.formal_detector_eligible,
+            "split_hash": self.split_hash,
+            "resolved_config_hash": self.resolved_config_hash,
         }
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -175,6 +179,8 @@ class CheckpointManifest:
             build_hash=payload["build_hash"],
             class_map_hash=payload["class_map_hash"],
             formal_detector_eligible=elig,
+            split_hash=payload.get("split_hash", ""),
+            resolved_config_hash=payload.get("resolved_config_hash", ""),
         )
         manifest._validate_hash_format()
         return manifest

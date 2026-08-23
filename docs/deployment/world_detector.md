@@ -62,6 +62,7 @@ Tools/Deployment/tests/vision/
 cd Tools/Deployment
 python train_survivors_world_detector.py \
     --annotations data/world_annotations.json \
+    --split data/split.json \
     --config configs/world_detector_v1.yaml \
     --class-map configs/world_class_map_v1.yaml \
     --output runs/world_detector_dev \
