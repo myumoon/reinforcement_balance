@@ -2,7 +2,7 @@
 
 連続する画面座標を操作用情報に閉じ込め、モデル入力へ漏らさないことを確認します。
 """
-from dataclasses import FrozenInstanceError, fields
+from dataclasses import FrozenInstanceError, fields, replace
 import pytest
 from survivors.perception_snapshot import (
     NormalizedRoi,
@@ -131,3 +131,18 @@ def test_source_hash_absorbs_sub_quantum_confidence_at_same_timestamp() -> None:
     b = build_ui_presentation_from_hud(hud_b, (1000, 1000), snapshot_id="s", frame_id="f")
     assert a.source_content_hash == b.source_content_hash  # both round to 0.8000
     assert a.ui_state_key == b.ui_state_key
+
+
+def test_low_screen_confidence_invalidates_ui_targets() -> None:
+    """screen_state_confidence が閾値未満のとき候補とボタンの validity が False になる。
+
+    画面認識精度が低い状態で操作対象を valid=True にするとクリックが誤分類画面に飛びます。
+    """
+    hud = _hud(
+        cards=(ParsedCard(0, "whip", "weapon", 2, .99, "ok", (100, 100, 400, 500)),),
+        buttons=(ParsedButton("reroll", .9, "ok", (0, 900, 100, 1000)),),
+    )
+    low_conf_hud = replace(hud, screen_state_confidence=.3)
+    snap = build_ui_presentation_from_hud(low_conf_hud, (1000, 1000), snapshot_id="s", frame_id="f")
+    assert all(not t.validity for t in snap.candidates)
+    assert all(not t.validity for t in snap.buttons)

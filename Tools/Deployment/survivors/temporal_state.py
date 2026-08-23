@@ -52,6 +52,8 @@ class TemporalAssembler:
         if not isinstance(hud, HudStateV1):
             raise TypeError("hud must be HudStateV1")
         if self._session_id is not None and hud.session_id != self._session_id:
+            if self._hud is not None and hud.captured_monotonic_ns <= self._hud.captured_monotonic_ns:
+                return  # 旧sessionの残存フレームは保持中の新sessionを上書きしない
             self._hud = None
             self._world = None
             self._last_tick_ns = None

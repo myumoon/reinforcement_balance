@@ -21,6 +21,7 @@ UI_PRESENTATION_SCHEMA_HASH = canonical_hash(
     }
 )
 _BUTTON_ACTIONS = frozenset({"ack_chest", "confirm", "reroll", "skip", "banish"})
+_SCREEN_CONFIDENCE_THRESHOLD = 0.5
 def _finite_ratio(value: Any, label: str) -> float:
     """有限な [0,1] 比率を検証して float 化する。
 
@@ -224,13 +225,14 @@ def build_ui_presentation_from_hud(
     resolved_snapshot = snapshot_id or canonical_hash(
         {"session_id": hud.session_id, "frame_id": resolved_frame, "captured_ns": hud.captured_monotonic_ns}
     )
+    screen_confident = hud.screen_state_confidence >= _SCREEN_CONFIDENCE_THRESHOLD
     candidates = []
     for card in sorted(hud.cards, key=lambda value: value.slot_index):
         roi, geometry_valid = _normalized_roi(card.roi_xyxy, viewport)
         candidates.append(
             UiCandidateTargetV1(
                 card.item_id or f"unknown:{card.slot_index}", card.slot_index,
-                _candidate_semantic(card), roi, geometry_valid and card.confidence >= .35,
+                _candidate_semantic(card), roi, geometry_valid and card.confidence >= .35 and screen_confident,
                 card.confidence,
             )
         )
@@ -246,7 +248,7 @@ def build_ui_presentation_from_hud(
             raise ValueError(f"unsupported button action: {action}")
         roi, geometry_valid = _normalized_roi(parsed.roi_xyxy, viewport)
         target = UiButtonTargetV1(
-            action, roi, geometry_valid and parsed.confidence >= .35,
+            action, roi, geometry_valid and parsed.confidence >= .35 and screen_confident,
             capabilities[action], parsed.confidence,
         )
         if action not in best_buttons:

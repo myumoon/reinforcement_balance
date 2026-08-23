@@ -110,6 +110,7 @@ class RealObsAssembler:
         self._last_gameplay_world: TrackedWorldStateV1 | None = None
         self._last_gameplay_screen: dict[str, NamedEstimate] | None = None
         self._last_gameplay_ns: int | None = None
+        self._last_session_id: str | None = None
 
     def assemble(
         self, hud: HudStateV1, world: TrackedWorldStateV1,
@@ -124,14 +125,19 @@ class RealObsAssembler:
         if not isinstance(viewport, tuple) or len(viewport) != 2 or any(type(value) is not int or value <= 0 for value in viewport):
             raise ValueError("viewport must be a positive integer pair")
         joined = self.temporal.join(hud, world)
-        frame_id = f"{hud.session_id}:{hud.frame_index}:{world.frame_index}"
+        if self._last_session_id != joined.hud.session_id:  # session変更時にgameplayキャッシュを破棄
+            self._last_gameplay_world = None
+            self._last_gameplay_screen = None
+            self._last_gameplay_ns = None
+            self._last_session_id = joined.hud.session_id
+        frame_id = f"{joined.hud.session_id}:{joined.hud.frame_index}:{joined.world.frame_index}"
         snapshot_id = canonical_hash({
-            "session_id": hud.session_id, "frame_id": frame_id,
-            "hud_timestamp_ns": hud.captured_monotonic_ns, "world_timestamp_ns": world.timestamp_ns,
-            "parser_artifact_hash": hud.parser_artifact_hash,
+            "session_id": joined.hud.session_id, "frame_id": frame_id,
+            "hud_timestamp_ns": joined.hud.captured_monotonic_ns, "world_timestamp_ns": joined.world.timestamp_ns,
+            "parser_artifact_hash": joined.hud.parser_artifact_hash,
         })
         screen = build_screen_space_estimates(joined.world)
-        if joined.hud.screen_state == "gameplay" and joined.world_validity > 0:
+        if joined.combat_validity > 0:  # combat有効フレームのみdangerキャッシュを更新
             self._last_gameplay_world = joined.world
             self._last_gameplay_screen = screen
             self._last_gameplay_ns = joined.captured_ns
@@ -151,11 +157,13 @@ class RealObsAssembler:
                 estimates[name] = NamedEstimate(value.value, value.timestamp_ns, value.validity * combat)
         deploy_obs = build_deploy_observation(schema, estimates, joined.captured_ns)
         ui = build_ui_presentation_from_hud(joined.hud, viewport, snapshot_id=snapshot_id, frame_id=frame_id)
-        gameplay_screen = self._last_gameplay_screen if self._last_gameplay_screen is not None else screen
-        item_context, choices = _item_context(
-            joined, snapshot_id, gameplay_screen,
-            self._last_gameplay_world, self._last_gameplay_ns, joined.captured_ns,
-        )
+        if self._last_gameplay_screen is not None:
+            item_context, choices = _item_context(
+                joined, snapshot_id, self._last_gameplay_screen,
+                self._last_gameplay_world, self._last_gameplay_ns, joined.captured_ns,
+            )
+        else:
+            item_context, choices = None, ()  # キャッシュなし: item overlay をgameplayとして流さない
         diagnostics = {
             "hud_world_skew_ms": abs(hud.captured_monotonic_ns - world.timestamp_ns) / 1_000_000,
             "hud_validity": joined.hud_validity, "world_validity": joined.world_validity,

@@ -51,7 +51,10 @@ def test_ui_snapshot_is_atomic_and_diagnostics_have_no_roi() -> None:
 
     HudState side channel や ROI diagnostics を作らず、identity を同じ snapshot に束縛します。
     """
-    snapshot = RealObsAssembler().assemble(*_inputs("level_up_items"), DeployObsSchema.default_v1(), (1000, 1000))
+    assembler = RealObsAssembler()
+    schema = DeployObsSchema.default_v1()
+    assembler.assemble(*_inputs("gameplay"), schema, (1000, 1000))
+    snapshot = assembler.assemble(*_inputs("level_up_items"), schema, (1000, 1000))
     assert snapshot.ui_presentation.snapshot_id == snapshot.snapshot_id
     assert snapshot.ui_presentation.frame_id == snapshot.frame_id
     assert snapshot.ui_presentation.source_content_hash == snapshot.source_content_hash
@@ -98,6 +101,89 @@ def test_item_context_uses_cached_gameplay_danger() -> None:
     assert snapshot.item_context is not None
     assert snapshot.item_context.enemy_density > 0.
     assert snapshot.item_context.world_age > 0.
+
+def test_snapshot_identity_uses_joined_state_not_discarded_input() -> None:
+    """frame_id と snapshot_id は破棄した入力ではなく保持済み joined state から生成する。
+
+    時刻が巻き戻った古い HUD を渡しても、identity は継続中の最新フレームを指します。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    card = ParsedCard(0, "whip", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    def _make_hud(frame_idx: int, ts: int) -> HudStateV1:
+        return HudStateV1(
+            "hud_state.v1", "session", frame_idx, ts, "a" * 64, "gameplay", .9, "ok",
+            20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+            ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+            False, False, False, .9, "ok",
+        )
+    assembler.assemble(_make_hud(5, 2_000_000_000), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(_make_hud(3, 1_500_000_000), TrackedWorldStateV1(3, 1_500_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap.frame_id == "session:5:5"
+
+def test_gameplay_cache_cleared_on_session_change() -> None:
+    """session 変更後に gameplay キャッシュが破棄され、旧 session の danger が引き継がれない。
+
+    s1 で danger を蓄積後、s2 の item overlay では item_context が None になります。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud_gp, world_gp = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session2", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot.item_context is None
+    assert snapshot.choices == ()
+
+def test_low_combat_validity_does_not_update_danger_cache() -> None:
+    """combat_validity=0 の gameplay フレームは danger キャッシュを上書きしない。
+
+    信頼度不足の低品質フレームで敵密度ゼロに更新されると次の item 選択精度が落ちます。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud_gp, world_gp = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    hud_low = dataclasses.replace(hud_gp, frame_index=5, captured_monotonic_ns=2_000_000_000, screen_state_confidence=.3)
+    world_empty = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    assembler.assemble(hud_low, world_empty, schema, (1000, 1000))
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session", 6, 3_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world_lu = TrackedWorldStateV1(6, 3_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot.item_context is not None
+    assert snapshot.item_context.enemy_density > 0.
+
+def test_item_context_fail_closed_without_gameplay_cache() -> None:
+    """gameplay キャッシュ未取得時に item overlay を gameplay として流さない。
+
+    初回が item 画面の場合、空の world が新鮮な danger 特徴として学習に入ることを防ぎます。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session", 4, 1_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world_lu = TrackedWorldStateV1(4, 1_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot.item_context is None
+    assert snapshot.choices == ()
 
 def test_duplicate_card_ids_fail_closed() -> None:
     """重複 item_id を持つカードがある場合 item_context と choices を返さない。

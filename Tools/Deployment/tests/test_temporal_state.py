@@ -93,6 +93,18 @@ def test_session_change_resets_monotonic_state() -> None:
     assert joined.hud.timer_seconds == 1.
     assert joined.hud.level == 1
 
+def test_stale_session_hud_does_not_overwrite_newer_session() -> None:
+    """非同期で到着した旧 session フレームが現在 session の状態を巻き戻さない。
+
+    s1→s2→遅延s1 の順に入力しても、assembler は s2 のままで level/timer を保ちます。
+    """
+    assembler = TemporalAssembler()
+    assembler.join(_hud(1_000, timer_seconds=10., level=5, session_id="s1"), _world(1_000))
+    assembler.join(_hud(2_000, timer_seconds=20., level=10, session_id="s2"), _world(2_000))
+    joined = assembler.join(_hud(1_500, timer_seconds=1., level=1, session_id="s1"), _world(1_500))
+    assert joined.hud.session_id == "s2"
+    assert joined.hud.level == 10
+
 def test_low_screen_state_confidence_fails_validity() -> None:
     """screen_state_confidence が閾値未満のとき combat/item validity をゼロに落とす。
 
