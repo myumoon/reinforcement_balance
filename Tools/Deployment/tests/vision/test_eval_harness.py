@@ -150,6 +150,35 @@ class TestMapCrossImage:
             f"class1=AP1.0, class2=AP0.0 → 平均0.5を期待、実際={metrics.proxy_ap50_95}"
         )
 
+    def test_cross_image_position_swap_gives_zero_map(self):
+        """image0とimage1でGT/予測の位置を入れ替えたとき、mAP=0.0（class recall=0.0）。"""
+        # image 0: GT が左、Pred が右 → IoU=0
+        # image 1: GT が右、Pred が左 → IoU=0
+        gts = [_gt(0, [50, 200, 50, 50], 1), _gt(1, [1800, 200, 50, 50], 1)]
+        preds = [_pred(0, [1800, 200, 50, 50], 1, score=0.9),
+                 _pred(1, [50, 200, 50, 50], 1, score=0.8)]
+        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        assert metrics.proxy_ap50_95 < 1e-4, (
+            f"位置入れ替えは全FP → mAP≈0を期待、実際={metrics.proxy_ap50_95}"
+        )
+        assert metrics.class_recall.get(1, 0.0) < 1e-4
+
+
+class TestDensityCorrelationImageAware:
+    """density_correlation が画像ごとに計算されることを検証する（P1 修正）。"""
+
+    def test_cross_image_position_swap_gives_low_correlation(self):
+        """image0/1 で GT/予測の左右を入れ替えると correlation は低くなる。"""
+        # image 0: GT 左 (x≈100)、Pred 右 (x≈1800)
+        # image 1: GT 右 (x≈1800)、Pred 左 (x≈100)
+        gts = [_gt(0, [100, 500, 50, 50], 1), _gt(1, [1800, 500, 50, 50], 1)]
+        preds = [_pred(0, [1800, 500, 50, 50], 1, score=0.9),
+                 _pred(1, [100, 500, 50, 50], 1, score=0.8)]
+        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        assert metrics.density_correlation < 0.5, (
+            f"位置が全画像でずれているので correlation は低くなるはず、実際={metrics.density_correlation}"
+        )
+
 
 class TestNearestDistanceMedian:
     """nearest_distance_error が実 median で計算されることを検証する（P1 修正）。"""

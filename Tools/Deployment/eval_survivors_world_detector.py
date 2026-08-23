@@ -158,48 +158,142 @@ def _box_center(box_xyxy: np.ndarray) -> np.ndarray:
                      (box_xyxy[:, 1] + box_xyxy[:, 3]) / 2], axis=1)
 
 
-def _directional_density_correlation(
-    gt_anns: list[dict], pred_anns: list[dict], n_bins: int = 8
+def _compute_class_ap_coco(
+    gt_by_image: dict[int, list[dict]],
+    pred_by_image: dict[int, list[dict]],
+    class_id: int,
 ) -> float:
-    """directional bin ごとの GT-予測エンティティ密度 Pearson 相関を返す（0〜1）。
+    """COCO mAP50:95 を 1 クラス分計算する（confidence降順・同一image内GTのみ1:1マッチ）。
 
-    viewport を n_bins 方向に分割し、各方向の GT 数・予測数を集計して
-    Pearson 相関係数を計算する。GT・予測ともに空の場合は 1.0 を返す。
+    全画像の予測を confidence 降順で走査し、各予測は同じ画像の GT のみとマッチできる。
+    画像をまたいだ誤 TP を防ぎ、COCO 公式定義に準拠する。
     """
-    def _centers(anns: list[dict]) -> np.ndarray:
-        if not anns:
-            return np.zeros((0, 2), np.float32)
-        return np.array(
-            [[a["bbox"][0] + a["bbox"][2] / 2, a["bbox"][1] + a["bbox"][3] / 2]
-             for a in anns], dtype=np.float32,
-        )
+    n_gt = sum(
+        1 for gts in gt_by_image.values()
+        for g in gts if g["category_id"] == class_id
+    )
+    if n_gt == 0:
+        return 0.0
 
-    gt_c = _centers(gt_anns)
-    pred_c = _centers(pred_anns)
+    all_preds: list[tuple[float, int, dict]] = sorted(
+        (
+            (p.get("score", 1.0), iid, p)
+            for iid, preds in pred_by_image.items()
+            for p in preds if p["category_id"] == class_id
+        ),
+        key=lambda x: -x[0],
+    )
+    if not all_preds:
+        return 0.0
 
-    if len(gt_c) == 0 and len(pred_c) == 0:
+    # 各予測について同一 image 内 class_id GT との IoU を事前計算し降順保持
+    iid_class_gts: dict[int, list[dict]] = {
+        iid: [g for g in gts if g["category_id"] == class_id]
+        for iid, gts in gt_by_image.items()
+    }
+    pred_gt_ious: list[list[tuple[int, float]]] = []
+    for _score, iid, p in all_preds:
+        px1, py1, pw, ph = p["bbox"]
+        pred_xyxy = np.array([[px1, py1, px1 + pw, py1 + ph]], dtype=np.float32)
+        gts = iid_class_gts.get(iid, [])
+        ious: list[tuple[int, float]] = []
+        for gi, g in enumerate(gts):
+            x1, y1, w, h = g["bbox"]
+            iou_val = float(compute_iou_matrix(
+                np.array([[x1, y1, x1 + w, y1 + h]], dtype=np.float32), pred_xyxy,
+            )[0, 0])
+            ious.append((gi, iou_val))
+        pred_gt_ious.append(sorted(ious, key=lambda x: -x[1]))
+
+    iou_thresholds = np.arange(0.50, 1.00, 0.05)
+    aps: list[float] = []
+    for iou_thr in iou_thresholds:
+        matched: dict[int, set[int]] = {iid: set() for iid in gt_by_image}
+        tp_arr: list[int] = []
+        fp_arr: list[int] = []
+        for idx, (_score, iid, _p) in enumerate(all_preds):
+            best_gi = -1
+            for gi, iou_val in pred_gt_ious[idx]:
+                if gi not in matched[iid] and iou_val >= iou_thr:
+                    best_gi = gi
+                    break
+            if best_gi >= 0:
+                matched[iid].add(best_gi)
+                tp_arr.append(1); fp_arr.append(0)
+            else:
+                tp_arr.append(0); fp_arr.append(1)
+
+        cum_tp = np.cumsum(tp_arr, dtype=float)
+        cum_fp = np.cumsum(fp_arr, dtype=float)
+        prec = cum_tp / np.maximum(cum_tp + cum_fp, 1e-9)
+        rec = cum_tp / n_gt
+        prec = np.concatenate([[1.0], prec, [0.0]])
+        rec = np.concatenate([[0.0], rec, [rec[-1]]])
+        for i in range(len(prec) - 2, -1, -1):
+            prec[i] = max(prec[i], prec[i + 1])
+        aps.append(float(np.trapz(prec, rec)))
+
+    return float(np.mean(aps))
+
+
+def _directional_density_correlation(
+    gt_by_image: dict[int, list[dict]],
+    pred_by_image: dict[int, list[dict]],
+    n_bins: int = 8,
+) -> float:
+    """画像ごとの directional bin ベクトルを対にして GT-予測密度 Pearson 相関を計算する。
+
+    全画像を単一ヒストグラムに集約せず、画像ごとに GT/予測 bin ベクトルを作成して
+    対で連結し Pearson 相関を計算する。画像間の位置入れ替えを正しく検出できる。
+    """
+    all_image_ids = set(gt_by_image) | set(pred_by_image)
+    if not all_image_ids:
         return 1.0
 
-    all_c = np.concatenate([gt_c, pred_c]) if len(gt_c) > 0 and len(pred_c) > 0 \
-        else (gt_c if len(gt_c) > 0 else pred_c)
-    cx = float(np.mean(all_c[:, 0]))
-    cy = float(np.mean(all_c[:, 1]))
+    gt_vec_parts: list[np.ndarray] = []
+    pred_vec_parts: list[np.ndarray] = []
 
-    def _bin_counts(pts: np.ndarray) -> np.ndarray:
-        if len(pts) == 0:
-            return np.zeros(n_bins, dtype=float)
-        angles = np.arctan2(pts[:, 1] - cy, pts[:, 0] - cx)
-        bins = ((angles + np.pi) / (2 * np.pi) * n_bins).astype(int) % n_bins
-        return np.bincount(bins, minlength=n_bins).astype(float)
+    for iid in all_image_ids:
+        gts = gt_by_image.get(iid, [])
+        preds = pred_by_image.get(iid, [])
 
-    gt_bins = _bin_counts(gt_c)
-    pred_bins = _bin_counts(pred_c)
+        def _centers(anns: list[dict]) -> np.ndarray:
+            if not anns:
+                return np.zeros((0, 2), np.float32)
+            return np.array(
+                [[a["bbox"][0] + a["bbox"][2] / 2, a["bbox"][1] + a["bbox"][3] / 2]
+                 for a in anns], dtype=np.float32,
+            )
 
-    if np.std(gt_bins) < 1e-9 or np.std(pred_bins) < 1e-9:
-        # 一様分布同士は完全相関、エンティティ数が異なる場合は 0.5
-        return 1.0 if abs(gt_bins.sum() - pred_bins.sum()) < 1e-9 else 0.5
+        gt_c = _centers(gts)
+        pred_c = _centers(preds)
 
-    corr = float(np.corrcoef(gt_bins, pred_bins)[0, 1])
+        all_c = np.concatenate([gt_c, pred_c]) if len(gt_c) > 0 and len(pred_c) > 0 \
+            else (gt_c if len(gt_c) > 0 else pred_c)
+        if len(all_c) == 0:
+            continue
+        cx, cy = float(np.mean(all_c[:, 0])), float(np.mean(all_c[:, 1]))
+
+        def _bin_vec(pts: np.ndarray) -> np.ndarray:
+            if len(pts) == 0:
+                return np.zeros(n_bins, dtype=float)
+            angles = np.arctan2(pts[:, 1] - cy, pts[:, 0] - cx)
+            bins = ((angles + np.pi) / (2 * np.pi) * n_bins).astype(int) % n_bins
+            return np.bincount(bins, minlength=n_bins).astype(float)
+
+        gt_vec_parts.append(_bin_vec(gt_c))
+        pred_vec_parts.append(_bin_vec(pred_c))
+
+    if not gt_vec_parts:
+        return 1.0
+
+    gt_vec = np.concatenate(gt_vec_parts)
+    pred_vec = np.concatenate(pred_vec_parts)
+
+    if np.std(gt_vec) < 1e-9 or np.std(pred_vec) < 1e-9:
+        return 1.0 if abs(gt_vec.sum() - pred_vec.sum()) < 1e-9 else 0.5
+
+    corr = float(np.corrcoef(gt_vec, pred_vec)[0, 1])
     return max(0.0, corr)
 
 
@@ -230,13 +324,6 @@ def evaluate_from_predictions(
 
     all_image_ids = set(gt_by_image) | set(pred_by_image)
 
-    # COCO mAP: クラスごとに全画像の予測を集約してから AP を計算する
-    all_gt_boxes_parts: list[np.ndarray] = []
-    all_gt_classes_parts: list[np.ndarray] = []
-    all_pred_boxes_parts: list[np.ndarray] = []
-    all_pred_scores_parts: list[np.ndarray] = []
-    all_pred_classes_parts: list[np.ndarray] = []
-
     class_tp: dict[int, int] = {c: 0 for c in range(1, num_classes)}
     class_gt: dict[int, int] = {c: 0 for c in range(1, num_classes)}
     count_errors: list[float] = []
@@ -256,28 +343,19 @@ def evaluate_from_predictions(
         pred_scores = np.array([p.get("score", 1.0) for p in preds], dtype=np.float32)
         pred_classes = np.array([p["category_id"] for p in preds], dtype=np.int32)
 
-        if len(gt_boxes):
-            all_gt_boxes_parts.append(gt_boxes)
-            all_gt_classes_parts.append(gt_classes)
-        if len(pred_boxes):
-            all_pred_boxes_parts.append(pred_boxes)
-            all_pred_scores_parts.append(pred_scores)
-            all_pred_classes_parts.append(pred_classes)
-
         count_errors.append(abs(len(gts) - len(preds)))
 
         # nearest_distance_error: GT ごとに最近傍の予測中心との距離を個別に集計する
         if len(gt_boxes) > 0 and len(pred_boxes) > 0:
-            gt_centers = _box_center(gt_boxes)  # (G, 2)
-            pred_centers = _box_center(pred_boxes)  # (P, 2)
+            gt_centers = _box_center(gt_boxes)
+            pred_centers = _box_center(pred_boxes)
             diff = gt_centers[:, None, :] - pred_centers[None, :, :]
-            dists = np.sqrt((diff ** 2).sum(axis=2))  # (G, P)
+            dists = np.sqrt((diff ** 2).sum(axis=2))
             nearest_dist_errors.extend((dists.min(axis=1) / viewport_diagonal).tolist())
         elif len(gt_boxes) > 0:
-            # GT があるが予測がない → GT 件数ぶん最大誤差 1.0 を記録
             nearest_dist_errors.extend([1.0] * len(gt_boxes))
 
-        # class recall: confidence 降順・一対一 matching（予測を外側に走査してGT入力順依存を排除）
+        # class recall: confidence 降順・一対一 matching
         for c in range(1, num_classes):
             class_gt[c] += int((gt_classes == c).sum())
             if len(gt_boxes) > 0 and len(pred_boxes) > 0:
@@ -300,29 +378,15 @@ def evaluate_from_predictions(
         c: class_tp[c] / class_gt[c] if class_gt[c] > 0 else 0.0
         for c in range(1, num_classes)
     }
-
     density_error = float(np.mean(count_errors)) if count_errors else 0.0
 
-    # COCO mAP: クラスごとに全画像の予測を集約して AP を計算し平均する
-    all_gt_boxes = np.concatenate(all_gt_boxes_parts) if all_gt_boxes_parts else np.zeros((0, 4), np.float32)
-    all_gt_classes = np.concatenate(all_gt_classes_parts) if all_gt_classes_parts else np.zeros(0, np.int32)
-    all_pred_boxes = np.concatenate(all_pred_boxes_parts) if all_pred_boxes_parts else np.zeros((0, 4), np.float32)
-    all_pred_scores = np.concatenate(all_pred_scores_parts) if all_pred_scores_parts else np.zeros(0, np.float32)
-    all_pred_classes = np.concatenate(all_pred_classes_parts) if all_pred_classes_parts else np.zeros(0, np.int32)
-
+    # COCO mAP: 同一画像内 GT のみとマッチする image-aware 計算
     class_aps: list[float] = []
     for c in range(1, num_classes):
-        gt_mask = all_gt_classes == c
-        pred_mask = all_pred_classes == c
-        ap = compute_ap50_95(
-            all_gt_boxes[gt_mask], all_gt_classes[gt_mask],
-            all_pred_boxes[pred_mask], all_pred_scores[pred_mask],
-            all_pred_classes[pred_mask],
-        )
-        if gt_mask.any():
-            class_aps.append(ap)
+        if any(g["category_id"] == c for gts in gt_by_image.values() for g in gts):
+            class_aps.append(_compute_class_ap_coco(gt_by_image, pred_by_image, c))
 
-    density_corr = _directional_density_correlation(gt_annotations, pred_annotations)
+    density_corr = _directional_density_correlation(gt_by_image, pred_by_image)
 
     return EvalMetrics(
         proxy_ap50_95=float(np.mean(class_aps)) if class_aps else 0.0,
@@ -331,7 +395,7 @@ def evaluate_from_predictions(
         count_error=density_error,
         nearest_distance_error=float(np.median(nearest_dist_errors)) if nearest_dist_errors else 0.0,
         density_correlation=density_corr,
-        track_id_switches=_UNSUPPORTED,  # 静的 eval では計算不能
+        track_id_switches=_UNSUPPORTED,
     )
 
 
