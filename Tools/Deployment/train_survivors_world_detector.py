@@ -66,8 +66,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="preflight チェックのみ実行して終了")
     p.add_argument("--resume", help="resume する checkpoint ディレクトリ")
     p.add_argument(
-        "--feasibility",
-        help="feasibility JSON ファイル（04-06 の verdict=pass を要求する formal preflight 用）",
+        "--smoke",
+        action="store_true",
+        help=(
+            "smoke モード: 画像ファイルが存在しない場合にゼロ画像を許可する。"
+            " 通常学習では使用しないこと。smoke 成果物は development/smoke であることを manifest に記録する。"
+        ),
     )
     return p
 
@@ -337,28 +341,6 @@ def _create_split_views(ds: Any, split: Any) -> tuple[_DatasetView, _DatasetView
 
 # ---- config guard ----
 
-def _run_formal_preflight(feasibility_path: pathlib.Path, cfg: dict) -> None:
-    """feasibility JSON を読み込み、formal 学習に必要な条件を検証する。
-
-    04-06 フェーズの verdict が pass でなければ ValueError を送出する。
-    architecture が config と一致しなければ ValueError を送出する。
-    """
-    raw = json.loads(feasibility_path.read_text(encoding="utf-8"))
-    verdict = raw.get("verdict")
-    if verdict != "pass":
-        raise ValueError(
-            f"feasibility verdict が 'pass' ではありません: {verdict!r}。"
-            " 04-06 の feasibility チェックを通過してから再実行してください。"
-        )
-    # architecture 一致確認
-    feas_arch = raw.get("architecture")
-    cfg_arch = cfg.get("model", {}).get("architecture")
-    if feas_arch and cfg_arch and feas_arch != cfg_arch:
-        raise ValueError(
-            f"feasibility の architecture {feas_arch!r} が config {cfg_arch!r} と一致しません。"
-        )
-
-
 def _reject_unimplemented_config(cfg: dict) -> None:
     """未実装の config キーが設定されていれば ValueError を送出する。
 
@@ -389,24 +371,25 @@ def _run_training(
     selector: CheckpointSelector,
     out_dir: pathlib.Path,
     resume_dir: pathlib.Path | None = None,
+    *,
+    smoke: bool = False,
 ) -> None:
     """学習ループ。
 
     torch が利用できる場合は実 SGD ステップを実行し、
     そうでない場合は stub エポックループを回す。
     resume_dir が指定された場合は model / optimizer / selector を復元する。
+    smoke=True のとき画像欠損をゼロ画像で代替する（通常学習では使用しない）。
     """
     try:
         import torch as _torch
         import torch.optim as optim
     except ImportError:
-        # torch 不在: stub ループ。resume は torch 必須なので即 RuntimeError。
         if resume_dir is not None:
             raise RuntimeError("[RESUME] model/optimizer state の復元には torch が必要です。")
         _run_training_stub(max_epochs, selector, out_dir, start_epoch=1)
         return
 
-    # torch 利用可能。以降の ImportError（cv2・torchvision 等）は伝播させる。
     opt_cfg = cfg.get("training", {}).get("optimizer", {}).get("sgd", {})
     optimizer = optim.SGD(
         detector._model.parameters(),
@@ -430,6 +413,7 @@ def _run_training(
         out_dir,
         optimizer,
         start_epoch,
+        smoke=smoke,
     )
 
 
@@ -443,22 +427,24 @@ def _run_training_torch(
     out_dir: pathlib.Path,
     optimizer: Any,
     start_epoch: int,
+    *,
+    smoke: bool = False,
 ) -> None:
     """torch DataLoader + SGD optimizer の実学習ループ。
 
     DatasetSample の実 annotation から target を構築し optimizer step を実行する。
-    画像ファイルが存在しない場合は合成画像にフォールバックする（smoke 対応）。
+    通常モード: 画像欠損は FileNotFoundError。smoke=True 時のみゼロ画像を許可。
     """
     import torch
 
     save_every = cfg.get("checkpoint_selection", {}).get("save_every_n_epochs", 5)
 
     for epoch in range(start_epoch, max_epochs + 1):
-        # session-balanced sampler: train view の実サンプルだけで optimizer step
-        _train_epoch(detector, train_ds, optimizer, cfg)
+        # session-interleaved sampler: train view の実サンプルだけで optimizer step
+        _train_epoch(detector, train_ds, optimizer, cfg, smoke=smoke)
 
         # selector の score は独立した validation view だけから得る
-        val_score = _evaluate_validation(detector, validation_ds, cfg)
+        val_score = _evaluate_validation(detector, validation_ds, cfg, smoke=smoke)
 
         if epoch % save_every == 0 or epoch == max_epochs:
             ckpt_path = out_dir / f"epoch_{epoch:04d}.pt"
@@ -471,23 +457,31 @@ def _run_training_torch(
     print(f"[INFO] best checkpoint: epoch={selector.best.epoch if selector.best else None}")
 
 
-def _load_training_sample(sample: Any) -> tuple[Any, dict[str, Any]]:
-    """DatasetSample を torchvision detection model の image/target へ変換する。"""
+def _load_training_sample(sample: Any, *, smoke: bool = False) -> tuple[Any, dict[str, Any]]:
+    """DatasetSample を torchvision detection model の image/target へ変換する。
+
+    通常モード（smoke=False）: 画像ファイルが存在しない場合は FileNotFoundError。
+    smoke モード（smoke=True）: 画像ファイルが存在しない場合はゼロ画像を使用。
+    cv2.imread デコード失敗・cv2/torchvision の ImportError はモードに関係なく伝播する。
+    """
     import torch
 
     img_path = pathlib.Path(sample.file_name)
     frame: Any = None
     if img_path.exists():
-        # ファイルが存在する場合は ImportError・デコード失敗を伝播させる（smoke モード用ゼロ画像不可）
         import cv2
         import torchvision.transforms.functional as TF
         bgr = cv2.imread(str(img_path))
         if bgr is None:
             raise OSError(f"cv2.imread デコード失敗: {img_path}")
         frame = TF.to_tensor(bgr[..., ::-1].copy())
-
-    if frame is None:
+    elif smoke:
         frame = torch.zeros(3, sample.image_height, sample.image_width)
+    else:
+        raise FileNotFoundError(
+            f"画像ファイルが見つかりません: {img_path}。"
+            " smoke モードを使う場合は --smoke フラグを指定してください。"
+        )
 
     boxes_list = []
     labels_list = []
@@ -509,37 +503,37 @@ def _load_training_sample(sample: Any) -> tuple[Any, dict[str, Any]]:
     return frame, target
 
 
-def _session_balanced_indices(ds: Any) -> list[int]:
-    """各 session から等数ずつサンプルを取り session 間不均衡を抑える。
+def _session_interleaved_indices(ds: Any) -> list[int]:
+    """各 session のサンプルを round-robin で並べ、全サンプルを一度ずつ返す。
 
-    最短 session の長さを quota として全 session を上限制限し round-robin で並べる。
-    長期 session が 1 epoch を独占しなくなる。
-    # ponytail: min-quota。サンプル量が問題になるなら per-session weight sampling へ移行。
+    DatasetSample.session_id（画像レベル）を session 識別の正本として使用する。
+    annotation.session_id は参照しない。
+    100:1 のような不均衡 dataset でも全 101 件が一度ずつ選ばれる。
+    # ponytail: 単純 round-robin。重み付き balanced sampling が必要なら別作業で実装。
     """
     session_groups: dict[str, list[int]] = {}
     for index in range(len(ds)):
         sample = ds[index]
-        session_ids = sorted({ann.session_id for ann in sample.annotations if ann.session_id})
-        session_id = session_ids[0] if session_ids else ""
+        session_id = getattr(sample, "session_id", "")
         session_groups.setdefault(session_id, []).append(index)
 
-    quota = min(len(indices) for indices in session_groups.values())
+    max_len = max(len(indices) for indices in session_groups.values())
     ordered: list[int] = []
-    for offset in range(quota):
+    for offset in range(max_len):
         for indices in session_groups.values():
-            ordered.append(indices[offset])
+            if offset < len(indices):
+                ordered.append(indices[offset])
     return ordered
 
 
 def _train_epoch(
-    detector: Any, ds: Any, optimizer: Any, cfg: dict
+    detector: Any, ds: Any, optimizer: Any, cfg: dict, *, smoke: bool = False
 ) -> None:
-    """session-balanced sampler で config batch_size 単位の 1 epoch を学習する。
+    """session-interleaved sampler で config batch_size 単位の 1 epoch を学習する。
 
-    複数 session を round-robin して batch を作り、SSDLite BatchNorm が
+    全サンプルを session round-robin で並べて batch を作る。SSDLite BatchNorm が
     batch=1 にならないよう singleton remainder は学習へ渡さない。
-    画像ファイルが不在の場合は合成画像（ゼロ）にフォールバックする。
-    例外を握り潰さない（FileNotFoundError のみ合成画像でリカバー）。
+    通常モード: 画像ファイル不在は FileNotFoundError。smoke=True 時のみゼロ画像を許可。
     """
     if len(ds) == 0:
         return
@@ -548,7 +542,7 @@ def _train_epoch(
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 2:
         raise ValueError("training.batch_size は 2 以上の整数である必要があります。")
 
-    ordered_indices = _session_balanced_indices(ds)
+    ordered_indices = _session_interleaved_indices(ds)
     for start in range(0, len(ordered_indices), batch_size):
         batch_indices = ordered_indices[start:start + batch_size]
         if len(batch_indices) == 1:
@@ -557,7 +551,7 @@ def _train_epoch(
         images = []
         targets = []
         for sample_index in batch_indices:
-            image, target = _load_training_sample(ds[sample_index])
+            image, target = _load_training_sample(ds[sample_index], smoke=smoke)
             images.append(image)
             targets.append(target)
 
@@ -571,7 +565,7 @@ def _train_epoch(
         # stub model が list を返す場合はスキップ（smoke: 推論のみ）
 
 
-def _evaluate_validation(detector: Any, validation_ds: Any, cfg: dict) -> float:
+def _evaluate_validation(detector: Any, validation_ds: Any, cfg: dict, *, smoke: bool = False) -> float:
     """validation 専用 view で detector を推論評価し proxy_ap50_95 を返す。
 
     torch eval モードでサンプルを1件ずつ推論し、evaluate_from_predictions で AP を計算する。
@@ -591,7 +585,7 @@ def _evaluate_validation(detector: Any, validation_ds: Any, cfg: dict) -> float:
         for idx in range(len(validation_ds)):
             sample = validation_ds[idx]
             image_id = int(getattr(sample, "image_id", idx))
-            img, target = _load_training_sample(sample)
+            img, target = _load_training_sample(sample, smoke=smoke)
             for box, label in zip(target["boxes"].tolist(), target["labels"].tolist()):
                 x1, y1, x2, y2 = box
                 gt_anns.append({
@@ -705,14 +699,6 @@ def main(argv: list[str] | None = None) -> int:
         "フレームへ分離しました。"
     )
 
-    # formal preflight（--feasibility が指定された場合のみ）
-    if args.feasibility:
-        try:
-            _run_formal_preflight(pathlib.Path(args.feasibility), cfg)
-        except (ValueError, OSError) as e:
-            print(f"[FORMAL PREFLIGHT ERROR] {e}", file=sys.stderr)
-            return 1
-
     # 未実装設定の早期拒否（config hash と学習条件の乖離を防ぐ）
     try:
         _reject_unimplemented_config(cfg)
@@ -746,12 +732,16 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     resume_dir: pathlib.Path | None = pathlib.Path(args.resume) if args.resume else None
+    smoke: bool = args.smoke
+    if smoke:
+        print("[WARN] --smoke モード: 画像欠損をゼロ画像で代替します。smoke 成果物は実 weight ではありません。")
     _run_training(
         detector, train_ds, validation_ds, cfg,
         max_epochs=max_epochs,
         selector=selector,
         out_dir=out_dir,
         resume_dir=resume_dir,
+        smoke=smoke,
     )
 
     # -- build hash
@@ -786,6 +776,9 @@ def main(argv: list[str] | None = None) -> int:
         resolved_config_hash=_resolved_config_hash,
     )
     manifest.save(out_dir / "manifest.json")
+
+    if smoke:
+        print("[SMOKE] smoke モードで完了しました。ゼロ画像を使用した成果物は実 weight ではありません。")
 
     # checkpoint selection 規則を manifest JSON に追記する
     m_path = out_dir / "manifest.json"

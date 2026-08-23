@@ -333,10 +333,22 @@ class WorldDataset:
                         f"bbox {bbox} が画像 ({img['width']}x{img['height']}) の外へはみ出しています。"
                     )
 
-            session_id = raw.get("session_id", "")
-            if session_id and session_id in self._rejected_sessions:
+            ann_session_id = raw.get("session_id", "")
+            img_session_id = images[raw["image_id"]].get("session_id", "")
+
+            # annotation.session_id と image.session_id の一致検証（両方に値がある場合のみ）
+            if ann_session_id and img_session_id and ann_session_id != img_session_id:
                 raise DatasetPreflightError(
-                    f"拒否セッション '{session_id}' のフレーム (image_id={raw['image_id']}) が"
+                    f"annotation.session_id={ann_session_id!r} と"
+                    f" image.session_id={img_session_id!r} が一致しません"
+                    f" (image_id={raw['image_id']})。"
+                )
+
+            # annotation レベルの拒否チェック
+            check_session = ann_session_id or img_session_id
+            if check_session and check_session in self._rejected_sessions:
+                raise DatasetPreflightError(
+                    f"拒否セッション '{check_session}' のフレーム (image_id={raw['image_id']}) が"
                     " dataset に含まれています。error_calibration / final_e2e_test を分離してください。"
                 )
             ann = COCOAnnotation(
@@ -344,12 +356,27 @@ class WorldDataset:
                 image_id=raw["image_id"],
                 category_id=cat_id,
                 bbox_xywh=bbox,  # type: ignore[arg-type]
-                session_id=session_id,
+                session_id=ann_session_id,
             )
             if ann.image_id in ann_by_image:
                 ann_by_image[ann.image_id].append(ann)
 
         ann_dir = path.parent
+        samples_raw = [
+            (iid, img)
+            for iid, img in sorted(images.items())
+        ]
+
+        # 画像レベルの rejected_sessions チェック（annotation なし負例も対象）
+        for iid, img in samples_raw:
+            img_session_id = img.get("session_id", "")
+            if img_session_id and img_session_id in self._rejected_sessions:
+                raise DatasetPreflightError(
+                    f"拒否セッション '{img_session_id}' の画像 (image_id={iid}) が"
+                    " dataset に含まれています（annotation なし負例）。"
+                    " error_calibration / final_e2e_test を分離してください。"
+                )
+
         samples = [
             DatasetSample(
                 image_id=iid,
@@ -363,6 +390,6 @@ class WorldDataset:
                 annotations=ann_by_image.get(iid, []),
                 session_id=img.get("session_id", ""),
             )
-            for iid, img in sorted(images.items())
+            for iid, img in samples_raw
         ]
         return samples

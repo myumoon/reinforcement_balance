@@ -164,11 +164,12 @@ def _compute_class_ap_coco(
     pred_by_image: dict[int, list[dict]],
     class_id: int,
 ) -> float:
-    """1 クラス分の AP50:95 を台形積分で計算する（confidence降順・同一image内GTのみ1:1マッチ）。
+    """1 クラス分の開発用 AP50:95 を台形積分で計算する（confidence降順・同一image内GTのみ1:1マッチ）。
 
     全画像の予測を confidence 降順で走査し、各予測は同じ画像の GT のみとマッチできる。
     画像をまたいだ誤 TP を防ぐ。
-    注意: 台形積分（np.trapz）を使用。COCO 公式の 101 点補間とは値が僅かに異なる。
+    注意: 台形積分（np.trapz）を使用した開発用 diagnostic。COCO 公式 101 点補間とは異なる。
+    COCO 公式準拠の 101 点補間は 04-08 で実装する。
     """
     n_gt = sum(
         1 for gts in gt_by_image.values()
@@ -405,9 +406,10 @@ def evaluate_from_predictions(
 
 @dataclass
 class SliceGateResult:
-    """1 slice の performance gate 結果。
+    """1 slice の development diagnostic 結果。
 
     recall や instance 数が基準を満たさない場合は passed=False となる。
+    formal 合否ではなく開発用 diagnostic。
     """
 
     slice_name: str
@@ -434,11 +436,14 @@ class SliceGateResult:
 
 
 @dataclass
-class PerformanceGateResult:
-    """全体 performance gate の合否とその根拠。
+class DevDiagnosticsResult:
+    """開発用 diagnostics の集計結果。
 
-    synthetic metrics でゲートロジックを検証できる。
-    actual weight での合格は 04-08 に委譲する。
+    実装済み指標（class recall / density / nearest-distance / slice recall）の
+    development diagnostic 合否を示す。formal gate / release gate ではない。
+    actual weight での formal 合否判定は 04-08 に委譲する。
+
+    gpu_p95_latency_ms は情報表示のみ（unsupported）。passed に影響しない。
     """
 
     passed: bool
@@ -449,8 +454,8 @@ class PerformanceGateResult:
     density_correlation_min: float
     nearest_distance_median: float
     nearest_distance_median_max: float
-    gpu_p95_latency_ms: float | None
-    gpu_p95_latency_max_ms: float
+    # GPU latency は unsupported（04-08 で実装）。passed には影響しない。
+    gpu_p95_latency_ms: str | float | None
     slice_results: list[SliceGateResult]
 
     def to_dict(self) -> dict:
@@ -465,9 +470,12 @@ class PerformanceGateResult:
             "nearest_distance_median": self.nearest_distance_median,
             "nearest_distance_median_max": self.nearest_distance_median_max,
             "gpu_p95_latency_ms": self.gpu_p95_latency_ms,
-            "gpu_p95_latency_max_ms": self.gpu_p95_latency_max_ms,
             "slice_results": [s.to_dict() for s in self.slice_results],
         }
+
+
+# 後方互換エイリアス（テスト・既存コードが参照している場合のみ）
+PerformanceGateResult = DevDiagnosticsResult
 
 
 def _compute_slice_recall(
@@ -580,7 +588,7 @@ def _compute_session_ci_recall(
     return max(0.0, mean_r - z * se)
 
 
-def check_performance_gate(
+def compute_dev_diagnostics(
     metrics: EvalMetrics,
     gate_cfg: dict,
     class_name_by_id: dict[int, str],
@@ -589,33 +597,24 @@ def check_performance_gate(
     slice_predictions: dict[str, list[dict]] | None = None,
     gpu_p95_latency_ms: float | None = None,
     num_classes: int = 12,
-) -> PerformanceGateResult:
-    """EvalMetrics と gate_cfg を照合してパス / フェイルを判定する。
+) -> DevDiagnosticsResult:
+    """EvalMetrics と diagnostic 設定を照合し、実装済み指標の合否を返す（development diagnostics）。
 
-    全ゲートを実行して個別結果を返す。1 つでも FAIL なら全体 passed=False。
+    formal gate / release gate ではない。actual weight での formal 合否は 04-08 に委譲する。
+    GPU latency / track ID switch は unsupported のため passed に影響しない。
     slice_annotations は {slice_name: gt_annotations} の dict。
     slice_predictions は {slice_name: pred_annotations} の dict（省略時は空予測）。
-    slice recall は一対一 IoU matching で計算する。
-    synthetic 値でゲートロジック自体を検証できるよう設計する。
     """
     all_passed = True
 
-    # --- 必須 metric の存在・有限値チェック（fail-closed） ---
-    _required_finite = [
+    # --- 必須 metric の有限値チェック（fail-closed） ---
+    for _name, _val in [
         ("proxy_ap50_95", metrics.proxy_ap50_95),
         ("density_correlation", metrics.density_correlation),
         ("nearest_distance_error", metrics.nearest_distance_error),
-    ]
-    for _name, _val in _required_finite:
+    ]:
         if not math.isfinite(_val):
             all_passed = False
-
-    # GPU latency が gate で要求される場合は None も FAIL
-    latency_max = gate_cfg.get("gpu_p95_latency_max_ms", 25.0)
-    if "gpu_p95_latency_max_ms" in gate_cfg and gpu_p95_latency_ms is None:
-        all_passed = False
-    elif gpu_p95_latency_ms is not None and not math.isfinite(gpu_p95_latency_ms):
-        all_passed = False
 
     # --- overall mAP50:95 ---
     map_min = gate_cfg.get("map50_95_min", 0.0)
@@ -626,7 +625,6 @@ def check_performance_gate(
     recall_cfg: dict[str, float] = gate_cfg.get("class_recall_min", {})
     class_recall_results: dict[str, dict] = {}
     for class_name, recall_min in recall_cfg.items():
-        # class_id を class_name から逆引きする
         cid = next((k for k, v in class_name_by_id.items() if v == class_name), None)
         recall = metrics.class_recall.get(cid, 0.0) if cid is not None else 0.0
         passed = math.isfinite(recall) and recall >= recall_min
@@ -645,15 +643,16 @@ def check_performance_gate(
         all_passed = False
 
     # --- nearest-distance median error ---
-    nd_median = metrics.nearest_distance_error  # median（全対象距離の実 median）
+    nd_median = metrics.nearest_distance_error
     nd_max = gate_cfg.get("nearest_distance_median_max", 0.04)
     if nd_median > nd_max:
         all_passed = False
 
-    # --- GPU p95 latency （NaN チェックは冒頭で実施済み）---
-    if gpu_p95_latency_ms is not None and math.isfinite(gpu_p95_latency_ms) \
-            and gpu_p95_latency_ms > latency_max:
-        all_passed = False
+    # --- GPU p95 latency: unsupported（passed に影響しない） ---
+    # GPU latency は 04-08 で実装する。現在は情報表示のみ。
+    gpu_latency_display: str | float | None = (
+        "unsupported" if gpu_p95_latency_ms is None else gpu_p95_latency_ms
+    )
 
     # --- slice gates ---
     slice_cfg: dict[str, dict] = gate_cfg.get("slice_gate", {})
@@ -667,12 +666,11 @@ def check_performance_gate(
         n_instances = len(s_anns)
         n_sessions = len({a.get("session_id", "") for a in s_anns if a.get("session_id")})
 
-        # recall はセッション分布の CI 下限で判定する（pooled recall では大規模 session が支配的）
         if n_instances >= s_min_instances and n_sessions >= s_min_sessions:
             s_preds = (slice_predictions or {}).get(slice_name, [])
             s_recall: float | None = _compute_session_ci_recall(s_anns, s_preds)
         else:
-            s_recall = None  # インスタンス/セッション不足 → gate 自体を FAIL
+            s_recall = None
 
         s_passed = (
             s_recall is not None
@@ -694,7 +692,7 @@ def check_performance_gate(
             passed=s_passed,
         ))
 
-    return PerformanceGateResult(
+    return DevDiagnosticsResult(
         passed=all_passed,
         map50_95=metrics.proxy_ap50_95,
         map50_95_min=map_min,
@@ -703,10 +701,13 @@ def check_performance_gate(
         density_correlation_min=density_min,
         nearest_distance_median=nd_median,
         nearest_distance_median_max=nd_max,
-        gpu_p95_latency_ms=gpu_p95_latency_ms,
-        gpu_p95_latency_max_ms=latency_max,
+        gpu_p95_latency_ms=gpu_latency_display,
         slice_results=slice_results,
     )
+
+
+# 後方互換エイリアス（既存コードが check_performance_gate を直接呼んでいる場合）
+check_performance_gate = compute_dev_diagnostics
 
 
 # ---- CLI ----

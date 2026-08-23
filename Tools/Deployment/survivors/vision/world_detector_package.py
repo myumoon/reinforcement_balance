@@ -1,4 +1,4 @@
-"""WorldDetector development package writer / loader。
+"""WorldDetector development package writer / loader（PR#315 development-only）。
 
 development weight、resolved config、class map、tracker config、
 metrics、dataset/target/build/contract hash を
@@ -10,10 +10,8 @@ world_class_map_v1.yaml を格納するため、別環境でも restore でき�
 restore 後に 04-06 golden fixture と同じ TrackedWorldStateV1 schema を返し、
 schema 差を PackageSchemaError で拒否する。
 
-development package は formal_detector_eligible=false とし、
-formal publish は全 parent と validation PASS がなければ出力しない。
-formal publish では checkpoint_manifest.assert_formal_eligible() を呼び
-parent hash を検証する。
+PR#315 では development package のみ提供する。formal publish は 04-08 に委譲する。
+publish_formal_package() は呼び出すと常に FormalPackageRejectedError を送出する。
 
 使用例:
     from survivors.vision.world_detector_package import publish_development_package, restore_package
@@ -267,60 +265,15 @@ def publish_development_package(
     return _write_package(pkg_manifest, store_dir, cfg_path, cm_path, weight_path)
 
 
-def publish_formal_package(
-    checkpoint_manifest: Any,
-    metrics_dict: dict,
-    checkpoint_selection: dict,
-    store_dir: pathlib.Path,
-    *,
-    cfg_path: pathlib.Path,
-    cm_path: pathlib.Path,
-    weight_path: pathlib.Path,
-    validation_passed: bool,
-    score_threshold: float,
-) -> pathlib.Path:
-    """formal package を publish する。
+def publish_formal_package(*_args: Any, **_kwargs: Any) -> pathlib.Path:
+    """formal package publish は PR#315 の責務外。常に FormalPackageRejectedError を送出する。
 
-    全 parent ハッシュ、validation PASS、model_hash が一致する weight が必要。
-    checkpoint_manifest.assert_formal_eligible() で parent hash を検証する。
-    validation_passed=False の場合は ValueError を送出する。
-    score_threshold は restore_package での推論スコア閾値として manifest に保存し、
-    validation 時の閾値と restore 時の閾値を一致させることで再現性を保証する。
+    formal weight / threshold / gate の確定は 04-08 に委譲する。
     """
-    if not isinstance(validation_passed, bool):
-        raise TypeError(
-            f"validation_passed は bool 型が必要です。got: {type(validation_passed).__name__!r}。"
-            " check_performance_gate() の result.passed を渡してください。"
-        )
-    if validation_passed is not True:
-        raise ValueError(
-            "formal publish には validation PASS が必要です。"
-            " performance gate を全て通過してから再実行してください。"
-        )
-    # parent hash 検証（assert_formal_eligible は型 / SHA-256 形式も確認する）
-    checkpoint_manifest.assert_formal_eligible()
-    weight_path = pathlib.Path(weight_path)
-    _verify_weight_hash(weight_path, checkpoint_manifest.model_hash)
-
-    contract_hash = _compute_contract_hash()
-
-    pkg_manifest = PackageManifest(
-        schema_version=PACKAGE_SCHEMA_VERSION,
-        formal_detector_eligible=True,
-        model_hash=checkpoint_manifest.model_hash,
-        data_hash=checkpoint_manifest.data_hash,
-        config_hash=checkpoint_manifest.config_hash,
-        build_hash=checkpoint_manifest.build_hash,
-        class_map_hash=checkpoint_manifest.class_map_hash,
-        contract_hash=contract_hash,
-        metrics=metrics_dict,
-        checkpoint_selection=checkpoint_selection,
-        weight_included=True,
-        score_threshold=score_threshold,
+    raise FormalPackageRejectedError(
+        "publish_formal_package() は PR#315 では無効です。"
+        " formal package の発行は 04-08 で実施してください。"
     )
-
-    store_dir.mkdir(parents=True, exist_ok=True)
-    return _write_package(pkg_manifest, store_dir, cfg_path, cm_path, weight_path)
 
 
 # ---- restore ----

@@ -355,8 +355,8 @@ class TestTrainEpoch:
         detector = WorldDetector.from_config(cfg, CLASS_MAP_PATH)
         optimizer = optim.SGD(detector._model.parameters(), lr=0.001)
 
-        # torch と DatasetSample がある状態で step を実行し、例外がないことを確認
-        _train_epoch(detector, ds, optimizer, cfg)
+        # smoke=True: 画像ファイルが存在しないためゼロ画像でテスト
+        _train_epoch(detector, ds, optimizer, cfg, smoke=True)
 
     def test_train_epoch_uses_configured_batch_size(self):
         """複数 session の sample を config batch_size ごとに model へ渡す。"""
@@ -400,6 +400,7 @@ class TestTrainEpoch:
             samples,
             RecordingOptimizer(),
             {"training": {"batch_size": 4}},
+            smoke=True,  # 画像ファイルが存在しないためゼロ画像でテスト
         )
         assert model.batch_sizes == [(4, 4), (4, 4)]
 
@@ -433,6 +434,7 @@ class TestTrainEpoch:
         _train_epoch(
             SimpleNamespace(_model=Model()), samples, optimizer,
             {"training": {"batch_size": 3}},
+            smoke=True,  # 画像ファイルが存在しないためゼロ画像でテスト
         )
         assert batch_sizes == [3]
 
@@ -469,11 +471,11 @@ class TestTrainingSplitViews:
         routed = {}
         monkeypatch.setattr(
             training, "_train_epoch",
-            lambda detector, ds, optimizer, cfg: routed.setdefault("train", ds),
+            lambda detector, ds, optimizer, cfg, **kw: routed.setdefault("train", ds),
         )
         monkeypatch.setattr(
             training, "_evaluate_validation",
-            lambda detector, ds, cfg: routed.setdefault("validation", ds) and 0.25,
+            lambda detector, ds, cfg, **kw: routed.setdefault("validation", ds) and 0.25,
         )
         monkeypatch.setattr(training, "_save_resume_state", lambda *args: None)
         detector = SimpleNamespace(_model=SimpleNamespace(state_dict=lambda: {}))
@@ -520,16 +522,16 @@ class TestTrainingSplitViews:
         ds = _SingleItemDs()
 
         with pytest.raises(RuntimeError, match="simulated inference error"):
-            training._evaluate_validation(detector, ds, cfg)
+            training._evaluate_validation(detector, ds, cfg, smoke=True)
 
 
 # ---- Task 3: performance gate boundary values ----
 
 class TestPerformanceGateBoundary:
-    """metric gate 境界値を synthetic metrics でテストする。"""
+    """development diagnostics 境界値を synthetic metrics でテストする。"""
 
     def _gate_cfg(self) -> dict:
-        """テスト用の gate config（実際の閾値）。"""
+        """テスト用の dev_diagnostics 設定（実際の閾値）。"""
         return {
             "map50_95_min": 0.0,
             "class_recall_min": {
@@ -539,7 +541,6 @@ class TestPerformanceGateBoundary:
             },
             "density_correlation_min": 0.85,
             "nearest_distance_median_max": 0.04,
-            "gpu_p95_latency_max_ms": 25.0,
             "slice_gate": {
                 "heavy_effect": {"recall_min": 0.80, "min_instances": 4, "min_sessions": 4},
                 "boss": {"recall_min": 0.98, "min_instances": 3, "min_sessions": 3},
@@ -564,62 +565,62 @@ class TestPerformanceGateBoundary:
 
     def test_enemy_recall_below_threshold_fails(self):
         """enemy_normal recall < 0.90 はゲート FAIL。"""
-        from eval_survivors_world_detector import EvalMetrics, check_performance_gate
+        from eval_survivors_world_detector import EvalMetrics, compute_dev_diagnostics
 
         m = self._base_metrics()
         m.class_recall[2] = 0.89  # 0.90 未満
-        result = check_performance_gate(m, self._gate_cfg(), self._class_name_by_id())
+        result = compute_dev_diagnostics(m, self._gate_cfg(), self._class_name_by_id())
         assert not result.class_recall_results["enemy_normal"]["passed"]
         assert not result.passed
 
     def test_enemy_recall_at_threshold_passes(self):
         """enemy_normal recall = 0.90 ちょうどで PASS。"""
-        from eval_survivors_world_detector import EvalMetrics, check_performance_gate
+        from eval_survivors_world_detector import EvalMetrics, compute_dev_diagnostics
 
         m = self._base_metrics()
         m.class_recall[2] = 0.90
-        result = check_performance_gate(m, self._gate_cfg(), self._class_name_by_id())
+        result = compute_dev_diagnostics(m, self._gate_cfg(), self._class_name_by_id())
         assert result.class_recall_results["enemy_normal"]["passed"]
 
     def test_boss_recall_below_threshold_fails(self):
         """enemy_boss recall < 0.98 はゲート FAIL。"""
-        from eval_survivors_world_detector import EvalMetrics, check_performance_gate
+        from eval_survivors_world_detector import EvalMetrics, compute_dev_diagnostics
 
         m = self._base_metrics()
         m.class_recall[4] = 0.97
-        result = check_performance_gate(m, self._gate_cfg(), self._class_name_by_id())
+        result = compute_dev_diagnostics(m, self._gate_cfg(), self._class_name_by_id())
         assert not result.class_recall_results["enemy_boss"]["passed"]
 
     def test_gem_recall_below_threshold_fails(self):
         """gem_blue recall < 0.92 はゲート FAIL。"""
-        from eval_survivors_world_detector import EvalMetrics, check_performance_gate
+        from eval_survivors_world_detector import EvalMetrics, compute_dev_diagnostics
 
         m = self._base_metrics()
         m.class_recall[5] = 0.91
-        result = check_performance_gate(m, self._gate_cfg(), self._class_name_by_id())
+        result = compute_dev_diagnostics(m, self._gate_cfg(), self._class_name_by_id())
         assert not result.class_recall_results["gem_blue"]["passed"]
 
     def test_density_correlation_below_threshold_fails(self):
         """density_correlation=0.80 < 0.85 は FAIL。"""
-        from eval_survivors_world_detector import check_performance_gate
+        from eval_survivors_world_detector import compute_dev_diagnostics
 
         m = self._base_metrics()
         m.density_correlation = 0.80
-        result = check_performance_gate(m, self._gate_cfg(), self._class_name_by_id())
+        result = compute_dev_diagnostics(m, self._gate_cfg(), self._class_name_by_id())
         assert not result.passed
 
     def test_nearest_distance_above_max_fails(self):
         """nearest_distance_error > 0.04 は FAIL。"""
-        from eval_survivors_world_detector import check_performance_gate
+        from eval_survivors_world_detector import compute_dev_diagnostics
 
         m = self._base_metrics()
         m.nearest_distance_error = 0.05
-        result = check_performance_gate(m, self._gate_cfg(), self._class_name_by_id())
+        result = compute_dev_diagnostics(m, self._gate_cfg(), self._class_name_by_id())
         assert not result.passed
 
     def test_slice_instance_below_min_fails(self):
         """heavy_effect slice の instance 数 < min_instances は FAIL。"""
-        from eval_survivors_world_detector import check_performance_gate
+        from eval_survivors_world_detector import compute_dev_diagnostics
 
         m = self._base_metrics()
         # heavy_effect slice に 3 件しかない（min_instances=4）
@@ -630,7 +631,7 @@ class TestPerformanceGateBoundary:
                 {"image_id": 2, "category_id": 2, "bbox": [10, 10, 50, 50], "session_id": "s3"},
             ],
         }
-        result = check_performance_gate(
+        result = compute_dev_diagnostics(
             m, self._gate_cfg(), self._class_name_by_id(),
             slice_annotations=slice_annotations,
         )
@@ -639,7 +640,7 @@ class TestPerformanceGateBoundary:
 
     def test_slice_recall_computed_from_predictions(self):
         """slice recall は prediction との一対一 matching で計算される。"""
-        from eval_survivors_world_detector import check_performance_gate
+        from eval_survivors_world_detector import compute_dev_diagnostics
 
         m = self._base_metrics()
         gate_cfg = {
@@ -661,7 +662,7 @@ class TestPerformanceGateBoundary:
             {"image_id": i, "category_id": 4, "bbox": [10, 10, 50, 50], "score": 0.9}
             for i in range(3)
         ]
-        result = check_performance_gate(
+        result = compute_dev_diagnostics(
             m, gate_cfg, {4: "enemy_boss"},
             slice_annotations={"boss": gt_anns},
             slice_predictions={"boss": pred_anns},
@@ -672,7 +673,7 @@ class TestPerformanceGateBoundary:
 
     def test_slice_recall_zero_when_no_predictions(self):
         """prediction が空のとき recall=0.0、閾値 > 0 ならば FAIL。"""
-        from eval_survivors_world_detector import check_performance_gate
+        from eval_survivors_world_detector import compute_dev_diagnostics
 
         m = self._base_metrics()
         gate_cfg = {
@@ -689,7 +690,7 @@ class TestPerformanceGateBoundary:
             {"image_id": i, "category_id": 2, "bbox": [10, 10, 50, 50], "session_id": f"s{i+1}"}
             for i in range(4)
         ]
-        result = check_performance_gate(
+        result = compute_dev_diagnostics(
             m, gate_cfg, {},
             slice_annotations={"heavy_effect": gt_anns},
             slice_predictions={"heavy_effect": []},  # 空予測
@@ -698,21 +699,29 @@ class TestPerformanceGateBoundary:
         assert heavy.recall == pytest.approx(0.0)
         assert not heavy.passed
 
-    def test_latency_above_max_fails(self):
-        """GPU p95 latency > 25ms は FAIL。"""
-        from eval_survivors_world_detector import check_performance_gate
+    def test_latency_is_unsupported_and_does_not_affect_passed(self):
+        """GPU latency は unsupported のため passed に影響しない（04-08 で実装）。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics
 
         m = self._base_metrics()
-        result = check_performance_gate(
-            m, self._gate_cfg(), self._class_name_by_id(),
-            gpu_p95_latency_ms=26.0,
-        )
-        assert not result.passed
+        # 全実装済み指標を通過させた上で、GPU latency のみ非常に大きい値を渡す
+        gate_cfg = {
+            "map50_95_min": 0.0,
+            "class_recall_min": {},
+            "density_correlation_min": 0.0,
+            "nearest_distance_median_max": 1.0,
+            "slice_gate": {},
+        }
+        result_with = compute_dev_diagnostics(m, gate_cfg, {}, gpu_p95_latency_ms=999999.0)
+        result_without = compute_dev_diagnostics(m, gate_cfg, {}, gpu_p95_latency_ms=None)
+        assert result_with.passed, "実装済み指標が全部通れば passed=True（GPU latency は無視）"
+        assert result_without.passed, "gpu_p95_latency_ms=None でも passed に影響しない"
+        # gpu_p95_latency_ms は情報表示のみ（unsupported として記録される）
+        assert result_without.gpu_p95_latency_ms == "unsupported"
 
     def test_all_pass_returns_passed_true(self):
-        """全 gate を通過したとき passed=True。gpu_p95_latency_max_ms が gate に含まれる場合は
-        gpu_p95_latency_ms を渡さないと fail-closed になるため値を渡す。"""
-        from eval_survivors_world_detector import check_performance_gate
+        """全実装済み gate を通過したとき passed=True。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics
 
         m = self._base_metrics()
         gate_cfg = {
@@ -720,10 +729,9 @@ class TestPerformanceGateBoundary:
             "class_recall_min": {},
             "density_correlation_min": 0.0,
             "nearest_distance_median_max": 1.0,
-            "gpu_p95_latency_max_ms": 1000.0,
             "slice_gate": {},
         }
-        result = check_performance_gate(m, gate_cfg, {}, gpu_p95_latency_ms=10.0)
+        result = compute_dev_diagnostics(m, gate_cfg, {})
         assert result.passed
 
 
@@ -806,141 +814,37 @@ class TestPackagePublish:
         with pytest.raises(FormalPackageRejectedError):
             pm.assert_formal_eligible()
 
-    def test_formal_publish_requires_validation_pass(self, tmp_path):
-        """formal publish は validation_passed=False のとき ValueError。"""
-        from survivors.vision.world_detector_package import publish_formal_package
+    def test_formal_publish_always_rejected(self, tmp_path):
+        """PR#315 では publish_formal_package() は常に FormalPackageRejectedError を送出する。"""
+        from survivors.vision.world_detector_package import publish_formal_package, FormalPackageRejectedError
 
         store = tmp_path / "store"
         store.mkdir()
-        with pytest.raises(ValueError, match="validation PASS"):
+        # どんな引数を渡しても拒否されることを確認
+        with pytest.raises(FormalPackageRejectedError):
             publish_formal_package(
                 _make_checkpoint_manifest(formal=True),
                 {}, {}, store,
                 cfg_path=DETECTOR_CONFIG_PATH,
                 cm_path=CLASS_MAP_PATH,
-                weight_path=tmp_path / "missing.pt",
-                validation_passed=False,
+                weight_path=tmp_path / "model.pt",
+                validation_passed=True,
                 score_threshold=0.5,
             )
 
-    def test_formal_publish_calls_assert_formal_eligible(self, tmp_path):
-        """formal publish は assert_formal_eligible() を呼び parent hash を検証する。
-
-        formal_detector_eligible=False の checkpoint は FormalDetectorRejectedError で拒否される。
-        CheckpointManifest.assert_formal_eligible() は FormalDetectorRejectedError を送出し、
-        publish_formal_package はそれを伝播させる。
-        """
-        from survivors.vision.world_detector import FormalDetectorRejectedError
-        from survivors.vision.world_detector_package import publish_formal_package
+    def test_formal_publish_rejected_with_dev_manifest(self, tmp_path):
+        """development checkpoint でも formal publish は常に拒否される。"""
+        from survivors.vision.world_detector_package import publish_formal_package, FormalPackageRejectedError
 
         store = tmp_path / "store"
         store.mkdir()
-        # formal_detector_eligible=False の checkpoint を渡す
-        with pytest.raises(FormalDetectorRejectedError):
+        with pytest.raises(FormalPackageRejectedError):
             publish_formal_package(
-                _make_checkpoint_manifest(formal=False),   # development checkpoint
+                _make_checkpoint_manifest(formal=False),
                 {}, {}, store,
                 cfg_path=DETECTOR_CONFIG_PATH,
                 cm_path=CLASS_MAP_PATH,
-                weight_path=tmp_path / "missing.pt",
-                validation_passed=True,
-                score_threshold=0.5,
             )
-
-    def test_formal_publish_requires_valid_hashes(self, tmp_path):
-        """assert_formal_eligible は SHA-256 形式不正も拒否する。
-
-        model_hash="" → _validate_hash_format() が ValueError を送出する。
-        publish_formal_package はこれを伝播させる。
-        """
-        from survivors.vision.world_detector import CheckpointManifest, FormalDetectorRejectedError
-        from survivors.vision.world_detector_package import publish_formal_package
-
-        store = tmp_path / "store"
-        store.mkdir()
-        # model_hash が SHA-256 形式不正（64 hex 文字でない）の formal manifest
-        bad_cm = CheckpointManifest(
-            model_hash="",     # 不正
-            data_hash="b" * 64,
-            config_hash="c" * 64,
-            build_hash="d" * 64,
-            class_map_hash="e" * 64,
-            formal_detector_eligible=True,
-        )
-        # assert_formal_eligible → _validate_hash_format → ValueError
-        with pytest.raises(ValueError):
-            publish_formal_package(
-                bad_cm, {}, {}, store,
-                cfg_path=DETECTOR_CONFIG_PATH,
-                cm_path=CLASS_MAP_PATH,
-                weight_path=tmp_path / "missing.pt",
-                validation_passed=True,
-                score_threshold=0.5,
-            )
-
-    def test_formal_publish_requires_weight(self, tmp_path):
-        """formal package は validation 済みでも weight なしでは作成できない。"""
-        from survivors.vision.world_detector_package import publish_formal_package
-
-        store = tmp_path / "store"
-        store.mkdir()
-        with pytest.raises((TypeError, ValueError)):
-            publish_formal_package(
-                _make_checkpoint_manifest(formal=True), {}, {}, store,
-                cfg_path=DETECTOR_CONFIG_PATH,
-                cm_path=CLASS_MAP_PATH,
-                validation_passed=True,
-                score_threshold=0.5,
-            )
-
-    def test_formal_publish_rejects_weight_hash_mismatch_before_copy(self, tmp_path):
-        """formal publish は copy 前の weight/model_hash 不一致を拒否する。"""
-        from survivors.vision.world_detector_package import publish_formal_package
-
-        store = tmp_path / "store"
-        store.mkdir()
-        weight_path = tmp_path / "model.pt"
-        weight_path.write_bytes(b"actual weight")
-
-        with pytest.raises(ValueError, match="model_hash"):
-            publish_formal_package(
-                _make_checkpoint_manifest(formal=True), {}, {}, store,
-                cfg_path=DETECTOR_CONFIG_PATH,
-                cm_path=CLASS_MAP_PATH,
-                weight_path=weight_path,
-                validation_passed=True,
-                score_threshold=0.5,
-            )
-
-    def test_formal_publish_includes_hash_verified_weight(self, tmp_path):
-        """model_hash が一致する formal weight を package へコピーする。"""
-        from survivors.vision.world_detector import CheckpointManifest
-        from survivors.vision.world_detector_package import publish_formal_package
-
-        store = tmp_path / "store"
-        store.mkdir()
-        weight_path = tmp_path / "model.pt"
-        weight_path.write_bytes(b"actual weight")
-        manifest = CheckpointManifest(
-            model_hash=_sha256_file(weight_path),
-            data_hash="b" * 64,
-            config_hash=_sha256_file(DETECTOR_CONFIG_PATH),
-            build_hash="d" * 64,
-            class_map_hash=_sha256_file(CLASS_MAP_PATH),
-            formal_detector_eligible=True,
-        )
-
-        pkg_path = publish_formal_package(
-            manifest, {}, {}, store,
-            cfg_path=DETECTOR_CONFIG_PATH,
-            cm_path=CLASS_MAP_PATH,
-            weight_path=weight_path,
-            validation_passed=True,
-            score_threshold=0.7,
-        )
-        copied_weight = pkg_path.parent / "model.pt"
-        assert copied_weight.exists()
-        assert _sha256_file(copied_weight) == manifest.model_hash
 
     def test_score_threshold_stored_in_manifest(self, tmp_path):
         """score_threshold が manifest に保存され restore_package で再現性が保証される。"""
@@ -1079,3 +983,166 @@ class TestPackageRestore:
         frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
         with pytest.raises(PackageSchemaError, match="model_hash"):
             restore_package(pkg_path, frame)
+
+
+# ---- 新規回帰テスト: P1/P2 findings ----
+
+class TestDefaultConfigGuard:
+    """既定 world_detector_v1.yaml が _reject_unimplemented_config() を通過することを確認する。"""
+
+    def test_default_config_passes_config_guard(self):
+        """リポジトリ同梱の既定 config が未実装設定ガードを通過する。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+        from survivors.vision.world_detector import load_detector_config
+
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        # 例外が発生しなければ OK
+        _reject_unimplemented_config(cfg)
+
+    def test_augmentation_in_config_is_rejected(self):
+        """augmentation が含まれる config はガードに拒否される。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+
+        cfg = {"input": {"augmentation": {"random_horizontal_flip": True}}}
+        with pytest.raises(ValueError, match="augmentation"):
+            _reject_unimplemented_config(cfg)
+
+    def test_lr_scheduler_in_config_is_rejected(self):
+        """lr_scheduler が含まれる config はガードに拒否される。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+
+        cfg = {"training": {"lr_scheduler": "cosine"}}
+        with pytest.raises(ValueError, match="lr_scheduler"):
+            _reject_unimplemented_config(cfg)
+
+
+class TestSessionInterleavedIndices:
+    """_session_interleaved_indices が全サンプルを一度ずつ返すことを確認する。"""
+
+    def _make_ds(self, session_lengths: dict[str, int]) -> list:
+        """session_lengths: {session_id: count} のダミーデータセットを作る。"""
+        from survivors.vision.world_dataset import DatasetSample
+        samples = []
+        for sid, n in session_lengths.items():
+            for _ in range(n):
+                samples.append(DatasetSample(
+                    image_id=len(samples),
+                    file_name="dummy.png",
+                    image_width=32, image_height=32,
+                    annotations=[],
+                    session_id=sid,
+                ))
+        return samples
+
+    def test_all_indices_returned_once_equal_sessions(self):
+        """同数 session: 全インデックスが重複なく一度ずつ含まれる。"""
+        from train_survivors_world_detector import _session_interleaved_indices
+
+        ds = self._make_ds({"s1": 3, "s2": 3})
+        indices = _session_interleaved_indices(ds)
+        assert sorted(indices) == list(range(6)), "全 6 件が一度ずつ選ばれる"
+
+    def test_all_indices_returned_once_imbalanced_100_to_1(self):
+        """100:1 の不均衡 dataset でも 101 件全てが一度ずつ選ばれる。"""
+        from train_survivors_world_detector import _session_interleaved_indices
+
+        ds = self._make_ds({"big": 100, "small": 1})
+        indices = _session_interleaved_indices(ds)
+        assert len(indices) == 101, f"101 件を期待、実際={len(indices)}"
+        assert len(set(indices)) == 101, "重複がないことを確認"
+        assert sorted(indices) == list(range(101)), "全インデックスが一度ずつ"
+
+    def test_no_permanently_unselected_samples(self):
+        """各 epoch で永久に選ばれないサンプルが存在しないことを確認する。"""
+        from train_survivors_world_detector import _session_interleaved_indices
+
+        ds = self._make_ds({"a": 5, "b": 2, "c": 8})
+        indices = _session_interleaved_indices(ds)
+        assert set(indices) == set(range(15)), "全 15 件が選択済み"
+
+    def test_uses_image_session_id_not_annotation(self):
+        """annotation なし負例（session_id は画像レベル）も正しく処理される。"""
+        from train_survivors_world_detector import _session_interleaved_indices
+        from survivors.vision.world_dataset import DatasetSample, COCOAnnotation
+
+        ds = [
+            DatasetSample(0, "img0.png", 32, 32,
+                          [COCOAnnotation(0, 0, 1, (1, 1, 4, 4), "ann_session")],
+                          session_id="img_session"),
+            DatasetSample(1, "img1.png", 32, 32, [], session_id="other_session"),
+        ]
+        indices = _session_interleaved_indices(ds)
+        assert sorted(indices) == [0, 1], "annotation session_id ではなく image session_id を使用"
+
+
+class TestImageLevelSessionRejection:
+    """画像レベルの session_id による rejected_sessions チェックを確認する。"""
+
+    def _write_coco_with_image_sessions(self, tmp_path: pathlib.Path, image_session: str) -> pathlib.Path:
+        """annotation なし（負例）フレームに image_session を付与した COCO JSON を作成する。"""
+        data = {
+            "images": [{"id": 0, "file_name": "frame_0.png", "width": 1920, "height": 1080,
+                         "session_id": image_session}],
+            "annotations": [],
+            "categories": [{"id": k, "name": f"c{k}"} for k in range(1, 12)],
+        }
+        p = tmp_path / "ann.json"
+        p.write_text(json.dumps(data), encoding="utf-8")
+        return p
+
+    def test_annotation_free_rejected_session_raises(self, tmp_path):
+        """annotation なし負例でも画像レベルの session_id が rejected_sessions にあれば拒否する。"""
+        from survivors.vision.world_dataset import WorldDataset, DatasetPreflightError
+
+        ann_path = self._write_coco_with_image_sessions(tmp_path, "final")
+        with pytest.raises(DatasetPreflightError):
+            WorldDataset(ann_path, CLASS_MAP_PATH, rejected_sessions={"final"})
+
+    def test_annotation_free_allowed_session_passes(self, tmp_path):
+        """annotation なし負例でも画像レベル session_id が許可リストなら通過する。"""
+        from survivors.vision.world_dataset import WorldDataset
+
+        ann_path = self._write_coco_with_image_sessions(tmp_path, "train")
+        ds = WorldDataset(ann_path, CLASS_MAP_PATH, rejected_sessions={"final"})
+        assert len(ds) == 1
+
+    def test_annotation_session_mismatch_raises(self, tmp_path):
+        """annotation.session_id と image.session_id が不一致の場合は拒否する。"""
+        from survivors.vision.world_dataset import WorldDataset, DatasetPreflightError
+
+        data = {
+            "images": [{"id": 0, "file_name": "f.png", "width": 1920, "height": 1080,
+                         "session_id": "img_sess"}],
+            "annotations": [{"id": 0, "image_id": 0, "category_id": 1,
+                              "bbox": [0, 0, 10, 10], "session_id": "ann_sess"}],
+            "categories": [{"id": k, "name": f"c{k}"} for k in range(1, 12)],
+        }
+        p = tmp_path / "ann.json"
+        p.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(DatasetPreflightError, match="一致しません"):
+            WorldDataset(p, CLASS_MAP_PATH)
+
+
+class TestSmokeAndNormalModeImageLoading:
+    """通常モードで画像欠損が FileNotFoundError、smoke モードでゼロ画像を許可することを確認する。"""
+
+    def test_normal_mode_raises_on_missing_image(self):
+        """通常モード（smoke=False）で存在しない画像を渡すと FileNotFoundError。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import _load_training_sample
+        from survivors.vision.world_dataset import DatasetSample
+
+        sample = DatasetSample(0, "/nonexistent/frame.png", 32, 32, [], session_id="s1")
+        with pytest.raises(FileNotFoundError):
+            _load_training_sample(sample, smoke=False)
+
+    def test_smoke_mode_allows_zero_image(self, tmp_path):
+        """smoke=True のとき存在しない画像はゼロ画像を返す（例外なし）。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import _load_training_sample
+        from survivors.vision.world_dataset import DatasetSample
+
+        sample = DatasetSample(0, str(tmp_path / "missing.png"), 32, 32, [], session_id="s1")
+        img, target = _load_training_sample(sample, smoke=True)
+        assert img.shape == (3, 32, 32)
+        assert float(img.sum()) == 0.0, "ゼロ画像であることを確認"

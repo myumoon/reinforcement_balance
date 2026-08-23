@@ -1,8 +1,8 @@
-# world_detector_v1 — WorldDetector 学習・推論設定。
+# world_detector_v1 — WorldDetector 学習・推論設定（development-only）。
 #
-# feasibility_config の architecture/budget と整合した初期設定。
+# PR#315 で提供する development-only tooling の設定。
 # formal_detector_eligible=false のため、このままでは正式パッケージへ昇格できない。
-# 04-07 / 04-08 が weight / threshold / resolved config を差し替える。
+# formal weight / threshold / resolved config の差し替えは 04-08 で実施する。
 schema_version: world_detector.v1
 
 # 開発用フラグ。false のまま配布したモデルは正式ローダーに拒否される。
@@ -12,7 +12,6 @@ formal_detector_eligible: false
 class_map_config: configs/world_class_map_v1.yaml
 
 # --- モデルアーキテクチャ ---
-# perception_feasibility_v1.yaml の architectures リストから選択する。
 # 未実装 architecture を指定したときは silent fallback せず即エラーとする。
 model:
   architecture: ssdlite320
@@ -21,18 +20,13 @@ model:
   num_classes: 12
   # 入力解像度 (W, H)。SSDLite320 の標準入力サイズ。
   input_size: [320, 320]
-  # pretrained backbone を使用し、head だけをランダム初期化する。
-  # 04-06 の development stub はランダム初期化。04-07 が正式 pretrained backbone ロードを実装する。
+  # pretrained backbone は 04-07 で実装する。現在はランダム初期化のみ。
   pretrained_backbone: false
 
 # --- 入力・前処理 ---
+# augmentation / lr_scheduler は未実装のため記載しない。
+# _reject_unimplemented_config() がこれらのキーを検出するとエラーになる。
 input:
-  # 学習時 tile / multi-scale 拡張の設定。
-  # feasibility の ssdlite320_p10_short_side_px=4.0 に合わせて小物体を保持する。
-  augmentation:
-    random_horizontal_flip: true
-    color_jitter: {brightness: 0.3, contrast: 0.3, saturation: 0.2, hue: 0.05}
-    random_crop_min_iou: 0.5
   normalize:
     mean: [0.485, 0.456, 0.406]
     std: [0.229, 0.224, 0.225]
@@ -45,7 +39,6 @@ training:
       lr: 0.01
       momentum: 0.9
       weight_decay: 0.0005
-  lr_scheduler: cosine
   max_epochs: 50
   # preflight チェックの最小要件。満たさなければ training step 0 のまま停止する。
   preflight:
@@ -57,16 +50,12 @@ training:
 # --- チェックポイント選択規則 ---
 # 学習開始前に manifest へ固定し、validation で best checkpoint を一度だけ選択する。
 checkpoint_selection:
-  # 選択基準メトリクス（高いほど良い）。
   metric: val_map50_95
-  # best checkpoint 選択後に候補を保持する最大数。
   keep_top_k: 3
-  # 保存インターバル（epoch 単位）。
   save_every_n_epochs: 5
 
 # --- tracker 設定 ---
 tracker:
-  # class ごとの最大 age（フレーム）。超えたトラックは削除される。
   max_age_by_class:
     player_anchor: 10
     enemy_normal: 5
@@ -79,20 +68,15 @@ tracker:
     pickup_special: 4
     hazard_projectile: 3
     hazard_area: 4
-  # greedy マッチングのコスト上限。この値を超えた割り当ては棄却する。
   max_match_cost: 0.7
-  # EMA の平滑化係数。velocity の更新に使用する。
   velocity_ema_alpha: 0.6
-  # decay（フレームごとの confidence 減衰率）。
   confidence_decay_per_frame: 0.9
 
-# --- 性能ゲート ---
-# 各メトリクスの合格下限。synthetic 値でゲートロジックを検証できる。
-# actual weight での合格は 04-08 に委譲する（現在の下限は 0.0）。
-performance_gate:
-  # 全体 mAP50:95 の合格下限。04-07 はゲートロジックのみ実装する。
+# --- 開発用 diagnostics 閾値 ---
+# 実装済み指標の開発用基準値。formal 合否判定・release gate ではない。
+# GPU latency / track ID switch / formal session CI は 04-08 で実装する（現在 unsupported）。
+dev_diagnostics:
   map50_95_min: 0.0
-  # クラス別 recall 合格下限。
   class_recall_min:
     enemy_normal: 0.90
     enemy_elite: 0.90
@@ -100,13 +84,8 @@ performance_gate:
     gem_blue: 0.92
     gem_green: 0.92
     gem_red: 0.92
-  # directional-density correlation 合格下限。
   density_correlation_min: 0.85
-  # nearest-distance median error 合格上限（viewport 正規化）。
   nearest_distance_median_max: 0.04
-  # GPU p95 latency 合格上限 (ms)。CPU smoke では無視される。
-  gpu_p95_latency_max_ms: 25.0
-  # heavy-effect / late-game slice 別ゲート（全体平均で代用しない）。
   slice_gate:
     heavy_effect:
       recall_min: 0.80
