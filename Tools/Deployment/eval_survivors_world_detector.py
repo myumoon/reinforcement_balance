@@ -291,7 +291,7 @@ def _directional_density_correlation(
     pred_vec = np.concatenate(pred_vec_parts)
 
     if np.std(gt_vec) < 1e-9 or np.std(pred_vec) < 1e-9:
-        return 1.0 if abs(gt_vec.sum() - pred_vec.sum()) < 1e-9 else 0.5
+        return 1.0 if np.allclose(gt_vec, pred_vec) else 0.0
 
     corr = float(np.corrcoef(gt_vec, pred_vec)[0, 1])
     return max(0.0, corr)
