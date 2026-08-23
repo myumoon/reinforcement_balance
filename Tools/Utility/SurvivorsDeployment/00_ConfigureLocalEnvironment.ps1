@@ -37,6 +37,7 @@ $keys = @(
     'SURVIVORS_EVIDENCE_ROOT',
     'VAMPIRE_SURVIVORS_EXE',
     'SURVIVORS_CANONICAL_SAVE',
+    'SURVIVORS_CANONICAL_SAVE_BACKUP_ROOT',
     'SURVIVORS_TARGET_PROFILE'
 )
 $missing = @($keys | Where-Object { -not $settings.Contains($_) -or [string]::IsNullOrWhiteSpace([string]$settings[$_]) })

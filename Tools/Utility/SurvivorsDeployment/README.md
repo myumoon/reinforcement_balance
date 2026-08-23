@@ -19,6 +19,12 @@ PR #308 が `main` にマージされた後だけ、最後に次を実行しま�
 04_VerifyDeploymentSmoke.bat
 ```
 
+canonical save の運用バックアップが必要なときは、設定確認後に次を個別に実行します。これは artifact store の同期やrestoreではありません。
+
+```text
+05_BackupCanonicalSave.bat
+```
+
 各 workflow は失敗時に非ゼロ終了します。値そのものを PR、issue、チャット、コンソールログへ貼り付けないでください。`.env/survivors_deployment.env` はローカル専用であり、テンプレート・PowerShell・`.bat`・テスト・README だけが Git 管理対象です。
 
 ## 設定キー
@@ -30,10 +36,11 @@ PR #308 が `main` にマージされた後だけ、最後に次を実行しま�
 | `SURVIVORS_ARTIFACT_BACKUP_ROOT` | primary のバックアップ先。正式運用では primary と別ボリュームに置く。 |
 | `SURVIVORS_EVIDENCE_ROOT` | MachineInfo、実行ファイル metadata、canonical hash の証跡保存先。リポジトリ外に置く。 |
 | `VAMPIRE_SURVIVORS_EXE` | 対象 Vampire Survivors 実行ファイル。自動探索せず、設定値だけを使う。 |
-| `SURVIVORS_CANONICAL_SAVE` | 任意。ユーザーが明示的に選んだ save の証跡を取得する。空欄ならスキップする。 |
+| `SURVIVORS_CANONICAL_SAVE` | `03` では任意、`05` では必須。ユーザーが明示的に選んだ canonical save ファイル。 |
+| `SURVIVORS_CANONICAL_SAVE_BACKUP_ROOT` | `05` 専用。canonical save の世代バックアップ先。artifact primary/backup root と兼用しない。 |
 | `SURVIVORS_TARGET_PROFILE` | 任意。ユーザーが明示的に選んだ TargetProfile の証跡を取得する。空欄ならスキップする。 |
 
-save と profile の本体はコピーしません。設定されたファイルが存在することを確認し、外部 evidence に basename と canonical hash だけを記録します。空欄の save/profile を自動探索して canonical 扱いすることもありません。
+`03` はsaveとprofileの本体をコピーしません。設定されたファイルが存在することを確認し、外部evidenceにbasenameとcanonical hashだけを記録します。空欄のsave/profileを自動探索してcanonical扱いすることもありません。
 
 MachineInfo JSON と executable metadata JSON は、収集後にそれぞれ primary artifact store へ登録します。target-evidence manifest には各ファイルの canonical hash と `artifact_ref`（content SHA-256、サイズ、`artifact://sha256/...` URI）を記録します。対象ゲーム exe 本体はコピーせず、basename と canonical hash のみを記録します。
 
@@ -47,6 +54,23 @@ primary、backup、evidence はすべてリポジトリ外でなければなり�
 - `Tools/Artifacts/manage_artifacts.py check-backup-root` が成功すること。
 
 primary と backup を別ボリュームにするのは、同じディスクや同じボリュームの障害・誤削除で主保存とバックアップが同時に失われるのを避けるためです。`02_PrepareArtifactStore.ps1 -DryRun` は同じ検証を行いますが、フォルダは作成しません。
+
+## canonical save バックアップ
+
+`05` は `SURVIVORS_CANONICAL_SAVE` を読み取り専用の入力として扱い、`SURVIVORS_CANONICAL_SAVE_BACKUP_ROOT` 配下のUTC時刻付き世代ディレクトリへコピーします。canonical save の編集・削除、Steam／Steam Cloud／Vampire Survivors の起動・停止・設定変更は行いません。artifact store の `SURVIVORS_ARTIFACT_PRIMARY_ROOT`／`SURVIVORS_ARTIFACT_BACKUP_ROOT` はこの運用バックアップ先ではありません。
+
+コピー前に入力が通常ファイルであること、入力とバックアップrootが同一パスでないこと、バックアップrootがlocal fixed NTFS上でreparse pointを経由しないことを確認します。コピーは世代ディレクトリ内の一時ファイルへ行い、sourceと一時ファイルのSHA-256およびサイズが一致した場合だけ非上書きrenameで確定します。既存世代は上書きせず、失敗時は非ゼロ終了します。
+
+成功した世代にはsave本体と `backup-result.json` が作られます。標準出力にも同じschemaのJSONを出力し、`source_path`、`backup_path`、`source_hash`、`backup_hash`、`size`、`collected_at`、`match`、`schema_version` を記録します。失敗JSONは `status=failure`、`match=false` と `blocking_reason` を含みます。save内容やenvの他の値は記録しません。
+
+既定ではリポジトリrootから導出した `.env/survivors_deployment.env` を読みます。別のenv、または明示した2つのパスを使う場合は次のように実行できます。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Utility/SurvivorsDeployment/05_BackupCanonicalSave.ps1 -EnvPath <ENV_FILE>
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Utility/SurvivorsDeployment/05_BackupCanonicalSave.ps1 -CanonicalSavePath <SAVE_FILE> -BackupRoot <BACKUP_DIRECTORY>
+```
+
+ゲームやSteam Cloudがsaveを書き換えている可能性はツール側で判断しません。operatorが適切な時点を選び、成功JSONとsidecarの `match=true` を確認してください。restoreはこのツールの対象外です。
 
 ## PR #308 と smoke test
 
@@ -66,6 +90,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Utility/SurvivorsD
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Utility/SurvivorsDeployment/02_PrepareArtifactStore.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Utility/SurvivorsDeployment/03_CollectTargetEvidence.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Utility/SurvivorsDeployment/04_VerifyDeploymentSmoke.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tools/Utility/SurvivorsDeployment/05_BackupCanonicalSave.ps1
 ```
 
-失敗時はまず外部 operator log の workflow 名と exit code を確認し、次に `.env` のキーが空欄でないこと、保存先がリポジトリ外であること、primary/backup が別ボリュームであることを確認してください。実値を含む `.env` や evidence payload を Git 管理領域へ移動しないでください。
+`00`〜`04` の失敗時はまず外部operator logのworkflow名とexit codeを確認してください。`05` の失敗時は標準出力JSONの `blocking_reason` を確認します。次に `.env` のキーが空欄でないこと、各保存先が意図した外部rootであること、artifact primary/backupが別ボリュームであること、canonical save backup rootがlocal fixed NTFSであることを確認してください。実値を含む `.env` やevidence payloadをGit管理領域へ移動しないでください。
