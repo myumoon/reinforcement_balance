@@ -549,23 +549,20 @@ def _evaluate_validation(detector: Any, validation_ds: Any, cfg: dict) -> float:
                     "category_id": int(label),
                     "bbox": [x1, y1, x2 - x1, y2 - y1],
                 })
-            try:
-                preds = detector._model([img])
-                if isinstance(preds, list) and preds and isinstance(preds[0], dict):
-                    for box, label, score in zip(
-                        preds[0].get("boxes", torch.zeros(0, 4)).tolist(),
-                        preds[0].get("labels", torch.zeros(0, dtype=torch.long)).tolist(),
-                        preds[0].get("scores", torch.zeros(0)).tolist(),
-                    ):
-                        x1, y1, x2, y2 = box
-                        pred_anns.append({
-                            "image_id": image_id,
-                            "category_id": int(label),
-                            "bbox": [x1, y1, x2 - x1, y2 - y1],
-                            "score": float(score),
-                        })
-            except Exception:
-                pass  # stub model の場合はスキップ
+            preds = detector._model([img])
+            if isinstance(preds, list) and preds and isinstance(preds[0], dict):
+                for box, label, score in zip(
+                    preds[0].get("boxes", torch.zeros(0, 4)).tolist(),
+                    preds[0].get("labels", torch.zeros(0, dtype=torch.long)).tolist(),
+                    preds[0].get("scores", torch.zeros(0)).tolist(),
+                ):
+                    x1, y1, x2, y2 = box
+                    pred_anns.append({
+                        "image_id": image_id,
+                        "category_id": int(label),
+                        "bbox": [x1, y1, x2 - x1, y2 - y1],
+                        "score": float(score),
+                    })
 
     num_classes = cfg.get("model", {}).get("num_classes", detector.num_classes) + 1
     metrics = evaluate_from_predictions(gt_anns, pred_anns, num_classes=num_classes)

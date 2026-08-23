@@ -46,6 +46,8 @@ class EvalMetrics:
     count_error: float = 0.0
     # nearest_distance_error: GT と予測の最近傍中心距離（正規化 px）
     nearest_distance_error: float = 0.0
+    # density_correlation: directional bin ごとの GT-予測密度 Pearson 相関（0〜1）。
+    density_correlation: float = 1.0
     # track_id_switches: 静的 eval では計算不能。CLI は "unsupported" を出力する。
     track_id_switches: str | int = _UNSUPPORTED
     # mean_latency_ms: metric 集計処理時間（検出器推論時間ではない）。
@@ -60,6 +62,7 @@ class EvalMetrics:
                 "density_error": self.density_error,
                 "count_error": self.count_error,
                 "nearest_distance_error": self.nearest_distance_error,
+                "density_correlation": self.density_correlation,
                 "track_id_switches": self.track_id_switches,
                 "mean_latency_ms_metric_only": self.mean_latency_ms,
             },
@@ -155,6 +158,51 @@ def _box_center(box_xyxy: np.ndarray) -> np.ndarray:
                      (box_xyxy[:, 1] + box_xyxy[:, 3]) / 2], axis=1)
 
 
+def _directional_density_correlation(
+    gt_anns: list[dict], pred_anns: list[dict], n_bins: int = 8
+) -> float:
+    """directional bin ごとの GT-予測エンティティ密度 Pearson 相関を返す（0〜1）。
+
+    viewport を n_bins 方向に分割し、各方向の GT 数・予測数を集計して
+    Pearson 相関係数を計算する。GT・予測ともに空の場合は 1.0 を返す。
+    """
+    def _centers(anns: list[dict]) -> np.ndarray:
+        if not anns:
+            return np.zeros((0, 2), np.float32)
+        return np.array(
+            [[a["bbox"][0] + a["bbox"][2] / 2, a["bbox"][1] + a["bbox"][3] / 2]
+             for a in anns], dtype=np.float32,
+        )
+
+    gt_c = _centers(gt_anns)
+    pred_c = _centers(pred_anns)
+
+    if len(gt_c) == 0 and len(pred_c) == 0:
+        return 1.0
+
+    all_c = np.concatenate([gt_c, pred_c]) if len(gt_c) > 0 and len(pred_c) > 0 \
+        else (gt_c if len(gt_c) > 0 else pred_c)
+    cx = float(np.mean(all_c[:, 0]))
+    cy = float(np.mean(all_c[:, 1]))
+
+    def _bin_counts(pts: np.ndarray) -> np.ndarray:
+        if len(pts) == 0:
+            return np.zeros(n_bins, dtype=float)
+        angles = np.arctan2(pts[:, 1] - cy, pts[:, 0] - cx)
+        bins = ((angles + np.pi) / (2 * np.pi) * n_bins).astype(int) % n_bins
+        return np.bincount(bins, minlength=n_bins).astype(float)
+
+    gt_bins = _bin_counts(gt_c)
+    pred_bins = _bin_counts(pred_c)
+
+    if np.std(gt_bins) < 1e-9 or np.std(pred_bins) < 1e-9:
+        # 一様分布同士は完全相関、エンティティ数が異なる場合は 0.5
+        return 1.0 if abs(gt_bins.sum() - pred_bins.sum()) < 1e-9 else 0.5
+
+    corr = float(np.corrcoef(gt_bins, pred_bins)[0, 1])
+    return max(0.0, corr)
+
+
 def evaluate_from_predictions(
     gt_annotations: list[dict],
     pred_annotations: list[dict],
@@ -182,7 +230,13 @@ def evaluate_from_predictions(
 
     all_image_ids = set(gt_by_image) | set(pred_by_image)
 
-    ap_scores: list[float] = []
+    # COCO mAP: クラスごとに全画像の予測を集約してから AP を計算する
+    all_gt_boxes_parts: list[np.ndarray] = []
+    all_gt_classes_parts: list[np.ndarray] = []
+    all_pred_boxes_parts: list[np.ndarray] = []
+    all_pred_scores_parts: list[np.ndarray] = []
+    all_pred_classes_parts: list[np.ndarray] = []
+
     class_tp: dict[int, int] = {c: 0 for c in range(1, num_classes)}
     class_gt: dict[int, int] = {c: 0 for c in range(1, num_classes)}
     count_errors: list[float] = []
@@ -202,31 +256,35 @@ def evaluate_from_predictions(
         pred_scores = np.array([p.get("score", 1.0) for p in preds], dtype=np.float32)
         pred_classes = np.array([p["category_id"] for p in preds], dtype=np.int32)
 
-        ap = compute_ap50_95(gt_boxes, gt_classes, pred_boxes, pred_scores, pred_classes)
-        ap_scores.append(ap)
+        if len(gt_boxes):
+            all_gt_boxes_parts.append(gt_boxes)
+            all_gt_classes_parts.append(gt_classes)
+        if len(pred_boxes):
+            all_pred_boxes_parts.append(pred_boxes)
+            all_pred_scores_parts.append(pred_scores)
+            all_pred_classes_parts.append(pred_classes)
+
         count_errors.append(abs(len(gts) - len(preds)))
 
-        # nearest_distance_error: GT ごとに最近傍の予測中心との距離を集計する
+        # nearest_distance_error: GT ごとに最近傍の予測中心との距離を個別に集計する
         if len(gt_boxes) > 0 and len(pred_boxes) > 0:
             gt_centers = _box_center(gt_boxes)  # (G, 2)
             pred_centers = _box_center(pred_boxes)  # (P, 2)
-            # (G, P) 距離行列
             diff = gt_centers[:, None, :] - pred_centers[None, :, :]
             dists = np.sqrt((diff ** 2).sum(axis=2))  # (G, P)
-            nearest_dist_errors.append(float(dists.min(axis=1).mean()) / viewport_diagonal)
+            nearest_dist_errors.extend((dists.min(axis=1) / viewport_diagonal).tolist())
         elif len(gt_boxes) > 0:
-            # GT があるが予測がない → 正規化後の最大誤差 1.0 を記録
-            nearest_dist_errors.append(1.0)
+            # GT があるが予測がない → GT 件数ぶん最大誤差 1.0 を記録
+            nearest_dist_errors.extend([1.0] * len(gt_boxes))
 
         # class recall: confidence 降順・一対一 matching（予測を外側に走査してGT入力順依存を排除）
         for c in range(1, num_classes):
             class_gt[c] += int((gt_classes == c).sum())
             if len(gt_boxes) > 0 and len(pred_boxes) > 0:
                 iou_mat = compute_iou_matrix(gt_boxes, pred_boxes)
-                # confidence 降順でソートした予測インデックス（class=c のみ）
                 pred_c_idxs = [pi for pi in np.argsort(-pred_scores) if pred_classes[pi] == c]
                 matched_gt: set[int] = set()
-                for pi in pred_c_idxs:  # 予測が外側（confidence 優先でGTを割り当て）
+                for pi in pred_c_idxs:
                     best_gi, best_iou = -1, 0.5 - 1e-9
                     for gi in range(len(gt_boxes)):
                         if gi in matched_gt or gt_classes[gi] != c:
@@ -245,12 +303,34 @@ def evaluate_from_predictions(
 
     density_error = float(np.mean(count_errors)) if count_errors else 0.0
 
+    # COCO mAP: クラスごとに全画像の予測を集約して AP を計算し平均する
+    all_gt_boxes = np.concatenate(all_gt_boxes_parts) if all_gt_boxes_parts else np.zeros((0, 4), np.float32)
+    all_gt_classes = np.concatenate(all_gt_classes_parts) if all_gt_classes_parts else np.zeros(0, np.int32)
+    all_pred_boxes = np.concatenate(all_pred_boxes_parts) if all_pred_boxes_parts else np.zeros((0, 4), np.float32)
+    all_pred_scores = np.concatenate(all_pred_scores_parts) if all_pred_scores_parts else np.zeros(0, np.float32)
+    all_pred_classes = np.concatenate(all_pred_classes_parts) if all_pred_classes_parts else np.zeros(0, np.int32)
+
+    class_aps: list[float] = []
+    for c in range(1, num_classes):
+        gt_mask = all_gt_classes == c
+        pred_mask = all_pred_classes == c
+        ap = compute_ap50_95(
+            all_gt_boxes[gt_mask], all_gt_classes[gt_mask],
+            all_pred_boxes[pred_mask], all_pred_scores[pred_mask],
+            all_pred_classes[pred_mask],
+        )
+        if gt_mask.any():
+            class_aps.append(ap)
+
+    density_corr = _directional_density_correlation(gt_annotations, pred_annotations)
+
     return EvalMetrics(
-        proxy_ap50_95=float(np.mean(ap_scores)) if ap_scores else 0.0,
+        proxy_ap50_95=float(np.mean(class_aps)) if class_aps else 0.0,
         class_recall=class_recall,
         density_error=density_error,
         count_error=density_error,
-        nearest_distance_error=float(np.mean(nearest_dist_errors)) if nearest_dist_errors else 0.0,
+        nearest_distance_error=float(np.median(nearest_dist_errors)) if nearest_dist_errors else 0.0,
+        density_correlation=density_corr,
         track_id_switches=_UNSUPPORTED,  # 静的 eval では計算不能
     )
 
@@ -431,16 +511,14 @@ def check_performance_gate(
             "passed": passed,
         }
 
-    # --- density correlation (proxy: 1 - density_error / max_error) ---
-    # ponytail: directional-density correlation は full tracker 実行が必要; ここでは
-    # 1 - density_error をプロキシとして使う。実値は 04-08 で差し替える。
-    density_corr = max(0.0, 1.0 - metrics.density_error)
+    # --- density correlation ---
+    density_corr = metrics.density_correlation
     density_min = gate_cfg.get("density_correlation_min", 0.85)
     if density_corr < density_min:
         all_passed = False
 
     # --- nearest-distance median error ---
-    nd_median = metrics.nearest_distance_error  # mean; median は full dataset で計算
+    nd_median = metrics.nearest_distance_error  # median（全対象距離の実 median）
     nd_max = gate_cfg.get("nearest_distance_median_max", 0.04)
     if nd_median > nd_max:
         all_passed = False

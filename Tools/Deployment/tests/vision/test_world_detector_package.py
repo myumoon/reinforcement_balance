@@ -491,6 +491,37 @@ class TestTrainingSplitViews:
 
         assert routed == {"train": train_view, "validation": validation_view}
 
+    def test_validation_inference_error_propagates(self, tmp_path):
+        """validation 推論で RuntimeError が発生した場合は _evaluate_validation が例外を伝播する。"""
+        import train_survivors_world_detector as training
+
+        class _ErrorModel:
+            def __call__(self, imgs):
+                raise RuntimeError("simulated inference error")
+            def eval(self):
+                pass
+            def state_dict(self):
+                return {}
+
+        class _SingleItemDs:
+            def __len__(self):
+                return 1
+            def __getitem__(self, idx):
+                return SimpleNamespace(
+                    image_id=0,
+                    file_name="/nonexistent/image.jpg",
+                    image_height=64,
+                    image_width=64,
+                    annotations=[],
+                )
+
+        detector = SimpleNamespace(_model=_ErrorModel(), num_classes=10)
+        cfg = {"model": {"num_classes": 10}}
+        ds = _SingleItemDs()
+
+        with pytest.raises(RuntimeError, match="simulated inference error"):
+            training._evaluate_validation(detector, ds, cfg)
+
 
 # ---- Task 3: performance gate boundary values ----
 
@@ -521,9 +552,10 @@ class TestPerformanceGateBoundary:
         return EvalMetrics(
             proxy_ap50_95=0.5,
             class_recall={2: 0.95, 4: 0.99, 5: 0.93},  # enemy_normal=2, boss=4, gem_blue=5
-            density_error=0.10,  # 1 - 0.10 = 0.90 >= 0.85
+            density_error=0.10,
             count_error=0.10,
             nearest_distance_error=0.02,  # <= 0.04
+            density_correlation=0.90,  # >= 0.85
             mean_latency_ms=10.0,
         )
 
@@ -568,11 +600,11 @@ class TestPerformanceGateBoundary:
         assert not result.class_recall_results["gem_blue"]["passed"]
 
     def test_density_correlation_below_threshold_fails(self):
-        """density_error=0.20 → density_corr=0.80 < 0.85 は FAIL。"""
+        """density_correlation=0.80 < 0.85 は FAIL。"""
         from eval_survivors_world_detector import check_performance_gate
 
         m = self._base_metrics()
-        m.density_error = 0.20
+        m.density_correlation = 0.80
         result = check_performance_gate(m, self._gate_cfg(), self._class_name_by_id())
         assert not result.passed
 

@@ -126,6 +126,55 @@ class TestNearestDistanceNormalization:
         assert metrics.nearest_distance_error < 1e-6
 
 
+class TestMapCrossImage:
+    """cross-image mAP 集計の正確性を検証する（P1 修正）。"""
+
+    def test_fp_in_different_image_does_not_lower_ap(self):
+        """画像0にTP(高conf)、画像1に空GT+FP(低conf) → dataset全体のAP=1.0。"""
+        gts = [_gt(0, [0, 0, 50, 50], 1)]
+        preds = [
+            _pred(0, [0, 0, 50, 50], 1, score=0.9),   # image 0: TP
+            _pred(1, [200, 200, 50, 50], 1, score=0.1),  # image 1: FP (no GT)
+        ]
+        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        assert abs(metrics.proxy_ap50_95 - 1.0) < 1e-4, (
+            f"クロス画像でFPが後続 → AP=1.0 を期待、実際={metrics.proxy_ap50_95}"
+        )
+
+    def test_per_class_map_average(self):
+        """class1を完全検出・class2を全欠落 → class平均mAP=0.5。"""
+        gts = [_gt(0, [0, 0, 50, 50], 1), _gt(0, [200, 0, 50, 50], 2)]
+        preds = [_pred(0, [0, 0, 50, 50], 1, score=0.9)]  # class2の予測なし
+        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        assert abs(metrics.proxy_ap50_95 - 0.5) < 1e-4, (
+            f"class1=AP1.0, class2=AP0.0 → 平均0.5を期待、実際={metrics.proxy_ap50_95}"
+        )
+
+
+class TestNearestDistanceMedian:
+    """nearest_distance_error が実 median で計算されることを検証する（P1 修正）。"""
+
+    def test_median_not_mean_on_skewed_distances(self):
+        """正規化距離 [0, 0, large] → median≈0 で通過、mean は large/3 になる。"""
+        vp_diag = float(np.hypot(1920, 1080))
+        # 3 GT、pred1 は完全一致×2、pred3 は遠い場所
+        gts = [
+            _gt(0, [100, 100, 10, 10], 1),
+            _gt(0, [200, 100, 10, 10], 1),
+            _gt(0, [300, 100, 10, 10], 1),
+        ]
+        preds = [
+            _pred(0, [100, 100, 10, 10], 1, score=0.9),  # GT1 に完全一致
+            _pred(0, [200, 100, 10, 10], 1, score=0.8),  # GT2 に完全一致
+            _pred(0, [1900, 1070, 10, 10], 1, score=0.7),  # GT3 から遠い
+        ]
+        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        # distances: [0, 0, ~vp_diag] / vp_diag → median=0
+        assert metrics.nearest_distance_error < 1e-6, (
+            f"median は 0 を期待（外れ値 1 つは median を変えない）、実際={metrics.nearest_distance_error}"
+        )
+
+
 class TestTrackIdSwitchesUnsupported:
     """track_id_switches は静的 eval で計算不能 → unsupported を明示する（P1 修正）。"""
 
