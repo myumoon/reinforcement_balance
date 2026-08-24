@@ -6,7 +6,7 @@ development checkpoint（formal_detector_eligible=false）を保存する。
 学習前に split manifest（--split）を読み込み、error_calibration / final_e2e_test
 session を dataset loader に渡して自動除外する。
 
-session-balanced sampler で DatasetSample の実画像・target を構築して optimizer step する。
+session-interleaved sampler で DatasetSample の実画像・target を構築して optimizer step する。
 torch が不在の場合だけ stub ループにフォールバックする（例外の握り潰しなし）。
 
 チェックポイント選択規則は学習開始前に manifest へ固定する。
@@ -312,13 +312,13 @@ def _create_split_views(ds: Any, split: Any) -> tuple[_DatasetView, _DatasetView
 
     for index in range(len(ds)):
         sample = ds[index]
-        sample_sessions = {ann.session_id for ann in sample.annotations if ann.session_id}
-        if not sample_sessions:
-            # 負例フレーム: 画像レベルの session_id で振り分ける
-            img_session = getattr(sample, "session_id", "")
-            if not img_session:
-                continue
-            sample_sessions = {img_session}
+        img_session = getattr(sample, "session_id", "")
+        if not img_session:
+            raise DatasetPreflightError(
+                f"session_id が未設定の画像があります (image_id={sample.image_id})。"
+                " run_split_preflight() で session 欠損を先に検出してください。"
+            )
+        sample_sessions = {img_session}
         unknown_sessions = sample_sessions - allowed_sessions
         if unknown_sessions:
             raise DatasetPreflightError(
@@ -382,13 +382,15 @@ def _run_training(
     smoke=True のとき画像欠損をゼロ画像で代替する（通常学習では使用しない）。
     """
     try:
-        import torch as _torch
-        import torch.optim as optim
-    except ImportError:
+        import torch as _torch  # noqa: F401
+    except ModuleNotFoundError as e:
+        if e.name != "torch":
+            raise
         if resume_dir is not None:
             raise RuntimeError("[RESUME] model/optimizer state の復元には torch が必要です。")
         _run_training_stub(max_epochs, selector, out_dir, start_epoch=1)
         return
+    import torch.optim as optim
 
     opt_cfg = cfg.get("training", {}).get("optimizer", {}).get("sgd", {})
     optimizer = optim.SGD(
@@ -531,8 +533,8 @@ def _train_epoch(
 ) -> None:
     """session-interleaved sampler で config batch_size 単位の 1 epoch を学習する。
 
-    全サンプルを session round-robin で並べて batch を作る。SSDLite BatchNorm が
-    batch=1 にならないよう singleton remainder は学習へ渡さない。
+    全サンプルを session round-robin で並べて batch を作る。BatchNorm 保護のため
+    singleton 末尾 batch は直前 batch へ統合し、全サンプルを必ず学習へ渡す。
     通常モード: 画像ファイル不在は FileNotFoundError。smoke=True 時のみゼロ画像を許可。
     """
     if len(ds) == 0:
@@ -543,11 +545,13 @@ def _train_epoch(
         raise ValueError("training.batch_size は 2 以上の整数である必要があります。")
 
     ordered_indices = _session_interleaved_indices(ds)
-    for start in range(0, len(ordered_indices), batch_size):
-        batch_indices = ordered_indices[start:start + batch_size]
-        if len(batch_indices) == 1:
-            print("[WARN] BatchNorm 保護のため singleton training batch をスキップします。")
-            continue
+    batches = [ordered_indices[i:i + batch_size] for i in range(0, len(ordered_indices), batch_size)]
+    # singleton 末尾 batch を直前 batch へ統合して BatchNorm を保護しつつ全件学習する
+    if len(batches) >= 2 and len(batches[-1]) == 1:
+        batches[-2] = batches[-2] + batches[-1]
+        batches.pop()
+
+    for batch_indices in batches:
         images = []
         targets = []
         for sample_index in batch_indices:
@@ -774,6 +778,8 @@ def main(argv: list[str] | None = None) -> int:
         formal_detector_eligible=False,
         split_hash=_split_hash,
         resolved_config_hash=_resolved_config_hash,
+        development_only=True,
+        training_mode="smoke" if smoke else "development",
     )
     manifest.save(out_dir / "manifest.json")
 

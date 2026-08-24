@@ -35,7 +35,8 @@ def _make_coco(
     """
     sessions = sessions or ["s1", "s2", "s3", "s4"]
     images = [
-        {"id": i, "file_name": f"frame_{i:04d}.png", "width": 1920, "height": 1080}
+        {"id": i, "file_name": f"frame_{i:04d}.png", "width": 1920, "height": 1080,
+         "session_id": sessions[i % len(sessions)]}
         for i in range(n_images)
     ]
     annotations = []
@@ -170,6 +171,87 @@ class TestSplitPreflight:
         )
         with pytest.raises(DatasetPreflightError, match="train"):
             ds.run_split_preflight(split, min_frames_per_split=1, min_entities_per_split=1, min_classes_per_split=1)
+
+    def test_split_preflight_uses_sample_session_id_for_forbidden(self, tmp_path):
+        """run_split_preflight は DatasetSample.session_id を正本として forbidden を検出する。
+
+        annotation なし負例（annotation.session_id が空）でも final_e2e_test を検出できること。
+        """
+        from survivors.vision.world_dataset import WorldDataset, SessionSplit, DatasetPreflightError
+
+        # 画像レベルに session_id を付け、annotation なし負例として final_e2e_test を混入
+        data: dict = {
+            "images": [
+                {"id": 0, "file_name": "f0.png", "width": 100, "height": 100, "session_id": "train_01"},
+                {"id": 1, "file_name": "f1.png", "width": 100, "height": 100, "session_id": "val_01"},
+                {"id": 2, "file_name": "f2.png", "width": 100, "height": 100, "session_id": "final_e2e"},
+            ],
+            "annotations": [
+                {"id": 0, "image_id": 0, "category_id": 1, "bbox": [0, 0, 10, 10], "session_id": "train_01"},
+                {"id": 1, "image_id": 1, "category_id": 1, "bbox": [0, 0, 10, 10], "session_id": "val_01"},
+                # image_id=2 は annotation なし（annotation.session_id が存在しない）
+            ],
+            "categories": [{"id": k, "name": f"class_{k}"} for k in range(1, 12)],
+        }
+        ann_path = _write_coco(tmp_path, data)
+        ds = WorldDataset(ann_path, CLASS_MAP_PATH)
+        split = SessionSplit(
+            train=["train_01"], validation=["val_01"],
+            error_calibration=[], final_e2e_test=["final_e2e"],
+        )
+        with pytest.raises(DatasetPreflightError, match="final_e2e"):
+            ds.run_split_preflight(split, min_frames_per_split=1, min_entities_per_split=1, min_classes_per_split=1)
+
+    def test_split_preflight_raises_on_missing_sample_session_id(self, tmp_path):
+        """DatasetSample.session_id が未設定の画像は run_split_preflight で拒否される。"""
+        from survivors.vision.world_dataset import WorldDataset, SessionSplit, DatasetPreflightError
+
+        # 画像に session_id を付けない
+        data: dict = {
+            "images": [
+                {"id": 0, "file_name": "f0.png", "width": 100, "height": 100},  # session_id なし
+                {"id": 1, "file_name": "f1.png", "width": 100, "height": 100, "session_id": "val_01"},
+            ],
+            "annotations": [
+                {"id": 0, "image_id": 0, "category_id": 1, "bbox": [0, 0, 10, 10], "session_id": "train_01"},
+                {"id": 1, "image_id": 1, "category_id": 1, "bbox": [0, 0, 10, 10], "session_id": "val_01"},
+            ],
+            "categories": [{"id": k, "name": f"class_{k}"} for k in range(1, 12)],
+        }
+        ann_path = _write_coco(tmp_path, data)
+        ds = WorldDataset(ann_path, CLASS_MAP_PATH)
+        split = SessionSplit(
+            train=["train_01"], validation=["val_01"],
+            error_calibration=[], final_e2e_test=[],
+        )
+        with pytest.raises(DatasetPreflightError, match="session_id"):
+            ds.run_split_preflight(split, min_frames_per_split=1, min_entities_per_split=1, min_classes_per_split=1)
+
+    def test_split_preflight_counts_train_negatives_by_sample_session_id(self, tmp_path):
+        """train 負例フレームは DatasetSample.session_id でカウントされる。"""
+        from survivors.vision.world_dataset import WorldDataset, SessionSplit, DatasetPreflightError
+
+        # train session に annotation なし負例を 1 件含む（annotation は val のみ）
+        data: dict = {
+            "images": [
+                {"id": 0, "file_name": "f0.png", "width": 100, "height": 100, "session_id": "train_01"},
+                {"id": 1, "file_name": "f1.png", "width": 100, "height": 100, "session_id": "val_01"},
+            ],
+            "annotations": [
+                # image_id=0 は annotation なし（train 負例）
+                {"id": 0, "image_id": 1, "category_id": 1, "bbox": [0, 0, 10, 10], "session_id": "val_01"},
+            ],
+            "categories": [{"id": k, "name": f"class_{k}"} for k in range(1, 12)],
+        }
+        ann_path = _write_coco(tmp_path, data)
+        ds = WorldDataset(ann_path, CLASS_MAP_PATH)
+        split = SessionSplit(
+            train=["train_01"], validation=["val_01"],
+            error_calibration=[], final_e2e_test=[],
+        )
+        # train 1 frame（負例）, validation 1 frame: min_frames_per_split=1 で通過
+        # DatasetSample.session_id を使えば train も 1 件カウントされる
+        ds.run_split_preflight(split, min_frames_per_split=1, min_entities_per_split=0, min_classes_per_split=0)
 
 
 # ---- Task 2: training smoke / checkpoint selection ----
@@ -404,8 +486,8 @@ class TestTrainEpoch:
         )
         assert model.batch_sizes == [(4, 4), (4, 4)]
 
-    def test_train_epoch_drops_singleton_remainder(self):
-        """最終 batch が 1 件だけの場合は BatchNorm へ渡さない。"""
+    def test_train_epoch_merges_singleton_remainder(self):
+        """4件 batch_size=3 の場合、singleton 末尾を直前へ統合して全4件を学習する。"""
         torch = pytest.importorskip("torch")
         from train_survivors_world_detector import _train_epoch
         from survivors.vision.world_dataset import COCOAnnotation, DatasetSample
@@ -417,17 +499,18 @@ class TestTrainEpoch:
                 image_width=32,
                 image_height=32,
                 annotations=[COCOAnnotation(index, index, 1, (1, 1, 4, 4), f"s{index % 2}")],
+                session_id=f"s{index % 2}",
             )
             for index in range(4)
         ]
-        batch_sizes = []
+        trained_items: list[int] = []
 
         class Model:
             def train(self):
                 return self
 
             def __call__(self, images, targets):
-                batch_sizes.append(len(images))
+                trained_items.extend(range(len(images)))
                 return {"loss": torch.tensor(1.0, requires_grad=True)}
 
         optimizer = SimpleNamespace(zero_grad=lambda: None, step=lambda: None)
@@ -436,7 +519,8 @@ class TestTrainEpoch:
             {"training": {"batch_size": 3}},
             smoke=True,  # 画像ファイルが存在しないためゼロ画像でテスト
         )
-        assert batch_sizes == [3]
+        # singleton(1件) を直前 batch(3件) へ統合 → 4件全件が学習される
+        assert sum(1 for _ in trained_items) == 4
 
 
 class TestTrainingSplitViews:
@@ -523,6 +607,65 @@ class TestTrainingSplitViews:
 
         with pytest.raises(RuntimeError, match="simulated inference error"):
             training._evaluate_validation(detector, ds, cfg, smoke=True)
+
+    def test_create_split_views_raises_on_missing_sample_session_id(self, tmp_path):
+        """DatasetSample.session_id が空の場合は _create_split_views が DatasetPreflightError。"""
+        from survivors.vision.world_dataset import WorldDataset, SessionSplit
+        from train_survivors_world_detector import _create_split_views
+        from survivors.vision.world_dataset import DatasetPreflightError
+
+        # 画像に session_id を付けない（session_id 欠損）
+        data: dict = {
+            "images": [
+                {"id": 0, "file_name": "f0.png", "width": 100, "height": 100},
+                {"id": 1, "file_name": "f1.png", "width": 100, "height": 100, "session_id": "val_01"},
+            ],
+            "annotations": [
+                {"id": 0, "image_id": 0, "category_id": 1, "bbox": [0, 0, 10, 10], "session_id": "train_01"},
+                {"id": 1, "image_id": 1, "category_id": 1, "bbox": [0, 0, 10, 10], "session_id": "val_01"},
+            ],
+            "categories": [{"id": k, "name": f"class_{k}"} for k in range(1, 12)],
+        }
+        ann_path = _write_coco(tmp_path, data)
+        ds = WorldDataset(ann_path, CLASS_MAP_PATH)
+        split = SessionSplit(
+            train=["train_01"], validation=["val_01"],
+            error_calibration=[], final_e2e_test=[],
+        )
+        with pytest.raises(DatasetPreflightError, match="session_id"):
+            _create_split_views(ds, split)
+
+
+# ---- Task 2.5: ImportError narrowing ----
+
+class TestImportErrorNarrowing:
+    """内部 ImportError は stub へ fallback せず伝播することを確認する。"""
+
+    def test_internal_torch_optim_error_propagates(self, monkeypatch):
+        """torch は存在するが torch.optim.SGD が内部 ImportError を送出する場合は伝播する。"""
+        import torch.optim as real_optim
+        import train_survivors_world_detector as training
+
+        pytest.importorskip("torch")
+
+        class _BrokenSGD:
+            """SGD コンストラクタが ImportError を送出するスタブ。"""
+
+            def __init__(self, *args, **kwargs):
+                raise ImportError("simulated internal torch.optim.SGD error")
+
+        monkeypatch.setattr(real_optim, "SGD", _BrokenSGD)
+
+        # _run_training は torch 利用可能 → optim.SGD(...) で ImportError → 伝播する
+        detector = SimpleNamespace(_model=SimpleNamespace(parameters=lambda: []))
+        with pytest.raises(ImportError, match="simulated internal"):
+            training._run_training(
+                detector, [], [],
+                {"training": {"batch_size": 2, "max_epochs": 1}},
+                max_epochs=1,
+                selector=training.CheckpointSelector(metric="val_map50_95", keep_top_k=1),
+                out_dir=pathlib.Path("/tmp"),
+            )
 
 
 # ---- Task 3: performance gate boundary values ----
@@ -895,6 +1038,52 @@ class TestPackagePublish:
         docs = docs_path.read_text(encoding="utf-8")
         assert "cfg_path=cfg_path" in docs
         assert "cm_path=cm_path" in docs
+
+    def test_development_only_and_training_mode_development_in_package(self, tmp_path):
+        """publish_development_package の manifest に development_only=True と training_mode='development' が含まれる。"""
+        from survivors.vision.world_detector_package import publish_development_package, PackageManifest
+
+        checkpoint_manifest = _make_checkpoint_manifest()
+        store = tmp_path / "store"
+        store.mkdir()
+        pkg_path = publish_development_package(
+            checkpoint_manifest,
+            metrics_dict={}, checkpoint_selection={},
+            store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
+        )
+        raw = json.loads(pkg_path.read_text(encoding="utf-8"))
+        pm = PackageManifest.from_dict(raw)
+        assert pm.development_only is True
+        assert pm.training_mode == "development"
+
+    def test_smoke_training_mode_propagates_to_package(self, tmp_path):
+        """training_mode='smoke' の CheckpointManifest から package に伝播する。"""
+        from survivors.vision.world_detector_package import publish_development_package, PackageManifest
+        from survivors.vision.world_detector import CheckpointManifest
+
+        ckpt = CheckpointManifest(
+            model_hash="a" * 64,
+            data_hash="b" * 64,
+            config_hash=_sha256_file(DETECTOR_CONFIG_PATH),
+            build_hash="d" * 64,
+            class_map_hash=_sha256_file(CLASS_MAP_PATH),
+            formal_detector_eligible=False,
+            training_mode="smoke",
+        )
+        store = tmp_path / "store"
+        store.mkdir()
+        pkg_path = publish_development_package(
+            ckpt,
+            metrics_dict={}, checkpoint_selection={},
+            store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
+        )
+        raw = json.loads(pkg_path.read_text(encoding="utf-8"))
+        pm = PackageManifest.from_dict(raw)
+        assert pm.training_mode == "smoke"
 
 
 class TestPackageRestore:

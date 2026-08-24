@@ -39,7 +39,7 @@ class EvalMetrics:
     未実装指標は "unsupported" を出力し、0 と区別する。
     """
 
-    # AP50:95: PR 曲線台形積分の IoU 閾値平均（COCO 定義）。
+    # proxy_ap50_95: PR 曲線台形積分の IoU 閾値平均（development diagnostic）。COCO 公式 101 点補間とは異なる。
     proxy_ap50_95: float = 0.0
     class_recall: dict[int, float] = field(default_factory=dict)
     # density_error: エンティティ密度誤差（count_error と同じ集計軸）
@@ -383,7 +383,7 @@ def evaluate_from_predictions(
     }
     density_error = float(np.mean(count_errors)) if count_errors else 0.0
 
-    # COCO mAP: 同一画像内 GT のみとマッチする image-aware 計算
+    # proxy mAP（開発 diagnostic）: 同一画像内 GT のみとマッチする image-aware 台形積分
     class_aps: list[float] = []
     for c in range(1, num_classes):
         if any(g["category_id"] == c for gts in gt_by_image.values() for g in gts):
@@ -544,49 +544,6 @@ def _compute_slice_recall(
     return float(total_tp / total_gt) if total_gt > 0 else 1.0
 
 
-def _compute_session_ci_recall(
-    gt_annotations: list[dict],
-    pred_annotations: list[dict],
-    iou_threshold: float = 0.5,
-    z: float = 1.645,
-) -> float | None:
-    """セッション単位の recall 分布から cluster CI 下限を返す。
-
-    全インスタンスを pool した recall ではなく、セッションごとの recall 平均の
-    信頼区間下限（z=1.645 で 90% 片側）を返す。1 つのセッションだけが好成績で
-    他が全滅するモデルでも gate を通過できなくなる。
-    セッションが 1 件のみの場合は recall をそのまま返す。
-    """
-    # session ごとに GT をグループ化（image_id でもインデックス化）
-    session_gts: dict[str, list[dict]] = {}
-    session_images: dict[str, set[int]] = {}
-    for a in gt_annotations:
-        sid = a.get("session_id", "")
-        session_gts.setdefault(sid, []).append(a)
-        session_images.setdefault(sid, set()).add(a["image_id"])
-
-    if not session_gts:
-        return None
-
-    # per-session recall: prediction は session 内 image_id でマッチ（session_id 不要）
-    recalls: list[float] = []
-    for sid, s_gts in session_gts.items():
-        s_img_ids = session_images[sid]
-        s_preds = [a for a in pred_annotations if a.get("image_id") in s_img_ids]
-        r = _compute_slice_recall(s_gts, s_preds, iou_threshold)
-        recalls.append(r)
-
-    n = len(recalls)
-    if n == 1:
-        return recalls[0]
-
-    mean_r = sum(recalls) / n
-    # 不偏標本分散 → SE → t/z 近似 CI 下限
-    variance = sum((r - mean_r) ** 2 for r in recalls) / (n - 1)
-    se = (variance / n) ** 0.5
-    # ponytail: z 近似（n>=4 前提）。n<4 なら min_sessions 条件で gate 自体が FAIL する。
-    return max(0.0, mean_r - z * se)
-
 
 def compute_dev_diagnostics(
     metrics: EvalMetrics,
@@ -666,9 +623,10 @@ def compute_dev_diagnostics(
         n_instances = len(s_anns)
         n_sessions = len({a.get("session_id", "") for a in s_anns if a.get("session_id")})
 
+        # 04-07: 単純な development slice recall。session-cluster CI は 04-08 で実装する。
         if n_instances >= s_min_instances and n_sessions >= s_min_sessions:
             s_preds = (slice_predictions or {}).get(slice_name, [])
-            s_recall: float | None = _compute_session_ci_recall(s_anns, s_preds)
+            s_recall: float | None = _compute_slice_recall(s_anns, s_preds)
         else:
             s_recall = None
 

@@ -105,8 +105,9 @@ synthetic fixture のみ使用。GPU・実画像・実 weight 不要。
 ## 制約と非目標
 
 - **formal_detector_eligible=false:** 本 PR の checkpoint / config はすべて開発用。
-  正式パッケージへの昇格は 04-08 が確定する。
-- **weight なし:** 学習 CLI はスタブ実装。実際の weight 更新は 04-07 が実装する。
+  正式パッケージへの昇格は 04-08 が確定する。formal publish は常に `FormalPackageRejectedError` で拒否される。
+- **development-only:** 学習 CLI は DataLoader / optimizer / SGD を実装する（開発用）。
+  manifest に `development_only=true` と `training_mode: "smoke" | "development"` を記録する。
 - **新規 detection framework 依存なし:** torchvision だけを使用する。
 - **実動画の recall / latency 合格は本 PR の完了条件ではない。**
 
@@ -149,18 +150,21 @@ validation 後に `selector.record(CheckpointRecord(...))` を呼ぶと、
 `keep_top_k` 内の best が `selector.best` で取得できる。
 `selector.to_dict()` は `manifest.json` に追記される。
 
-### performance gate
+### development diagnostics gate
 
 ```python
-gate_result = check_performance_gate(
+from eval_survivors_world_detector import compute_dev_diagnostics
+
+gate_result = compute_dev_diagnostics(
     metrics, gate_cfg, class_name_by_id,
     slice_annotations=slice_annotations,
 )
-# gate_result.passed が False なら全体 FAIL
+# gate_result.passed が False なら開発 diagnostic FAIL
 ```
 
-`world_detector_v1.yaml` の `performance_gate` セクションに閾値を定義する。
-実 weight での合格は 04-08 に委譲する。
+`world_detector_v1.yaml` の `dev_diagnostics` セクションに閾値を定義する。
+formal 性能判定・threshold・session-cluster CI は 04-08 に委譲する。
+development diagnostics の `passed=True` は formal PASSではない。
 
 ### package writer
 
@@ -181,5 +185,5 @@ state = restore_package(pkg_path, frame_bgr)  # TrackedWorldStateV1 を返す
 
 - `formal_detector_eligible=false` の package は `assert_formal_eligible()` で拒否される。
 - `contract_hash` が TrackedWorldStateV1 フィールド定義と一致しない場合は `PackageSchemaError`。
-- formal publish は `validation_passed=True` かつ `formal_detector_eligible=True` の
-  `CheckpointManifest` と、`model_hash` が一致する必須の `weight_path` が必要（04-08 で発行）。
+- `publish_formal_package()` は引数にかかわらず `FormalPackageRejectedError` を送出する（04-08 で実装）。
+- manifest には `development_only=true` と `training_mode` が記録される。

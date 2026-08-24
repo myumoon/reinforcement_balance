@@ -192,6 +192,25 @@ class TestCheckpointManifest:
         assert loaded.model_hash == manifest.model_hash
         assert loaded.formal_detector_eligible is False
 
+    def test_manifest_development_only_and_training_mode_round_trip(self, tmp_path):
+        """development_only と training_mode が save/load で保持される。"""
+        for mode in ("smoke", "development"):
+            manifest = CheckpointManifest(
+                model_hash="a" * 64,
+                data_hash="b" * 64,
+                config_hash="c" * 64,
+                build_hash="d" * 64,
+                class_map_hash="e" * 64,
+                formal_detector_eligible=False,
+                development_only=True,
+                training_mode=mode,
+            )
+            path = tmp_path / f"manifest_{mode}.json"
+            manifest.save(path)
+            loaded = CheckpointManifest.load(path)
+            assert loaded.development_only is True
+            assert loaded.training_mode == mode
+
     def test_load_rejects_invalid_hash_format(self, tmp_path):
         """SHA-256 形式でないハッシュを持つ manifest の load を拒否する。"""
         bad = {

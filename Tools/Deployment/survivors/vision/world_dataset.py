@@ -259,8 +259,17 @@ class WorldDataset:
         0 件 slice は DatasetPreflightError で失敗する。
         error_calibration / final_e2e_test の session ID がサンプル側に存在しないことも確認する。
         """
+        # DatasetSample.session_id を正本として使用する。
+        missing_session = [s for s in self._samples if not s.session_id]
+        if missing_session:
+            image_ids = [s.image_id for s in missing_session[:5]]
+            raise DatasetPreflightError(
+                f"session_id が未設定の画像が {len(missing_session)} 件あります"
+                f" (image_ids={image_ids}...)。session 欠損サンプルは使用できません。"
+            )
+
         forbidden = set(split.error_calibration) | set(split.final_e2e_test)
-        seen_in_data = {a.session_id for s in self._samples for a in s.annotations if a.session_id}
+        seen_in_data = {s.session_id for s in self._samples}
         overlap = forbidden & seen_in_data
         if overlap:
             raise DatasetPreflightError(
@@ -277,7 +286,7 @@ class WorldDataset:
                 raise DatasetPreflightError(f"split '{split_name}' のセッションが 0 件です。")
             samples_in_split = [
                 s for s in self._samples
-                if any(a.session_id in session_set for a in s.annotations)
+                if s.session_id in session_set
             ]
             n_frames = len(samples_in_split)
             if n_frames < min_frames_per_split:

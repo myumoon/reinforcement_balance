@@ -66,6 +66,8 @@ class PackageManifest:
     checkpoint_selection: dict  # CheckpointSelector.to_dict()
     weight_included: bool       # package 内に model.pt があるか
     score_threshold: float      # restore_package の推論スコア閾値（再現性保証）
+    development_only: bool = True   # 常に True。04-08 以外で False にはならない。
+    training_mode: str = "development"  # "smoke" | "development"
 
     def to_dict(self) -> dict:
         """JSON シリアライズ用 dict。"""
@@ -82,6 +84,8 @@ class PackageManifest:
             "checkpoint_selection": self.checkpoint_selection,
             "weight_included": self.weight_included,
             "score_threshold": self.score_threshold,
+            "development_only": self.development_only,
+            "training_mode": self.training_mode,
         }
 
     @staticmethod
@@ -104,6 +108,8 @@ class PackageManifest:
             checkpoint_selection=d.get("checkpoint_selection", {}),
             weight_included=d.get("weight_included", False),
             score_threshold=float(d.get("score_threshold", 0.5)),
+            development_only=d.get("development_only", True),
+            training_mode=d.get("training_mode", "development"),
         )
 
     def assert_formal_eligible(self) -> None:
@@ -259,6 +265,8 @@ def publish_development_package(
         checkpoint_selection=checkpoint_selection,
         weight_included=(weight_path is not None),
         score_threshold=score_threshold,
+        development_only=getattr(checkpoint_manifest, "development_only", True),
+        training_mode=getattr(checkpoint_manifest, "training_mode", "development"),
     )
 
     store_dir.mkdir(parents=True, exist_ok=True)
@@ -356,13 +364,16 @@ def restore_package(
             raise PackageSchemaError("weight の model_hash が manifest と一致しません。")
         try:
             import torch
+        except ModuleNotFoundError as e:
+            if e.name != "torch":
+                raise
+        else:
+            # torch が利用可能な場合のみ weight をロードする（内部エラーは伝播）
             try:
                 state_dict = torch.load(weight_file, map_location="cpu", weights_only=True)
             except TypeError:
                 state_dict = torch.load(weight_file, map_location="cpu")
             detector._model.load_state_dict(state_dict)
-        except ImportError:
-            pass  # torch 不在: stub model のまま推論する
 
     # -- infer（manifest の score_threshold で再現性を保証）
     result = detector.infer(frame_bgr, score_threshold=pkg_manifest.score_threshold)

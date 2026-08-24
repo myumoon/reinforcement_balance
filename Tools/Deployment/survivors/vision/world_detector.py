@@ -26,7 +26,9 @@ try:
     import torch
     import torchvision
     _TORCH_AVAILABLE = True
-except ImportError:  # pragma: no cover — CI 環境で torch が入っていない場合
+except ModuleNotFoundError as e:  # pragma: no cover — CI 環境で torch が入っていない場合
+    if e.name not in {"torch", "torchvision"}:
+        raise
     _TORCH_AVAILABLE = False
 
 
@@ -107,6 +109,8 @@ class CheckpointManifest:
     formal_detector_eligible: bool
     split_hash: str = ""           # split JSON の SHA-256。空文字は旧 manifest との互換用。
     resolved_config_hash: str = "" # CLI override 適用後の config dict SHA-256。
+    development_only: bool = True  # 常に True。04-08 以外で False にはならない。
+    training_mode: str = "development"  # "smoke" | "development"
 
     _HASH_FIELDS = ("model_hash", "data_hash", "config_hash", "build_hash", "class_map_hash")
 
@@ -159,6 +163,8 @@ class CheckpointManifest:
             "formal_detector_eligible": self.formal_detector_eligible,
             "split_hash": self.split_hash,
             "resolved_config_hash": self.resolved_config_hash,
+            "development_only": self.development_only,
+            "training_mode": self.training_mode,
         }
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -181,6 +187,8 @@ class CheckpointManifest:
             formal_detector_eligible=elig,
             split_hash=payload.get("split_hash", ""),
             resolved_config_hash=payload.get("resolved_config_hash", ""),
+            development_only=payload.get("development_only", True),
+            training_mode=payload.get("training_mode", "development"),
         )
         manifest._validate_hash_format()
         return manifest
