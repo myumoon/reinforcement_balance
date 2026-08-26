@@ -241,18 +241,53 @@ class TestCheckpointManifest:
         with pytest.raises(ValueError, match="bool"):
             CheckpointManifest.load(path)
 
-    def test_assert_formal_eligible_rejects_non_bool_true(self):
-        """formal_detector_eligible=True (bool) でないと assert_formal_eligible() は拒否する。"""
-        manifest = CheckpointManifest(
-            model_hash="a" * 64,
-            data_hash="b" * 64,
-            config_hash="c" * 64,
-            build_hash="d" * 64,
-            class_map_hash="e" * 64,
-            formal_detector_eligible=False,
-        )
-        with pytest.raises(FormalDetectorRejectedError):
-            manifest.assert_formal_eligible()
+    def test_assert_formal_eligible_always_rejects(self):
+        """04-07 checkpoint は formal_detector_eligible の値に関わらず assert_formal_eligible() が拒否する。"""
+        for eligible in (False, True):
+            manifest = CheckpointManifest(
+                model_hash="a" * 64,
+                data_hash="b" * 64,
+                config_hash="c" * 64,
+                build_hash="d" * 64,
+                class_map_hash="e" * 64,
+                formal_detector_eligible=eligible,
+            )
+            with pytest.raises(FormalDetectorRejectedError):
+                manifest.assert_formal_eligible()
+
+    def test_load_forces_formal_false_and_development_only(self, tmp_path):
+        """load() は formal_detector_eligible=True のファイルを False に上書きし development_only=True を保証する。"""
+        payload = {
+            "model_hash": "a" * 64,
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "formal_detector_eligible": True,   # caller が True にしても
+            "development_only": False,           # False にしても
+            "training_mode": "development",
+        }
+        path = tmp_path / "manifest.json"
+        path.write_text(__import__("json").dumps(payload), encoding="utf-8")
+        loaded = CheckpointManifest.load(path)
+        assert loaded.formal_detector_eligible is False
+        assert loaded.development_only is True
+
+    def test_load_rejects_invalid_training_mode(self, tmp_path):
+        """load() は training_mode が 'smoke'|'development' 以外なら ValueError を送出する。"""
+        payload = {
+            "model_hash": "a" * 64,
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "formal_detector_eligible": False,
+            "training_mode": "formal",
+        }
+        path = tmp_path / "manifest_bad_mode.json"
+        path.write_text(__import__("json").dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="training_mode"):
+            CheckpointManifest.load(path)
 
     def test_verify_identity_passes_on_match(self):
         """verify_identity() は期待 hash と一致すれば例外を送出しない。"""

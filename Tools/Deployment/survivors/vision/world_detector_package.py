@@ -90,14 +90,23 @@ class PackageManifest:
 
     @staticmethod
     def from_dict(d: dict) -> "PackageManifest":
-        """dict から PackageManifest を復元する。schema_version を検証する。"""
+        """dict から PackageManifest を復元する。schema_version を検証する。
+
+        04-07 境界: formal_detector_eligible は必ず False へ上書き、development_only は True、
+        training_mode は "smoke" | "development" のみ許容する。
+        """
         if d.get("schema_version") != PACKAGE_SCHEMA_VERSION:
             raise ValueError(
                 f"未知の package schema_version: {d.get('schema_version')!r}"
             )
+        raw_mode = d.get("training_mode", "development")
+        if raw_mode not in ("smoke", "development"):
+            raise ValueError(
+                f"training_mode の許容値は 'smoke' | 'development' です。got: {raw_mode!r}"
+            )
         return PackageManifest(
             schema_version=d["schema_version"],
-            formal_detector_eligible=d["formal_detector_eligible"],
+            formal_detector_eligible=False,    # 04-07 は常に False
             model_hash=d["model_hash"],
             data_hash=d["data_hash"],
             config_hash=d["config_hash"],
@@ -108,17 +117,20 @@ class PackageManifest:
             checkpoint_selection=d.get("checkpoint_selection", {}),
             weight_included=d.get("weight_included", False),
             score_threshold=float(d.get("score_threshold", 0.5)),
-            development_only=d.get("development_only", True),
-            training_mode=d.get("training_mode", "development"),
+            development_only=True,             # 04-07 は常に True
+            training_mode=raw_mode,
         )
 
     def assert_formal_eligible(self) -> None:
-        """formal 昇格していない package をロードしようとすると拒否する。"""
-        if not (type(self.formal_detector_eligible) is bool and self.formal_detector_eligible):
-            raise FormalPackageRejectedError(
-                "development package は formal detector として使用できません。"
-                " formal_detector_eligible=true の package を 04-08 で作成してください。"
-            )
+        """04-07 の package は caller 指定フラグに関わらず常に formal 拒否する。
+
+        formal_detector_eligible の値に関係なく例外を送出する。
+        formal 昇格は 04-08 の validated verdict によってのみ可能。
+        """
+        raise FormalPackageRejectedError(
+            "04-07 package は formal detector として使用できません。"
+            " formal 昇格は 04-08 の検証済み verdict によってのみ行われます。"
+        )
 
 
 class FormalPackageRejectedError(ValueError):

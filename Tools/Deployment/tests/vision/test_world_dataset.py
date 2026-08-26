@@ -50,7 +50,11 @@ def _make_coco_json(
     *,
     add_images: bool = True,
 ) -> dict:
-    """最小限の COCO JSON 構造を組み立てる。"""
+    """最小限の COCO JSON 構造を組み立てる。
+
+    annotation の session_id を images[].session_id へ伝播し、
+    DatasetSample.session_id（画像レベル正本）が正しく設定されるようにする。
+    """
     if categories is None:
         categories = [
             {"id": i, "name": name}
@@ -71,8 +75,20 @@ def _make_coco_json(
                 ]
             )
         ]
+    # annotation の session_id を image レベルへ伝播する（最初に出現した値を採用）
+    image_session: dict[int, str] = {}
+    for r in records:
+        sid = r.get("session_id", "")
+        if sid and r["image_id"] not in image_session:
+            image_session[r["image_id"]] = sid
     images = [
-        {"id": i, "file_name": f"frame_{i:06d}.png", "width": 1920, "height": 1080}
+        {
+            "id": i,
+            "file_name": f"frame_{i:06d}.png",
+            "width": 1920,
+            "height": 1080,
+            **( {"session_id": image_session[i]} if i in image_session else {} ),
+        }
         for i in range(num_images)
     ] if add_images else []
     annotations = [
@@ -285,6 +301,31 @@ class TestDatasetPreflight:
         ds = WorldDataset(path, CLASS_MAP_PATH)
         with pytest.raises(DatasetPreflightError, match="min_time_bands"):
             ds.run_preflight(min_frames=300, min_entities=10, min_classes=1, min_time_bands=4)
+
+    def test_min_time_bands_uses_image_session_not_annotation_session(self, tmp_path):
+        """annotation.session_id が空でも images[].session_id が 4 種あれば min_time_bands=4 を通過する。
+
+        P1回帰テスト: min_time_bands を DatasetSample.session_id（画像レベル）から計算することを確認する。
+        """
+        sessions = ["s0", "s1", "s2", "s3"]
+        images = [
+            {"id": i, "file_name": f"frame_{i:04d}.png", "width": 1920, "height": 1080,
+             "session_id": sessions[i]}
+            for i in range(4)
+        ]
+        # annotation.session_id を意図的に省略（空）
+        annotations = [
+            {"id": i, "image_id": i, "category_id": (i % 3) + 1, "bbox": [10, 10, 20, 20]}
+            for i in range(4)
+        ]
+        categories = [{"id": k, "name": f"c{k}"} for k in range(1, 12)]
+        data = {"images": images, "annotations": annotations, "categories": categories}
+        path = tmp_path / "ann.json"
+        path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+        ds = WorldDataset(path, CLASS_MAP_PATH)
+        # annotation session なし・画像 session 4 種 → min_time_bands=4 を通過
+        ds.run_preflight(min_frames=4, min_entities=4, min_classes=1, min_time_bands=4)
 
 
 # ---- 新規回帰テスト: 画像レベル session_id の rejected_sessions チェック ----

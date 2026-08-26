@@ -147,11 +147,14 @@ def _save_resume_state(
     selector: CheckpointSelector,
     model: Any,
     optimizer: Any,
+    *,
+    training_mode: str = "development",
 ) -> None:
-    """model / optimizer / epoch / selector を単一 last checkpoint に保存する。
+    """model / optimizer / epoch / selector / training_mode を single last checkpoint に保存する。
 
     best checkpoint は選択・publish 専用であり、resume には使用しない。
     last checkpoint の SHA-256 は metadata に保存し、復元前に検証する。
+    training_mode は resume 時の smoke/development 混在を防ぐために保存する。
     """
     import torch
 
@@ -181,6 +184,7 @@ def _save_resume_state(
         "last_epoch": epoch,
         "last_checkpoint": _LAST_CHECKPOINT_NAME,
         "last_checkpoint_hash": _sha256_file(checkpoint_path),
+        "training_mode": training_mode,
     }
     metadata_path = out_dir / _RESUME_STATE_NAME
     tmp_metadata = metadata_path.with_suffix(".json.tmp")
@@ -195,11 +199,14 @@ def _load_resume_state(
     selector: CheckpointSelector,
     model: Any,
     optimizer: Any,
+    *,
+    expected_training_mode: str = "development",
 ) -> int:
     """resume_dir から training state を復元し、次の epoch 番号を返す。
 
     metadata / last checkpoint の欠落・hash 不一致・state 欠落は ValueError。
     best checkpoint は参照せず、単一 last checkpoint だけを復元する。
+    training_mode の smoke/development 混在（例: smoke checkpoint を development で resume）は拒否する。
     """
     state_path = resume_dir / _RESUME_STATE_NAME
     if not state_path.exists():
@@ -223,6 +230,13 @@ def _load_resume_state(
         raise ValueError(
             f"[RESUME] training_state.json の schema_version が不正です: "
             f"{state.get('schema_version')!r}"
+        )
+
+    saved_mode = state.get("training_mode")
+    if saved_mode is not None and saved_mode != expected_training_mode:
+        raise ValueError(
+            f"[RESUME] training_mode の不一致: 保存済み={saved_mode!r}, "
+            f"現在={expected_training_mode!r}。smoke と development の間で resume はできません。"
         )
     if state.get("last_checkpoint") != _LAST_CHECKPOINT_NAME:
         raise ValueError("[RESUME] last checkpoint path が不正です。")
@@ -339,6 +353,31 @@ def _create_split_views(ds: Any, split: Any) -> tuple[_DatasetView, _DatasetView
     return _DatasetView(ds, train_indices), _DatasetView(ds, validation_indices)
 
 
+# ---- image preflight ----
+
+def _check_all_images(*dataset_views: Any) -> list[str]:
+    """全 view の全サンプル画像を存在確認し、欠落・decode 失敗のパスリストを返す。
+
+    optimizer 作成前に呼ぶことで、後半画像の欠落による optimizer step 後失敗を防ぐ。
+    smoke モード以外でのみ使用する。
+    """
+    errors: list[str] = []
+    for view in dataset_views:
+        for idx in range(len(view)):
+            sample = view[idx]
+            img_path = pathlib.Path(sample.file_name)
+            if not img_path.exists():
+                errors.append(f"画像欠落: {img_path}")
+                continue
+            try:
+                import cv2
+                if cv2.imread(str(img_path)) is None:
+                    errors.append(f"decode 失敗: {img_path}")
+            except Exception as exc:
+                errors.append(f"decode 例外 ({exc}): {img_path}")
+    return errors
+
+
 # ---- config guard ----
 
 def _reject_unimplemented_config(cfg: dict) -> None:
@@ -386,6 +425,11 @@ def _run_training(
     except ModuleNotFoundError as e:
         if e.name != "torch":
             raise
+        if not smoke:
+            raise RuntimeError(
+                "torch が見つかりません。通常学習には torch が必要です。"
+                " smoke モードのみ torch なし実行を許可します（--smoke フラグを使用してください）。"
+            )
         if resume_dir is not None:
             raise RuntimeError("[RESUME] model/optimizer state の復元には torch が必要です。")
         _run_training_stub(max_epochs, selector, out_dir, start_epoch=1)
@@ -401,8 +445,12 @@ def _run_training(
     )
 
     start_epoch = 1
+    current_mode = "smoke" if smoke else "development"
     if resume_dir is not None:
-        start_epoch = _load_resume_state(resume_dir, selector, detector._model, optimizer)
+        start_epoch = _load_resume_state(
+            resume_dir, selector, detector._model, optimizer,
+            expected_training_mode=current_mode,
+        )
         print(f"[RESUME] epoch {start_epoch} から再開します。")
 
     _run_training_torch(
@@ -454,7 +502,10 @@ def _run_training_torch(
             selector.record(CheckpointRecord(epoch, val_score, str(ckpt_path)))
             print(f"  epoch {epoch}/{max_epochs}: val_map50_95={val_score:.4f} → saved {ckpt_path.name}")
         # resume 用 last は best 候補の保存間隔に関係なく毎 epoch 更新する
-        _save_resume_state(out_dir, epoch, selector, detector._model, optimizer)
+        _save_resume_state(
+            out_dir, epoch, selector, detector._model, optimizer,
+            training_mode="smoke" if smoke else "development",
+        )
 
     print(f"[INFO] best checkpoint: epoch={selector.best.epoch if selector.best else None}")
 
@@ -546,10 +597,14 @@ def _train_epoch(
 
     ordered_indices = _session_interleaved_indices(ds)
     batches = [ordered_indices[i:i + batch_size] for i in range(0, len(ordered_indices), batch_size)]
-    # singleton 末尾 batch を直前 batch へ統合して BatchNorm を保護しつつ全件学習する
+    # 末尾が singleton のとき、直前 batch と合わせて均等に 2 つへ再配分する。
+    # 例: batch_size=3, 4 サンプル → [3,1] → [2,2]（batch_size 以下かつ全件処理を保証）
+    # ponytail: 単純な 2 分割。3 つ以上の再配分が必要なら別作業で実装。
     if len(batches) >= 2 and len(batches[-1]) == 1:
-        batches[-2] = batches[-2] + batches[-1]
-        batches.pop()
+        combined = batches[-2] + batches[-1]
+        mid = len(combined) // 2
+        batches[-2] = combined[:mid]
+        batches[-1] = combined[mid:]
 
     for batch_indices in batches:
         images = []
@@ -713,6 +768,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print("[DRY-RUN] --dry-run が指定されたため学習をスキップします。")
         return 0
+
+    # -- 全採用画像の存在・decode を optimizer 作成前に確認する（smoke 以外）
+    if not args.smoke:
+        missing = _check_all_images(train_ds, validation_ds)
+        if missing:
+            for m in missing[:5]:
+                print(f"[IMAGE PREFLIGHT FAIL] {m}", file=sys.stderr)
+            if len(missing) > 5:
+                print(f"  ... 他 {len(missing) - 5} 件", file=sys.stderr)
+            print("[INFO] training step 0 のまま停止します。", file=sys.stderr)
+            return 1
+        print(f"[IMAGE PREFLIGHT OK] 全 {len(train_ds) + len(validation_ds)} 画像を確認しました。")
 
     # -- build model
     try:

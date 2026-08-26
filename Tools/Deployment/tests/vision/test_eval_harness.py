@@ -219,3 +219,61 @@ class TestTrackIdSwitchesUnsupported:
         metrics = evaluate_from_predictions(gts, preds, num_classes=12)
         js = json.loads(metrics.to_json())
         assert js["track_id_switches"] == _UNSUPPORTED
+
+
+class TestDiagnosticRangeValidation:
+    """check_development_diagnostics() が metric 範囲外値を fail-closed で拒否することを確認する（P1 回帰テスト）。"""
+
+    def _make_metrics(self, **overrides) -> EvalMetrics:
+        """有効な EvalMetrics を作り、指定キーを上書きする。"""
+        base = evaluate_from_predictions(
+            [_gt(0, [10, 10, 50, 50], 1)],
+            [_pred(0, [10, 10, 50, 50], 1, score=0.9)],
+            num_classes=12,
+        )
+        for k, v in overrides.items():
+            setattr(base, k, v)
+        return base
+
+    def _run_gate(self, metrics: EvalMetrics) -> bool:
+        from eval_survivors_world_detector import compute_dev_diagnostics
+        result = compute_dev_diagnostics(
+            metrics=metrics,
+            gate_cfg={"map50_95_min": 0.0, "density_correlation_min": -1.0, "nearest_distance_median_max": 1.0},
+            class_name_by_id={1: "cls1"},
+            num_classes=12,
+        )
+        return result.passed
+
+    def test_ap_over_1_is_rejected(self):
+        """proxy_ap50_95 > 1.0 は passed=False になる。"""
+        m = self._make_metrics(proxy_ap50_95=2.0)
+        assert not self._run_gate(m)
+
+    def test_ap_negative_is_rejected(self):
+        """proxy_ap50_95 < 0.0 は passed=False になる。"""
+        m = self._make_metrics(proxy_ap50_95=-0.1)
+        assert not self._run_gate(m)
+
+    def test_class_recall_over_1_is_rejected(self):
+        """class recall > 1.0 は passed=False になる。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics
+        m = self._make_metrics()
+        m.class_recall = {1: 2.0}
+        result = compute_dev_diagnostics(
+            metrics=m,
+            gate_cfg={"class_recall_min": {"cls1": 0.0}},
+            class_name_by_id={1: "cls1"},
+            num_classes=12,
+        )
+        assert not result.passed
+
+    def test_density_correlation_over_1_is_rejected(self):
+        """density_correlation > 1.0 は passed=False になる。"""
+        m = self._make_metrics(density_correlation=2.0)
+        assert not self._run_gate(m)
+
+    def test_nearest_distance_negative_is_rejected(self):
+        """nearest_distance_error < 0 は passed=False になる。"""
+        m = self._make_metrics(nearest_distance_error=-1.0)
+        assert not self._run_gate(m)

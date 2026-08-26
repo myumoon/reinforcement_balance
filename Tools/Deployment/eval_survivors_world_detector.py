@@ -97,9 +97,10 @@ def compute_ap50_95(
     pred_scores: np.ndarray,
     pred_classes: np.ndarray,
 ) -> float:
-    """AP50:95 を PR 曲線台形積分で計算する（COCO 定義: iou_thresholds=[0.5,...,0.95,step=0.05]）。
+    """proxy AP50:95 を PR 曲線台形積分で計算する（development diagnostic 用）。
 
-    各 IoU 閾値で precision-recall 曲線を作り台形積分し、その平均を返す。
+    IoU 閾値 [0.5,...,0.95, step=0.05] ごとに PR 曲線を台形積分し平均を返す。
+    COCO 公式 101 点補間とは異なる（proxy）。正式 metric は 04-08 で実装する。
     class 0 は背景として無視する。1 GT + 1 TP(高 conf) + 1 FP(低 conf) → AP=1.0。
     """
     iou_thresholds = np.arange(0.50, 1.00, 0.05)
@@ -564,28 +565,55 @@ def compute_dev_diagnostics(
     """
     all_passed = True
 
-    # --- 必須 metric の有限値チェック（fail-closed） ---
-    for _name, _val in [
-        ("proxy_ap50_95", metrics.proxy_ap50_95),
-        ("density_correlation", metrics.density_correlation),
-        ("nearest_distance_error", metrics.nearest_distance_error),
-    ]:
-        if not math.isfinite(_val):
-            all_passed = False
+    # --- metric 有限値・有効範囲チェック（fail-closed）---
+    # AP/recall は [0, 1]、correlation は [-1, 1]、distance は >= 0 を要求する。
+    def _check_metric(name: str, val: float, lo: float, hi: float) -> bool:
+        """val が [lo, hi] かつ有限なら True。それ以外は all_passed を False にして False を返す。"""
+        if not (math.isfinite(val) and lo <= val <= hi):
+            return False
+        return True
+
+    if not _check_metric("proxy_ap50_95", metrics.proxy_ap50_95, 0.0, 1.0):
+        all_passed = False
+    if not _check_metric("density_correlation", metrics.density_correlation, -1.0, 1.0):
+        all_passed = False
+    if not (math.isfinite(metrics.nearest_distance_error) and metrics.nearest_distance_error >= 0.0):
+        all_passed = False
+
+    # --- threshold パラメータ自体の有限性・型・範囲を事前検証（fail-closed）---
+    map_min = gate_cfg.get("map50_95_min", 0.0)
+    if not (isinstance(map_min, (int, float)) and math.isfinite(map_min) and 0.0 <= map_min <= 1.0):
+        all_passed = False
+        map_min = 0.0  # 無効な閾値でのさらなる比較を避ける
+
+    density_min = gate_cfg.get("density_correlation_min", 0.85)
+    if not (isinstance(density_min, (int, float)) and math.isfinite(density_min) and -1.0 <= density_min <= 1.0):
+        all_passed = False
+        density_min = 1.1  # 無効なので通過不可にする
+
+    nd_max = gate_cfg.get("nearest_distance_median_max", 0.04)
+    if not (isinstance(nd_max, (int, float)) and math.isfinite(nd_max) and nd_max >= 0.0):
+        all_passed = False
+        nd_max = -1.0  # 無効なので通過不可にする
 
     # --- overall mAP50:95 ---
-    map_min = gate_cfg.get("map50_95_min", 0.0)
-    if metrics.proxy_ap50_95 < map_min:
+    if not _check_metric("proxy_ap50_95 vs threshold", metrics.proxy_ap50_95, map_min, 1.0):
         all_passed = False
 
     # --- class recall ---
     recall_cfg: dict[str, float] = gate_cfg.get("class_recall_min", {})
     class_recall_results: dict[str, dict] = {}
     for class_name, recall_min in recall_cfg.items():
+        recall_min_valid = (
+            isinstance(recall_min, (int, float))
+            and math.isfinite(recall_min)
+            and 0.0 <= recall_min <= 1.0
+        )
         cid = next((k for k, v in class_name_by_id.items() if v == class_name), None)
         recall = metrics.class_recall.get(cid, 0.0) if cid is not None else 0.0
-        passed = math.isfinite(recall) and recall >= recall_min
-        if not passed:
+        in_range = math.isfinite(recall) and 0.0 <= recall <= 1.0
+        passed = recall_min_valid and in_range and recall >= recall_min
+        if not (recall_min_valid and in_range and passed):
             all_passed = False
         class_recall_results[class_name] = {
             "recall": recall,
@@ -595,14 +623,12 @@ def compute_dev_diagnostics(
 
     # --- density correlation ---
     density_corr = metrics.density_correlation
-    density_min = gate_cfg.get("density_correlation_min", 0.85)
-    if density_corr < density_min:
+    if not _check_metric("density_correlation vs threshold", density_corr, density_min, 1.0):
         all_passed = False
 
     # --- nearest-distance median error ---
     nd_median = metrics.nearest_distance_error
-    nd_max = gate_cfg.get("nearest_distance_median_max", 0.04)
-    if nd_median > nd_max:
+    if not (math.isfinite(nd_median) and nd_median >= 0.0 and nd_median <= nd_max):
         all_passed = False
 
     # --- GPU p95 latency: unsupported（passed に影響しない） ---

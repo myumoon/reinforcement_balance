@@ -408,6 +408,41 @@ class TestCheckpointSelector:
         with pytest.raises(ValueError, match="optimizer_state_dict"):
             _load_resume_state(tmp_path, selector, SimpleNamespace(load_state_dict=lambda _: None), None)
 
+    def test_resume_rejects_mode_mismatch(self, tmp_path):
+        """smoke checkpoint を development でまたは development を smoke で resume すると拒否される（P1 回帰テスト）。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import (
+            CheckpointSelector,
+            _LAST_CHECKPOINT_NAME,
+            _RESUME_STATE_NAME,
+            _load_resume_state,
+            _save_resume_state,
+        )
+
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+
+        # smoke モードで保存
+        _save_resume_state(tmp_path, 1, selector, model, optimizer, training_mode="smoke")
+
+        # development モードで resume → 拒否
+        with pytest.raises(ValueError, match="training_mode"):
+            _load_resume_state(
+                tmp_path, selector, model, optimizer,
+                expected_training_mode="development",
+            )
+
+        # 逆方向も確認: training_state.json を development に書き換えて smoke で resume
+        state = json.loads((tmp_path / _RESUME_STATE_NAME).read_text())
+        state["training_mode"] = "development"
+        (tmp_path / _RESUME_STATE_NAME).write_text(json.dumps(state), encoding="utf-8")
+        with pytest.raises(ValueError, match="training_mode"):
+            _load_resume_state(
+                tmp_path, selector, model, optimizer,
+                expected_training_mode="smoke",
+            )
+
 
 class TestTrainEpoch:
     """_train_epoch が実 DatasetSample から target を構築することを確認する。"""
@@ -486,8 +521,8 @@ class TestTrainEpoch:
         )
         assert model.batch_sizes == [(4, 4), (4, 4)]
 
-    def test_train_epoch_merges_singleton_remainder(self):
-        """4件 batch_size=3 の場合、singleton 末尾を直前へ統合して全4件を学習する。"""
+    def test_train_epoch_rebalances_singleton_remainder(self):
+        """4件 batch_size=3 の場合、singleton を再配分して [2,2] になり全4件かつ batch_size 以下を保証する（P2 回帰テスト）。"""
         torch = pytest.importorskip("torch")
         from train_survivors_world_detector import _train_epoch
         from survivors.vision.world_dataset import COCOAnnotation, DatasetSample
@@ -503,14 +538,14 @@ class TestTrainEpoch:
             )
             for index in range(4)
         ]
-        trained_items: list[int] = []
+        batch_sizes: list[int] = []
 
         class Model:
             def train(self):
                 return self
 
             def __call__(self, images, targets):
-                trained_items.extend(range(len(images)))
+                batch_sizes.append(len(images))
                 return {"loss": torch.tensor(1.0, requires_grad=True)}
 
         optimizer = SimpleNamespace(zero_grad=lambda: None, step=lambda: None)
@@ -519,8 +554,12 @@ class TestTrainEpoch:
             {"training": {"batch_size": 3}},
             smoke=True,  # 画像ファイルが存在しないためゼロ画像でテスト
         )
-        # singleton(1件) を直前 batch(3件) へ統合 → 4件全件が学習される
-        assert sum(1 for _ in trained_items) == 4
+        # 4件全員が学習される（全件性）
+        assert sum(batch_sizes) == 4
+        # すべての batch が batch_size=3 以下（最大サイズ保証）
+        assert all(b <= 3 for b in batch_sizes), f"batch_size を超えた batch があります: {batch_sizes}"
+        # 2 batch に分割されている（[2,2]）
+        assert len(batch_sizes) == 2, f"2 batch に再配分されるべき: {batch_sizes}"
 
 
 class TestTrainingSplitViews:
@@ -561,7 +600,7 @@ class TestTrainingSplitViews:
             training, "_evaluate_validation",
             lambda detector, ds, cfg, **kw: routed.setdefault("validation", ds) and 0.25,
         )
-        monkeypatch.setattr(training, "_save_resume_state", lambda *args: None)
+        monkeypatch.setattr(training, "_save_resume_state", lambda *args, **kwargs: None)
         detector = SimpleNamespace(_model=SimpleNamespace(state_dict=lambda: {}))
         selector = training.CheckpointSelector(metric="val_map50_95", keep_top_k=1)
 
@@ -936,8 +975,8 @@ class TestPackagePublish:
         pm = PackageManifest.from_dict(raw)
         assert pm.formal_detector_eligible is False
 
-    def test_assert_formal_eligible_raises_for_dev(self, tmp_path):
-        """development package の assert_formal_eligible は例外を送出する。"""
+    def test_assert_formal_eligible_always_raises(self, tmp_path):
+        """PackageManifest は formal_detector_eligible の値に関わらず assert_formal_eligible() が常に拒否する。"""
         from survivors.vision.world_detector_package import (
             publish_development_package, PackageManifest, FormalPackageRejectedError
         )
@@ -953,9 +992,53 @@ class TestPackagePublish:
             cm_path=CLASS_MAP_PATH,
         )
         raw = json.loads(pkg_path.read_text(encoding="utf-8"))
+        # from_dict では False に上書きされるが、それでも raises
         pm = PackageManifest.from_dict(raw)
         with pytest.raises(FormalPackageRejectedError):
             pm.assert_formal_eligible()
+
+        # caller が直接 formal_detector_eligible=True を指定してもやはり拒否
+        raw_true = dict(raw)
+        raw_true["formal_detector_eligible"] = True
+        pm_true = PackageManifest.from_dict(raw_true)
+        assert pm_true.formal_detector_eligible is False  # 上書きされる
+        with pytest.raises(FormalPackageRejectedError):
+            pm_true.assert_formal_eligible()
+
+    def test_from_dict_rejects_invalid_training_mode(self):
+        """from_dict は training_mode が 'smoke'|'development' 以外を拒否する。"""
+        from survivors.vision.world_detector_package import PackageManifest, PACKAGE_SCHEMA_VERSION
+        bad = {
+            "schema_version": PACKAGE_SCHEMA_VERSION,
+            "formal_detector_eligible": False,
+            "model_hash": "a" * 64,
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "contract_hash": "f" * 64,
+            "training_mode": "formal",
+        }
+        with pytest.raises(ValueError, match="training_mode"):
+            PackageManifest.from_dict(bad)
+
+    def test_restore_package_require_formal_raises(self, tmp_path):
+        """restore_package(require_formal=True) は development package を FormalPackageRejectedError で拒否する。"""
+        from survivors.vision.world_detector_package import publish_development_package, restore_package, FormalPackageRejectedError
+
+        store = tmp_path / "store"
+        store.mkdir()
+        pkg_path = publish_development_package(
+            _make_checkpoint_manifest(),
+            metrics_dict={},
+            checkpoint_selection={},
+            store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
+        )
+        frame = __import__("numpy").zeros((1080, 1920, 3), dtype="uint8")
+        with pytest.raises(FormalPackageRejectedError):
+            restore_package(pkg_path, frame, require_formal=True)
 
     def test_formal_publish_always_rejected(self, tmp_path):
         """PR#315 では publish_formal_package() は常に FormalPackageRejectedError を送出する。"""
@@ -1335,3 +1418,34 @@ class TestSmokeAndNormalModeImageLoading:
         img, target = _load_training_sample(sample, smoke=True)
         assert img.shape == (3, 32, 32)
         assert float(img.sum()) == 0.0, "ゼロ画像であることを確認"
+
+
+class TestImagePreflightBeforeOptimizer:
+    """後半画像欠落でも optimizer step が 0 件になることを確認する（P1 回帰テスト）。"""
+
+    def test_late_missing_image_stops_before_optimizer_step(self, tmp_path):
+        """3 件目の画像が欠落しているとき、optimizer step 0 件のまま停止する。"""
+        from train_survivors_world_detector import _check_all_images
+        from survivors.vision.world_dataset import DatasetSample
+
+        # 4 サンプル: 0,1,3 は存在するが 2 は欠落
+        existing = tmp_path / "frame_exist.png"
+        existing.write_bytes(b"")  # 0 バイトの dummy（cv2 失敗は別経路）
+
+        samples = [
+            DatasetSample(0, str(existing), 32, 32, [], session_id="s0"),
+            DatasetSample(1, str(existing), 32, 32, [], session_id="s1"),
+            DatasetSample(2, str(tmp_path / "missing.png"), 32, 32, [], session_id="s2"),
+            DatasetSample(3, str(existing), 32, 32, [], session_id="s3"),
+        ]
+
+        class _FakeView:
+            def __init__(self, items): self._items = items
+            def __len__(self): return len(self._items)
+            def __getitem__(self, i): return self._items[i]
+
+        train_view = _FakeView(samples[:2])
+        val_view = _FakeView(samples[2:])
+
+        errors = _check_all_images(train_view, val_view)
+        assert any("missing.png" in e for e in errors), f"欠落画像が検出されるべき: {errors}"

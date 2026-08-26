@@ -97,8 +97,9 @@ class DetectionResult:
 class CheckpointManifest:
     """model / data / config / build / class-map の SHA-256 ハッシュを保持する manifest。
 
-    formal_detector_eligible=false の manifest は assert_formal_eligible() で拒否される。
-    04-07 / 04-08 が weight と threshold を差し替えて formal=true に更新する。
+    04-07 は development-only artifact のみ生成する。formal_detector_eligible は常に False。
+    assert_formal_eligible() は caller 指定フラグに関わらず常に FormalDetectorRejectedError を送出する。
+    formal 昇格は 04-08 の validated verdict によってのみ行われる。
     """
 
     model_hash: str
@@ -115,18 +116,15 @@ class CheckpointManifest:
     _HASH_FIELDS = ("model_hash", "data_hash", "config_hash", "build_hash", "class_map_hash")
 
     def assert_formal_eligible(self) -> None:
-        """formal 昇格していない checkpoint をロードしようとすると拒否する。
+        """04-07 の checkpoint は caller 指定フラグに関わらず常に formal 拒否する。
 
-        formal_detector_eligible が bool の True でない場合（型不正・False 含む）は拒否する。
-        SHA-256 形式不正も拒否する。
+        formal_detector_eligible の値に関係なく例外を送出する。
+        formal 昇格は 04-08 の validated verdict によってのみ可能。
         """
-        if not (type(self.formal_detector_eligible) is bool and self.formal_detector_eligible is True):
-            raise FormalDetectorRejectedError(
-                "development checkpoint は formal detector として使用できません。"
-                " formal_detector_eligible=true の checkpoint を 04-08 で作成してください。"
-            )
-        # formal 昇格済みでもハッシュ形式を検証する
-        self._validate_hash_format()
+        raise FormalDetectorRejectedError(
+            "04-07 checkpoint は formal detector として使用できません。"
+            " formal 昇格は 04-08 の検証済み verdict によってのみ行われます。"
+        )
 
     def _validate_hash_format(self) -> None:
         for fname in self._HASH_FIELDS:
@@ -170,7 +168,11 @@ class CheckpointManifest:
 
     @classmethod
     def load(cls, path: pathlib.Path | str) -> "CheckpointManifest":
-        """JSON から読み込む。ハッシュ形式・型が不正な場合は ValueError。"""
+        """JSON から読み込む。ハッシュ形式・型が不正な場合は ValueError。
+
+        04-07 境界: formal_detector_eligible は必ず False へ上書き、development_only は True、
+        training_mode は "smoke" | "development" のみ許容する。
+        """
         path = pathlib.Path(path)
         payload = json.loads(path.read_text(encoding="utf-8"))
         elig = payload["formal_detector_eligible"]
@@ -178,17 +180,22 @@ class CheckpointManifest:
             raise ValueError(
                 f"formal_detector_eligible は bool 型が必要です。got: {type(elig).__name__!r}"
             )
+        raw_mode = payload.get("training_mode", "development")
+        if raw_mode not in ("smoke", "development"):
+            raise ValueError(
+                f"training_mode の許容値は 'smoke' | 'development' です。got: {raw_mode!r}"
+            )
         manifest = cls(
             model_hash=payload["model_hash"],
             data_hash=payload["data_hash"],
             config_hash=payload["config_hash"],
             build_hash=payload["build_hash"],
             class_map_hash=payload["class_map_hash"],
-            formal_detector_eligible=elig,
+            formal_detector_eligible=False,   # 04-07 は常に False
             split_hash=payload.get("split_hash", ""),
             resolved_config_hash=payload.get("resolved_config_hash", ""),
-            development_only=payload.get("development_only", True),
-            training_mode=payload.get("training_mode", "development"),
+            development_only=True,             # 04-07 は常に True
+            training_mode=raw_mode,
         )
         manifest._validate_hash_format()
         return manifest

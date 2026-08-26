@@ -116,8 +116,8 @@ synthetic fixture のみ使用。GPU・実画像・実 weight 不要。
 | 責務 | 担当 PR |
 |------|---------|
 | class map / schema / tracker / dataset loader | 04-06 |
-| DataLoader / optimizer / augmentation / checkpoint selection / package writer | **04-07 (本 PR)** |
-| formal weight / threshold / formal_detector_eligible=true | 04-08 |
+| DataLoader / optimizer / development checkpoint / development package | **04-07 (本 PR)** |
+| 正式 augmentation / formal weight / threshold / formal_detector_eligible=true | 04-08 |
 | deploy obs への変換 | 04-09 |
 
 ## 04-07 tooling — session 拒否 / checkpoint selection / package writer

@@ -239,7 +239,8 @@ class WorldDataset:
                 f"min_classes 不足: {n_classes} < {min_classes}"
             )
 
-        n_bands = len({a.session_id for a in all_annotations if a.session_id})
+        # annotation.session_id は空の場合があるため、画像レベルの DatasetSample.session_id を正本として使用する
+        n_bands = len({s.session_id for s in self._samples if s.session_id})
         if n_bands < min_time_bands:
             raise DatasetPreflightError(
                 f"min_time_bands 不足: {n_bands} < {min_time_bands}"
