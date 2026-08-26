@@ -73,15 +73,17 @@ def test_target_equivalence_requires_every_geometric_and_confidence_gate() -> No
 
     一つでも安全閾値を外れた対象は、前フレームと同じクリック先とみなしません。
     """
+    _ns = dict(old_captured_ns=1, new_captured_ns=2, old_ui_state_key="k", new_ui_state_key="k")
     old = UiCandidateTargetV1("whip", 0, "item_card", NormalizedRoi(.1, .1, .4, .4), True, 1.)
     good = UiCandidateTargetV1("whip", 0, "item_card", NormalizedRoi(.101, .101, .401, .401), True, .99)
-    assert is_equivalent_ui_target(old, good, old_captured_ns=1, new_captured_ns=2)
-    assert not is_equivalent_ui_target(old, good, old_captured_ns=2, new_captured_ns=1)
-    assert not is_equivalent_ui_target(old, UiCandidateTargetV1("whip", 0, "item_card", good.roi, False, 1.))
-    assert not is_equivalent_ui_target(old, UiCandidateTargetV1("whip", 0, "item_card", good.roi, True, .989))
-    assert not is_equivalent_ui_target(old, UiCandidateTargetV1("whip", 0, "item_card", NormalizedRoi(.111, .1, .411, .4), True, 1.))
-    assert not is_equivalent_ui_target(old, UiCandidateTargetV1("whip", 0, "item_card", NormalizedRoi(.2, .1, .5, .4), True, 1.))
-    assert not is_equivalent_ui_target(old, UiCandidateTargetV1("axe", 0, "item_card", good.roi, True, 1.))
+    assert is_equivalent_ui_target(old, good, **_ns)
+    assert not is_equivalent_ui_target(old, good, old_captured_ns=2, new_captured_ns=1, old_ui_state_key="k", new_ui_state_key="k")
+    assert not is_equivalent_ui_target(old, UiCandidateTargetV1("whip", 0, "item_card", good.roi, False, 1.), **_ns)
+    assert not is_equivalent_ui_target(old, UiCandidateTargetV1("whip", 0, "item_card", good.roi, True, .989), **_ns)
+    assert not is_equivalent_ui_target(old, UiCandidateTargetV1("whip", 0, "item_card", NormalizedRoi(.111, .1, .411, .4), True, 1.), **_ns)
+    assert not is_equivalent_ui_target(old, UiCandidateTargetV1("whip", 0, "item_card", NormalizedRoi(.2, .1, .5, .4), True, 1.), **_ns)
+    assert not is_equivalent_ui_target(old, UiCandidateTargetV1("axe", 0, "item_card", good.roi, True, 1.), **_ns)
+    assert not is_equivalent_ui_target(old, good, old_captured_ns=1, new_captured_ns=2, old_ui_state_key="k1", new_ui_state_key="k2")
 
 def test_fallback_cards_and_buttons_have_unique_semantics() -> None:
     """fallback reward と操作ボタンを重複なく分離する。
@@ -146,3 +148,37 @@ def test_low_screen_confidence_invalidates_ui_targets() -> None:
     snap = build_ui_presentation_from_hud(low_conf_hud, (1000, 1000), snapshot_id="s", frame_id="f")
     assert all(not t.validity for t in snap.candidates)
     assert all(not t.validity for t in snap.buttons)
+
+
+def test_non_item_screen_state_invalidates_ui_targets() -> None:
+    """item 以外の screen_state (gameplay 等) では UI target validity が False になる。
+
+    gameplay/paused/death 画面に残留したカードを操作対象として公開しません。
+    """
+    hud = _hud(
+        cards=(ParsedCard(0, "whip", "weapon", 2, .99, "ok", (100, 100, 400, 500)),),
+        buttons=(ParsedButton("reroll", .9, "ok", (0, 900, 100, 1000)),),
+    )
+    gameplay_hud = replace(hud, screen_state="gameplay")
+    snap = build_ui_presentation_from_hud(gameplay_hud, (1000, 1000), snapshot_id="s", frame_id="f")
+    assert all(not t.validity for t in snap.candidates)
+    assert all(not t.validity for t in snap.buttons)
+
+
+def test_duplicate_candidate_choice_id_or_index_raises() -> None:
+    """重複する choice_id または choice_index を持つカードは ValueError を上げる。
+
+    同一 identity で異なる ROI が共存すると UI 操作先の解決が曖昧になります。
+    """
+    dup_id = (
+        ParsedCard(0, "whip", "weapon", 2, .99, "ok", (100, 100, 400, 500)),
+        ParsedCard(1, "whip", "weapon", 2, .99, "ok", (500, 100, 800, 500)),  # same item_id
+    )
+    with pytest.raises(ValueError, match="choice_id"):
+        build_ui_presentation_from_hud(_hud(cards=dup_id), (1000, 1000), snapshot_id="s", frame_id="f")
+    dup_idx = (
+        ParsedCard(0, "whip", "weapon", 2, .99, "ok", (100, 100, 400, 500)),
+        ParsedCard(0, "knife", "weapon", 2, .99, "ok", (500, 100, 800, 500)),  # same slot_index
+    )
+    with pytest.raises(ValueError, match="choice_index"):
+        build_ui_presentation_from_hud(_hud(cards=dup_idx), (1000, 1000), snapshot_id="s", frame_id="f")

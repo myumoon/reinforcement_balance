@@ -22,6 +22,7 @@ UI_PRESENTATION_SCHEMA_HASH = canonical_hash(
 )
 _BUTTON_ACTIONS = frozenset({"ack_chest", "confirm", "reroll", "skip", "banish"})
 _SCREEN_CONFIDENCE_THRESHOLD = 0.5
+_UI_SCREEN_STATES = frozenset({"level_up_items", "level_up_fallback", "chest"})
 def _finite_ratio(value: Any, label: str) -> float:
     """有限な [0,1] 比率を検証して float 化する。
 
@@ -121,6 +122,10 @@ class UiPresentationSnapshotV1:
         actions = [button.semantic_action for button in self.buttons]
         if len(actions) != len(set(actions)):
             raise ValueError("button semantics must be unique")
+        if len(set(c.choice_id for c in self.candidates)) != len(self.candidates):
+            raise ValueError("candidate choice_id must be unique")
+        if len(set(c.choice_index for c in self.candidates)) != len(self.candidates):
+            raise ValueError("candidate choice_index must be unique")
 def _diagnostics_has_roi(value: Any) -> bool:
     """diagnostics 内に ROI 型や ROI 名のキーがあるか調べる。
 
@@ -225,7 +230,7 @@ def build_ui_presentation_from_hud(
     resolved_snapshot = snapshot_id or canonical_hash(
         {"session_id": hud.session_id, "frame_id": resolved_frame, "captured_ns": hud.captured_monotonic_ns}
     )
-    screen_confident = hud.screen_state_confidence >= _SCREEN_CONFIDENCE_THRESHOLD
+    screen_confident = hud.screen_state_confidence >= _SCREEN_CONFIDENCE_THRESHOLD and hud.screen_state in _UI_SCREEN_STATES
     candidates = []
     for card in sorted(hud.cards, key=lambda value: value.slot_index):
         roi, geometry_valid = _normalized_roi(card.roi_xyxy, viewport)
@@ -297,16 +302,18 @@ def is_equivalent_ui_target(
     old: UiCandidateTargetV1 | UiButtonTargetV1,
     new: UiCandidateTargetV1 | UiButtonTargetV1,
     *,
-    old_captured_ns: int | None = None,
-    new_captured_ns: int | None = None,
+    old_captured_ns: int,
+    new_captured_ns: int,
+    old_ui_state_key: str,
+    new_ui_state_key: str,
 ) -> bool:
     """二フレームの UI target が安全に同一とみなせる場合だけ True を返す。
 
-    semantic・時系列・validity・confidence・IoU・中心移動の全 gate を AND で適用します。
+    semantic・時系列・ui_state_key・validity・confidence・IoU・中心移動の全 gate を AND で適用します。
     """
-    if (old_captured_ns is None) != (new_captured_ns is None):
+    if type(old_captured_ns) is not int or type(new_captured_ns) is not int or new_captured_ns <= old_captured_ns:
         return False
-    if old_captured_ns is not None and (type(old_captured_ns) is not int or type(new_captured_ns) is not int or new_captured_ns <= old_captured_ns):
+    if old_ui_state_key != new_ui_state_key:
         return False
     if _target_identity(old) != _target_identity(new):
         return False

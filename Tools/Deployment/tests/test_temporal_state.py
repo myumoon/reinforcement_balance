@@ -93,6 +93,18 @@ def test_session_change_resets_monotonic_state() -> None:
     assert joined.hud.timer_seconds == 1.
     assert joined.hud.level == 1
 
+def test_stale_session_world_does_not_join_with_newer_session_hud() -> None:
+    """遅れた旧 session world が新 session HUD と結合して combat_validity=1 にならない。
+
+    s2 HUD 受け入れ後、session_start_ns より前の s1 world は observe_world が拒否します。
+    """
+    assembler = TemporalAssembler()
+    assembler.observe_hud(_hud(1_000, session_id="s1"))
+    assembler.observe_world(_world(1_000))
+    assembler.observe_hud(_hud(2_000, session_id="s2"))  # session reset; _session_start_ns=2000
+    assembler.observe_world(_world(1_999))  # s1 残存 world@1999 < session_start_ns=2000 → 拒否
+    assert assembler.tick(2_000) is None  # s2 world 未到着のため tick 不発
+
 def test_stale_session_hud_does_not_overwrite_newer_session() -> None:
     """非同期で到着した旧 session フレームが現在 session の状態を巻き戻さない。
 

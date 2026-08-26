@@ -77,7 +77,9 @@ def _item_context(
         "none",
     )
     max_cards = max(3, len(choices))
-    world_age = (now_ns - last_gameplay_ns) / 1_000_000_000 if now_ns is not None and last_gameplay_ns is not None else 0.
+    world_age = (now_ns - gameplay_world.timestamp_ns) / 1_000_000_000 if now_ns is not None and gameplay_world is not None else 0.
+    snapshot_age = (now_ns - last_gameplay_ns) / 1_000_000_000 if now_ns is not None and last_gameplay_ns is not None else 0.
+    ui_state_age = max(0., (now_ns - joined.hud.captured_monotonic_ns) / 1_000_000_000) if now_ns is not None else 0.
     context = ItemDecisionFeatures(
         decision_id=snapshot_id, feature_schema="context_danger_v1",
         elapsed_time=joined.hud.timer_seconds or 0., level=joined.hud.level or 1,
@@ -85,13 +87,13 @@ def _item_context(
         weapon_slots=inventory_levels[:6], passive_slots=inventory_levels[6:],
         empty_slot_count=inventory_levels.count(0), evolution_readiness=0.,
         choice_count=len(choices), card_mask=(True,) * len(choices) + (False,) * (max_cards - len(choices)),
-        fallback_kind=fallback, ui_state_validity=joined.item_validity, ui_state_age=0.,
+        fallback_kind=fallback, ui_state_validity=joined.item_validity, ui_state_age=ui_state_age,
         candidates=choices, max_item_cards=max_cards, enemy_density=enemy_density,
         gem_density=gem_density, nearest_enemy_screen_dist=radius.value[0] if radius else 1.,
         nearest_enemy_screen_dir=nearest.value if nearest else (0., 0.),
         boss_flag=any(track.coarse_class == "enemy" and "boss" in track.class_name for track in visible),
         hazard_flag=any(track.coarse_class == "hazard" for track in visible),
-        world_validity=joined.world_validity, world_age=world_age, last_gameplay_snapshot_age=world_age,
+        world_validity=joined.world_validity, world_age=world_age, last_gameplay_snapshot_age=snapshot_age,
     )
     return context, choices
 
@@ -115,16 +117,22 @@ class RealObsAssembler:
     def assemble(
         self, hud: HudStateV1, world: TrackedWorldStateV1,
         schema: DeployObsSchema, viewport: tuple[int, int],
-    ) -> PerceptionSnapshot:
-        """同フレーム候補の HUD/world から PerceptionSnapshot を構築する。
+    ) -> PerceptionSnapshot | None:
+        """15 Hz cadence を守りながら HUD/world から PerceptionSnapshot を構築する。
 
+        tick_interval 未満の入力は observe のみ受け付け、snapshot の発行を抑制します。
         UI presentation は tensor builder に渡さず、完成後の snapshot へ一度だけ格納します。
         """
         if not isinstance(schema, DeployObsSchema):
             raise TypeError("schema must be DeployObsSchema")
         if not isinstance(viewport, tuple) or len(viewport) != 2 or any(type(value) is not int or value <= 0 for value in viewport):
             raise ValueError("viewport must be a positive integer pair")
-        joined = self.temporal.join(hud, world)
+        self.temporal.observe_hud(hud)
+        self.temporal.observe_world(world)
+        now_ns = max(hud.captured_monotonic_ns, world.timestamp_ns)
+        joined = self.temporal.tick(now_ns)
+        if joined is None:
+            return None
         if self._last_session_id != joined.hud.session_id:  # session変更時にgameplayキャッシュを破棄
             self._last_gameplay_world = None
             self._last_gameplay_screen = None

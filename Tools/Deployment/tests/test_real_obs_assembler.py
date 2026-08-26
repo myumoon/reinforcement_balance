@@ -15,21 +15,22 @@ from survivors.real_obs_assembler import RealObsAssembler
 from survivors.vision.entity_tracker import PlayerAnchorState, TrackedEntityV1, TrackedWorldStateV1
 from survivors.vision.hud_parser import HudStateV1, ParsedCard
 
-def _inputs(state="gameplay") -> tuple[HudStateV1, TrackedWorldStateV1]:
+def _inputs(state="gameplay", *, ts=1_000_000_000) -> tuple[HudStateV1, TrackedWorldStateV1]:
     """assembler test 用の同時刻 HUD/world を返す。
 
     visible と off-screen の敵を混ぜ、release 境界を一度に検証します。
+    ts を変えると別フレームとして tick 制限を超えられます。
     """
     card = ParsedCard(0, "whip", "weapon", 2, .99, "ok", (100, 100, 400, 500))
     hud = HudStateV1(
-        "hud_state.v1", "session", 4, 1_000_000_000, "a" * 64, state, .9, "ok",
+        "hud_state.v1", "session", 4, ts, "a" * 64, state, .9, "ok",
         20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
     visible = TrackedEntityV1(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
     leaked = TrackedEntityV1(2, 2, "enemy_normal", "enemy", .99, 1, 4, .51, .5, .01, 0., 0., 0., False, False)
-    world = TrackedWorldStateV1(4, 1_000_000_000, [visible, leaked], PlayerAnchorState(.5, .5, .9, False))
+    world = TrackedWorldStateV1(4, ts, [visible, leaked], PlayerAnchorState(.5, .5, .9, False))
     return hud, world
 
 def test_assemble_builds_release_observation_without_offscreen_leak() -> None:
@@ -54,7 +55,8 @@ def test_ui_snapshot_is_atomic_and_diagnostics_have_no_roi() -> None:
     assembler = RealObsAssembler()
     schema = DeployObsSchema.default_v1()
     assembler.assemble(*_inputs("gameplay"), schema, (1000, 1000))
-    snapshot = assembler.assemble(*_inputs("level_up_items"), schema, (1000, 1000))
+    snapshot = assembler.assemble(*_inputs("level_up_items", ts=2_000_000_000), schema, (1000, 1000))
+    assert snapshot is not None
     assert snapshot.ui_presentation.snapshot_id == snapshot.snapshot_id
     assert snapshot.ui_presentation.frame_id == snapshot.frame_id
     assert snapshot.ui_presentation.source_content_hash == snapshot.source_content_hash
@@ -98,14 +100,15 @@ def test_item_context_uses_cached_gameplay_danger() -> None:
     )
     world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot is not None
     assert snapshot.item_context is not None
     assert snapshot.item_context.enemy_density > 0.
     assert snapshot.item_context.world_age > 0.
 
-def test_snapshot_identity_uses_joined_state_not_discarded_input() -> None:
-    """frame_id と snapshot_id は破棄した入力ではなく保持済み joined state から生成する。
+def test_assemble_returns_none_for_old_frame() -> None:
+    """時刻が前回 tick より古いフレームは snapshot を発行しない。
 
-    時刻が巻き戻った古い HUD を渡しても、identity は継続中の最新フレームを指します。
+    monotonic tick に基づき、now_ns が _last_tick_ns 未満のフレームを抑制します。
     """
     schema = DeployObsSchema.default_v1()
     assembler = RealObsAssembler()
@@ -117,9 +120,10 @@ def test_snapshot_identity_uses_joined_state_not_discarded_input() -> None:
             ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
             False, False, False, .9, "ok",
         )
-    assembler.assemble(_make_hud(5, 2_000_000_000), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
-    snap = assembler.assemble(_make_hud(3, 1_500_000_000), TrackedWorldStateV1(3, 1_500_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
-    assert snap.frame_id == "session:5:5"
+    snap1 = assembler.assemble(_make_hud(5, 2_000_000_000), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap1 is not None
+    snap2 = assembler.assemble(_make_hud(3, 1_500_000_000), TrackedWorldStateV1(3, 1_500_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap2 is None
 
 def test_gameplay_cache_cleared_on_session_change() -> None:
     """session 変更後に gameplay キャッシュが破棄され、旧 session の danger が引き継がれない。
@@ -139,6 +143,7 @@ def test_gameplay_cache_cleared_on_session_change() -> None:
     )
     world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot is not None
     assert snapshot.item_context is None
     assert snapshot.choices == ()
 
@@ -163,6 +168,7 @@ def test_low_combat_validity_does_not_update_danger_cache() -> None:
     )
     world_lu = TrackedWorldStateV1(6, 3_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot is not None
     assert snapshot.item_context is not None
     assert snapshot.item_context.enemy_density > 0.
 
@@ -182,13 +188,14 @@ def test_item_context_fail_closed_without_gameplay_cache() -> None:
     )
     world_lu = TrackedWorldStateV1(4, 1_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot is not None
     assert snapshot.item_context is None
     assert snapshot.choices == ()
 
 def test_duplicate_card_ids_fail_closed() -> None:
-    """重複 item_id を持つカードがある場合 item_context と choices を返さない。
+    """重複 choice_id を持つカードは presentation 生成で ValueError を上げる。
 
-    model と UI で identity が対応しない状態を作らないよう fail-closed にします。
+    model と UI で identity が対応しない状態を UiPresentationSnapshotV1 の検証で排除します。
     """
     schema = DeployObsSchema.default_v1()
     card_a = ParsedCard(0, "whip", "weapon", 2, .99, "ok", (100, 100, 400, 500))
@@ -200,6 +207,44 @@ def test_duplicate_card_ids_fail_closed() -> None:
         False, False, False, .9, "ok",
     )
     world = TrackedWorldStateV1(4, 1_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
-    snapshot = RealObsAssembler().assemble(hud, world, schema, (1000, 1000))
-    assert snapshot.item_context is None
-    assert snapshot.choices == ()
+    with pytest.raises(ValueError):
+        RealObsAssembler().assemble(hud, world, schema, (1000, 1000))
+
+def test_assemble_respects_policy_hz() -> None:
+    """tick_interval 未満の入力では None を返し、15 Hz 発行制限を守る。
+
+    60 Hz 等の高頻度入力でも snapshot 発行は 15 Hz に抑制されます。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud_gp, world_gp = _inputs("gameplay")
+    snap1 = assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    assert snap1 is not None
+    hud2 = dataclasses.replace(hud_gp, frame_index=5, captured_monotonic_ns=hud_gp.captured_monotonic_ns + 1_000_000)
+    world2 = TrackedWorldStateV1(5, world_gp.timestamp_ns + 1_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snap2 = assembler.assemble(hud2, world2, schema, (1000, 1000))
+    assert snap2 is None  # 1ms は 15 Hz interval (66.7ms) 未満
+
+def test_item_context_world_age_and_snapshot_age_computed_independently() -> None:
+    """world_age は cached world timestamp、snapshot_age は tick time から個別に計算される。
+
+    world が tick より 40ms 古い場合に両者が異なる値になることを確認します。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud_gp, _ = _inputs("gameplay")  # ts=1B
+    visible = TrackedEntityV1(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
+    world_skewed = TrackedWorldStateV1(4, 960_000_000, [visible], PlayerAnchorState(.5, .5, .9, False))
+    assembler.assemble(hud_gp, world_skewed, schema, (1000, 1000))
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot is not None and snapshot.item_context is not None
+    assert snapshot.item_context.world_age == pytest.approx(1.04)  # (2B - 960M) / 1e9
+    assert snapshot.item_context.last_gameplay_snapshot_age == pytest.approx(1.00)  # (2B - 1B) / 1e9

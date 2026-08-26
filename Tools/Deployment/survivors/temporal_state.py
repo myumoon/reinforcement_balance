@@ -43,6 +43,7 @@ class TemporalAssembler:
         self._world: TrackedWorldStateV1 | None = None
         self._last_tick_ns: int | None = None
         self._session_id: str | None = None
+        self._session_start_ns: int | None = None  # 現在sessionの最初のHUD timestamp
 
     def observe_hud(self, hud: HudStateV1) -> None:
         """最新 HUD を monotonic・bounded filter へ取り込む。
@@ -57,6 +58,7 @@ class TemporalAssembler:
             self._hud = None
             self._world = None
             self._last_tick_ns = None
+            self._session_start_ns = hud.captured_monotonic_ns  # 新session開始境界を記録
         self._session_id = hud.session_id
         previous = self._hud
         if previous is None:
@@ -92,6 +94,8 @@ class TemporalAssembler:
         """
         if not isinstance(world, TrackedWorldStateV1):
             raise TypeError("world must be TrackedWorldStateV1")
+        if self._session_start_ns is not None and world.timestamp_ns < self._session_start_ns:
+            return  # 現在session開始より前のworldは旧sessionの残存として拒否
         if self._world is None or world.timestamp_ns >= self._world.timestamp_ns:
             self._world = world
 
