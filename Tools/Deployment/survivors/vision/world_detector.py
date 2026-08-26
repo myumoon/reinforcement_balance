@@ -150,7 +150,20 @@ class CheckpointManifest:
                 )
 
     def save(self, path: pathlib.Path | str) -> None:
-        """JSON として保存する。"""
+        """JSON として保存する。04-07 境界を書き込み時に強制する。
+
+        formal_detector_eligible は False、development_only は True、
+        training_mode は "smoke" | "development" のみ許容する。
+        """
+        if self.formal_detector_eligible is not False:
+            raise ValueError("CheckpointManifest.save(): formal_detector_eligible は False でなければなりません。")
+        if self.development_only is not True:
+            raise ValueError("CheckpointManifest.save(): development_only は True でなければなりません。")
+        if self.training_mode not in ("smoke", "development"):
+            raise ValueError(
+                f"CheckpointManifest.save(): training_mode の許容値は 'smoke' | 'development' です。"
+                f" got: {self.training_mode!r}"
+            )
         path = pathlib.Path(path)
         payload = {
             "model_hash": self.model_hash,

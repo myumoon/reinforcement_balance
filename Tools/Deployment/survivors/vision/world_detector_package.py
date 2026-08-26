@@ -205,6 +205,34 @@ def _write_package(
     pkg_dir = store_dir / content_key
 
     if pkg_dir.exists():
+        # 既存 package の完全性を検証する。欠落・破損があれば明示的に失敗させる。
+        _manifest_path = pkg_dir / _MANIFEST_NAME
+        if not _manifest_path.exists():
+            raise PackageSchemaError(
+                f"既存 package ディレクトリ {pkg_dir} に manifest が存在しません。"
+                " 破損しています。ディレクトリを削除して再 publish してください。"
+            )
+        # manifest が読める状態かを確認し、content key が dir 名と一致するかを検証する
+        try:
+            _cached_pkg = PackageManifest.from_dict(json.loads(_manifest_path.read_text(encoding="utf-8")))
+            if _content_key(_cached_pkg) != pkg_dir.name:
+                raise PackageSchemaError(
+                    f"既存 package の manifest content key が dir 名と一致しません: {pkg_dir}"
+                )
+        except (json.JSONDecodeError, KeyError, ValueError) as _e:
+            raise PackageSchemaError(
+                f"既存 package の manifest 読み込みに失敗しました: {_manifest_path}: {_e}"
+            ) from _e
+        _cfg_cached = pkg_dir / _CONFIG_NAME
+        if not _cfg_cached.exists() or _sha256_file(_cfg_cached) != pkg_manifest.config_hash:
+            raise PackageSchemaError(
+                f"既存 package の config が欠落または改ざんされています: {_cfg_cached}"
+            )
+        _cm_cached = pkg_dir / _CLASS_MAP_NAME
+        if not _cm_cached.exists() or _sha256_file(_cm_cached) != pkg_manifest.class_map_hash:
+            raise PackageSchemaError(
+                f"既存 package の class_map が欠落または改ざんされています: {_cm_cached}"
+            )
         if pkg_manifest.weight_included:
             _verify_weight_hash(pkg_dir / _WEIGHT_NAME, pkg_manifest.model_hash)
         return pkg_dir / _MANIFEST_NAME
@@ -262,6 +290,30 @@ def publish_development_package(
     model_hash を検証する。指定した path の欠落や不一致は publish を失敗させる。
     score_threshold は restore_package での推論スコア閾値として manifest に保存する。
     """
+    # ---- 書き込み境界バリデーション（fail-closed）----
+    import math as _math
+    raw_mode = getattr(checkpoint_manifest, "training_mode", "development")
+    if raw_mode not in ("smoke", "development"):
+        raise ValueError(
+            f"publish_development_package: training_mode の許容値は 'smoke' | 'development' です。"
+            f" got: {raw_mode!r}"
+        )
+    raw_dev_only = getattr(checkpoint_manifest, "development_only", True)
+    if raw_dev_only is not True:
+        raise ValueError(
+            "publish_development_package: development_only は True でなければなりません。"
+        )
+    if (
+        isinstance(score_threshold, bool)
+        or not isinstance(score_threshold, (int, float))
+        or not _math.isfinite(score_threshold)
+        or not (0.0 <= score_threshold <= 1.0)
+    ):
+        raise ValueError(
+            f"publish_development_package: score_threshold は [0, 1] の有限数値である必要があります。"
+            f" got: {score_threshold!r}"
+        )
+
     contract_hash = _compute_contract_hash()
 
     pkg_manifest = PackageManifest(

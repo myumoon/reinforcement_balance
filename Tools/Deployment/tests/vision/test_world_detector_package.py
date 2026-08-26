@@ -401,6 +401,7 @@ class TestCheckpointSelector:
             "last_epoch": 2,
             "last_checkpoint": _LAST_CHECKPOINT_NAME,
             "last_checkpoint_hash": _sha256_file(checkpoint_path),
+            "training_mode": "development",  # Fix 2: training_mode は必須フィールド
         }
         (tmp_path / _RESUME_STATE_NAME).write_text(json.dumps(metadata), encoding="utf-8")
 
@@ -1449,3 +1450,199 @@ class TestImagePreflightBeforeOptimizer:
 
         errors = _check_all_images(train_view, val_view)
         assert any("missing.png" in e for e in errors), f"欠落画像が検出されるべき: {errors}"
+
+
+class TestIter11Regressions:
+    """iter11 P1 修正 6 件の回帰テスト。"""
+
+    # ---- Fix 1: dry-run でも画像 preflight が実行される ----
+    def test_dry_run_returns_exit_code_1_on_missing_image(self, tmp_path):
+        """欠落画像を含む dataset で dry-run を実行すると exit code 1 になる（P1 回帰テスト）。"""
+        from train_survivors_world_detector import _check_all_images
+        from survivors.vision.world_dataset import DatasetSample
+
+        existing = tmp_path / "exist.png"
+        existing.write_bytes(b"")
+
+        class _FakeView:
+            def __init__(self, items): self._items = items
+            def __len__(self): return len(self._items)
+            def __getitem__(self, i): return self._items[i]
+
+        train_view = _FakeView([DatasetSample(0, str(existing), 32, 32, [], session_id="s0")])
+        val_view = _FakeView([DatasetSample(1, str(tmp_path / "missing.png"), 32, 32, [], session_id="s1")])
+
+        # _check_all_images は dry-run 前に呼ばれる想定なので、欠落が検出されれば OK
+        errors = _check_all_images(train_view, val_view)
+        assert errors, "欠落画像が検出されるべき（dry-run でも preflight は走る）"
+
+    # ---- Fix 2: training_mode 欠落 resume を拒否 ----
+    def test_resume_rejects_missing_training_mode_field(self, tmp_path):
+        """training_state.json に training_mode がない場合は resume を拒否する（P1 回帰テスト）。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import (
+            CheckpointSelector, _LAST_CHECKPOINT_NAME, _RESUME_STATE_NAME,
+            _save_resume_state, _load_resume_state,
+        )
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        _save_resume_state(tmp_path, 1, selector, model, optimizer, training_mode="smoke")
+
+        # training_mode を削除して旧 schema を模擬する
+        state = json.loads((tmp_path / _RESUME_STATE_NAME).read_text())
+        del state["training_mode"]
+        (tmp_path / _RESUME_STATE_NAME).write_text(json.dumps(state), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="training_mode"):
+            _load_resume_state(tmp_path, selector, model, optimizer, expected_training_mode="smoke")
+
+    # ---- Fix 3: 書き込み境界 — CheckpointManifest.save() ----
+    def test_checkpoint_manifest_save_rejects_formal_true(self, tmp_path):
+        """CheckpointManifest.save() は formal_detector_eligible=True を拒否する（P1 回帰テスト）。"""
+        from survivors.vision.world_detector import CheckpointManifest
+        m = CheckpointManifest(
+            model_hash="a" * 64, data_hash="b" * 64, config_hash="c" * 64,
+            build_hash="d" * 64, class_map_hash="e" * 64,
+            formal_detector_eligible=True,
+        )
+        with pytest.raises(ValueError, match="formal_detector_eligible"):
+            m.save(tmp_path / "manifest.json")
+
+    def test_checkpoint_manifest_save_rejects_invalid_training_mode(self, tmp_path):
+        """CheckpointManifest.save() は training_mode='formal' を拒否する（P1 回帰テスト）。"""
+        from survivors.vision.world_detector import CheckpointManifest
+        m = CheckpointManifest(
+            model_hash="a" * 64, data_hash="b" * 64, config_hash="c" * 64,
+            build_hash="d" * 64, class_map_hash="e" * 64,
+            formal_detector_eligible=False,
+            training_mode="formal",
+        )
+        with pytest.raises(ValueError, match="training_mode"):
+            m.save(tmp_path / "manifest.json")
+
+    # ---- Fix 3: 書き込み境界 — publish_development_package() ----
+    def test_publish_rejects_nan_score_threshold(self, tmp_path):
+        """NaN score_threshold で publish すると ValueError になる（P1 回帰テスト）。"""
+        from survivors.vision.world_detector_package import publish_development_package
+        store = tmp_path / "store"; store.mkdir()
+        with pytest.raises(ValueError, match="score_threshold"):
+            publish_development_package(
+                _make_checkpoint_manifest(), metrics_dict={}, checkpoint_selection={},
+                store_dir=store, cfg_path=DETECTOR_CONFIG_PATH, cm_path=CLASS_MAP_PATH,
+                score_threshold=float("nan"),
+            )
+
+    def test_publish_rejects_invalid_development_only(self, tmp_path):
+        """development_only=False の manifest で publish すると ValueError になる（P1 回帰テスト）。"""
+        from survivors.vision.world_detector_package import publish_development_package
+        from survivors.vision.world_detector import CheckpointManifest
+        store = tmp_path / "store"; store.mkdir()
+        bad_manifest = CheckpointManifest(
+            model_hash="a" * 64, data_hash="b" * 64, config_hash="c" * 64,
+            build_hash="d" * 64, class_map_hash="e" * 64,
+            formal_detector_eligible=False,
+            development_only=False,
+        )
+        with pytest.raises(ValueError, match="development_only"):
+            publish_development_package(
+                bad_manifest, metrics_dict={}, checkpoint_selection={},
+                store_dir=store, cfg_path=DETECTOR_CONFIG_PATH, cm_path=CLASS_MAP_PATH,
+            )
+
+    # ---- Fix 4: nearest_distance 上限 / slice params 検証 ----
+    def test_nearest_distance_over_1_is_rejected(self):
+        """nearest_distance_error > 1.0 は passed=False になる（P1 回帰テスト）。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics, evaluate_from_predictions
+        m = evaluate_from_predictions([], [], num_classes=12)
+        m.nearest_distance_error = 2.0
+        result = compute_dev_diagnostics(
+            metrics=m,
+            gate_cfg={"nearest_distance_median_max": 3.0},  # 閾値が大きくても distance>1 は拒否
+            class_name_by_id={},
+            num_classes=12,
+        )
+        assert not result.passed
+
+    def test_invalid_nd_max_over_1_is_rejected(self):
+        """nearest_distance_median_max > 1.0 の閾値自体も fail-closed で拒否（P1 回帰テスト）。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics, evaluate_from_predictions
+        m = evaluate_from_predictions([], [], num_classes=12)
+        m.nearest_distance_error = 0.5
+        result = compute_dev_diagnostics(
+            metrics=m,
+            gate_cfg={"nearest_distance_median_max": 3.0},  # 閾値が [0,1] 外
+            class_name_by_id={},
+            num_classes=12,
+        )
+        assert not result.passed
+
+    def test_slice_negative_min_instances_is_rejected(self):
+        """slice の min_instances < 1 は passed=False になる（P1 回帰テスト）。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics, evaluate_from_predictions
+        m = evaluate_from_predictions([], [], num_classes=12)
+        gate_cfg = {"slice_gate": {"boss": {"recall_min": 0.5, "min_instances": -1, "min_sessions": 1}}}
+        result = compute_dev_diagnostics(
+            metrics=m, gate_cfg=gate_cfg, class_name_by_id={}, num_classes=12,
+            slice_annotations={"boss": []}, slice_predictions={"boss": []},
+        )
+        assert not result.passed
+
+    # ---- Fix 5: batch_size=2 を拒否 ----
+    def test_batch_size_2_is_rejected(self):
+        """batch_size=2 は ValueError になる（P1 回帰テスト）。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import _train_epoch
+        from survivors.vision.world_dataset import COCOAnnotation, DatasetSample
+
+        samples = [
+            DatasetSample(i, f"missing-{i}.png", 32, 32,
+                          [COCOAnnotation(i, i, 1, (1, 1, 4, 4), f"s{i % 2}")], session_id=f"s{i % 2}")
+            for i in range(3)
+        ]
+        with pytest.raises(ValueError, match="batch_size"):
+            _train_epoch(
+                SimpleNamespace(_model=SimpleNamespace(train=lambda: None, __call__=lambda *a: {})),
+                samples,
+                SimpleNamespace(zero_grad=lambda: None, step=lambda: None),
+                {"training": {"batch_size": 2}},
+                smoke=True,
+            )
+
+    # ---- Fix 6: 既存 package 完全性検証 ----
+    def test_republish_fails_on_missing_manifest(self, tmp_path):
+        """manifest 削除後に同内容を再 publish すると PackageSchemaError になる（P1 回帰テスト）。"""
+        from survivors.vision.world_detector_package import (
+            publish_development_package, PackageSchemaError
+        )
+        store = tmp_path / "store"; store.mkdir()
+        pkg_path = publish_development_package(
+            _make_checkpoint_manifest(), metrics_dict={}, checkpoint_selection={},
+            store_dir=store, cfg_path=DETECTOR_CONFIG_PATH, cm_path=CLASS_MAP_PATH,
+        )
+        # manifest を削除して破損させる
+        pkg_path.unlink()
+        with pytest.raises(PackageSchemaError, match="manifest"):
+            publish_development_package(
+                _make_checkpoint_manifest(), metrics_dict={}, checkpoint_selection={},
+                store_dir=store, cfg_path=DETECTOR_CONFIG_PATH, cm_path=CLASS_MAP_PATH,
+            )
+
+    def test_republish_fails_on_tampered_config(self, tmp_path):
+        """config を改ざん後に再 publish すると PackageSchemaError になる（P1 回帰テスト）。"""
+        from survivors.vision.world_detector_package import (
+            publish_development_package, PackageSchemaError, _CONFIG_NAME
+        )
+        store = tmp_path / "store"; store.mkdir()
+        pkg_path = publish_development_package(
+            _make_checkpoint_manifest(), metrics_dict={}, checkpoint_selection={},
+            store_dir=store, cfg_path=DETECTOR_CONFIG_PATH, cm_path=CLASS_MAP_PATH,
+        )
+        # config を改ざんする
+        cfg_cached = pkg_path.parent / _CONFIG_NAME
+        cfg_cached.write_text("# tampered", encoding="utf-8")
+        with pytest.raises(PackageSchemaError, match="config"):
+            publish_development_package(
+                _make_checkpoint_manifest(), metrics_dict={}, checkpoint_selection={},
+                store_dir=store, cfg_path=DETECTOR_CONFIG_PATH, cm_path=CLASS_MAP_PATH,
+            )

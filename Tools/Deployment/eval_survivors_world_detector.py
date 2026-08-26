@@ -592,7 +592,11 @@ def compute_dev_diagnostics(
         density_min = 1.1  # 無効なので通過不可にする
 
     nd_max = gate_cfg.get("nearest_distance_median_max", 0.04)
-    if not (isinstance(nd_max, (int, float)) and math.isfinite(nd_max) and nd_max >= 0.0):
+    if not (
+        isinstance(nd_max, (int, float))
+        and math.isfinite(nd_max)
+        and 0.0 <= nd_max <= 1.0   # 正規化 distance は [0,1] なので閾値も同範囲
+    ):
         all_passed = False
         nd_max = -1.0  # 無効なので通過不可にする
 
@@ -626,9 +630,11 @@ def compute_dev_diagnostics(
     if not _check_metric("density_correlation vs threshold", density_corr, density_min, 1.0):
         all_passed = False
 
-    # --- nearest-distance median error ---
+    # --- nearest-distance median error（正規化 [0,1] を要求） ---
     nd_median = metrics.nearest_distance_error
-    if not (math.isfinite(nd_median) and nd_median >= 0.0 and nd_median <= nd_max):
+    if not _check_metric("nearest_distance_error", nd_median, 0.0, 1.0):
+        all_passed = False
+    elif nd_median > nd_max:
         all_passed = False
 
     # --- GPU p95 latency: unsupported（passed に影響しない） ---
@@ -644,6 +650,37 @@ def compute_dev_diagnostics(
         s_recall_min = s_cfg.get("recall_min", 0.80)
         s_min_instances = s_cfg.get("min_instances", 4)
         s_min_sessions = s_cfg.get("min_sessions", 4)
+
+        # slice パラメータ型・範囲を fail-closed で検証する
+        s_recall_min_valid = (
+            isinstance(s_recall_min, (int, float))
+            and not isinstance(s_recall_min, bool)
+            and math.isfinite(s_recall_min)
+            and 0.0 <= s_recall_min <= 1.0
+        )
+        s_min_inst_valid = (
+            isinstance(s_min_instances, int)
+            and not isinstance(s_min_instances, bool)
+            and s_min_instances >= 1
+        )
+        s_min_sess_valid = (
+            isinstance(s_min_sessions, int)
+            and not isinstance(s_min_sessions, bool)
+            and s_min_sessions >= 1
+        )
+        if not (s_recall_min_valid and s_min_inst_valid and s_min_sess_valid):
+            all_passed = False
+            slice_results.append(SliceGateResult(
+                slice_name=slice_name,
+                recall=None,
+                recall_min=s_recall_min,
+                n_instances=0,
+                min_instances=s_min_instances,
+                n_sessions=0,
+                min_sessions=s_min_sessions,
+                passed=False,
+            ))
+            continue
 
         s_anns = (slice_annotations or {}).get(slice_name, [])
         n_instances = len(s_anns)

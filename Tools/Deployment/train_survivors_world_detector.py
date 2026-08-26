@@ -233,7 +233,12 @@ def _load_resume_state(
         )
 
     saved_mode = state.get("training_mode")
-    if saved_mode is not None and saved_mode != expected_training_mode:
+    if saved_mode not in ("smoke", "development"):
+        raise ValueError(
+            f"[RESUME] training_state.json の training_mode が不正または欠落しています: {saved_mode!r}。"
+            " 旧 schema の checkpoint は resume できません。新規学習してください。"
+        )
+    if saved_mode != expected_training_mode:
         raise ValueError(
             f"[RESUME] training_mode の不一致: 保存済み={saved_mode!r}, "
             f"現在={expected_training_mode!r}。smoke と development の間で resume はできません。"
@@ -592,8 +597,11 @@ def _train_epoch(
         return
 
     batch_size = cfg.get("training", {}).get("batch_size")
-    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 2:
-        raise ValueError("training.batch_size は 2 以上の整数である必要があります。")
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 3:
+        raise ValueError(
+            "training.batch_size は 3 以上の整数である必要があります。"
+            " 2 以下では奇数件 dataset でのsingleton batch 防止のため学習できません。"
+        )
 
     ordered_indices = _session_interleaved_indices(ds)
     batches = [ordered_indices[i:i + batch_size] for i in range(0, len(ordered_indices), batch_size)]
@@ -765,11 +773,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[CONFIG ERROR] {e}", file=sys.stderr)
         return 1
 
-    if args.dry_run:
-        print("[DRY-RUN] --dry-run が指定されたため学習をスキップします。")
-        return 0
-
-    # -- 全採用画像の存在・decode を optimizer 作成前に確認する（smoke 以外）
+    # -- 全採用画像の存在・decode を確認する（smoke 以外・dry-run より前）
+    # dry-run も同じ preflight を通す。欠落画像を含む dataset は dry-run でも exit code 1。
     if not args.smoke:
         missing = _check_all_images(train_ds, validation_ds)
         if missing:
@@ -780,6 +785,10 @@ def main(argv: list[str] | None = None) -> int:
             print("[INFO] training step 0 のまま停止します。", file=sys.stderr)
             return 1
         print(f"[IMAGE PREFLIGHT OK] 全 {len(train_ds) + len(validation_ds)} 画像を確認しました。")
+
+    if args.dry_run:
+        print("[DRY-RUN] --dry-run が指定されたため学習をスキップします。")
+        return 0
 
     # -- build model
     try:
