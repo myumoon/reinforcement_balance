@@ -11,6 +11,7 @@ $script:SurvivorsDeploymentAllowedKeys = @(
     'SURVIVORS_EVIDENCE_ROOT',
     'VAMPIRE_SURVIVORS_EXE',
     'SURVIVORS_CANONICAL_SAVE',
+    'SURVIVORS_CANONICAL_SAVE_BACKUP_ROOT',
     'SURVIVORS_TARGET_PROFILE'
 )
 
@@ -225,6 +226,177 @@ function Test-ArtifactStoreRoots {
         PrimaryVolume = $primaryVolume
         BackupVolume  = $backupVolume
         DryRun        = [bool]$DryRun
+    }
+}
+
+function Assert-LocalFixedNtfsPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $normalized = Get-NormalizedDeploymentPath $Path
+    $root = [IO.Path]::GetPathRoot($normalized)
+    if ($root -notmatch '^[A-Za-z]:\\$') {
+        throw 'Backup root must be on a local fixed NTFS volume.'
+    }
+    try {
+        $drive = New-Object IO.DriveInfo($root)
+        if (-not $drive.IsReady -or $drive.DriveType -ne [IO.DriveType]::Fixed -or $drive.DriveFormat -ne 'NTFS') {
+            throw 'unsupported volume'
+        }
+    }
+    catch {
+        throw 'Backup root must be on a local fixed NTFS volume.'
+    }
+}
+
+function Assert-NoReparsePointPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $current = Get-NearestExistingPath $Path
+    $root = [IO.Path]::GetPathRoot($current)
+    while ($true) {
+        $item = Get-Item -LiteralPath $current -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Backup root must not traverse a reparse point.'
+        }
+        if ($current.Equals($root, [StringComparison]::OrdinalIgnoreCase)) {
+            break
+        }
+        $current = Split-Path -Parent $current
+    }
+}
+
+function Invoke-CanonicalSaveBackup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SourcePath,
+        [Parameter(Mandatory)]
+        [string]$BackupRoot,
+        [string]$GenerationName,
+        [DateTimeOffset]$CollectedAt = [DateTimeOffset]::UtcNow,
+        [scriptblock]$HashProvider,
+        [scriptblock]$VolumeValidator
+    )
+
+    $source = Get-NormalizedDeploymentPath $SourcePath
+    $backupRootPath = Get-NormalizedDeploymentPath $BackupRoot
+    if ($source.Equals($backupRootPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Canonical save source and backup root must not be the same path.'
+    }
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw 'SURVIVORS_CANONICAL_SAVE must point to an existing regular file.'
+    }
+    $sourceItem = Get-Item -LiteralPath $source -Force
+    if (($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'SURVIVORS_CANONICAL_SAVE must point to an existing regular file.'
+    }
+    if (Test-Path -LiteralPath $backupRootPath -PathType Leaf) {
+        throw 'Canonical save backup root must be a directory.'
+    }
+
+    if ($null -eq $VolumeValidator) {
+        $VolumeValidator = { param([string]$Path) Assert-LocalFixedNtfsPath -Path $Path }
+    }
+    $null = & $VolumeValidator $backupRootPath
+    Assert-NoReparsePointPath -Path $backupRootPath
+
+    if ([string]::IsNullOrWhiteSpace($GenerationName)) {
+        $GenerationName = '{0}_{1}' -f $CollectedAt.ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ'), [guid]::NewGuid().ToString('N').Substring(0, 8)
+    }
+    if ($GenerationName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+        throw 'Backup generation name contains unsupported characters.'
+    }
+    if ($null -eq $HashProvider) {
+        $HashProvider = {
+            param([string]$Path)
+            return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+
+    New-Item -ItemType Directory -Path $backupRootPath -Force | Out-Null
+    Assert-NoReparsePointPath -Path $backupRootPath
+    $generationPath = Join-Path $backupRootPath $GenerationName
+    if (Test-Path -LiteralPath $generationPath) {
+        throw "Backup generation '$GenerationName' already exists."
+    }
+
+    $generationCreated = $false
+    $published = $false
+    $tempPath = $null
+    $recordTempPath = $null
+    try {
+        New-Item -ItemType Directory -Path $generationPath -ErrorAction Stop | Out-Null
+        $generationCreated = $true
+        $sourceName = Split-Path -Leaf $source
+        $backupPath = Join-Path $generationPath $sourceName
+        $recordPath = Join-Path $generationPath 'backup-result.json'
+        if ($sourceName.Equals('backup-result.json', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Canonical save basename conflicts with the backup result filename.'
+        }
+        $tempPath = Join-Path $generationPath ('.{0}.{1}.tmp' -f $sourceName, [guid]::NewGuid().ToString('N'))
+        [IO.File]::Copy($source, $tempPath, $false)
+
+        $sourceHash = [string](& $HashProvider $source)
+        $tempHash = [string](& $HashProvider $tempPath)
+        if ($sourceHash -notmatch '^[0-9A-Fa-f]{64}$' -or $tempHash -notmatch '^[0-9A-Fa-f]{64}$') {
+            throw 'SHA-256 provider returned an invalid hash.'
+        }
+        $sourceHash = $sourceHash.ToLowerInvariant()
+        $tempHash = $tempHash.ToLowerInvariant()
+        if (-not $sourceHash.Equals($tempHash, [StringComparison]::Ordinal)) {
+            throw 'Canonical save backup blocked: source and temporary copy SHA-256 mismatch.'
+        }
+        $sourceSize = (Get-Item -LiteralPath $source).Length
+        if ($sourceSize -ne (Get-Item -LiteralPath $tempPath).Length) {
+            throw 'Canonical save backup blocked: source and temporary copy size mismatch.'
+        }
+
+        [IO.File]::Move($tempPath, $backupPath)
+        $tempPath = $null
+        $backupHash = [string](& $HashProvider $backupPath)
+        if ($backupHash -notmatch '^[0-9A-Fa-f]{64}$' -or -not $sourceHash.Equals($backupHash.ToLowerInvariant(), [StringComparison]::Ordinal)) {
+            throw 'Canonical save backup blocked: finalized backup SHA-256 mismatch.'
+        }
+
+        $result = [ordered]@{
+            schema_version = 'survivors.canonical-save-backup.v1'
+            status = 'success'
+            source_path = $source
+            backup_path = $backupPath
+            source_hash = $sourceHash
+            backup_hash = $backupHash.ToLowerInvariant()
+            size = [long]$sourceSize
+            collected_at = $CollectedAt.ToUniversalTime().ToString('o')
+            match = $true
+            blocking_reason = $null
+            record_path = $recordPath
+        }
+        $recordTempPath = Join-Path $generationPath ('.backup-result.{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+        $utf8NoBom = New-Object Text.UTF8Encoding($false)
+        [IO.File]::WriteAllText($recordTempPath, ($result | ConvertTo-Json -Depth 4), $utf8NoBom)
+        [IO.File]::Move($recordTempPath, $recordPath)
+        $recordTempPath = $null
+        $published = $true
+        return [pscustomobject]$result
+    }
+    finally {
+        if ($null -ne $tempPath -and [IO.File]::Exists($tempPath)) {
+            [IO.File]::Delete($tempPath)
+        }
+        if ($null -ne $recordTempPath -and [IO.File]::Exists($recordTempPath)) {
+            [IO.File]::Delete($recordTempPath)
+        }
+        if (-not $published -and $generationCreated -and [IO.Directory]::Exists($generationPath) -and @(Get-ChildItem -LiteralPath $generationPath -Force).Count -eq 0) {
+            [IO.Directory]::Delete($generationPath)
+        }
     }
 }
 

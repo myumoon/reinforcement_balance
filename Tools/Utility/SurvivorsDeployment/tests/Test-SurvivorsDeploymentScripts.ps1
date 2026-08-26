@@ -77,6 +77,7 @@ function Write-TestEnv {
         'SURVIVORS_EVIDENCE_ROOT',
         'VAMPIRE_SURVIVORS_EXE',
         'SURVIVORS_CANONICAL_SAVE',
+        'SURVIVORS_CANONICAL_SAVE_BACKUP_ROOT',
         'SURVIVORS_TARGET_PROFILE'
     )
     $lines = foreach ($key in $keys) {
@@ -93,7 +94,8 @@ $workflowNames = @(
     '01_SetupDeploymentEnvironment',
     '02_PrepareArtifactStore',
     '03_CollectTargetEvidence',
-    '04_VerifyDeploymentSmoke'
+    '04_VerifyDeploymentSmoke',
+    '05_BackupCanonicalSave'
 )
 
 foreach ($name in $workflowNames) {
@@ -119,7 +121,9 @@ foreach ($requiredText in @(
         'formal_dataset_eligible=false',
         '%LOCALAPPDATA%\ReinBalance\DeploymentLogs',
         '00_ConfigureLocalEnvironment.bat',
-        '04_VerifyDeploymentSmoke.bat'
+        '04_VerifyDeploymentSmoke.bat',
+        '05_BackupCanonicalSave.bat',
+        'SURVIVORS_CANONICAL_SAVE_BACKUP_ROOT'
     )) {
     Assert-True ($readme -match [regex]::Escape($requiredText)) "README must document '$requiredText'."
 }

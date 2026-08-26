@@ -91,6 +91,7 @@ foreach ($key in @(
         'SURVIVORS_EVIDENCE_ROOT',
         'VAMPIRE_SURVIVORS_EXE',
         'SURVIVORS_CANONICAL_SAVE',
+        'SURVIVORS_CANONICAL_SAVE_BACKUP_ROOT',
         'SURVIVORS_TARGET_PROFILE'
     )) {
     Assert-True ($exampleText -match "(?m)^$key=\s*$") "Template key $key must have an empty value."
