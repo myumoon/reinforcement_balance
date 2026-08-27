@@ -6,8 +6,11 @@ from __future__ import annotations
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from reinbalance_survivors_contracts.item_decision import CandidateFeatures, ItemDecisionFeatures
+from reinbalance_survivors_contracts.ui_policy import (
+    FallbackSemantic, FallbackTarget, ScreenState, UiPolicyInputV1,
+)
 from .deploy_obs_adapter import NamedEstimate, build_deploy_observation, normalized_category
-from .perception_snapshot import PerceptionSnapshot, build_ui_presentation_from_hud
+from .perception_snapshot import PerceptionSnapshot, UiPresentationSnapshotV1, build_ui_presentation_from_hud
 from .screen_space_features import build_screen_space_estimates
 from .temporal_state import TemporalAssembler, TemporalJoin
 from .vision.entity_tracker import TrackedEntityV1, TrackedWorldStateV1
@@ -43,6 +46,57 @@ def _candidate(card: ParsedCard, used_ids: set[str], inventory: tuple[str | None
         owned=owned, is_new=not owned, is_evolve=card.kind == "evolved",
         is_union=False, has_prerequisite=False, slot_capacity=6,
     )
+
+_HUD_TO_SCREEN_STATE: dict[str, ScreenState] = {
+    "gameplay": ScreenState.GAMEPLAY,
+    "level_up_items": ScreenState.LEVEL_UP,
+    "level_up_fallback": ScreenState.FALLBACK,
+    "chest": ScreenState.CHEST,
+}
+_KNOWN_FALLBACK_IDS = {FallbackSemantic.CHICKEN.value, FallbackSemantic.GOLD.value}
+
+
+def _build_ui_policy_input(
+    snapshot_id: str,
+    frame_id: str,
+    hud: HudStateV1,
+    ui: UiPresentationSnapshotV1,
+) -> UiPolicyInputV1:
+    """HUD と UI presentation から UiPolicyInputV1 を構築する。
+
+    combat_validity に依存せず hud.hp_ratio（画面由来）を直接使うことで、
+    fallback 画面でも fallback_heuristic_v1 が HP 閾値を評価できる。
+    """
+    screen_state = _HUD_TO_SCREEN_STATE.get(hud.screen_state, ScreenState.UNKNOWN)
+    hp_fraction = float(hud.hp_ratio) if hud.hp_ratio is not None else 0.
+    fallback_targets = []
+    for cand in ui.candidates:
+        if cand.semantic_kind != "fallback_reward":
+            continue
+        cid = cand.choice_id.casefold()
+        semantic = (
+            FallbackSemantic.CHICKEN.value if "chicken" in cid
+            else FallbackSemantic.GOLD.value if "gold" in cid
+            else "unknown_fallback"
+        )
+        fallback_targets.append(FallbackTarget(
+            target_id=cand.choice_id,
+            target_index=cand.choice_index,
+            semantic=semantic,
+            valid=cand.validity,
+        ))
+    return UiPolicyInputV1(
+        source_snapshot_hash=snapshot_id,
+        source_frame_hash=frame_id,
+        source_content_hash=ui.source_content_hash,
+        ui_state_key=ui.ui_state_key,
+        screen_state=screen_state,
+        hp_fraction=hp_fraction,
+        candidate_set_hash=ui.candidate_set_hash,
+        inventory_hash=ui.inventory_hash,
+        fallback_targets=tuple(fallback_targets),
+    )
+
 
 def _item_context(
     joined: TemporalJoin, snapshot_id: str, screen: dict[str, NamedEstimate],
@@ -80,9 +134,9 @@ def _item_context(
     if not choices:
         return None, ()
     # ponytail: HudStateV1.inventory は identity のみ保持。slot level・evolution_readiness・is_union・
-    # has_prerequisite は画面から観測不可。screen-observable contract として occupancy (0=空, 1=占有) を
-    # 使う。このアセンブラで収集した訓練データとのみ整合する — UE5 HTTP API 経由で実 level を与えた
-    # データとは分布が異なる。parser が per-slot level を提供するまでの暫定実装。
+    # has_prerequisite は画面から観測不可。context_danger_occupancy_v1 スキーマで
+    # occupancy (0=空, 1=占有) を使う。simulator の context_danger_v1 とは別スキーマのため
+    # 対応する専用モデルが必要。parser が per-slot level を提供すれば context_danger_v1 へ移行可。
     inventory_levels = tuple(1 if item is not None else 0 for item in joined.hud.inventory)
     nearest = screen.get("nearest_enemy_offset")
     radius = screen.get("nearest_enemy_screen_radius")
@@ -94,8 +148,14 @@ def _item_context(
     world_age = (now_ns - gameplay_world.timestamp_ns) / 1_000_000_000 if now_ns is not None and gameplay_world is not None else 0.
     snapshot_age = (now_ns - last_gameplay_ns) / 1_000_000_000 if now_ns is not None and last_gameplay_ns is not None else 0.
     ui_state_age = max(0., (now_ns - joined.hud.captured_monotonic_ns) / 1_000_000_000) if now_ns is not None else 0.
+    # P2: fallback/missing anchor 由来の estimate (validity=0) を中立値へ戻し world_validity に反映する。
+    # nearest が None の場合 (敵なし) は制約を課さない (near_val=1.0)。
+    near_val = nearest.validity if nearest is not None else 1.0
+    nearest_enemy_screen_dist = radius.value[0] if (radius is not None and near_val > 0) else 0.
+    nearest_enemy_screen_dir = nearest.value if (nearest is not None and near_val > 0) else (0., 0.)
+    world_validity = min(joined.world_validity, near_val)
     context = ItemDecisionFeatures(
-        decision_id=snapshot_id, feature_schema="context_danger_v1",
+        decision_id=snapshot_id, feature_schema="context_danger_occupancy_v1",
         elapsed_time=joined.hud.timer_seconds or 0., level=joined.hud.level or 1,
         hp_ratio=joined.hud.hp_ratio or 0., xp_ratio=joined.hud.xp_ratio or 0.,
         weapon_slots=inventory_levels[:6], passive_slots=inventory_levels[6:],
@@ -103,11 +163,11 @@ def _item_context(
         choice_count=len(choices), card_mask=(True,) * len(choices) + (False,) * (max_cards - len(choices)),
         fallback_kind=fallback, ui_state_validity=joined.item_validity, ui_state_age=ui_state_age,
         candidates=choices, max_item_cards=max_cards, enemy_density=enemy_density,
-        gem_density=gem_density, nearest_enemy_screen_dist=radius.value[0] if radius else 1.,
-        nearest_enemy_screen_dir=nearest.value if nearest else (0., 0.),
+        gem_density=gem_density, nearest_enemy_screen_dist=nearest_enemy_screen_dist,
+        nearest_enemy_screen_dir=nearest_enemy_screen_dir,
         boss_flag=any(track.coarse_class == "enemy" and "boss" in track.class_name for track in visible),
         hazard_flag=any(track.coarse_class == "hazard" for track in visible),
-        world_validity=joined.world_validity, world_age=world_age, last_gameplay_snapshot_age=snapshot_age,
+        world_validity=world_validity, world_age=world_age, last_gameplay_snapshot_age=snapshot_age,
     )
     return context, choices
 
@@ -188,6 +248,7 @@ class RealObsAssembler:
             )
         else:
             item_context, choices = None, ()  # キャッシュなし: item overlay をgameplayとして流さない
+        ui_policy_input = _build_ui_policy_input(snapshot_id, frame_id, joined.hud, ui)
         diagnostics = {
             "hud_world_skew_ms": abs(joined.hud.captured_monotonic_ns - joined.world.timestamp_ns) / 1_000_000,
             "hud_validity": joined.hud_validity, "world_validity": joined.world_validity,
@@ -197,4 +258,5 @@ class RealObsAssembler:
             snapshot_id, frame_id, joined.captured_ns, joined.hud.parser_artifact_hash,
             ui.source_content_hash, ui.ui_state_key, joined.hud.screen_state, deploy_obs,
             item_context, choices, ui, diagnostics,
+            ui_policy_input=ui_policy_input,
         )

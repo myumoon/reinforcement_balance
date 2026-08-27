@@ -44,7 +44,7 @@ def test_contract_dataclasses_are_exact_and_frozen() -> None:
         UiCandidateTargetV1: ("choice_id", "choice_index", "semantic_kind", "roi", "validity", "confidence"),
         UiButtonTargetV1: ("semantic_action", "roi", "validity", "capability", "confidence"),
         UiPresentationSnapshotV1: ("schema_hash", "snapshot_id", "frame_id", "parser_artifact_hash", "screen_state", "candidate_set_hash", "inventory_hash", "source_content_hash", "ui_state_key", "candidates", "buttons"),
-        PerceptionSnapshot: ("snapshot_id", "frame_id", "captured_ns", "parser_artifact_hash", "source_content_hash", "ui_state_key", "screen_state", "deploy_obs", "item_context", "choices", "ui_presentation", "diagnostics"),
+        PerceptionSnapshot: ("snapshot_id", "frame_id", "captured_ns", "parser_artifact_hash", "source_content_hash", "ui_state_key", "screen_state", "deploy_obs", "item_context", "choices", "ui_presentation", "diagnostics", "ui_policy_input"),
     }
     for cls, names in expected.items():
         assert tuple(field.name for field in fields(cls)) == names

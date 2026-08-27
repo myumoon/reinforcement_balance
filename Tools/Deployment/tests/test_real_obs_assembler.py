@@ -314,17 +314,16 @@ def test_skew_ms_uses_joined_timestamps() -> None:
 
 
 def test_item_context_slot_encoding_is_binary_occupancy() -> None:
-    """weapon/passive slot は占有 (1) か空 (0) の 2 値エンコーディングで、実 level は使わない。
+    """weapon/passive slot は occupancy (0/1) で context_danger_occupancy_v1 スキーマを使う。
 
     HudStateV1.inventory は item identity のみ保持し level は画面から観測できないため、
-    このアセンブラで収集した訓練データとのみ整合します。evolution_readiness・is_union・
-    has_prerequisite も同様に画面観測不能として固定値を使用します。
+    simulator 用の context_danger_v1 とは別スキーマで表現します。
+    evolution_readiness・is_union・has_prerequisite も同様に画面観測不能として固定値です。
     """
     schema = DeployObsSchema.default_v1()
     assembler = RealObsAssembler()
     hud_gp, world_gp = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
-    # inventory slot 0 に whip が入った状態でレベルアップ画面へ遷移
     card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
     hud_lu = HudStateV1(
         "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
@@ -336,10 +335,192 @@ def test_item_context_slot_encoding_is_binary_occupancy() -> None:
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
     assert snapshot is not None and snapshot.item_context is not None
     ctx = snapshot.item_context
-    # whip は slot 0 に占有 → level = 1 (実レベルによらず固定)
+    assert ctx.feature_schema == "context_danger_occupancy_v1"  # simulator の context_danger_v1 ではない
     assert ctx.weapon_slots == (1, 0, 0, 0, 0, 0)
     assert ctx.passive_slots == (0, 0, 0, 0, 0, 0)
-    # screen-unobservable フィールドは固定値
     assert ctx.evolution_readiness == pytest.approx(0.)
     assert all(not c.is_union for c in snapshot.choices)
     assert all(not c.has_prerequisite for c in snapshot.choices)
+
+
+# ─── P1#1: UiPolicyInputV1 / fallback_heuristic_v1 回帰テスト ───
+
+def _fallback_hud(hp: float, cards: tuple, ts: int = 2_000_000_000) -> HudStateV1:
+    """fallback 画面用 HUD を生成する。"""
+    return HudStateV1(
+        "hud_state.v1", "session", 5, ts, "a" * 64, "level_up_fallback", .9, "ok",
+        20., .9, "ok", False, hp, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, cards, "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+
+
+def test_ui_policy_input_hp_025_selects_chicken() -> None:
+    """HP=0.25 (<=0.70 閾値) では fallback_heuristic_v1 が chicken を選ぶ。
+
+    combat_validity=0 でも hud.hp_ratio (画面由来) を UiPolicyInputV1.hp_fraction に使うため
+    DeployObservation の HP=0 とは独立して chicken / gold を判定できます。
+    """
+    from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, decide_non_model_ui_intent
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
+    card_chk = ParsedCard(1, "chicken_leg", "fallback", 0, .99, "ok", (500, 100, 800, 300))
+    snap = assembler.assemble(_fallback_hud(0.25, (card_gold, card_chk)), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is not None
+    assert snap.ui_policy_input.hp_fraction == pytest.approx(0.25)
+    assert snap.ui_policy_input.screen_state.value == "fallback"
+    config = NonModelUiPolicyConfigV1.default_config()
+    intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
+    assert intent is not None and intent.semantic_action == "chicken"
+
+
+def test_ui_policy_input_hp_090_selects_gold() -> None:
+    """HP=0.90 (>0.70 閾値) では fallback_heuristic_v1 が gold を選ぶ。"""
+    from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, decide_non_model_ui_intent
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
+    card_chk = ParsedCard(1, "chicken_leg", "fallback", 0, .99, "ok", (500, 100, 800, 300))
+    snap = assembler.assemble(_fallback_hud(0.90, (card_gold, card_chk)), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is not None
+    config = NonModelUiPolicyConfigV1.default_config()
+    intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
+    assert intent is not None and intent.semantic_action == "gold"
+
+
+def test_ui_policy_input_chicken_only_selects_chicken() -> None:
+    """chicken のみ有効なら gold がなくても chicken を選ぶ。"""
+    from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, decide_non_model_ui_intent
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    card_chk = ParsedCard(0, "chicken_leg", "fallback", 0, .99, "ok", (100, 100, 400, 300))
+    snap = assembler.assemble(_fallback_hud(0.90, (card_chk,)), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is not None
+    config = NonModelUiPolicyConfigV1.default_config()
+    intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
+    assert intent is not None and intent.semantic_action == "chicken"
+
+
+def test_ui_policy_input_invalid_target_stops() -> None:
+    """confidence < 0.35 で validity=False の fallback target は fail-closed (stop) になる。
+
+    無効な候補から誤ったクリック座標を生成しないことを確認します。
+    """
+    from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, decide_non_model_ui_intent
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    # confidence=0.1 < 0.35 → validity=False
+    card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .1, "ok", (100, 100, 400, 300))
+    card_chk = ParsedCard(1, "chicken_leg", "fallback", 0, .1, "ok", (500, 100, 800, 300))
+    snap = assembler.assemble(_fallback_hud(0.25, (card_gold, card_chk)), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is not None
+    config = NonModelUiPolicyConfigV1.default_config()
+    intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
+    assert intent is not None and intent.kind.value == "stop"
+
+
+def test_ui_policy_input_unknown_semantic_stops() -> None:
+    """'gold' / 'chicken' を含まない item_id の fallback は fail-closed (stop) になる。
+
+    未知の fallback target が意図せず選ばれることを防ぎます。
+    """
+    from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, decide_non_model_ui_intent
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    card_unk = ParsedCard(0, "mystery_box", "fallback", 0, .99, "ok", (100, 100, 400, 300))
+    snap = assembler.assemble(_fallback_hud(0.25, (card_unk,)), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is not None
+    config = NonModelUiPolicyConfigV1.default_config()
+    intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
+    assert intent is not None and intent.kind.value == "stop"
+
+
+# ─── P2: nearest estimate validity 伝播 回帰テスト ───
+
+def test_item_context_fallback_anchor_resets_direction_to_neutral() -> None:
+    """fallback anchor から作った nearest estimate は item context で中立値に戻される。
+
+    world_validity にも anchor の無効性が伝播し、推測座標が有効扱いにならないことを確認します。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    # is_fallback=True の gameplay frame でキャッシュを構築
+    visible = TrackedEntityV1(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
+    world_gp_fb = TrackedWorldStateV1(4, 1_000_000_000, [visible], PlayerAnchorState(.5, .5, .9, True))
+    hud_gp, _ = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp_fb, schema, (1000, 1000))
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, True))
+    snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot is not None and snapshot.item_context is not None
+    # fallback anchor → offset_validity=0 → direction は中立値へリセット
+    assert snapshot.item_context.nearest_enemy_screen_dir == pytest.approx((0., 0.))
+    assert snapshot.item_context.nearest_enemy_screen_dist == pytest.approx(0.)
+    # world_validity に anchor の無効性が反映される
+    assert snapshot.item_context.world_validity == pytest.approx(0.)
+
+
+def test_item_context_real_anchor_preserves_direction() -> None:
+    """実 anchor では nearest estimate の direction と world_validity が保持される。
+
+    fallback anchor との非対称性を確認することで P2 fix の回帰テストとします。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    visible = TrackedEntityV1(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
+    world_gp = TrackedWorldStateV1(4, 1_000_000_000, [visible], PlayerAnchorState(.5, .5, .9, False))
+    hud_gp, _ = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot is not None and snapshot.item_context is not None
+    # 実 anchor → 0.2 オフセットが保持される
+    assert snapshot.item_context.nearest_enemy_screen_dist > 0.
+    dir_x, dir_y = snapshot.item_context.nearest_enemy_screen_dir
+    assert abs(dir_x) + abs(dir_y) > 0.  # 中立値ではない
+    assert snapshot.item_context.world_validity > 0.
+
+
+# ─── P1#2: occupancy parity (determinism) テスト ───
+
+def test_item_context_occupancy_schema_is_deterministic() -> None:
+    """同じ入力から context_danger_occupancy_v1 が決定論的に同じ decision_hash を返す。
+
+    screen-observable な入力が同じなら canonical wire hash が一致することを確認します
+    (occupancy parity)。simulator の context_danger_v1 とは schema が異なるため、
+    対応する専用モデルが必要です。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler1 = RealObsAssembler()
+    assembler2 = RealObsAssembler()
+    hud_gp, world_gp = _inputs("gameplay")
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    for a in (assembler1, assembler2):
+        a.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    snap1 = assembler1.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    snap2 = assembler2.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snap1 is not None and snap2 is not None
+    assert snap1.item_context is not None and snap2.item_context is not None
+    assert snap1.item_context.feature_schema == "context_danger_occupancy_v1"
+    assert snap1.item_context.decision_hash == snap2.item_context.decision_hash

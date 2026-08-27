@@ -10,6 +10,7 @@ from typing import Any, Literal, Mapping
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from reinbalance_survivors_contracts.deploy_obs import DeployObservation
 from reinbalance_survivors_contracts.item_decision import CandidateFeatures, ItemDecisionFeatures
+from reinbalance_survivors_contracts.ui_policy import UiPolicyInputV1
 from .vision.hud_parser import HudStateV1, ParsedCard
 UI_PRESENTATION_SCHEMA_VERSION = "ui_presentation_snapshot.v1"
 UI_PROFILE_VERSION = "survivors_ui_profile.v1"
@@ -149,6 +150,7 @@ class PerceptionSnapshot:
     deploy_obs: DeployObservation; item_context: ItemDecisionFeatures | None
     choices: tuple[CandidateFeatures, ...]; ui_presentation: UiPresentationSnapshotV1
     diagnostics: Mapping[str, Any]
+    ui_policy_input: UiPolicyInputV1 | None = None
     def __post_init__(self) -> None:
         """atomic identity と ROI leakage 禁止を検証する。
 
@@ -162,6 +164,8 @@ class PerceptionSnapshot:
             raise ValueError("invalid perception payload")
         if self.item_context is not None and not isinstance(self.item_context, ItemDecisionFeatures):
             raise ValueError("invalid item_context")
+        if self.ui_policy_input is not None and not isinstance(self.ui_policy_input, UiPolicyInputV1):
+            raise ValueError("ui_policy_input must be UiPolicyInputV1 or None")
         if not isinstance(self.choices, tuple) or not all(isinstance(value, CandidateFeatures) for value in self.choices):
             raise ValueError("choices must be CandidateFeatures tuple")
         ui = self.ui_presentation

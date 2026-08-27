@@ -24,9 +24,13 @@ __all__ = [
 ITEM_DECISION_SCHEMA_VERSION = "item_decision.v1"
 CANDIDATE_FEATURES_SCHEMA_VERSION = "candidate_features.v1"
 ItemDecisionSchemaV1: TypeAlias = Literal[
-    "context_only_v1", "context_danger_v1"
+    "context_only_v1", "context_danger_v1", "context_danger_occupancy_v1"
 ]
-_FEATURE_SCHEMAS = frozenset({"context_only_v1", "context_danger_v1"})
+_FEATURE_SCHEMAS = frozenset({"context_only_v1", "context_danger_v1", "context_danger_occupancy_v1"})
+# context_danger_occupancy_v1: real-screen assembler 専用。weapon/passive slots は
+# 画面から観測できる occupancy (0=空, 1=占有) のみを保持し実 level は含まない。
+# context_danger_v1 (simulator 用) とは schema が異なるため、対応する専用モデルが必要。
+_DANGER_SCHEMAS = frozenset({"context_danger_v1", "context_danger_occupancy_v1"})
 _PADDING_KIND = "padding"
 _PADDING_ITEM_ID = "__padding__"
 _CANDIDATE_WIRE_FIELDS = frozenset(
@@ -292,7 +296,8 @@ class CandidateFeatures:
 class ItemDecisionFeatures:
     """一回の level-up context と可変個数候補を二つの feature 案で表す。
 
-    base context は両案で共通、danger field は ``context_danger_v1`` のみ必須とし、wire
+    base context は両案で共通、danger field は ``context_danger_v1`` および
+    ``context_danger_occupancy_v1`` で必須とし、wire
     では候補を ``max_item_cards`` まで padding する。
     """
 
@@ -387,7 +392,9 @@ class ItemDecisionFeatures:
                 raise ValueError("danger fields are forbidden for context_only_v1")
             return
         if any(value is None for value in fields.values()):
-            raise ValueError("all danger fields are required for context_danger_v1")
+            raise ValueError(
+                f"all danger fields are required for {self.feature_schema}"
+            )
         _ratio(self.enemy_density, "enemy_density")
         _ratio(self.gem_density, "gem_density")
         _ratio(self.nearest_enemy_screen_dist, "nearest_enemy_screen_dist")
@@ -429,7 +436,7 @@ class ItemDecisionFeatures:
             "ui_state_validity": float(self.ui_state_validity),
             "ui_state_age": float(self.ui_state_age),
         }
-        if self.feature_schema == "context_danger_v1":
+        if self.feature_schema in _DANGER_SCHEMAS:
             result.update(
                 {
                     "enemy_density": float(self.enemy_density),
@@ -513,7 +520,7 @@ class ItemDecisionFeatures:
             raise ValueError("unsupported item decision feature_schema")
         expected_context = (
             _BASE_CONTEXT_FIELDS | _DANGER_CONTEXT_FIELDS
-            if feature_schema == "context_danger_v1"
+            if feature_schema in _DANGER_SCHEMAS
             else _BASE_CONTEXT_FIELDS
         )
         context = data["context_features"]
@@ -544,7 +551,7 @@ class ItemDecisionFeatures:
                 else context[name]
             )
             for name in _DANGER_CONTEXT_FIELDS
-        } if feature_schema == "context_danger_v1" else {}
+        } if feature_schema in _DANGER_SCHEMAS else {}
         return cls(
             decision_id=data["decision_id"],
             feature_schema=feature_schema,
