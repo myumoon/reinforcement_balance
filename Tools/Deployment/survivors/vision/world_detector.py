@@ -154,6 +154,7 @@ class CheckpointManifest:
 
         formal_detector_eligible は False、development_only は True、
         training_mode は "smoke" | "development" のみ許容する。
+        必須 hash は SHA-256 hex 64 文字であることを保証する。
         """
         if self.formal_detector_eligible is not False:
             raise ValueError("CheckpointManifest.save(): formal_detector_eligible は False でなければなりません。")
@@ -164,6 +165,12 @@ class CheckpointManifest:
                 f"CheckpointManifest.save(): training_mode の許容値は 'smoke' | 'development' です。"
                 f" got: {self.training_mode!r}"
             )
+        self._validate_hash_format()
+        for fname, h in (("split_hash", self.split_hash), ("resolved_config_hash", self.resolved_config_hash)):
+            if h and not _SHA256_RE.fullmatch(h):
+                raise ValueError(
+                    f"CheckpointManifest.save(): {fname} は SHA-256 hex 64 文字が必要です。got: {h!r}"
+                )
         path = pathlib.Path(path)
         payload = {
             "model_hash": self.model_hash,

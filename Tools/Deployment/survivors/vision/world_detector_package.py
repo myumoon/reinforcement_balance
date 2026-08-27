@@ -1,5 +1,6 @@
 """WorldDetector development package writer / loader（PR#315 development-only）。
 
+
 development weight、resolved config、class map、tracker config、
 metrics、dataset/target/build/contract hash を
 content-addressed temp store へ atomic publish する。
@@ -26,10 +27,13 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field
 from typing import Any
+
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 import numpy as np
 
@@ -104,7 +108,7 @@ class PackageManifest:
             raise ValueError(
                 f"training_mode の許容値は 'smoke' | 'development' です。got: {raw_mode!r}"
             )
-        return PackageManifest(
+        pm = PackageManifest(
             schema_version=d["schema_version"],
             formal_detector_eligible=False,    # 04-07 は常に False
             model_hash=d["model_hash"],
@@ -120,6 +124,13 @@ class PackageManifest:
             development_only=True,             # 04-07 は常に True
             training_mode=raw_mode,
         )
+        for fname in ("model_hash", "data_hash", "config_hash", "build_hash", "class_map_hash", "contract_hash"):
+            h = getattr(pm, fname)
+            if not _SHA256_RE.fullmatch(h):
+                raise ValueError(
+                    f"PackageManifest: {fname} は SHA-256 hex 64 文字が必要です。got: {h!r}"
+                )
+        return pm
 
     def assert_formal_eligible(self) -> None:
         """04-07 の package は caller 指定フラグに関わらず常に formal 拒否する。
@@ -144,13 +155,27 @@ class PackageSchemaError(ValueError):
 # ---- contract hash ----
 
 def _compute_contract_hash() -> str:
-    """TrackedWorldStateV1 のフィールド定義 hash を計算する。
+    """TrackedWorldStateV1 契約全体の SHA-256 を計算する。
 
-    フィールドリストが変わると hash が変わり、schema ドリフトを検知する。
+    TrackedWorldStateV1・TrackedEntityV1・PlayerAnchorState の
+    フィールド名と型注釈を含む canonical descriptor を JSON 化してハッシュする。
+    トップレベルフィールドの追加・削除・型変更でもハッシュが変わり、
+    schema ドリフトを確実に検知する。
     """
-    from survivors.vision.entity_tracker import TrackedWorldStateV1
-    field_names = TrackedWorldStateV1.track_field_names()
-    payload = json.dumps({"track_fields": field_names}, sort_keys=True)
+    import dataclasses as _dc
+    from survivors.vision.entity_tracker import (
+        TrackedWorldStateV1, TrackedEntityV1, PlayerAnchorState,
+    )
+
+    def _descriptor(cls: type) -> dict:
+        return {f.name: str(f.type) for f in _dc.fields(cls)}
+
+    descriptor = {
+        "TrackedWorldStateV1": _descriptor(TrackedWorldStateV1),
+        "TrackedEntityV1": _descriptor(TrackedEntityV1),
+        "PlayerAnchorState": _descriptor(PlayerAnchorState),
+    }
+    payload = json.dumps(descriptor, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -292,6 +317,12 @@ def publish_development_package(
     """
     # ---- 書き込み境界バリデーション（fail-closed）----
     import math as _math
+    for _fname in ("model_hash", "data_hash", "config_hash", "build_hash", "class_map_hash"):
+        _h = getattr(checkpoint_manifest, _fname, None)
+        if not isinstance(_h, str) or not _SHA256_RE.fullmatch(_h):
+            raise ValueError(
+                f"publish_development_package: {_fname} は SHA-256 hex 64 文字が必要です。got: {_h!r}"
+            )
     raw_mode = getattr(checkpoint_manifest, "training_mode", "development")
     if raw_mode not in ("smoke", "development"):
         raise ValueError(
@@ -463,15 +494,5 @@ def restore_package(
     state = tracker.update(result, frame_index=0, timestamp_ns=0)
     v1 = TrackedWorldStateV1.from_state(state, frame_index=0, timestamp_ns=0, class_map_path=cm_path)
 
-    # -- schema 検証
-    from dataclasses import fields as dc_fields
-    from survivors.vision.entity_tracker import TrackedEntityV1
-    expected_fields = set(TrackedWorldStateV1.track_field_names())
-    actual_fields = {f.name for f in dc_fields(TrackedEntityV1)}
-    if expected_fields != actual_fields:
-        raise PackageSchemaError(
-            f"TrackedEntityV1 フィールド不一致: expected={sorted(expected_fields)}"
-            f" actual={sorted(actual_fields)}"
-        )
-
+    # -- schema 検証は上の contract_hash 比較で実施済み（_compute_contract_hash が3クラス全体をカバー）
     return v1

@@ -1646,3 +1646,334 @@ class TestIter11Regressions:
                 _make_checkpoint_manifest(), metrics_dict={}, checkpoint_selection={},
                 store_dir=store, cfg_path=DETECTOR_CONFIG_PATH, cm_path=CLASS_MAP_PATH,
             )
+
+
+# ---- iter12 回帰テスト（P1/P2）----
+
+class TestIter12Regressions:
+    """iter12 P1/P2 修正 4 件の回帰テスト。"""
+
+    # ---- Fix 1: contract_hash が TrackedWorldStateV1・PlayerAnchorState を含む ----
+
+    def test_contract_hash_differs_from_entity_only_hash(self):
+        """contract_hash が TrackedEntityV1 だけのハッシュと異なる（P1 回帰テスト）。
+
+        旧実装は track_fields（TrackedEntityV1 フィールド名のみ）だけをハッシュしていた。
+        修正後は 3 クラス全体のフィールド名＋型を含むため、旧ハッシュと一致しない。
+        """
+        import hashlib
+        import json
+        from survivors.vision.entity_tracker import TrackedWorldStateV1
+        from survivors.vision.world_detector_package import _compute_contract_hash
+
+        old_payload = json.dumps({"track_fields": TrackedWorldStateV1.track_field_names()}, sort_keys=True)
+        old_hash = hashlib.sha256(old_payload.encode()).hexdigest()
+        new_hash = _compute_contract_hash()
+        assert old_hash != new_hash, (
+            "contract_hash は TrackedWorldStateV1・PlayerAnchorState を含むため旧ハッシュと異なるはず"
+        )
+
+    def test_contract_hash_covers_world_and_anchor_fields(self):
+        """contract_hash のペイロードに world/anchor クラス名が含まれる（P1 回帰テスト）。"""
+        import dataclasses
+        import json
+        from survivors.vision.entity_tracker import TrackedWorldStateV1, TrackedEntityV1, PlayerAnchorState
+        from survivors.vision.world_detector_package import _compute_contract_hash
+
+        # _compute_contract_hash が生成するデスクリプタと同じ構造を再現して一致確認
+        def _descriptor(cls):
+            return {f.name: str(f.type) for f in dataclasses.fields(cls)}
+
+        expected = {
+            "TrackedWorldStateV1": _descriptor(TrackedWorldStateV1),
+            "TrackedEntityV1": _descriptor(TrackedEntityV1),
+            "PlayerAnchorState": _descriptor(PlayerAnchorState),
+        }
+        import hashlib
+        payload = json.dumps(expected, sort_keys=True)
+        expected_hash = hashlib.sha256(payload.encode()).hexdigest()
+        assert _compute_contract_hash() == expected_hash
+
+    def test_contract_hash_changes_when_world_field_removed(self):
+        """TrackedWorldStateV1 のフィールドが変わると contract_hash が変わる（P1 回帰テスト）。"""
+        import dataclasses
+        import hashlib
+        import json
+        from survivors.vision.entity_tracker import TrackedWorldStateV1, TrackedEntityV1, PlayerAnchorState
+
+        # フィールドが 1 つ少ない仮想デスクリプタを作る
+        def _descriptor(cls):
+            return {f.name: str(f.type) for f in dataclasses.fields(cls)}
+
+        all_fields = _descriptor(TrackedWorldStateV1)
+        # player_anchor を取り除いた仮想デスクリプタ
+        reduced = {k: v for k, v in all_fields.items() if k != "player_anchor"}
+        fake_descriptor = {
+            "TrackedWorldStateV1": reduced,
+            "TrackedEntityV1": _descriptor(TrackedEntityV1),
+            "PlayerAnchorState": _descriptor(PlayerAnchorState),
+        }
+        fake_hash = hashlib.sha256(json.dumps(fake_descriptor, sort_keys=True).encode()).hexdigest()
+
+        from survivors.vision.world_detector_package import _compute_contract_hash
+        assert _compute_contract_hash() != fake_hash, (
+            "player_anchor を持つ本物の hash は、それを除いた仮想ハッシュと一致してはならない"
+        )
+
+    # ---- Fix 2: 未実装 config 値の拒否 ----
+
+    def test_config_guard_rejects_non_default_backbone(self):
+        """model.backbone が mobilenet_v3_large 以外は拒否される（P1 回帰テスト）。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+
+        cfg = {"model": {"architecture": "ssdlite320", "num_classes": 12, "backbone": "bogus"}}
+        with pytest.raises(ValueError, match="backbone"):
+            _reject_unimplemented_config(cfg)
+
+    def test_config_guard_accepts_default_backbone(self):
+        """model.backbone が mobilenet_v3_large は通過する（P1 回帰テスト）。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+
+        _reject_unimplemented_config({"model": {"backbone": "mobilenet_v3_large"}})
+
+    def test_config_guard_rejects_non_default_input_size(self):
+        """model.input_size が [320, 320] 以外は拒否される（P1 回帰テスト）。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+
+        cfg = {"model": {"input_size": [111, 222]}}
+        with pytest.raises(ValueError, match="input_size"):
+            _reject_unimplemented_config(cfg)
+
+    def test_config_guard_rejects_pretrained_backbone_true(self):
+        """model.pretrained_backbone=true は拒否される（P1 回帰テスト）。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+
+        cfg = {"model": {"pretrained_backbone": True}}
+        with pytest.raises(ValueError, match="pretrained_backbone"):
+            _reject_unimplemented_config(cfg)
+
+    def test_config_guard_accepts_pretrained_backbone_false(self):
+        """model.pretrained_backbone=false は通過する（P1 回帰テスト）。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+
+        _reject_unimplemented_config({"model": {"pretrained_backbone": False}})
+
+    def test_config_guard_rejects_non_default_normalize(self):
+        """input.normalize が ImageNet 既定値以外は拒否される（P1 回帰テスト）。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+
+        cfg = {"input": {"normalize": {"mean": [0, 0, 0], "std": [1, 1, 1]}}}
+        with pytest.raises(ValueError, match="normalize"):
+            _reject_unimplemented_config(cfg)
+
+    def test_config_guard_accepts_default_normalize(self):
+        """input.normalize が ImageNet 既定値は通過する（P1 回帰テスト）。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+
+        cfg = {"input": {"normalize": {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]}}}
+        _reject_unimplemented_config(cfg)
+
+    def test_config_guard_rejects_non_val_map_metric(self):
+        """checkpoint_selection.metric が val_map50_95 以外は拒否される（P1 回帰テスト）。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+
+        cfg = {"checkpoint_selection": {"metric": "bogus_metric"}}
+        with pytest.raises(ValueError, match="metric"):
+            _reject_unimplemented_config(cfg)
+
+    def test_config_guard_accepts_val_map_metric(self):
+        """checkpoint_selection.metric が val_map50_95 は通過する（P1 回帰テスト）。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+
+        _reject_unimplemented_config({"checkpoint_selection": {"metric": "val_map50_95"}})
+
+    def test_config_guard_rejects_class_map_config(self):
+        """config に class_map_config が存在すると拒否される（P1 回帰テスト）。"""
+        from train_survivors_world_detector import _reject_unimplemented_config
+
+        cfg = {"class_map_config": "configs/world_class_map_v1.yaml"}
+        with pytest.raises(ValueError, match="class_map_config"):
+            _reject_unimplemented_config(cfg)
+
+    # ---- Fix 3: SHA-256 identity 検証 ----
+
+    def test_checkpoint_manifest_save_rejects_bad_model_hash(self, tmp_path):
+        """model_hash が不正な SHA-256 の場合 CheckpointManifest.save() を拒否する（P1 回帰テスト）。"""
+        from survivors.vision.world_detector import CheckpointManifest
+
+        bad = CheckpointManifest(
+            model_hash="bad",  # 不正
+            data_hash="b" * 64, config_hash="c" * 64,
+            build_hash="d" * 64, class_map_hash="e" * 64,
+            formal_detector_eligible=False,
+        )
+        with pytest.raises(ValueError, match="model_hash"):
+            bad.save(tmp_path / "manifest.json")
+
+    def test_checkpoint_manifest_save_rejects_bad_split_hash(self, tmp_path):
+        """split_hash が非空かつ不正な場合 save() を拒否する（P1 回帰テスト）。"""
+        from survivors.vision.world_detector import CheckpointManifest
+
+        bad = CheckpointManifest(
+            model_hash="a" * 64, data_hash="b" * 64, config_hash="c" * 64,
+            build_hash="d" * 64, class_map_hash="e" * 64,
+            formal_detector_eligible=False,
+            split_hash="bad_split",  # 非空かつ不正
+        )
+        with pytest.raises(ValueError, match="split_hash"):
+            bad.save(tmp_path / "manifest.json")
+
+    def test_package_manifest_from_dict_rejects_bad_model_hash(self):
+        """model_hash が不正な SHA-256 の場合 PackageManifest.from_dict() を拒否する（P1 回帰テスト）。"""
+        from survivors.vision.world_detector_package import PackageManifest, PACKAGE_SCHEMA_VERSION
+
+        bad = {
+            "schema_version": PACKAGE_SCHEMA_VERSION,
+            "formal_detector_eligible": False,
+            "model_hash": "bad",  # 不正
+            "data_hash": "b" * 64, "config_hash": "c" * 64,
+            "build_hash": "d" * 64, "class_map_hash": "e" * 64,
+            "contract_hash": "f" * 64,
+            "training_mode": "development",
+        }
+        with pytest.raises(ValueError, match="model_hash"):
+            PackageManifest.from_dict(bad)
+
+    def test_package_manifest_from_dict_rejects_bad_contract_hash(self):
+        """contract_hash が不正な SHA-256 の場合 PackageManifest.from_dict() を拒否する（P1 回帰テスト）。"""
+        from survivors.vision.world_detector_package import PackageManifest, PACKAGE_SCHEMA_VERSION
+
+        bad = {
+            "schema_version": PACKAGE_SCHEMA_VERSION,
+            "formal_detector_eligible": False,
+            "model_hash": "a" * 64, "data_hash": "b" * 64, "config_hash": "c" * 64,
+            "build_hash": "d" * 64, "class_map_hash": "e" * 64,
+            "contract_hash": "bad",  # 不正
+            "training_mode": "development",
+        }
+        with pytest.raises(ValueError, match="contract_hash"):
+            PackageManifest.from_dict(bad)
+
+    def test_publish_rejects_bad_model_hash_in_checkpoint_manifest(self, tmp_path):
+        """checkpoint_manifest の model_hash が不正な場合 publish_development_package() を拒否する（P1 回帰テスト）。"""
+        from survivors.vision.world_detector import CheckpointManifest
+        from survivors.vision.world_detector_package import publish_development_package
+
+        bad = CheckpointManifest(
+            model_hash="bad",  # 不正
+            data_hash="b" * 64, config_hash="c" * 64,
+            build_hash="d" * 64, class_map_hash="e" * 64,
+            formal_detector_eligible=False,
+        )
+        store = tmp_path / "store"; store.mkdir()
+        with pytest.raises(ValueError, match="model_hash"):
+            publish_development_package(
+                bad, metrics_dict={}, checkpoint_selection={},
+                store_dir=store, cfg_path=DETECTOR_CONFIG_PATH, cm_path=CLASS_MAP_PATH,
+            )
+
+    # ---- Fix 4: bool 型 metric/threshold が passed=False になる ----
+
+    def _base_metrics_for_bool(self):
+        """bool 検証用 base metrics（正常値）。"""
+        from eval_survivors_world_detector import EvalMetrics
+        return EvalMetrics(
+            proxy_ap50_95=0.5,
+            class_recall={2: 0.95},
+            density_error=0.1,
+            count_error=0.1,
+            nearest_distance_error=0.02,
+            density_correlation=0.90,
+            mean_latency_ms=10.0,
+        )
+
+    def _base_gate_cfg(self) -> dict:
+        return {
+            "map50_95_min": 0.0,
+            "class_recall_min": {"enemy_normal": 0.90},
+            "density_correlation_min": 0.0,
+            "nearest_distance_median_max": 1.0,
+            "slice_gate": {},
+        }
+
+    def test_bool_proxy_ap_as_metric_fails(self):
+        """proxy_ap50_95=True をメトリクスに渡すと passed=False になる（P2 回帰テスト）。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics
+
+        m = self._base_metrics_for_bool()
+        m.proxy_ap50_95 = True  # bool を注入
+        result = compute_dev_diagnostics(m, self._base_gate_cfg(), {2: "enemy_normal"})
+        assert not result.passed, "proxy_ap50_95=True は passed=False でなければならない"
+
+    def test_bool_density_correlation_as_metric_fails(self):
+        """density_correlation=True をメトリクスに渡すと passed=False になる（P2 回帰テスト）。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics
+
+        m = self._base_metrics_for_bool()
+        m.density_correlation = True  # bool を注入
+        result = compute_dev_diagnostics(m, self._base_gate_cfg(), {2: "enemy_normal"})
+        assert not result.passed, "density_correlation=True は passed=False でなければならない"
+
+    def test_bool_nearest_distance_as_metric_fails(self):
+        """nearest_distance_error=False をメトリクスに渡すと passed=False になる（P2 回帰テスト）。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics
+
+        m = self._base_metrics_for_bool()
+        m.nearest_distance_error = False  # bool（0）を注入
+        result = compute_dev_diagnostics(m, self._base_gate_cfg(), {2: "enemy_normal"})
+        assert not result.passed, "nearest_distance_error=False は passed=False でなければならない"
+
+    def test_bool_class_recall_as_metric_fails(self):
+        """class_recall=True をメトリクスに渡すと passed=False になる（P2 回帰テスト）。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics
+
+        m = self._base_metrics_for_bool()
+        m.class_recall = {2: True}  # bool を注入
+        result = compute_dev_diagnostics(m, self._base_gate_cfg(), {2: "enemy_normal"})
+        assert not result.class_recall_results["enemy_normal"]["passed"], (
+            "class_recall=True は passed=False でなければならない"
+        )
+        assert not result.passed
+
+    def test_bool_map_min_threshold_fails(self):
+        """map50_95_min=True を閾値に渡すと passed=False になる（P2 回帰テスト）。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics
+
+        m = self._base_metrics_for_bool()
+        gate_cfg = dict(self._base_gate_cfg())
+        gate_cfg["map50_95_min"] = True  # bool を閾値として注入
+        result = compute_dev_diagnostics(m, gate_cfg, {2: "enemy_normal"})
+        assert not result.passed, "map50_95_min=True は passed=False でなければならない"
+
+    def test_bool_density_min_threshold_fails(self):
+        """density_correlation_min=True を閾値に渡すと passed=False になる（P2 回帰テスト）。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics
+
+        m = self._base_metrics_for_bool()
+        gate_cfg = dict(self._base_gate_cfg())
+        gate_cfg["density_correlation_min"] = True  # bool
+        result = compute_dev_diagnostics(m, gate_cfg, {2: "enemy_normal"})
+        assert not result.passed, "density_correlation_min=True は passed=False でなければならない"
+
+    def test_bool_nd_max_threshold_fails(self):
+        """nearest_distance_median_max=True を閾値に渡すと passed=False になる（P2 回帰テスト）。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics
+
+        m = self._base_metrics_for_bool()
+        gate_cfg = dict(self._base_gate_cfg())
+        gate_cfg["nearest_distance_median_max"] = True  # bool
+        result = compute_dev_diagnostics(m, gate_cfg, {2: "enemy_normal"})
+        assert not result.passed, "nearest_distance_median_max=True は passed=False でなければならない"
+
+    def test_bool_class_recall_min_threshold_fails(self):
+        """class_recall_min の値が True の場合 passed=False になる（P2 回帰テスト）。"""
+        from eval_survivors_world_detector import compute_dev_diagnostics
+
+        m = self._base_metrics_for_bool()
+        gate_cfg = dict(self._base_gate_cfg())
+        gate_cfg["class_recall_min"] = {"enemy_normal": True}  # bool を閾値として注入
+        result = compute_dev_diagnostics(m, gate_cfg, {2: "enemy_normal"})
+        assert not result.class_recall_results["enemy_normal"]["passed"], (
+            "recall_min=True は passed=False でなければならない"
+        )
+        assert not result.passed

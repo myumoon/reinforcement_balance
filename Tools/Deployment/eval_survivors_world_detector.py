@@ -568,8 +568,8 @@ def compute_dev_diagnostics(
     # --- metric 有限値・有効範囲チェック（fail-closed）---
     # AP/recall は [0, 1]、correlation は [-1, 1]、distance は >= 0 を要求する。
     def _check_metric(name: str, val: float, lo: float, hi: float) -> bool:
-        """val が [lo, hi] かつ有限なら True。それ以外は all_passed を False にして False を返す。"""
-        if not (math.isfinite(val) and lo <= val <= hi):
+        """val が [lo, hi] かつ有限な実数なら True。bool は明示的に拒否する。"""
+        if isinstance(val, bool) or not (math.isfinite(val) and lo <= val <= hi):
             return False
         return True
 
@@ -577,23 +577,25 @@ def compute_dev_diagnostics(
         all_passed = False
     if not _check_metric("density_correlation", metrics.density_correlation, -1.0, 1.0):
         all_passed = False
-    if not (math.isfinite(metrics.nearest_distance_error) and metrics.nearest_distance_error >= 0.0):
+    if isinstance(metrics.nearest_distance_error, bool) or not (math.isfinite(metrics.nearest_distance_error) and metrics.nearest_distance_error >= 0.0):
         all_passed = False
 
     # --- threshold パラメータ自体の有限性・型・範囲を事前検証（fail-closed）---
+    # bool は int の派生型のため isinstance(True, int) は True になる。明示的に除外する。
     map_min = gate_cfg.get("map50_95_min", 0.0)
-    if not (isinstance(map_min, (int, float)) and math.isfinite(map_min) and 0.0 <= map_min <= 1.0):
+    if not (not isinstance(map_min, bool) and isinstance(map_min, (int, float)) and math.isfinite(map_min) and 0.0 <= map_min <= 1.0):
         all_passed = False
         map_min = 0.0  # 無効な閾値でのさらなる比較を避ける
 
     density_min = gate_cfg.get("density_correlation_min", 0.85)
-    if not (isinstance(density_min, (int, float)) and math.isfinite(density_min) and -1.0 <= density_min <= 1.0):
+    if not (not isinstance(density_min, bool) and isinstance(density_min, (int, float)) and math.isfinite(density_min) and -1.0 <= density_min <= 1.0):
         all_passed = False
         density_min = 1.1  # 無効なので通過不可にする
 
     nd_max = gate_cfg.get("nearest_distance_median_max", 0.04)
     if not (
-        isinstance(nd_max, (int, float))
+        not isinstance(nd_max, bool)
+        and isinstance(nd_max, (int, float))
         and math.isfinite(nd_max)
         and 0.0 <= nd_max <= 1.0   # 正規化 distance は [0,1] なので閾値も同範囲
     ):
@@ -609,13 +611,14 @@ def compute_dev_diagnostics(
     class_recall_results: dict[str, dict] = {}
     for class_name, recall_min in recall_cfg.items():
         recall_min_valid = (
-            isinstance(recall_min, (int, float))
+            not isinstance(recall_min, bool)
+            and isinstance(recall_min, (int, float))
             and math.isfinite(recall_min)
             and 0.0 <= recall_min <= 1.0
         )
         cid = next((k for k, v in class_name_by_id.items() if v == class_name), None)
         recall = metrics.class_recall.get(cid, 0.0) if cid is not None else 0.0
-        in_range = math.isfinite(recall) and 0.0 <= recall <= 1.0
+        in_range = not isinstance(recall, bool) and math.isfinite(recall) and 0.0 <= recall <= 1.0
         passed = recall_min_valid and in_range and recall >= recall_min
         if not (recall_min_valid and in_range and passed):
             all_passed = False

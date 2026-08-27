@@ -389,6 +389,7 @@ def _reject_unimplemented_config(cfg: dict) -> None:
     """未実装の config キーが設定されていれば ValueError を送出する。
 
     config hash と実際の学習条件が乖離しないよう、未実装設定を早期に拒否する。
+    04-07 で実装されない値、または固定値から外れた値を全て拒否する。
     """
     checks = [
         ("input.augmentation", cfg.get("input", {}).get("augmentation")),
@@ -402,6 +403,47 @@ def _reject_unimplemented_config(cfg: dict) -> None:
             raise ValueError(
                 f"config '{key}' は未実装です。このバージョンでは設定を除去してください。"
             )
+
+    # class_map_config は CLI の --class-map 引数で指定する。config に記載しても反映されない。
+    if cfg.get("class_map_config") is not None:
+        raise ValueError(
+            "config 'class_map_config' は未実装です。CLI の --class-map 引数を使用してください。"
+        )
+
+    # model.backbone: mobilenet_v3_large のみ実装済み（ssdlite320 architecture に固定）。
+    backbone = cfg.get("model", {}).get("backbone")
+    if backbone is not None and backbone != "mobilenet_v3_large":
+        raise ValueError(
+            f"model.backbone は 'mobilenet_v3_large' のみ実装済みです。got: {backbone!r}"
+        )
+
+    # model.input_size: [320, 320] のみ実装済み（SSDLite320 固定サイズ）。
+    input_size = cfg.get("model", {}).get("input_size")
+    if input_size is not None and input_size != [320, 320]:
+        raise ValueError(
+            f"model.input_size は [320, 320] のみ実装済みです。got: {input_size!r}"
+        )
+
+    # model.pretrained_backbone: true は 04-07 では未実装（weights_backbone=None 固定）。
+    if cfg.get("model", {}).get("pretrained_backbone") is True:
+        raise ValueError(
+            "model.pretrained_backbone=true は未実装です。04-07 では false のみ許可します。"
+        )
+
+    # input.normalize: ImageNet 既定値以外は学習に反映されない。
+    _DEFAULT_NORMALIZE = {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]}
+    normalize = cfg.get("input", {}).get("normalize")
+    if normalize is not None and normalize != _DEFAULT_NORMALIZE:
+        raise ValueError(
+            f"input.normalize は ImageNet 既定値のみ実装済みです。got: {normalize!r}"
+        )
+
+    # checkpoint_selection.metric: val_map50_95 のみ実装済み（選択処理が固定）。
+    metric = cfg.get("checkpoint_selection", {}).get("metric")
+    if metric is not None and metric != "val_map50_95":
+        raise ValueError(
+            f"checkpoint_selection.metric は 'val_map50_95' のみ実装済みです。got: {metric!r}"
+        )
 
 
 # ---- training loop ----

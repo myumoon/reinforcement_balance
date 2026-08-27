@@ -8,9 +8,6 @@ schema_version: world_detector.v1
 # 開発用フラグ。false のまま配布したモデルは正式ローダーに拒否される。
 formal_detector_eligible: false
 
-# 参照するクラスマップ設定ファイル。
-class_map_config: configs/world_class_map_v1.yaml
-
 # --- モデルアーキテクチャ ---
 # 未実装 architecture を指定したときは silent fallback せず即エラーとする。
 model:
