@@ -443,6 +443,17 @@ class TestValidateDetectorConfig:
         from survivors.vision.world_detector import validate_detector_config
         validate_detector_config(valid_cfg)  # no exception
 
+    @pytest.mark.parametrize("missing_key", [
+        "min_frames", "min_entities", "min_classes", "min_time_bands",
+        "min_frames_per_split", "min_entities_per_split", "min_classes_per_split",
+    ])
+    def test_preflight_required_field_missing_rejected(self, valid_cfg, missing_key):
+        """training.preflight の必須 7 フィールドが欠落すると拒否される（iter15 回帰）。"""
+        from survivors.vision.world_detector import validate_detector_config
+        del valid_cfg["training"]["preflight"][missing_key]
+        with pytest.raises(ValueError, match="必須 key"):
+            validate_detector_config(valid_cfg)
+
 
 # ---- sentinel: 各入口が validator を迂回しないことを確認 ----
 
@@ -452,7 +463,7 @@ class TestValidatorSentinels:
     def test_load_detector_config_sentinel(self, tmp_path):
         """load_detector_config は formal_detector_eligible=true を拒否する（sentinel）。"""
         import yaml
-        with DETECTOR_CONFIG_PATH.open() as f:
+        with DETECTOR_CONFIG_PATH.open(encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
         cfg["formal_detector_eligible"] = True
         invalid_path = tmp_path / "invalid.yaml"

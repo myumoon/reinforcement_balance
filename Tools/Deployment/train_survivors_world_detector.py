@@ -715,6 +715,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ERROR] config 読み込み失敗: {e}", file=sys.stderr)
         return 1
 
+    # -- CLI override を config 読み込み直後に適用・検証（学習・optimizer・出力ディレクトリ作成より前）
+    # args.epochs is not None チェックにより --epochs 0 を「未指定」と誤認しない
+    _resolved_cfg = copy.deepcopy(cfg)
+    if args.epochs is not None:
+        _resolved_cfg["training"]["max_epochs"] = args.epochs
+        try:
+            from survivors.vision.world_detector import validate_detector_config as _vdc_pre
+            _vdc_pre(_resolved_cfg)
+        except ValueError as _ve:
+            print(f"[CONFIG ERROR] resolved config: {_ve}", file=sys.stderr)
+            return 1
+
     # -- 必須 split manifest 読み込み（error_calibration / final_e2e_test を自動除外）
     split_data = json.loads(pathlib.Path(args.split).read_text(encoding="utf-8"))
     split = SessionSplit(
@@ -728,7 +740,8 @@ def main(argv: list[str] | None = None) -> int:
           f", rejected={len(rejected)} session")
 
     # -- preflight
-    preflight_cfg = cfg.get("training", {}).get("preflight", {})
+    # validate_detector_config が全 7 フィールドの存在を保証するため .get(default) は不要
+    preflight_cfg = _resolved_cfg["training"]["preflight"]
     try:
         ds = WorldDataset(
             ann_path, cm_path,
@@ -736,16 +749,16 @@ def main(argv: list[str] | None = None) -> int:
             rejected_sessions=rejected,
         )
         ds.run_preflight(
-            min_frames=preflight_cfg.get("min_frames", 300),
-            min_entities=preflight_cfg.get("min_entities", 500),
-            min_classes=preflight_cfg.get("min_classes", 6),
-            min_time_bands=preflight_cfg.get("min_time_bands", 4),
+            min_frames=preflight_cfg["min_frames"],
+            min_entities=preflight_cfg["min_entities"],
+            min_classes=preflight_cfg["min_classes"],
+            min_time_bands=preflight_cfg["min_time_bands"],
         )
         ds.run_split_preflight(
             split,
-            min_frames_per_split=preflight_cfg.get("min_frames_per_split", 50),
-            min_entities_per_split=preflight_cfg.get("min_entities_per_split", 100),
-            min_classes_per_split=preflight_cfg.get("min_classes_per_split", 4),
+            min_frames_per_split=preflight_cfg["min_frames_per_split"],
+            min_entities_per_split=preflight_cfg["min_entities_per_split"],
+            min_classes_per_split=preflight_cfg["min_classes_per_split"],
         )
         train_ds, validation_ds = _create_split_views(ds, split)
     except DatasetPreflightError as e:
@@ -792,7 +805,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # -- train
     print(f"[INFO] アーキテクチャ: {cfg['model']['architecture']}, num_classes={detector.num_classes}")
-    max_epochs = args.epochs or cfg.get("training", {}).get("max_epochs", 1)
+    max_epochs = _resolved_cfg.get("training", {}).get("max_epochs", 1)
     print(f"[INFO] max_epochs={max_epochs} で学習を開始します...")
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -815,18 +828,7 @@ def main(argv: list[str] | None = None) -> int:
     # split hash: split JSON ファイルの内容 SHA-256
     _split_hash = _sha256_file(pathlib.Path(args.split))
 
-    # resolved config hash: CLI override 適用後の config dict を正規化してハッシュ
-    # deepcopy で元 config の nested mapping を変更しないことを保証する
-    _resolved_cfg = copy.deepcopy(cfg)
-    if args.epochs:
-        _resolved_cfg["training"]["max_epochs"] = args.epochs
-        # CLI override 適用後も共有 validator で再検証する
-        try:
-            from survivors.vision.world_detector import validate_detector_config as _vdc
-            _vdc(_resolved_cfg)
-        except ValueError as _ve:
-            print(f"[CONFIG ERROR] resolved config: {_ve}", file=sys.stderr)
-            return 1
+    # resolved config hash: config 読み込み直後に構築済みの _resolved_cfg を使用
     _resolved_config_hash = _sha256_str(json.dumps(_resolved_cfg, sort_keys=True, ensure_ascii=False))
 
     # best checkpoint hash: 実ファイルがあれば hash、なければ config hash で代用

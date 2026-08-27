@@ -399,6 +399,19 @@ def publish_development_package(
             f" got: {score_threshold!r}"
         )
 
+    # metrics_dict / checkpoint_selection は dict が必要（PackageManifest.from_dict() と同じ制約）
+    # content hash 計算・store 書込みより前に拒否することで publish 成功だが restore 不能な状態を防ぐ
+    if not isinstance(metrics_dict, dict):
+        raise ValueError(
+            f"publish_development_package: metrics_dict は dict が必要。"
+            f" got: {type(metrics_dict).__name__!r}"
+        )
+    if not isinstance(checkpoint_selection, dict):
+        raise ValueError(
+            f"publish_development_package: checkpoint_selection は dict が必要。"
+            f" got: {type(checkpoint_selection).__name__!r}"
+        )
+
     contract_hash = _compute_contract_hash()
 
     pkg_manifest = PackageManifest(

@@ -239,10 +239,11 @@ def validate_detector_config(config: Mapping[str, Any]) -> None:
     unknown_preflight = set(preflight.keys()) - _allowed_preflight
     if unknown_preflight:
         raise ValueError(f"training.preflight に未知の key があります: {sorted(unknown_preflight)}")
+    missing_preflight = _allowed_preflight - set(preflight.keys())
+    if missing_preflight:
+        raise ValueError(f"training.preflight に必須 key がありません: {sorted(missing_preflight)}")
     for _pk in _allowed_preflight:
-        _pv = preflight.get(_pk)
-        if _pv is not None:
-            _vnum(_pv, f"training.preflight.{_pk}", lo=1, require_int=True)
+        _vnum(preflight[_pk], f"training.preflight.{_pk}", lo=1, require_int=True)
 
     # --- checkpoint_selection ---
     ckpt = config["checkpoint_selection"]

@@ -2100,7 +2100,7 @@ class TestPackageValidatorSentinels:
         from survivors.vision.world_detector import CheckpointManifest
 
         # 無効な config を作成（formal_detector_eligible=true）
-        with DETECTOR_CONFIG_PATH.open() as f:
+        with DETECTOR_CONFIG_PATH.open(encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
         cfg["formal_detector_eligible"] = True
         invalid_cfg_path = tmp_path / "invalid_cfg.yaml"
@@ -2157,7 +2157,7 @@ class TestPackageValidatorSentinels:
         import yaml
         import train_survivors_world_detector as training
 
-        with DETECTOR_CONFIG_PATH.open() as f:
+        with DETECTOR_CONFIG_PATH.open(encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
         cfg["formal_detector_eligible"] = True
         invalid_path = tmp_path / "invalid.yaml"
@@ -2257,3 +2257,116 @@ class TestPackageManifestFieldValidation:
         with pytest.raises((ValueError, PackageSchemaError)):
             from survivors.vision.world_detector_package import restore_package
             restore_package(pkg_path, frame)
+
+
+# ---- iter15 回帰: publish mapping 検証 / epochs override / preflight 必須フィールド ----
+
+class TestPublishMappingValidation:
+    """publish_development_package が metrics_dict / checkpoint_selection の型を検証する（iter15 回帰）。"""
+
+    def test_metrics_dict_list_rejected_before_write(self, tmp_path):
+        """metrics_dict=[] は store を書き込まずに ValueError を送出する。"""
+        from survivors.vision.world_detector_package import publish_development_package
+        store = tmp_path / "store"
+        store.mkdir()
+        with pytest.raises(ValueError, match="metrics_dict"):
+            publish_development_package(
+                _make_checkpoint_manifest(),
+                metrics_dict=[1, 2, 3],
+                checkpoint_selection={},
+                store_dir=store,
+                cfg_path=DETECTOR_CONFIG_PATH,
+                cm_path=CLASS_MAP_PATH,
+            )
+        assert list(store.iterdir()) == [], "store に書き込まれていてはならない"
+
+    def test_checkpoint_selection_list_rejected_before_write(self, tmp_path):
+        """checkpoint_selection=[] は store を書き込まずに ValueError を送出する。"""
+        from survivors.vision.world_detector_package import publish_development_package
+        store = tmp_path / "store"
+        store.mkdir()
+        with pytest.raises(ValueError, match="checkpoint_selection"):
+            publish_development_package(
+                _make_checkpoint_manifest(),
+                metrics_dict={},
+                checkpoint_selection=["bad"],
+                store_dir=store,
+                cfg_path=DETECTOR_CONFIG_PATH,
+                cm_path=CLASS_MAP_PATH,
+            )
+        assert list(store.iterdir()) == [], "store に書き込まれていてはならない"
+
+    def test_valid_publish_is_restorable(self, tmp_path):
+        """valid な publish は PackageManifest.from_dict() で復元できる。"""
+        import json
+        from survivors.vision.world_detector_package import publish_development_package, PackageManifest
+        store = tmp_path / "store"
+        store.mkdir()
+        pkg_path = publish_development_package(
+            _make_checkpoint_manifest(),
+            metrics_dict={"val_map50_95": 0.42},
+            checkpoint_selection={"metric": "val_map50_95"},
+            store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
+        )
+        manifest = PackageManifest.from_dict(json.loads(pkg_path.read_text(encoding="utf-8")))
+        assert manifest.metrics == {"val_map50_95": 0.42}
+        assert manifest.checkpoint_selection == {"metric": "val_map50_95"}
+
+
+class TestEpochsOverride:
+    """--epochs override が config 読み込み直後に適用・検証される（iter15 回帰）。"""
+
+    def _minimal_args(self, tmp_path, *, config_path=None, extra=None):
+        split_path = tmp_path / "split.json"
+        split_path.write_text(
+            '{"train":["s1"],"validation":["s2"],"error_calibration":[],"final_e2e_test":[]}',
+            encoding="utf-8",
+        )
+        ann_path = tmp_path / "ann.json"
+        ann_path.write_text('{"images":[],"annotations":[],"categories":[]}', encoding="utf-8")
+        args = [
+            "--annotations", str(ann_path),
+            "--split", str(split_path),
+            "--config", str(config_path or DETECTOR_CONFIG_PATH),
+            "--class-map", str(CLASS_MAP_PATH),
+            "--output", str(tmp_path / "out"),
+        ]
+        if extra:
+            args.extend(extra)
+        return args
+
+    def test_epochs_zero_rejected_before_training(self, tmp_path, capsys):
+        """--epochs 0 は config 検証で拒否される（0 or YAML 誤認しない回帰）。"""
+        import train_survivors_world_detector as training
+        result = training.main(self._minimal_args(tmp_path, extra=["--epochs", "0"]))
+        assert result != 0, "--epochs 0 は拒否されるべき"
+        captured = capsys.readouterr()
+        assert "[CONFIG ERROR]" in captured.err, "config error として拒否されるべき"
+
+    def test_epochs_negative_rejected(self, tmp_path, capsys):
+        """--epochs -1 は config 検証で拒否される。"""
+        import train_survivors_world_detector as training
+        result = training.main(self._minimal_args(tmp_path, extra=["--epochs", "-1"]))
+        assert result != 0, "--epochs -1 は拒否されるべき"
+        captured = capsys.readouterr()
+        assert "[CONFIG ERROR]" in captured.err, "config error として拒否されるべき"
+
+    def test_epochs_positive_override_not_rejected_by_config(self, tmp_path, capsys):
+        """--epochs 5 は config 検証を通過する（YAML 値 50 ではなく 5 が適用される）。"""
+        import yaml
+        import train_survivors_world_detector as training
+
+        with DETECTOR_CONFIG_PATH.open(encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        cfg["training"]["max_epochs"] = 50  # YAML 値
+        cfg_path = tmp_path / "cfg.yaml"
+        cfg_path.write_text(yaml.dump(cfg), encoding="utf-8")
+
+        # データなしで preflight 失敗するが、config error にはならないことを確認
+        training.main(self._minimal_args(
+            tmp_path, config_path=cfg_path, extra=["--epochs", "5"]
+        ))
+        captured = capsys.readouterr()
+        assert "[CONFIG ERROR]" not in captured.err, "--epochs 5 は config error を出してはならない"
