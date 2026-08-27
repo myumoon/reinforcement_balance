@@ -102,6 +102,42 @@ bash Tools/run-pytest.sh Tools/Deployment/tests/vision -q -rs
 
 synthetic fixture のみ使用。GPU・実画像・実 weight 不要。
 
+## config 共有バリデーション
+
+すべての public 入口（`load_detector_config()`, `WorldDetector.from_config()`,
+学習 CLI, 評価 CLI, `publish_development_package()`, `restore_package()`）は
+`survivors.vision.world_detector.validate_detector_config()` を必ず通る。
+
+バリデーション規則はこの共有 validator にのみ定義する。各 caller へ複製しない。
+
+**対応範囲（world_detector.v1）**
+
+| フィールド | 許容値 |
+|---|---|
+| `schema_version` | 文字列 `world_detector.v1` のみ |
+| `formal_detector_eligible` | bool `false` のみ |
+| `model.architecture` | `ssdlite320` のみ |
+| `model.backbone` | `mobilenet_v3_large` のみ |
+| `model.pretrained_backbone` | bool `false` のみ（int 1 / 文字列 `'false'` は不可） |
+| `model.num_classes` | int `12` のみ（bool 不可） |
+| `model.input_size` | `[320, 320]` のみ（bool 不可） |
+| `input.normalize.mean` | `[0.485, 0.456, 0.406]` のみ |
+| `input.normalize.std` | `[0.229, 0.224, 0.225]` のみ |
+| `training.optimizer` | `sgd` キーのみ（adam 等は未実装） |
+| `training.batch_size` | int ≥ 3（bool 不可） |
+| `tracker.max_age_by_class` のキー | 04-06 class map 内の名前のみ |
+| 数値フィールド全般 | 有限値のみ（NaN / Infinity / bool / 文字列は拒否） |
+
+**未対応値はサイレント受理されない。** 未知 top-level key, 未知 nested key, 型違い, 非有限値,
+未実装 optimizer (adam 等) / scheduler / augmentation はすべてバリデーション段階で拒否される。
+
+**development score_threshold について**
+
+04-07 の `score_threshold` は development package を同じ条件で restore・推論するための
+再現用値であり、formal threshold・formal PASS・formal eligibility の根拠ではない。
+formal threshold は 04-08 で正式 dataset / target / validation verdict に基づいて別途選定する。
+04-07 の値をそのまま formal threshold へ昇格しない。
+
 ## 制約と非目標
 
 - **formal_detector_eligible=false:** 本 PR の checkpoint / config はすべて開発用。
@@ -110,6 +146,9 @@ synthetic fixture のみ使用。GPU・実画像・実 weight 不要。
   manifest に `development_only=true` と `training_mode: "smoke" | "development"` を記録する。
 - **新規 detection framework 依存なし:** torchvision だけを使用する。
 - **実動画の recall / latency 合格は本 PR の完了条件ではない。**
+- **formal 機能は 04-08 へ委譲:** formal preflight, 正式 augmentation, 性能合格,
+  threshold 選定, formal package, formal release はすべて 04-08 の責務。
+  04-07 (本 PR) は development-only tooling を提供する。
 
 ## 04-07 / 04-08 との境界
 

@@ -337,3 +337,197 @@ class TestArchitectureDispatchP1:
         cfg["model"]["num_classes"] = 5  # class map は 12
         with pytest.raises(ValueError, match="num_classes"):
             WorldDetector.from_config(cfg, CLASS_MAP_PATH)
+
+
+# ---- validate_detector_config: invalid family 網羅テスト ----
+
+class TestValidateDetectorConfig:
+    """validate_detector_config の invalid family テスト。
+
+    共有 validator の unit test。各 invalid family を一つずつ確認する。
+    """
+
+    @pytest.fixture
+    def valid_cfg(self):
+        """有効な full config dict を返す（ベース）。"""
+        return load_detector_config(DETECTOR_CONFIG_PATH)
+
+    def test_pretrained_backbone_int_1_rejected(self, valid_cfg):
+        """model.pretrained_backbone=1 (int) は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["model"]["pretrained_backbone"] = 1
+        with pytest.raises(ValueError, match="pretrained_backbone"):
+            validate_detector_config(valid_cfg)
+
+    def test_pretrained_backbone_string_false_rejected(self, valid_cfg):
+        """model.pretrained_backbone='false' (str) は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["model"]["pretrained_backbone"] = "false"
+        with pytest.raises(ValueError, match="pretrained_backbone"):
+            validate_detector_config(valid_cfg)
+
+    def test_formal_detector_eligible_true_rejected(self, valid_cfg):
+        """formal_detector_eligible=true は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["formal_detector_eligible"] = True
+        with pytest.raises(ValueError, match="formal_detector_eligible"):
+            validate_detector_config(valid_cfg)
+
+    def test_optimizer_adam_rejected(self, valid_cfg):
+        """training.optimizer.adam は未実装として拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["training"]["optimizer"] = {"adam": {"lr": 0.001}}
+        with pytest.raises(ValueError, match="adam"):
+            validate_detector_config(valid_cfg)
+
+    def test_normalize_mean_changed_rejected(self, valid_cfg):
+        """input.normalize.mean を変更すると拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["input"]["normalize"]["mean"] = [0.0, 0.0, 0.0]
+        with pytest.raises(ValueError, match="normalize"):
+            validate_detector_config(valid_cfg)
+
+    def test_unknown_top_level_key_rejected(self, valid_cfg):
+        """未知の top-level key は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["unknown_top_key"] = "bad"
+        with pytest.raises(ValueError, match="unknown_top_key"):
+            validate_detector_config(valid_cfg)
+
+    def test_unknown_nested_key_in_model_rejected(self, valid_cfg):
+        """model に未知の nested key は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["model"]["dropout"] = 0.1
+        with pytest.raises(ValueError, match="dropout"):
+            validate_detector_config(valid_cfg)
+
+    def test_unknown_tracker_class_rejected(self, valid_cfg):
+        """tracker.max_age_by_class に 04-06 class map 外のクラス名は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["tracker"]["max_age_by_class"]["unknown_class"] = 5
+        with pytest.raises(ValueError, match="unknown_class"):
+            validate_detector_config(valid_cfg)
+
+    def test_bool_in_batch_size_rejected(self, valid_cfg):
+        """training.batch_size=True (bool) は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["training"]["batch_size"] = True
+        with pytest.raises(ValueError, match="batch_size"):
+            validate_detector_config(valid_cfg)
+
+    def test_nan_in_sgd_lr_rejected(self, valid_cfg):
+        """training.optimizer.sgd.lr=NaN は拒否される。"""
+        import math
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["training"]["optimizer"]["sgd"]["lr"] = math.nan
+        with pytest.raises(ValueError, match="lr"):
+            validate_detector_config(valid_cfg)
+
+    def test_infinity_in_sgd_momentum_rejected(self, valid_cfg):
+        """training.optimizer.sgd.momentum=Infinity は拒否される。"""
+        import math
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["training"]["optimizer"]["sgd"]["momentum"] = math.inf
+        with pytest.raises(ValueError, match="momentum"):
+            validate_detector_config(valid_cfg)
+
+    def test_missing_required_top_level_key_rejected(self, valid_cfg):
+        """必須 top-level key が欠落すると拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        del valid_cfg["training"]
+        with pytest.raises(ValueError, match="training"):
+            validate_detector_config(valid_cfg)
+
+    def test_default_config_passes(self, valid_cfg):
+        """既定 world_detector_v1.yaml は validate_detector_config を通過する。"""
+        from survivors.vision.world_detector import validate_detector_config
+        validate_detector_config(valid_cfg)  # no exception
+
+
+# ---- sentinel: 各入口が validator を迂回しないことを確認 ----
+
+class TestValidatorSentinels:
+    """各入口が shared validator を通ることを 1 入口 1 テストで確認する。"""
+
+    def test_load_detector_config_sentinel(self, tmp_path):
+        """load_detector_config は formal_detector_eligible=true を拒否する（sentinel）。"""
+        import yaml
+        with DETECTOR_CONFIG_PATH.open() as f:
+            cfg = yaml.safe_load(f)
+        cfg["formal_detector_eligible"] = True
+        invalid_path = tmp_path / "invalid.yaml"
+        invalid_path.write_text(yaml.dump(cfg), encoding="utf-8")
+        with pytest.raises(ValueError, match="formal_detector_eligible"):
+            load_detector_config(invalid_path)
+
+    def test_world_detector_from_config_sentinel(self):
+        """WorldDetector.from_config は未知 top-level key を拒否する（sentinel）。"""
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["unsupported_field"] = "bad"
+        with pytest.raises(ValueError, match="unsupported_field"):
+            WorldDetector.from_config(cfg, CLASS_MAP_PATH)
+
+
+# ---- CheckpointManifest optional hash: save/load 対称化 ----
+
+class TestCheckpointManifestOptionalHashes:
+    """CheckpointManifest.load() が optional hash を save() と同じルールで検証する。"""
+
+    def _base_payload(self) -> dict:
+        return {
+            "model_hash": "a" * 64,
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "formal_detector_eligible": False,
+            "development_only": True,
+            "training_mode": "development",
+        }
+
+    def test_load_rejects_bad_split_hash(self, tmp_path):
+        """CheckpointManifest.load() は不正 split_hash を拒否する。"""
+        payload = self._base_payload()
+        payload["split_hash"] = "bad_split"
+        p = tmp_path / "m.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="split_hash"):
+            CheckpointManifest.load(p)
+
+    def test_load_rejects_bad_resolved_config_hash(self, tmp_path):
+        """CheckpointManifest.load() は不正 resolved_config_hash を拒否する。"""
+        payload = self._base_payload()
+        payload["resolved_config_hash"] = "bad_resolved"
+        p = tmp_path / "m.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="resolved_config_hash"):
+            CheckpointManifest.load(p)
+
+    def test_load_rejects_uppercase_split_hash(self, tmp_path):
+        """uppercase の split_hash は拒否される。"""
+        payload = self._base_payload()
+        payload["split_hash"] = "A" * 64
+        p = tmp_path / "m.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="split_hash"):
+            CheckpointManifest.load(p)
+
+    def test_load_accepts_empty_optional_hashes(self, tmp_path):
+        """split_hash / resolved_config_hash が空文字は後方互換として許可する。"""
+        payload = self._base_payload()
+        payload["split_hash"] = ""
+        payload["resolved_config_hash"] = ""
+        p = tmp_path / "m.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        m = CheckpointManifest.load(p)
+        assert m.split_hash == ""
+        assert m.resolved_config_hash == ""
+
+    def test_load_rejects_non_string_split_hash(self, tmp_path):
+        """非文字列 split_hash は拒否される。"""
+        payload = self._base_payload()
+        payload["split_hash"] = 12345
+        p = tmp_path / "m.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="split_hash"):
+            CheckpointManifest.load(p)

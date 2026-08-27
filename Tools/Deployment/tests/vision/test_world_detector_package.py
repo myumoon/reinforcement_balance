@@ -1273,18 +1273,22 @@ class TestDefaultConfigGuard:
         _reject_unimplemented_config(cfg)
 
     def test_augmentation_in_config_is_rejected(self):
-        """augmentation が含まれる config はガードに拒否される。"""
+        """augmentation が含まれる config は共有 validator に拒否される。"""
         from train_survivors_world_detector import _reject_unimplemented_config
+        from survivors.vision.world_detector import load_detector_config
 
-        cfg = {"input": {"augmentation": {"random_horizontal_flip": True}}}
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["input"]["augmentation"] = {"random_horizontal_flip": True}
         with pytest.raises(ValueError, match="augmentation"):
             _reject_unimplemented_config(cfg)
 
     def test_lr_scheduler_in_config_is_rejected(self):
-        """lr_scheduler が含まれる config はガードに拒否される。"""
+        """lr_scheduler が含まれる config は共有 validator に拒否される。"""
         from train_survivors_world_detector import _reject_unimplemented_config
+        from survivors.vision.world_detector import load_detector_config
 
-        cfg = {"training": {"lr_scheduler": "cosine"}}
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["training"]["lr_scheduler"] = "cosine"
         with pytest.raises(ValueError, match="lr_scheduler"):
             _reject_unimplemented_config(cfg)
 
@@ -1723,75 +1727,80 @@ class TestIter12Regressions:
     # ---- Fix 2: 未実装 config 値の拒否 ----
 
     def test_config_guard_rejects_non_default_backbone(self):
-        """model.backbone が mobilenet_v3_large 以外は拒否される（P1 回帰テスト）。"""
+        """model.backbone が mobilenet_v3_large 以外は拒否される。"""
         from train_survivors_world_detector import _reject_unimplemented_config
+        from survivors.vision.world_detector import load_detector_config
 
-        cfg = {"model": {"architecture": "ssdlite320", "num_classes": 12, "backbone": "bogus"}}
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["model"]["backbone"] = "bogus"
         with pytest.raises(ValueError, match="backbone"):
             _reject_unimplemented_config(cfg)
 
-    def test_config_guard_accepts_default_backbone(self):
-        """model.backbone が mobilenet_v3_large は通過する（P1 回帰テスト）。"""
+    def test_config_guard_accepts_default_config(self):
+        """既定 config は共有 validator を通過する。"""
         from train_survivors_world_detector import _reject_unimplemented_config
+        from survivors.vision.world_detector import load_detector_config
 
-        _reject_unimplemented_config({"model": {"backbone": "mobilenet_v3_large"}})
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        _reject_unimplemented_config(cfg)  # no exception
 
     def test_config_guard_rejects_non_default_input_size(self):
-        """model.input_size が [320, 320] 以外は拒否される（P1 回帰テスト）。"""
+        """model.input_size が [320, 320] 以外は拒否される。"""
         from train_survivors_world_detector import _reject_unimplemented_config
+        from survivors.vision.world_detector import load_detector_config
 
-        cfg = {"model": {"input_size": [111, 222]}}
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["model"]["input_size"] = [111, 222]
         with pytest.raises(ValueError, match="input_size"):
             _reject_unimplemented_config(cfg)
 
     def test_config_guard_rejects_pretrained_backbone_true(self):
-        """model.pretrained_backbone=true は拒否される（P1 回帰テスト）。"""
+        """model.pretrained_backbone=true は拒否される。"""
         from train_survivors_world_detector import _reject_unimplemented_config
+        from survivors.vision.world_detector import load_detector_config
 
-        cfg = {"model": {"pretrained_backbone": True}}
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["model"]["pretrained_backbone"] = True
         with pytest.raises(ValueError, match="pretrained_backbone"):
             _reject_unimplemented_config(cfg)
 
-    def test_config_guard_accepts_pretrained_backbone_false(self):
-        """model.pretrained_backbone=false は通過する（P1 回帰テスト）。"""
+    def test_config_guard_rejects_pretrained_backbone_int_one(self):
+        """model.pretrained_backbone=1 (int) は拒否される。"""
         from train_survivors_world_detector import _reject_unimplemented_config
+        from survivors.vision.world_detector import load_detector_config
 
-        _reject_unimplemented_config({"model": {"pretrained_backbone": False}})
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["model"]["pretrained_backbone"] = 1
+        with pytest.raises(ValueError, match="pretrained_backbone"):
+            _reject_unimplemented_config(cfg)
 
     def test_config_guard_rejects_non_default_normalize(self):
-        """input.normalize が ImageNet 既定値以外は拒否される（P1 回帰テスト）。"""
+        """input.normalize が ImageNet 既定値以外は拒否される。"""
         from train_survivors_world_detector import _reject_unimplemented_config
+        from survivors.vision.world_detector import load_detector_config
 
-        cfg = {"input": {"normalize": {"mean": [0, 0, 0], "std": [1, 1, 1]}}}
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["input"]["normalize"]["mean"] = [0.0, 0.0, 0.0]
         with pytest.raises(ValueError, match="normalize"):
             _reject_unimplemented_config(cfg)
 
-    def test_config_guard_accepts_default_normalize(self):
-        """input.normalize が ImageNet 既定値は通過する（P1 回帰テスト）。"""
-        from train_survivors_world_detector import _reject_unimplemented_config
-
-        cfg = {"input": {"normalize": {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]}}}
-        _reject_unimplemented_config(cfg)
-
     def test_config_guard_rejects_non_val_map_metric(self):
-        """checkpoint_selection.metric が val_map50_95 以外は拒否される（P1 回帰テスト）。"""
+        """checkpoint_selection.metric が val_map50_95 以外は拒否される。"""
         from train_survivors_world_detector import _reject_unimplemented_config
+        from survivors.vision.world_detector import load_detector_config
 
-        cfg = {"checkpoint_selection": {"metric": "bogus_metric"}}
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["checkpoint_selection"]["metric"] = "bogus_metric"
         with pytest.raises(ValueError, match="metric"):
             _reject_unimplemented_config(cfg)
 
-    def test_config_guard_accepts_val_map_metric(self):
-        """checkpoint_selection.metric が val_map50_95 は通過する（P1 回帰テスト）。"""
+    def test_config_guard_rejects_class_map_config_as_unknown_key(self):
+        """config に class_map_config が存在すると未知 top-level key として拒否される。"""
         from train_survivors_world_detector import _reject_unimplemented_config
+        from survivors.vision.world_detector import load_detector_config
 
-        _reject_unimplemented_config({"checkpoint_selection": {"metric": "val_map50_95"}})
-
-    def test_config_guard_rejects_class_map_config(self):
-        """config に class_map_config が存在すると拒否される（P1 回帰テスト）。"""
-        from train_survivors_world_detector import _reject_unimplemented_config
-
-        cfg = {"class_map_config": "configs/world_class_map_v1.yaml"}
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["class_map_config"] = "configs/world_class_map_v1.yaml"
         with pytest.raises(ValueError, match="class_map_config"):
             _reject_unimplemented_config(cfg)
 
@@ -1824,7 +1833,7 @@ class TestIter12Regressions:
             bad.save(tmp_path / "manifest.json")
 
     def test_package_manifest_from_dict_rejects_bad_model_hash(self):
-        """model_hash が不正な SHA-256 の場合 PackageManifest.from_dict() を拒否する（P1 回帰テスト）。"""
+        """model_hash が不正な SHA-256 の場合 PackageManifest.from_dict() を拒否する。"""
         from survivors.vision.world_detector_package import PackageManifest, PACKAGE_SCHEMA_VERSION
 
         bad = {
@@ -1834,13 +1843,14 @@ class TestIter12Regressions:
             "data_hash": "b" * 64, "config_hash": "c" * 64,
             "build_hash": "d" * 64, "class_map_hash": "e" * 64,
             "contract_hash": "f" * 64,
+            "score_threshold": 0.5,
             "training_mode": "development",
         }
         with pytest.raises(ValueError, match="model_hash"):
             PackageManifest.from_dict(bad)
 
     def test_package_manifest_from_dict_rejects_bad_contract_hash(self):
-        """contract_hash が不正な SHA-256 の場合 PackageManifest.from_dict() を拒否する（P1 回帰テスト）。"""
+        """contract_hash が不正な SHA-256 の場合 PackageManifest.from_dict() を拒否する。"""
         from survivors.vision.world_detector_package import PackageManifest, PACKAGE_SCHEMA_VERSION
 
         bad = {
@@ -1849,6 +1859,7 @@ class TestIter12Regressions:
             "model_hash": "a" * 64, "data_hash": "b" * 64, "config_hash": "c" * 64,
             "build_hash": "d" * 64, "class_map_hash": "e" * 64,
             "contract_hash": "bad",  # 不正
+            "score_threshold": 0.5,
             "training_mode": "development",
         }
         with pytest.raises(ValueError, match="contract_hash"):
@@ -1977,3 +1988,272 @@ class TestIter12Regressions:
             "recall_min=True は passed=False でなければならない"
         )
         assert not result.passed
+
+
+# ---- PackageManifest.score_threshold: read/write 対称化 ----
+
+class TestPackageManifestScoreThreshold:
+    """PackageManifest.from_dict() が score_threshold を厳格に検証することを確認する。"""
+
+    def _base_dict(self) -> dict:
+        from survivors.vision.world_detector_package import PACKAGE_SCHEMA_VERSION
+        return {
+            "schema_version": PACKAGE_SCHEMA_VERSION,
+            "formal_detector_eligible": False,
+            "model_hash": "a" * 64,
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "contract_hash": "f" * 64,
+            "metrics": {},
+            "checkpoint_selection": {},
+            "weight_included": False,
+            "training_mode": "development",
+        }
+
+    def test_from_dict_rejects_bool_true(self):
+        """score_threshold=True は拒否される。"""
+        from survivors.vision.world_detector_package import PackageManifest
+        d = self._base_dict()
+        d["score_threshold"] = True
+        with pytest.raises(ValueError, match="score_threshold"):
+            PackageManifest.from_dict(d)
+
+    def test_from_dict_rejects_bool_false(self):
+        """score_threshold=False は拒否される。"""
+        from survivors.vision.world_detector_package import PackageManifest
+        d = self._base_dict()
+        d["score_threshold"] = False
+        with pytest.raises(ValueError, match="score_threshold"):
+            PackageManifest.from_dict(d)
+
+    def test_from_dict_rejects_nan(self):
+        """score_threshold=NaN は拒否される。"""
+        import math
+        from survivors.vision.world_detector_package import PackageManifest
+        d = self._base_dict()
+        d["score_threshold"] = math.nan
+        with pytest.raises(ValueError, match="score_threshold"):
+            PackageManifest.from_dict(d)
+
+    def test_from_dict_rejects_infinity(self):
+        """score_threshold=Infinity は拒否される。"""
+        import math
+        from survivors.vision.world_detector_package import PackageManifest
+        d = self._base_dict()
+        d["score_threshold"] = math.inf
+        with pytest.raises(ValueError, match="score_threshold"):
+            PackageManifest.from_dict(d)
+
+    def test_from_dict_rejects_negative(self):
+        """score_threshold=-1.0 は拒否される。"""
+        from survivors.vision.world_detector_package import PackageManifest
+        d = self._base_dict()
+        d["score_threshold"] = -1.0
+        with pytest.raises(ValueError, match="score_threshold"):
+            PackageManifest.from_dict(d)
+
+    def test_from_dict_rejects_above_one(self):
+        """score_threshold=2.0 は拒否される。"""
+        from survivors.vision.world_detector_package import PackageManifest
+        d = self._base_dict()
+        d["score_threshold"] = 2.0
+        with pytest.raises(ValueError, match="score_threshold"):
+            PackageManifest.from_dict(d)
+
+    def test_from_dict_rejects_string_threshold(self):
+        """score_threshold='0.5' (str) は拒否される。"""
+        from survivors.vision.world_detector_package import PackageManifest
+        d = self._base_dict()
+        d["score_threshold"] = "0.5"
+        with pytest.raises(ValueError, match="score_threshold"):
+            PackageManifest.from_dict(d)
+
+    def test_from_dict_rejects_missing_threshold(self):
+        """score_threshold キーが欠落していると拒否される。"""
+        from survivors.vision.world_detector_package import PackageManifest
+        d = self._base_dict()
+        # score_threshold を意図的に除く
+        with pytest.raises(ValueError, match="score_threshold"):
+            PackageManifest.from_dict(d)
+
+    def test_from_dict_accepts_valid_threshold(self):
+        """score_threshold=0.7 は許可される。"""
+        from survivors.vision.world_detector_package import PackageManifest
+        d = self._base_dict()
+        d["score_threshold"] = 0.7
+        pm = PackageManifest.from_dict(d)
+        assert abs(pm.score_threshold - 0.7) < 1e-9
+
+
+# ---- sentinel: package 入口が validator を迂回しないことを確認 ----
+
+class TestPackageValidatorSentinels:
+    """publish / restore の各入口が shared validator を通ることを確認する（sentinel）。"""
+
+    def test_publish_sentinel_rejects_invalid_config(self, tmp_path):
+        """publish_development_package は cfg_path の config を検証し、invalid を拒否する（sentinel）。"""
+        import hashlib
+        import yaml
+        from survivors.vision.world_detector_package import publish_development_package
+        from survivors.vision.world_detector import CheckpointManifest
+
+        # 無効な config を作成（formal_detector_eligible=true）
+        with DETECTOR_CONFIG_PATH.open() as f:
+            cfg = yaml.safe_load(f)
+        cfg["formal_detector_eligible"] = True
+        invalid_cfg_path = tmp_path / "invalid_cfg.yaml"
+        invalid_cfg_path.write_text(yaml.dump(cfg), encoding="utf-8")
+
+        # checkpoint manifest の config_hash を無効 config に合わせる
+        config_hash = hashlib.sha256(invalid_cfg_path.read_bytes()).hexdigest()
+        m = CheckpointManifest(
+            model_hash="a" * 64,
+            data_hash="b" * 64,
+            config_hash=config_hash,
+            build_hash="d" * 64,
+            class_map_hash=_sha256_file(CLASS_MAP_PATH),
+            formal_detector_eligible=False,
+        )
+        store = tmp_path / "store"
+        store.mkdir()
+        with pytest.raises(ValueError, match="formal_detector_eligible"):
+            publish_development_package(
+                m, metrics_dict={}, checkpoint_selection={},
+                store_dir=store,
+                cfg_path=invalid_cfg_path,
+                cm_path=CLASS_MAP_PATH,
+            )
+
+    def test_restore_package_sentinel_calls_validator(self, tmp_path, monkeypatch):
+        """restore_package は config 読み込み後に validate_detector_config を呼ぶ（sentinel）。"""
+        from survivors.vision import world_detector as wd_mod
+        from survivors.vision.world_detector_package import publish_development_package, restore_package
+
+        # 先に valid package を publish
+        store = tmp_path / "store"
+        store.mkdir()
+        pkg_path = publish_development_package(
+            _make_checkpoint_manifest(),
+            metrics_dict={}, checkpoint_selection={},
+            store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
+        )
+
+        # validator を常に例外を送出するよう差し替える
+        def _always_raise(cfg):
+            raise ValueError("sentinel_blocked_by_validator")
+
+        monkeypatch.setattr(wd_mod, "validate_detector_config", _always_raise)
+
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        with pytest.raises(ValueError, match="sentinel_blocked_by_validator"):
+            restore_package(pkg_path, frame)
+
+    def test_training_cli_sentinel_rejects_invalid_config(self, tmp_path):
+        """training CLI は load_detector_config 経由で validate_detector_config を呼ぶ（sentinel）。"""
+        import yaml
+        import train_survivors_world_detector as training
+
+        with DETECTOR_CONFIG_PATH.open() as f:
+            cfg = yaml.safe_load(f)
+        cfg["formal_detector_eligible"] = True
+        invalid_path = tmp_path / "invalid.yaml"
+        invalid_path.write_text(yaml.dump(cfg), encoding="utf-8")
+
+        split_path = tmp_path / "split.json"
+        split_path.write_text(
+            '{"train":["s1"],"validation":["s2"],"error_calibration":[],"final_e2e_test":[]}',
+            encoding="utf-8",
+        )
+        ann_path = tmp_path / "ann.json"
+        ann_path.write_text('{"images":[],"annotations":[],"categories":[]}', encoding="utf-8")
+
+        result = training.main([
+            "--annotations", str(ann_path),
+            "--split", str(split_path),
+            "--config", str(invalid_path),
+            "--class-map", str(CLASS_MAP_PATH),
+            "--output", str(tmp_path / "out"),
+        ])
+        assert result != 0, "invalid config で training CLI が exit code 0 を返した"
+
+
+# ---- PackageManifest.from_dict: manifest フィールド検証 ----
+
+class TestPackageManifestFieldValidation:
+    """disk 由来 manifest の各フィールドが検証されることを確認する。"""
+
+    def _base_dict(self) -> dict:
+        from survivors.vision.world_detector_package import PACKAGE_SCHEMA_VERSION
+        return {
+            "schema_version": PACKAGE_SCHEMA_VERSION,
+            "formal_detector_eligible": False,
+            "model_hash": "a" * 64,
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "contract_hash": "f" * 64,
+            "metrics": {},
+            "checkpoint_selection": {},
+            "weight_included": False,
+            "score_threshold": 0.5,
+            "training_mode": "development",
+        }
+
+    def test_metrics_not_dict_rejected(self):
+        """metrics がリストなら拒否される。"""
+        from survivors.vision.world_detector_package import PackageManifest
+        d = self._base_dict()
+        d["metrics"] = [1, 2, 3]
+        with pytest.raises(ValueError, match="metrics"):
+            PackageManifest.from_dict(d)
+
+    def test_checkpoint_selection_not_dict_rejected(self):
+        """checkpoint_selection が文字列なら拒否される。"""
+        from survivors.vision.world_detector_package import PackageManifest
+        d = self._base_dict()
+        d["checkpoint_selection"] = "bad"
+        with pytest.raises(ValueError, match="checkpoint_selection"):
+            PackageManifest.from_dict(d)
+
+    def test_weight_included_not_bool_rejected(self):
+        """weight_included が数値なら拒否される。"""
+        from survivors.vision.world_detector_package import PackageManifest
+        d = self._base_dict()
+        d["weight_included"] = 1
+        with pytest.raises(ValueError, match="weight_included"):
+            PackageManifest.from_dict(d)
+
+    def test_restore_rejects_invalid_threshold_before_inference(self, tmp_path):
+        """restore_package は不正 score_threshold の manifest を推論前に拒否する。"""
+        import json as _json
+        from survivors.vision.world_detector_package import (
+            publish_development_package,
+            PACKAGE_SCHEMA_VERSION,
+            PackageSchemaError,
+        )
+
+        store = tmp_path / "store"
+        store.mkdir()
+        pkg_path = publish_development_package(
+            _make_checkpoint_manifest(),
+            metrics_dict={}, checkpoint_selection={},
+            store_dir=store,
+            cfg_path=DETECTOR_CONFIG_PATH,
+            cm_path=CLASS_MAP_PATH,
+        )
+
+        # manifest.json の score_threshold を不正値 (True) に書き換える
+        raw = _json.loads(pkg_path.read_text(encoding="utf-8"))
+        raw["score_threshold"] = True
+        pkg_path.write_text(_json.dumps(raw), encoding="utf-8")
+
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        # PackageSchemaError (content_key mismatch) か ValueError (score_threshold) で拒否される
+        with pytest.raises((ValueError, PackageSchemaError)):
+            from survivors.vision.world_detector_package import restore_package
+            restore_package(pkg_path, frame)

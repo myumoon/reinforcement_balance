@@ -43,6 +43,10 @@ training:
     min_entities: 500
     min_classes: 6
     min_time_bands: 4
+    # split ごとの最小要件（run_split_preflight に使用）。
+    min_frames_per_split: 50
+    min_entities_per_split: 100
+    min_classes_per_split: 4
 
 # --- チェックポイント選択規則 ---
 # 学習開始前に manifest へ固定し、validation で best checkpoint を一度だけ選択する。

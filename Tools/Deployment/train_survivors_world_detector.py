@@ -23,6 +23,7 @@ best checkpoint は選択専用、model / optimizer / epoch を含む last check
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import pathlib
@@ -386,64 +387,13 @@ def _check_all_images(*dataset_views: Any) -> list[str]:
 # ---- config guard ----
 
 def _reject_unimplemented_config(cfg: dict) -> None:
-    """未実装の config キーが設定されていれば ValueError を送出する。
+    """validate_detector_config の薄い alias（後方互換）。
 
-    config hash と実際の学習条件が乖離しないよう、未実装設定を早期に拒否する。
-    04-07 で実装されない値、または固定値から外れた値を全て拒否する。
+    validation 規則は survivors.vision.world_detector.validate_detector_config に集約する。
+    重複実装しない。
     """
-    checks = [
-        ("input.augmentation", cfg.get("input", {}).get("augmentation")),
-        ("training.lr_scheduler", cfg.get("training", {}).get("lr_scheduler")),
-        ("training.class_weights", cfg.get("training", {}).get("class_weights")),
-        ("training.near_duplicate_suppression",
-         cfg.get("training", {}).get("near_duplicate_suppression")),
-    ]
-    for key, val in checks:
-        if val is not None:
-            raise ValueError(
-                f"config '{key}' は未実装です。このバージョンでは設定を除去してください。"
-            )
-
-    # class_map_config は CLI の --class-map 引数で指定する。config に記載しても反映されない。
-    if cfg.get("class_map_config") is not None:
-        raise ValueError(
-            "config 'class_map_config' は未実装です。CLI の --class-map 引数を使用してください。"
-        )
-
-    # model.backbone: mobilenet_v3_large のみ実装済み（ssdlite320 architecture に固定）。
-    backbone = cfg.get("model", {}).get("backbone")
-    if backbone is not None and backbone != "mobilenet_v3_large":
-        raise ValueError(
-            f"model.backbone は 'mobilenet_v3_large' のみ実装済みです。got: {backbone!r}"
-        )
-
-    # model.input_size: [320, 320] のみ実装済み（SSDLite320 固定サイズ）。
-    input_size = cfg.get("model", {}).get("input_size")
-    if input_size is not None and input_size != [320, 320]:
-        raise ValueError(
-            f"model.input_size は [320, 320] のみ実装済みです。got: {input_size!r}"
-        )
-
-    # model.pretrained_backbone: true は 04-07 では未実装（weights_backbone=None 固定）。
-    if cfg.get("model", {}).get("pretrained_backbone") is True:
-        raise ValueError(
-            "model.pretrained_backbone=true は未実装です。04-07 では false のみ許可します。"
-        )
-
-    # input.normalize: ImageNet 既定値以外は学習に反映されない。
-    _DEFAULT_NORMALIZE = {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]}
-    normalize = cfg.get("input", {}).get("normalize")
-    if normalize is not None and normalize != _DEFAULT_NORMALIZE:
-        raise ValueError(
-            f"input.normalize は ImageNet 既定値のみ実装済みです。got: {normalize!r}"
-        )
-
-    # checkpoint_selection.metric: val_map50_95 のみ実装済み（選択処理が固定）。
-    metric = cfg.get("checkpoint_selection", {}).get("metric")
-    if metric is not None and metric != "val_map50_95":
-        raise ValueError(
-            f"checkpoint_selection.metric は 'val_map50_95' のみ実装済みです。got: {metric!r}"
-        )
+    from survivors.vision.world_detector import validate_detector_config
+    validate_detector_config(cfg)
 
 
 # ---- training loop ----
@@ -808,13 +758,6 @@ def main(argv: list[str] | None = None) -> int:
         "フレームへ分離しました。"
     )
 
-    # 未実装設定の早期拒否（config hash と学習条件の乖離を防ぐ）
-    try:
-        _reject_unimplemented_config(cfg)
-    except ValueError as e:
-        print(f"[CONFIG ERROR] {e}", file=sys.stderr)
-        return 1
-
     # -- 全採用画像の存在・decode を確認する（smoke 以外・dry-run より前）
     # dry-run も同じ preflight を通す。欠落画像を含む dataset は dry-run でも exit code 1。
     if not args.smoke:
@@ -873,9 +816,17 @@ def main(argv: list[str] | None = None) -> int:
     _split_hash = _sha256_file(pathlib.Path(args.split))
 
     # resolved config hash: CLI override 適用後の config dict を正規化してハッシュ
-    _resolved_cfg = dict(cfg)
+    # deepcopy で元 config の nested mapping を変更しないことを保証する
+    _resolved_cfg = copy.deepcopy(cfg)
     if args.epochs:
-        _resolved_cfg.setdefault("training", {})["max_epochs"] = args.epochs
+        _resolved_cfg["training"]["max_epochs"] = args.epochs
+        # CLI override 適用後も共有 validator で再検証する
+        try:
+            from survivors.vision.world_detector import validate_detector_config as _vdc
+            _vdc(_resolved_cfg)
+        except ValueError as _ve:
+            print(f"[CONFIG ERROR] resolved config: {_ve}", file=sys.stderr)
+            return 1
     _resolved_config_hash = _sha256_str(json.dumps(_resolved_cfg, sort_keys=True, ensure_ascii=False))
 
     # best checkpoint hash: 実ファイルがあれば hash、なければ config hash で代用

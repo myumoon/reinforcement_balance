@@ -26,12 +26,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pathlib
 import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field
 from typing import Any
+
+from survivors.vision.world_detector import validate_detector_config
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -94,11 +97,16 @@ class PackageManifest:
 
     @staticmethod
     def from_dict(d: dict) -> "PackageManifest":
-        """dict から PackageManifest を復元する。schema_version を検証する。
+        """dict から PackageManifest を復元する。
 
-        04-07 境界: formal_detector_eligible は必ず False へ上書き、development_only は True、
-        training_mode は "smoke" | "development" のみ許容する。
+        04-07 境界: formal_detector_eligible は必ず False へ上書き、development_only は True。
+        disk 由来の manifest はすべて型・値・hash 形式を検証してから構築する。
+        score_threshold は必須フィールドで暗黙の変換や default は使わない。
         """
+        if not isinstance(d, dict):
+            raise ValueError(
+                f"PackageManifest.from_dict: dict が必要。got: {type(d).__name__!r}"
+            )
         if d.get("schema_version") != PACKAGE_SCHEMA_VERSION:
             raise ValueError(
                 f"未知の package schema_version: {d.get('schema_version')!r}"
@@ -108,6 +116,46 @@ class PackageManifest:
             raise ValueError(
                 f"training_mode の許容値は 'smoke' | 'development' です。got: {raw_mode!r}"
             )
+
+        # metrics / checkpoint_selection は dict が必要
+        metrics = d.get("metrics", {})
+        if not isinstance(metrics, dict):
+            raise ValueError(
+                f"PackageManifest: metrics は dict が必要。got: {type(metrics).__name__!r}"
+            )
+        ckpt_sel = d.get("checkpoint_selection", {})
+        if not isinstance(ckpt_sel, dict):
+            raise ValueError(
+                f"PackageManifest: checkpoint_selection は dict が必要。"
+                f" got: {type(ckpt_sel).__name__!r}"
+            )
+
+        # weight_included は bool が必要
+        wi = d.get("weight_included", False)
+        if not isinstance(wi, bool):
+            raise ValueError(
+                f"PackageManifest: weight_included は bool が必要。got: {type(wi).__name__!r}"
+            )
+
+        # score_threshold は必須フィールド: bool 不可・有限・[0, 1]
+        if "score_threshold" not in d:
+            raise ValueError("PackageManifest: score_threshold が欠落しています。")
+        st = d["score_threshold"]
+        if isinstance(st, bool) or not isinstance(st, (int, float)):
+            raise ValueError(
+                f"PackageManifest: score_threshold は数値が必要 (bool / 文字列は不可)。"
+                f" got: {st!r}"
+            )
+        if not math.isfinite(st):
+            raise ValueError(
+                f"PackageManifest: score_threshold は有限値が必要 (NaN / Infinity は不可)。"
+                f" got: {st!r}"
+            )
+        if not (0.0 <= st <= 1.0):
+            raise ValueError(
+                f"PackageManifest: score_threshold は [0, 1] の範囲が必要。got: {st!r}"
+            )
+
         pm = PackageManifest(
             schema_version=d["schema_version"],
             formal_detector_eligible=False,    # 04-07 は常に False
@@ -117,10 +165,10 @@ class PackageManifest:
             build_hash=d["build_hash"],
             class_map_hash=d["class_map_hash"],
             contract_hash=d["contract_hash"],
-            metrics=d.get("metrics", {}),
-            checkpoint_selection=d.get("checkpoint_selection", {}),
-            weight_included=d.get("weight_included", False),
-            score_threshold=float(d.get("score_threshold", 0.5)),
+            metrics=metrics,
+            checkpoint_selection=ckpt_sel,
+            weight_included=wi,
+            score_threshold=float(st),
             development_only=True,             # 04-07 は常に True
             training_mode=raw_mode,
         )
@@ -315,6 +363,12 @@ def publish_development_package(
     model_hash を検証する。指定した path の欠落や不一致は publish を失敗させる。
     score_threshold は restore_package での推論スコア閾値として manifest に保存する。
     """
+    # ---- cfg_path の config を共有 validator で検証（model / tracker 構築より前）----
+    import yaml as _yaml
+    with cfg_path.open(encoding="utf-8") as _f:
+        _cfg_to_validate = _yaml.safe_load(_f)
+    validate_detector_config(_cfg_to_validate)
+
     # ---- 書き込み境界バリデーション（fail-closed）----
     import math as _math
     for _fname in ("model_hash", "data_hash", "config_hash", "build_hash", "class_map_hash"):
@@ -448,6 +502,9 @@ def restore_package(
     with cfg_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
+    # 共有 validator を明示的に呼ぶ（model / tracker 構築より前）
+    validate_detector_config(cfg)
+
     detector = WorldDetector.from_config(cfg, cm_path)
 
     # -- weight hash 検証・ロード（hash は torch の有無にかかわらず必須）
@@ -479,10 +536,8 @@ def restore_package(
     max_age_raw: dict = tracker_cfg.get("max_age_by_class", {})
     max_age_by_class: dict[int, int] = {}
     for name, age in max_age_raw.items():
-        try:
-            max_age_by_class[cm.name_to_id(name)] = age
-        except KeyError:
-            pass
+        # validate_detector_config が既に class 名を検証済み。KeyError は伝播させる。
+        max_age_by_class[cm.name_to_id(name)] = age
 
     tracker = EntityTracker(
         max_age_by_class=max_age_by_class,
