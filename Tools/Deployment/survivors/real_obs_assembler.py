@@ -47,10 +47,11 @@ def _candidate(card: ParsedCard, used_ids: set[str], inventory: tuple[str | None
 def _item_context(
     joined: TemporalJoin, snapshot_id: str, screen: dict[str, NamedEstimate],
     gameplay_world: TrackedWorldStateV1 | None, last_gameplay_ns: int | None, now_ns: int | None,
+    valid_ui_ids: frozenset[str],
 ) -> tuple[ItemDecisionFeatures | None, tuple[CandidateFeatures, ...]]:
     """item UI 用 context と候補を visible feature だけから構築する。
 
-    gameplay/停止画面では None を返し、fallback と chest も semantic choice として保持します。
+    gameplay/停止画面では None を返し、item_card だけを model 候補とします。
     danger 特徴は直前の gameplay snapshot から取得し、item UI 中も正確な鮮度を算出します。
     """
     if joined.item_validity == 0:
@@ -60,11 +61,27 @@ def _item_context(
     raw_ids = [card.item_id or f"unknown:{card.slot_index}" for card in cards]
     if len(raw_ids) != len(set(raw_ids)):
         return None, ()
-    choices = tuple(_candidate(card, used, joined.hud.inventory) for card in cards)
-    if not choices and joined.hud.screen_state == "chest":
-        choices = (CandidateFeatures("chest", "ack_chest", 0, False, False, False, False, False, 0),)
+    # fallback/gold/chicken は fallback_kind フィールドへ。chest は ack_chest ボタンのみで表現。
+    fallback = next(
+        (card.item_id or "" for card in cards
+         if card.kind == "fallback" or "gold" in (card.item_id or "").casefold()
+         or "chicken" in (card.item_id or "").casefold()),
+        "none",
+    )
+    item_cards = [
+        card for card in cards
+        if card.kind not in ("fallback", "chest")
+        and "gold" not in (card.item_id or "").casefold()
+        and "chicken" not in (card.item_id or "").casefold()
+    ]
+    choices = tuple(_candidate(card, used, joined.hud.inventory) for card in item_cards)
+    # UI validity 同期: 対応する UI target が valid でない候補をモデルから除く
+    choices = tuple(c for c in choices if c.item_id in valid_ui_ids)
     if not choices:
         return None, ()
+    # ponytail: HudStateV1.inventory は identity のみ保持。slot level は画面から観測不可。
+    # binary encoding (0=空、1=占有=level 1 仮定) は強化済み武器で訓練/推論の分布ズレを生む。
+    # parser が per-slot level を提供するまでの暫定実装。
     inventory_levels = tuple(1 if item is not None else 0 for item in joined.hud.inventory)
     nearest = screen.get("nearest_enemy_offset")
     radius = screen.get("nearest_enemy_screen_radius")
@@ -72,10 +89,6 @@ def _item_context(
     gem_density = screen["gem_density"].value[0]
     effective_world = gameplay_world if gameplay_world is not None else joined.world
     visible = [track for track in effective_world.tracks if track.on_screen and not track.clipped and track.confidence >= .35]
-    fallback = next(
-        (choice.item_id for choice in choices if choice.kind == "fallback" or "gold" in choice.item_id.casefold() or "chicken" in choice.item_id.casefold()),
-        "none",
-    )
     max_cards = max(3, len(choices))
     world_age = (now_ns - gameplay_world.timestamp_ns) / 1_000_000_000 if now_ns is not None and gameplay_world is not None else 0.
     snapshot_age = (now_ns - last_gameplay_ns) / 1_000_000_000 if now_ns is not None and last_gameplay_ns is not None else 0.
@@ -165,15 +178,17 @@ class RealObsAssembler:
                 estimates[name] = NamedEstimate(value.value, value.timestamp_ns, value.validity * combat)
         deploy_obs = build_deploy_observation(schema, estimates, joined.captured_ns)
         ui = build_ui_presentation_from_hud(joined.hud, viewport, snapshot_id=snapshot_id, frame_id=frame_id)
+        valid_ui_ids = frozenset(c.choice_id for c in ui.candidates if c.validity and c.semantic_kind == "item_card")
         if self._last_gameplay_screen is not None:
             item_context, choices = _item_context(
                 joined, snapshot_id, self._last_gameplay_screen,
                 self._last_gameplay_world, self._last_gameplay_ns, joined.captured_ns,
+                valid_ui_ids,
             )
         else:
             item_context, choices = None, ()  # キャッシュなし: item overlay をgameplayとして流さない
         diagnostics = {
-            "hud_world_skew_ms": abs(hud.captured_monotonic_ns - world.timestamp_ns) / 1_000_000,
+            "hud_world_skew_ms": abs(joined.hud.captured_monotonic_ns - joined.world.timestamp_ns) / 1_000_000,
             "hud_validity": joined.hud_validity, "world_validity": joined.world_validity,
             "combat_validity": joined.combat_validity, "item_validity": joined.item_validity,
         }

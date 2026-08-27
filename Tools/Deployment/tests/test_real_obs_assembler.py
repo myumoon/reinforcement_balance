@@ -248,3 +248,66 @@ def test_item_context_world_age_and_snapshot_age_computed_independently() -> Non
     assert snapshot is not None and snapshot.item_context is not None
     assert snapshot.item_context.world_age == pytest.approx(1.04)  # (2B - 960M) / 1e9
     assert snapshot.item_context.last_gameplay_snapshot_age == pytest.approx(1.00)  # (2B - 1B) / 1e9
+
+
+def test_fallback_card_excluded_from_model_choices() -> None:
+    """fallback/gold/chicken カードは model 候補に含めず fallback_kind にのみ反映する。
+
+    ItemSelector が非選択 UI policy の所有物を選択しないよう、choices から除きます。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud_gp, world_gp = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    card_item = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    card_fallback = ParsedCard(1, "gold_bag", "fallback", 0, .99, "ok", (500, 100, 700, 400))
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_fallback", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card_item, card_fallback), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot is not None and snapshot.item_context is not None
+    assert all(c.item_id != "gold_bag" for c in snapshot.choices)
+    assert snapshot.item_context.fallback_kind == "gold_bag"
+    assert len(snapshot.choices) == 1
+
+
+def test_item_context_excludes_low_confidence_ui_targets() -> None:
+    """UI confidence < 0.35 のカードは model choices から除く。
+
+    クリック不能な候補を ItemSelector が選択するとレベルアップ画面で進行不能になります。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud_gp, world_gp = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    card = ParsedCard(0, "knife", "weapon", 2, .1, "ok", (100, 100, 400, 500))  # confidence=0.1 < 0.35
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot is not None
+    assert snapshot.item_context is None
+    assert snapshot.choices == ()
+
+
+def test_skew_ms_uses_joined_timestamps() -> None:
+    """hud_world_skew_ms は joined 後の HUD/world タイムスタンプから計算される。
+
+    out-of-order 入力を片側だけ破棄した場合、raw args ではなく joined state のズレを示します。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    # HUD ts=2B, world ts=1B → joined 後は両者が採用されるので skew = |2B - 1B| = 1B ns = 1000 ms
+    hud, _ = _inputs(ts=2_000_000_000)
+    world = TrackedWorldStateV1(4, 1_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snapshot = assembler.assemble(hud, world, schema, (1000, 1000))
+    assert snapshot is not None
+    assert snapshot.diagnostics["hud_world_skew_ms"] == pytest.approx(1000.)

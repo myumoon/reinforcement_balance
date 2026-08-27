@@ -60,6 +60,12 @@ def build_screen_space_estimates(
     if enemies:
         nearest = min(enemies, key=lambda track: track.player_relative_x ** 2 + track.player_relative_y ** 2)
         offset = (nearest.player_relative_x, nearest.player_relative_y)
-        result["nearest_enemy_offset"] = NamedEstimate(offset, world.timestamp_ns, nearest.confidence)
-        result["nearest_enemy_screen_radius"] = NamedEstimate((min(math.hypot(*offset), 1.),), world.timestamp_ns, nearest.confidence)
+        anchor_conf = (
+            world.player_anchor.confidence
+            if world.player_anchor is not None and not world.player_anchor.is_fallback
+            else 0.
+        )
+        offset_validity = min(nearest.confidence, anchor_conf)
+        result["nearest_enemy_offset"] = NamedEstimate(offset, world.timestamp_ns, offset_validity)
+        result["nearest_enemy_screen_radius"] = NamedEstimate((min(math.hypot(*offset), 1.),), world.timestamp_ns, offset_validity)
     return result

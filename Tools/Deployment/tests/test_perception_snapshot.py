@@ -165,6 +165,28 @@ def test_non_item_screen_state_invalidates_ui_targets() -> None:
     assert all(not t.validity for t in snap.buttons)
 
 
+def test_roi_outside_viewport_is_invalid() -> None:
+    """viewport をはみ出した ROI は clip せず invalid として扱う。
+
+    切り取り後の中心でクリックすると隣接カードや別 UI を誤操作するため、
+    範囲外矩形はクリック対象として公開しません。
+    """
+    viewport = (1000, 1000)
+    # 左端が viewport の外にはみ出している (-100, 100, 400, 500)
+    hud = _hud(cards=(ParsedCard(0, "whip", "weapon", 2, .99, "ok", (-100, 100, 400, 500)),))
+    snap = build_ui_presentation_from_hud(hud, viewport, snapshot_id="s", frame_id="f")
+    assert not snap.candidates[0].validity
+    assert snap.candidates[0].roi == NormalizedRoi(0., 0., 0., 0.)
+    # 右端が viewport をはみ出している (100, 100, 1200, 500)
+    hud2 = _hud(cards=(ParsedCard(0, "whip", "weapon", 2, .99, "ok", (100, 100, 1200, 500)),))
+    snap2 = build_ui_presentation_from_hud(hud2, viewport, snapshot_id="s", frame_id="f")
+    assert not snap2.candidates[0].validity
+    # 完全に viewport 内に収まっている正常ケース
+    hud3 = _hud(cards=(ParsedCard(0, "whip", "weapon", 2, .99, "ok", (100, 100, 400, 500)),))
+    snap3 = build_ui_presentation_from_hud(hud3, viewport, snapshot_id="s", frame_id="f")
+    assert snap3.candidates[0].validity
+
+
 def test_duplicate_candidate_choice_id_or_index_raises() -> None:
     """重複する choice_id または choice_index を持つカードは ValueError を上げる。
 

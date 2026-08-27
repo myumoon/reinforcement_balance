@@ -187,13 +187,9 @@ def _normalized_roi(roi_xyxy: tuple[int, int, int, int] | None, viewport: tuple[
     if roi_xyxy is None or len(roi_xyxy) != 4 or any(type(value) is not int for value in roi_xyxy):
         return NormalizedRoi(0., 0., 0., 0.), False
     left, top, right, bottom = roi_xyxy
-    clipped = (
-        max(0., min(1., left / width)), max(0., min(1., top / height)),
-        max(0., min(1., right / width)), max(0., min(1., bottom / height)),
-    )
-    if clipped[2] <= clipped[0] or clipped[3] <= clipped[1]:
+    if not (0 <= left < right <= width and 0 <= top < bottom <= height):
         return NormalizedRoi(0., 0., 0., 0.), False
-    return NormalizedRoi(*clipped), True
+    return NormalizedRoi(left / width, top / height, right / width, bottom / height), True
 def _candidate_semantic(card: ParsedCard) -> Literal["item_card", "fallback_reward"]:
     """card を item または fallback reward へ分類する。
 

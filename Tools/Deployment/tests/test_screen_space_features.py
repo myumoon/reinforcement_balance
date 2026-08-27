@@ -61,3 +61,32 @@ def test_no_visible_enemy_omits_nearest_but_returns_zero_densities() -> None:
     assert "nearest_enemy_offset" not in estimates
     assert estimates["visible_enemy_count"].value == (0.,)
     assert estimates["gem_density"].value == (0.,)
+
+
+def test_nearest_enemy_offset_validity_uses_anchor_confidence() -> None:
+    """anchor confidence が enemy confidence より低いとき、offset validity に反映される。
+
+    relative 座標の精度は anchor と enemy 両方に依存するため min を取ります。
+    """
+    world = TrackedWorldStateV1(
+        frame_index=10, timestamp_ns=1_000,
+        tracks=[_track(1, "enemy", .2, 0.)],
+        player_anchor=PlayerAnchorState(.5, .5, .3, False),  # confidence=0.3 < enemy confidence=0.9
+    )
+    estimates = build_screen_space_estimates(world)
+    assert estimates["nearest_enemy_offset"].validity == pytest.approx(.3)
+
+
+def test_nearest_enemy_offset_validity_zero_when_anchor_is_fallback() -> None:
+    """anchor が fallback のとき nearest_enemy_offset validity を 0 にする。
+
+    player 未検出の代替座標から計算した offset は信頼できません。
+    """
+    world = TrackedWorldStateV1(
+        frame_index=10, timestamp_ns=1_000,
+        tracks=[_track(1, "enemy", .2, 0.)],
+        player_anchor=PlayerAnchorState(.5, .5, .9, True),  # is_fallback=True
+    )
+    estimates = build_screen_space_estimates(world)
+    assert estimates["nearest_enemy_offset"].validity == pytest.approx(0.)
+    assert estimates["nearest_enemy_screen_radius"].validity == pytest.approx(0.)
