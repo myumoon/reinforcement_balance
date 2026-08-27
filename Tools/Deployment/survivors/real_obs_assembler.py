@@ -79,9 +79,10 @@ def _item_context(
     choices = tuple(c for c in choices if c.item_id in valid_ui_ids)
     if not choices:
         return None, ()
-    # ponytail: HudStateV1.inventory は identity のみ保持。slot level は画面から観測不可。
-    # binary encoding (0=空、1=占有=level 1 仮定) は強化済み武器で訓練/推論の分布ズレを生む。
-    # parser が per-slot level を提供するまでの暫定実装。
+    # ponytail: HudStateV1.inventory は identity のみ保持。slot level・evolution_readiness・is_union・
+    # has_prerequisite は画面から観測不可。screen-observable contract として occupancy (0=空, 1=占有) を
+    # 使う。このアセンブラで収集した訓練データとのみ整合する — UE5 HTTP API 経由で実 level を与えた
+    # データとは分布が異なる。parser が per-slot level を提供するまでの暫定実装。
     inventory_levels = tuple(1 if item is not None else 0 for item in joined.hud.inventory)
     nearest = screen.get("nearest_enemy_offset")
     radius = screen.get("nearest_enemy_screen_radius")

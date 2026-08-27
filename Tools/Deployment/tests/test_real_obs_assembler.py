@@ -311,3 +311,35 @@ def test_skew_ms_uses_joined_timestamps() -> None:
     snapshot = assembler.assemble(hud, world, schema, (1000, 1000))
     assert snapshot is not None
     assert snapshot.diagnostics["hud_world_skew_ms"] == pytest.approx(1000.)
+
+
+def test_item_context_slot_encoding_is_binary_occupancy() -> None:
+    """weapon/passive slot は占有 (1) か空 (0) の 2 値エンコーディングで、実 level は使わない。
+
+    HudStateV1.inventory は item identity のみ保持し level は画面から観測できないため、
+    このアセンブラで収集した訓練データとのみ整合します。evolution_readiness・is_union・
+    has_prerequisite も同様に画面観測不能として固定値を使用します。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud_gp, world_gp = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    # inventory slot 0 に whip が入った状態でレベルアップ画面へ遷移
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
+    assert snapshot is not None and snapshot.item_context is not None
+    ctx = snapshot.item_context
+    # whip は slot 0 に占有 → level = 1 (実レベルによらず固定)
+    assert ctx.weapon_slots == (1, 0, 0, 0, 0, 0)
+    assert ctx.passive_slots == (0, 0, 0, 0, 0, 0)
+    # screen-unobservable フィールドは固定値
+    assert ctx.evolution_readiness == pytest.approx(0.)
+    assert all(not c.is_union for c in snapshot.choices)
+    assert all(not c.has_prerequisite for c in snapshot.choices)
