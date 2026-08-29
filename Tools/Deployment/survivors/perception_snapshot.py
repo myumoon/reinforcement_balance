@@ -217,6 +217,7 @@ def build_ui_presentation_from_hud(
     *,
     snapshot_id: str | None = None,
     frame_id: str | None = None,
+    hud_valid: bool = True,
 ) -> UiPresentationSnapshotV1:
     """HudStateV1 から versioned UI presentation を構築する。
 
@@ -237,7 +238,7 @@ def build_ui_presentation_from_hud(
         candidates.append(
             UiCandidateTargetV1(
                 card.item_id or f"unknown:{card.slot_index}", card.slot_index,
-                _candidate_semantic(card), roi, geometry_valid and card.confidence >= .35 and screen_confident,
+                _candidate_semantic(card), roi, geometry_valid and card.confidence >= .35 and screen_confident and hud_valid,
                 card.confidence,
             )
         )
@@ -253,7 +254,7 @@ def build_ui_presentation_from_hud(
             raise ValueError(f"unsupported button action: {action}")
         roi, geometry_valid = _normalized_roi(parsed.roi_xyxy, viewport)
         target = UiButtonTargetV1(
-            action, roi, geometry_valid and parsed.confidence >= .35 and screen_confident,
+            action, roi, geometry_valid and parsed.confidence >= .35 and screen_confident and hud_valid,
             capabilities[action], parsed.confidence,
         )
         if action not in best_buttons:

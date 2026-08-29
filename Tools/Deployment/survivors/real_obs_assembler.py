@@ -7,7 +7,7 @@ from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from reinbalance_survivors_contracts.item_decision import CandidateFeatures, ItemDecisionFeatures
 from reinbalance_survivors_contracts.ui_policy import (
-    FallbackSemantic, FallbackTarget, ScreenState, UiPolicyInputV1,
+    ButtonOption, FallbackSemantic, FallbackTarget, NonModelUiPolicyConfigV1, ScreenState, UiPolicyInputV1,
 )
 from .deploy_obs_adapter import NamedEstimate, build_deploy_observation, normalized_category
 from .perception_snapshot import PerceptionSnapshot, UiPresentationSnapshotV1, build_ui_presentation_from_hud
@@ -56,6 +56,7 @@ _HUD_TO_SCREEN_STATE: dict[str, ScreenState] = {
 }
 _KNOWN_FALLBACK_IDS = {FallbackSemantic.CHICKEN.value, FallbackSemantic.GOLD.value}
 _POLICY_SCREEN_CONFIDENCE_THRESHOLD = 0.5
+_HP_CONFIDENCE_THRESHOLD = 0.35  # hud_parserと同じ閾値を共有する
 
 
 def _build_ui_policy_input(
@@ -63,19 +64,20 @@ def _build_ui_policy_input(
     frame_id: str,
     hud: HudStateV1,
     ui: UiPresentationSnapshotV1,
+    meta_priority: tuple[str, ...] = (),
 ) -> UiPolicyInputV1 | None:
     """HUD と UI presentation から UiPolicyInputV1 を構築する。
 
-    HP が欠損・信頼度 0、または画面信頼度が低い場合は None を返し、
-    誤クリックを防ぐ fail-closed な振る舞いをとります。
-    combat_validity に依存せず hud.hp_ratio（画面由来）を直接使うことで、
-    fallback 画面でも fallback_heuristic_v1 が HP 閾値を評価できる。
+    screen_state を HP より先に解決し、HP を必須にするのは FALLBACK のみとします。
+    CHEST/CONFIRM は HP 欠損に関係なく policy input を生成します。
     """
-    if hud.hp_ratio is None or hud.hp_confidence <= 0.0:
-        return None
     screen_confident = hud.screen_state_confidence >= _POLICY_SCREEN_CONFIDENCE_THRESHOLD
     screen_state = _HUD_TO_SCREEN_STATE.get(hud.screen_state, ScreenState.UNKNOWN) if screen_confident else ScreenState.UNKNOWN
-    hp_fraction = float(hud.hp_ratio)
+    # HP は fallback_heuristic_v1 だけで必要。CHEST/CONFIRM は HP 欠損に関係なく生成する。
+    if screen_state == ScreenState.FALLBACK:
+        if hud.hp_ratio is None or hud.hp_confidence < _HP_CONFIDENCE_THRESHOLD:
+            return None
+    hp_fraction = float(hud.hp_ratio) if hud.hp_ratio is not None else 0.0
     fallback_targets = []
     for cand in ui.candidates:
         if cand.semantic_kind != "fallback_reward":
@@ -92,6 +94,14 @@ def _build_ui_policy_input(
             semantic=semantic,
             valid=cand.validity,
         ))
+    button = None
+    if meta_priority:
+        by_action = {b.semantic_action: b for b in ui.buttons}
+        for sem in meta_priority:
+            btn = by_action.get(sem)
+            if btn is not None and btn.validity and btn.capability:
+                button = ButtonOption(semantic=btn.semantic_action, capability=btn.capability)
+                break
     return UiPolicyInputV1(
         source_snapshot_hash=snapshot_id,
         source_frame_hash=frame_id,
@@ -102,6 +112,7 @@ def _build_ui_policy_input(
         candidate_set_hash=ui.candidate_set_hash,
         inventory_hash=ui.inventory_hash,
         fallback_targets=tuple(fallback_targets),
+        button=button,
     )
 
 
@@ -198,11 +209,13 @@ class RealObsAssembler:
     def assemble(
         self, hud: HudStateV1, world: TrackedWorldStateV1,
         schema: DeployObsSchema, viewport: tuple[int, int],
+        config: NonModelUiPolicyConfigV1 | None = None,
     ) -> PerceptionSnapshot | None:
         """15 Hz cadence を守りながら HUD/world から PerceptionSnapshot を構築する。
 
         tick_interval 未満の入力は observe のみ受け付け、snapshot の発行を抑制します。
         UI presentation は tensor builder に渡さず、完成後の snapshot へ一度だけ格納します。
+        config を渡すと meta_priority に従い ui_policy_input.button が設定されます。
         """
         if not isinstance(schema, DeployObsSchema):
             raise TypeError("schema must be DeployObsSchema")
@@ -245,7 +258,8 @@ class RealObsAssembler:
                 value = screen[name]
                 estimates[name] = NamedEstimate(value.value, value.timestamp_ns, value.validity * combat)
         deploy_obs = build_deploy_observation(schema, estimates, joined.captured_ns)
-        ui = build_ui_presentation_from_hud(joined.hud, viewport, snapshot_id=snapshot_id, frame_id=frame_id)
+        hud_valid = joined.hud_validity > 0
+        ui = build_ui_presentation_from_hud(joined.hud, viewport, snapshot_id=snapshot_id, frame_id=frame_id, hud_valid=hud_valid)
         valid_ui_ids = frozenset(c.choice_id for c in ui.candidates if c.validity and c.semantic_kind == "item_card")
         if self._last_gameplay_screen is not None:
             item_context, choices = _item_context(
@@ -255,7 +269,11 @@ class RealObsAssembler:
             )
         else:
             item_context, choices = None, ()  # キャッシュなし: item overlay をgameplayとして流さない
-        ui_policy_input = _build_ui_policy_input(snapshot_id, frame_id, joined.hud, ui)
+        ui_policy_input = (
+            _build_ui_policy_input(snapshot_id, frame_id, joined.hud, ui,
+                                   meta_priority=config.meta_priority if config is not None else ())
+            if hud_valid else None
+        )
         diagnostics = {
             "hud_world_skew_ms": abs(joined.hud.captured_monotonic_ns - joined.world.timestamp_ns) / 1_000_000,
             "hud_validity": joined.hud_validity, "world_validity": joined.world_validity,

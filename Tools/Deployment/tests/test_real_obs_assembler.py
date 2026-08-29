@@ -606,3 +606,160 @@ def test_ui_policy_input_target_reached_transition_confirm() -> None:
     config = NonModelUiPolicyConfigV1.default_config()
     intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
     assert intent is not None and intent.kind.value == "confirm"
+
+
+# ─── P1-1 回帰: CHEST/CONFIRM は HP 欠損に関係なく policy input を生成する ───
+
+def test_policy_input_chest_with_no_hp() -> None:
+    """chest 画面は hp_ratio=None・hp_confidence=0 でも ui_policy_input (ack_chest) を生成する。
+
+    ack_confirm_rule_v1 は HP を判断条件にしないため、HP 欠損でも遷移を止めません。
+    """
+    from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, ScreenState, decide_non_model_ui_intent
+    from survivors.vision.hud_parser import ParsedButton
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    ack_btn = ParsedButton("ack_chest", .9, "ok", (300, 300, 700, 600))
+    hud = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "chest", .9, "ok",
+        20., .9, "ok", False, None, 0., "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (), "c" * 64, (ack_btn,),
+        False, False, False, .9, "ok",
+    )
+    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is not None
+    assert snap.ui_policy_input.screen_state is ScreenState.CHEST
+    config = NonModelUiPolicyConfigV1.default_config()
+    intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
+    assert intent is not None and intent.kind.value == "ack_chest"
+
+
+def test_policy_input_confirm_with_no_hp() -> None:
+    """target_reached_transition は hp_ratio=None・hp_confidence=0 でも confirm intent を生成する。
+
+    ack_confirm_rule_v1 は HP を判断条件にしないため、HP 欠損でも画面遷移を止めません。
+    """
+    from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, ScreenState, decide_non_model_ui_intent
+    from survivors.vision.hud_parser import ParsedButton
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    confirm_btn = ParsedButton("confirm", .9, "ok", (300, 300, 700, 600))
+    hud = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "target_reached_transition", .9, "ok",
+        20., .9, "ok", False, None, 0., "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (), "c" * 64, (confirm_btn,),
+        False, False, False, .9, "ok",
+    )
+    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is not None
+    assert snap.ui_policy_input.screen_state is ScreenState.CONFIRM
+    config = NonModelUiPolicyConfigV1.default_config()
+    intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
+    assert intent is not None and intent.kind.value == "confirm"
+
+
+# ─── P1-2 回帰: hud_validity ゲート・HP confidence 閾値 0.35 ───
+
+def test_stale_hud_clears_policy_input_and_candidate_validity() -> None:
+    """stale HUD (age > 200ms) は ui_policy_input=None かつ全 candidate validity=False になる。
+
+    古い HUD の ROI や HP から誤操作が生成されないよう fail-closed にします。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud_gp, world_gp = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    # hud_ts=1_100_000_000, world_ts=1_400_000_000 → hud_age = 300ms > 200ms → hud_valid=0
+    hud_stale = HudStateV1(
+        "hud_state.v1", "session", 5, 1_100_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    world_fresh = TrackedWorldStateV1(5, 1_400_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    snap = assembler.assemble(hud_stale, world_fresh, schema, (1000, 1000))
+    assert snap is not None
+    assert snap.ui_policy_input is None
+    assert all(not c.validity for c in snap.ui_presentation.candidates)
+
+
+def test_fallback_hp_confidence_below_threshold_returns_none() -> None:
+    """FALLBACK 画面で hp_confidence=0.1 (<0.35) は ui_policy_input=None になる。
+
+    parserと同じ 0.35 閾値を共有し、信頼できないHPから誤った fallback 選択を防ぎます。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
+    hud = dataclasses.replace(_fallback_hud(0.5, (card_gold,)), hp_confidence=0.1)
+    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is None
+
+
+def test_fallback_hp_confidence_at_threshold_generates_input() -> None:
+    """FALLBACK 画面で hp_confidence=0.36 (≥0.35) は ui_policy_input を生成する。
+
+    閾値直上は有効な HP として受け入れ、fallback_heuristic_v1 が動作します。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
+    hud = dataclasses.replace(_fallback_hud(0.5, (card_gold,)), hp_confidence=0.36)
+    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is not None
+
+
+# ─── P2 回帰: UiPolicyInputV1.button と meta_priority 選択 ───
+
+def test_meta_priority_selects_valid_reroll_button() -> None:
+    """meta_priority=("reroll",) かつ valid な reroll button があれば button が設定される。
+
+    05-01 adapter が meta_priority を渡すことで reroll/skip/banish intent を生成できます。
+    """
+    from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1
+    from survivors.vision.hud_parser import ParsedButton
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    reroll_btn = ParsedButton("reroll", .9, "ok", (100, 100, 200, 150))
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (reroll_btn,),
+        True, False, False, .9, "ok",
+    )
+    # まず gameplay frame でアセンブラを初期化
+    hud_gp, world_gp = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    config = NonModelUiPolicyConfigV1(
+        meta_policy_enabled=True, meta_priority=("reroll", "skip", "banish"),
+    )
+    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000), config=config)
+    assert snap is not None and snap.ui_policy_input is not None
+    assert snap.ui_policy_input.button is not None
+    assert snap.ui_policy_input.button.semantic == "reroll"
+    assert snap.ui_policy_input.button.capability is True
+
+
+def test_no_config_button_is_none() -> None:
+    """config なし（デフォルト）では ui_policy_input.button=None になる。
+
+    05-01 adapter が config を渡すまで meta_priority は空のままで button は設定されません。
+    """
+    from survivors.vision.hud_parser import ParsedButton
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    reroll_btn = ParsedButton("reroll", .9, "ok", (100, 100, 200, 150))
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (reroll_btn,),
+        True, False, False, .9, "ok",
+    )
+    hud_gp, world_gp = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is not None
+    assert snap.ui_policy_input.button is None
