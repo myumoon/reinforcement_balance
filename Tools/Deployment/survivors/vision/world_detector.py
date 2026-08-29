@@ -12,21 +12,38 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pathlib
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import yaml
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
+# 04-06 world_class_map_v1.yaml の foreground クラス名（background 除く）
+_KNOWN_CLASS_NAMES = frozenset([
+    "player_anchor", "enemy_normal", "enemy_elite", "enemy_boss",
+    "gem_blue", "gem_green", "gem_red",
+    "pickup_heal", "pickup_special",
+    "hazard_projectile", "hazard_area",
+])
+
+_ALLOWED_TOP_LEVEL_KEYS = frozenset([
+    "schema_version", "formal_detector_eligible",
+    "model", "input", "training", "checkpoint_selection",
+    "tracker", "dev_diagnostics",
+])
+
 try:
     import torch
     import torchvision
     _TORCH_AVAILABLE = True
-except ImportError:  # pragma: no cover — CI 環境で torch が入っていない場合
+except ModuleNotFoundError as e:  # pragma: no cover — CI 環境で torch が入っていない場合
+    if e.name not in {"torch", "torchvision"}:
+        raise
     _TORCH_AVAILABLE = False
 
 
@@ -45,18 +62,284 @@ class UnknownArchitectureError(ValueError):
 _KNOWN_ARCHITECTURES = frozenset(["ssdlite320", "ssdlite640_multiscale", "tile_2x2", "coarse_density"])
 
 
+# ---- shared config validator ----
+
+def _vnum(
+    val: Any,
+    name: str,
+    lo: float | None = None,
+    hi: float | None = None,
+    require_int: bool = False,
+) -> None:
+    """有限数値バリデーション。bool拒否・型チェック・有限性・範囲チェック (inclusive)。
+
+    validate_detector_config 内から呼ぶ内部ヘルパー。
+    NaN / Infinity / bool / 文字列 / None を拒否する。
+    """
+    if isinstance(val, bool):
+        raise ValueError(
+            f"config '{name}': bool は不可。明示的な数値を指定してください。got: {val!r}"
+        )
+    if require_int:
+        if not isinstance(val, int):
+            raise ValueError(f"config '{name}': int が必要。got: {type(val).__name__!r}")
+    else:
+        if not isinstance(val, (int, float)):
+            raise ValueError(f"config '{name}': 数値が必要。got: {type(val).__name__!r}")
+    if not math.isfinite(float(val)):
+        raise ValueError(f"config '{name}': NaN / Infinity は不可。got: {val!r}")
+    if lo is not None and val < lo:
+        raise ValueError(f"config '{name}': {val} < {lo} (下限違反)。")
+    if hi is not None and val > hi:
+        raise ValueError(f"config '{name}': {val} > {hi} (上限違反)。")
+
+
+def validate_detector_config(config: Mapping[str, Any]) -> None:
+    """world_detector.v1 config の共有バリデーション境界。
+
+    全 public 入口から必ず呼ぶ。未知キー・型違い・非有限値・未実装値を
+    model / tracker 構築・推論・publish より前に拒否する。
+    validation 規則はここだけに定義し、caller へ複製しない。
+    """
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"config は mapping (dict) が必要です。got: {type(config).__name__!r}"
+        )
+
+    # --- top-level keys ---
+    unknown = set(config.keys()) - _ALLOWED_TOP_LEVEL_KEYS
+    if unknown:
+        raise ValueError(f"config に未知の top-level key があります: {sorted(unknown)}")
+    missing = _ALLOWED_TOP_LEVEL_KEYS - set(config.keys())
+    if missing:
+        raise ValueError(f"config に必須 key が欠落しています: {sorted(missing)}")
+
+    if config["schema_version"] != "world_detector.v1":
+        raise ValueError(
+            f"schema_version は 'world_detector.v1' が必要。got: {config['schema_version']!r}"
+        )
+
+    fde = config["formal_detector_eligible"]
+    if not isinstance(fde, bool) or fde is not False:
+        raise ValueError(
+            f"formal_detector_eligible は bool の false のみ許可。"
+            f" int 1 や文字列 'false' は不可。got: {fde!r}"
+        )
+
+    # --- model ---
+    model = config["model"]
+    if not isinstance(model, dict):
+        raise ValueError("config 'model' は dict が必要。")
+    _allowed_model = frozenset(["architecture", "backbone", "num_classes", "input_size", "pretrained_backbone"])
+    unknown_model = set(model.keys()) - _allowed_model
+    if unknown_model:
+        raise ValueError(f"model に未知の key があります: {sorted(unknown_model)}")
+
+    if model.get("architecture") != "ssdlite320":
+        raise UnknownArchitectureError(
+            f"model.architecture は 'ssdlite320' のみ実装済み。got: {model.get('architecture')!r}"
+        )
+    if model.get("backbone") != "mobilenet_v3_large":
+        raise ValueError(
+            f"model.backbone は 'mobilenet_v3_large' のみ実装済み。got: {model.get('backbone')!r}"
+        )
+    ptb = model.get("pretrained_backbone")
+    if not isinstance(ptb, bool) or ptb is not False:
+        raise ValueError(
+            f"model.pretrained_backbone は bool の false のみ許可。"
+            f" int 1 や文字列 'false' は不可。got: {ptb!r}"
+        )
+    nc = model.get("num_classes")
+    if isinstance(nc, bool) or not isinstance(nc, int) or nc != 12:
+        raise ValueError(f"model.num_classes は int 12 のみ。got: {nc!r}")
+    inp_size = model.get("input_size")
+    if not isinstance(inp_size, list) or len(inp_size) != 2:
+        raise ValueError(f"model.input_size は 2 要素 list が必要。got: {inp_size!r}")
+    for _i, _v in enumerate(inp_size):
+        if isinstance(_v, bool) or not isinstance(_v, int):
+            raise ValueError(f"model.input_size[{_i}] は int が必要。got: {_v!r}")
+    if inp_size != [320, 320]:
+        raise ValueError(f"model.input_size は [320, 320] のみ実装済み。got: {inp_size!r}")
+
+    # --- input ---
+    inp = config["input"]
+    if not isinstance(inp, dict):
+        raise ValueError("config 'input' は dict が必要。")
+    unknown_input = set(inp.keys()) - frozenset(["normalize"])
+    if unknown_input:
+        raise ValueError(
+            f"input に未知/未実装の key があります (augmentation 等は未実装): {sorted(unknown_input)}"
+        )
+    normalize = inp.get("normalize")
+    if not isinstance(normalize, dict):
+        raise ValueError("input.normalize は dict が必要。")
+    unknown_norm = set(normalize.keys()) - frozenset(["mean", "std"])
+    if unknown_norm:
+        raise ValueError(f"input.normalize に未知の key があります: {sorted(unknown_norm)}")
+    _IMAGENET_MEAN = [0.485, 0.456, 0.406]
+    _IMAGENET_STD = [0.229, 0.224, 0.225]
+    if normalize.get("mean") != _IMAGENET_MEAN:
+        raise ValueError(
+            f"input.normalize.mean は {_IMAGENET_MEAN} のみ。got: {normalize.get('mean')!r}"
+        )
+    if normalize.get("std") != _IMAGENET_STD:
+        raise ValueError(
+            f"input.normalize.std は {_IMAGENET_STD} のみ。got: {normalize.get('std')!r}"
+        )
+
+    # --- training ---
+    training = config["training"]
+    if not isinstance(training, dict):
+        raise ValueError("config 'training' は dict が必要。")
+    _allowed_training = frozenset(["batch_size", "optimizer", "max_epochs", "preflight"])
+    unknown_training = set(training.keys()) - _allowed_training
+    if unknown_training:
+        raise ValueError(
+            f"training に未知/未実装の key があります"
+            f" (lr_scheduler, class_weights, near_duplicate_suppression は未実装):"
+            f" {sorted(unknown_training)}"
+        )
+
+    _vnum(training.get("batch_size"), "training.batch_size", lo=3, require_int=True)
+    _vnum(training.get("max_epochs"), "training.max_epochs", lo=1, require_int=True)
+
+    opt = training.get("optimizer")
+    if not isinstance(opt, dict):
+        raise ValueError(f"training.optimizer は dict が必要。got: {type(opt).__name__!r}")
+    if set(opt.keys()) != {"sgd"}:
+        raise ValueError(
+            f"training.optimizer には 'sgd' キーのみ許可 (adam 等は未実装)。"
+            f" got: {sorted(opt.keys())!r}"
+        )
+    sgd = opt["sgd"]
+    if not isinstance(sgd, dict):
+        raise ValueError(f"training.optimizer.sgd は dict が必要。got: {type(sgd).__name__!r}")
+    unknown_sgd = set(sgd.keys()) - frozenset(["lr", "momentum", "weight_decay"])
+    if unknown_sgd:
+        raise ValueError(f"training.optimizer.sgd に未知の key があります: {sorted(unknown_sgd)}")
+    lr = sgd.get("lr")
+    _vnum(lr, "training.optimizer.sgd.lr")
+    if lr <= 0:
+        raise ValueError(f"training.optimizer.sgd.lr は 0 より大きい値が必要。got: {lr!r}")
+    momentum = sgd.get("momentum")
+    _vnum(momentum, "training.optimizer.sgd.momentum", lo=0)
+    if momentum >= 1:
+        raise ValueError(
+            f"training.optimizer.sgd.momentum は 0 以上 1 未満が必要。got: {momentum!r}"
+        )
+    _vnum(sgd.get("weight_decay"), "training.optimizer.sgd.weight_decay", lo=0)
+
+    preflight = training.get("preflight", {})
+    if not isinstance(preflight, dict):
+        raise ValueError("training.preflight は dict が必要。")
+    _allowed_preflight = frozenset([
+        "min_frames", "min_entities", "min_classes", "min_time_bands",
+        "min_frames_per_split", "min_entities_per_split", "min_classes_per_split",
+    ])
+    unknown_preflight = set(preflight.keys()) - _allowed_preflight
+    if unknown_preflight:
+        raise ValueError(f"training.preflight に未知の key があります: {sorted(unknown_preflight)}")
+    missing_preflight = _allowed_preflight - set(preflight.keys())
+    if missing_preflight:
+        raise ValueError(f"training.preflight に必須 key がありません: {sorted(missing_preflight)}")
+    for _pk in _allowed_preflight:
+        _vnum(preflight[_pk], f"training.preflight.{_pk}", lo=1, require_int=True)
+
+    # --- checkpoint_selection ---
+    ckpt = config["checkpoint_selection"]
+    if not isinstance(ckpt, dict):
+        raise ValueError("config 'checkpoint_selection' は dict が必要。")
+    unknown_ckpt = set(ckpt.keys()) - frozenset(["metric", "keep_top_k", "save_every_n_epochs"])
+    if unknown_ckpt:
+        raise ValueError(f"checkpoint_selection に未知の key があります: {sorted(unknown_ckpt)}")
+    if ckpt.get("metric") != "val_map50_95":
+        raise ValueError(
+            f"checkpoint_selection.metric は 'val_map50_95' のみ実装済み。"
+            f" got: {ckpt.get('metric')!r}"
+        )
+    _vnum(ckpt.get("keep_top_k"), "checkpoint_selection.keep_top_k", lo=1, require_int=True)
+    _vnum(ckpt.get("save_every_n_epochs"), "checkpoint_selection.save_every_n_epochs", lo=1, require_int=True)
+
+    # --- tracker ---
+    tracker = config["tracker"]
+    if not isinstance(tracker, dict):
+        raise ValueError("config 'tracker' は dict が必要。")
+    _allowed_tracker = frozenset([
+        "max_age_by_class", "max_match_cost", "velocity_ema_alpha", "confidence_decay_per_frame"
+    ])
+    unknown_tracker = set(tracker.keys()) - _allowed_tracker
+    if unknown_tracker:
+        raise ValueError(f"tracker に未知の key があります: {sorted(unknown_tracker)}")
+    max_age = tracker.get("max_age_by_class", {})
+    if not isinstance(max_age, dict):
+        raise ValueError("tracker.max_age_by_class は dict が必要。")
+    for _cls_name, _age in max_age.items():
+        if _cls_name not in _KNOWN_CLASS_NAMES:
+            raise ValueError(
+                f"tracker.max_age_by_class に未知の class 名があります: {_cls_name!r}"
+                f" (04-06 class map 外)"
+            )
+        _vnum(_age, f"tracker.max_age_by_class.{_cls_name}", lo=0, require_int=True)
+    _vnum(tracker.get("max_match_cost"), "tracker.max_match_cost", lo=0)
+    _vnum(tracker.get("velocity_ema_alpha"), "tracker.velocity_ema_alpha", lo=0, hi=1)
+    _vnum(tracker.get("confidence_decay_per_frame"), "tracker.confidence_decay_per_frame", lo=0, hi=1)
+
+    # --- dev_diagnostics ---
+    dd = config["dev_diagnostics"]
+    if not isinstance(dd, dict):
+        raise ValueError("config 'dev_diagnostics' は dict が必要。")
+    _allowed_dd = frozenset([
+        "map50_95_min", "class_recall_min", "density_correlation_min",
+        "nearest_distance_median_max", "slice_gate",
+    ])
+    unknown_dd = set(dd.keys()) - _allowed_dd
+    if unknown_dd:
+        raise ValueError(f"dev_diagnostics に未知の key があります: {sorted(unknown_dd)}")
+    _vnum(dd.get("map50_95_min"), "dev_diagnostics.map50_95_min", lo=0, hi=1)
+    _vnum(dd.get("density_correlation_min"), "dev_diagnostics.density_correlation_min", lo=-1, hi=1)
+    _vnum(dd.get("nearest_distance_median_max"), "dev_diagnostics.nearest_distance_median_max", lo=0, hi=1)
+    class_recall_min = dd.get("class_recall_min", {})
+    if not isinstance(class_recall_min, dict):
+        raise ValueError("dev_diagnostics.class_recall_min は dict が必要。")
+    for _cls_name, _threshold in class_recall_min.items():
+        if _cls_name not in _KNOWN_CLASS_NAMES:
+            raise ValueError(
+                f"dev_diagnostics.class_recall_min に未知の class 名があります: {_cls_name!r}"
+            )
+        _vnum(_threshold, f"dev_diagnostics.class_recall_min.{_cls_name}", lo=0, hi=1)
+    slice_gate = dd.get("slice_gate", {})
+    if not isinstance(slice_gate, dict):
+        raise ValueError("dev_diagnostics.slice_gate は dict が必要。")
+    _allowed_slice = frozenset(["recall_min", "min_instances", "min_sessions"])
+    for _sname, _scfg in slice_gate.items():
+        if not isinstance(_scfg, dict):
+            raise ValueError(f"dev_diagnostics.slice_gate.{_sname!r} は dict が必要。")
+        unknown_slice = set(_scfg.keys()) - _allowed_slice
+        if unknown_slice:
+            raise ValueError(
+                f"dev_diagnostics.slice_gate.{_sname!r} に未知の key があります: {sorted(unknown_slice)}"
+            )
+        _vnum(_scfg.get("recall_min"), f"dev_diagnostics.slice_gate.{_sname}.recall_min", lo=0, hi=1)
+        _vnum(_scfg.get("min_instances"), f"dev_diagnostics.slice_gate.{_sname}.min_instances", lo=1, require_int=True)
+        _vnum(_scfg.get("min_sessions"), f"dev_diagnostics.slice_gate.{_sname}.min_sessions", lo=1, require_int=True)
+
+
 # ---- config ----
 
 def load_detector_config(path: pathlib.Path | str) -> dict[str, Any]:
-    """YAML から detector config を読み込む。
+    """YAML から detector config を読み込み、共有 validator を通す。
 
-    schema_version が "world_detector.v1" でなければ ValueError。
+    YAML root が mapping でなければ ValueError。
+    schema_version / 型 / 値 / 未知 key のチェックはすべて validate_detector_config へ委譲する。
     """
     path = pathlib.Path(path)
     with path.open(encoding="utf-8") as f:
         data = yaml.safe_load(f)
-    if data.get("schema_version") != "world_detector.v1":
-        raise ValueError(f"未知の schema_version: {data.get('schema_version')}")
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"config YAML の root は mapping が必要です。got: {type(data).__name__!r}"
+        )
+    validate_detector_config(data)
     return data
 
 
@@ -95,8 +378,9 @@ class DetectionResult:
 class CheckpointManifest:
     """model / data / config / build / class-map の SHA-256 ハッシュを保持する manifest。
 
-    formal_detector_eligible=false の manifest は assert_formal_eligible() で拒否される。
-    04-07 / 04-08 が weight と threshold を差し替えて formal=true に更新する。
+    04-07 は development-only artifact のみ生成する。formal_detector_eligible は常に False。
+    assert_formal_eligible() は caller 指定フラグに関わらず常に FormalDetectorRejectedError を送出する。
+    formal 昇格は 04-08 の validated verdict によってのみ行われる。
     """
 
     model_hash: str
@@ -105,22 +389,41 @@ class CheckpointManifest:
     build_hash: str
     class_map_hash: str
     formal_detector_eligible: bool
+    split_hash: str = ""           # split JSON の SHA-256。空文字は旧 manifest との互換用。
+    resolved_config_hash: str = "" # CLI override 適用後の config dict SHA-256。
+    development_only: bool = True  # 常に True。04-08 以外で False にはならない。
+    training_mode: str = "development"  # "smoke" | "development"
 
     _HASH_FIELDS = ("model_hash", "data_hash", "config_hash", "build_hash", "class_map_hash")
 
-    def assert_formal_eligible(self) -> None:
-        """formal 昇格していない checkpoint をロードしようとすると拒否する。
+    @staticmethod
+    def _check_optional_hash_field(fname: str, h: Any) -> None:
+        """split_hash / resolved_config_hash を検証する共有ヘルパー。
 
-        formal_detector_eligible が bool の True でない場合（型不正・False 含む）は拒否する。
-        SHA-256 形式不正も拒否する。
+        save() と load() の両方から呼ぶ。
+        空文字（後方互換）または lowercase SHA-256 hex 64 文字のみ許可する。
+        非文字列・大文字・不正長さはすべて拒否する。
         """
-        if not (type(self.formal_detector_eligible) is bool and self.formal_detector_eligible is True):
-            raise FormalDetectorRejectedError(
-                "development checkpoint は formal detector として使用できません。"
-                " formal_detector_eligible=true の checkpoint を 04-08 で作成してください。"
+        if not isinstance(h, str):
+            raise ValueError(
+                f"CheckpointManifest: {fname} は str が必要。got: {type(h).__name__!r}"
             )
-        # formal 昇格済みでもハッシュ形式を検証する
-        self._validate_hash_format()
+        if h and not _SHA256_RE.fullmatch(h):
+            raise ValueError(
+                f"CheckpointManifest: {fname} は空文字または lowercase SHA-256 hex 64 文字が必要。"
+                f" got: {h!r}"
+            )
+
+    def assert_formal_eligible(self) -> None:
+        """04-07 の checkpoint は caller 指定フラグに関わらず常に formal 拒否する。
+
+        formal_detector_eligible の値に関係なく例外を送出する。
+        formal 昇格は 04-08 の validated verdict によってのみ可能。
+        """
+        raise FormalDetectorRejectedError(
+            "04-07 checkpoint は formal detector として使用できません。"
+            " formal 昇格は 04-08 の検証済み verdict によってのみ行われます。"
+        )
 
     def _validate_hash_format(self) -> None:
         for fname in self._HASH_FIELDS:
@@ -146,7 +449,24 @@ class CheckpointManifest:
                 )
 
     def save(self, path: pathlib.Path | str) -> None:
-        """JSON として保存する。"""
+        """JSON として保存する。04-07 境界を書き込み時に強制する。
+
+        formal_detector_eligible は False、development_only は True、
+        training_mode は "smoke" | "development" のみ許容する。
+        必須 hash は SHA-256 hex 64 文字であることを保証する。
+        """
+        if self.formal_detector_eligible is not False:
+            raise ValueError("CheckpointManifest.save(): formal_detector_eligible は False でなければなりません。")
+        if self.development_only is not True:
+            raise ValueError("CheckpointManifest.save(): development_only は True でなければなりません。")
+        if self.training_mode not in ("smoke", "development"):
+            raise ValueError(
+                f"CheckpointManifest.save(): training_mode の許容値は 'smoke' | 'development' です。"
+                f" got: {self.training_mode!r}"
+            )
+        self._validate_hash_format()
+        self._check_optional_hash_field("split_hash", self.split_hash)
+        self._check_optional_hash_field("resolved_config_hash", self.resolved_config_hash)
         path = pathlib.Path(path)
         payload = {
             "model_hash": self.model_hash,
@@ -155,12 +475,20 @@ class CheckpointManifest:
             "build_hash": self.build_hash,
             "class_map_hash": self.class_map_hash,
             "formal_detector_eligible": self.formal_detector_eligible,
+            "split_hash": self.split_hash,
+            "resolved_config_hash": self.resolved_config_hash,
+            "development_only": self.development_only,
+            "training_mode": self.training_mode,
         }
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     @classmethod
     def load(cls, path: pathlib.Path | str) -> "CheckpointManifest":
-        """JSON から読み込む。ハッシュ形式・型が不正な場合は ValueError。"""
+        """JSON から読み込む。ハッシュ形式・型が不正な場合は ValueError。
+
+        04-07 境界: formal_detector_eligible は必ず False へ上書き、development_only は True、
+        training_mode は "smoke" | "development" のみ許容する。
+        """
         path = pathlib.Path(path)
         payload = json.loads(path.read_text(encoding="utf-8"))
         elig = payload["formal_detector_eligible"]
@@ -168,15 +496,27 @@ class CheckpointManifest:
             raise ValueError(
                 f"formal_detector_eligible は bool 型が必要です。got: {type(elig).__name__!r}"
             )
+        raw_mode = payload.get("training_mode", "development")
+        if raw_mode not in ("smoke", "development"):
+            raise ValueError(
+                f"training_mode の許容値は 'smoke' | 'development' です。got: {raw_mode!r}"
+            )
         manifest = cls(
             model_hash=payload["model_hash"],
             data_hash=payload["data_hash"],
             config_hash=payload["config_hash"],
             build_hash=payload["build_hash"],
             class_map_hash=payload["class_map_hash"],
-            formal_detector_eligible=elig,
+            formal_detector_eligible=False,   # 04-07 は常に False
+            split_hash=payload.get("split_hash", ""),
+            resolved_config_hash=payload.get("resolved_config_hash", ""),
+            development_only=True,             # 04-07 は常に True
+            training_mode=raw_mode,
         )
         manifest._validate_hash_format()
+        # save() と同一ヘルパーで optional hash を対称に検証する
+        manifest._check_optional_hash_field("split_hash", manifest.split_hash)
+        manifest._check_optional_hash_field("resolved_config_hash", manifest.resolved_config_hash)
         return manifest
 
 
@@ -212,9 +552,12 @@ class WorldDetector:
     ) -> "WorldDetector":
         """config dict から detector を組み立てる。
 
+        caller が直接 dict を渡す経路を守るため、必ず共有 validator を呼ぶ。
         ssdlite320 のみ実装済み。それ以外は（feasibility 既知候補でも）UnknownArchitectureError。
         class map の num_classes と config の num_classes が一致しない場合も拒否する。
         """
+        validate_detector_config(config)
+
         from survivors.vision.world_dataset import load_class_map
 
         arch = config["model"]["architecture"]

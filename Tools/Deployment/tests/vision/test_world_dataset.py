@@ -50,7 +50,11 @@ def _make_coco_json(
     *,
     add_images: bool = True,
 ) -> dict:
-    """最小限の COCO JSON 構造を組み立てる。"""
+    """最小限の COCO JSON 構造を組み立てる。
+
+    annotation の session_id を images[].session_id へ伝播し、
+    DatasetSample.session_id（画像レベル正本）が正しく設定されるようにする。
+    """
     if categories is None:
         categories = [
             {"id": i, "name": name}
@@ -71,8 +75,20 @@ def _make_coco_json(
                 ]
             )
         ]
+    # annotation の session_id を image レベルへ伝播する（最初に出現した値を採用）
+    image_session: dict[int, str] = {}
+    for r in records:
+        sid = r.get("session_id", "")
+        if sid and r["image_id"] not in image_session:
+            image_session[r["image_id"]] = sid
     images = [
-        {"id": i, "file_name": f"frame_{i:06d}.png", "width": 1920, "height": 1080}
+        {
+            "id": i,
+            "file_name": f"frame_{i:06d}.png",
+            "width": 1920,
+            "height": 1080,
+            **( {"session_id": image_session[i]} if i in image_session else {} ),
+        }
         for i in range(num_images)
     ] if add_images else []
     annotations = [
@@ -285,3 +301,111 @@ class TestDatasetPreflight:
         ds = WorldDataset(path, CLASS_MAP_PATH)
         with pytest.raises(DatasetPreflightError, match="min_time_bands"):
             ds.run_preflight(min_frames=300, min_entities=10, min_classes=1, min_time_bands=4)
+
+    def test_min_time_bands_uses_image_session_not_annotation_session(self, tmp_path):
+        """annotation.session_id が空でも images[].session_id が 4 種あれば min_time_bands=4 を通過する。
+
+        P1回帰テスト: min_time_bands を DatasetSample.session_id（画像レベル）から計算することを確認する。
+        """
+        sessions = ["s0", "s1", "s2", "s3"]
+        images = [
+            {"id": i, "file_name": f"frame_{i:04d}.png", "width": 1920, "height": 1080,
+             "session_id": sessions[i]}
+            for i in range(4)
+        ]
+        # annotation.session_id を意図的に省略（空）
+        annotations = [
+            {"id": i, "image_id": i, "category_id": (i % 3) + 1, "bbox": [10, 10, 20, 20]}
+            for i in range(4)
+        ]
+        categories = [{"id": k, "name": f"c{k}"} for k in range(1, 12)]
+        data = {"images": images, "annotations": annotations, "categories": categories}
+        path = tmp_path / "ann.json"
+        path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+        ds = WorldDataset(path, CLASS_MAP_PATH)
+        # annotation session なし・画像 session 4 種 → min_time_bands=4 を通過
+        ds.run_preflight(min_frames=4, min_entities=4, min_classes=1, min_time_bands=4)
+
+
+# ---- 新規回帰テスト: 画像レベル session_id の rejected_sessions チェック ----
+
+class TestImageLevelSessionRejection:
+    """画像レベルの session_id による rejected_sessions チェックを確認する（annotation なし負例含む）。"""
+
+    def _write_coco_image_session(
+        self, tmp_path: pathlib.Path, image_session: str, with_annotation: bool = False
+    ) -> pathlib.Path:
+        """images[].session_id に image_session を付与した COCO JSON を作成する。"""
+        img = {"id": 0, "file_name": "frame_0.png", "width": 1920, "height": 1080,
+               "session_id": image_session}
+        anns = []
+        if with_annotation:
+            anns.append({"id": 0, "image_id": 0, "category_id": 1,
+                          "bbox": [0, 0, 10, 10], "session_id": image_session})
+        data = {
+            "images": [img],
+            "annotations": anns,
+            "categories": [{"id": k, "name": f"c{k}"} for k in range(1, 12)],
+        }
+        p = tmp_path / "ann.json"
+        p.write_text(json.dumps(data), encoding="utf-8")
+        return p
+
+    def test_train_session_no_annotation_passes(self, tmp_path):
+        """train session の annotation なし負例は通過する。"""
+        path = self._write_coco_image_session(tmp_path, "train_session", with_annotation=False)
+        ds = WorldDataset(path, CLASS_MAP_PATH, rejected_sessions={"final_e2e_test"})
+        assert len(ds) == 1
+
+    def test_validation_session_no_annotation_passes(self, tmp_path):
+        """validation session の annotation なし負例も通過する。"""
+        path = self._write_coco_image_session(tmp_path, "validation_session", with_annotation=False)
+        ds = WorldDataset(path, CLASS_MAP_PATH, rejected_sessions={"final_e2e_test"})
+        assert len(ds) == 1
+
+    def test_error_calibration_no_annotation_raises(self, tmp_path):
+        """error_calibration session の annotation なし負例は DatasetPreflightError。"""
+        path = self._write_coco_image_session(tmp_path, "error_calibration", with_annotation=False)
+        with pytest.raises(DatasetPreflightError):
+            WorldDataset(path, CLASS_MAP_PATH, rejected_sessions={"error_calibration"})
+
+    def test_final_e2e_test_no_annotation_raises(self, tmp_path):
+        """final_e2e_test session の annotation なし負例は DatasetPreflightError。"""
+        path = self._write_coco_image_session(tmp_path, "final_e2e_test", with_annotation=False)
+        with pytest.raises(DatasetPreflightError):
+            WorldDataset(path, CLASS_MAP_PATH, rejected_sessions={"final_e2e_test"})
+
+    def test_annotation_session_mismatch_raises(self, tmp_path):
+        """annotation.session_id と image.session_id が不一致のとき DatasetPreflightError。"""
+        data = {
+            "images": [{"id": 0, "file_name": "f.png", "width": 1920, "height": 1080,
+                         "session_id": "img_sess"}],
+            "annotations": [{"id": 0, "image_id": 0, "category_id": 1,
+                              "bbox": [0, 0, 10, 10], "session_id": "ann_sess"}],
+            "categories": [{"id": k, "name": f"c{k}"} for k in range(1, 12)],
+        }
+        path = tmp_path / "ann.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(DatasetPreflightError, match="一致しません"):
+            WorldDataset(path, CLASS_MAP_PATH)
+
+    def test_matching_annotation_image_session_passes(self, tmp_path):
+        """annotation.session_id と image.session_id が一致すれば通過する。"""
+        data = {
+            "images": [{"id": 0, "file_name": "f.png", "width": 1920, "height": 1080,
+                         "session_id": "s1"}],
+            "annotations": [{"id": 0, "image_id": 0, "category_id": 1,
+                              "bbox": [0, 0, 10, 10], "session_id": "s1"}],
+            "categories": [{"id": k, "name": f"c{k}"} for k in range(1, 12)],
+        }
+        path = tmp_path / "ann.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        ds = WorldDataset(path, CLASS_MAP_PATH, rejected_sessions={"final_e2e_test"})
+        assert len(ds) == 1
+
+    def test_rejected_session_with_annotation_also_raises(self, tmp_path):
+        """annotation ありでも rejected session は DatasetPreflightError（重複チェック確認）。"""
+        path = self._write_coco_image_session(tmp_path, "error_calibration", with_annotation=True)
+        with pytest.raises(DatasetPreflightError):
+            WorldDataset(path, CLASS_MAP_PATH, rejected_sessions={"error_calibration"})

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pathlib
 from dataclasses import dataclass, field
 from typing import Any
@@ -113,6 +114,8 @@ class DatasetSample:
     """1 フレーム分のサンプル（アノテーションリスト付き）。
 
     image_id と file_name を保持し、loader が PNG を開けるよう準備する。
+    session_id は画像レベルの session 識別子で、アノテーション無し（負例）フレームの
+    split 割り当てに使用する。
     """
 
     image_id: int
@@ -120,6 +123,7 @@ class DatasetSample:
     image_width: int
     image_height: int
     annotations: list[COCOAnnotation]
+    session_id: str = ""
 
 
 # ---- split ----
@@ -182,6 +186,7 @@ class WorldDataset:
 
     class map 整合性と bbox bounds を検証し、不正なアノテーションを拒否する。
     session_id フィールドを持たないアノテーションは session_id="" として扱う。
+    rejected_sessions に含まれる session_id のフレームは DatasetPreflightError を送出する。
     """
 
     def __init__(
@@ -190,8 +195,10 @@ class WorldDataset:
         class_map_path: pathlib.Path | str,
         *,
         validate_bounds: bool = False,
+        rejected_sessions: set[str] | None = None,
     ) -> None:
         self._class_map = load_class_map(class_map_path)
+        self._rejected_sessions: set[str] = rejected_sessions or set()
         self._samples = self._load(pathlib.Path(annotation_path), validate_bounds=validate_bounds)
 
     # ---- public API ----
@@ -232,11 +239,71 @@ class WorldDataset:
                 f"min_classes 不足: {n_classes} < {min_classes}"
             )
 
-        n_bands = len({a.session_id for a in all_annotations if a.session_id})
+        # annotation.session_id は空の場合があるため、画像レベルの DatasetSample.session_id を正本として使用する
+        n_bands = len({s.session_id for s in self._samples if s.session_id})
         if n_bands < min_time_bands:
             raise DatasetPreflightError(
                 f"min_time_bands 不足: {n_bands} < {min_time_bands}"
             )
+
+    def run_split_preflight(
+        self,
+        split: "SessionSplit",
+        *,
+        min_frames_per_split: int = 50,
+        min_entities_per_split: int = 100,
+        min_classes_per_split: int = 4,
+    ) -> None:
+        """SessionSplit 整合性と split ごとの最小要件チェック。
+
+        train / validation 各 split が最小 frame / entity / class を満たすか確認する。
+        0 件 slice は DatasetPreflightError で失敗する。
+        error_calibration / final_e2e_test の session ID がサンプル側に存在しないことも確認する。
+        """
+        # DatasetSample.session_id を正本として使用する。
+        missing_session = [s for s in self._samples if not s.session_id]
+        if missing_session:
+            image_ids = [s.image_id for s in missing_session[:5]]
+            raise DatasetPreflightError(
+                f"session_id が未設定の画像が {len(missing_session)} 件あります"
+                f" (image_ids={image_ids}...)。session 欠損サンプルは使用できません。"
+            )
+
+        forbidden = set(split.error_calibration) | set(split.final_e2e_test)
+        seen_in_data = {s.session_id for s in self._samples}
+        overlap = forbidden & seen_in_data
+        if overlap:
+            raise DatasetPreflightError(
+                f"error_calibration/final_e2e_test セッション {sorted(overlap)} がデータセットに含まれています。"
+            )
+
+        split_ids: dict[str, tuple[str, ...]] = {
+            "train": split.train,
+            "validation": split.validation,
+        }
+        for split_name, session_ids in split_ids.items():
+            session_set = set(session_ids)
+            if not session_set:
+                raise DatasetPreflightError(f"split '{split_name}' のセッションが 0 件です。")
+            samples_in_split = [
+                s for s in self._samples
+                if s.session_id in session_set
+            ]
+            n_frames = len(samples_in_split)
+            if n_frames < min_frames_per_split:
+                raise DatasetPreflightError(
+                    f"split '{split_name}' の min_frames 不足: {n_frames} < {min_frames_per_split}"
+                )
+            anns = [a for s in samples_in_split for a in s.annotations]
+            if len(anns) < min_entities_per_split:
+                raise DatasetPreflightError(
+                    f"split '{split_name}' の min_entities 不足: {len(anns)} < {min_entities_per_split}"
+                )
+            n_classes = len({a.category_id for a in anns})
+            if n_classes < min_classes_per_split:
+                raise DatasetPreflightError(
+                    f"split '{split_name}' の min_classes 不足: {n_classes} < {min_classes_per_split}"
+                )
 
     # ---- internal ----
 
@@ -264,32 +331,75 @@ class WorldDataset:
                 )
 
             bbox = tuple(float(v) for v in raw["bbox"])
+            x, y, w, h = bbox
+            if not all(math.isfinite(v) for v in bbox):
+                raise ValueError(f"bbox {bbox} に非有限値が含まれています。")
+            if w <= 0 or h <= 0:
+                raise ValueError(f"bbox {bbox} の幅・高さは正でなければなりません。")
             if validate_bounds:
                 img = images[raw["image_id"]]
-                x, y, w, h = bbox
                 if x < 0 or y < 0 or x + w > img["width"] or y + h > img["height"]:
                     raise ValueError(
                         f"bbox {bbox} が画像 ({img['width']}x{img['height']}) の外へはみ出しています。"
                     )
 
+            ann_session_id = raw.get("session_id", "")
+            img_session_id = images[raw["image_id"]].get("session_id", "")
+
+            # annotation.session_id と image.session_id の一致検証（両方に値がある場合のみ）
+            if ann_session_id and img_session_id and ann_session_id != img_session_id:
+                raise DatasetPreflightError(
+                    f"annotation.session_id={ann_session_id!r} と"
+                    f" image.session_id={img_session_id!r} が一致しません"
+                    f" (image_id={raw['image_id']})。"
+                )
+
+            # annotation レベルの拒否チェック
+            check_session = ann_session_id or img_session_id
+            if check_session and check_session in self._rejected_sessions:
+                raise DatasetPreflightError(
+                    f"拒否セッション '{check_session}' のフレーム (image_id={raw['image_id']}) が"
+                    " dataset に含まれています。error_calibration / final_e2e_test を分離してください。"
+                )
             ann = COCOAnnotation(
                 annotation_id=raw.get("id", 0),
                 image_id=raw["image_id"],
                 category_id=cat_id,
                 bbox_xywh=bbox,  # type: ignore[arg-type]
-                session_id=raw.get("session_id", ""),
+                session_id=ann_session_id,
             )
             if ann.image_id in ann_by_image:
                 ann_by_image[ann.image_id].append(ann)
 
+        ann_dir = path.parent
+        samples_raw = [
+            (iid, img)
+            for iid, img in sorted(images.items())
+        ]
+
+        # 画像レベルの rejected_sessions チェック（annotation なし負例も対象）
+        for iid, img in samples_raw:
+            img_session_id = img.get("session_id", "")
+            if img_session_id and img_session_id in self._rejected_sessions:
+                raise DatasetPreflightError(
+                    f"拒否セッション '{img_session_id}' の画像 (image_id={iid}) が"
+                    " dataset に含まれています（annotation なし負例）。"
+                    " error_calibration / final_e2e_test を分離してください。"
+                )
+
         samples = [
             DatasetSample(
                 image_id=iid,
-                file_name=img["file_name"],
+                file_name=str(
+                    ann_dir / img["file_name"]
+                    if not pathlib.Path(img["file_name"]).is_absolute()
+                    else img["file_name"]
+                ),
                 image_width=img["width"],
                 image_height=img["height"],
                 annotations=ann_by_image.get(iid, []),
+                session_id=img.get("session_id", ""),
             )
-            for iid, img in sorted(images.items())
+            for iid, img in samples_raw
         ]
         return samples

@@ -192,6 +192,25 @@ class TestCheckpointManifest:
         assert loaded.model_hash == manifest.model_hash
         assert loaded.formal_detector_eligible is False
 
+    def test_manifest_development_only_and_training_mode_round_trip(self, tmp_path):
+        """development_only と training_mode が save/load で保持される。"""
+        for mode in ("smoke", "development"):
+            manifest = CheckpointManifest(
+                model_hash="a" * 64,
+                data_hash="b" * 64,
+                config_hash="c" * 64,
+                build_hash="d" * 64,
+                class_map_hash="e" * 64,
+                formal_detector_eligible=False,
+                development_only=True,
+                training_mode=mode,
+            )
+            path = tmp_path / f"manifest_{mode}.json"
+            manifest.save(path)
+            loaded = CheckpointManifest.load(path)
+            assert loaded.development_only is True
+            assert loaded.training_mode == mode
+
     def test_load_rejects_invalid_hash_format(self, tmp_path):
         """SHA-256 形式でないハッシュを持つ manifest の load を拒否する。"""
         bad = {
@@ -222,18 +241,53 @@ class TestCheckpointManifest:
         with pytest.raises(ValueError, match="bool"):
             CheckpointManifest.load(path)
 
-    def test_assert_formal_eligible_rejects_non_bool_true(self):
-        """formal_detector_eligible=True (bool) でないと assert_formal_eligible() は拒否する。"""
-        manifest = CheckpointManifest(
-            model_hash="a" * 64,
-            data_hash="b" * 64,
-            config_hash="c" * 64,
-            build_hash="d" * 64,
-            class_map_hash="e" * 64,
-            formal_detector_eligible=False,
-        )
-        with pytest.raises(FormalDetectorRejectedError):
-            manifest.assert_formal_eligible()
+    def test_assert_formal_eligible_always_rejects(self):
+        """04-07 checkpoint は formal_detector_eligible の値に関わらず assert_formal_eligible() が拒否する。"""
+        for eligible in (False, True):
+            manifest = CheckpointManifest(
+                model_hash="a" * 64,
+                data_hash="b" * 64,
+                config_hash="c" * 64,
+                build_hash="d" * 64,
+                class_map_hash="e" * 64,
+                formal_detector_eligible=eligible,
+            )
+            with pytest.raises(FormalDetectorRejectedError):
+                manifest.assert_formal_eligible()
+
+    def test_load_forces_formal_false_and_development_only(self, tmp_path):
+        """load() は formal_detector_eligible=True のファイルを False に上書きし development_only=True を保証する。"""
+        payload = {
+            "model_hash": "a" * 64,
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "formal_detector_eligible": True,   # caller が True にしても
+            "development_only": False,           # False にしても
+            "training_mode": "development",
+        }
+        path = tmp_path / "manifest.json"
+        path.write_text(__import__("json").dumps(payload), encoding="utf-8")
+        loaded = CheckpointManifest.load(path)
+        assert loaded.formal_detector_eligible is False
+        assert loaded.development_only is True
+
+    def test_load_rejects_invalid_training_mode(self, tmp_path):
+        """load() は training_mode が 'smoke'|'development' 以外なら ValueError を送出する。"""
+        payload = {
+            "model_hash": "a" * 64,
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "formal_detector_eligible": False,
+            "training_mode": "formal",
+        }
+        path = tmp_path / "manifest_bad_mode.json"
+        path.write_text(__import__("json").dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="training_mode"):
+            CheckpointManifest.load(path)
 
     def test_verify_identity_passes_on_match(self):
         """verify_identity() は期待 hash と一致すれば例外を送出しない。"""
@@ -283,3 +337,208 @@ class TestArchitectureDispatchP1:
         cfg["model"]["num_classes"] = 5  # class map は 12
         with pytest.raises(ValueError, match="num_classes"):
             WorldDetector.from_config(cfg, CLASS_MAP_PATH)
+
+
+# ---- validate_detector_config: invalid family 網羅テスト ----
+
+class TestValidateDetectorConfig:
+    """validate_detector_config の invalid family テスト。
+
+    共有 validator の unit test。各 invalid family を一つずつ確認する。
+    """
+
+    @pytest.fixture
+    def valid_cfg(self):
+        """有効な full config dict を返す（ベース）。"""
+        return load_detector_config(DETECTOR_CONFIG_PATH)
+
+    def test_pretrained_backbone_int_1_rejected(self, valid_cfg):
+        """model.pretrained_backbone=1 (int) は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["model"]["pretrained_backbone"] = 1
+        with pytest.raises(ValueError, match="pretrained_backbone"):
+            validate_detector_config(valid_cfg)
+
+    def test_pretrained_backbone_string_false_rejected(self, valid_cfg):
+        """model.pretrained_backbone='false' (str) は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["model"]["pretrained_backbone"] = "false"
+        with pytest.raises(ValueError, match="pretrained_backbone"):
+            validate_detector_config(valid_cfg)
+
+    def test_formal_detector_eligible_true_rejected(self, valid_cfg):
+        """formal_detector_eligible=true は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["formal_detector_eligible"] = True
+        with pytest.raises(ValueError, match="formal_detector_eligible"):
+            validate_detector_config(valid_cfg)
+
+    def test_optimizer_adam_rejected(self, valid_cfg):
+        """training.optimizer.adam は未実装として拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["training"]["optimizer"] = {"adam": {"lr": 0.001}}
+        with pytest.raises(ValueError, match="adam"):
+            validate_detector_config(valid_cfg)
+
+    def test_normalize_mean_changed_rejected(self, valid_cfg):
+        """input.normalize.mean を変更すると拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["input"]["normalize"]["mean"] = [0.0, 0.0, 0.0]
+        with pytest.raises(ValueError, match="normalize"):
+            validate_detector_config(valid_cfg)
+
+    def test_unknown_top_level_key_rejected(self, valid_cfg):
+        """未知の top-level key は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["unknown_top_key"] = "bad"
+        with pytest.raises(ValueError, match="unknown_top_key"):
+            validate_detector_config(valid_cfg)
+
+    def test_unknown_nested_key_in_model_rejected(self, valid_cfg):
+        """model に未知の nested key は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["model"]["dropout"] = 0.1
+        with pytest.raises(ValueError, match="dropout"):
+            validate_detector_config(valid_cfg)
+
+    def test_unknown_tracker_class_rejected(self, valid_cfg):
+        """tracker.max_age_by_class に 04-06 class map 外のクラス名は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["tracker"]["max_age_by_class"]["unknown_class"] = 5
+        with pytest.raises(ValueError, match="unknown_class"):
+            validate_detector_config(valid_cfg)
+
+    def test_bool_in_batch_size_rejected(self, valid_cfg):
+        """training.batch_size=True (bool) は拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["training"]["batch_size"] = True
+        with pytest.raises(ValueError, match="batch_size"):
+            validate_detector_config(valid_cfg)
+
+    def test_nan_in_sgd_lr_rejected(self, valid_cfg):
+        """training.optimizer.sgd.lr=NaN は拒否される。"""
+        import math
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["training"]["optimizer"]["sgd"]["lr"] = math.nan
+        with pytest.raises(ValueError, match="lr"):
+            validate_detector_config(valid_cfg)
+
+    def test_infinity_in_sgd_momentum_rejected(self, valid_cfg):
+        """training.optimizer.sgd.momentum=Infinity は拒否される。"""
+        import math
+        from survivors.vision.world_detector import validate_detector_config
+        valid_cfg["training"]["optimizer"]["sgd"]["momentum"] = math.inf
+        with pytest.raises(ValueError, match="momentum"):
+            validate_detector_config(valid_cfg)
+
+    def test_missing_required_top_level_key_rejected(self, valid_cfg):
+        """必須 top-level key が欠落すると拒否される。"""
+        from survivors.vision.world_detector import validate_detector_config
+        del valid_cfg["training"]
+        with pytest.raises(ValueError, match="training"):
+            validate_detector_config(valid_cfg)
+
+    def test_default_config_passes(self, valid_cfg):
+        """既定 world_detector_v1.yaml は validate_detector_config を通過する。"""
+        from survivors.vision.world_detector import validate_detector_config
+        validate_detector_config(valid_cfg)  # no exception
+
+    @pytest.mark.parametrize("missing_key", [
+        "min_frames", "min_entities", "min_classes", "min_time_bands",
+        "min_frames_per_split", "min_entities_per_split", "min_classes_per_split",
+    ])
+    def test_preflight_required_field_missing_rejected(self, valid_cfg, missing_key):
+        """training.preflight の必須 7 フィールドが欠落すると拒否される（iter15 回帰）。"""
+        from survivors.vision.world_detector import validate_detector_config
+        del valid_cfg["training"]["preflight"][missing_key]
+        with pytest.raises(ValueError, match="必須 key"):
+            validate_detector_config(valid_cfg)
+
+
+# ---- sentinel: 各入口が validator を迂回しないことを確認 ----
+
+class TestValidatorSentinels:
+    """各入口が shared validator を通ることを 1 入口 1 テストで確認する。"""
+
+    def test_load_detector_config_sentinel(self, tmp_path):
+        """load_detector_config は formal_detector_eligible=true を拒否する（sentinel）。"""
+        import yaml
+        with DETECTOR_CONFIG_PATH.open(encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        cfg["formal_detector_eligible"] = True
+        invalid_path = tmp_path / "invalid.yaml"
+        invalid_path.write_text(yaml.dump(cfg), encoding="utf-8")
+        with pytest.raises(ValueError, match="formal_detector_eligible"):
+            load_detector_config(invalid_path)
+
+    def test_world_detector_from_config_sentinel(self):
+        """WorldDetector.from_config は未知 top-level key を拒否する（sentinel）。"""
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        cfg["unsupported_field"] = "bad"
+        with pytest.raises(ValueError, match="unsupported_field"):
+            WorldDetector.from_config(cfg, CLASS_MAP_PATH)
+
+
+# ---- CheckpointManifest optional hash: save/load 対称化 ----
+
+class TestCheckpointManifestOptionalHashes:
+    """CheckpointManifest.load() が optional hash を save() と同じルールで検証する。"""
+
+    def _base_payload(self) -> dict:
+        return {
+            "model_hash": "a" * 64,
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "formal_detector_eligible": False,
+            "development_only": True,
+            "training_mode": "development",
+        }
+
+    def test_load_rejects_bad_split_hash(self, tmp_path):
+        """CheckpointManifest.load() は不正 split_hash を拒否する。"""
+        payload = self._base_payload()
+        payload["split_hash"] = "bad_split"
+        p = tmp_path / "m.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="split_hash"):
+            CheckpointManifest.load(p)
+
+    def test_load_rejects_bad_resolved_config_hash(self, tmp_path):
+        """CheckpointManifest.load() は不正 resolved_config_hash を拒否する。"""
+        payload = self._base_payload()
+        payload["resolved_config_hash"] = "bad_resolved"
+        p = tmp_path / "m.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="resolved_config_hash"):
+            CheckpointManifest.load(p)
+
+    def test_load_rejects_uppercase_split_hash(self, tmp_path):
+        """uppercase の split_hash は拒否される。"""
+        payload = self._base_payload()
+        payload["split_hash"] = "A" * 64
+        p = tmp_path / "m.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="split_hash"):
+            CheckpointManifest.load(p)
+
+    def test_load_accepts_empty_optional_hashes(self, tmp_path):
+        """split_hash / resolved_config_hash が空文字は後方互換として許可する。"""
+        payload = self._base_payload()
+        payload["split_hash"] = ""
+        payload["resolved_config_hash"] = ""
+        p = tmp_path / "m.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        m = CheckpointManifest.load(p)
+        assert m.split_hash == ""
+        assert m.resolved_config_hash == ""
+
+    def test_load_rejects_non_string_split_hash(self, tmp_path):
+        """非文字列 split_hash は拒否される。"""
+        payload = self._base_payload()
+        payload["split_hash"] = 12345
+        p = tmp_path / "m.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="split_hash"):
+            CheckpointManifest.load(p)

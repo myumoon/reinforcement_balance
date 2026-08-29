@@ -3,12 +3,19 @@
 COCO アノテーション済み dataset から SSDLite320 を学習し、
 development checkpoint（formal_detector_eligible=false）を保存する。
 
-学習開始前に preflight チェックを実行し、最小 frame/entity/class/time-band 数を
-満たさない場合は step 0 のまま停止する。
+学習前に split manifest（--split）を読み込み、error_calibration / final_e2e_test
+session を dataset loader に渡して自動除外する。
+
+session-interleaved sampler で DatasetSample の実画像・target を構築して optimizer step する。
+torch が不在の場合だけ stub ループにフォールバックする（例外の握り潰しなし）。
+
+チェックポイント選択規則は学習開始前に manifest へ固定する。
+best checkpoint は選択専用、model / optimizer / epoch を含む last checkpoint は resume 専用とする。
 
 使用例:
     python train_survivors_world_detector.py \\
         --annotations data/world_annotations.json \\
+        --split data/split.json \\
         --config configs/world_detector_v1.yaml \\
         --class-map configs/world_class_map_v1.yaml \\
         --output runs/world_detector_dev
@@ -16,10 +23,13 @@ development checkpoint（formal_detector_eligible=false）を保存する。
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import pathlib
 import sys
+import tempfile
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import yaml
@@ -31,19 +41,652 @@ def _sha256_file(path: pathlib.Path) -> str:
     return h.hexdigest()
 
 
+def _sha256_str(s: str) -> str:
+    return hashlib.sha256(s.encode()).hexdigest()
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="world detector 学習ハーネス（開発用）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--annotations", required=True, help="COCO JSON アノテーションファイル")
+    p.add_argument(
+        "--split",
+        required=True,
+        help=(
+            "SessionSplit JSON ファイル。train/validation/error_calibration/final_e2e_test"
+            " の session ID を列挙する。error_calibration / final_e2e_test は自動除外され、"
+            " train / validation は独立した Dataset view に分割される。"
+        ),
+    )
     p.add_argument("--config", default="configs/world_detector_v1.yaml", help="detector config YAML")
     p.add_argument("--class-map", default="configs/world_class_map_v1.yaml", help="class map YAML")
     p.add_argument("--output", required=True, help="checkpoint 出力ディレクトリ")
     p.add_argument("--epochs", type=int, default=None, help="学習エポック数（config 優先）")
     p.add_argument("--dry-run", action="store_true", help="preflight チェックのみ実行して終了")
+    p.add_argument("--resume", help="resume する checkpoint ディレクトリ")
+    p.add_argument(
+        "--smoke",
+        action="store_true",
+        help=(
+            "smoke モード: 画像ファイルが存在しない場合にゼロ画像を許可する。"
+            " 通常学習では使用しないこと。smoke 成果物は development/smoke であることを manifest に記録する。"
+        ),
+    )
     return p
 
+
+# ---- checkpoint selection ----
+
+@dataclass
+class CheckpointRecord:
+    """1 エポックのチェックポイント記録。
+
+    val_map50_95 が高いほど良い checkpoint とする。
+    """
+
+    epoch: int
+    val_map50_95: float
+    checkpoint_path: str  # str で保存して JSON に対応する
+
+
+@dataclass
+class CheckpointSelector:
+    """学習前にルールを manifest へ固定し、validation で best を一度だけ選ぶ。
+
+    metric / keep_top_k は学習開始前に凍結され、後から変更できない。
+    """
+
+    metric: str
+    keep_top_k: int
+    _records: list[CheckpointRecord] = field(default_factory=list, repr=False)
+
+    def record(self, rec: CheckpointRecord) -> None:
+        """チェックポイントを記録し keep_top_k を超えた分を削除する。"""
+        self._records.append(rec)
+        self._records.sort(key=lambda r: r.val_map50_95, reverse=True)
+        if len(self._records) > self.keep_top_k:
+            self._records = self._records[: self.keep_top_k]
+
+    @property
+    def best(self) -> CheckpointRecord | None:
+        """val_map50_95 が最大の checkpoint を返す（未選択なら None）。"""
+        return self._records[0] if self._records else None
+
+    def to_dict(self) -> dict:
+        """manifest に保存できる dict 形式にシリアライズする。"""
+        return {
+            "metric": self.metric,
+            "keep_top_k": self.keep_top_k,
+            "best_epoch": self.best.epoch if self.best else None,
+            "best_val_map50_95": self.best.val_map50_95 if self.best else None,
+            "records": [asdict(r) for r in self._records],
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "CheckpointSelector":
+        """dict から CheckpointSelector を復元する（resume 用）。"""
+        sel = CheckpointSelector(
+            metric=d.get("metric", "val_map50_95"),
+            keep_top_k=d.get("keep_top_k", 3),
+        )
+        for r in d.get("records", []):
+            sel._records.append(CheckpointRecord(**r))
+        return sel
+
+
+# ---- resume state ----
+
+_RESUME_STATE_NAME = "training_state.json"
+_LAST_CHECKPOINT_NAME = "last_checkpoint.pt"
+
+
+def _save_resume_state(
+    out_dir: pathlib.Path,
+    epoch: int,
+    selector: CheckpointSelector,
+    model: Any,
+    optimizer: Any,
+    *,
+    training_mode: str = "development",
+) -> None:
+    """model / optimizer / epoch / selector / training_mode を single last checkpoint に保存する。
+
+    best checkpoint は選択・publish 専用であり、resume には使用しない。
+    last checkpoint の SHA-256 は metadata に保存し、復元前に検証する。
+    training_mode は resume 時の smoke/development 混在を防ぐために保存する。
+    """
+    import torch
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "selector": selector.to_dict(),
+    }
+
+    checkpoint_path = out_dir / _LAST_CHECKPOINT_NAME
+    tmp_checkpoint: pathlib.Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=out_dir, prefix=f".{_LAST_CHECKPOINT_NAME}.", delete=False
+        ) as tmp_file:
+            tmp_checkpoint = pathlib.Path(tmp_file.name)
+        torch.save(checkpoint, tmp_checkpoint)
+        tmp_checkpoint.replace(checkpoint_path)
+    finally:
+        if tmp_checkpoint is not None and tmp_checkpoint.exists():
+            tmp_checkpoint.unlink()
+
+    metadata = {
+        "schema_version": 1,
+        "last_epoch": epoch,
+        "last_checkpoint": _LAST_CHECKPOINT_NAME,
+        "last_checkpoint_hash": _sha256_file(checkpoint_path),
+        "training_mode": training_mode,
+    }
+    metadata_path = out_dir / _RESUME_STATE_NAME
+    tmp_metadata = metadata_path.with_suffix(".json.tmp")
+    tmp_metadata.write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    tmp_metadata.replace(metadata_path)
+
+
+def _load_resume_state(
+    resume_dir: pathlib.Path,
+    selector: CheckpointSelector,
+    model: Any,
+    optimizer: Any,
+    *,
+    expected_training_mode: str = "development",
+) -> int:
+    """resume_dir から training state を復元し、次の epoch 番号を返す。
+
+    metadata / last checkpoint の欠落・hash 不一致・state 欠落は ValueError。
+    best checkpoint は参照せず、単一 last checkpoint だけを復元する。
+    training_mode の smoke/development 混在（例: smoke checkpoint を development で resume）は拒否する。
+    """
+    state_path = resume_dir / _RESUME_STATE_NAME
+    if not state_path.exists():
+        raise ValueError(
+            f"[RESUME] training_state.json が見つかりません: {state_path}\n"
+            "新規学習の場合は --resume を省略してください。"
+        )
+
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"[RESUME] training_state.json の解析に失敗しました: {e}") from e
+
+    last_epoch: int = state.get("last_epoch")
+    if not isinstance(last_epoch, int) or last_epoch < 1:
+        raise ValueError(
+            f"[RESUME] training_state.json の last_epoch が不正です: {last_epoch!r}"
+        )
+
+    if state.get("schema_version") != 1:
+        raise ValueError(
+            f"[RESUME] training_state.json の schema_version が不正です: "
+            f"{state.get('schema_version')!r}"
+        )
+
+    saved_mode = state.get("training_mode")
+    if saved_mode not in ("smoke", "development"):
+        raise ValueError(
+            f"[RESUME] training_state.json の training_mode が不正または欠落しています: {saved_mode!r}。"
+            " 旧 schema の checkpoint は resume できません。新規学習してください。"
+        )
+    if saved_mode != expected_training_mode:
+        raise ValueError(
+            f"[RESUME] training_mode の不一致: 保存済み={saved_mode!r}, "
+            f"現在={expected_training_mode!r}。smoke と development の間で resume はできません。"
+        )
+    if state.get("last_checkpoint") != _LAST_CHECKPOINT_NAME:
+        raise ValueError("[RESUME] last checkpoint path が不正です。")
+    expected_hash = state.get("last_checkpoint_hash")
+    if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+        raise ValueError("[RESUME] last_checkpoint_hash が不正です。")
+
+    checkpoint_path = resume_dir / _LAST_CHECKPOINT_NAME
+    if not checkpoint_path.is_file():
+        raise ValueError(f"[RESUME] last checkpoint が見つかりません: {checkpoint_path}")
+    actual_hash = _sha256_file(checkpoint_path)
+    if actual_hash != expected_hash:
+        raise ValueError(
+            f"[RESUME] last checkpoint hash が一致しません: "
+            f"expected={expected_hash}, actual={actual_hash}"
+        )
+
+    try:
+        import torch
+    except ImportError as e:
+        raise RuntimeError("[RESUME] last checkpoint の復元には torch が必要です。") from e
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+    if not isinstance(checkpoint, dict):
+        raise ValueError("[RESUME] last checkpoint state が dict ではありません。")
+    required_keys = {"epoch", "model_state_dict", "optimizer_state_dict", "selector"}
+    missing = sorted(required_keys - checkpoint.keys())
+    if missing:
+        raise ValueError(f"[RESUME] last checkpoint state に {', '.join(missing)} がありません。")
+    if checkpoint["epoch"] != last_epoch:
+        raise ValueError(
+            f"[RESUME] metadata/checkpoint epoch が一致しません: "
+            f"{last_epoch} != {checkpoint['epoch']!r}"
+        )
+
+    saved_selector = CheckpointSelector.from_dict(checkpoint["selector"])
+    if saved_selector.metric != selector.metric or saved_selector.keep_top_k != selector.keep_top_k:
+        raise ValueError("[RESUME] checkpoint selection rule が現在の config と一致しません。")
+
+    try:
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    except Exception as e:
+        raise ValueError(f"[RESUME] model/optimizer state の復元に失敗しました: {e}") from e
+    selector._records = list(saved_selector._records)
+    print(f"[RESUME] model/optimizer state を {checkpoint_path} から復元しました。")
+
+    return last_epoch + 1
+
+
+# ---- dataset split views ----
+
+class _DatasetView:
+    """WorldDataset の sample index を固定した読み取り専用 view。"""
+
+    def __init__(self, dataset: Any, indices: list[int]) -> None:
+        self._dataset = dataset
+        self._indices = tuple(indices)
+
+    def __len__(self) -> int:
+        return len(self._indices)
+
+    def __getitem__(self, index: int) -> Any:
+        return self._dataset[self._indices[index]]
+
+    def __iter__(self):
+        for index in self._indices:
+            yield self._dataset[index]
+
+
+def _create_split_views(ds: Any, split: Any) -> tuple[_DatasetView, _DatasetView]:
+    """session assignment から互いに素な train / validation view を作る。
+
+    アノテーション無しフレーム（負例）は画像レベルの session_id で split に振り分ける。
+    未知 session や train/validation が同一フレームに混在するデータは fail-closed で拒否する。
+    """
+    from survivors.vision.world_dataset import DatasetPreflightError
+
+    train_sessions = set(split.train)
+    validation_sessions = set(split.validation)
+    allowed_sessions = train_sessions | validation_sessions
+    train_indices: list[int] = []
+    validation_indices: list[int] = []
+
+    for index in range(len(ds)):
+        sample = ds[index]
+        img_session = getattr(sample, "session_id", "")
+        if not img_session:
+            raise DatasetPreflightError(
+                f"session_id が未設定の画像があります (image_id={sample.image_id})。"
+                " run_split_preflight() で session 欠損を先に検出してください。"
+            )
+        sample_sessions = {img_session}
+        unknown_sessions = sample_sessions - allowed_sessions
+        if unknown_sessions:
+            raise DatasetPreflightError(
+                f"split に未割当の session {sorted(unknown_sessions)} が image_id="
+                f"{sample.image_id} に含まれています。"
+            )
+        if sample_sessions <= train_sessions:
+            train_indices.append(index)
+        elif sample_sessions <= validation_sessions:
+            validation_indices.append(index)
+        else:
+            raise DatasetPreflightError(
+                f"train/validation session が image_id={sample.image_id} に混在しています。"
+            )
+
+    if not train_indices or not validation_indices:
+        raise DatasetPreflightError("train/validation Dataset view の一方が空です。")
+    return _DatasetView(ds, train_indices), _DatasetView(ds, validation_indices)
+
+
+# ---- image preflight ----
+
+def _check_all_images(*dataset_views: Any) -> list[str]:
+    """全 view の全サンプル画像を存在確認し、欠落・decode 失敗のパスリストを返す。
+
+    optimizer 作成前に呼ぶことで、後半画像の欠落による optimizer step 後失敗を防ぐ。
+    smoke モード以外でのみ使用する。
+    """
+    errors: list[str] = []
+    for view in dataset_views:
+        for idx in range(len(view)):
+            sample = view[idx]
+            img_path = pathlib.Path(sample.file_name)
+            if not img_path.exists():
+                errors.append(f"画像欠落: {img_path}")
+                continue
+            try:
+                import cv2
+                if cv2.imread(str(img_path)) is None:
+                    errors.append(f"decode 失敗: {img_path}")
+            except Exception as exc:
+                errors.append(f"decode 例外 ({exc}): {img_path}")
+    return errors
+
+
+# ---- config guard ----
+
+def _reject_unimplemented_config(cfg: dict) -> None:
+    """validate_detector_config の薄い alias（後方互換）。
+
+    validation 規則は survivors.vision.world_detector.validate_detector_config に集約する。
+    重複実装しない。
+    """
+    from survivors.vision.world_detector import validate_detector_config
+    validate_detector_config(cfg)
+
+
+# ---- training loop ----
+
+def _run_training(
+    detector: Any,
+    train_ds: Any,
+    validation_ds: Any,
+    cfg: dict,
+    max_epochs: int,
+    selector: CheckpointSelector,
+    out_dir: pathlib.Path,
+    resume_dir: pathlib.Path | None = None,
+    *,
+    smoke: bool = False,
+) -> None:
+    """学習ループ。
+
+    torch が利用できる場合は実 SGD ステップを実行し、
+    そうでない場合は stub エポックループを回す。
+    resume_dir が指定された場合は model / optimizer / selector を復元する。
+    smoke=True のとき画像欠損をゼロ画像で代替する（通常学習では使用しない）。
+    """
+    try:
+        import torch as _torch  # noqa: F401
+    except ModuleNotFoundError as e:
+        if e.name != "torch":
+            raise
+        if not smoke:
+            raise RuntimeError(
+                "torch が見つかりません。通常学習には torch が必要です。"
+                " smoke モードのみ torch なし実行を許可します（--smoke フラグを使用してください）。"
+            )
+        if resume_dir is not None:
+            raise RuntimeError("[RESUME] model/optimizer state の復元には torch が必要です。")
+        _run_training_stub(max_epochs, selector, out_dir, start_epoch=1)
+        return
+    import torch.optim as optim
+
+    opt_cfg = cfg.get("training", {}).get("optimizer", {}).get("sgd", {})
+    optimizer = optim.SGD(
+        detector._model.parameters(),
+        lr=opt_cfg.get("lr", 0.01),
+        momentum=opt_cfg.get("momentum", 0.9),
+        weight_decay=opt_cfg.get("weight_decay", 0.0005),
+    )
+
+    start_epoch = 1
+    current_mode = "smoke" if smoke else "development"
+    if resume_dir is not None:
+        start_epoch = _load_resume_state(
+            resume_dir, selector, detector._model, optimizer,
+            expected_training_mode=current_mode,
+        )
+        print(f"[RESUME] epoch {start_epoch} から再開します。")
+
+    _run_training_torch(
+        detector,
+        train_ds,
+        validation_ds,
+        cfg,
+        max_epochs,
+        selector,
+        out_dir,
+        optimizer,
+        start_epoch,
+        smoke=smoke,
+    )
+
+
+def _run_training_torch(
+    detector: Any,
+    train_ds: Any,
+    validation_ds: Any,
+    cfg: dict,
+    max_epochs: int,
+    selector: CheckpointSelector,
+    out_dir: pathlib.Path,
+    optimizer: Any,
+    start_epoch: int,
+    *,
+    smoke: bool = False,
+) -> None:
+    """torch DataLoader + SGD optimizer の実学習ループ。
+
+    DatasetSample の実 annotation から target を構築し optimizer step を実行する。
+    通常モード: 画像欠損は FileNotFoundError。smoke=True 時のみゼロ画像を許可。
+    """
+    import torch
+
+    save_every = cfg.get("checkpoint_selection", {}).get("save_every_n_epochs", 5)
+
+    for epoch in range(start_epoch, max_epochs + 1):
+        # session-interleaved sampler: train view の実サンプルだけで optimizer step
+        _train_epoch(detector, train_ds, optimizer, cfg, smoke=smoke)
+
+        # selector の score は独立した validation view だけから得る
+        val_score = _evaluate_validation(detector, validation_ds, cfg, smoke=smoke)
+
+        if epoch % save_every == 0 or epoch == max_epochs:
+            ckpt_path = out_dir / f"epoch_{epoch:04d}.pt"
+            torch.save(detector._model.state_dict(), ckpt_path)
+            selector.record(CheckpointRecord(epoch, val_score, str(ckpt_path)))
+            print(f"  epoch {epoch}/{max_epochs}: val_map50_95={val_score:.4f} → saved {ckpt_path.name}")
+        # resume 用 last は best 候補の保存間隔に関係なく毎 epoch 更新する
+        _save_resume_state(
+            out_dir, epoch, selector, detector._model, optimizer,
+            training_mode="smoke" if smoke else "development",
+        )
+
+    print(f"[INFO] best checkpoint: epoch={selector.best.epoch if selector.best else None}")
+
+
+def _load_training_sample(sample: Any, *, smoke: bool = False) -> tuple[Any, dict[str, Any]]:
+    """DatasetSample を torchvision detection model の image/target へ変換する。
+
+    通常モード（smoke=False）: 画像ファイルが存在しない場合は FileNotFoundError。
+    smoke モード（smoke=True）: 画像ファイルが存在しない場合はゼロ画像を使用。
+    cv2.imread デコード失敗・cv2/torchvision の ImportError はモードに関係なく伝播する。
+    """
+    import torch
+
+    img_path = pathlib.Path(sample.file_name)
+    frame: Any = None
+    if img_path.exists():
+        import cv2
+        import torchvision.transforms.functional as TF
+        bgr = cv2.imread(str(img_path))
+        if bgr is None:
+            raise OSError(f"cv2.imread デコード失敗: {img_path}")
+        frame = TF.to_tensor(bgr[..., ::-1].copy())
+    elif smoke:
+        frame = torch.zeros(3, sample.image_height, sample.image_width)
+    else:
+        raise FileNotFoundError(
+            f"画像ファイルが見つかりません: {img_path}。"
+            " smoke モードを使う場合は --smoke フラグを指定してください。"
+        )
+
+    boxes_list = []
+    labels_list = []
+    for ann in sample.annotations:
+        x, y, w, h = ann.bbox_xywh
+        boxes_list.append([x, y, x + w, y + h])
+        labels_list.append(ann.category_id)
+
+    if boxes_list:
+        target = {
+            "boxes": torch.tensor(boxes_list, dtype=torch.float32),
+            "labels": torch.tensor(labels_list, dtype=torch.long),
+        }
+    else:
+        target = {
+            "boxes": torch.zeros(0, 4),
+            "labels": torch.zeros(0, dtype=torch.long),
+        }
+    return frame, target
+
+
+def _session_interleaved_indices(ds: Any) -> list[int]:
+    """各 session のサンプルを round-robin で並べ、全サンプルを一度ずつ返す。
+
+    DatasetSample.session_id（画像レベル）を session 識別の正本として使用する。
+    annotation.session_id は参照しない。
+    100:1 のような不均衡 dataset でも全 101 件が一度ずつ選ばれる。
+    # ponytail: 単純 round-robin。重み付き balanced sampling が必要なら別作業で実装。
+    """
+    session_groups: dict[str, list[int]] = {}
+    for index in range(len(ds)):
+        sample = ds[index]
+        session_id = getattr(sample, "session_id", "")
+        session_groups.setdefault(session_id, []).append(index)
+
+    max_len = max(len(indices) for indices in session_groups.values())
+    ordered: list[int] = []
+    for offset in range(max_len):
+        for indices in session_groups.values():
+            if offset < len(indices):
+                ordered.append(indices[offset])
+    return ordered
+
+
+def _train_epoch(
+    detector: Any, ds: Any, optimizer: Any, cfg: dict, *, smoke: bool = False
+) -> None:
+    """session-interleaved sampler で config batch_size 単位の 1 epoch を学習する。
+
+    全サンプルを session round-robin で並べて batch を作る。BatchNorm 保護のため
+    singleton 末尾 batch は直前 batch へ統合し、全サンプルを必ず学習へ渡す。
+    通常モード: 画像ファイル不在は FileNotFoundError。smoke=True 時のみゼロ画像を許可。
+    """
+    if len(ds) == 0:
+        return
+
+    batch_size = cfg.get("training", {}).get("batch_size")
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 3:
+        raise ValueError(
+            "training.batch_size は 3 以上の整数である必要があります。"
+            " 2 以下では奇数件 dataset でのsingleton batch 防止のため学習できません。"
+        )
+
+    ordered_indices = _session_interleaved_indices(ds)
+    batches = [ordered_indices[i:i + batch_size] for i in range(0, len(ordered_indices), batch_size)]
+    # 末尾が singleton のとき、直前 batch と合わせて均等に 2 つへ再配分する。
+    # 例: batch_size=3, 4 サンプル → [3,1] → [2,2]（batch_size 以下かつ全件処理を保証）
+    # ponytail: 単純な 2 分割。3 つ以上の再配分が必要なら別作業で実装。
+    if len(batches) >= 2 and len(batches[-1]) == 1:
+        combined = batches[-2] + batches[-1]
+        mid = len(combined) // 2
+        batches[-2] = combined[:mid]
+        batches[-1] = combined[mid:]
+
+    for batch_indices in batches:
+        images = []
+        targets = []
+        for sample_index in batch_indices:
+            image, target = _load_training_sample(ds[sample_index], smoke=smoke)
+            images.append(image)
+            targets.append(target)
+
+        optimizer.zero_grad()
+        detector._model.train()
+        loss_dict = detector._model(images, targets)
+        if isinstance(loss_dict, dict):
+            total_loss = sum(loss_dict.values())  # type: ignore[arg-type]
+            total_loss.backward()
+            optimizer.step()
+        # stub model が list を返す場合はスキップ（smoke: 推論のみ）
+
+
+def _evaluate_validation(detector: Any, validation_ds: Any, cfg: dict, *, smoke: bool = False) -> float:
+    """validation 専用 view で detector を推論評価し proxy_ap50_95 を返す。
+
+    torch eval モードでサンプルを1件ずつ推論し、evaluate_from_predictions で AP を計算する。
+    stub model（テスト環境）は空予測を返すため AP=0.0 になる。
+    """
+    import torch
+    from eval_survivors_world_detector import evaluate_from_predictions
+
+    if len(validation_ds) == 0:
+        raise ValueError("validation Dataset view が空です。")
+
+    gt_anns: list[dict] = []
+    pred_anns: list[dict] = []
+
+    detector._model.eval()
+    with torch.no_grad():
+        for idx in range(len(validation_ds)):
+            sample = validation_ds[idx]
+            image_id = int(getattr(sample, "image_id", idx))
+            img, target = _load_training_sample(sample, smoke=smoke)
+            for box, label in zip(target["boxes"].tolist(), target["labels"].tolist()):
+                x1, y1, x2, y2 = box
+                gt_anns.append({
+                    "image_id": image_id,
+                    "category_id": int(label),
+                    "bbox": [x1, y1, x2 - x1, y2 - y1],
+                })
+            preds = detector._model([img])
+            if isinstance(preds, list) and preds and isinstance(preds[0], dict):
+                for box, label, score in zip(
+                    preds[0].get("boxes", torch.zeros(0, 4)).tolist(),
+                    preds[0].get("labels", torch.zeros(0, dtype=torch.long)).tolist(),
+                    preds[0].get("scores", torch.zeros(0)).tolist(),
+                ):
+                    x1, y1, x2, y2 = box
+                    pred_anns.append({
+                        "image_id": image_id,
+                        "category_id": int(label),
+                        "bbox": [x1, y1, x2 - x1, y2 - y1],
+                        "score": float(score),
+                    })
+
+    num_classes = cfg.get("model", {}).get("num_classes", detector.num_classes) + 1
+    metrics = evaluate_from_predictions(gt_anns, pred_anns, num_classes=num_classes)
+    return metrics.proxy_ap50_95
+
+
+def _run_training_stub(
+    max_epochs: int,
+    selector: CheckpointSelector,
+    out_dir: pathlib.Path,
+    start_epoch: int,
+) -> None:
+    """torch 不在環境用のスタブ学習ループ。"""
+    for epoch in range(start_epoch, max_epochs + 1):
+        val_score = 0.0
+        ckpt_path = out_dir / f"epoch_{epoch:04d}.ckpt"
+        selector.record(CheckpointRecord(epoch, val_score, str(ckpt_path)))
+        print(f"  epoch {epoch}/{max_epochs} ... (stub: weight 更新なし)")
+
+
+# ---- entry point ----
 
 def main(argv: list[str] | None = None) -> int:
     """学習ハーネスのエントリポイント。
@@ -52,8 +695,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = _build_arg_parser().parse_args(argv)
 
-    # -- import here to keep CI fast even without torch
-    from survivors.vision.world_dataset import WorldDataset, load_class_map, DatasetPreflightError
+    from survivors.vision.world_dataset import WorldDataset, DatasetPreflightError, SessionSplit
     from survivors.vision.world_detector import (
         WorldDetector,
         CheckpointManifest,
@@ -73,23 +715,74 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ERROR] config 読み込み失敗: {e}", file=sys.stderr)
         return 1
 
+    # -- CLI override を config 読み込み直後に適用・検証（学習・optimizer・出力ディレクトリ作成より前）
+    # args.epochs is not None チェックにより --epochs 0 を「未指定」と誤認しない
+    _resolved_cfg = copy.deepcopy(cfg)
+    if args.epochs is not None:
+        _resolved_cfg["training"]["max_epochs"] = args.epochs
+        try:
+            from survivors.vision.world_detector import validate_detector_config as _vdc_pre
+            _vdc_pre(_resolved_cfg)
+        except ValueError as _ve:
+            print(f"[CONFIG ERROR] resolved config: {_ve}", file=sys.stderr)
+            return 1
+
+    # -- 必須 split manifest 読み込み（error_calibration / final_e2e_test を自動除外）
+    split_data = json.loads(pathlib.Path(args.split).read_text(encoding="utf-8"))
+    split = SessionSplit(
+        train=split_data.get("train", []),
+        validation=split_data.get("validation", []),
+        error_calibration=split_data.get("error_calibration", []),
+        final_e2e_test=split_data.get("final_e2e_test", []),
+    )
+    rejected = set(split.error_calibration) | set(split.final_e2e_test)
+    print(f"[INFO] split: train={len(split.train)}, val={len(split.validation)}"
+          f", rejected={len(rejected)} session")
+
     # -- preflight
-    preflight_cfg = cfg.get("training", {}).get("preflight", {})
+    # validate_detector_config が全 7 フィールドの存在を保証するため .get(default) は不要
+    preflight_cfg = _resolved_cfg["training"]["preflight"]
     try:
-        # 学習では bbox bounds 検証を必須とする
-        ds = WorldDataset(ann_path, cm_path, validate_bounds=True)
-        ds.run_preflight(
-            min_frames=preflight_cfg.get("min_frames", 300),
-            min_entities=preflight_cfg.get("min_entities", 500),
-            min_classes=preflight_cfg.get("min_classes", 6),
-            min_time_bands=preflight_cfg.get("min_time_bands", 4),
+        ds = WorldDataset(
+            ann_path, cm_path,
+            validate_bounds=True,
+            rejected_sessions=rejected,
         )
+        ds.run_preflight(
+            min_frames=preflight_cfg["min_frames"],
+            min_entities=preflight_cfg["min_entities"],
+            min_classes=preflight_cfg["min_classes"],
+            min_time_bands=preflight_cfg["min_time_bands"],
+        )
+        ds.run_split_preflight(
+            split,
+            min_frames_per_split=preflight_cfg["min_frames_per_split"],
+            min_entities_per_split=preflight_cfg["min_entities_per_split"],
+            min_classes_per_split=preflight_cfg["min_classes_per_split"],
+        )
+        train_ds, validation_ds = _create_split_views(ds, split)
     except DatasetPreflightError as e:
         print(f"[PREFLIGHT FAIL] {e}", file=sys.stderr)
         print("[INFO] training step 0 のまま停止します。", file=sys.stderr)
         return 1
 
-    print(f"[PREFLIGHT OK] {len(ds)} フレーム読み込み完了。")
+    print(
+        f"[PREFLIGHT OK] train={len(train_ds)}, validation={len(validation_ds)} "
+        "フレームへ分離しました。"
+    )
+
+    # -- 全採用画像の存在・decode を確認する（smoke 以外・dry-run より前）
+    # dry-run も同じ preflight を通す。欠落画像を含む dataset は dry-run でも exit code 1。
+    if not args.smoke:
+        missing = _check_all_images(train_ds, validation_ds)
+        if missing:
+            for m in missing[:5]:
+                print(f"[IMAGE PREFLIGHT FAIL] {m}", file=sys.stderr)
+            if len(missing) > 5:
+                print(f"  ... 他 {len(missing) - 5} 件", file=sys.stderr)
+            print("[INFO] training step 0 のまま停止します。", file=sys.stderr)
+            return 1
+        print(f"[IMAGE PREFLIGHT OK] 全 {len(train_ds) + len(validation_ds)} 画像を確認しました。")
 
     if args.dry_run:
         print("[DRY-RUN] --dry-run が指定されたため学習をスキップします。")
@@ -102,40 +795,77 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ERROR] {e}", file=sys.stderr)
         return 1
 
-    # -- train loop (minimal harness; 04-07 が本格実装)
+    # -- checkpoint selection rules を学習開始前に固定する
+    sel_cfg = cfg.get("checkpoint_selection", {})
+    selector = CheckpointSelector(
+        metric=sel_cfg.get("metric", "val_map50_95"),
+        keep_top_k=sel_cfg.get("keep_top_k", 3),
+    )
+    print(f"[INFO] checkpoint_selection: metric={selector.metric}, keep_top_k={selector.keep_top_k}")
+
+    # -- train
     print(f"[INFO] アーキテクチャ: {cfg['model']['architecture']}, num_classes={detector.num_classes}")
-    max_epochs = args.epochs or cfg.get("training", {}).get("max_epochs", 1)
+    max_epochs = _resolved_cfg.get("training", {}).get("max_epochs", 1)
     print(f"[INFO] max_epochs={max_epochs} で学習を開始します...")
 
-    _run_training(detector, ds, cfg, max_epochs=max_epochs)
-
-    # -- checkpoint manifest
-    # model_hash: weight なし開発 stub なので config hash で代用。04-08 が実 weight hash を設定する。
-    # build_hash: 実行環境 (sys.version) の hash で開発 build を識別する。
-    import sys as _sys
-    _build_hash = hashlib.sha256(f"dev-python:{_sys.version}".encode()).hexdigest()
     out_dir.mkdir(parents=True, exist_ok=True)
+    resume_dir: pathlib.Path | None = pathlib.Path(args.resume) if args.resume else None
+    smoke: bool = args.smoke
+    if smoke:
+        print("[WARN] --smoke モード: 画像欠損をゼロ画像で代替します。smoke 成果物は実 weight ではありません。")
+    _run_training(
+        detector, train_ds, validation_ds, cfg,
+        max_epochs=max_epochs,
+        selector=selector,
+        out_dir=out_dir,
+        resume_dir=resume_dir,
+        smoke=smoke,
+    )
+
+    # -- build hash
+    _build_hash = _sha256_str(f"dev-python:{sys.version}")
+
+    # split hash: split JSON ファイルの内容 SHA-256
+    _split_hash = _sha256_file(pathlib.Path(args.split))
+
+    # resolved config hash: config 読み込み直後に構築済みの _resolved_cfg を使用
+    _resolved_config_hash = _sha256_str(json.dumps(_resolved_cfg, sort_keys=True, ensure_ascii=False))
+
+    # best checkpoint hash: 実ファイルがあれば hash、なければ config hash で代用
+    best = selector.best
+    weight_path: pathlib.Path | None = None
+    if best and pathlib.Path(best.checkpoint_path).exists():
+        weight_path = pathlib.Path(best.checkpoint_path)
+        model_hash = _sha256_file(weight_path)
+    else:
+        model_hash = _sha256_file(cfg_path)  # stub: config hash で代用
+
     manifest = CheckpointManifest(
-        model_hash=_sha256_file(cfg_path),  # weight なし stub: config hash で代用
+        model_hash=model_hash,
         data_hash=_sha256_file(ann_path),
         config_hash=_sha256_file(cfg_path),
         build_hash=_build_hash,
         class_map_hash=_sha256_file(cm_path),
-        formal_detector_eligible=False,  # development のみ
+        formal_detector_eligible=False,
+        split_hash=_split_hash,
+        resolved_config_hash=_resolved_config_hash,
+        development_only=True,
+        training_mode="smoke" if smoke else "development",
     )
     manifest.save(out_dir / "manifest.json")
-    print(f"[INFO] manifest を {out_dir / 'manifest.json'} へ保存しました。")
+
+    if smoke:
+        print("[SMOKE] smoke モードで完了しました。ゼロ画像を使用した成果物は実 weight ではありません。")
+
+    # checkpoint selection 規則を manifest JSON に追記する
+    m_path = out_dir / "manifest.json"
+    m_data = json.loads(m_path.read_text(encoding="utf-8"))
+    m_data["checkpoint_selection"] = selector.to_dict()
+    m_path.write_text(json.dumps(m_data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    print(f"[INFO] manifest を {m_path} へ保存しました。")
     print("[INFO] formal_detector_eligible=false — このままでは正式パッケージへ昇格できません。")
     return 0
-
-
-def _run_training(detector: Any, ds: Any, cfg: dict, max_epochs: int) -> None:
-    """学習ループのスタブ。04-07 が本格 DataLoader / optimizer を実装する。
-
-    実際の weight 更新は行わず、エポック数だけログを出す。
-    """
-    for epoch in range(1, max_epochs + 1):
-        print(f"  epoch {epoch}/{max_epochs} ... (stub: weight 更新なし)")
 
 
 if __name__ == "__main__":
