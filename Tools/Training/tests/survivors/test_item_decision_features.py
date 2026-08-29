@@ -115,6 +115,46 @@ def test_variant_fields_and_unknown_wire_fields_fail_closed() -> None:
         ItemDecisionFeatures.from_wire(wire)
 
 
+def test_occupancy_slot_binary_enforced() -> None:
+    """context_danger_occupancy_v1 のスロット値は 0/1 のみ許可される。
+
+    occupancy schema は weapon/passive slot を binary で表現するため、
+    level 値 (2 以上) や bool も含め {0,1} 以外は拒否します。
+    """
+    danger = {
+        "enemy_density": 0.25,
+        "gem_density": 0.5,
+        "nearest_enemy_screen_dist": 0.125,
+        "nearest_enemy_screen_dir": (-0.5, 0.75),
+        "boss_flag": True,
+        "hazard_flag": False,
+        "world_validity": 1.0,
+        "world_age": 0.04,
+        "last_gameplay_snapshot_age": 0.08,
+    }
+    with pytest.raises(ValueError, match="weapon_slots"):
+        ItemDecisionFeatures(
+            decision_id="decision-001",
+            feature_schema="context_danger_occupancy_v1",
+            elapsed_time=125.5,
+            level=12,
+            hp_ratio=0.75,
+            xp_ratio=0.375,
+            weapon_slots=(2, 1, 0, 0, 0, 0),  # 2 は binary 違反
+            passive_slots=(1, 0, 0, 0, 0, 0),
+            empty_slot_count=9,
+            evolution_readiness=0.5,
+            choice_count=2,
+            card_mask=(True, True, False),
+            fallback_kind="none",
+            ui_state_validity=1.0,
+            ui_state_age=0.02,
+            candidates=(_candidate("wand", level=1), _candidate("knife")),
+            max_item_cards=3,
+            **danger,
+        )
+
+
 def test_candidate_permutation_preserves_item_identity() -> None:
     """候補順を変えても item_id が feature と一緒に移動する。
 

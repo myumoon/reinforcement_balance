@@ -1,0 +1,129 @@
+"""非同期 HUD/world 結合と temporal filter を検証する。
+
+時刻ずれ、古い frame、画面状態による validity の切替を確認します。
+"""
+
+from dataclasses import replace
+
+from survivors.temporal_state import TemporalAssembler
+from survivors.vision.entity_tracker import PlayerAnchorState, TrackedWorldStateV1
+from survivors.vision.hud_parser import HudStateV1
+
+def _hud(timestamp: int, state: str = "gameplay", **changes) -> HudStateV1:
+    """temporal test 用 HUD state を作る。
+
+    値と時刻だけを差し替え、parser の画像処理からテストを切り離します。
+    """
+    base = HudStateV1(
+        "hud_state.v1", "session", 1, timestamp, "a" * 64, state, .9, "ok",
+        10., .9, "ok", False, .8, .9, "ok", .4, .9, "ok", 3, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    return replace(base, **changes)
+
+def _world(timestamp: int) -> TrackedWorldStateV1:
+    """track なしの world state を作る。
+
+    join の鮮度と skew だけを検証するため最小の状態を返します。
+    """
+    return TrackedWorldStateV1(1, timestamp, [], PlayerAnchorState(.5, .5, .9, False))
+
+def test_join_applies_monotonic_and_bounded_filters() -> None:
+    """timer・level・inventory の後退を防ぎ HP/XP を範囲内に保つ。
+
+    OCR が一時的に古い値を返しても、確定済みの進行状態へ戻しません。
+    """
+    assembler = TemporalAssembler()
+    assembler.join(_hud(1_000, timer_seconds=20., level=5), _world(1_000))
+    joined = assembler.join(
+        _hud(2_000, timer_seconds=19., level=4, inventory=(None,) * 12, hp_ratio=.95, xp_ratio=.05),
+        _world(2_000),
+    )
+    assert joined.hud.timer_seconds == 20.
+    assert joined.hud.level == 5
+    assert joined.hud.inventory[0] == "whip"
+    assert joined.hud.hp_ratio == .875
+    assert joined.hud.xp_ratio == .225
+    assert assembler.join(_hud(1_500), _world(1_500)).hud.captured_monotonic_ns == 2_000
+
+def test_skew_and_staleness_fail_closed() -> None:
+    """50ms skew と source stale age を超えた combat を無効化する。
+
+    新旧フレームを無理に混ぜず、値を保持しても validity はゼロへ落とします。
+    """
+    assembler = TemporalAssembler()
+    skewed = assembler.join(_hud(1_000_000_000), _world(1_060_000_001), now_ns=1_060_000_001)
+    assert skewed.combat_validity == 0.
+    stale = assembler.join(_hud(1_000_000_000), _world(1_000_000_000), now_ns=1_300_000_002)
+    assert stale.hud_validity == stale.world_validity == stale.combat_validity == 0.
+
+def test_screen_state_routes_combat_and_item_validity() -> None:
+    """gameplay・item UI・停止画面の用途別 validity を切り替える。
+
+    戦闘 policy と選択 policy が同じ frame を同時に有効扱いしないようにします。
+    """
+    assembler = TemporalAssembler()
+    gameplay = assembler.join(_hud(1_000, "gameplay"), _world(1_000))
+    level_up = assembler.join(_hud(2_000, "level_up_items"), _world(2_000))
+    paused = assembler.join(_hud(3_000, "paused"), _world(3_000))
+    assert (gameplay.combat_validity, gameplay.item_validity) == (1., 0.)
+    assert (level_up.combat_validity, level_up.item_validity) == (0., 1.)
+    assert (paused.combat_validity, paused.item_validity) == (0., 0.)
+
+def test_join_uses_accepted_state_for_now_ns() -> None:
+    """遅延 frame を破棄しても now_ns が保持済み state の時刻から計算される。
+
+    破棄した古い frame の timestamp を使うと hud_age が負になり ContractValidationError が起きます。
+    """
+    assembler = TemporalAssembler()
+    assembler.join(_hud(2_000), _world(2_000))
+    joined = assembler.join(_hud(1_500), _world(1_500))
+    assert joined.hud.captured_monotonic_ns == 2_000
+    assert joined.captured_ns == 2_000
+
+def test_session_change_resets_monotonic_state() -> None:
+    """新 session では旧 session の timer/level が引き継がれない。
+
+    session_id 変更で HUD/world/tick state をリセットし、新 session の観測値を素直に採用します。
+    """
+    assembler = TemporalAssembler()
+    assembler.join(_hud(1_000, timer_seconds=100., level=10), _world(1_000))
+    joined = assembler.join(_hud(1_001, timer_seconds=1., level=1, session_id="s2"), _world(1_001))
+    assert joined.hud.timer_seconds == 1.
+    assert joined.hud.level == 1
+
+def test_stale_session_world_does_not_join_with_newer_session_hud() -> None:
+    """遅れた旧 session world が新 session HUD と結合して combat_validity=1 にならない。
+
+    s2 HUD 受け入れ後、session_start_ns より前の s1 world は observe_world が拒否します。
+    """
+    assembler = TemporalAssembler()
+    assembler.observe_hud(_hud(1_000, session_id="s1"))
+    assembler.observe_world(_world(1_000))
+    assembler.observe_hud(_hud(2_000, session_id="s2"))  # session reset; _session_start_ns=2000
+    assembler.observe_world(_world(1_999))  # s1 残存 world@1999 < session_start_ns=2000 → 拒否
+    assert assembler.tick(2_000) is None  # s2 world 未到着のため tick 不発
+
+def test_stale_session_hud_does_not_overwrite_newer_session() -> None:
+    """非同期で到着した旧 session フレームが現在 session の状態を巻き戻さない。
+
+    s1→s2→遅延s1 の順に入力しても、assembler は s2 のままで level/timer を保ちます。
+    """
+    assembler = TemporalAssembler()
+    assembler.join(_hud(1_000, timer_seconds=10., level=5, session_id="s1"), _world(1_000))
+    assembler.join(_hud(2_000, timer_seconds=20., level=10, session_id="s2"), _world(2_000))
+    joined = assembler.join(_hud(1_500, timer_seconds=1., level=1, session_id="s1"), _world(1_500))
+    assert joined.hud.session_id == "s2"
+    assert joined.hud.level == 10
+
+def test_low_screen_state_confidence_fails_validity() -> None:
+    """screen_state_confidence が閾値未満のとき combat/item validity をゼロに落とす。
+
+    誤分類された画面の操作を防ぐため、信頼度が低ければ fail-closed にします。
+    """
+    assembler = TemporalAssembler()
+    low = assembler.join(_hud(1_000, "level_up_items", screen_state_confidence=0.1), _world(1_000))
+    high = assembler.join(_hud(2_000, "level_up_items", screen_state_confidence=0.9), _world(2_000))
+    assert low.item_validity == 0.
+    assert high.item_validity == 1.
