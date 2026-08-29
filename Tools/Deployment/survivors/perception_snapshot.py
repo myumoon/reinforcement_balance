@@ -23,7 +23,7 @@ UI_PRESENTATION_SCHEMA_HASH = canonical_hash(
 )
 _BUTTON_ACTIONS = frozenset({"ack_chest", "confirm", "reroll", "skip", "banish"})
 _SCREEN_CONFIDENCE_THRESHOLD = 0.5
-_UI_SCREEN_STATES = frozenset({"level_up_items", "level_up_fallback", "chest"})
+_UI_SCREEN_STATES = frozenset({"level_up_items", "level_up_fallback", "chest", "target_reached_transition"})
 def _finite_ratio(value: Any, label: str) -> float:
     """有限な [0,1] 比率を検証して float 化する。
 

@@ -346,6 +346,10 @@ class ItemDecisionFeatures:
         _ratio(self.xp_ratio, "xp_ratio")
         _slot_levels(self.weapon_slots, "weapon_slots")
         _slot_levels(self.passive_slots, "passive_slots")
+        if self.feature_schema == "context_danger_occupancy_v1":
+            for _slots, _label in ((self.weapon_slots, "weapon_slots"), (self.passive_slots, "passive_slots")):
+                if any(v not in {0, 1} for v in _slots):
+                    raise ValueError(f"{_label} must be binary (0 or 1) for context_danger_occupancy_v1")
         _strict_int(self.empty_slot_count, "empty_slot_count")
         _ratio(self.evolution_readiness, "evolution_readiness")
         _strict_int(self.max_item_cards, "max_item_cards", minimum=1)

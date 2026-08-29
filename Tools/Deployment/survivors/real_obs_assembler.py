@@ -52,8 +52,10 @@ _HUD_TO_SCREEN_STATE: dict[str, ScreenState] = {
     "level_up_items": ScreenState.LEVEL_UP,
     "level_up_fallback": ScreenState.FALLBACK,
     "chest": ScreenState.CHEST,
+    "target_reached_transition": ScreenState.CONFIRM,
 }
 _KNOWN_FALLBACK_IDS = {FallbackSemantic.CHICKEN.value, FallbackSemantic.GOLD.value}
+_POLICY_SCREEN_CONFIDENCE_THRESHOLD = 0.5
 
 
 def _build_ui_policy_input(
@@ -61,14 +63,19 @@ def _build_ui_policy_input(
     frame_id: str,
     hud: HudStateV1,
     ui: UiPresentationSnapshotV1,
-) -> UiPolicyInputV1:
+) -> UiPolicyInputV1 | None:
     """HUD と UI presentation から UiPolicyInputV1 を構築する。
 
+    HP が欠損・信頼度 0、または画面信頼度が低い場合は None を返し、
+    誤クリックを防ぐ fail-closed な振る舞いをとります。
     combat_validity に依存せず hud.hp_ratio（画面由来）を直接使うことで、
     fallback 画面でも fallback_heuristic_v1 が HP 閾値を評価できる。
     """
-    screen_state = _HUD_TO_SCREEN_STATE.get(hud.screen_state, ScreenState.UNKNOWN)
-    hp_fraction = float(hud.hp_ratio) if hud.hp_ratio is not None else 0.
+    if hud.hp_ratio is None or hud.hp_confidence <= 0.0:
+        return None
+    screen_confident = hud.screen_state_confidence >= _POLICY_SCREEN_CONFIDENCE_THRESHOLD
+    screen_state = _HUD_TO_SCREEN_STATE.get(hud.screen_state, ScreenState.UNKNOWN) if screen_confident else ScreenState.UNKNOWN
+    hp_fraction = float(hud.hp_ratio)
     fallback_targets = []
     for cand in ui.candidates:
         if cand.semantic_kind != "fallback_reward":

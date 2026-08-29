@@ -524,3 +524,85 @@ def test_item_context_occupancy_schema_is_deterministic() -> None:
     assert snap1.item_context is not None and snap2.item_context is not None
     assert snap1.item_context.feature_schema == "context_danger_occupancy_v1"
     assert snap1.item_context.decision_hash == snap2.item_context.decision_hash
+
+
+# ─── P1 fix 回帰テスト: HP 欠損・低信頼・target_reached_transition ───
+
+def test_ui_policy_input_missing_hp_returns_none() -> None:
+    """hp_ratio=None の HUD は ui_policy_input=None を返す (fail-closed)。
+
+    欠損 HP を 0.0 に置換すると fallback_heuristic_v1 が chicken を誤選択するため、
+    None を返してアクションを起こさない設計にしています。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
+    hud = dataclasses.replace(
+        _fallback_hud(0.5, (card_gold,)),
+        hp_ratio=None,
+        hp_confidence=0.0,
+    )
+    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is None
+
+
+def test_ui_policy_input_hp_confidence_zero_returns_none() -> None:
+    """hp_confidence=0 の HUD は ui_policy_input=None を返す (fail-closed)。
+
+    HP 測定が完全に信頼できない場合は行動を起こさない設計にしています。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
+    hud = dataclasses.replace(
+        _fallback_hud(0.5, (card_gold,)),
+        hp_confidence=0.0,
+    )
+    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is None
+
+
+def test_ui_policy_input_low_confidence_screen_maps_to_unknown() -> None:
+    """screen_state_confidence < 0.5 の chest 画面は UNKNOWN に写像され非モデル intent を生成しない。
+
+    低信頼画面で CHEST/FALLBACK/CONFIRM に写像すると誤クリックが発生するため、
+    信頼度不足の場合は UNKNOWN を返して no-op にします。
+    """
+    from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, ScreenState, decide_non_model_ui_intent
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud = dataclasses.replace(
+        _fallback_hud(0.75, ()),
+        screen_state="chest",
+        screen_state_confidence=0.3,
+    )
+    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is not None
+    assert snap.ui_policy_input.screen_state is ScreenState.UNKNOWN
+    config = NonModelUiPolicyConfigV1.default_config()
+    intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
+    assert intent is None or intent.kind.value == "stop"
+
+
+def test_ui_policy_input_target_reached_transition_confirm() -> None:
+    """target_reached_transition + 有効な confirm ボタンは confirm intent を生成する。
+
+    target_reached_transition が CONFIRM に写像されることで遷移画面を正しく閉じられます。
+    """
+    from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, decide_non_model_ui_intent
+    from survivors.vision.hud_parser import ParsedButton
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    confirm_btn = ParsedButton("confirm", .9, "ok", (300, 300, 700, 600))
+    hud = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64,
+        "target_reached_transition", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (), "c" * 64, (confirm_btn,),
+        False, False, False, .9, "ok",
+    )
+    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    assert snap is not None and snap.ui_policy_input is not None
+    config = NonModelUiPolicyConfigV1.default_config()
+    intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
+    assert intent is not None and intent.kind.value == "confirm"
