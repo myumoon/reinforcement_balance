@@ -1,18 +1,23 @@
 """perception_session_split の split 検証テスト。
 
 calibration/final の overlap、mixed build、underpowered slice、
-source policy 制約を synthetic セッションで確認します。
+source policy 制約、content hash 一意性、session 最小時間、
+clock regression を synthetic セッションで確認します。
 """
 
 from __future__ import annotations
 
 import pytest
 from survivors.perception_session_split import (
+    ClockRegressionError,
+    MissingBenchmarkSplitError,
     MixedBuildError,
     SessionRecord,
     SessionSplit,
+    ShortSessionError,
     SplitOverlapError,
     UnderpoweredSliceError,
+    validate_frame_timestamps,
     validate_source_policy_consistency,
     validate_split,
 )
@@ -28,14 +33,19 @@ def _session(
     build_hash: str = _BH,
     profile_hash: str = _PH,
     source_policy: str = "raw",
+    duration_seconds: float = 1800.0,
+    session_hash: str | None = None,
 ) -> SessionRecord:
+    if session_hash is None:
+        session_hash = session_id * 2 + "c" * max(0, 64 - len(session_id) * 2)
+        session_hash = session_hash[:64]
     return SessionRecord(
         session_id=session_id,
-        session_hash="c" * 64,
+        session_hash=session_hash,
         build_hash=build_hash,
         target_profile_hash=profile_hash,
         resolution_wh=(1920, 1080),
-        duration_seconds=1800.0,
+        duration_seconds=duration_seconds,
         kind=kind,  # type: ignore[arg-type]
         source_policy=source_policy,  # type: ignore[arg-type]
     )
@@ -45,22 +55,25 @@ class TestSplitOverlap:
     """calibration/final/train/validation の session_id 重複を拒否する。"""
 
     def test_calibration_final_overlap_fails(self) -> None:
-        """同じ session_id が calibration と final_e2e_test の両方に現れるとき SplitOverlapError。"""
-        sessions = [_session("s1", "calibration")] * 3 + [_session("s1", "final_e2e_test")] * 3
-        with pytest.raises(SplitOverlapError, match="session overlap"):
+        """同じ session_id が calibration と final の両方に現れると SplitOverlapError。"""
+        sessions = (
+            [_session("s1", "error_calibration")] * 3
+            + [_session("s1", "final_e2e_test")] * 3
+        )
+        with pytest.raises(SplitOverlapError):
             validate_split(sessions)
 
     def test_train_calibration_overlap_fails(self) -> None:
         sessions = [
-            _session("shared", "train"),
-            _session("shared", "calibration"),
+            _session("shared", "model_train"),
+            _session("shared", "error_calibration"),
         ]
         with pytest.raises(SplitOverlapError):
             validate_split(sessions, min_benchmark_sessions=1)
 
     def test_validation_final_overlap_fails(self) -> None:
         sessions = [
-            _session("shared", "validation"),
+            _session("shared", "model_validation"),
             _session("shared", "final_e2e_test"),
         ]
         with pytest.raises(SplitOverlapError):
@@ -69,62 +82,85 @@ class TestSplitOverlap:
     def test_no_overlap_ok(self) -> None:
         """異なる session_id で calibration/final が揃っているとき成功する。"""
         sessions = (
-            [_session(f"cal_{i}", "calibration") for i in range(3)]
+            [_session(f"cal_{i}", "error_calibration") for i in range(3)]
             + [_session(f"final_{i}", "final_e2e_test") for i in range(3)]
         )
         result = validate_split(sessions)
         assert isinstance(result, SessionSplit)
         assert len(result.sessions) == 6
 
+    def test_different_session_id_same_content_hash_fails(self) -> None:
+        """別 session_id でも同一 content hash は split 横断で拒否する（必須回帰テスト）。"""
+        shared_hash = "f" * 64
+        sessions = (
+            [_session(f"cal_{i}", "error_calibration", session_hash=shared_hash) for i in range(3)]
+            + [_session(f"final_{i}", "final_e2e_test", session_hash=shared_hash) for i in range(3)]
+        )
+        with pytest.raises(SplitOverlapError, match="session_hash"):
+            validate_split(sessions)
+
 
 class TestMixedBuild:
-    """calibration セッション間で build/profile/resolution が異なるとき拒否する。"""
+    """benchmark セッション間で build/profile/resolution が異なるとき拒否する。"""
 
     def test_mixed_build_hash_fails(self) -> None:
         sessions = [
-            _session("cal_0", "calibration", build_hash="a" * 64),
-            _session("cal_1", "calibration", build_hash="b" * 64),
-            _session("cal_2", "calibration", build_hash="a" * 64),
-        ]
+            _session("cal_0", "error_calibration", build_hash="a" * 64),
+            _session("cal_1", "error_calibration", build_hash="b" * 64),
+            _session("cal_2", "error_calibration", build_hash="a" * 64),
+        ] + [_session(f"fin_{i}", "final_e2e_test") for i in range(3)]
         with pytest.raises(MixedBuildError):
             validate_split(sessions)
 
     def test_mixed_profile_hash_fails(self) -> None:
         sessions = [
-            _session("c0", "calibration", profile_hash="a" * 64),
-            _session("c1", "calibration", profile_hash="b" * 64),
-            _session("c2", "calibration", profile_hash="a" * 64),
-        ]
+            _session("c0", "error_calibration", profile_hash="a" * 64),
+            _session("c1", "error_calibration", profile_hash="b" * 64),
+            _session("c2", "error_calibration", profile_hash="a" * 64),
+        ] + [_session(f"fin_{i}", "final_e2e_test") for i in range(3)]
         with pytest.raises(MixedBuildError):
             validate_split(sessions)
 
     def test_consistent_build_ok(self) -> None:
-        sessions = [_session(f"c{i}", "calibration") for i in range(3)]
+        sessions = (
+            [_session(f"c{i}", "error_calibration") for i in range(3)]
+            + [_session(f"f{i}", "final_e2e_test") for i in range(3)]
+        )
         result = validate_split(sessions)
-        assert len(result.sessions) == 3
+        assert len(result.sessions) == 6
 
 
 class TestUnderpowered:
-    """calibration/final スライスが min_benchmark_sessions 未満のとき拒否する。"""
+    """benchmark スライスが min_benchmark_sessions 未満のとき拒否する。"""
 
-    def test_one_calibration_session_fails(self) -> None:
-        sessions = [_session("c0", "calibration")]
+    def test_one_calibration_one_final_fails(self) -> None:
+        """両方存在するが各1件 → underpowered。"""
+        sessions = [
+            _session("c0", "error_calibration"),
+            _session("f0", "final_e2e_test"),
+        ]
         with pytest.raises(UnderpoweredSliceError):
             validate_split(sessions)
 
-    def test_two_calibration_sessions_fails(self) -> None:
-        sessions = [_session(f"c{i}", "calibration") for i in range(2)]
+    def test_two_calibration_fails(self) -> None:
+        sessions = (
+            [_session(f"c{i}", "error_calibration") for i in range(2)]
+            + [_session(f"f{i}", "final_e2e_test") for i in range(3)]
+        )
         with pytest.raises(UnderpoweredSliceError):
             validate_split(sessions)
 
-    def test_three_calibration_sessions_ok(self) -> None:
-        sessions = [_session(f"c{i}", "calibration") for i in range(3)]
+    def test_three_calibration_three_final_ok(self) -> None:
+        sessions = (
+            [_session(f"c{i}", "error_calibration") for i in range(3)]
+            + [_session(f"f{i}", "final_e2e_test") for i in range(3)]
+        )
         result = validate_split(sessions)
-        assert len(result.sessions) == 3
+        assert len(result.sessions) == 6
 
-    def test_no_benchmark_sessions_ok(self) -> None:
-        """calibration/final がゼロ件のとき UnderpoweredSliceError は起きない。"""
-        sessions = [_session("t0", "train")]
+    def test_train_only_ok(self) -> None:
+        """calibration/final がゼロ件（train のみ）は通る。"""
+        sessions = [_session("t0", "model_train")]
         result = validate_split(sessions)
         assert len(result.sessions) == 1
 
@@ -133,32 +169,130 @@ class TestUnderpowered:
         assert len(result.sessions) == 0
 
 
+class TestMissingBenchmarkSplit:
+    """calibration か final の片側だけ存在するとき拒否する（必須回帰テスト）。"""
+
+    def test_calibration_only_fails(self) -> None:
+        """calibration 3件、final 0件 → MissingBenchmarkSplitError。"""
+        sessions = [_session(f"c{i}", "error_calibration") for i in range(3)]
+        with pytest.raises(MissingBenchmarkSplitError, match="final_e2e_test"):
+            validate_split(sessions)
+
+    def test_final_only_fails(self) -> None:
+        """final 3件、calibration 0件 → MissingBenchmarkSplitError。"""
+        sessions = [_session(f"f{i}", "final_e2e_test") for i in range(3)]
+        with pytest.raises(MissingBenchmarkSplitError, match="error_calibration"):
+            validate_split(sessions)
+
+    def test_empty_calibration_with_final_fails(self) -> None:
+        """empty calibration split は fail closed（必須回帰テスト）。"""
+        sessions = [_session("f0", "final_e2e_test")]
+        with pytest.raises(MissingBenchmarkSplitError):
+            validate_split(sessions, min_benchmark_sessions=1)
+
+
+class TestShortSession:
+    """30分未満のセッションを拒否する（必須回帰テスト）。"""
+
+    def test_one_second_sessions_fail(self) -> None:
+        """1秒セッションを3件並べても ShortSessionError で拒否。"""
+        sessions = (
+            [_session(f"c{i}", "error_calibration", duration_seconds=1.0) for i in range(3)]
+            + [_session(f"f{i}", "final_e2e_test", duration_seconds=1.0) for i in range(3)]
+        )
+        with pytest.raises(ShortSessionError):
+            validate_split(sessions)
+
+    def test_exactly_30_minutes_ok(self) -> None:
+        sessions = (
+            [_session(f"c{i}", "error_calibration", duration_seconds=1800.0) for i in range(3)]
+            + [_session(f"f{i}", "final_e2e_test", duration_seconds=1800.0) for i in range(3)]
+        )
+        result = validate_split(sessions)
+        assert len(result.sessions) == 6
+
+    def test_29_minutes_fails(self) -> None:
+        sessions = (
+            [_session("c0", "error_calibration", duration_seconds=1799.0)]
+            + [_session(f"c{i}", "error_calibration") for i in range(1, 3)]
+            + [_session(f"f{i}", "final_e2e_test") for i in range(3)]
+        )
+        with pytest.raises(ShortSessionError):
+            validate_split(sessions)
+
+
+class TestClockRegression:
+    """フレームタイムスタンプの strict monotonicity を確認する（必須回帰テスト）。"""
+
+    def test_monotonic_timestamps_ok(self) -> None:
+        validate_frame_timestamps([100, 200, 300, 400])
+
+    def test_decreasing_timestamp_fails(self) -> None:
+        with pytest.raises(ClockRegressionError):
+            validate_frame_timestamps([100, 200, 150, 300])
+
+    def test_equal_timestamp_fails(self) -> None:
+        """同値タイムスタンプも clock regression として拒否。"""
+        with pytest.raises(ClockRegressionError):
+            validate_frame_timestamps([100, 200, 200, 300])
+
+    def test_empty_timestamps_ok(self) -> None:
+        validate_frame_timestamps([])
+
+    def test_single_timestamp_ok(self) -> None:
+        validate_frame_timestamps([100])
+
+
 class TestSourcePolicy:
     """MP4 decode は domain-shift 比較専用で benchmark 入力に使えない。"""
 
     def test_mp4_in_calibration_fails_source_check(self) -> None:
-        sessions = [_session(f"c{i}", "calibration", source_policy="mp4") for i in range(3)]
+        sessions = [
+            _session(f"c{i}", "error_calibration", source_policy="mp4") for i in range(3)
+        ] + [_session(f"f{i}", "final_e2e_test") for i in range(3)]
         validate_split(sessions)  # split 自体は通る
         with pytest.raises(ValueError, match="mp4"):
-            validate_source_policy_consistency(sessions, benchmark_kind="calibration")
+            validate_source_policy_consistency(sessions, benchmark_kind="error_calibration")
 
     def test_raw_lossless_in_calibration_ok(self) -> None:
         sessions = [
-            _session("c0", "calibration", source_policy="raw"),
-            _session("c1", "calibration", source_policy="lossless"),
-            _session("c2", "calibration", source_policy="raw"),
-        ]
-        validate_source_policy_consistency(sessions, benchmark_kind="calibration")  # エラーなし
+            _session("c0", "error_calibration", source_policy="raw"),
+            _session("c1", "error_calibration", source_policy="lossless"),
+            _session("c2", "error_calibration", source_policy="raw"),
+        ] + [_session(f"f{i}", "final_e2e_test") for i in range(3)]
+        validate_source_policy_consistency(sessions, benchmark_kind="error_calibration")  # エラーなし
 
     def test_mp4_in_train_ok(self) -> None:
         """train セッションでは MP4 を許可する。"""
-        sessions = [_session("t0", "train", source_policy="mp4")]
-        validate_source_policy_consistency(sessions, benchmark_kind="calibration")  # エラーなし
+        sessions = [_session("t0", "model_train", source_policy="mp4")]
+        validate_source_policy_consistency(sessions, benchmark_kind="error_calibration")  # エラーなし
 
     def test_raw_and_lossless_distinguished(self) -> None:
         """raw と lossless は source_policy で明示的に区別される。"""
-        r = _session("s0", "calibration", source_policy="raw")
-        l_ = _session("s1", "calibration", source_policy="lossless")
+        r = _session("s0", "error_calibration", source_policy="raw")
+        l_ = _session("s1", "error_calibration", source_policy="lossless")
         assert r.source_policy == "raw"
         assert l_.source_policy == "lossless"
         assert r.source_policy != l_.source_policy
+
+
+class TestSplitNamesMatchCapture:
+    """split 名が capture_dataset.py SPLIT_NAMES と一致する（必須回帰テスト）。"""
+
+    def test_exact_split_names(self) -> None:
+        """model_train, model_validation, error_calibration, final_e2e_test を受理する。"""
+        sessions = [
+            _session("t0", "model_train"),
+            _session("v0", "model_validation"),
+        ]
+        result = validate_split(sessions)
+        assert len(result.sessions) == 2
+
+    def test_model_train_error_calibration_same_session_fails(self) -> None:
+        """model_train と error_calibration の同一 session は失敗（必須回帰テスト）。"""
+        sessions = [
+            _session("shared", "model_train"),
+            _session("shared", "error_calibration"),
+        ]
+        with pytest.raises(SplitOverlapError):
+            validate_split(sessions, min_benchmark_sessions=1)

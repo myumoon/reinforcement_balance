@@ -27,7 +27,13 @@ ALLOWED_PARENT_KINDS: dict[str, frozenset[str]] = {
     "choice_dataset_release": frozenset({"teacher_validation_verdict"}),
     "item_selector_release": frozenset({"choice_dataset_release"}),
     "combat_student_release": frozenset({"choice_dataset_release"}),
-    "runtime_bundle": frozenset({"item_selector_release", "combat_student_release"}),
+    # perception calibration は source_descriptor（capture dataset）を親に持つ
+    "perception_calibration_profile": frozenset({"source_descriptor"}),
+    # perception final verdict は calibration profile を必須親とする
+    "perception_final_verdict": frozenset({"perception_calibration_profile"}),
+    "runtime_bundle": frozenset(
+        {"item_selector_release", "combat_student_release", "perception_final_verdict"}
+    ),
     "replay_shadow_verdict": frozenset({"runtime_bundle"}),
     "canary_campaign": frozenset({"replay_shadow_verdict"}),
     "goal_evidence": frozenset({"canary_campaign", "restore_test_verdict"}),
@@ -39,13 +45,16 @@ ALLOWED_PARENT_KINDS: dict[str, frozenset[str]] = {
 
 _REQUIRED_PARENT_KINDS: dict[str, frozenset[str]] = {
     "goal_evidence": frozenset({"canary_campaign", "restore_test_verdict"}),
+    "perception_final_verdict": frozenset({"perception_calibration_profile"}),
 }
 
 
 _KIND_ORDER = {
     "source_descriptor": 0,
     "teacher_validation_verdict": 1,
+    "perception_calibration_profile": 1,
     "choice_dataset_release": 2,
+    "perception_final_verdict": 2,
     "item_selector_release": 3,
     "combat_student_release": 3,
     "runtime_bundle": 4,
