@@ -180,6 +180,8 @@ class SnapshotReplayTick:
     ground_truth: PerceptionSnapshot
     predicted: PerceptionSnapshot | None
     latency_ms: float
+    # formal replay 経路でのみ設定。detector package artifact_hash との照合に使う。
+    detector_artifact_hash: str = ""
 
     def __post_init__(self) -> None:
         _nonempty_str(self.session_id, "SnapshotReplayTick.session_id")
@@ -197,6 +199,8 @@ class SnapshotReplayTick:
             raise ValueError("ground_truth frame_id is not bound to replay tick")
         if self.predicted is not None and self.predicted.frame_id != self.frame_id:
             raise ValueError("predicted frame_id is not bound to replay tick")
+        if not isinstance(self.detector_artifact_hash, str):
+            raise TypeError("detector_artifact_hash must be str")
 
 
 @dataclass

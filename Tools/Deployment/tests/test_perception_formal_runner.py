@@ -164,6 +164,7 @@ def _replay_provider(manifests, _restored):
             ticks.append(SnapshotReplayTick(
                 manifest.session_id, "final_e2e_test", "lossless",
                 snapshot.frame_id, snapshot, snapshot, 1.0,
+                detector_artifact_hash="2" * 64,
             ))
     return ticks
 

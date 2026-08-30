@@ -332,9 +332,47 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
             raise TypeError(
                 f"formal replay provider must yield SnapshotReplayTick, got {type(tick).__name__}"
             )
+    # session_kind / source_policy / raw fields を validated split の session record と照合する。
+    final_session_records = {
+        s.session_id: s for s in validated_split.sessions if s.kind == "final_e2e_test"
+    }
+    for tick in replay_ticks:
+        record = final_session_records.get(tick.session_id)
+        if record is None:
+            raise ValueError(
+                f"tick session {tick.session_id!r} is not in the validated final sessions"
+            )
+        if tick.session_kind != record.kind:
+            raise ValueError(
+                f"tick {tick.session_id}/{tick.frame_id}: session_kind {tick.session_kind!r} "
+                f"does not match split record kind {record.kind!r}"
+            )
+        if tick.source_policy != record.source_policy:
+            raise ValueError(
+                f"tick {tick.session_id}/{tick.frame_id}: source_policy {tick.source_policy!r} "
+                f"does not match split record source_policy {record.source_policy!r}"
+            )
+        # formal replay では raw_card_ids / raw_inventory が必須（hash 独立検証のため）。
+        for label, snapshot in (("ground_truth", tick.ground_truth), ("predicted", tick.predicted)):
+            if snapshot is None:
+                continue
+            ui = snapshot.ui_presentation
+            if ui.raw_card_ids is None or ui.raw_inventory is None:
+                raise ValueError(
+                    f"tick {tick.session_id}/{tick.frame_id} {label}: "
+                    "raw_card_ids and raw_inventory are required in formal replay"
+                )
     # replay の parser_artifact_hash が登録済み parser_package 宣言と一致することを確認する。
     parser_decl_hash = json.loads(restored["parser_package"])["artifact_hash"]
+    # detector_artifact_hash が登録済み detector_package 宣言と一致することを確認する。
+    detector_decl_hash = json.loads(restored["detector_package"])["artifact_hash"]
     for tick in replay_ticks:
+        if tick.detector_artifact_hash != detector_decl_hash:
+            raise ValueError(
+                f"tick {tick.session_id}/{tick.frame_id}: "
+                f"detector_artifact_hash ({tick.detector_artifact_hash[:8] if tick.detector_artifact_hash else '(empty)'}…) "
+                f"does not match detector_package artifact_hash ({detector_decl_hash[:8]}…)"
+            )
         for label, snapshot in (("ground_truth", tick.ground_truth), ("predicted", tick.predicted)):
             if snapshot is None:
                 continue
@@ -368,6 +406,12 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         or verdict_ref != descriptors[2].files[0]
     ):
         raise ValueError("published refs differ from prevalidated descriptor refs")
+    # 両 ref のジョイント再検証：seal publish 前に calibration と verdict の双方が store にあることを確認する。
+    # seal が commit marker になるため、seal publish に進む前に双方の存在と整合性を保証する。
+    for label, ref in (("calibration_profile", calibration_ref), ("final_verdict", verdict_ref)):
+        if not request.store.verify(ref).ok:
+            raise ValueError(f"post-publish joint revalidation failed for {label}")
+    validate_artifact_dag(descriptors)
     # ref 検証後にのみ seal を publish し、続いて session を開封する。
     persisted_seal = _create_formal_lineage_seal(
         final_session_hashes=final_hashes,
