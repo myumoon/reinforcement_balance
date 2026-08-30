@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -161,10 +162,11 @@ def _replay_provider(manifests, _restored):
                 schema, (1920, 1080),
             )
             assert snapshot is not None
+            # detector_artifact_hash は PerceptionSnapshot 側（SnapshotReplayTick ではない）へ設定する。
+            snapshot = replace(snapshot, detector_artifact_hash="2" * 64)
             ticks.append(SnapshotReplayTick(
                 manifest.session_id, "final_e2e_test", "lossless",
                 snapshot.frame_id, snapshot, snapshot, 1.0,
-                detector_artifact_hash="2" * 64,
             ))
     return ticks
 
@@ -281,7 +283,6 @@ def test_inventory_hash_tamper_caught_by_raw_inventory(tmp_path: Path) -> None:
         for index in range(3)
     )
     ticks = list(_replay_provider(manifests, {}))
-    from dataclasses import replace
     from survivors.perception_benchmark import ExpectedTick, run_benchmark
 
     target = ticks[0].ground_truth.ui_presentation
@@ -291,3 +292,59 @@ def test_inventory_hash_tamper_caught_by_raw_inventory(tmp_path: Path) -> None:
     expected = [ExpectedTick(tick.session_id, tick.frame_id) for tick in ticks]
     with pytest.raises(ValueError, match="inventory_hash does not match typed inventory"):
         run_benchmark(ticks, expected_ticks=expected)
+
+
+def test_detector_artifact_hash_mismatch_rejected_by_formal_runner(tmp_path: Path) -> None:
+    """formal runner が誤 detector_artifact_hash のスナップショットを拒否する。
+
+    SnapshotReplayTick ではなく PerceptionSnapshot 内の detector_artifact_hash を
+    検証するため、provider が後から hash を書き換えても検出できます。
+    """
+    import dataclasses
+
+    request = _request(tmp_path)
+    manifests = tuple(
+        DatasetWriter.restore(request.capture_store_root, f"final-{index}")
+        for index in range(3)
+    )
+
+    def _bad_detector_provider(final_manifests, restored):
+        for tick in _replay_provider(final_manifests, restored):
+            # detector_artifact_hash を誤値に差し替えた snapshot へ置き換える。
+            bad_snapshot = replace(tick.ground_truth, detector_artifact_hash="f" * 64)
+            yield replace(tick, ground_truth=bad_snapshot, predicted=bad_snapshot)
+
+    bad_request = dataclasses.replace(request, final_replay_provider=_bad_detector_provider)
+    with pytest.raises(ValueError, match="detector_artifact_hash"):
+        run_formal_pipeline(bad_request)
+
+
+def test_canonical_logical_ids_not_set_when_seal_fails(tmp_path: Path) -> None:
+    """seal（commit marker）失敗時に canonical logical_id が設定されないことを確認する。
+
+    staging → seal → canonical の順序で publish するため、seal が失敗しても
+    consumer から見える canonical logical_id が中途半端に残りません。
+    """
+    import dataclasses
+    from unittest.mock import patch
+
+    request = _request(tmp_path)
+    canonical_cal = request.calibration_logical_id
+    canonical_ver = request.verdict_logical_id
+
+    from Tools.Artifacts.artifact_store import ArtifactStoreError
+
+    # put_bytes_create_once（seal publish）だけを失敗させる。
+    def _fail_create_once(*, logical_id, data, media_type):
+        raise ArtifactStoreError("simulated seal failure")
+
+    with patch.object(request.store, "put_bytes_create_once", side_effect=_fail_create_once):
+        with pytest.raises(ArtifactStoreError, match="simulated seal failure"):
+            run_formal_pipeline(request)
+
+    # canonical logical_id の index が存在しないことを確認する。
+    # ArtifactStore は logical_id を logical_root 以下のパスへ記録する。
+    cal_index = request.store._logical_index_path(canonical_cal)
+    ver_index = request.store._logical_index_path(canonical_ver)
+    assert not cal_index.exists(), "calibration canonical logical_id must not be set before seal"
+    assert not ver_index.exists(), "verdict canonical logical_id must not be set before seal"

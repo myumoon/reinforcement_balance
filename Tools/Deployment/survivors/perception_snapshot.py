@@ -153,6 +153,9 @@ class PerceptionSnapshot:
     deploy_obs: DeployObservation; item_context: ItemDecisionFeatures | None
     choices: tuple[CandidateFeatures, ...]; ui_presentation: UiPresentationSnapshotV1
     diagnostics: Mapping[str, Any]
+    # 04-09 assembler が world detector パッケージ identity を束縛するフィールド。
+    # formal replay 経路でのみ設定。空文字はsynthetic（development_only）を意味する。
+    detector_artifact_hash: str = ""
     ui_policy_input: UiPolicyInputV1 | None = None
     def __post_init__(self) -> None:
         """atomic identity と ROI leakage 禁止を検証する。
@@ -167,6 +170,11 @@ class PerceptionSnapshot:
             raise ValueError("invalid perception payload")
         if self.item_context is not None and not isinstance(self.item_context, ItemDecisionFeatures):
             raise ValueError("invalid item_context")
+        if self.detector_artifact_hash and (
+            len(self.detector_artifact_hash) != 64
+            or not all(c in "0123456789abcdef" for c in self.detector_artifact_hash)
+        ):
+            raise ValueError("detector_artifact_hash must be a 64-char hex SHA-256 or empty")
         if self.ui_policy_input is not None and not isinstance(self.ui_policy_input, UiPolicyInputV1):
             raise ValueError("ui_policy_input must be UiPolicyInputV1 or None")
         if not isinstance(self.choices, tuple) or not all(isinstance(value, CandidateFeatures) for value in self.choices):

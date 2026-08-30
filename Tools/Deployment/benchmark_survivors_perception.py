@@ -362,26 +362,32 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
                     f"tick {tick.session_id}/{tick.frame_id} {label}: "
                     "raw_card_ids and raw_inventory are required in formal replay"
                 )
-    # replay の parser_artifact_hash が登録済み parser_package 宣言と一致することを確認する。
+    # replay の parser_artifact_hash / detector_artifact_hash が登録済みパッケージ宣言と一致することを確認する。
     parser_decl_hash = json.loads(restored["parser_package"])["artifact_hash"]
-    # detector_artifact_hash が登録済み detector_package 宣言と一致することを確認する。
     detector_decl_hash = json.loads(restored["detector_package"])["artifact_hash"]
     for tick in replay_ticks:
-        if tick.detector_artifact_hash != detector_decl_hash:
-            raise ValueError(
-                f"tick {tick.session_id}/{tick.frame_id}: "
-                f"detector_artifact_hash ({tick.detector_artifact_hash[:8] if tick.detector_artifact_hash else '(empty)'}…) "
-                f"does not match detector_package artifact_hash ({detector_decl_hash[:8]}…)"
-            )
         for label, snapshot in (("ground_truth", tick.ground_truth), ("predicted", tick.predicted)):
             if snapshot is None:
                 continue
-            actual = snapshot.ui_presentation.parser_artifact_hash
-            if actual != parser_decl_hash:
+            actual_parser = snapshot.ui_presentation.parser_artifact_hash
+            if actual_parser != parser_decl_hash:
                 raise ValueError(
                     f"tick {tick.session_id}/{tick.frame_id} {label}: "
-                    f"parser_artifact_hash ({actual[:8]}…) does not match "
+                    f"parser_artifact_hash ({actual_parser[:8]}…) does not match "
                     f"parser_package artifact_hash ({parser_decl_hash[:8]}…)"
+                )
+            # detector_artifact_hash はスナップショット構造内（SnapshotReplayTick の自己申告ではない）で確認する。
+            actual_detector = snapshot.detector_artifact_hash
+            if not actual_detector:
+                raise ValueError(
+                    f"tick {tick.session_id}/{tick.frame_id} {label}: "
+                    "detector_artifact_hash is empty; formal replay snapshots must carry detector identity"
+                )
+            if actual_detector != detector_decl_hash:
+                raise ValueError(
+                    f"tick {tick.session_id}/{tick.frame_id} {label}: "
+                    f"snapshot.detector_artifact_hash ({actual_detector[:8]}…) does not match "
+                    f"detector_package artifact_hash ({detector_decl_hash[:8]}…)"
                 )
     report = _formalize_benchmark_report(
         run_benchmark(replay_ticks, expected_ticks=expected_ticks)
@@ -393,26 +399,25 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     )
     descriptors = _descriptor_chain(request, profile, verdict)
 
-    # Phase B: content ノードを先に書き、seal+open を最後の point-of-no-return にする。
-    # content 書き込み失敗時に seal/open marker が残らない順序とする。
-    calibration_ref = _write_formal_calibration_profile(
-        profile, store=request.store, logical_id=request.calibration_logical_id
+    # Phase B: staging → seal（commit）→ canonical logical_id の順序で publish する。
+    # 1) まず content を staging logical_id（content hash ベース）へ書く。
+    #    staging 中は canonical logical_id が設定されないため、consumer は partial な状態を見ない。
+    staged_cal_ref = _write_formal_calibration_profile(
+        profile, store=request.store,
+        logical_id=f"perception/staging/calibration/{descriptors[1].files[0].sha256}",
     )
-    verdict_ref = _write_formal_final_verdict(
-        verdict, store=request.store, logical_id=request.verdict_logical_id
+    staged_ver_ref = _write_formal_final_verdict(
+        verdict, store=request.store,
+        logical_id=f"perception/staging/verdict/{descriptors[2].files[0].sha256}",
     )
     if (
-        calibration_ref != descriptors[1].files[0]
-        or verdict_ref != descriptors[2].files[0]
+        staged_cal_ref.sha256 != descriptors[1].files[0].sha256
+        or staged_ver_ref.sha256 != descriptors[2].files[0].sha256
     ):
-        raise ValueError("published refs differ from prevalidated descriptor refs")
-    # 両 ref のジョイント再検証：seal publish 前に calibration と verdict の双方が store にあることを確認する。
-    # seal が commit marker になるため、seal publish に進む前に双方の存在と整合性を保証する。
-    for label, ref in (("calibration_profile", calibration_ref), ("final_verdict", verdict_ref)):
-        if not request.store.verify(ref).ok:
-            raise ValueError(f"post-publish joint revalidation failed for {label}")
+        raise ValueError("staged refs sha256 differ from prevalidated descriptor refs")
     validate_artifact_dag(descriptors)
-    # ref 検証後にのみ seal を publish し、続いて session を開封する。
+    # 2) seal を put_bytes_create_once で publish する（単一 atomic 操作 = commit 点）。
+    #    seal が commit marker：seal が存在すれば calibration + verdict が確定している。
     persisted_seal = _create_formal_lineage_seal(
         final_session_hashes=final_hashes,
         store=request.store,
@@ -420,6 +425,13 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     )
     if persisted_seal.seal_id != seal.seal_id:
         raise ValueError("persisted lineage seal identity changed after validation")
+    # 3) seal commit 後に canonical logical_id を idempotent で設定する（同一 sha256 の put_bytes）。
+    calibration_ref = _write_formal_calibration_profile(
+        profile, store=request.store, logical_id=request.calibration_logical_id
+    )
+    verdict_ref = _write_formal_final_verdict(
+        verdict, store=request.store, logical_id=request.verdict_logical_id
+    )
     for manifest in final_manifests:
         persisted_seal.open_session(
             manifest.session_id, manifest.session_path / "session_manifest.json"
