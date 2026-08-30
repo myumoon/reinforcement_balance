@@ -21,7 +21,12 @@ from survivors.vision.entity_tracker import (
     TrackedEntityV1,
     TrackedWorldStateV1,
 )
-from survivors.vision.hud_parser import HudStateV1, ParsedCard
+from survivors.vision.hud_parser import (
+    HudStateV1,
+    ParsedCard,
+    _compute_candidate_set_hash,
+    _compute_inventory_hash,
+)
 
 
 PROFILE_HASH = "a" * 64
@@ -85,10 +90,13 @@ def _dependency_refs(store: ArtifactStore, split) -> dict[str, object]:
         "parser_package": _package_ref(store, "fixtures/parser.json", {
             "schema_version": "hud_parser_package.v1", "development_only": False,
             "formal_eligible": True,
+            # _hud_world の HudStateV1.parser_artifact_hash と一致させる。
+            "artifact_hash": "9" * 64,
         }),
         "detector_package": _package_ref(store, "fixtures/detector.json", {
             "schema_version": "world_detector_package.v1", "development_only": False,
             "formal_eligible": True,
+            "artifact_hash": "2" * 64,
         }),
         "assembler_config": _package_ref(store, "fixtures/assembler.json", {
             "schema_version": "assembler_config.v1", "development_only": False,
@@ -107,11 +115,15 @@ def _dependency_refs(store: ArtifactStore, split) -> dict[str, object]:
 
 def _hud_world(session_id: str, frame_index: int, timestamp_ns: int, screen_state: str):
     card = ParsedCard(0, "whip", "weapon", 2, 1.0, "fixture", (100, 100, 400, 500))
+    inventory = ("whip",) + (None,) * 11
+    # canonical hash を実際の計算関数で生成し、_recomputed_snapshot_hashes の照合に通す。
+    real_inventory_hash = _compute_inventory_hash(inventory)
+    real_candidate_set_hash = _compute_candidate_set_hash(screen_state, (card,))
     hud = HudStateV1(
         "hud_state.v1", session_id, frame_index, timestamp_ns, "9" * 64,
         screen_state, 1.0, "fixture", 20.0, 1.0, "fixture", False,
         0.75, 1.0, "fixture", 0.5, 1.0, "fixture", 4, 1.0, "fixture",
-        ("whip",) + (None,) * 11, 1.0, "8" * 64, (card,), "7" * 64,
+        inventory, 1.0, real_inventory_hash, (card,), real_candidate_set_hash,
         (), False, False, False, 1.0, "fixture",
     )
     entity = TrackedEntityV1(

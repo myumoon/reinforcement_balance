@@ -78,6 +78,17 @@ _DEPENDENCY_NAMES = frozenset(
         "assembler_config", "target_config",
     }
 )
+# パッケージ種別ごとの required field 集合。JSON 内容を exact schema で検証する。
+_PACKAGE_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
+    "parser_package": frozenset({"schema_version", "development_only", "formal_eligible", "artifact_hash"}),
+    "detector_package": frozenset({"schema_version", "development_only", "formal_eligible", "artifact_hash"}),
+    "assembler_config": frozenset({
+        "schema_version", "development_only", "formal_eligible",
+        "assembler_schema_hash", "ui_presentation_schema_hash",
+        "atlas_vocabulary_hash", "assembler_impl_hash", "roi_resolver_input_hash",
+    }),
+    "target_config": frozenset({"schema_version", "development_only", "formal_eligible", "threshold_hash"}),
+}
 _CLI_PROVIDER_FACTORY: Callable[[Mapping[str, bytes]], tuple[CalibrationProvider, FinalReplayProvider]] | None = None
 
 
@@ -114,6 +125,19 @@ def _restore_dependencies(request: FormalBenchmarkRequest) -> dict[str, bytes]:
                 or payload.get("formal_eligible") is not True
             ):
                 raise ValueError(f"{name} package content is not formal eligible")
+            # パッケージ種別別の exact required field 検証。
+            required_fields = _PACKAGE_REQUIRED_FIELDS[name]
+            missing = required_fields - set(payload)
+            if missing:
+                raise ValueError(f"{name} is missing required fields: {sorted(missing)}")
+            # parser/detector パッケージ: artifact_hash が 64 char hex であることを確認する。
+            # replay との照合は run_formal_pipeline で行う。
+            if name in {"parser_package", "detector_package"}:
+                decl_hash = payload.get("artifact_hash")
+                if not isinstance(decl_hash, str) or len(decl_hash) != 64 or not all(
+                    c in "0123456789abcdef" for c in decl_hash
+                ):
+                    raise ValueError(f"{name} artifact_hash must be a 64-char lowercase SHA-256 hex string")
         restored[name] = data
         # TOCTOU を閉じるため内容を読んだ後にも object を再検証する。
         if not request.store.verify(ref).ok:
@@ -302,7 +326,25 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         if session.kind == "final_e2e_test"
         for frame_id in session.expected_frame_ids
     ]
-    # formal/synthetic とも公開 run_benchmark の同じ replay/gate 実装を通す。
+    # formal runner: typed SnapshotReplayTick のみ受理する。
+    for tick in replay_ticks:
+        if not isinstance(tick, SnapshotReplayTick):
+            raise TypeError(
+                f"formal replay provider must yield SnapshotReplayTick, got {type(tick).__name__}"
+            )
+    # replay の parser_artifact_hash が登録済み parser_package 宣言と一致することを確認する。
+    parser_decl_hash = json.loads(restored["parser_package"])["artifact_hash"]
+    for tick in replay_ticks:
+        for label, snapshot in (("ground_truth", tick.ground_truth), ("predicted", tick.predicted)):
+            if snapshot is None:
+                continue
+            actual = snapshot.ui_presentation.parser_artifact_hash
+            if actual != parser_decl_hash:
+                raise ValueError(
+                    f"tick {tick.session_id}/{tick.frame_id} {label}: "
+                    f"parser_artifact_hash ({actual[:8]}…) does not match "
+                    f"parser_package artifact_hash ({parser_decl_hash[:8]}…)"
+                )
     report = _formalize_benchmark_report(
         run_benchmark(replay_ticks, expected_ticks=expected_ticks)
     )
@@ -313,18 +355,8 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     )
     descriptors = _descriptor_chain(request, profile, verdict)
 
-    # Phase B: 全内容/gate/DAG が成立した後だけ seal/open/output を atomic publish する。
-    persisted_seal = _create_formal_lineage_seal(
-        final_session_hashes=final_hashes,
-        store=request.store,
-        **seal_subjects,
-    )
-    if persisted_seal.seal_id != seal.seal_id:
-        raise ValueError("persisted lineage seal identity changed after validation")
-    for manifest in final_manifests:
-        persisted_seal.open_session(
-            manifest.session_id, manifest.session_path / "session_manifest.json"
-        )
+    # Phase B: content ノードを先に書き、seal+open を最後の point-of-no-return にする。
+    # content 書き込み失敗時に seal/open marker が残らない順序とする。
     calibration_ref = _write_formal_calibration_profile(
         profile, store=request.store, logical_id=request.calibration_logical_id
     )
@@ -336,6 +368,18 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         or verdict_ref != descriptors[2].files[0]
     ):
         raise ValueError("published refs differ from prevalidated descriptor refs")
+    # ref 検証後にのみ seal を publish し、続いて session を開封する。
+    persisted_seal = _create_formal_lineage_seal(
+        final_session_hashes=final_hashes,
+        store=request.store,
+        **seal_subjects,
+    )
+    if persisted_seal.seal_id != seal.seal_id:
+        raise ValueError("persisted lineage seal identity changed after validation")
+    for manifest in final_manifests:
+        persisted_seal.open_session(
+            manifest.session_id, manifest.session_path / "session_manifest.json"
+        )
     return FormalBenchmarkResult(
         validated_split, profile, verdict, calibration_ref, verdict_ref, descriptors
     )

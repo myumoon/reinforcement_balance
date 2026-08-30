@@ -143,11 +143,13 @@ class BenchmarkRecord:
             if predicted is not None:
                 _nonnegative(predicted, "timer_seconds.predicted")
         elif self.field == "ui_roi_center_error":
-            _nonnegative(gt, "ui_roi_center_error.ground_truth")
+            gt_val = _nonnegative(gt, "ui_roi_center_error.ground_truth")
+            if gt_val > math.sqrt(2.0):
+                raise ValueError("ui_roi_center_error.ground_truth exceeds normalized screen diagonal")
             if predicted is not None:
-                value = _nonnegative(predicted, "ui_roi_center_error.predicted")
-                if value > math.sqrt(2.0):
-                    raise ValueError("ui_roi_center_error exceeds normalized screen diagonal")
+                pred_val = _nonnegative(predicted, "ui_roi_center_error.predicted")
+                if pred_val > math.sqrt(2.0):
+                    raise ValueError("ui_roi_center_error.predicted exceeds normalized screen diagonal")
         elif self.field in {
             "ui_inside_region", "ui_false_positive", "ui_cross_frame_equivalent"
         }:
@@ -330,6 +332,19 @@ def _recomputed_snapshot_hashes(snapshot: PerceptionSnapshot) -> tuple[str, str,
             for value in ui.buttons
         ],
     }
+    # candidate_set_hash / inventory_hash を typed 内容から独立再計算して照合する。
+    # raw_card_ids / raw_inventory は formal 経路 (build_ui_presentation_from_hud) のみ設定。
+    if ui.raw_card_ids is not None:
+        expected_candidate_hash = canonical_hash({
+            "screen_state": ui.screen_state,
+            "card_ids": sorted(c or "unknown" for c in ui.raw_card_ids),
+        })
+        if expected_candidate_hash != ui.candidate_set_hash:
+            raise ValueError("candidate_set_hash does not match typed card IDs")
+    if ui.raw_inventory is not None:
+        expected_inventory_hash = canonical_hash({"slots": list(ui.raw_inventory)})
+        if expected_inventory_hash != ui.inventory_hash:
+            raise ValueError("inventory_hash does not match typed inventory")
     source_hash = canonical_hash(source_payload)
     state_hash = canonical_hash(state_payload)
     if source_hash != ui.source_content_hash or source_hash != snapshot.source_content_hash:
@@ -613,8 +628,31 @@ def _run_benchmark_common(
         records = list(raw_values)  # type: ignore[assignment]
     else:
         raise TypeError("benchmark input must contain one homogeneous typed sequence")
-    if not records:
+    # expected_ticks を先に構築してから空 records を判定する。
+    # expected_ticks が存在する場合は availability/latency accounting を省略しない。
+    tick_latencies_pre: dict[tuple[str, str], float] = {}
+    for record in records:
+        key = (record.session_id, record.frame_id)
+        prev = tick_latencies_pre.setdefault(key, record.latency_ms)
+        if prev != record.latency_ms:
+            raise ValueError(f"inconsistent latency for tick {key}")
+    pre_expected = list(expected_ticks or [ExpectedTick(*key) for key in tick_latencies_pre])
+    if not records and not pre_expected:
         return _empty_report(development_only=development_only, formal_eligible=formal_eligible)
+    if not records:
+        # expected_ticks あり・observations なし: 全 tick 欠落として報告する。
+        e_keys = [(tick.session_id, tick.frame_id) for tick in pre_expected]
+        if len(e_keys) != len(set(e_keys)):
+            raise ValueError("expected_ticks must be unique")
+        n_expected = len(e_keys)
+        empty = _empty_report(development_only=development_only, formal_eligible=formal_eligible)
+        empty.expected_tick_count = n_expected
+        empty.observed_tick_count = 0
+        empty.latency_tick_count = 0
+        empty.invalid_tick_rate = 1.0
+        empty.blocking_reasons = _metric_gate(empty.metrics_wire())
+        empty.passed = not empty.blocking_reasons
+        return empty
 
     session_kinds = {record.session_kind for record in records}
     source_policies = {record.source_policy for record in records}
@@ -660,7 +698,9 @@ def _run_benchmark_common(
         density_corr = float(np.corrcoef(gt, pred)[0, 1]) if gt.std() > 0 and pred.std() > 0 else (1.0 if np.array_equal(gt, pred) else 0.0)
     else:
         density_corr = 0.0
-    positive_latencies = [value for key, value in tick_latencies.items() if key in expected_set and value > 0.0]
+    # latency=0.0 は有効な計測値として latency_tick_count に含める。
+    # 旧 positive_latencies (>0.0) フィルタは availability/latency gate を壊していた。
+    positive_latencies = [value for key, value in tick_latencies.items() if key in expected_set]
     invalid_ticks = expected_set - observed_set
     for record in records:
         if record.predicted is None:

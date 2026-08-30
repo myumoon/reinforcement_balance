@@ -103,6 +103,9 @@ class UiPresentationSnapshotV1:
     screen_state: str; candidate_set_hash: str; inventory_hash: str
     source_content_hash: str; ui_state_key: str
     candidates: tuple[UiCandidateTargetV1, ...]; buttons: tuple[UiButtonTargetV1, ...]
+    # 独立 hash 検証に使う raw 入力値。formal replay 経路でのみ設定される。
+    raw_card_ids: tuple[str | None, ...] | None = None
+    raw_inventory: tuple[str | None, ...] | None = None
     def __post_init__(self) -> None:
         """identity と target tuple の整合性・一意性を検証する。
 
@@ -288,6 +291,8 @@ def build_ui_presentation_from_hud(
         UI_PRESENTATION_SCHEMA_HASH, resolved_snapshot, resolved_frame, hud.parser_artifact_hash,
         hud.screen_state, hud.candidate_set_hash, hud.inventory_hash,
         canonical_hash(source_payload), canonical_hash(state_payload), candidate_tuple, buttons,
+        raw_card_ids=tuple(c.item_id for c in sorted(hud.cards, key=lambda c: c.slot_index)),
+        raw_inventory=hud.inventory,
     )
 def _target_identity(target: UiCandidateTargetV1 | UiButtonTargetV1) -> tuple[Any, ...]:
     """同値比較に使う semantic identity を返す。
