@@ -223,3 +223,70 @@ def test_typed_replay_recomputes_ui_hashes_and_rejects_tamper(tmp_path: Path) ->
     expected = [ExpectedTick(tick.session_id, tick.frame_id) for tick in ticks]
     with pytest.raises(ValueError, match="source/content hash"):
         run_benchmark(ticks, expected_ticks=expected)
+
+
+def test_formal_runner_rejects_precomputed_benchmark_records(tmp_path: Path) -> None:
+    """formal runner が SnapshotReplayTick 以外を返す provider を拒否する。
+
+    run_formal_pipeline は typed snapshot のみを受理し、事前計算値では formal verdict を
+    生成できない構造である必要があります。
+    """
+    import dataclasses
+
+    request = _request(tmp_path)
+
+    class _FakeTick:
+        """SnapshotReplayTick でない偽オブジェクト（事前計算値の代わり）。"""
+
+    def _bad_provider(manifests, restored):
+        return [_FakeTick()]
+
+    bad_request = dataclasses.replace(request, final_replay_provider=_bad_provider)
+    with pytest.raises(TypeError, match="SnapshotReplayTick"):
+        run_formal_pipeline(bad_request)
+
+
+def test_candidate_set_hash_tamper_caught_by_raw_card_ids(tmp_path: Path) -> None:
+    """candidate_set_hash 単独改ざんを raw_card_ids 独立検証で検出する。
+
+    outer hash を更新せずに candidate_set_hash だけ差し替えても、
+    raw_card_ids から再計算したハッシュと照合することで改ざんを検出します。
+    """
+    request = _request(tmp_path)
+    manifests = tuple(
+        DatasetWriter.restore(request.capture_store_root, f"final-{index}")
+        for index in range(3)
+    )
+    ticks = list(_replay_provider(manifests, {}))
+    from dataclasses import replace
+    from survivors.perception_benchmark import ExpectedTick, run_benchmark
+
+    target = ticks[0].ground_truth.ui_presentation
+    # raw_card_ids は実値のまま、candidate_set_hash だけ偽値に差し替える。
+    # raw_card_ids チェックが先に発火して coherent 偽値でも検出する。
+    bad_ui = replace(target, candidate_set_hash="f" * 64)
+    bad_snapshot = replace(ticks[0].ground_truth, ui_presentation=bad_ui)
+    ticks[0] = replace(ticks[0], ground_truth=bad_snapshot)
+    expected = [ExpectedTick(tick.session_id, tick.frame_id) for tick in ticks]
+    with pytest.raises(ValueError, match="candidate_set_hash does not match typed card IDs"):
+        run_benchmark(ticks, expected_ticks=expected)
+
+
+def test_inventory_hash_tamper_caught_by_raw_inventory(tmp_path: Path) -> None:
+    """inventory_hash 単独改ざんを raw_inventory 独立検証で検出する。"""
+    request = _request(tmp_path)
+    manifests = tuple(
+        DatasetWriter.restore(request.capture_store_root, f"final-{index}")
+        for index in range(3)
+    )
+    ticks = list(_replay_provider(manifests, {}))
+    from dataclasses import replace
+    from survivors.perception_benchmark import ExpectedTick, run_benchmark
+
+    target = ticks[0].ground_truth.ui_presentation
+    bad_ui = replace(target, inventory_hash="e" * 64)
+    bad_snapshot = replace(ticks[0].ground_truth, ui_presentation=bad_ui)
+    ticks[0] = replace(ticks[0], ground_truth=bad_snapshot)
+    expected = [ExpectedTick(tick.session_id, tick.frame_id) for tick in ticks]
+    with pytest.raises(ValueError, match="inventory_hash does not match typed inventory"):
+        run_benchmark(ticks, expected_ticks=expected)
