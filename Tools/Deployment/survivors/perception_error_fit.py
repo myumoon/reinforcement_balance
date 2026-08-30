@@ -486,16 +486,11 @@ def _create_lineage_seal(
     if store is not None and publish:
         seal_bytes = canonical_json_bytes(seal.to_wire())
         seal_logical_id = logical_id or f"perception/lineage/{seal.seal_id}/seal.json"
-        # formal seal は create-once：上書きを禁止して seal identity の不変性を保証する。
-        # synthetic（development_only=True）は put_bytes で idempotent 再 publish を許す。
-        if seal.development_only:
-            ref = store.put_bytes(
-                logical_id=seal_logical_id, data=seal_bytes, media_type="application/json",
-            )
-        else:
-            ref = store.put_bytes_create_once(
-                logical_id=seal_logical_id, data=seal_bytes, media_type="application/json",
-            )
+        # seal は idempotent put_bytes：同一 lineage の再実行でも同一 sha256 を再 publish できる。
+        # commit 責務は呼び出し元の batch commit manifest が担う（そちらが single atomic 操作）。
+        ref = store.put_bytes(
+            logical_id=seal_logical_id, data=seal_bytes, media_type="application/json",
+        )
         verification = store.verify(ref)
         if not verification.ok:
             raise HashMismatchError("lineage seal failed ArtifactStore revalidation")

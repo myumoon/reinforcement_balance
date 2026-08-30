@@ -319,32 +319,36 @@ def test_detector_artifact_hash_mismatch_rejected_by_formal_runner(tmp_path: Pat
         run_formal_pipeline(bad_request)
 
 
-def test_canonical_logical_ids_not_set_when_seal_fails(tmp_path: Path) -> None:
-    """seal（commit marker）失敗時に canonical logical_id が設定されないことを確認する。
+def test_canonical_logical_ids_not_set_when_batch_commit_fails(tmp_path: Path) -> None:
+    """batch commit（commit marker）失敗時に canonical logical_id が設定されないことを確認する。
 
-    staging → seal → canonical の順序で publish するため、seal が失敗しても
-    consumer から見える canonical logical_id が中途半端に残りません。
+    staging → batch commit → seal → canonical の順序で publish するため、
+    batch commit が失敗しても consumer から見える canonical logical_id が残りません。
+    batch commit は単一の put_bytes であり、これが唯一の commit 点です。
     """
     import dataclasses
     from unittest.mock import patch
+
+    from Tools.Artifacts.artifact_store import ArtifactStoreError
 
     request = _request(tmp_path)
     canonical_cal = request.calibration_logical_id
     canonical_ver = request.verdict_logical_id
 
-    from Tools.Artifacts.artifact_store import ArtifactStoreError
+    original_put_bytes = request.store.put_bytes
 
-    # put_bytes_create_once（seal publish）だけを失敗させる。
-    def _fail_create_once(*, logical_id, data, media_type):
-        raise ArtifactStoreError("simulated seal failure")
+    def _fail_on_batch_commit(*, logical_id, data, media_type):
+        if logical_id.startswith("perception/batch_commit/"):
+            raise ArtifactStoreError("simulated batch commit failure")
+        return original_put_bytes(logical_id=logical_id, data=data, media_type=media_type)
 
-    with patch.object(request.store, "put_bytes_create_once", side_effect=_fail_create_once):
-        with pytest.raises(ArtifactStoreError, match="simulated seal failure"):
+    with patch.object(request.store, "put_bytes", side_effect=_fail_on_batch_commit):
+        with pytest.raises(ArtifactStoreError, match="simulated batch commit failure"):
             run_formal_pipeline(request)
 
     # canonical logical_id の index が存在しないことを確認する。
     # ArtifactStore は logical_id を logical_root 以下のパスへ記録する。
     cal_index = request.store._logical_index_path(canonical_cal)
     ver_index = request.store._logical_index_path(canonical_ver)
-    assert not cal_index.exists(), "calibration canonical logical_id must not be set before seal"
-    assert not ver_index.exists(), "verdict canonical logical_id must not be set before seal"
+    assert not cal_index.exists(), "calibration canonical logical_id must not be set before batch commit"
+    assert not ver_index.exists(), "verdict canonical logical_id must not be set before batch commit"

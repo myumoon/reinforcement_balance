@@ -377,6 +377,10 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
                     f"parser_package artifact_hash ({parser_decl_hash[:8]}…)"
                 )
             # detector_artifact_hash はスナップショット構造内（SnapshotReplayTick の自己申告ではない）で確認する。
+            # ponytail: detector 観測内容の真正性はこのチェックでは保証できない。provider が宣言 hash を
+            # コピーして任意の deploy_obs を注入することは防げない。完全な provenance 検証には runner 側で
+            # restored detector package を実行し観測を生成する実装（runner-side execution）が必要。
+            # 今 PR は code-only（正式実行なし）のため、hash の構造的検証のみとし実行は follow-up とする。
             actual_detector = snapshot.detector_artifact_hash
             if not actual_detector:
                 raise ValueError(
@@ -399,9 +403,12 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     )
     descriptors = _descriptor_chain(request, profile, verdict)
 
-    # Phase B: staging → seal（commit）→ canonical logical_id の順序で publish する。
-    # 1) まず content を staging logical_id（content hash ベース）へ書く。
-    #    staging 中は canonical logical_id が設定されないため、consumer は partial な状態を見ない。
+    # Phase B: stage → batch commit（single atomic）→ seal → canonical logical_id の順序で publish する。
+    # ・batch commit が唯一の commit 点（単一 put_bytes）：これが存在すれば cal + verdict が確定。
+    # ・staging 後に失敗 → batch commit 未発行 → canonical logical_id 不可視（clean state）。
+    # ・batch commit 後に失敗 → 再実行は全操作が idempotent なので安全に回復できる。
+
+    # 1) content を staging logical_id（content hash ベース・canonical 名前空間外）へ書く。
     staged_cal_ref = _write_formal_calibration_profile(
         profile, store=request.store,
         logical_id=f"perception/staging/calibration/{descriptors[1].files[0].sha256}",
@@ -416,8 +423,23 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     ):
         raise ValueError("staged refs sha256 differ from prevalidated descriptor refs")
     validate_artifact_dag(descriptors)
-    # 2) seal を put_bytes_create_once で publish する（単一 atomic 操作 = commit 点）。
-    #    seal が commit marker：seal が存在すれば calibration + verdict が確定している。
+
+    # 2) batch commit manifest を単一 put_bytes で発行する（= commit 点）。
+    #    calibration と verdict の sha256 を同時に可視化する publication manifest index。
+    #    同一 lineage の再実行は同一 sha256 → idempotent。
+    batch_commit_payload = canonical_json_bytes({
+        "schema_version": "perception_formal_batch_commit.v1",
+        "seal_id": seal.seal_id,
+        "calibration_artifact_sha256": staged_cal_ref.sha256,
+        "verdict_artifact_sha256": staged_ver_ref.sha256,
+    })
+    request.store.put_bytes(
+        logical_id=f"perception/batch_commit/{seal.seal_id}",
+        data=batch_commit_payload,
+        media_type="application/json",
+    )
+
+    # 3) 以降はすべて idempotent（batch commit 済みのため re-run 安全）。
     persisted_seal = _create_formal_lineage_seal(
         final_session_hashes=final_hashes,
         store=request.store,
@@ -425,7 +447,6 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     )
     if persisted_seal.seal_id != seal.seal_id:
         raise ValueError("persisted lineage seal identity changed after validation")
-    # 3) seal commit 後に canonical logical_id を idempotent で設定する（同一 sha256 の put_bytes）。
     calibration_ref = _write_formal_calibration_profile(
         profile, store=request.store, logical_id=request.calibration_logical_id
     )
