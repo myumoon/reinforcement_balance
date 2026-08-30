@@ -33,6 +33,8 @@ ARTIFACT_NODE_KINDS = frozenset(
         "choice_dataset_release",
         "item_selector_release",
         "combat_student_release",
+        "perception_calibration_profile",
+        "perception_final_verdict",
         "runtime_bundle",
         "replay_shadow_verdict",
         "canary_campaign",

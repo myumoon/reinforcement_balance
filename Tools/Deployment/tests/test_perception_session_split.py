@@ -7,7 +7,11 @@ clock regression を synthetic セッションで確認します。
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 import pytest
+from survivors.capture_dataset import FrameRecord, SessionManifest, SplitManifest, SplitUnit
 from survivors.perception_session_split import (
     ClockRegressionError,
     MissingBenchmarkSplitError,
@@ -26,6 +30,30 @@ _BH = "a" * 64
 _PH = "b" * 64
 
 
+def _manifest(tmp_path: Path, session_id: str) -> SessionManifest:
+    session_path = tmp_path / session_id
+    session_path.mkdir(parents=True, exist_ok=True)
+    manifest_bytes = session_id.encode()
+    (session_path / "session_manifest.json").write_bytes(manifest_bytes)
+    manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
+    records = tuple(
+        FrameRecord(
+            frame_id=index,
+            captured_monotonic_ns=index * 1_800_000_000_000,
+            object_path=f"frames/{index}.png",
+            object_sha256=hashlib.sha256(f"{session_id}:{index}".encode()).hexdigest(),
+            client_rect_screen_px=(0, 0, 1920, 1080), foreground=True,
+            target_profile_hash=_PH, game_build_id="build-1",
+        )
+        for index in (0, 1)
+    )
+    return SessionManifest(
+        1, session_id, _PH, "build-1", False, "synthetic", "lossless_png",
+        "frames.jsonl", "d" * 64, len(records), session_path,
+        manifest_hash, records, (),
+    )
+
+
 def _session(
     session_id: str,
     kind: str,
@@ -37,8 +65,7 @@ def _session(
     session_hash: str | None = None,
 ) -> SessionRecord:
     if session_hash is None:
-        session_hash = session_id * 2 + "c" * max(0, 64 - len(session_id) * 2)
-        session_hash = session_hash[:64]
+        session_hash = hashlib.sha256(session_id.encode()).hexdigest()
     return SessionRecord(
         session_id=session_id,
         session_hash=session_hash,
@@ -98,6 +125,11 @@ class TestSplitOverlap:
         )
         with pytest.raises(SplitOverlapError, match="session_hash"):
             validate_split(sessions)
+
+    def test_same_kind_duplicate_id_and_hash_fails(self) -> None:
+        duplicate = _session("same", "model_train")
+        with pytest.raises(SplitOverlapError, match="session_id"):
+            validate_split([duplicate, duplicate])
 
 
 class TestMixedBuild:
@@ -220,6 +252,10 @@ class TestShortSession:
         with pytest.raises(ShortSessionError):
             validate_split(sessions)
 
+    def test_nan_duration_fails_at_entry(self) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            _session("nan", "model_train", duration_seconds=float("nan"))
+
 
 class TestClockRegression:
     """フレームタイムスタンプの strict monotonicity を確認する（必須回帰テスト）。"""
@@ -250,9 +286,8 @@ class TestSourcePolicy:
         sessions = [
             _session(f"c{i}", "error_calibration", source_policy="mp4") for i in range(3)
         ] + [_session(f"f{i}", "final_e2e_test") for i in range(3)]
-        validate_split(sessions)  # split 自体は通る
         with pytest.raises(ValueError, match="mp4"):
-            validate_source_policy_consistency(sessions, benchmark_kind="error_calibration")
+            validate_split(sessions)
 
     def test_raw_lossless_in_calibration_ok(self) -> None:
         sessions = [
@@ -296,3 +331,34 @@ class TestSplitNamesMatchCapture:
         ]
         with pytest.raises(SplitOverlapError):
             validate_split(sessions, min_benchmark_sessions=1)
+
+
+class TestTypedCaptureManifests:
+    def test_split_and_session_manifest_are_the_formal_input(self, tmp_path: Path) -> None:
+        manifests = {
+            name: _manifest(tmp_path, name)
+            for name in ("cal", "final")
+        }
+        split = SplitManifest(
+            1, True,
+            {
+                "model_train": (), "model_validation": (),
+                "error_calibration": (SplitUnit("cal", "build-1", manifests["cal"].manifest_sha256),),
+                "final_e2e_test": (SplitUnit("final", "build-1", manifests["final"].manifest_sha256),),
+            },
+            tmp_path / "capture_split_manifest.json", "e" * 64,
+        )
+        validated = validate_split(split, manifests, min_benchmark_sessions=1)
+        assert validated.split_manifest_hash == "e" * 64
+        assert validated.expected_ticks == (("cal", "0"), ("cal", "1"), ("final", "0"), ("final", "1"))
+
+    def test_typed_same_kind_duplicate_is_rejected(self, tmp_path: Path) -> None:
+        manifest = _manifest(tmp_path, "train")
+        unit = SplitUnit("train", "build-1", manifest.manifest_sha256)
+        split = SplitManifest(
+            1, True,
+            {"model_train": (unit, unit), "model_validation": (), "error_calibration": (), "final_e2e_test": ()},
+            tmp_path / "capture_split_manifest.json", "e" * 64,
+        )
+        with pytest.raises(SplitOverlapError):
+            validate_split(split, {"train": manifest})

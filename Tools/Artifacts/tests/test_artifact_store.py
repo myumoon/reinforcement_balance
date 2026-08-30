@@ -154,6 +154,20 @@ def test_put_verify_list_and_duplicate_logical_id_guard(tmp_path):
         )
 
 
+def test_put_bytes_create_once_rejects_even_identical_second_publish(tmp_path):
+    """lineage marker は通常の idempotent put と異なり二回目そのものを拒否する。"""
+    store = ArtifactStore(tmp_path / "store")
+    kwargs = {
+        "logical_id": "perception/lineage/seal/opened/session.json",
+        "data": b'{"opened":true}',
+        "media_type": "application/json",
+    }
+    ref = store.put_bytes_create_once(**kwargs)
+    assert store.verify(ref).ok
+    with pytest.raises(ArtifactStoreError, match="already exists"):
+        store.put_bytes_create_once(**kwargs)
+
+
 def test_concurrent_different_bytes_publish_only_one_logical_ref(
     tmp_path, monkeypatch
 ):

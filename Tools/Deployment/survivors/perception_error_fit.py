@@ -1,136 +1,133 @@
-"""calibration residuals から PerceptionErrorProfile を fit し、final lineage seal を管理する。
-
-calibration セッションの誤差残差だけを使ってエラープロファイルを推定し、
-final E2E セッションの一度限り開封ポリシーと stale-verdict 検証を提供します。
-
-## FinalLineageSeal の設計
-
-seal は create-once オブジェクトで、ArtifactStore への書き込みで永続化されます。
-- `final_session_set` で開封可能なセッション集合を固定する（追加・変更不可）。
-- 同じ session_id の 2 回目の開封を拒否する（異なる session_id は各1回許可）。
-- ArtifactStore がない環境ではプロセス内リストでフォールバックするが、
-  その場合 development_only=True を強制する。
-"""
+"""Perception error fit、formal lineage seal、stale-proof verdict 契約。"""
 
 from __future__ import annotations
 
 import hashlib
 import math
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from types import MappingProxyType
+from typing import Any, Final, Mapping, Sequence
 
 import numpy as np
 
-from reinbalance_survivors_contracts.canonical_json import canonical_hash
+from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 from reinbalance_survivors_contracts.perception_error import (
     ITEM_CATEGORY_SIZE,
     PerceptionErrorProfile,
 )
 
-LINEAGE_SEAL_SCHEMA_VERSION: Final[str] = "perception_lineage_seal.v1"
-CALIBRATION_VERDICT_SCHEMA_VERSION: Final[str] = "perception_calibration_verdict.v1"
-FINAL_VERDICT_SCHEMA_VERSION: Final[str] = "perception_final_verdict.v1"
+from .perception_benchmark import BenchmarkReport, recompute_gate_from_metrics
 
-# PerceptionFinalVerdict の必須 wire フィールド（完全なfield set）
+LINEAGE_SEAL_SCHEMA_VERSION: Final[str] = "perception_lineage_seal.v2"
+CALIBRATION_VERDICT_SCHEMA_VERSION: Final[str] = "perception_calibration_verdict.v1"
+CALIBRATION_ARTIFACT_SCHEMA_VERSION: Final[str] = "perception_calibration_profile.v1"
+FINAL_VERDICT_SCHEMA_VERSION: Final[str] = "perception_final_verdict.v2"
+
+_HASH_FIELDS: Final[tuple[str, ...]] = (
+    "parser_artifact_hash",
+    "detector_artifact_hash",
+    "assembler_schema_hash",
+    "ui_presentation_schema_hash",
+    "config_hash",
+    "capture_dataset_hash",
+    "calibration_profile_hash",
+    "threshold_hash",
+    "atlas_vocabulary_hash",
+    "assembler_impl_hash",
+    "roi_resolver_input_hash",
+    "benchmark_fit_code_hash",
+    "lineage_seal_hash",
+)
+_SEAL_SUBJECT_HASH_FIELDS: Final[tuple[str, ...]] = tuple(
+    name for name in _HASH_FIELDS if name != "lineage_seal_hash"
+)
 _FINAL_VERDICT_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
     {
-        "schema_version",
-        "verdict_id",
-        "seal_id",
-        "final_session_ids",
-        "parser_artifact_hash",
-        "detector_artifact_hash",
-        "assembler_schema_hash",
-        "ui_presentation_schema_hash",
-        "config_hash",
-        "metrics",
-        "passed",
-        "blocking_reasons",
-        "development_only",
-        "formal_perception_verdict_eligible",
-        # 拡張 subject フィールド（Item 6）
-        "capture_dataset_hash",
-        "calibration_profile_hash",
-        "threshold_hash",
-        "atlas_vocabulary_hash",
-        "assembler_impl_hash",
-        "roi_resolver_input_hash",
-        "benchmark_fit_code_hash",
-        "lineage_seal_hash",
+        "schema_version", "verdict_id", "seal_id", "final_session_ids",
+        "metrics", "passed", "blocking_reasons", "development_only",
+        "formal_perception_verdict_eligible", *_HASH_FIELDS,
     }
 )
-
-_SHA256_RE_LEN: Final[int] = 64
+_SEAL_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "schema_version", "seal_id", "final_session_hashes", "development_only",
+        *_SEAL_SUBJECT_HASH_FIELDS,
+    }
+)
+_RESIDUAL_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "hp_ratio", "xp_ratio", "timer_seconds", "inventory_hash", "coord_noise",
+        "coord_quantization_px", "burst_enter", "burst_exit", "burst_dropout",
+        "unknown_screen_collapse", "unknown_screen_collapse_duration",
+        "item_category", "enemy_category",
+    }
+)
+_FORMAL_FACTORY_TOKEN = object()
 
 
 def _is_sha256(value: object) -> bool:
-    """64 文字 lowercase hex 文字列かどうかを確認する。"""
-    if not isinstance(value, str) or len(value) != _SHA256_RE_LEN:
-        return False
-    return all(c in "0123456789abcdef" for c in value)
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _require_sha256(value: object, label: str) -> str:
+    if not _is_sha256(value):
+        raise ValueError(f"{label} must be a 64-character lowercase SHA-256")
+    return value  # type: ignore[return-value]
+
+
+def _strict_number(value: object, label: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float, np.integer, np.floating))
+        or not math.isfinite(float(value))
+    ):
+        raise InvalidResidualError(f"{label} must be a finite number (bool is forbidden)")
+    return float(value)
 
 
 class FinalSessionAlreadyOpenedError(ValueError):
-    """final E2E セッションが既に開封済み（create-once 違反）。
-
-    同じ session_id の 2 回目の開封を拒否します。
-    """
+    """final session の create-once marker が既に存在する。"""
 
 
 class FinalSessionNotInSealError(ValueError):
-    """開封しようとした session が lineage seal の固定集合に含まれていない。
-
-    seal 作成後に final session 集合を追加・変更することは禁止されています。
-    """
+    """final session が seal identity の固定集合に含まれない。"""
 
 
 class FinalFitMixingError(ValueError):
-    """final E2E セッションの calibration fit に混入しようとした。
-
-    final データを fit に使うと未使用 E2E test の独立性が失われます。
-    """
+    """calibration residual 集合へ final/unknown session が混入した。"""
 
 
 class StaleVerdictError(ValueError):
-    """producer hash が verdict 発行時から変化し、verdict が陳腐化した。
-
-    parser/detector/config のいずれかが変わったとき旧 verdict は無効です。
-    """
+    """producer/profile/threshold hash または gate 結果が stale である。"""
 
 
 class HashMismatchError(ValueError):
-    """ロードした artifact の hash が保存済み hash と一致しない。"""
+    """実 artifact content hash が seal/verdict の exact hash と一致しない。"""
 
 
 class SessionOverlapError(ValueError):
-    """calibration と final の session_id が重複している。"""
+    """calibration/final session identity が重複している。"""
 
 
 class EmptyResidualError(ValueError):
-    """必須フィールドの residual が空で、underpowered sample として拒否する。"""
+    """residual が 0 件、または calibration session の一部が無標本である。"""
 
 
 class InvalidResidualError(ValueError):
-    """residual の値が NaN または Inf を含む。"""
+    """residual field/type/range が fit 契約外である。"""
 
 
 class FormalVerdictPromotionError(ValueError):
-    """development-only の synthetic 成果物を formal として発行しようとした。
-
-    synthetic fixture（development_only=True）から formal verdict を作成
-    することは禁止されています。
-    """
+    """synthetic public constructor から formal flag を構築しようとした。"""
 
 
 @dataclass(frozen=True, slots=True)
 class CalibrationResidual:
-    """1 フレーム・1 フィールドの calibration 残差。
-
-    session_id / frame_id でデータ出所を追跡し、NaN/Inf が混入しないよう
-    生成時に検証します。
-    """
-
     session_id: str
     frame_id: str
     field: str
@@ -138,347 +135,392 @@ class CalibrationResidual:
     confidence: float
     age_frames: int
     latency_frames: float = 0.0
+    ground_truth_category: int | None = None
+    predicted_category: int | None = None
 
     def __post_init__(self) -> None:
-        """NaN/Inf を拒否する。"""
-        for name in ("residual", "confidence", "latency_frames"):
-            val = getattr(self, name)
-            if not math.isfinite(val):
-                raise InvalidResidualError(
-                    f"CalibrationResidual.{name} is not finite: {val!r}"
-                )
+        if type(self.session_id) is not str or not self.session_id:
+            raise InvalidResidualError("session_id must be a non-empty string")
+        if type(self.frame_id) is not str or not self.frame_id:
+            raise InvalidResidualError("frame_id must be a non-empty string")
+        if self.field not in _RESIDUAL_FIELDS:
+            raise InvalidResidualError(f"unsupported residual field {self.field!r}")
+        object.__setattr__(self, "residual", _strict_number(self.residual, "residual"))
+        confidence = _strict_number(self.confidence, "confidence")
+        if not 0.0 <= confidence <= 1.0:
+            raise InvalidResidualError("confidence must be in [0, 1]")
+        object.__setattr__(self, "confidence", confidence)
+        if type(self.age_frames) is not int or self.age_frames < 0:
+            raise InvalidResidualError("age_frames must be a non-negative integer")
+        latency = _strict_number(self.latency_frames, "latency_frames")
+        if latency < 0.0:
+            raise InvalidResidualError("latency_frames must be non-negative")
+        object.__setattr__(self, "latency_frames", latency)
+        category_pair = (self.ground_truth_category, self.predicted_category)
+        if (category_pair[0] is None) != (category_pair[1] is None):
+            raise InvalidResidualError("category ground truth/prediction must be provided together")
+        if category_pair[0] is not None:
+            if self.field not in {"item_category", "enemy_category"}:
+                raise InvalidResidualError("category labels require a category residual field")
+            if any(type(value) is not int or not 0 <= value < ITEM_CATEGORY_SIZE for value in category_pair):
+                raise InvalidResidualError("category labels are outside the fixed vocabulary")
+        elif self.field in {"item_category", "enemy_category"}:
+            raise InvalidResidualError("category residual fields require category labels")
 
 
-@dataclass
-class FinalLineageSeal:
-    """create-once の final session 開封ポリシー。
+@dataclass(frozen=True)
+class FittedPerceptionErrorProfile(PerceptionErrorProfile):
+    """既存 profile wire を維持しつつ fit artifact metadata を保持する subtype。"""
 
-    seal 作成時に `final_session_set` を固定し、集合の変更を拒否します。
-    固定集合内の各 session_id は最大 1 回だけ開封できます（3+ 件の別 session を許容）。
-    再起動後も同一 session を再開封できないよう、ArtifactStore へ永続化します。
-    """
+    calibration_session_hashes: Mapping[str, str] = field(default_factory=dict)
+    field_sample_counts: Mapping[str, int] = field(default_factory=dict)
+    fit_code_hash: str = ""
 
-    seal_id: str
-    parser_artifact_hash: str
-    detector_artifact_hash: str
-    assembler_schema_hash: str
-    config_hash: str
-    # 開封可能な final session 集合を固定する（変更不可）
-    final_session_set: frozenset[str] = field(default_factory=frozenset)
-    # 各 session_hash: str も固定する
-    final_session_hashes: dict[str, str] = field(default_factory=dict)
-    opened_session_ids: list[str] = field(default_factory=list)
-    development_only: bool = True
-    schema_version: str = LINEAGE_SEAL_SCHEMA_VERSION
-    # ArtifactStore を使う場合の永続化パス（省略可）
-    _store_path: Path | None = field(default=None, repr=False, compare=False)
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        hashes = dict(self.calibration_session_hashes)
+        if set(hashes) != set(self.calibration_session_ids):
+            raise ValueError("calibration_session_hashes must exactly match calibration ids")
+        for session_id, content_hash in hashes.items():
+            if type(session_id) is not str or not session_id:
+                raise ValueError("calibration session hash key must be non-empty")
+            _require_sha256(content_hash, f"calibration_session_hashes[{session_id!r}]")
+        counts = dict(self.field_sample_counts)
+        if not counts or not all(type(name) is str and type(count) is int and count > 0 for name, count in counts.items()):
+            raise ValueError("field_sample_counts must contain positive integer counts")
+        _require_sha256(self.fit_code_hash, "fit_code_hash")
+        object.__setattr__(self, "calibration_session_hashes", MappingProxyType(hashes))
+        object.__setattr__(self, "field_sample_counts", MappingProxyType(counts))
 
-    def verify_hashes(
-        self,
-        *,
-        parser: str,
-        detector: str,
-        assembler: str,
-        config: str,
-    ) -> None:
-        """producer hash が seal 発行時から変化していないか検証する。
-
-        いずれか 1 フィールドでも変化したとき StaleVerdictError を送出します。
-        """
-        changed: list[str] = []
-        if parser != self.parser_artifact_hash:
-            changed.append("parser_artifact_hash")
-        if detector != self.detector_artifact_hash:
-            changed.append("detector_artifact_hash")
-        if assembler != self.assembler_schema_hash:
-            changed.append("assembler_schema_hash")
-        if config != self.config_hash:
-            changed.append("config_hash")
-        if changed:
-            raise StaleVerdictError(
-                f"Seal {self.seal_id!r} stale; changed fields: {changed}"
-            )
-
-    def open_session(self, session_id: str) -> None:
-        """final セッションを開封済みとして登録する。
-
-        - session_id が final_session_set に含まれない場合は拒否する。
-        - 同じ session_id が既に開封済みの場合は拒否する。
-        - 異なる session_id は最大 1 回ずつ開封できる（3+ 件の別 session をサポート）。
-        """
-        if self.final_session_set and session_id not in self.final_session_set:
-            raise FinalSessionNotInSealError(
-                f"session {session_id!r} is not in the sealed final session set "
-                f"{sorted(self.final_session_set)}"
-            )
-        if session_id in self.opened_session_ids:
-            raise FinalSessionAlreadyOpenedError(
-                f"Final session {session_id!r} already opened. "
-                "Cannot open same session twice."
-            )
-        self.opened_session_ids.append(session_id)
-        # ArtifactStore 永続化（store_path が設定されている場合）
-        if self._store_path is not None:
-            self._persist_opened()
-
-    def _persist_opened(self) -> None:
-        """開封状態を store_path へ atomic に書き込む。"""
-        if self._store_path is None:
-            return
-        wire = self.to_wire()
-        import json
-        import os
-        import tempfile
-        data = json.dumps(wire, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-        self._store_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(
-            prefix=".seal.", suffix=".tmp", dir=str(self._store_path.parent)
-        )
-        tmp_path = Path(tmp)
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            tmp_path.replace(self._store_path)
-        finally:
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
-
-    @classmethod
-    def load_from_store(cls, store_path: Path) -> "FinalLineageSeal":
-        """ArtifactStore から seal を読み込む。
-
-        再起動後も開封済み session 集合を復元し、同一 session の再開封を拒否します。
-        """
-        import json
-        wire = json.loads(store_path.read_text(encoding="utf-8"))
-        return cls(
-            seal_id=wire["seal_id"],
-            parser_artifact_hash=wire["parser_artifact_hash"],
-            detector_artifact_hash=wire["detector_artifact_hash"],
-            assembler_schema_hash=wire["assembler_schema_hash"],
-            config_hash=wire["config_hash"],
-            final_session_set=frozenset(wire.get("final_session_set", [])),
-            final_session_hashes=dict(wire.get("final_session_hashes", {})),
-            opened_session_ids=list(wire.get("opened_session_ids", [])),
-            development_only=bool(wire.get("development_only", True)),
-            schema_version=wire.get("schema_version", LINEAGE_SEAL_SCHEMA_VERSION),
-            _store_path=store_path,
-        )
-
-    def to_wire(self) -> dict[str, Any]:
-        """seal JSON 保存用の dict として返す。"""
+    def to_artifact_wire(self) -> dict[str, Any]:
         return {
-            "schema_version": self.schema_version,
-            "seal_id": self.seal_id,
-            "parser_artifact_hash": self.parser_artifact_hash,
-            "detector_artifact_hash": self.detector_artifact_hash,
-            "assembler_schema_hash": self.assembler_schema_hash,
-            "config_hash": self.config_hash,
-            "final_session_set": sorted(self.final_session_set),
-            "final_session_hashes": dict(self.final_session_hashes),
-            "opened_session_ids": list(self.opened_session_ids),
-            "development_only": self.development_only,
+            "schema_version": CALIBRATION_ARTIFACT_SCHEMA_VERSION,
+            "profile": self.to_wire(),
+            "profile_hash": self.profile_hash,
+            "calibration_session_hashes": dict(self.calibration_session_hashes),
+            "field_sample_counts": dict(self.field_sample_counts),
+            "fit_code_hash": self.fit_code_hash,
         }
 
+    @property
+    def artifact_hash(self) -> str:
+        return canonical_hash(self.to_artifact_wire())
 
-def create_lineage_seal(
-    parser_artifact_hash: str,
-    detector_artifact_hash: str,
-    assembler_schema_hash: str,
-    config_hash: str,
-    *,
-    final_session_set: frozenset[str] | None = None,
-    final_session_hashes: dict[str, str] | None = None,
-    development_only: bool = True,
-    store_path: Path | None = None,
-) -> FinalLineageSeal:
-    """producer hashes から lineage seal を作成する。
 
-    seal_id は 4 hashes の canonical hash で決定論的に生成されます。
-    """
-    seal_id = canonical_hash(
-        {
-            "parser": parser_artifact_hash,
-            "detector": detector_artifact_hash,
-            "assembler": assembler_schema_hash,
-            "config": config_hash,
-        }
+def _weighted_mean(values: Sequence[float], weights: Sequence[float]) -> float:
+    return float(np.average(np.asarray(values, dtype=float), weights=np.asarray(weights, dtype=float)))
+
+
+def _weighted_std(values: Sequence[float], weights: Sequence[float]) -> float:
+    mean = _weighted_mean(values, weights)
+    return float(
+        math.sqrt(
+            np.average(
+                (np.asarray(values, dtype=float) - mean) ** 2,
+                weights=np.asarray(weights, dtype=float),
+            )
+        )
     )
-    seal = FinalLineageSeal(
-        seal_id=seal_id,
-        parser_artifact_hash=parser_artifact_hash,
-        detector_artifact_hash=detector_artifact_hash,
-        assembler_schema_hash=assembler_schema_hash,
-        config_hash=config_hash,
-        final_session_set=final_session_set or frozenset(),
-        final_session_hashes=final_session_hashes or {},
-        development_only=development_only,
-        _store_path=store_path,
-    )
-    # store_path が指定された場合、exclusive create（既存なら load で整合性確認）
-    if store_path is not None:
-        if store_path.exists():
-            existing = FinalLineageSeal.load_from_store(store_path)
-            if existing.seal_id != seal.seal_id:
-                raise HashMismatchError(
-                    f"Existing seal {existing.seal_id!r} differs from new seal {seal.seal_id!r}. "
-                    "Final session set cannot be changed after creation."
-                )
-            return existing
-        seal._persist_opened()
-    return seal
+
+
+def _confusion_matrix(rows: Sequence[CalibrationResidual]) -> list[list[float]]:
+    if not rows:
+        return []
+    counts = np.zeros((ITEM_CATEGORY_SIZE, ITEM_CATEGORY_SIZE), dtype=float)
+    for residual in rows:
+        assert residual.ground_truth_category is not None
+        assert residual.predicted_category is not None
+        counts[residual.ground_truth_category, residual.predicted_category] += (
+            residual.confidence / (1.0 + residual.age_frames)
+        )
+    matrix: list[list[float]] = []
+    for index, row in enumerate(counts):
+        if row.sum() == 0.0:
+            values = [0.0] * ITEM_CATEGORY_SIZE
+            values[index] = 1.0
+        else:
+            values = [float(value / row.sum()) for value in row]
+        matrix.append(values)
+    return matrix
 
 
 def fit_error_profile(
-    residuals: list[CalibrationResidual],
-    calibration_session_ids: list[str],
-    final_e2e_session_ids: list[str],
-) -> PerceptionErrorProfile:
-    """calibration residuals から PerceptionErrorProfile を fit する。
-
-    final E2E の session_id が calibration と重複するとき、
-    または final の residual が混入しているとき拒否します。
-    NaN/Inf が混入した residual は InvalidResidualError で拒否します。
-    """
-    cal_ids = set(calibration_session_ids)
-    final_ids = set(final_e2e_session_ids)
-    overlap = cal_ids & final_ids
+    residuals: Sequence[CalibrationResidual],
+    calibration_session_ids: Sequence[str],
+    final_e2e_session_ids: Sequence[str],
+    *,
+    calibration_session_hashes: Mapping[str, str] | None = None,
+) -> FittedPerceptionErrorProfile:
+    """exact calibration residual 集合から既存 consumer-compatible profile を fit する。"""
+    if not residuals:
+        raise EmptyResidualError("at least one calibration residual is required")
+    if not all(isinstance(residual, CalibrationResidual) for residual in residuals):
+        raise InvalidResidualError("residuals must contain CalibrationResidual values")
+    cal_ids = list(calibration_session_ids)
+    final_ids = list(final_e2e_session_ids)
+    if not cal_ids or any(type(value) is not str or not value for value in cal_ids):
+        raise EmptyResidualError("calibration_session_ids must be non-empty")
+    if len(cal_ids) != len(set(cal_ids)) or len(final_ids) != len(set(final_ids)):
+        raise SessionOverlapError("session id lists must be unique")
+    overlap = set(cal_ids) & set(final_ids)
     if overlap:
-        raise SessionOverlapError(
-            f"calibration/final session overlap: {sorted(overlap)}"
+        raise SessionOverlapError(f"calibration/final session overlap: {sorted(overlap)}")
+    residual_ids = {residual.session_id for residual in residuals}
+    unknown = residual_ids - set(cal_ids)
+    if unknown:
+        if unknown & set(final_ids):
+            raise FinalFitMixingError(f"final residuals present: {sorted(unknown & set(final_ids))}")
+        raise FinalFitMixingError(f"residuals outside exact calibration set: {sorted(unknown)}")
+    missing = set(cal_ids) - residual_ids
+    if missing:
+        raise EmptyResidualError(f"calibration sessions have 0 residuals: {sorted(missing)}")
+
+    if calibration_session_hashes is None:
+        # synthetic compatibility: identity is still exact and explicit in the artifact.
+        hashes = {session_id: canonical_hash({"synthetic_session_id": session_id}) for session_id in cal_ids}
+    else:
+        hashes = dict(calibration_session_hashes)
+        if set(hashes) != set(cal_ids):
+            raise ValueError("calibration_session_hashes must exactly match calibration ids")
+        for session_id, content_hash in hashes.items():
+            _require_sha256(content_hash, f"calibration_session_hashes[{session_id!r}]")
+
+    by_field: dict[str, list[CalibrationResidual]] = {}
+    for residual in residuals:
+        by_field.setdefault(residual.field, []).append(residual)
+    sample_counts = {name: len(rows) for name, rows in by_field.items()}
+    underpowered = {name: count for name, count in sample_counts.items() if count < 2}
+    if underpowered:
+        raise EmptyResidualError(
+            f"residual fields are underpowered (minimum 2 samples): {underpowered}"
         )
-    if any(r.session_id in final_ids for r in residuals):
-        raise FinalFitMixingError(
-            "Final E2E session residuals cannot be used in calibration fit."
+
+    def weighted_rows(name: str) -> tuple[list[float], list[float]]:
+        rows = by_field.get(name, [])
+        return (
+            [row.residual for row in rows],
+            [max(row.confidence / (1.0 + row.age_frames), 1e-12) for row in rows],
         )
 
-    # NaN/Inf チェックは CalibrationResidual.__post_init__ で実施済み
-    cal_residuals = [r for r in residuals if r.session_id in cal_ids]
+    def mean(name: str, default: float = 0.0) -> float:
+        values, weights = weighted_rows(name)
+        return _weighted_mean(values, weights) if values else default
 
-    by_field: dict[str, list[float]] = {}
-    for r in cal_residuals:
-        by_field.setdefault(r.field, []).append(r.residual)
+    def std(name: str) -> float:
+        values, weights = weighted_rows(name)
+        return _weighted_std(values, weights) if values else 0.0
 
-    def _std(vals: list[float]) -> float:
-        return float(np.std(vals)) if vals else 0.0
+    def probability(name: str, threshold: float) -> float:
+        values, weights = weighted_rows(name)
+        if not values:
+            return 0.0
+        indicators = [float(abs(value) > threshold) for value in values]
+        return _weighted_mean(indicators, weights)
 
-    def _mean(vals: list[float]) -> float:
-        return float(np.mean(vals)) if vals else 0.0
-
-    def _prob(vals: list[float], threshold: float) -> float:
-        return float(np.mean([abs(v) > threshold for v in vals])) if vals else 0.0
-
-    def _clamp01(v: float) -> float:
-        return min(1.0, max(0.0, v))
-
-    def _nonneg(v: float) -> float:
-        return max(0.0, v)
-
-    # HP/XP/timer
-    hp_misread_std = _std(by_field.get("hp_ratio", []))
-    xp_stale_prob = _prob(by_field.get("xp_ratio", []), 0.1)
-    timer_stale_prob = _prob(by_field.get("timer_seconds", []), 1.0)
-    inventory_stale_prob = _prob(by_field.get("inventory_hash", []), 0.5)
-
-    # 座標誤差
-    coord_noise_std = _std(by_field.get("coord_noise", []))
-    coord_quant_px = _nonneg(_mean(by_field.get("coord_quantization_px", [])))
-
-    # レイテンシ
-    lat_vals = by_field.get("latency_frames", [])
-    lat_mean = _nonneg(_mean(lat_vals))
-    lat_std = _nonneg(_std(lat_vals))
-
-    # burst パラメータ
-    # burst_enter: バースト開始確率（フレームごとの dropout 開始確率）
-    burst_enter_prob = _clamp01(_mean(by_field.get("burst_enter", [])))
-    # burst_exit: バースト終了確率（dropout 終了確率）
-    burst_vals = by_field.get("burst_exit", [])
-    burst_exit_prob = _clamp01(_mean(burst_vals)) if burst_vals else 1.0
-    # burst_dropout: バースト中の dropout 確率
-    burst_dropout_prob = _clamp01(_mean(by_field.get("burst_dropout", [])))
-
-    # unknown screen collapse
-    unknown_collapse_prob = _clamp01(_mean(by_field.get("unknown_screen_collapse", [])))
-    unknown_collapse_dur = _nonneg(_mean(by_field.get("unknown_screen_collapse_duration", [])))
-
-    # item confusion matrix（ITEM_CATEGORY_SIZE x ITEM_CATEGORY_SIZE）
-    n = ITEM_CATEGORY_SIZE
-    identity_mat = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-
-    return PerceptionErrorProfile(
-        latency_mean_frames=lat_mean,
-        latency_std_frames=lat_std,
-        burst_enter_prob=burst_enter_prob,
-        burst_exit_prob=burst_exit_prob,
-        burst_dropout_prob=burst_dropout_prob,
-        coord_noise_std=_nonneg(coord_noise_std),
-        coord_quantization_px=coord_quant_px,
-        hud_hp_misread_std=_nonneg(hp_misread_std),
-        hud_xp_stale_prob=_clamp01(xp_stale_prob),
-        hud_timer_stale_prob=_clamp01(timer_stale_prob),
-        hud_inventory_stale_prob=_clamp01(inventory_stale_prob),
-        unknown_screen_collapse_prob=unknown_collapse_prob,
-        unknown_screen_collapse_duration_frames=unknown_collapse_dur,
-        item_confusion_matrix=identity_mat,
-        enemy_confusion_matrix=identity_mat,
-        calibration_session_ids=list(calibration_session_ids),
-        final_e2e_session_ids=list(final_e2e_session_ids),
+    all_weights = [max(row.confidence / (1.0 + row.age_frames), 1e-12) for row in residuals]
+    latency_values = [row.latency_frames for row in residuals]
+    fit_code_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    clamp = lambda value: min(1.0, max(0.0, value))
+    return FittedPerceptionErrorProfile(
+        latency_mean_frames=max(0.0, _weighted_mean(latency_values, all_weights)),
+        latency_std_frames=max(0.0, _weighted_std(latency_values, all_weights)),
+        burst_enter_prob=clamp(mean("burst_enter")),
+        burst_exit_prob=clamp(mean("burst_exit", 1.0)),
+        burst_dropout_prob=clamp(mean("burst_dropout")),
+        coord_noise_std=max(0.0, std("coord_noise")),
+        coord_quantization_px=max(0.0, mean("coord_quantization_px")),
+        hud_hp_misread_std=max(0.0, std("hp_ratio")),
+        hud_xp_stale_prob=clamp(probability("xp_ratio", 0.1)),
+        hud_timer_stale_prob=clamp(probability("timer_seconds", 1.0)),
+        hud_inventory_stale_prob=clamp(probability("inventory_hash", 0.5)),
+        unknown_screen_collapse_prob=clamp(mean("unknown_screen_collapse")),
+        unknown_screen_collapse_duration_frames=max(0.0, mean("unknown_screen_collapse_duration")),
+        item_confusion_matrix=_confusion_matrix(by_field.get("item_category", [])),
+        enemy_confusion_matrix=_confusion_matrix(by_field.get("enemy_category", [])),
+        calibration_session_ids=cal_ids,
+        final_e2e_session_ids=final_ids,
+        calibration_session_hashes=hashes,
+        field_sample_counts=sample_counts,
+        fit_code_hash=fit_code_hash,
     )
 
 
 def simulator_distance_report(
-    calibrated: PerceptionErrorProfile,
-    simulator: PerceptionErrorProfile,
+    calibrated: PerceptionErrorProfile, simulator: PerceptionErrorProfile
 ) -> dict[str, float]:
-    """calibrated profile と simulator profile のスカラー距離を返す。
-
-    03-05 wrapper の compatibility 確認と residual 分布距離レポートに使います。
-    """
     return {
-        "latency_mean_diff": abs(
-            calibrated.latency_mean_frames - simulator.latency_mean_frames
-        ),
-        "latency_std_diff": abs(
-            calibrated.latency_std_frames - simulator.latency_std_frames
-        ),
-        "coord_noise_std_diff": abs(
-            calibrated.coord_noise_std - simulator.coord_noise_std
-        ),
-        "hp_misread_std_diff": abs(
-            calibrated.hud_hp_misread_std - simulator.hud_hp_misread_std
-        ),
-        "xp_stale_prob_diff": abs(
-            calibrated.hud_xp_stale_prob - simulator.hud_xp_stale_prob
-        ),
-        "timer_stale_prob_diff": abs(
-            calibrated.hud_timer_stale_prob - simulator.hud_timer_stale_prob
-        ),
-        "burst_enter_diff": abs(
-            calibrated.burst_enter_prob - simulator.burst_enter_prob
-        ),
-        "burst_exit_diff": abs(
-            calibrated.burst_exit_prob - simulator.burst_exit_prob
-        ),
-        "burst_dropout_diff": abs(
-            calibrated.burst_dropout_prob - simulator.burst_dropout_prob
-        ),
-        "unknown_collapse_prob_diff": abs(
-            calibrated.unknown_screen_collapse_prob - simulator.unknown_screen_collapse_prob
-        ),
+        "latency_mean_diff": abs(calibrated.latency_mean_frames - simulator.latency_mean_frames),
+        "latency_std_diff": abs(calibrated.latency_std_frames - simulator.latency_std_frames),
+        "coord_noise_std_diff": abs(calibrated.coord_noise_std - simulator.coord_noise_std),
+        "hp_misread_std_diff": abs(calibrated.hud_hp_misread_std - simulator.hud_hp_misread_std),
+        "xp_stale_prob_diff": abs(calibrated.hud_xp_stale_prob - simulator.hud_xp_stale_prob),
+        "timer_stale_prob_diff": abs(calibrated.hud_timer_stale_prob - simulator.hud_timer_stale_prob),
+        "burst_enter_diff": abs(calibrated.burst_enter_prob - simulator.burst_enter_prob),
+        "burst_exit_diff": abs(calibrated.burst_exit_prob - simulator.burst_exit_prob),
+        "burst_dropout_diff": abs(calibrated.burst_dropout_prob - simulator.burst_dropout_prob),
+        "unknown_collapse_prob_diff": abs(calibrated.unknown_screen_collapse_prob - simulator.unknown_screen_collapse_prob),
     }
 
 
 @dataclass
+class FinalLineageSeal:
+    seal_id: str
+    final_session_hashes: Mapping[str, str]
+    parser_artifact_hash: str
+    detector_artifact_hash: str
+    assembler_schema_hash: str
+    ui_presentation_schema_hash: str
+    config_hash: str
+    capture_dataset_hash: str
+    calibration_profile_hash: str
+    threshold_hash: str
+    atlas_vocabulary_hash: str
+    assembler_impl_hash: str
+    roi_resolver_input_hash: str
+    benchmark_fit_code_hash: str
+    development_only: bool = True
+    schema_version: str = LINEAGE_SEAL_SCHEMA_VERSION
+    opened_session_ids: list[str] = field(default_factory=list, repr=False)
+    _store: Any = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != LINEAGE_SEAL_SCHEMA_VERSION:
+            raise ValueError("unsupported lineage seal schema")
+        hashes = dict(self.final_session_hashes)
+        if not hashes:
+            raise ValueError("final session set must not be empty")
+        for session_id, content_hash in hashes.items():
+            if type(session_id) is not str or not session_id:
+                raise ValueError("final session ids must be non-empty strings")
+            _require_sha256(content_hash, f"final_session_hashes[{session_id!r}]")
+        self.final_session_hashes = MappingProxyType(hashes)
+        for name in _SEAL_SUBJECT_HASH_FIELDS:
+            _require_sha256(getattr(self, name), name)
+        expected_id = canonical_hash(self.identity_payload())
+        if self.seal_id != expected_id:
+            raise HashMismatchError("seal_id does not bind the complete lineage identity")
+        if type(self.development_only) is not bool:
+            raise ValueError("development_only must be bool")
+        if not self.development_only and self._store is None:
+            raise FormalVerdictPromotionError("formal lineage seal requires ArtifactStore")
+
+    @property
+    def final_session_set(self) -> frozenset[str]:
+        return frozenset(self.final_session_hashes)
+
+    def identity_payload(self) -> dict[str, Any]:
+        return {
+            **{name: getattr(self, name) for name in _SEAL_SUBJECT_HASH_FIELDS},
+            "final_sessions": [
+                {"session_id": session_id, "session_hash": self.final_session_hashes[session_id]}
+                for session_id in sorted(self.final_session_hashes)
+            ],
+        }
+
+    def verify_hashes(self, **current_hashes: str) -> None:
+        if set(current_hashes) != set(_SEAL_SUBJECT_HASH_FIELDS):
+            raise ValueError("verify_hashes requires the complete sealed hash set")
+        changed = [name for name in _SEAL_SUBJECT_HASH_FIELDS if current_hashes[name] != getattr(self, name)]
+        if changed:
+            raise StaleVerdictError(f"lineage seal is stale: {changed}")
+
+    def open_session(self, session_id: str, session_manifest_path: Path) -> None:
+        expected_hash = self.final_session_hashes.get(session_id)
+        if expected_hash is None:
+            raise FinalSessionNotInSealError(f"session {session_id!r} is not sealed")
+        path = Path(session_manifest_path).resolve()
+        if not path.is_file():
+            raise HashMismatchError(f"missing final session manifest: {path}")
+        actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual_hash != expected_hash:
+            raise HashMismatchError(
+                f"final session {session_id!r} hash mismatch: {actual_hash} != {expected_hash}"
+            )
+        if session_id in self.opened_session_ids:
+            raise FinalSessionAlreadyOpenedError(f"final session {session_id!r} already opened")
+        if self._store is not None:
+            marker = canonical_json_bytes(
+                {"schema_version": "perception_final_open.v1", "seal_id": self.seal_id,
+                 "session_id": session_id, "session_hash": expected_hash}
+            )
+            try:
+                self._store.put_bytes_create_once(
+                    logical_id=f"perception/lineage/{self.seal_id}/opened/{session_id}.json",
+                    data=marker, media_type="application/json",
+                )
+            except Exception as exc:
+                raise FinalSessionAlreadyOpenedError(
+                    f"final session {session_id!r} already opened or marker publish failed"
+                ) from exc
+        self.opened_session_ids.append(session_id)
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "seal_id": self.seal_id,
+            "final_session_hashes": dict(self.final_session_hashes),
+            "development_only": self.development_only,
+            **{name: getattr(self, name) for name in _SEAL_SUBJECT_HASH_FIELDS},
+        }
+
+
+def _create_lineage_seal(
+    *, final_session_hashes: Mapping[str, str], development_only: bool, store: Any,
+    logical_id: str | None = None, publish: bool = True, **subject_hashes: str,
+) -> FinalLineageSeal:
+    if set(subject_hashes) != set(_SEAL_SUBJECT_HASH_FIELDS):
+        missing = sorted(set(_SEAL_SUBJECT_HASH_FIELDS) - set(subject_hashes))
+        extra = sorted(set(subject_hashes) - set(_SEAL_SUBJECT_HASH_FIELDS))
+        raise ValueError(f"seal subject hash set mismatch; missing={missing}, extra={extra}")
+    identity = {
+        **subject_hashes,
+        "final_sessions": [
+            {"session_id": session_id, "session_hash": final_session_hashes[session_id]}
+            for session_id in sorted(final_session_hashes)
+        ],
+    }
+    seal = FinalLineageSeal(
+        seal_id=canonical_hash(identity), final_session_hashes=final_session_hashes,
+        development_only=development_only, _store=store, **subject_hashes,
+    )
+    if store is not None and publish:
+        ref = store.put_bytes(
+            logical_id=logical_id or f"perception/lineage/{seal.seal_id}/seal.json",
+            data=canonical_json_bytes(seal.to_wire()), media_type="application/json",
+        )
+        verification = store.verify(ref)
+        if not verification.ok:
+            raise HashMismatchError("lineage seal failed ArtifactStore revalidation")
+    return seal
+
+
+def create_lineage_seal(
+    *, final_session_hashes: Mapping[str, str], store: Any = None,
+    logical_id: str | None = None, **subject_hashes: str,
+) -> FinalLineageSeal:
+    """synthetic 入口。development_only は公開引数にせず True 固定。"""
+    if "development_only" in subject_hashes:
+        raise ValueError("development_only cannot be overridden on the synthetic API")
+    return _create_lineage_seal(
+        final_session_hashes=final_session_hashes, development_only=True,
+        store=store, logical_id=logical_id, **subject_hashes,
+    )
+
+
+def _create_formal_lineage_seal(
+    *, final_session_hashes: Mapping[str, str], store: Any,
+    logical_id: str | None = None, _publish: bool = True, **subject_hashes: str,
+) -> FinalLineageSeal:
+    if store is None:
+        raise FormalVerdictPromotionError("formal lineage seal requires ArtifactStore")
+    return _create_lineage_seal(
+        final_session_hashes=final_session_hashes, development_only=False,
+        store=store, logical_id=logical_id, publish=_publish, **subject_hashes,
+    )
+
+
+@dataclass
 class PerceptionCalibrationVerdict:
-    """calibration profile の development-only verdict 型。
-
-    formal 発行には calibration session 収録と 04-05/04-08 package が必要です。
-    この dataclass の development_only は常に True でなければなりません。
-    """
-
     profile: PerceptionErrorProfile
     calibration_session_ids: list[str]
     development_only: bool = True
@@ -486,22 +528,12 @@ class PerceptionCalibrationVerdict:
     schema_version: str = CALIBRATION_VERDICT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        # development writer は常に development_only=True
-        if not self.development_only:
-            raise FormalVerdictPromotionError(
-                "PerceptionCalibrationVerdict must always have development_only=True. "
-                "Formal calibration profile requires formal parent chain."
-            )
+        if self.development_only is not True or self.formal_perception_verdict_eligible is not False:
+            raise FormalVerdictPromotionError("synthetic calibration verdict flags are fixed")
 
 
 @dataclass
 class PerceptionFinalVerdict:
-    """final perception verdict（development-only）。
-
-    formal 入力が揃ったときだけ development_only=False にできます。
-    ただし現在の code-only PR では formal 発行不可です。
-    """
-
     verdict_id: str
     seal_id: str
     final_session_ids: list[str]
@@ -510,162 +542,184 @@ class PerceptionFinalVerdict:
     assembler_schema_hash: str
     ui_presentation_schema_hash: str
     config_hash: str
+    capture_dataset_hash: str
+    calibration_profile_hash: str
+    threshold_hash: str
+    atlas_vocabulary_hash: str
+    assembler_impl_hash: str
+    roi_resolver_input_hash: str
+    benchmark_fit_code_hash: str
+    lineage_seal_hash: str
     metrics: dict[str, Any]
     passed: bool
     blocking_reasons: list[str]
     development_only: bool = True
     formal_perception_verdict_eligible: bool = False
     schema_version: str = FINAL_VERDICT_SCHEMA_VERSION
-    # 拡張 subject フィールド
-    capture_dataset_hash: str = ""
-    calibration_profile_hash: str = ""
-    threshold_hash: str = ""
-    atlas_vocabulary_hash: str = ""
-    assembler_impl_hash: str = ""
-    roi_resolver_input_hash: str = ""
-    benchmark_fit_code_hash: str = ""
-    lineage_seal_hash: str = ""
+    _factory_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
-        # arbitrary constructor では formal_eligible=True にできない
-        # formal parent chain 検証後のみ許可される（現在の code-only PR では不可）
-        if self.formal_perception_verdict_eligible:
-            raise FormalVerdictPromotionError(
-                "Cannot set formal_perception_verdict_eligible=True via constructor. "
-                "Formal verdict requires verified formal parent chain via formal writer."
-            )
+    def __post_init__(self, _factory_token: object | None) -> None:
+        _require_sha256(self.verdict_id, "verdict_id")
+        _require_sha256(self.seal_id, "seal_id")
+        for name in _HASH_FIELDS:
+            _require_sha256(getattr(self, name), name)
+        if (
+            not isinstance(self.final_session_ids, list)
+            or not self.final_session_ids
+            or not all(type(value) is str and value for value in self.final_session_ids)
+            or len(self.final_session_ids) != len(set(self.final_session_ids))
+        ):
+            raise ValueError("final_session_ids must be a non-empty unique list")
+        if type(self.passed) is not bool or type(self.development_only) is not bool or type(self.formal_perception_verdict_eligible) is not bool:
+            raise ValueError("verdict flags must be exact bool values")
+        if self.development_only and self.formal_perception_verdict_eligible:
+            raise FormalVerdictPromotionError("development verdict cannot be formal eligible")
+        if not self.development_only and not self.formal_perception_verdict_eligible:
+            raise FormalVerdictPromotionError("formal verdict must be formal eligible")
+        if not self.development_only and _factory_token is not _FORMAL_FACTORY_TOKEN:
+            raise FormalVerdictPromotionError("formal verdict requires the verified formal factory")
+        if not isinstance(self.metrics, dict):
+            raise ValueError("metrics must be a dict")
+        if not isinstance(self.blocking_reasons, list) or not all(
+            type(value) is str for value in self.blocking_reasons
+        ):
+            raise ValueError("blocking_reasons must be a string list")
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version, "verdict_id": self.verdict_id,
+            "seal_id": self.seal_id, "final_session_ids": list(self.final_session_ids),
+            **{name: getattr(self, name) for name in _HASH_FIELDS},
+            "metrics": self.metrics, "passed": self.passed,
+            "blocking_reasons": list(self.blocking_reasons),
+            "development_only": self.development_only,
+            "formal_perception_verdict_eligible": self.formal_perception_verdict_eligible,
+        }
 
 
-def _write_formal_final_verdict(
-    verdict: PerceptionFinalVerdict,
-    *,
-    formal_parent_chain_verified: bool,
-) -> None:
-    """formal final verdict を書き込む（formal parent chain 検証後のみ呼べる）。
+def _verdict_identity_payload(
+    report: BenchmarkReport, seal_id: str, final_session_ids: Sequence[str],
+    subject_hashes: Mapping[str, str],
+) -> dict[str, Any]:
+    return {
+        "seal_id": seal_id, "final_session_ids": sorted(final_session_ids),
+        "subject_hashes": dict(subject_hashes), "metrics": report.metrics_wire(),
+    }
 
-    synthetic fixture をこの関数へ渡すと FormalVerdictPromotionError。
-    formal parent chain が検証されていない場合も拒否します。
-    """
-    if not formal_parent_chain_verified:
-        raise FormalVerdictPromotionError(
-            "Formal final verdict requires verified formal parent chain. "
-            "Run formal dependency verification first."
-        )
-    if verdict.development_only:
-        raise FormalVerdictPromotionError(
-            "Cannot write synthetic (development_only=True) verdict as formal."
-        )
-    if not verdict.formal_perception_verdict_eligible:
-        raise FormalVerdictPromotionError(
-            "Verdict must have formal_perception_verdict_eligible=True for formal publish."
-        )
-    # 実際の ArtifactStore 書き込みは formal deps 揃い次第実装
-    raise NotImplementedError(
-        "Formal ArtifactStore publish requires D04-CAPTURE-DATASET, "
-        "04-05 parser package, and 04-08 detector package."
+
+def _create_final_verdict(
+    report: BenchmarkReport, *, seal_id: str, final_session_ids: Sequence[str],
+    development_only: bool, formal_eligible: bool, **subject_hashes: str,
+) -> PerceptionFinalVerdict:
+    if set(subject_hashes) != set(_HASH_FIELDS):
+        raise ValueError("final verdict requires the complete hash subject set")
+    passed, blocking = recompute_gate_from_metrics(report.metrics_wire())
+    if report.passed != passed or report.blocking_reasons != blocking:
+        raise StaleVerdictError("BenchmarkReport gate fields do not match metric recomputation")
+    identity = _verdict_identity_payload(report, seal_id, final_session_ids, subject_hashes)
+    return PerceptionFinalVerdict(
+        verdict_id=canonical_hash(identity), seal_id=seal_id,
+        final_session_ids=list(sorted(final_session_ids)), metrics=report.metrics_wire(),
+        passed=passed, blocking_reasons=blocking, development_only=development_only,
+        formal_perception_verdict_eligible=formal_eligible,
+        _factory_token=_FORMAL_FACTORY_TOKEN if not development_only else None,
+        **subject_hashes,
     )
 
 
+def create_synthetic_final_verdict(
+    report: BenchmarkReport, *, seal_id: str, final_session_ids: Sequence[str],
+    **subject_hashes: str,
+) -> PerceptionFinalVerdict:
+    if report.development_only is not True or report.formal_perception_verdict_eligible is not False:
+        raise FormalVerdictPromotionError("synthetic verdict requires a synthetic benchmark report")
+    return _create_final_verdict(
+        report, seal_id=seal_id, final_session_ids=final_session_ids,
+        development_only=True, formal_eligible=False, **subject_hashes,
+    )
+
+
+def _create_formal_final_verdict(
+    report: BenchmarkReport, *, seal_id: str, final_session_ids: Sequence[str],
+    **subject_hashes: str,
+) -> PerceptionFinalVerdict:
+    if report.development_only is not False or report.formal_perception_verdict_eligible is not True:
+        raise FormalVerdictPromotionError("formal verdict requires a formal benchmark report")
+    return _create_final_verdict(
+        report, seal_id=seal_id, final_session_ids=final_session_ids,
+        development_only=False, formal_eligible=True, **subject_hashes,
+    )
+
+
+def _write_formal_calibration_profile(
+    profile: FittedPerceptionErrorProfile, *, store: Any, logical_id: str,
+) -> Any:
+    if not isinstance(profile, FittedPerceptionErrorProfile) or store is None:
+        raise FormalVerdictPromotionError("formal calibration writer requires fitted profile and ArtifactStore")
+    ref = store.put_bytes(
+        logical_id=logical_id, data=canonical_json_bytes(profile.to_artifact_wire()),
+        media_type="application/json",
+    )
+    if not store.verify(ref).ok:
+        raise HashMismatchError("calibration profile publish revalidation failed")
+    return ref
+
+
+def _write_formal_final_verdict(
+    verdict: PerceptionFinalVerdict, *, store: Any, logical_id: str,
+) -> Any:
+    if verdict.development_only or not verdict.formal_perception_verdict_eligible or store is None:
+        raise FormalVerdictPromotionError("formal writer accepts only factory-built formal verdicts")
+    ref = store.put_bytes(
+        logical_id=logical_id, data=canonical_json_bytes(verdict.to_wire()),
+        media_type="application/json",
+    )
+    if not store.verify(ref).ok:
+        raise HashMismatchError("final verdict publish revalidation failed")
+    return ref
+
+
 def load_final_verdict(
-    data: dict[str, Any],
-    *,
-    current_parser_hash: str,
-    current_detector_hash: str,
-    current_assembler_hash: str,
-    current_config_hash: str,
+    data: dict[str, Any], *, current_parser_hash: str, current_detector_hash: str,
+    current_assembler_hash: str, current_config_hash: str,
     current_ui_schema_hash: str,
 ) -> PerceptionFinalVerdict:
-    """PerceptionFinalVerdict をロードし、producer hashes が変化していれば拒否する。
-
-    parser/detector/assembler/config/UI schema のいずれかが変わると
-    StaleVerdictError を送出します。旧 final sessions を development へ降格し、
-    新規 untouched sessions で再発行してください。
-
-    ローダーは次を fail-closed で検証します:
-    - exact schema field set
-    - SHA-256 形式（64文字 lowercase hex）
-    - development/formal flag 整合性
-    - pass と blocking_reasons の整合性
-    """
-    # schema field set の完全一致チェック
-    if not isinstance(data, dict) or not all(isinstance(k, str) for k in data):
-        raise ValueError("verdict data must be a dict with string keys")
-
-    if data.get("schema_version") != FINAL_VERDICT_SCHEMA_VERSION:
-        raise ValueError(
-            f"unsupported verdict schema_version {data.get('schema_version')!r}"
-        )
-
-    # SHA-256 形式チェック（主要な hash フィールド）
-    hash_fields = [
-        "parser_artifact_hash",
-        "detector_artifact_hash",
-        "assembler_schema_hash",
-        "config_hash",
-        "ui_presentation_schema_hash",
-    ]
-    for hf in hash_fields:
-        val = data.get(hf, "")
-        if val and not _is_sha256(val):
-            raise ValueError(
-                f"{hf} must be a 64-char lowercase hex SHA-256, got {val!r}"
-            )
-
-    # stale 確認
-    stale: list[str] = []
-    if data.get("parser_artifact_hash") != current_parser_hash:
-        stale.append("parser_artifact_hash")
-    if data.get("detector_artifact_hash") != current_detector_hash:
-        stale.append("detector_artifact_hash")
-    if data.get("assembler_schema_hash") != current_assembler_hash:
-        stale.append("assembler_schema_hash")
-    if data.get("config_hash") != current_config_hash:
-        stale.append("config_hash")
-    if data.get("ui_presentation_schema_hash") != current_ui_schema_hash:
-        stale.append("ui_presentation_schema_hash")
+    """exact schema/hash を検証し、保存済み metric から gate を必ず再計算する。"""
+    if not isinstance(data, dict) or set(data) != _FINAL_VERDICT_REQUIRED_FIELDS:
+        raise ValueError("final verdict fields must exactly match the v2 schema")
+    if data["schema_version"] != FINAL_VERDICT_SCHEMA_VERSION:
+        raise ValueError("unsupported final verdict schema_version")
+    for name in ("verdict_id", "seal_id", *_HASH_FIELDS):
+        _require_sha256(data[name], name)
+    current = {
+        "parser_artifact_hash": current_parser_hash,
+        "detector_artifact_hash": current_detector_hash,
+        "assembler_schema_hash": current_assembler_hash,
+        "config_hash": current_config_hash,
+        "ui_presentation_schema_hash": current_ui_schema_hash,
+    }
+    for name, value in current.items():
+        _require_sha256(value, f"current {name}")
+    stale = [name for name, value in current.items() if data[name] != value]
     if stale:
-        raise StaleVerdictError(
-            f"Final perception verdict stale; changed producer fields: {stale}. "
-            "Demote old final sessions to development and re-issue with new untouched sessions."
-        )
-
-    # development/formal flag 整合性チェック
-    development_only = bool(data.get("development_only", True))
-    formal_eligible = bool(data.get("formal_perception_verdict_eligible", False))
-    if formal_eligible and development_only:
-        raise FormalVerdictPromotionError(
-            "verdict has formal_perception_verdict_eligible=True but development_only=True. "
-            "This is inconsistent — possible tampering."
-        )
-
-    # passed と blocking_reasons の整合性チェック
-    passed = bool(data.get("passed", False))
-    blocking = list(data.get("blocking_reasons", []))
-    if passed and blocking:
-        raise ValueError(
-            "verdict has passed=True but blocking_reasons is non-empty. Inconsistent verdict."
-        )
-
+        raise StaleVerdictError(f"final perception verdict is stale: {stale}")
+    if any(type(data[name]) is not bool for name in ("passed", "development_only", "formal_perception_verdict_eligible")):
+        raise ValueError("verdict flags must be exact bool values")
+    if not isinstance(data["blocking_reasons"], list) or not all(type(value) is str for value in data["blocking_reasons"]):
+        raise ValueError("blocking_reasons must be a string list")
+    passed, blocking = recompute_gate_from_metrics(data["metrics"])
+    if data["passed"] != passed or data["blocking_reasons"] != blocking:
+        raise StaleVerdictError("stored pass/blocking result does not match metric gate")
+    identity_payload = {
+        "seal_id": data["seal_id"],
+        "final_session_ids": sorted(data["final_session_ids"]),
+        "subject_hashes": {name: data[name] for name in _HASH_FIELDS},
+        "metrics": data["metrics"],
+    }
+    if canonical_hash(identity_payload) != data["verdict_id"]:
+        raise HashMismatchError("verdict_id does not bind metrics and complete subject hashes")
     return PerceptionFinalVerdict(
-        verdict_id=data["verdict_id"],
-        seal_id=data["seal_id"],
-        final_session_ids=list(data["final_session_ids"]),
-        parser_artifact_hash=data["parser_artifact_hash"],
-        detector_artifact_hash=data["detector_artifact_hash"],
-        assembler_schema_hash=data["assembler_schema_hash"],
-        ui_presentation_schema_hash=data["ui_presentation_schema_hash"],
-        config_hash=data["config_hash"],
-        metrics=dict(data.get("metrics", {})),
-        passed=passed,
-        blocking_reasons=blocking,
-        development_only=development_only,
-        formal_perception_verdict_eligible=formal_eligible,
-        capture_dataset_hash=str(data.get("capture_dataset_hash", "")),
-        calibration_profile_hash=str(data.get("calibration_profile_hash", "")),
-        threshold_hash=str(data.get("threshold_hash", "")),
-        atlas_vocabulary_hash=str(data.get("atlas_vocabulary_hash", "")),
-        assembler_impl_hash=str(data.get("assembler_impl_hash", "")),
-        roi_resolver_input_hash=str(data.get("roi_resolver_input_hash", "")),
-        benchmark_fit_code_hash=str(data.get("benchmark_fit_code_hash", "")),
-        lineage_seal_hash=str(data.get("lineage_seal_hash", "")),
+        **{name: data[name] for name in _FINAL_VERDICT_REQUIRED_FIELDS if name != "schema_version"},
+        schema_version=data["schema_version"],
+        _factory_token=_FORMAL_FACTORY_TOKEN if not data["development_only"] else None,
     )

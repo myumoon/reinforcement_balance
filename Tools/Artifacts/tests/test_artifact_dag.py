@@ -79,6 +79,32 @@ def _campaign_lineage():
     return source, verdict, dataset, model, bundle, shadow, campaign
 
 
+def test_perception_profile_and_final_verdict_real_descriptors_pass_consumer_dag():
+    """producer と同じ ArtifactDescriptor 列を consumer validator へ通す。"""
+    source = _node("perception-source", "source_descriptor", ch="a")
+    profile = _node(
+        "perception-profile",
+        "perception_calibration_profile",
+        parents=(source.node_ref(),),
+        ch="b",
+    )
+    verdict = _node(
+        "perception-verdict",
+        "perception_final_verdict",
+        parents=(profile.node_ref(),),
+        ch="c",
+    )
+
+    report = validate_artifact_dag([verdict, source, profile])
+
+    assert report.node_count == 3
+    assert report.topological_identity_hashes == (
+        source.identity_hash,
+        profile.identity_hash,
+        verdict.identity_hash,
+    )
+
+
 def test_child_verdict_parent_reference_is_valid_storage_direction():
     source = _node("phase5-source", "source_descriptor", ch="a")
     verdict = ValidationVerdict(

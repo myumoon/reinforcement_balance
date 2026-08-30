@@ -287,6 +287,42 @@ class ArtifactStore:
             store_uri=artifact_uri(sha256),
         )
         self._ensure_logical_id_available(ref)
+        self._publish_object_bytes(ref, data)
+        self._record_logical_id(ref)
+        return ref
+
+    def put_bytes_create_once(
+        self, *, logical_id: str, data: bytes, media_type: str
+    ) -> ArtifactRef:
+        """logical id を lock 下で一度だけ atomic publish する。
+
+        通常の ``put_bytes`` は同一内容の idempotent 再 publish を許す。lineage
+        open marker のように二回目そのものを拒否する用途だけ、この境界を使う。
+        object publish と logical index commit の間は同じ logical-id lock を保持する。
+        """
+        if not isinstance(data, bytes):
+            raise ArtifactStoreError("put_bytes_create_once data must be bytes")
+        sha256 = sha256_hex(data)
+        ref = ArtifactRef(
+            logical_id=logical_id,
+            sha256=sha256,
+            size_bytes=len(data),
+            media_type=media_type,
+            store_uri=artifact_uri(sha256),
+        )
+        index_path = self._logical_index_path(logical_id)
+        with _exclusive_file_lock(self._logical_lock_path(logical_id)):
+            if index_path.exists():
+                # 破損 index も再利用せず fail-closed にする。
+                self._read_logical_index(index_path)
+                raise ArtifactStoreError(f"logical id {logical_id!r} already exists")
+            self._publish_object_bytes(ref, data)
+            self._record_logical_id_unlocked(ref, index_path)
+        return ref
+
+    def _publish_object_bytes(self, ref: ArtifactRef, data: bytes) -> None:
+        """content object を temp+fsync+replace で公開し、公開後 hash を再検証する。"""
+        sha256 = ref.sha256
         destination = self.object_path(ref.store_uri)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
@@ -312,9 +348,11 @@ class ArtifactStore:
             finally:
                 if temp_path.exists():
                     temp_path.unlink()
-
-        self._record_logical_id(ref)
-        return ref
+        verification = self.verify(ref)
+        if not verification.ok:
+            raise ArtifactStoreError(
+                f"published object {ref.store_uri} failed revalidation: {verification.reason}"
+            )
 
     def _ensure_logical_id_available(self, ref: ArtifactRef) -> None:
         index_path = self._logical_index_path(ref.logical_id)
@@ -339,23 +377,31 @@ class ArtifactStore:
                     f"logical id {ref.logical_id!r} already points to different metadata"
                 )
 
-            fd, temp_name = tempfile.mkstemp(
-                prefix=".logical.", suffix=".tmp", dir=str(index_path.parent)
-            )
-            temp_path = Path(temp_name)
-            try:
-                with os.fdopen(fd, "wb") as handle:
-                    handle.write(canonical_json_bytes(expected))
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                _durable_replace(temp_path, index_path)
-                if self._read_logical_index(index_path) != expected:
-                    raise ArtifactStoreError(
-                        f"logical id {ref.logical_id!r} publish revalidation failed"
-                    )
-            finally:
-                if temp_path.exists():
-                    temp_path.unlink()
+            self._record_logical_id_unlocked(ref, index_path)
+
+    def _record_logical_id_unlocked(
+        self, ref: ArtifactRef, index_path: Path
+    ) -> None:
+        """呼出側が logical-id lock を保持した状態で index を durable commit する。"""
+        expected = ref.to_wire()
+
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".logical.", suffix=".tmp", dir=str(index_path.parent)
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(canonical_json_bytes(expected))
+                handle.flush()
+                os.fsync(handle.fileno())
+            _durable_replace(temp_path, index_path)
+            if self._read_logical_index(index_path) != expected:
+                raise ArtifactStoreError(
+                    f"logical id {ref.logical_id!r} publish revalidation failed"
+                )
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
 
     def verify(
         self,

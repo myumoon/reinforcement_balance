@@ -11,6 +11,7 @@ import pytest
 from survivors.perception_benchmark import (
     BenchmarkRecord,
     BenchmarkReport,
+    ExpectedTick,
     bootstrap_cluster_ci,
     run_benchmark,
 )
@@ -23,7 +24,7 @@ def _rec(
     *,
     session: str = "s0",
     frame: str = "f0",
-    kind: str = "calibration",
+    kind: str = "error_calibration",
     confidence: float = 0.9,
     latency_ms: float = 0.0,
 ) -> BenchmarkRecord:
@@ -157,8 +158,8 @@ class TestLatencyPercentiles:
     def test_latency_aggregated_once_per_tick(self) -> None:
         """同じ (session_id, frame_id) はレイテンシを 1 回だけ集計する（必須回帰テスト）。"""
         records = [
-            BenchmarkRecord("f0", "s0", "calibration", "raw", "screen_state", "g", "g", 0.9, latency_ms=50.0),  # type: ignore[arg-type]
-            BenchmarkRecord("f0", "s0", "calibration", "raw", "hp_ratio", 0.5, 0.5, 0.9, latency_ms=50.0),  # type: ignore[arg-type]
+            BenchmarkRecord("f0", "s0", "error_calibration", "raw", "screen_state", "g", "g", 0.9, latency_ms=50.0),  # type: ignore[arg-type]
+            BenchmarkRecord("f0", "s0", "error_calibration", "raw", "hp_ratio", 0.5, 0.5, 0.9, latency_ms=50.0),  # type: ignore[arg-type]
         ]
         report = run_benchmark(records)
         # tick は 1 件だけなので p95=p99=50
@@ -167,12 +168,32 @@ class TestLatencyPercentiles:
     def test_negative_latency_rejected(self) -> None:
         """負の latency_ms は BenchmarkRecord 生成時に拒否する（必須回帰テスト）。"""
         with pytest.raises(ValueError, match="non-negative"):
-            BenchmarkRecord("f0", "s0", "cal", "raw", "screen_state", "g", "g", 0.9, latency_ms=-1.0)  # type: ignore[arg-type]
+            BenchmarkRecord("f0", "s0", "error_calibration", "raw", "screen_state", "g", "g", 0.9, latency_ms=-1.0)  # type: ignore[arg-type]
 
     def test_nan_latency_rejected(self) -> None:
         """NaN の latency_ms は BenchmarkRecord 生成時に拒否する。"""
         with pytest.raises(ValueError):
-            BenchmarkRecord("f0", "s0", "cal", "raw", "screen_state", "g", "g", 0.9, latency_ms=float("nan"))  # type: ignore[arg-type]
+            BenchmarkRecord("f0", "s0", "error_calibration", "raw", "screen_state", "g", "g", 0.9, latency_ms=float("nan"))  # type: ignore[arg-type]
+
+    def test_same_tick_inconsistent_latency_rejected(self) -> None:
+        records = [
+            _rec("screen_state", "g", "g", latency_ms=1.0),
+            _rec("hp_ratio", 0.5, 0.5, latency_ms=2.0),
+        ]
+        with pytest.raises(ValueError, match="inconsistent latency"):
+            run_benchmark(records)
+
+    def test_unmeasured_expected_tick_is_blocking(self) -> None:
+        records = [
+            _rec("screen_state", "g", "g", session="s0", frame="f0", latency_ms=1.0),
+            _rec("screen_state", "g", "g", session="s1", frame="f0", latency_ms=1.0),
+        ]
+        report = run_benchmark(
+            records,
+            expected_ticks=[ExpectedTick("s0", "f0"), ExpectedTick("s1", "f0"), ExpectedTick("s1", "dropped")],
+        )
+        assert report.invalid_tick_rate == pytest.approx(1 / 3)
+        assert any("latency measured" in reason for reason in report.blocking_reasons)
 
 
 class TestDevelopmentOnlyFlag:
@@ -187,6 +208,32 @@ class TestDevelopmentOnlyFlag:
         records = [_rec("screen_state", "g", "g")]
         report = run_benchmark(records)
         assert report.formal_perception_verdict_eligible is False
+
+    def test_development_only_is_not_a_public_override(self) -> None:
+        with pytest.raises(TypeError):
+            run_benchmark([_rec("screen_state", "g", "g")], development_only=False)  # type: ignore[call-arg]
+
+
+class TestRecordValidation:
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), True])
+    def test_numeric_substitutes_rejected(self, value: object) -> None:
+        with pytest.raises(ValueError):
+            _rec("hp_ratio", 0.5, value)
+
+    def test_out_of_range_ratio_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"\[0, 1\]"):
+            _rec("xp_ratio", 0.5, 1.1)
+
+    def test_mixed_session_kind_and_source_rejected(self) -> None:
+        with pytest.raises(ValueError, match="session_kind"):
+            run_benchmark([
+                _rec("screen_state", "g", "g", session="s0"),
+                _rec("screen_state", "g", "g", session="s1", kind="final_e2e_test"),
+            ])
+        with pytest.raises(ValueError, match="source_policy"):
+            first = _rec("screen_state", "g", "g", session="s0")
+            second = BenchmarkRecord("f0", "s1", "error_calibration", "lossless", "screen_state", "g", "g", 1.0, 1.0)
+            run_benchmark([first, second])
 
 
 class TestBootstrapClusterCI:
@@ -203,15 +250,14 @@ class TestBootstrapClusterCI:
         lo, hi = bootstrap_cluster_ci(session_values, n_bootstrap=200, rng=np.random.default_rng(0))
         assert lo < hi
 
-    def test_empty_sessions_returns_zero_ci(self) -> None:
-        lo, hi = bootstrap_cluster_ci({}, n_bootstrap=100)
-        assert lo == 0.0
-        assert hi == 0.0
+    def test_empty_sessions_rejected(self) -> None:
+        with pytest.raises(ValueError, match="at least two"):
+            bootstrap_cluster_ci({}, n_bootstrap=100)
 
-    def test_single_session_ci_zero_width(self) -> None:
+    def test_single_session_rejected(self) -> None:
         session_values = {"s0": [0.7, 0.8, 0.9]}
-        lo, hi = bootstrap_cluster_ci(session_values, n_bootstrap=100, rng=np.random.default_rng(0))
-        assert lo == pytest.approx(hi, abs=1e-6)
+        with pytest.raises(ValueError, match="at least two"):
+            bootstrap_cluster_ci(session_values, n_bootstrap=100, rng=np.random.default_rng(0))
 
     def test_invalid_n_bootstrap_raises(self) -> None:
         """n_bootstrap ≤ 0 は ValueError（必須回帰テスト）。"""
@@ -247,9 +293,9 @@ class TestInvalidTickRate:
     def test_availability_uses_unique_ticks(self) -> None:
         """同一 (session_id, frame_id) は 1 tick としてカウントする（record 数ではない）。"""
         records = [
-            BenchmarkRecord("f0", "s0", "cal", "raw", "screen_state", "g", "g", 0.9),  # type: ignore[arg-type]
-            BenchmarkRecord("f0", "s0", "cal", "raw", "hp_ratio", 0.5, None, 0.9),  # type: ignore[arg-type]
-            BenchmarkRecord("f0", "s0", "cal", "raw", "xp_ratio", 0.3, 0.3, 0.9),  # type: ignore[arg-type]
+            BenchmarkRecord("f0", "s0", "error_calibration", "raw", "screen_state", "g", "g", 0.9),  # type: ignore[arg-type]
+            BenchmarkRecord("f0", "s0", "error_calibration", "raw", "hp_ratio", 0.5, None, 0.9),  # type: ignore[arg-type]
+            BenchmarkRecord("f0", "s0", "error_calibration", "raw", "xp_ratio", 0.3, 0.3, 0.9),  # type: ignore[arg-type]
         ]
         report = run_benchmark(records)
         assert report.invalid_tick_rate == pytest.approx(1.0)
@@ -269,7 +315,7 @@ class TestRoiMetrics:
 
     def test_roi_center_p99(self) -> None:
         records = [
-            _rec("ui_roi_center_error", None, float(i) * 0.001, frame=str(i))
+            _rec("ui_roi_center_error", 0.0, float(i) * 0.001, frame=str(i))
             for i in range(1, 101)
         ]
         report = run_benchmark(records)
@@ -278,23 +324,23 @@ class TestRoiMetrics:
 
     def test_roi_inside_region_rate(self) -> None:
         records = (
-            [_rec("ui_inside_region", None, True, frame=str(i)) for i in range(9)]
-            + [_rec("ui_inside_region", None, False, frame="f_false")]
+            [_rec("ui_inside_region", True, True, frame=str(i)) for i in range(9)]
+            + [_rec("ui_inside_region", True, False, frame="f_false")]
         )
         report = run_benchmark(records)
         assert report.roi_inside_region_rate == pytest.approx(0.9)
 
     def test_no_false_positives(self) -> None:
         records = [
-            _rec("ui_false_positive", None, False, frame=str(i)) for i in range(5)
+            _rec("ui_false_positive", False, False, frame=str(i)) for i in range(5)
         ]
         report = run_benchmark(records)
         assert report.roi_false_positive_count == 0
 
     def test_three_false_positives(self) -> None:
         records = (
-            [_rec("ui_false_positive", None, True, frame=str(i)) for i in range(3)]
-            + [_rec("ui_false_positive", None, False, frame=str(i + 3)) for i in range(7)]
+            [_rec("ui_false_positive", False, True, frame=str(i)) for i in range(3)]
+            + [_rec("ui_false_positive", False, False, frame=str(i + 3)) for i in range(7)]
         )
         report = run_benchmark(records)
         assert report.roi_false_positive_count == 3
@@ -378,7 +424,7 @@ class TestThresholdGate:
         records = (
             [_rec("screen_state", "gameplay", "gameplay",
                   session=f"s{i % 3}", frame=str(i)) for i in range(30)]
-            + [_rec("ui_false_positive", None, True, frame="fp_0")]
+            + [_rec("ui_false_positive", False, True, frame="fp_0")]
         )
         report = run_benchmark(records)
         assert any("false-positive" in r for r in report.blocking_reasons), report.blocking_reasons

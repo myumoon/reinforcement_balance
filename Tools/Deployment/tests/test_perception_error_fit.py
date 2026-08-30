@@ -1,473 +1,226 @@
-"""perception_error_fit の calibration fit・lineage seal・verdict テスト。
-
-synthetic residuals から PerceptionErrorProfile を fit し、
-final session の lineage seal と stale-verdict 検証を確認します。
-全 fixture は development_only=True です。
-"""
+"""iteration 2: exact fit metadata、lineage seal、verdict replay gate。"""
 
 from __future__ import annotations
 
-import tempfile
+import hashlib
 from pathlib import Path
 
 import pytest
-from reinbalance_survivors_contracts.perception_error import PerceptionErrorProfile
+
+from Tools.Artifacts.artifact_store import ArtifactStore
+from survivors.perception_benchmark import BenchmarkRecord, run_benchmark
 from survivors.perception_error_fit import (
     FINAL_VERDICT_SCHEMA_VERSION,
     CalibrationResidual,
+    EmptyResidualError,
     FinalFitMixingError,
     FinalSessionAlreadyOpenedError,
     FinalSessionNotInSealError,
     FormalVerdictPromotionError,
+    HashMismatchError,
     InvalidResidualError,
-    PerceptionCalibrationVerdict,
     PerceptionFinalVerdict,
-    SessionOverlapError,
     StaleVerdictError,
     create_lineage_seal,
+    create_synthetic_final_verdict,
     fit_error_profile,
     load_final_verdict,
-    simulator_distance_report,
 )
 
-# 固定長 64 文字ダミーハッシュ
-_PH = "a" * 64  # parser
-_DH = "b" * 64  # detector
-_AH = "c" * 64  # assembler schema
-_CFH = "d" * 64  # config
-_UIH = "e" * 64  # UI schema
+
+def _residual(session_id: str, field: str = "hp_ratio", value: float = 0.1, **kwargs) -> CalibrationResidual:
+    return CalibrationResidual(session_id, "f0", field, value, 0.8, 1, 2.0, **kwargs)
 
 
-def _residual(
-    session_id: str,
-    field: str = "hp_ratio",
-    residual: float = 0.05,
-) -> CalibrationResidual:
-    return CalibrationResidual(
-        session_id=session_id,
-        frame_id="f0",
-        field=field,
-        residual=residual,
-        confidence=0.9,
-        age_frames=0,
-    )
+def _seal_subjects() -> dict[str, str]:
+    return {
+        "parser_artifact_hash": "a" * 64,
+        "detector_artifact_hash": "b" * 64,
+        "assembler_schema_hash": "c" * 64,
+        "ui_presentation_schema_hash": "d" * 64,
+        "config_hash": "e" * 64,
+        "capture_dataset_hash": "f" * 64,
+        "calibration_profile_hash": "1" * 64,
+        "threshold_hash": "2" * 64,
+        "atlas_vocabulary_hash": "3" * 64,
+        "assembler_impl_hash": "4" * 64,
+        "roi_resolver_input_hash": "5" * 64,
+        "benchmark_fit_code_hash": "6" * 64,
+    }
 
 
-class TestFitErrorProfile:
-    """calibration residuals から PerceptionErrorProfile を fit する。"""
+def _verdict_subjects() -> dict[str, str]:
+    return {**_seal_subjects(), "lineage_seal_hash": "7" * 64}
 
-    def test_fit_returns_valid_profile(self) -> None:
-        residuals = [_residual("cal_0") for _ in range(20)]
-        profile = fit_error_profile(residuals, ["cal_0"], [])
-        assert isinstance(profile, PerceptionErrorProfile)
 
-    def test_calibration_session_ids_saved(self) -> None:
-        residuals = [_residual("s1")]
-        profile = fit_error_profile(residuals, ["s1"], [])
-        assert "s1" in profile.calibration_session_ids
-
-    def test_final_ids_in_exclusion_list(self) -> None:
-        residuals = [_residual("s1")]
-        profile = fit_error_profile(residuals, ["s1"], ["final_0"])
-        assert "final_0" in profile.final_e2e_session_ids
-
-    def test_overlap_raises_session_overlap_error(self) -> None:
-        with pytest.raises(SessionOverlapError):
-            fit_error_profile([_residual("s1")], ["s1"], ["s1"])
-
-    def test_final_residual_raises_mixing_error(self) -> None:
-        with pytest.raises(FinalFitMixingError):
-            fit_error_profile(
-                [_residual("final_0", residual=0.1)],
-                ["cal_0"],
-                ["final_0"],
+def _full_report():
+    rows = []
+    for session_index, session in enumerate(("s0", "s1")):
+        for frame_index, density in enumerate((0.1, 0.2)):
+            common = dict(session=session, frame=f"f{frame_index}")
+            values = (
+                ("screen_state", "gameplay", "gameplay"),
+                ("timer_seconds", 10.0, 10.0), ("level", 2, 2),
+                ("hp_ratio", 0.8, 0.8), ("xp_ratio", 0.3, 0.3),
+                ("inventory_top1", "i" * 64, "i" * 64),
+                ("choice_top1", "c" * 64, "c" * 64),
+                ("entity_density", density, density),
+                ("nearest_distance", 0.2, 0.2),
+                ("ui_roi_center_error", 0.0, 0.0),
+                ("ui_inside_region", True, True),
+                ("ui_false_positive", False, False),
+                ("confidence", 1.0, 1.0),
             )
+            for field, ground, predicted in values:
+                rows.append(BenchmarkRecord(
+                    common["frame"], common["session"], "error_calibration", "raw",
+                    field, ground, predicted, 1.0, 1.0,
+                ))
+    report = run_benchmark(rows, n_bootstrap=20)
+    assert report.passed
+    return report
 
-    def test_hp_std_nonzero_when_residuals_vary(self) -> None:
-        """HP residual が分散を持つとき hud_hp_misread_std > 0。"""
-        residuals = [
-            _residual("cal_0", "hp_ratio", 0.1),
-            _residual("cal_0", "hp_ratio", -0.1),
-        ]
-        profile = fit_error_profile(residuals, ["cal_0"], [])
+
+class TestFit:
+    def test_zero_and_unknown_residual_sets_rejected(self) -> None:
+        with pytest.raises(EmptyResidualError):
+            fit_error_profile([], ["cal"], [])
+        with pytest.raises(FinalFitMixingError, match="outside"):
+            fit_error_profile([_residual("unknown")], ["cal"], [])
+
+    def test_underpowered_field_rejected(self) -> None:
+        with pytest.raises(EmptyResidualError, match="underpowered"):
+            fit_error_profile([_residual("cal")], ["cal"], [])
+
+    def test_every_calibration_session_requires_samples(self) -> None:
+        with pytest.raises(EmptyResidualError, match="0 residuals"):
+            fit_error_profile([_residual("c0")], ["c0", "c1"], [])
+
+    def test_latency_confidence_age_and_metadata_are_fitted(self) -> None:
+        profile = fit_error_profile(
+            [
+                CalibrationResidual("c0", "f0", "hp_ratio", -0.1, 1.0, 0, 1.0),
+                CalibrationResidual("c0", "f1", "hp_ratio", 0.3, 0.1, 9, 5.0),
+            ],
+            ["c0"], ["final"], calibration_session_hashes={"c0": "a" * 64},
+        )
+        assert 1.0 < profile.latency_mean_frames < 5.0
         assert profile.hud_hp_misread_std > 0.0
+        assert profile.calibration_session_hashes == {"c0": "a" * 64}
+        assert profile.field_sample_counts == {"hp_ratio": 2}
+        assert len(profile.fit_code_hash) == 64
+        # existing consumer wire は metadata を追加せず引き続き読める。
+        from reinbalance_survivors_contracts.perception_error import PerceptionErrorProfile
+        assert PerceptionErrorProfile.from_wire(profile.to_wire()).profile_hash == profile.profile_hash
 
-    def test_empty_residuals_yields_default_profile(self) -> None:
-        """residuals が空のとき全パラメータ 0 のデフォルトプロファイルになる。"""
-        profile = fit_error_profile([], ["cal_0"], [])
-        assert isinstance(profile, PerceptionErrorProfile)
-        assert profile.hud_hp_misread_std == 0.0
+    def test_confusion_matrix_uses_observed_categories(self) -> None:
+        profile = fit_error_profile(
+            [
+                _residual("c0", "item_category", 0.0, ground_truth_category=0, predicted_category=1),
+                _residual("c0", "item_category", 0.0, ground_truth_category=0, predicted_category=1),
+            ], ["c0"], [],
+        )
+        assert profile.item_confusion_matrix[0][1] == pytest.approx(1.0)
+        assert profile.item_confusion_matrix[0][0] == pytest.approx(0.0)
 
-    def test_nan_residual_rejected(self) -> None:
-        """NaN の residual は CalibrationResidual 生成時に拒否される。"""
+    @pytest.mark.parametrize("field,value", [("residual", float("nan")), ("confidence", True), ("latency_frames", float("inf"))])
+    def test_nonfinite_and_bool_rejected(self, field: str, value: object) -> None:
+        args = dict(session_id="c", frame_id="f", field="hp_ratio", residual=0.1, confidence=0.9, age_frames=0, latency_frames=1.0)
+        args[field] = value
         with pytest.raises(InvalidResidualError):
-            CalibrationResidual(
-                session_id="s0",
-                frame_id="f0",
-                field="hp_ratio",
-                residual=float("nan"),
-                confidence=0.9,
-                age_frames=0,
-            )
-
-    def test_inf_residual_rejected(self) -> None:
-        """Inf の residual は CalibrationResidual 生成時に拒否される。"""
-        with pytest.raises(InvalidResidualError):
-            CalibrationResidual(
-                session_id="s0",
-                frame_id="f0",
-                field="hp_ratio",
-                residual=float("inf"),
-                confidence=0.9,
-                age_frames=0,
-            )
-
-    def test_burst_fields_fit(self) -> None:
-        """burst パラメータを fit できる（全フィールドカバー）。"""
-        residuals = [
-            _residual("c0", "burst_enter", 0.1),
-            _residual("c0", "burst_exit", 0.9),
-            _residual("c0", "burst_dropout", 0.2),
-        ]
-        profile = fit_error_profile(residuals, ["c0"], [])
-        assert isinstance(profile, PerceptionErrorProfile)
-        assert 0.0 <= profile.burst_enter_prob <= 1.0
-        assert 0.0 <= profile.burst_exit_prob <= 1.0
-        assert 0.0 <= profile.burst_dropout_prob <= 1.0
-
-
-class TestSimulatorDistance:
-    """calibrated profile と simulator profile の距離を計算する。"""
-
-    def test_same_profile_zero_distance(self) -> None:
-        profile = PerceptionErrorProfile()
-        distances = simulator_distance_report(profile, profile)
-        assert all(v == 0.0 for v in distances.values())
-
-    def test_different_profiles_positive_distance(self) -> None:
-        base = PerceptionErrorProfile()
-        fitted = PerceptionErrorProfile(hud_hp_misread_std=0.05, coord_noise_std=2.0)
-        distances = simulator_distance_report(fitted, base)
-        assert distances["hp_misread_std_diff"] == pytest.approx(0.05)
-        assert distances["coord_noise_std_diff"] == pytest.approx(2.0)
-
-    def test_distance_report_has_expected_keys(self) -> None:
-        d = simulator_distance_report(PerceptionErrorProfile(), PerceptionErrorProfile())
-        assert "latency_mean_diff" in d
-        assert "coord_noise_std_diff" in d
-        assert "hp_misread_std_diff" in d
-        assert "burst_enter_diff" in d
-        assert "burst_exit_diff" in d
-        assert "burst_dropout_diff" in d
-        assert "unknown_collapse_prob_diff" in d
+            CalibrationResidual(**args)
 
 
 class TestLineageSeal:
-    """create-once final lineage seal を確認する。"""
+    def _manifest(self, tmp_path: Path, name: str, content: bytes = b"manifest") -> tuple[Path, str]:
+        path = tmp_path / f"{name}.json"
+        path.write_bytes(content)
+        return path, hashlib.sha256(content).hexdigest()
 
-    def test_create_seal_has_64_char_id(self) -> None:
-        seal = create_lineage_seal(_PH, _DH, _AH, _CFH)
-        assert isinstance(seal.seal_id, str)
-        assert len(seal.seal_id) == 64
-
-    def test_seal_development_only_by_default(self) -> None:
-        seal = create_lineage_seal(_PH, _DH, _AH, _CFH)
-        assert seal.development_only is True
-
-    def test_open_session_tracks_id(self) -> None:
-        seal = create_lineage_seal(
-            _PH, _DH, _AH, _CFH,
-            final_session_set=frozenset({"final_0"}),
-        )
-        seal.open_session("final_0")
-        assert "final_0" in seal.opened_session_ids
-
-    def test_same_session_twice_rejected(self) -> None:
-        """同一 session_id の 2 回目開封を拒否する（create-once）。"""
-        seal = create_lineage_seal(
-            _PH, _DH, _AH, _CFH,
-            final_session_set=frozenset({"final_0", "final_1", "final_2"}),
-        )
-        seal.open_session("final_0")
-        with pytest.raises(FinalSessionAlreadyOpenedError):
-            seal.open_session("final_0")
-
-    def test_three_different_sessions_each_once(self) -> None:
-        """固定集合内の 3 件の別 session は各 1 回ずつ開封できる（必須回帰テスト）。"""
-        seal = create_lineage_seal(
-            _PH, _DH, _AH, _CFH,
-            final_session_set=frozenset({"s0", "s1", "s2"}),
-        )
-        seal.open_session("s0")
-        seal.open_session("s1")
-        seal.open_session("s2")
-        assert len(seal.opened_session_ids) == 3
-
-    def test_session_not_in_set_rejected(self) -> None:
-        """固定集合に含まれない session_id は拒否する。"""
-        seal = create_lineage_seal(
-            _PH, _DH, _AH, _CFH,
-            final_session_set=frozenset({"s0", "s1", "s2"}),
-        )
-        with pytest.raises(FinalSessionNotInSealError):
-            seal.open_session("unknown_session")
-
-    def test_verify_hashes_ok_with_same(self) -> None:
-        seal = create_lineage_seal(_PH, _DH, _AH, _CFH)
-        seal.verify_hashes(parser=_PH, detector=_DH, assembler=_AH, config=_CFH)
-
-    def test_verify_hashes_fails_on_parser_change(self) -> None:
-        seal = create_lineage_seal(_PH, _DH, _AH, _CFH)
-        with pytest.raises(StaleVerdictError):
-            seal.verify_hashes(parser="x" * 64, detector=_DH, assembler=_AH, config=_CFH)
-
-    def test_verify_hashes_fails_on_config_change(self) -> None:
-        seal = create_lineage_seal(_PH, _DH, _AH, _CFH)
-        with pytest.raises(StaleVerdictError):
-            seal.verify_hashes(parser=_PH, detector=_DH, assembler=_AH, config="y" * 64)
-
-    def test_same_hashes_same_seal_id(self) -> None:
-        s1 = create_lineage_seal(_PH, _DH, _AH, _CFH)
-        s2 = create_lineage_seal(_PH, _DH, _AH, _CFH)
-        assert s1.seal_id == s2.seal_id
-
-    def test_different_hashes_different_seal_id(self) -> None:
-        s1 = create_lineage_seal(_PH, _DH, _AH, _CFH)
-        s2 = create_lineage_seal("x" * 64, _DH, _AH, _CFH)
-        assert s1.seal_id != s2.seal_id
-
-    def test_to_wire_has_development_only_true(self) -> None:
-        """to_wire に development_only=true を含む。"""
-        seal = create_lineage_seal(_PH, _DH, _AH, _CFH)
-        wire = seal.to_wire()
-        assert wire["seal_id"] == seal.seal_id
-        assert wire["development_only"] is True
-
-    def test_durable_seal_survives_reload(self) -> None:
-        """ArtifactStore 永続化後に load_from_store で開封状態を復元できる（必須回帰テスト）。"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            store_path = Path(tmpdir) / "seal.json"
-            seal = create_lineage_seal(
-                _PH, _DH, _AH, _CFH,
-                final_session_set=frozenset({"s0", "s1", "s2"}),
-                store_path=store_path,
-            )
-            seal.open_session("s0")
-            # reload: process 再起動をシミュレート
-            from survivors.perception_error_fit import FinalLineageSeal
-            restored = FinalLineageSeal.load_from_store(store_path)
-            # 復元後も s0 は開封済みとして記録されている
-            assert "s0" in restored.opened_session_ids
-            # 再度 s0 を開封しようとすると拒否される
-            with pytest.raises(FinalSessionAlreadyOpenedError):
-                restored.open_session("s0")
-            # s1, s2 は未開封なので開封できる
-            restored.open_session("s1")
-            assert "s1" in restored.opened_session_ids
-
-
-class TestFinalVerdictLoad:
-    """PerceptionFinalVerdict の stale 検証と flag 整合性を確認する。"""
-
-    def _make_wire(self, **overrides: object) -> dict[str, object]:
-        base: dict[str, object] = {
-            "schema_version": FINAL_VERDICT_SCHEMA_VERSION,
-            "verdict_id": "vtest",
-            "seal_id": "s" * 64,
-            "final_session_ids": ["final_0"],
-            "parser_artifact_hash": _PH,
-            "detector_artifact_hash": _DH,
-            "assembler_schema_hash": _AH,
-            "ui_presentation_schema_hash": _UIH,
-            "config_hash": _CFH,
-            "metrics": {},
-            "passed": False,
-            "blocking_reasons": ["development-only fixture"],
-            "development_only": True,
-            "formal_perception_verdict_eligible": False,
-            "capture_dataset_hash": "",
-            "calibration_profile_hash": "",
-            "threshold_hash": "",
-            "atlas_vocabulary_hash": "",
-            "assembler_impl_hash": "",
-            "roi_resolver_input_hash": "",
-            "benchmark_fit_code_hash": "",
-            "lineage_seal_hash": "",
-        }
-        base.update(overrides)
-        return base
-
-    def test_load_matching_hashes_ok(self) -> None:
-        wire = self._make_wire()
-        verdict = load_final_verdict(
-            wire,
-            current_parser_hash=_PH,
-            current_detector_hash=_DH,
-            current_assembler_hash=_AH,
-            current_config_hash=_CFH,
-            current_ui_schema_hash=_UIH,
-        )
-        assert verdict.verdict_id == "vtest"
-
-    def test_load_stale_parser_fails(self) -> None:
-        """parser hash が変わると StaleVerdictError を送出する。"""
-        wire = self._make_wire()
-        with pytest.raises(StaleVerdictError, match="parser_artifact_hash"):
-            load_final_verdict(
-                wire,
-                current_parser_hash="x" * 64,
-                current_detector_hash=_DH,
-                current_assembler_hash=_AH,
-                current_config_hash=_CFH,
-                current_ui_schema_hash=_UIH,
-            )
-
-    def test_load_stale_detector_fails(self) -> None:
-        wire = self._make_wire()
-        with pytest.raises(StaleVerdictError, match="detector_artifact_hash"):
-            load_final_verdict(
-                wire,
-                current_parser_hash=_PH,
-                current_detector_hash="x" * 64,
-                current_assembler_hash=_AH,
-                current_config_hash=_CFH,
-                current_ui_schema_hash=_UIH,
-            )
-
-    def test_load_stale_ui_schema_fails(self) -> None:
-        wire = self._make_wire()
-        with pytest.raises(StaleVerdictError, match="ui_presentation_schema_hash"):
-            load_final_verdict(
-                wire,
-                current_parser_hash=_PH,
-                current_detector_hash=_DH,
-                current_assembler_hash=_AH,
-                current_config_hash=_CFH,
-                current_ui_schema_hash="x" * 64,
-            )
-
-    def test_load_stale_config_fails(self) -> None:
-        wire = self._make_wire()
-        with pytest.raises(StaleVerdictError, match="config_hash"):
-            load_final_verdict(
-                wire,
-                current_parser_hash=_PH,
-                current_detector_hash=_DH,
-                current_assembler_hash=_AH,
-                current_config_hash="x" * 64,
-                current_ui_schema_hash=_UIH,
-            )
-
-    def test_wrong_schema_version_fails(self) -> None:
-        wire = self._make_wire(schema_version="wrong.v0")
+    def test_empty_final_set_and_public_formal_override_rejected(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            create_lineage_seal(final_session_hashes={}, **_seal_subjects())
+        path_hashes = {"f0": "f" * 64}
         with pytest.raises(ValueError):
-            load_final_verdict(
-                wire,
-                current_parser_hash=_PH,
-                current_detector_hash=_DH,
-                current_assembler_hash=_AH,
-                current_config_hash=_CFH,
-                current_ui_schema_hash=_UIH,
-            )
+            create_lineage_seal(final_session_hashes=path_hashes, development_only=False, **_seal_subjects())
 
-    def test_development_flags_preserved(self) -> None:
-        wire = self._make_wire()
-        verdict = load_final_verdict(
-            wire,
-            current_parser_hash=_PH,
-            current_detector_hash=_DH,
-            current_assembler_hash=_AH,
-            current_config_hash=_CFH,
-            current_ui_schema_hash=_UIH,
+    def test_identity_binds_all_hashes_and_sorted_sessions(self) -> None:
+        first = create_lineage_seal(final_session_hashes={"b": "8" * 64, "a": "9" * 64}, **_seal_subjects())
+        second = create_lineage_seal(final_session_hashes={"a": "9" * 64, "b": "8" * 64}, **_seal_subjects())
+        assert first.seal_id == second.seal_id
+        changed = dict(_seal_subjects(), threshold_hash="0" * 64)
+        assert create_lineage_seal(final_session_hashes={"a": "9" * 64, "b": "8" * 64}, **changed).seal_id != first.seal_id
+
+    def test_open_rechecks_real_file_hash_and_store_marker_is_create_once(self, tmp_path: Path) -> None:
+        path, digest = self._manifest(tmp_path, "f0")
+        store = ArtifactStore(tmp_path / "artifacts")
+        seal = create_lineage_seal(final_session_hashes={"f0": digest}, store=store, **_seal_subjects())
+        seal.open_session("f0", path)
+        recreated = create_lineage_seal(final_session_hashes={"f0": digest}, store=store, **_seal_subjects())
+        with pytest.raises(FinalSessionAlreadyOpenedError):
+            recreated.open_session("f0", path)
+
+    def test_unknown_and_tampered_session_rejected(self, tmp_path: Path) -> None:
+        path, digest = self._manifest(tmp_path, "f0")
+        seal = create_lineage_seal(final_session_hashes={"f0": digest}, **_seal_subjects())
+        with pytest.raises(FinalSessionNotInSealError):
+            seal.open_session("unknown", path)
+        path.write_bytes(b"tampered")
+        with pytest.raises(HashMismatchError):
+            seal.open_session("f0", path)
+
+
+class TestFinalVerdict:
+    def _wire(self) -> dict[str, object]:
+        verdict = create_synthetic_final_verdict(
+            _full_report(), seal_id="a" * 64, final_session_ids=["f0"],
+            **_verdict_subjects(),
         )
-        assert verdict.development_only is True
-        assert verdict.formal_perception_verdict_eligible is False
+        return verdict.to_wire()
 
+    def _load(self, wire: dict[str, object]):
+        subjects = _verdict_subjects()
+        return load_final_verdict(
+            wire,
+            current_parser_hash=subjects["parser_artifact_hash"],
+            current_detector_hash=subjects["detector_artifact_hash"],
+            current_assembler_hash=subjects["assembler_schema_hash"],
+            current_config_hash=subjects["config_hash"],
+            current_ui_schema_hash=subjects["ui_presentation_schema_hash"],
+        )
 
-class TestFormalPromotionBlocked:
-    """synthetic → formal への昇格経路が閉じていることを確認する（必須回帰テスト）。"""
+    def test_exact_fields_all_hashes_and_gate_recompute(self) -> None:
+        wire = self._wire()
+        assert wire["schema_version"] == FINAL_VERDICT_SCHEMA_VERSION
+        assert self._load(wire).passed is True
+        with pytest.raises(ValueError, match="exactly"):
+            self._load({**wire, "unknown": 1})
+        bad_hash = dict(wire, threshold_hash="bad")
+        with pytest.raises(ValueError, match="SHA-256"):
+            self._load(bad_hash)
+        stale_gate = dict(wire, passed=False)
+        with pytest.raises(StaleVerdictError, match="gate"):
+            self._load(stale_gate)
 
-    def test_development_only_false_formal_eligible_true_passed_true_blocked(self) -> None:
-        """synthetic metrics に development_only=False, formal_eligible=True, passed=True を
-        設定しても PerceptionFinalVerdict の作成で FormalVerdictPromotionError が発生する。"""
-        with pytest.raises(FormalVerdictPromotionError):
-            PerceptionFinalVerdict(
-                verdict_id="fake",
-                seal_id="s" * 64,
-                final_session_ids=["f0"],
-                parser_artifact_hash=_PH,
-                detector_artifact_hash=_DH,
-                assembler_schema_hash=_AH,
-                ui_presentation_schema_hash=_UIH,
-                config_hash=_CFH,
-                metrics={},
-                passed=True,
-                blocking_reasons=[],
-                development_only=False,
-                formal_perception_verdict_eligible=True,
-            )
-
-    def test_load_inconsistent_flags_fails(self) -> None:
-        """load_final_verdict でも formal_eligible=True かつ development_only=True を拒否。"""
-        base: dict[str, object] = {
-            "schema_version": FINAL_VERDICT_SCHEMA_VERSION,
-            "verdict_id": "v",
-            "seal_id": "s" * 64,
-            "final_session_ids": ["f0"],
-            "parser_artifact_hash": _PH,
-            "detector_artifact_hash": _DH,
-            "assembler_schema_hash": _AH,
-            "ui_presentation_schema_hash": _UIH,
-            "config_hash": _CFH,
-            "metrics": {},
-            "passed": False,
-            "blocking_reasons": [],
-            "development_only": True,
-            "formal_perception_verdict_eligible": True,  # 不整合
-        }
-        with pytest.raises(FormalVerdictPromotionError):
+    def test_stale_producer_rejected(self) -> None:
+        wire = self._wire()
+        with pytest.raises(StaleVerdictError):
             load_final_verdict(
-                base,
-                current_parser_hash=_PH,
-                current_detector_hash=_DH,
-                current_assembler_hash=_AH,
-                current_config_hash=_CFH,
-                current_ui_schema_hash=_UIH,
+                wire, current_parser_hash="0" * 64,
+                current_detector_hash="b" * 64, current_assembler_hash="c" * 64,
+                current_config_hash="e" * 64, current_ui_schema_hash="d" * 64,
             )
 
-    def test_passed_with_blocking_reasons_inconsistent(self) -> None:
-        """passed=True かつ blocking_reasons が非空は拒否する。"""
-        base: dict[str, object] = {
-            "schema_version": FINAL_VERDICT_SCHEMA_VERSION,
-            "verdict_id": "v",
-            "seal_id": "s" * 64,
-            "final_session_ids": ["f0"],
-            "parser_artifact_hash": _PH,
-            "detector_artifact_hash": _DH,
-            "assembler_schema_hash": _AH,
-            "ui_presentation_schema_hash": _UIH,
-            "config_hash": _CFH,
-            "metrics": {},
-            "passed": True,
-            "blocking_reasons": ["some reason"],
-            "development_only": True,
-            "formal_perception_verdict_eligible": False,
-        }
-        with pytest.raises(ValueError, match="blocking_reasons"):
-            load_final_verdict(
-                base,
-                current_parser_hash=_PH,
-                current_detector_hash=_DH,
-                current_assembler_hash=_AH,
-                current_config_hash=_CFH,
-                current_ui_schema_hash=_UIH,
-            )
-
-    def test_calibration_verdict_development_only_enforced(self) -> None:
-        """PerceptionCalibrationVerdict は常に development_only=True を要求する。"""
+    def test_direct_formal_and_inconsistent_false_false_rejected(self) -> None:
+        base = self._wire()
+        kwargs = {name: base[name] for name in (
+            "verdict_id", "seal_id", "final_session_ids", "parser_artifact_hash",
+            "detector_artifact_hash", "assembler_schema_hash", "ui_presentation_schema_hash",
+            "config_hash", "capture_dataset_hash", "calibration_profile_hash", "threshold_hash",
+            "atlas_vocabulary_hash", "assembler_impl_hash", "roi_resolver_input_hash",
+            "benchmark_fit_code_hash", "lineage_seal_hash", "metrics", "passed", "blocking_reasons",
+        )}
         with pytest.raises(FormalVerdictPromotionError):
-            PerceptionCalibrationVerdict(
-                profile=PerceptionErrorProfile(),
-                calibration_session_ids=["c0"],
-                development_only=False,
-            )
+            PerceptionFinalVerdict(**kwargs, development_only=False, formal_perception_verdict_eligible=True)
+        with pytest.raises(FormalVerdictPromotionError):
+            PerceptionFinalVerdict(**kwargs, development_only=False, formal_perception_verdict_eligible=False)

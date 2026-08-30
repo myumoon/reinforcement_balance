@@ -1,81 +1,68 @@
-"""Survivors perception benchmark のセッション split 検証。
-
-capture_dataset.py の SplitManifest と同じ split 名を使い、
-calibration/final の重複排除・build 一致・スライス最小件数・最短時間・
-session content hash 一意性・clock regression 拒否を行います。
-MP4 decode を benchmark 入力として拒否します。
-"""
+"""Survivors perception benchmark の typed session split 検証。"""
 
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import dataclass
-from typing import Final, Literal
+from pathlib import Path
+from typing import Final, Literal, Mapping, Sequence
 
-# capture_dataset.py SPLIT_NAMES と完全一致させる
-SessionKind = Literal["model_train", "model_validation", "error_calibration", "final_e2e_test"]
+from .capture_dataset import SPLIT_NAMES, SessionManifest, SplitManifest
+
+SessionKind = Literal[
+    "model_train", "model_validation", "error_calibration", "final_e2e_test"
+]
 SourcePolicy = Literal["raw", "lossless", "mp4"]
 
 _CALIBRATION_KIND: Final[str] = "error_calibration"
 _FINAL_KIND: Final[str] = "final_e2e_test"
 _BENCHMARK_KINDS: Final[frozenset[str]] = frozenset({_CALIBRATION_KIND, _FINAL_KIND})
-_ALL_KINDS: Final[frozenset[str]] = frozenset(
-    {"model_train", "model_validation", "error_calibration", "final_e2e_test"}
-)
-
-_MIN_SESSION_SECONDS: Final[float] = 1800.0  # 30 分
+_ALL_KINDS: Final[frozenset[str]] = frozenset(SPLIT_NAMES)
+_ALLOWED_SOURCE_POLICIES: Final[frozenset[str]] = frozenset({"raw", "lossless", "mp4"})
+_MIN_SESSION_SECONDS: Final[float] = 1800.0
+_SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 
 
 class SplitOverlapError(ValueError):
-    """session_id または session_hash が複数の split kind に登録されている。
-
-    calibration/final/train/validation 間でセッションが重複すると評価が汚染されます。
-    """
+    """session identity/content が split 内外で重複している。"""
 
 
 class MixedBuildError(ValueError):
-    """benchmark セッション間で build/profile/resolution が一致しない。
-
-    異なるビルドや解像度を同一ベンチマークへ混ぜると比較基準が崩れます。
-    """
+    """benchmark session の build/profile/resolution が混在している。"""
 
 
 class UnderpoweredSliceError(ValueError):
-    """calibration または final_e2e_test のセッション数が最小件数を下回る。
-
-    cluster CI の信頼性確保のために最低 min_benchmark_sessions 件が必要です。
-    """
+    """benchmark split の session cluster 数が最低数を下回る。"""
 
 
 class ShortSessionError(ValueError):
-    """セッションの収録時間が最低 30 分を下回る。
-
-    短時間セッションは rare-slice の標本数が不足し CI が発散します。
-    """
+    """benchmark session の収録時間が 30 分未満である。"""
 
 
 class ClockRegressionError(ValueError):
-    """フレームタイムスタンプが単調増加でない（clock regression 検出）。
-
-    monotonic でないタイムスタンプが混在すると latency 集計が壊れます。
-    """
+    """frame timestamp が strict monotonic でない。"""
 
 
 class MissingBenchmarkSplitError(ValueError):
-    """calibration または final_e2e_test の片側が欠落している。
+    """calibration/final split の片側が欠落している。"""
 
-    error_calibration と final_e2e_test は両方揃っていないと
-    calibration fit と final verification が実行できません。
-    """
+
+def _require_sha256(value: object, label: str) -> str:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a 64-character lowercase SHA-256")
+    return value
+
+
+def _require_nonempty(value: object, label: str) -> str:
+    if type(value) is not str or not value:
+        raise ValueError(f"{label} must be a non-empty string")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
-    """1 セッション分の benchmark メタデータ。
-
-    split 検証と build 一致確認に必要な属性だけを保持します。
-    session_hash はセッションの content hash（manifest SHA-256）で、
-    split 横断の一意性を保証するために使います。
-    """
+    """検証済み manifest から作る benchmark session の不変 view。"""
 
     session_id: str
     session_hash: str
@@ -85,127 +72,283 @@ class SessionRecord:
     duration_seconds: float
     kind: SessionKind
     source_policy: SourcePolicy
+    expected_frame_ids: tuple[str, ...] = ()
+    session_manifest_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        _require_nonempty(self.session_id, "session_id")
+        _require_sha256(self.session_hash, "session_hash")
+        _require_sha256(self.build_hash, "build_hash")
+        _require_sha256(self.target_profile_hash, "target_profile_hash")
+        if self.kind not in _ALL_KINDS:
+            raise ValueError(f"unsupported session kind {self.kind!r}")
+        if self.source_policy not in _ALLOWED_SOURCE_POLICIES:
+            raise ValueError(f"unsupported source policy {self.source_policy!r}")
+        if (
+            not isinstance(self.resolution_wh, tuple)
+            or len(self.resolution_wh) != 2
+            or any(type(value) is not int or value <= 0 for value in self.resolution_wh)
+        ):
+            raise ValueError("resolution_wh must contain two positive integers")
+        if (
+            isinstance(self.duration_seconds, bool)
+            or not isinstance(self.duration_seconds, (int, float))
+            or not math.isfinite(float(self.duration_seconds))
+            or float(self.duration_seconds) < 0.0
+        ):
+            raise ValueError("duration_seconds must be a finite non-negative number")
+        object.__setattr__(self, "duration_seconds", float(self.duration_seconds))
+        if (
+            not isinstance(self.expected_frame_ids, tuple)
+            or not all(type(value) is str and value for value in self.expected_frame_ids)
+            or len(self.expected_frame_ids) != len(set(self.expected_frame_ids))
+        ):
+            raise ValueError("expected_frame_ids must be a unique non-empty string tuple")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SessionSplit:
-    """検証済みセッションリスト。
-
-    validate_split() が返す不変オブジェクトで、重複・混在を除去済みです。
-    """
+    """lineage と内容を検証済みの split。"""
 
     sessions: tuple[SessionRecord, ...]
+    split_manifest_hash: str = ""
+
+    @property
+    def expected_ticks(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (session.session_id, frame_id)
+            for session in self.sessions
+            if session.kind in _BENCHMARK_KINDS
+            for frame_id in session.expected_frame_ids
+        )
+
+
+def validate_frame_timestamps(timestamps_ns: Sequence[int]) -> None:
+    """全 timestamp の型・非負・strict monotonicity を検証する。"""
+    for index, timestamp in enumerate(timestamps_ns):
+        if type(timestamp) is not int or timestamp < 0:
+            raise ClockRegressionError(
+                f"invalid captured timestamp at frame {index}: {timestamp!r}"
+            )
+        if index and timestamp <= timestamps_ns[index - 1]:
+            raise ClockRegressionError(
+                f"clock regression at frame {index}: "
+                f"{timestamp} <= {timestamps_ns[index - 1]}"
+            )
+
+
+def _source_policy(manifest: SessionManifest) -> SourcePolicy:
+    if manifest.pixel_source == "lossless_png":
+        return "lossless"
+    if manifest.pixel_source in _ALLOWED_SOURCE_POLICIES:
+        return manifest.pixel_source  # type: ignore[return-value]
+    raise ValueError(f"unsupported SessionManifest.pixel_source {manifest.pixel_source!r}")
+
+
+def _record_from_manifest(
+    kind: str,
+    unit_session_hash: str,
+    manifest: SessionManifest,
+) -> SessionRecord:
+    if not isinstance(manifest, SessionManifest):
+        raise TypeError("session_manifests must contain SessionManifest values")
+    if manifest.schema_version != 1:
+        raise ValueError("unsupported SessionManifest schema_version")
+    _require_nonempty(manifest.session_id, "SessionManifest.session_id")
+    _require_sha256(manifest.manifest_sha256, "SessionManifest.manifest_sha256")
+    _require_sha256(manifest.target_profile_hash, "SessionManifest.target_profile_hash")
+    _require_sha256(manifest.metadata_sha256, "SessionManifest.metadata_sha256")
+    if manifest.manifest_sha256 != unit_session_hash:
+        raise ValueError(
+            f"split/session manifest lineage mismatch for {manifest.session_id!r}"
+        )
+    manifest_path = manifest.session_path / "session_manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"missing restored session manifest file: {manifest_path}")
+    import hashlib
+
+    if hashlib.sha256(manifest_path.read_bytes()).hexdigest() != manifest.manifest_sha256:
+        raise ValueError("SessionManifest content changed after restore")
+    if type(manifest.frame_count) is not int or manifest.frame_count <= 0:
+        raise ValueError("SessionManifest.frame_count must be a positive integer")
+    if len(manifest.frame_records) != manifest.frame_count:
+        raise ValueError("SessionManifest frame_count/frame_records mismatch")
+
+    timestamps = [record.captured_monotonic_ns for record in manifest.frame_records]
+    validate_frame_timestamps(timestamps)
+    frame_ids = [record.frame_id for record in manifest.frame_records]
+    if any(type(value) is not int or value < 0 for value in frame_ids):
+        raise ValueError("frame_id must be a non-negative integer")
+    if len(frame_ids) != len(set(frame_ids)):
+        raise ValueError("frame_id must be unique within a session")
+
+    resolutions: set[tuple[int, int]] = set()
+    for record in manifest.frame_records:
+        _require_sha256(record.object_sha256, "FrameRecord.object_sha256")
+        if (
+            record.target_profile_hash != manifest.target_profile_hash
+            or record.game_build_id != manifest.game_build_id
+        ):
+            raise ValueError("frame lineage does not match SessionManifest")
+        left, top, right, bottom = record.client_rect_screen_px
+        resolution = (right - left, bottom - top)
+        if any(type(value) is not int or value <= 0 for value in resolution):
+            raise ValueError("frame resolution must contain positive integers")
+        resolutions.add(resolution)
+    if len(resolutions) != 1:
+        raise MixedBuildError("resolution changes within one session")
+
+    duration_seconds = (timestamps[-1] - timestamps[0]) / 1_000_000_000.0
+    # game_build_id は capture 契約上 hash とは限らないため canonical hash へ固定する。
+    build_hash = hashlib.sha256(manifest.game_build_id.encode("utf-8")).hexdigest()
+    return SessionRecord(
+        session_id=manifest.session_id,
+        session_hash=manifest.manifest_sha256,
+        build_hash=build_hash,
+        target_profile_hash=manifest.target_profile_hash,
+        resolution_wh=next(iter(resolutions)),
+        duration_seconds=duration_seconds,
+        kind=kind,  # type: ignore[arg-type]
+        source_policy=_source_policy(manifest),
+        expected_frame_ids=tuple(str(value) for value in frame_ids),
+        session_manifest_path=manifest_path,
+    )
+
+
+def _normalize_typed_split(
+    split_manifest: SplitManifest,
+    session_manifests: Mapping[str, SessionManifest] | Sequence[SessionManifest] | None,
+) -> tuple[list[SessionRecord], str]:
+    if not isinstance(split_manifest, SplitManifest):
+        raise TypeError("split_manifest must be a SplitManifest")
+    if split_manifest.schema_version != 1 or split_manifest.frozen is not True:
+        raise ValueError("SplitManifest must be frozen schema v1")
+    _require_sha256(split_manifest.manifest_sha256, "SplitManifest.manifest_sha256")
+    if set(split_manifest.splits) != _ALL_KINDS:
+        raise ValueError("SplitManifest split names do not match capture contract")
+    if session_manifests is None:
+        raise TypeError("session_manifests are required with SplitManifest")
+    if isinstance(session_manifests, Mapping):
+        manifests = dict(session_manifests)
+    else:
+        manifests = {manifest.session_id: manifest for manifest in session_manifests}
+        if len(manifests) != len(session_manifests):
+            raise SplitOverlapError("duplicate SessionManifest session_id")
+
+    records: list[SessionRecord] = []
+    referenced_ids: list[str] = []
+    for kind in SPLIT_NAMES:
+        units = split_manifest.splits[kind]
+        if not isinstance(units, tuple):
+            raise ValueError("SplitManifest entries must be tuples")
+        for unit in units:
+            manifest = manifests.get(unit.session_id)
+            if manifest is None:
+                raise ValueError(f"missing restored SessionManifest {unit.session_id!r}")
+            if unit.game_build_id != manifest.game_build_id:
+                raise ValueError(
+                    f"split/session build lineage mismatch for {unit.session_id!r}"
+                )
+            referenced_ids.append(unit.session_id)
+            records.append(
+                _record_from_manifest(kind, unit.session_manifest_sha256, manifest)
+            )
+    if set(manifests) != set(referenced_ids):
+        extra = sorted(set(manifests) - set(referenced_ids))
+        raise ValueError(f"unreferenced SessionManifest entries: {extra}")
+    return records, split_manifest.manifest_sha256
+
+
+def _validate_records(
+    records: Sequence[SessionRecord], *, min_benchmark_sessions: int
+) -> None:
+    if type(min_benchmark_sessions) is not int or min_benchmark_sessions <= 0:
+        raise ValueError("min_benchmark_sessions must be a positive integer")
+    if not all(isinstance(record, SessionRecord) for record in records):
+        raise TypeError("sessions must contain SessionRecord values")
+
+    seen_ids: set[str] = set()
+    seen_hashes: set[str] = set()
+    for record in records:
+        if record.session_id in seen_ids:
+            raise SplitOverlapError(f"duplicate session_id {record.session_id!r}")
+        if record.session_hash in seen_hashes:
+            raise SplitOverlapError(f"duplicate session_hash {record.session_hash!r}")
+        seen_ids.add(record.session_id)
+        seen_hashes.add(record.session_hash)
+
+    benchmark = [record for record in records if record.kind in _BENCHMARK_KINDS]
+    if benchmark:
+        reference = benchmark[0]
+        for record in benchmark[1:]:
+            if (
+                record.build_hash != reference.build_hash
+                or record.target_profile_hash != reference.target_profile_hash
+                or record.resolution_wh != reference.resolution_wh
+            ):
+                raise MixedBuildError(
+                    f"session {record.session_id!r} has different "
+                    "build/profile/resolution"
+                )
+        for record in benchmark:
+            if record.duration_seconds < _MIN_SESSION_SECONDS:
+                raise ShortSessionError(
+                    f"session {record.session_id!r} is {record.duration_seconds:.1f}s "
+                    f"(minimum {_MIN_SESSION_SECONDS:.0f}s)"
+                )
+            if record.source_policy == "mp4":
+                raise ValueError(
+                    f"session {record.session_id!r}: mp4 is review-only"
+                )
+
+    counts = {
+        kind: sum(record.kind == kind for record in records)
+        for kind in _BENCHMARK_KINDS
+    }
+    if any(counts.values()):
+        if counts[_CALIBRATION_KIND] == 0:
+            raise MissingBenchmarkSplitError("error_calibration sessions are required")
+        if counts[_FINAL_KIND] == 0:
+            raise MissingBenchmarkSplitError("final_e2e_test sessions are required")
+        for kind, count in counts.items():
+            if count < min_benchmark_sessions:
+                raise UnderpoweredSliceError(
+                    f"{kind} has only {count} session(s), "
+                    f"minimum is {min_benchmark_sessions}"
+                )
 
 
 def validate_split(
-    sessions: list[SessionRecord],
+    split_manifest: SplitManifest | Sequence[SessionRecord],
+    session_manifests: Mapping[str, SessionManifest] | Sequence[SessionManifest] | None = None,
     *,
     min_benchmark_sessions: int = 3,
 ) -> SessionSplit:
-    """セッションリストを split ルールで検証する。
+    """typed capture manifests を restore 後の内容と照合して split を seal する。
 
-    以下の条件をすべて満たすとき SessionSplit を返します。
-    - 全split間で session_id が重複しない。
-    - 全split間で session_hash（content hash）が重複しない。
-    - calibration + final のセッションはすべて同一 build/profile/resolution。
-    - calibration か final の一方でも存在すれば、両方が min_benchmark_sessions 以上ある。
-    - calibration/final の各セッションが最低 30 分。
+    `Sequence[SessionRecord]` は既存 synthetic unit test 用の互換入口であり、
+    formal runner は必ず `SplitManifest` / `SessionManifest` 経路を使用する。
+    両入口は最終的に `_validate_records` の同じ fail-closed gate を通る。
     """
-    # session_id と session_hash の split 横断一意性を検証
-    id_to_kinds: dict[str, list[str]] = {}
-    hash_to_kinds: dict[str, list[str]] = {}
-    for s in sessions:
-        id_to_kinds.setdefault(s.session_id, []).append(s.kind)
-        hash_to_kinds.setdefault(s.session_hash, []).append(s.kind)
-
-    for sid, kinds in id_to_kinds.items():
-        if len(set(kinds)) > 1:
-            raise SplitOverlapError(
-                f"session_id {sid!r} appears in multiple split kinds: {sorted(set(kinds))}"
-            )
-
-    for shash, kinds in hash_to_kinds.items():
-        if len(set(kinds)) > 1:
-            raise SplitOverlapError(
-                f"session_hash {shash!r} appears in multiple split kinds: {sorted(set(kinds))}"
-            )
-
-    # build/profile/resolution の一致確認（benchmark セッション間）
-    benchmark = [s for s in sessions if s.kind in _BENCHMARK_KINDS]
-    if benchmark:
-        ref = benchmark[0]
-        for s in benchmark[1:]:
-            if (
-                s.build_hash != ref.build_hash
-                or s.target_profile_hash != ref.target_profile_hash
-                or s.resolution_wh != ref.resolution_wh
-            ):
-                raise MixedBuildError(
-                    f"session {s.session_id!r} has different build/profile/resolution "
-                    f"from reference {ref.session_id!r}"
-                )
-
-    # benchmark セッションの最短時間チェック
-    for s in benchmark:
-        if s.duration_seconds < _MIN_SESSION_SECONDS:
-            raise ShortSessionError(
-                f"session {s.session_id!r} is {s.duration_seconds:.1f}s "
-                f"(minimum {_MIN_SESSION_SECONDS:.0f}s)"
-            )
-
-    # calibration/final 双方が揃っているかチェック
-    cal_count = sum(1 for s in sessions if s.kind == _CALIBRATION_KIND)
-    fin_count = sum(1 for s in sessions if s.kind == _FINAL_KIND)
-    any_benchmark = cal_count > 0 or fin_count > 0
-    if any_benchmark:
-        if cal_count == 0:
-            raise MissingBenchmarkSplitError(
-                "error_calibration sessions are required when final_e2e_test sessions exist"
-            )
-        if fin_count == 0:
-            raise MissingBenchmarkSplitError(
-                "final_e2e_test sessions are required when error_calibration sessions exist"
-            )
-        if cal_count < min_benchmark_sessions:
-            raise UnderpoweredSliceError(
-                f"error_calibration has only {cal_count} session(s), "
-                f"minimum is {min_benchmark_sessions}"
-            )
-        if fin_count < min_benchmark_sessions:
-            raise UnderpoweredSliceError(
-                f"final_e2e_test has only {fin_count} session(s), "
-                f"minimum is {min_benchmark_sessions}"
-            )
-
-    return SessionSplit(sessions=tuple(sessions))
-
-
-def validate_frame_timestamps(timestamps_ns: list[int]) -> None:
-    """フレームタイムスタンプの strict monotonicity を検証する。
-
-    同一セッション内でタイムスタンプが減少または同値の場合、
-    clock regression として ClockRegressionError を送出します。
-    """
-    for i in range(1, len(timestamps_ns)):
-        if timestamps_ns[i] <= timestamps_ns[i - 1]:
-            raise ClockRegressionError(
-                f"clock regression at frame {i}: "
-                f"{timestamps_ns[i]} <= {timestamps_ns[i - 1]}"
-            )
+    if isinstance(split_manifest, SplitManifest):
+        records, split_hash = _normalize_typed_split(split_manifest, session_manifests)
+    else:
+        if session_manifests is not None:
+            raise TypeError("session_manifests can only be used with SplitManifest")
+        records = list(split_manifest)
+        split_hash = ""
+    _validate_records(records, min_benchmark_sessions=min_benchmark_sessions)
+    return SessionSplit(tuple(records), split_hash)
 
 
 def validate_source_policy_consistency(
-    sessions: list[SessionRecord],
-    *,
-    benchmark_kind: SessionKind,
+    sessions: Sequence[SessionRecord], *, benchmark_kind: SessionKind
 ) -> None:
-    """benchmark 入力に MP4 decode が使われていないことを確認する。
-
-    MP4 は domain-shift 比較専用で、calibration/final のスコア計算に使えません。
-    """
-    for s in sessions:
-        if s.kind == benchmark_kind and s.source_policy == "mp4":
+    """指定 benchmark kind の source policy を同じ規則で再検証する。"""
+    if benchmark_kind not in _ALL_KINDS:
+        raise ValueError("unsupported benchmark_kind")
+    for session in sessions:
+        if session.kind == benchmark_kind and session.source_policy == "mp4":
             raise ValueError(
-                f"session {s.session_id!r}: mp4 decode not allowed as benchmark input "
-                "(domain-shift comparison only); use raw or lossless"
+                f"session {session.session_id!r}: mp4 decode not allowed as benchmark input"
             )

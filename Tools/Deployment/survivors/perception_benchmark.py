@@ -1,26 +1,23 @@
-"""Survivors perception benchmark のメトリクス計算。
-
-synthetic または formal calibration/final の予測レコードから
-分類・回帰・レイテンシ・UI ROI・session-cluster CI を集計します。
-
-## 設計方針
-
-- screen_state_f1 は macro F1（accuracy ではない）
-- availability は unique (session_id, frame_id) を分母にする
-- latency はパイプライン tick ごとに 1 回だけ集計する
-- 全入力で NaN/Inf を入口検証し、metric/report へ残さない
-- rare slice は session-cluster bootstrap 95% CI lower bound で判定する
-- overall 平均で rare slice を代用しない
-"""
+"""Typed 04-09 snapshot replay による Survivors perception benchmark。"""
 
 from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import Any, Final, Literal
+from dataclasses import asdict, dataclass, field, replace
+from typing import Any, Final, Literal, Sequence
 
 import numpy as np
+
+from reinbalance_survivors_contracts.canonical_json import canonical_hash
+
+from .perception_snapshot import (
+    PerceptionSnapshot,
+    UiButtonTargetV1,
+    UiCandidateTargetV1,
+    _quantized_target,
+    is_equivalent_ui_target,
+)
 
 FieldKind = Literal[
     "screen_state",
@@ -35,11 +32,17 @@ FieldKind = Literal[
     "ui_roi_center_error",
     "ui_inside_region",
     "ui_false_positive",
+    "confidence",
+    "ui_cross_frame_equivalent",
 ]
 
-_TIMER_EXACT_TOLERANCE: Final[float] = 0.5  # 秒
+_FIELD_KINDS: Final[frozenset[str]] = frozenset(FieldKind.__args__)
+_SESSION_KINDS: Final[frozenset[str]] = frozenset(
+    {"error_calibration", "final_e2e_test"}
+)
+_SOURCE_POLICIES: Final[frozenset[str]] = frozenset({"raw", "lossless"})
+_TIMER_EXACT_TOLERANCE: Final[float] = 0.5
 
-# デフォルト合格閾値（plan 04-10 End-to-end判定から）
 THRESHOLD_SCREEN_F1: Final[float] = 0.995
 THRESHOLD_TIMER_EXACT: Final[float] = 0.99
 THRESHOLD_LEVEL_EXACT: Final[float] = 0.99
@@ -55,23 +58,43 @@ THRESHOLD_INVALID_TICK: Final[float] = 0.03
 THRESHOLD_LEVELUP_INVALID: Final[float] = 0.005
 THRESHOLD_ROI_CENTER_P99: Final[float] = 0.01
 THRESHOLD_ROI_INSIDE: Final[float] = 0.999
+THRESHOLD_CONFIDENCE: Final[float] = 0.99
+THRESHOLD_CROSS_FRAME_EQUIVALENCE: Final[float] = 0.999
 
 
-def _assert_finite(value: float, name: str) -> float:
-    """NaN/Inf を拒否して値を返す。"""
-    if not math.isfinite(value):
-        raise ValueError(f"BenchmarkRecord.{name} must be finite, got {value!r}")
+def _strict_float(value: object, label: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float, np.integer, np.floating))
+        or not math.isfinite(float(value))
+    ):
+        raise ValueError(f"{label} must be a finite scalar number (bool is forbidden)")
+    return float(value)
+
+
+def _ratio(value: object, label: str) -> float:
+    result = _strict_float(value, label)
+    if not 0.0 <= result <= 1.0:
+        raise ValueError(f"{label} must be in [0, 1]")
+    return result
+
+
+def _nonnegative(value: object, label: str) -> float:
+    result = _strict_float(value, label)
+    if result < 0.0:
+        raise ValueError(f"{label} must be non-negative")
+    return result
+
+
+def _nonempty_str(value: object, label: str) -> str:
+    if type(value) is not str or not value:
+        raise ValueError(f"{label} must be a non-empty string")
     return value
 
 
 @dataclass(frozen=True, slots=True)
 class BenchmarkRecord:
-    """1 フレーム分の予測・正解ペア。
-
-    field に応じて ground_truth/predicted の型が変わります。
-    latency_ms は必ずパイプライン tick ごとに 1 回だけ設定してください。
-    latency_ms=0 はレイテンシ未計測を示します。負の値は拒否します。
-    """
+    """内部 metric 一件。field ごとの scalar shape/range を生成時に固定する。"""
 
     frame_id: str
     session_id: str
@@ -84,22 +107,98 @@ class BenchmarkRecord:
     latency_ms: float = 0.0
 
     def __post_init__(self) -> None:
-        """float 型フィールドの NaN/Inf と負の latency を拒否する。"""
-        if not math.isfinite(self.confidence):
-            raise ValueError(f"confidence must be finite, got {self.confidence!r}")
-        if not math.isfinite(self.latency_ms):
-            raise ValueError(f"latency_ms must be finite, got {self.latency_ms!r}")
-        if self.latency_ms < 0:
-            raise ValueError(f"latency_ms must be non-negative, got {self.latency_ms!r}")
+        _nonempty_str(self.frame_id, "frame_id")
+        _nonempty_str(self.session_id, "session_id")
+        if self.session_kind not in _SESSION_KINDS:
+            raise ValueError(f"unsupported session_kind {self.session_kind!r}")
+        if self.source_policy not in _SOURCE_POLICIES:
+            raise ValueError(f"unsupported source_policy {self.source_policy!r}")
+        if self.field not in _FIELD_KINDS:
+            raise ValueError(f"unsupported benchmark field {self.field!r}")
+        object.__setattr__(self, "confidence", _ratio(self.confidence, "confidence"))
+        object.__setattr__(
+            self, "latency_ms", _nonnegative(self.latency_ms, "latency_ms")
+        )
+
+        gt, predicted = self.ground_truth, self.predicted
+        if self.field in {"screen_state", "inventory_top1", "choice_top1"}:
+            _nonempty_str(gt, f"{self.field}.ground_truth")
+            if predicted is not None:
+                _nonempty_str(predicted, f"{self.field}.predicted")
+        elif self.field == "level":
+            if type(gt) is not int or gt < 1:
+                raise ValueError("level.ground_truth must be an int >= 1")
+            if predicted is not None and (type(predicted) is not int or predicted < 1):
+                raise ValueError("level.predicted must be an int >= 1 or None")
+        elif self.field in {"hp_ratio", "xp_ratio", "nearest_distance", "confidence"}:
+            _ratio(gt, f"{self.field}.ground_truth")
+            if predicted is not None:
+                _ratio(predicted, f"{self.field}.predicted")
+        elif self.field == "entity_density":
+            _nonnegative(gt, "entity_density.ground_truth")
+            if predicted is not None:
+                _nonnegative(predicted, "entity_density.predicted")
+        elif self.field == "timer_seconds":
+            _nonnegative(gt, "timer_seconds.ground_truth")
+            if predicted is not None:
+                _nonnegative(predicted, "timer_seconds.predicted")
+        elif self.field == "ui_roi_center_error":
+            _nonnegative(gt, "ui_roi_center_error.ground_truth")
+            if predicted is not None:
+                value = _nonnegative(predicted, "ui_roi_center_error.predicted")
+                if value > math.sqrt(2.0):
+                    raise ValueError("ui_roi_center_error exceeds normalized screen diagonal")
+        elif self.field in {
+            "ui_inside_region", "ui_false_positive", "ui_cross_frame_equivalent"
+        }:
+            if type(gt) is not bool or (predicted is not None and type(predicted) is not bool):
+                raise ValueError(f"{self.field} values must be bool or predicted None")
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectedTick:
+    """restored SessionManifest から先に構築する availability 分母。"""
+
+    session_id: str
+    frame_id: str
+
+    def __post_init__(self) -> None:
+        _nonempty_str(self.session_id, "ExpectedTick.session_id")
+        _nonempty_str(self.frame_id, "ExpectedTick.frame_id")
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotReplayTick:
+    """同一 capture tick の ground-truth と 04-09 perception 出力。"""
+
+    session_id: str
+    session_kind: str
+    source_policy: str
+    frame_id: str
+    ground_truth: PerceptionSnapshot
+    predicted: PerceptionSnapshot | None
+    latency_ms: float
+
+    def __post_init__(self) -> None:
+        _nonempty_str(self.session_id, "SnapshotReplayTick.session_id")
+        _nonempty_str(self.frame_id, "SnapshotReplayTick.frame_id")
+        if self.session_kind not in _SESSION_KINDS:
+            raise ValueError("unsupported SnapshotReplayTick.session_kind")
+        if self.source_policy not in _SOURCE_POLICIES:
+            raise ValueError("unsupported SnapshotReplayTick.source_policy")
+        if not isinstance(self.ground_truth, PerceptionSnapshot):
+            raise TypeError("ground_truth must be a PerceptionSnapshot")
+        if self.predicted is not None and not isinstance(self.predicted, PerceptionSnapshot):
+            raise TypeError("predicted must be a PerceptionSnapshot or None")
+        object.__setattr__(self, "latency_ms", _nonnegative(self.latency_ms, "latency_ms"))
+        if self.ground_truth.frame_id != self.frame_id:
+            raise ValueError("ground_truth frame_id is not bound to replay tick")
+        if self.predicted is not None and self.predicted.frame_id != self.frame_id:
+            raise ValueError("predicted frame_id is not bound to replay tick")
 
 
 @dataclass
 class BenchmarkReport:
-    """run_benchmark() が返す集計結果。
-
-    development_only=True のとき formal verdict には使えません。
-    """
-
     development_only: bool
     formal_perception_verdict_eligible: bool
     session_kind: str
@@ -120,28 +219,43 @@ class BenchmarkReport:
     roi_center_p99: float
     roi_inside_region_rate: float
     roi_false_positive_count: int
+    confidence_mean: float = 0.0
+    ui_cross_frame_equivalence_rate: float = 0.0
+    expected_tick_count: int = 0
+    observed_tick_count: int = 0
+    latency_tick_count: int = 0
+    slice_counts: dict[str, int] = field(default_factory=dict)
     slices: list[dict[str, Any]] = field(default_factory=list)
     blocking_reasons: list[str] = field(default_factory=list)
     passed: bool = False
 
+    def metrics_wire(self) -> dict[str, Any]:
+        omitted = {
+            "development_only",
+            "formal_perception_verdict_eligible",
+            "session_kind",
+            "blocking_reasons",
+            "passed",
+        }
+        return {
+            key: value
+            for key, value in asdict(self).items()
+            if key not in omitted
+        }
+
 
 def _macro_f1(ground_truths: list[Any], predictions: list[Any]) -> float:
-    """macro F1 を計算する（accuracy ではない）。
-
-    全クラスの per-class F1 の単純平均です。クラス数が少ない
-    rare class も等しく扱われます。
-    """
     if not ground_truths:
         return 0.0
     classes = set(ground_truths) | set(predictions)
     f1s: list[float] = []
-    for c in classes:
-        tp = sum(1 for gt, pr in zip(ground_truths, predictions) if gt == c and pr == c)
-        fp = sum(1 for gt, pr in zip(ground_truths, predictions) if gt != c and pr == c)
-        fn = sum(1 for gt, pr in zip(ground_truths, predictions) if gt == c and pr != c)
-        denom = 2 * tp + fp + fn
-        f1s.append((2 * tp / denom) if denom > 0 else 0.0)
-    return float(np.mean(f1s)) if f1s else 0.0
+    for value in classes:
+        tp = sum(gt == value and pred == value for gt, pred in zip(ground_truths, predictions))
+        fp = sum(gt != value and pred == value for gt, pred in zip(ground_truths, predictions))
+        fn = sum(gt == value and pred != value for gt, pred in zip(ground_truths, predictions))
+        denominator = 2 * tp + fp + fn
+        f1s.append(2 * tp / denominator if denominator else 0.0)
+    return float(np.mean(f1s))
 
 
 def bootstrap_cluster_ci(
@@ -150,310 +264,478 @@ def bootstrap_cluster_ci(
     alpha: float = 0.05,
     rng: np.random.Generator | None = None,
 ) -> tuple[float, float]:
-    """セッション単位でクラスター bootstrap CI を計算する。
-
-    セッション平均をブートストラップの単位として再サンプリングし、
-    overall 平均で代用せず rare-slice の分散を正確に推定します。
-    フレームを独立標本として扱わず、session cluster 全体を再標本化します。
-    """
-    sessions = list(session_values.keys())
-    if not sessions:
-        return (0.0, 0.0)
-    if n_bootstrap <= 0:
-        raise ValueError("n_bootstrap must be positive")
+    """session cluster を再標本化し、underpowered cluster を拒否する。"""
+    if type(n_bootstrap) is not int or n_bootstrap <= 0:
+        raise ValueError("n_bootstrap must be a positive integer")
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not math.isfinite(float(alpha)) or not 0.0 < float(alpha) < 1.0:
+        raise ValueError("alpha must be finite and in (0, 1)")
+    if len(session_values) < 2:
+        raise ValueError("cluster bootstrap requires at least two non-empty sessions")
+    if any(not values for values in session_values.values()):
+        raise ValueError("cluster bootstrap sessions must be non-empty")
+    session_means = np.array([np.mean(values) for values in session_values.values()])
+    if not np.all(np.isfinite(session_means)):
+        raise ValueError("cluster values must be finite")
     rng = rng or np.random.default_rng(0)
-    session_means = np.array([np.mean(session_values[s]) for s in sessions])
     boot = np.array(
         [
             np.mean(rng.choice(session_means, size=len(session_means), replace=True))
             for _ in range(n_bootstrap)
         ]
     )
-    lo = float(np.percentile(boot, 100 * alpha / 2))
-    hi = float(np.percentile(boot, 100 * (1 - alpha / 2)))
-    return (lo, hi)
+    return (
+        float(np.percentile(boot, 100 * float(alpha) / 2)),
+        float(np.percentile(boot, 100 * (1 - float(alpha) / 2))),
+    )
 
 
-def _percentile_exact(values: list[float], p: float) -> float:
-    """np.percentile と同じ線形補間で p パーセンタイルを返す。
+def _target_key(target: UiCandidateTargetV1 | UiButtonTargetV1) -> tuple[Any, ...]:
+    if isinstance(target, UiCandidateTargetV1):
+        return ("candidate", target.choice_id, target.choice_index, target.semantic_kind)
+    return ("button", target.semantic_action)
 
-    boundary: p=0 → min, p=100 → max。
-    """
-    if not values:
-        return 0.0
-    return float(np.percentile(values, p))
+
+def _recomputed_snapshot_hashes(snapshot: PerceptionSnapshot) -> tuple[str, str, str]:
+    """typed presentation から source/state/binding hash を正式 gate 内で再計算する。"""
+    ui = snapshot.ui_presentation
+    source_payload = {
+        "schema_hash": ui.schema_hash,
+        "snapshot_id": ui.snapshot_id,
+        "frame_id": ui.frame_id,
+        "parser_artifact_hash": ui.parser_artifact_hash,
+        "timestamp_ns": snapshot.captured_ns,
+        "screen_state": ui.screen_state,
+        "candidate_set_hash": ui.candidate_set_hash,
+        "inventory_hash": ui.inventory_hash,
+        "candidates": [_quantized_target(value) for value in ui.candidates],
+        "buttons": [_quantized_target(value) for value in ui.buttons],
+    }
+    state_payload = {
+        "screen_state": ui.screen_state,
+        "schema_hash": ui.schema_hash,
+        "profile": "survivors_ui_profile.v1",
+        "parser_artifact_hash": ui.parser_artifact_hash,
+        "candidate_set_hash": ui.candidate_set_hash,
+        "inventory_hash": ui.inventory_hash,
+        "candidates": [
+            {
+                "choice_id": value.choice_id,
+                "choice_index": value.choice_index,
+                "semantic_kind": value.semantic_kind,
+            }
+            for value in ui.candidates
+        ],
+        "buttons": [
+            {"semantic_action": value.semantic_action, "capability": value.capability}
+            for value in ui.buttons
+        ],
+    }
+    source_hash = canonical_hash(source_payload)
+    state_hash = canonical_hash(state_payload)
+    if source_hash != ui.source_content_hash or source_hash != snapshot.source_content_hash:
+        raise ValueError("source/content hash does not match typed UI presentation")
+    if state_hash != ui.ui_state_key or state_hash != snapshot.ui_state_key:
+        raise ValueError("state hash does not match typed UI presentation")
+    binding_hash = canonical_hash(
+        {
+            "source_content_hash": source_hash,
+            "ui_state_key": state_hash,
+            "candidate_set_hash": ui.candidate_set_hash,
+            "inventory_hash": ui.inventory_hash,
+            "roi_geometry": [_quantized_target(value) for value in (*ui.candidates, *ui.buttons)],
+        }
+    )
+    return source_hash, state_hash, binding_hash
+
+
+def _append_record(
+    records: list[BenchmarkRecord], tick: SnapshotReplayTick, field: FieldKind,
+    ground_truth: Any, predicted: Any, confidence: float,
+) -> None:
+    records.append(
+        BenchmarkRecord(
+            frame_id=tick.frame_id,
+            session_id=tick.session_id,
+            session_kind=tick.session_kind,
+            source_policy=tick.source_policy,
+            field=field,
+            ground_truth=ground_truth,
+            predicted=predicted,
+            confidence=confidence,
+            latency_ms=tick.latency_ms,
+        )
+    )
+
+
+def replay_snapshots(ticks: Sequence[SnapshotReplayTick]) -> list[BenchmarkRecord]:
+    """typed snapshot から全 metric record と UI geometry gate を内部生成する。"""
+    records: list[BenchmarkRecord] = []
+    previous_targets: dict[
+        tuple[str, tuple[Any, ...]],
+        tuple[PerceptionSnapshot, Any, PerceptionSnapshot | None, Any | None],
+    ] = {}
+    for tick in ticks:
+        ground = tick.ground_truth
+        predicted = tick.predicted
+        _recomputed_snapshot_hashes(ground)
+        if predicted is not None:
+            _recomputed_snapshot_hashes(predicted)
+        pred_conf = (
+            min(
+                [target.confidence for target in (*predicted.ui_presentation.candidates, *predicted.ui_presentation.buttons)],
+                default=1.0,
+            )
+            if predicted is not None
+            else 0.0
+        )
+        _append_record(records, tick, "screen_state", ground.screen_state, predicted.screen_state if predicted else None, pred_conf)
+
+        ground_context = ground.item_context
+        pred_context = predicted.item_context if predicted else None
+        if ground_context is not None:
+            for field_name, attribute in (
+                ("timer_seconds", "elapsed_time"),
+                ("level", "level"),
+                ("hp_ratio", "hp_ratio"),
+                ("xp_ratio", "xp_ratio"),
+            ):
+                _append_record(
+                    records, tick, field_name, getattr(ground_context, attribute),
+                    getattr(pred_context, attribute) if pred_context is not None else None,
+                    pred_conf,
+                )
+            if ground_context.enemy_density is not None:
+                _append_record(records, tick, "entity_density", ground_context.enemy_density,
+                               pred_context.enemy_density if pred_context is not None else None, pred_conf)
+            if ground_context.nearest_enemy_screen_dist is not None:
+                _append_record(records, tick, "nearest_distance", ground_context.nearest_enemy_screen_dist,
+                               pred_context.nearest_enemy_screen_dist if pred_context is not None else None, pred_conf)
+
+        ground_ui = ground.ui_presentation
+        pred_ui = predicted.ui_presentation if predicted else None
+        _append_record(records, tick, "inventory_top1", ground_ui.inventory_hash,
+                       pred_ui.inventory_hash if pred_ui else None, pred_conf)
+        _append_record(records, tick, "choice_top1", ground_ui.candidate_set_hash,
+                       pred_ui.candidate_set_hash if pred_ui else None, pred_conf)
+        ground_targets = {_target_key(target): target for target in (*ground_ui.candidates, *ground_ui.buttons)}
+        pred_targets = {_target_key(target): target for target in (*pred_ui.candidates, *pred_ui.buttons)} if pred_ui else {}
+        for key, ground_target in ground_targets.items():
+            pred_target = pred_targets.get(key)
+            if pred_target is None:
+                _append_record(records, tick, "ui_roi_center_error", 0.0, None, 0.0)
+                _append_record(records, tick, "ui_inside_region", True, None, 0.0)
+                _append_record(records, tick, "confidence", 1.0, None, 0.0)
+                continue
+            ground_center = ((ground_target.roi.left + ground_target.roi.right) / 2,
+                             (ground_target.roi.top + ground_target.roi.bottom) / 2)
+            pred_center = ((pred_target.roi.left + pred_target.roi.right) / 2,
+                           (pred_target.roi.top + pred_target.roi.bottom) / 2)
+            center_error = math.hypot(pred_center[0] - ground_center[0], pred_center[1] - ground_center[1])
+            inside = (ground_target.roi.left <= pred_center[0] <= ground_target.roi.right
+                      and ground_target.roi.top <= pred_center[1] <= ground_target.roi.bottom)
+            _append_record(records, tick, "ui_roi_center_error", 0.0, center_error, pred_target.confidence)
+            _append_record(records, tick, "ui_inside_region", True, inside, pred_target.confidence)
+            _append_record(records, tick, "confidence", 1.0, pred_target.confidence, pred_target.confidence)
+            previous = previous_targets.get((tick.session_id, key))
+            if previous is not None:
+                old_ground_snapshot, old_ground_target, old_pred_snapshot, old_pred_target = previous
+                expected_equivalent = is_equivalent_ui_target(
+                    old_ground_target, ground_target,
+                    old_captured_ns=old_ground_snapshot.captured_ns,
+                    new_captured_ns=ground.captured_ns,
+                    old_ui_state_key=old_ground_snapshot.ui_state_key,
+                    new_ui_state_key=ground.ui_state_key,
+                )
+                if expected_equivalent:
+                    actual_equivalent = (
+                        old_pred_snapshot is not None
+                        and old_pred_target is not None
+                        and predicted is not None
+                        and is_equivalent_ui_target(
+                            old_pred_target, pred_target,
+                            old_captured_ns=old_pred_snapshot.captured_ns,
+                            new_captured_ns=predicted.captured_ns,
+                            old_ui_state_key=old_pred_snapshot.ui_state_key,
+                            new_ui_state_key=predicted.ui_state_key,
+                        )
+                    )
+                    _append_record(
+                        records, tick, "ui_cross_frame_equivalent", True,
+                        actual_equivalent, pred_target.confidence,
+                    )
+            previous_targets[(tick.session_id, key)] = (
+                ground, ground_target, predicted, pred_target,
+            )
+        false_positive_keys = set(pred_targets) - set(ground_targets)
+        _append_record(records, tick, "ui_false_positive", False, bool(false_positive_keys), pred_conf)
+    return records
+
+
+def _empty_report(*, development_only: bool, formal_eligible: bool) -> BenchmarkReport:
+    return BenchmarkReport(
+        development_only=development_only,
+        formal_perception_verdict_eligible=formal_eligible,
+        session_kind="unknown", total_records=0, screen_state_f1=0.0,
+        timer_exact_rate=0.0, level_exact_rate=0.0, inventory_top1_rate=0.0,
+        choice_top1_rate=0.0, hp_mae=float("inf"), xp_mae=float("inf"),
+        density_correlation=0.0, nearest_normalized_median_error=float("inf"),
+        latency_p95_ms=0.0, latency_p99_ms=0.0, invalid_tick_rate=1.0,
+        levelup_invalid_choice_rate=1.0, roi_center_p99=float("inf"),
+        roi_inside_region_rate=0.0, roi_false_positive_count=0,
+        blocking_reasons=["no records", "availability slice has 0 expected ticks (blocking)"],
+    )
+
+
+def _metric_gate(metrics: dict[str, Any]) -> list[str]:
+    """writer/loader と benchmark が共有する stale-proof threshold gate。"""
+    blocking: list[str] = []
+    counts = metrics["slice_counts"]
+    required = {
+        "screen_state", "timer_seconds", "level", "hp_ratio", "xp_ratio",
+        "inventory_top1", "choice_top1", "entity_density", "nearest_distance",
+        "ui_roi_center_error", "ui_inside_region", "ui_false_positive", "confidence",
+    }
+    for name in sorted(required):
+        if counts.get(name, 0) == 0:
+            blocking.append(f"{name} slice has 0 records (blocking)")
+    if metrics["expected_tick_count"] == 0:
+        blocking.append("availability slice has 0 expected ticks (blocking)")
+    if metrics["latency_tick_count"] != metrics["expected_tick_count"]:
+        blocking.append(
+            f"latency measured for {metrics['latency_tick_count']}/"
+            f"{metrics['expected_tick_count']} expected ticks (blocking)"
+        )
+    checks = (
+        ("screen_state macro F1", metrics["screen_state_f1"] < THRESHOLD_SCREEN_F1),
+        ("timer exact rate", metrics["timer_exact_rate"] < THRESHOLD_TIMER_EXACT),
+        ("level exact rate", metrics["level_exact_rate"] < THRESHOLD_LEVEL_EXACT),
+        ("inventory top-1", metrics["inventory_top1_rate"] < THRESHOLD_INVENTORY_TOP1),
+        ("choice top-1", metrics["choice_top1_rate"] < THRESHOLD_CHOICE_TOP1),
+        ("HP MAE", metrics["hp_mae"] > THRESHOLD_HP_MAE),
+        ("XP MAE", metrics["xp_mae"] > THRESHOLD_XP_MAE),
+        ("entity density correlation", metrics["density_correlation"] < THRESHOLD_DENSITY_CORR),
+        ("nearest normalized median error", metrics["nearest_normalized_median_error"] > THRESHOLD_NEAREST_MED),
+        ("latency p95", metrics["latency_p95_ms"] > THRESHOLD_LAT_P95_MS),
+        ("latency p99", metrics["latency_p99_ms"] > THRESHOLD_LAT_P99_MS),
+        ("invalid tick rate", metrics["invalid_tick_rate"] > THRESHOLD_INVALID_TICK),
+        ("level-up invalid choice rate", metrics["levelup_invalid_choice_rate"] > THRESHOLD_LEVELUP_INVALID),
+        ("ROI center p99", metrics["roi_center_p99"] > THRESHOLD_ROI_CENTER_P99),
+        ("ROI inside-region rate", metrics["roi_inside_region_rate"] < THRESHOLD_ROI_INSIDE),
+        ("confidence mean", metrics["confidence_mean"] < THRESHOLD_CONFIDENCE),
+    )
+    for label, failed in checks:
+        if failed:
+            blocking.append(f"{label} outside formal threshold")
+    if counts.get("ui_cross_frame_equivalent", 0) and metrics["ui_cross_frame_equivalence_rate"] < THRESHOLD_CROSS_FRAME_EQUIVALENCE:
+        blocking.append("UI cross-frame equivalence rate outside formal threshold")
+    for slice_summary in metrics["slices"]:
+        if (
+            isinstance(slice_summary, dict)
+            and slice_summary.get("name") == "overall_screen_state"
+            and slice_summary.get("ci_lower") is not None
+            and slice_summary["ci_lower"] < THRESHOLD_SCREEN_F1
+        ):
+            blocking.append("screen_state cluster CI lower bound outside formal threshold")
+    if metrics["roi_false_positive_count"] > 0:
+        blocking.append("invalid/ambiguous ROI false-positive count is non-zero")
+    return blocking
+
+
+def recompute_gate_from_metrics(metrics: dict[str, Any]) -> tuple[bool, list[str]]:
+    """verdict loader 用に metric mapping を型検証して gate を再計算する。"""
+    if not isinstance(metrics, dict):
+        raise ValueError("metrics must be a dict")
+    required = set(_empty_report(development_only=True, formal_eligible=False).metrics_wire())
+    if set(metrics) != required:
+        raise ValueError("metrics fields do not match BenchmarkReport schema")
+    # bool/NaN/Inf を再ロード境界でも拒否する。nested count/slice は個別検証する。
+    if not isinstance(metrics["slice_counts"], dict):
+        raise ValueError("slice_counts must be a dict")
+    if not all(
+        key in _FIELD_KINDS and type(value) is int and value >= 0
+        for key, value in metrics["slice_counts"].items()
+    ):
+        raise ValueError("slice_counts must contain non-negative integer values")
+    if not isinstance(metrics["slices"], list):
+        raise ValueError("slices must be a list")
+    for summary in metrics["slices"]:
+        if (
+            not isinstance(summary, dict)
+            or set(summary) != {"name", "count", "macro_f1", "ci_lower"}
+            or summary["name"] != "overall_screen_state"
+            or type(summary["count"]) is not int
+            or summary["count"] <= 0
+        ):
+            raise ValueError("slice summary does not match the exact schema")
+        _ratio(summary["macro_f1"], "slice macro_f1")
+        if summary["ci_lower"] is not None:
+            _ratio(summary["ci_lower"], "slice ci_lower")
+    for name in ("expected_tick_count", "observed_tick_count", "latency_tick_count", "total_records", "roi_false_positive_count"):
+        if type(metrics[name]) is not int or metrics[name] < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+    for name, value in metrics.items():
+        if name in {"slice_counts", "slices", "expected_tick_count", "observed_tick_count", "latency_tick_count", "total_records", "roi_false_positive_count"}:
+            continue
+        _strict_float(value, name)
+    for name in (
+        "screen_state_f1", "timer_exact_rate", "level_exact_rate",
+        "inventory_top1_rate", "choice_top1_rate",
+        "invalid_tick_rate", "levelup_invalid_choice_rate",
+        "roi_inside_region_rate", "confidence_mean",
+        "ui_cross_frame_equivalence_rate",
+    ):
+        _ratio(metrics[name], name)
+    density_correlation = _strict_float(
+        metrics["density_correlation"], "density_correlation"
+    )
+    if not -1.0 <= density_correlation <= 1.0:
+        raise ValueError("density_correlation must be in [-1, 1]")
+    blocking = _metric_gate(metrics)
+    return not blocking, blocking
+
+
+def _run_benchmark_common(
+    values: Sequence[BenchmarkRecord] | Sequence[SnapshotReplayTick],
+    *, expected_ticks: Sequence[ExpectedTick] | None, development_only: bool,
+    formal_eligible: bool, rng_seed: int, n_bootstrap: int, alpha: float,
+) -> BenchmarkReport:
+    if type(rng_seed) is not int:
+        raise ValueError("rng_seed must be an int")
+    # validate bootstrap arguments even when a slice is empty.
+    if type(n_bootstrap) is not int or n_bootstrap <= 0:
+        raise ValueError("n_bootstrap must be a positive integer")
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not math.isfinite(float(alpha)) or not 0.0 < float(alpha) < 1.0:
+        raise ValueError("alpha must be finite and in (0, 1)")
+    raw_values = list(values)
+    if raw_values and all(isinstance(value, SnapshotReplayTick) for value in raw_values):
+        records = replay_snapshots(raw_values)  # type: ignore[arg-type]
+    elif all(isinstance(value, BenchmarkRecord) for value in raw_values):
+        records = list(raw_values)  # type: ignore[assignment]
+    else:
+        raise TypeError("benchmark input must contain one homogeneous typed sequence")
+    if not records:
+        return _empty_report(development_only=development_only, formal_eligible=formal_eligible)
+
+    session_kinds = {record.session_kind for record in records}
+    source_policies = {record.source_policy for record in records}
+    if len(session_kinds) != 1:
+        raise ValueError("benchmark records mix session_kind values")
+    if len(source_policies) != 1:
+        raise ValueError("benchmark records mix source_policy values")
+    tick_latencies: dict[tuple[str, str], float] = {}
+    for record in records:
+        key = (record.session_id, record.frame_id)
+        previous = tick_latencies.setdefault(key, record.latency_ms)
+        if previous != record.latency_ms:
+            raise ValueError(f"inconsistent latency for tick {key}")
+
+    expected = list(expected_ticks or [ExpectedTick(*key) for key in tick_latencies])
+    expected_keys = [(tick.session_id, tick.frame_id) for tick in expected]
+    if len(expected_keys) != len(set(expected_keys)):
+        raise ValueError("expected_ticks must be unique")
+    expected_set = set(expected_keys)
+    observed_set = set(tick_latencies)
+    extra = observed_set - expected_set
+    if extra:
+        raise ValueError(f"observed ticks not present in restored manifest: {sorted(extra)}")
+
+    by_field: dict[str, list[BenchmarkRecord]] = defaultdict(list)
+    for record in records:
+        by_field[record.field].append(record)
+    valid = lambda name: [record for record in by_field[name] if record.predicted is not None]
+    ss, tr, levels = valid("screen_state"), valid("timer_seconds"), valid("level")
+    inv, choices = valid("inventory_top1"), valid("choice_top1")
+    hp, xp = valid("hp_ratio"), valid("xp_ratio")
+    density, nearest = valid("entity_density"), valid("nearest_distance")
+    roi, inside, false_positive = valid("ui_roi_center_error"), valid("ui_inside_region"), valid("ui_false_positive")
+    confidence, cross = valid("confidence"), valid("ui_cross_frame_equivalent")
+
+    screen_f1 = _macro_f1([r.ground_truth for r in ss], [r.predicted for r in ss]) if ss else 0.0
+    exact = lambda rows: sum(r.ground_truth == r.predicted for r in rows) / len(rows) if rows else 0.0
+    timer_exact = sum(abs(r.ground_truth - r.predicted) < _TIMER_EXACT_TOLERANCE for r in tr) / len(tr) if tr else 0.0
+    mae = lambda rows: float(np.mean([abs(r.ground_truth - r.predicted) for r in rows])) if rows else float("inf")
+    if len(density) >= 2:
+        gt = np.array([r.ground_truth for r in density], dtype=float)
+        pred = np.array([r.predicted for r in density], dtype=float)
+        density_corr = float(np.corrcoef(gt, pred)[0, 1]) if gt.std() > 0 and pred.std() > 0 else (1.0 if np.array_equal(gt, pred) else 0.0)
+    else:
+        density_corr = 0.0
+    positive_latencies = [value for key, value in tick_latencies.items() if key in expected_set and value > 0.0]
+    invalid_ticks = expected_set - observed_set
+    for record in records:
+        if record.predicted is None:
+            invalid_ticks.add((record.session_id, record.frame_id))
+    invalid_rate = len(invalid_ticks) / len(expected_set) if expected_set else 1.0
+    invalid_choice = sum(record.predicted in {None, ""} for record in by_field["choice_top1"])
+    choice_denominator = len(by_field["choice_top1"])
+    slice_counts = {name: len(rows) for name, rows in by_field.items()}
+    session_screen: dict[str, list[float]] = defaultdict(list)
+    for record in ss:
+        session_screen[record.session_id].append(float(record.ground_truth == record.predicted))
+    ci_lower = None
+    if len(session_screen) >= 2:
+        ci_lower, _ = bootstrap_cluster_ci(dict(session_screen), n_bootstrap, alpha, np.random.default_rng(rng_seed))
+
+    report = BenchmarkReport(
+        development_only=development_only,
+        formal_perception_verdict_eligible=formal_eligible,
+        session_kind=next(iter(session_kinds)), total_records=len(records),
+        screen_state_f1=screen_f1, timer_exact_rate=timer_exact,
+        level_exact_rate=exact(levels), inventory_top1_rate=exact(inv),
+        choice_top1_rate=exact(choices), hp_mae=mae(hp), xp_mae=mae(xp),
+        density_correlation=density_corr,
+        nearest_normalized_median_error=float(np.median([abs(r.ground_truth-r.predicted) for r in nearest])) if nearest else float("inf"),
+        latency_p95_ms=float(np.percentile(positive_latencies, 95)) if positive_latencies else 0.0,
+        latency_p99_ms=float(np.percentile(positive_latencies, 99)) if positive_latencies else 0.0,
+        invalid_tick_rate=invalid_rate,
+        levelup_invalid_choice_rate=invalid_choice / choice_denominator if choice_denominator else 1.0,
+        roi_center_p99=float(np.percentile([r.predicted for r in roi], 99)) if roi else float("inf"),
+        roi_inside_region_rate=sum(bool(r.predicted) for r in inside) / len(inside) if inside else 0.0,
+        roi_false_positive_count=sum(bool(r.predicted) for r in false_positive),
+        confidence_mean=float(np.mean([r.predicted for r in confidence])) if confidence else 0.0,
+        ui_cross_frame_equivalence_rate=sum(bool(r.predicted) for r in cross) / len(cross) if cross else 0.0,
+        expected_tick_count=len(expected_set), observed_tick_count=len(observed_set),
+        latency_tick_count=len(positive_latencies), slice_counts=slice_counts,
+        slices=[{"name": "overall_screen_state", "count": len(ss), "macro_f1": screen_f1, "ci_lower": ci_lower}] if ss else [],
+    )
+    report.blocking_reasons = _metric_gate(report.metrics_wire())
+    report.passed = not report.blocking_reasons
+    return report
 
 
 def run_benchmark(
-    records: list[BenchmarkRecord],
-    *,
-    development_only: bool = True,
-    rng_seed: int = 0,
-    n_bootstrap: int = 1000,
+    values: Sequence[BenchmarkRecord] | Sequence[SnapshotReplayTick], *,
+    expected_ticks: Sequence[ExpectedTick] | None = None,
+    rng_seed: int = 0, n_bootstrap: int = 1000, alpha: float = 0.05,
 ) -> BenchmarkReport:
-    """予測レコードから benchmark メトリクスを集計する。
-
-    formal 入力なしで呼ばれるとき development_only=True を設定し、
-    formal_perception_verdict_eligible を常に False にします。
-
-    random seed を固定（rng_seed=0）すると byte-identical な report になります。
-    """
-    if not records:
-        return BenchmarkReport(
-            development_only=development_only,
-            formal_perception_verdict_eligible=False,
-            session_kind="unknown",
-            total_records=0,
-            screen_state_f1=0.0,
-            timer_exact_rate=0.0,
-            level_exact_rate=0.0,
-            inventory_top1_rate=0.0,
-            choice_top1_rate=0.0,
-            hp_mae=float("inf"),
-            xp_mae=float("inf"),
-            density_correlation=0.0,
-            nearest_normalized_median_error=float("inf"),
-            latency_p95_ms=0.0,
-            latency_p99_ms=0.0,
-            invalid_tick_rate=1.0,
-            levelup_invalid_choice_rate=0.0,
-            roi_center_p99=float("inf"),
-            roi_inside_region_rate=0.0,
-            roi_false_positive_count=0,
-            blocking_reasons=["no records"],
-            passed=False,
-        )
-
-    by_field: dict[str, list[BenchmarkRecord]] = {}
-    for r in records:
-        by_field.setdefault(r.field, []).append(r)
-
-    session_kind = records[0].session_kind
-    rng = np.random.default_rng(rng_seed)
-
-    # --- 分類メトリクス (macro F1) ---
-    ss = by_field.get("screen_state", [])
-    screen_f1 = _macro_f1(
-        [r.ground_truth for r in ss],
-        [r.predicted for r in ss],
-    ) if ss else 0.0
-
-    tr = by_field.get("timer_seconds", [])
-    timer_exact = (
-        sum(1 for r in tr if abs(r.ground_truth - r.predicted) < _TIMER_EXACT_TOLERANCE)
-        / len(tr)
-        if tr
-        else 0.0
+    """synthetic 入口。development_only は公開引数にせず常に True に固定する。"""
+    return _run_benchmark_common(
+        values, expected_ticks=expected_ticks, development_only=True,
+        formal_eligible=False, rng_seed=rng_seed, n_bootstrap=n_bootstrap, alpha=alpha,
     )
 
-    lr = by_field.get("level", [])
-    level_exact = (
-        sum(1 for r in lr if r.ground_truth == r.predicted) / len(lr) if lr else 0.0
+
+def _run_formal_benchmark(
+    values: Sequence[SnapshotReplayTick], *, expected_ticks: Sequence[ExpectedTick],
+    rng_seed: int = 0, n_bootstrap: int = 1000, alpha: float = 0.05,
+) -> BenchmarkReport:
+    """verified formal runner 専用 factory。事前計算 record/bool は受理しない。"""
+    if not all(isinstance(value, SnapshotReplayTick) for value in values):
+        raise TypeError("formal benchmark accepts only typed SnapshotReplayTick values")
+    return _formalize_benchmark_report(
+        run_benchmark(
+            values, expected_ticks=expected_ticks, rng_seed=rng_seed,
+            n_bootstrap=n_bootstrap, alpha=alpha,
+        )
     )
 
-    inv = by_field.get("inventory_top1", [])
-    inv_rate = (
-        sum(1 for r in inv if r.ground_truth == r.predicted) / len(inv) if inv else 0.0
-    )
 
-    ch = by_field.get("choice_top1", [])
-    choice_rate = (
-        sum(1 for r in ch if r.ground_truth == r.predicted) / len(ch) if ch else 0.0
-    )
-
-    # --- 回帰メトリクス ---
-    hpr = [r for r in by_field.get("hp_ratio", []) if r.predicted is not None]
-    hp_mae = (
-        float(np.mean([abs(r.ground_truth - r.predicted) for r in hpr]))
-        if hpr
-        else float("inf")
-    )
-
-    xpr = [r for r in by_field.get("xp_ratio", []) if r.predicted is not None]
-    xp_mae = (
-        float(np.mean([abs(r.ground_truth - r.predicted) for r in xpr]))
-        if xpr
-        else float("inf")
-    )
-
-    # --- world entity メトリクス ---
-    dr = by_field.get("entity_density", [])
-    if len(dr) >= 2:
-        gt_v = np.array([r.ground_truth for r in dr], dtype=float)
-        pred_v = np.array([r.predicted for r in dr], dtype=float)
-        if gt_v.ndim != 1 or pred_v.ndim != 1:
-            raise ValueError(
-                "entity_density ground_truth/predicted must be scalar (1D per record)"
-            )
-        density_corr = (
-            float(np.corrcoef(gt_v, pred_v)[0, 1])
-            if gt_v.std() > 0 and pred_v.std() > 0
-            else 0.0
-        )
-    else:
-        density_corr = 0.0
-
-    nr = by_field.get("nearest_distance", [])
-    nearest_med = (
-        float(np.median([abs(r.ground_truth - r.predicted) for r in nr]))
-        if nr
-        else float("inf")
-    )
-
-    # --- レイテンシ（unique tick ごとに 1 回のみ集計）---
-    # (session_id, frame_id) の一意 tick ごとに latency_ms を取る
-    tick_latencies: dict[tuple[str, str], float] = {}
-    for r in records:
-        if r.latency_ms > 0:
-            key = (r.session_id, r.frame_id)
-            if key not in tick_latencies:
-                tick_latencies[key] = r.latency_ms
-    all_lat = list(tick_latencies.values())
-    lat_p95 = _percentile_exact(all_lat, 95) if all_lat else 0.0
-    lat_p99 = _percentile_exact(all_lat, 99) if all_lat else 0.0
-
-    # --- 可用性（unique tick を分母にする）---
-    # unique (session_id, frame_id) が分母
-    unique_ticks: set[tuple[str, str]] = {(r.session_id, r.frame_id) for r in records}
-    invalid_ticks: set[tuple[str, str]] = set()
-    # required フィールドが 1 つでも invalid (predicted=None) の tick をカウント
-    for r in records:
-        if r.predicted is None:
-            invalid_ticks.add((r.session_id, r.frame_id))
-    invalid_tick_rate = len(invalid_ticks) / len(unique_ticks) if unique_ticks else 0.0
-
-    levelup_ch = [r for r in ch if r.ground_truth is not None]
-    levelup_invalid = sum(
-        1 for r in levelup_ch if r.predicted is None or r.predicted == ""
-    )
-    levelup_invalid_rate = levelup_invalid / len(levelup_ch) if levelup_ch else 0.0
-
-    # --- UI ROI ---
-    roi_cr = by_field.get("ui_roi_center_error", [])
-    roi_p99 = (
-        _percentile_exact([r.predicted for r in roi_cr], 99)
-        if roi_cr
-        else float("inf")
-    )
-
-    inside_r = by_field.get("ui_inside_region", [])
-    inside_rate = (
-        sum(1 for r in inside_r if r.predicted) / len(inside_r) if inside_r else 0.0
-    )
-
-    fp_r = by_field.get("ui_false_positive", [])
-    fp_count = sum(1 for r in fp_r if r.predicted)
-
-    # --- rare slice CI（session-cluster bootstrap）---
-    # session ごとの screen_state 一致率を集計して CI を計算
-    session_screen_correct: dict[str, list[float]] = defaultdict(list)
-    for r in ss:
-        session_screen_correct[r.session_id].append(
-            1.0 if r.ground_truth == r.predicted else 0.0
-        )
-    rare_ci_lo: float | None = None
-    if session_screen_correct:
-        rare_ci_lo, _ = bootstrap_cluster_ci(
-            dict(session_screen_correct),
-            n_bootstrap=n_bootstrap,
-            rng=rng,
-        )
-
-    # --- threshold gate → passed / blocking_reasons ---
-    blocking: list[str] = []
-
-    if ss and screen_f1 < THRESHOLD_SCREEN_F1:
-        blocking.append(f"screen_state macro F1 {screen_f1:.4f} < {THRESHOLD_SCREEN_F1}")
-    if tr and timer_exact < THRESHOLD_TIMER_EXACT:
-        blocking.append(f"timer exact rate {timer_exact:.4f} < {THRESHOLD_TIMER_EXACT}")
-    if lr and level_exact < THRESHOLD_LEVEL_EXACT:
-        blocking.append(f"level exact rate {level_exact:.4f} < {THRESHOLD_LEVEL_EXACT}")
-    if inv and inv_rate < THRESHOLD_INVENTORY_TOP1:
-        blocking.append(f"inventory top-1 {inv_rate:.4f} < {THRESHOLD_INVENTORY_TOP1}")
-    if ch and choice_rate < THRESHOLD_CHOICE_TOP1:
-        blocking.append(f"choice top-1 {choice_rate:.4f} < {THRESHOLD_CHOICE_TOP1}")
-    if hpr and hp_mae > THRESHOLD_HP_MAE:
-        blocking.append(f"HP MAE {hp_mae:.4f} > {THRESHOLD_HP_MAE}")
-    if xpr and xp_mae > THRESHOLD_XP_MAE:
-        blocking.append(f"XP MAE {xp_mae:.4f} > {THRESHOLD_XP_MAE}")
-    if dr and density_corr < THRESHOLD_DENSITY_CORR:
-        blocking.append(
-            f"entity density correlation {density_corr:.4f} < {THRESHOLD_DENSITY_CORR}"
-        )
-    if nr and nearest_med > THRESHOLD_NEAREST_MED:
-        blocking.append(
-            f"nearest normalized median error {nearest_med:.4f} > {THRESHOLD_NEAREST_MED}"
-        )
-    if all_lat:
-        if lat_p95 > THRESHOLD_LAT_P95_MS:
-            blocking.append(f"latency p95 {lat_p95:.1f}ms > {THRESHOLD_LAT_P95_MS}ms")
-        if lat_p99 > THRESHOLD_LAT_P99_MS:
-            blocking.append(f"latency p99 {lat_p99:.1f}ms > {THRESHOLD_LAT_P99_MS}ms")
-    if invalid_tick_rate > THRESHOLD_INVALID_TICK:
-        blocking.append(
-            f"invalid tick rate {invalid_tick_rate:.4f} > {THRESHOLD_INVALID_TICK}"
-        )
-    if levelup_ch and levelup_invalid_rate > THRESHOLD_LEVELUP_INVALID:
-        blocking.append(
-            f"level-up invalid choice rate {levelup_invalid_rate:.4f} "
-            f"> {THRESHOLD_LEVELUP_INVALID}"
-        )
-    if roi_cr and roi_p99 > THRESHOLD_ROI_CENTER_P99:
-        blocking.append(f"ROI center p99 {roi_p99:.4f} > {THRESHOLD_ROI_CENTER_P99}")
-    if inside_r and inside_rate < THRESHOLD_ROI_INSIDE:
-        blocking.append(
-            f"ROI inside-region rate {inside_rate:.4f} < {THRESHOLD_ROI_INSIDE}"
-        )
-    if fp_count > 0:
-        blocking.append(f"invalid/ambiguous ROI false-positive count: {fp_count}")
-
-    # rare slice: CI lower bound チェック
-    if rare_ci_lo is not None:
-        if rare_ci_lo < THRESHOLD_SCREEN_F1:
-            blocking.append(
-                f"screen_state cluster CI lower bound {rare_ci_lo:.4f} < {THRESHOLD_SCREEN_F1}"
-            )
-
-    # rare slice 0 件チェック
-    if not ss:
-        blocking.append("screen_state slice has 0 records (blocking)")
-
-    # slices サマリー
-    slices: list[dict[str, Any]] = []
-    if ss:
-        slices.append(
-            {
-                "name": "overall_screen_state",
-                "count": len(ss),
-                "macro_f1": screen_f1,
-                "ci_lower": rare_ci_lo,
-            }
-        )
-
-    passed = len(blocking) == 0
-
-    return BenchmarkReport(
-        development_only=development_only,
-        formal_perception_verdict_eligible=False,
-        session_kind=session_kind,
-        total_records=len(records),
-        screen_state_f1=screen_f1,
-        timer_exact_rate=timer_exact,
-        level_exact_rate=level_exact,
-        inventory_top1_rate=inv_rate,
-        choice_top1_rate=choice_rate,
-        hp_mae=hp_mae,
-        xp_mae=xp_mae,
-        density_correlation=density_corr,
-        nearest_normalized_median_error=nearest_med,
-        latency_p95_ms=lat_p95,
-        latency_p99_ms=lat_p99,
-        invalid_tick_rate=invalid_tick_rate,
-        levelup_invalid_choice_rate=levelup_invalid_rate,
-        roi_center_p99=roi_p99,
-        roi_inside_region_rate=inside_rate,
-        roi_false_positive_count=fp_count,
-        slices=slices,
-        blocking_reasons=blocking,
-        passed=passed,
+def _formalize_benchmark_report(report: BenchmarkReport) -> BenchmarkReport:
+    """formal runner だけが synthetic-fixed public report を formal subject 化する。"""
+    if not isinstance(report, BenchmarkReport):
+        raise TypeError("formal benchmark factory requires BenchmarkReport")
+    if report.development_only is not True or report.formal_perception_verdict_eligible is not False:
+        raise ValueError("benchmark report was already promoted or has inconsistent flags")
+    return replace(
+        report, development_only=False, formal_perception_verdict_eligible=True
     )
