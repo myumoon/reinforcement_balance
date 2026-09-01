@@ -54,6 +54,11 @@ def _verdict_subjects() -> dict[str, str]:
 
 
 def _full_report():
+    """passed=True になる最小ベンチマーク結果を生成する。
+
+    per-state gate（最低 2 種類の screen_state、各 3 件以上）を満たすため
+    gameplay と level_up_items の両方を含めます。
+    """
     rows = []
     for session_index, session in enumerate(("s0", "s1")):
         for frame_index, density in enumerate((0.1, 0.2)):
@@ -76,6 +81,12 @@ def _full_report():
                     common["frame"], common["session"], "error_calibration", "raw",
                     field, ground, predicted, 1.0, 1.0,
                 ))
+    # per-state gate: level_up_items を 3 件追加して最低 2 種類を満たす
+    for i in range(3):
+        rows.append(BenchmarkRecord(
+            f"lui-{i}", "s0", "error_calibration", "raw",
+            "screen_state", "level_up_items", "level_up_items", 1.0, 1.0,
+        ))
     report = run_benchmark(rows, n_bootstrap=20)
     assert report.passed
     return report
@@ -179,15 +190,7 @@ class TestFinalVerdict:
         return verdict.to_wire()
 
     def _load(self, wire: dict[str, object]):
-        subjects = _verdict_subjects()
-        return load_final_verdict(
-            wire,
-            current_parser_hash=subjects["parser_artifact_hash"],
-            current_detector_hash=subjects["detector_artifact_hash"],
-            current_assembler_hash=subjects["assembler_schema_hash"],
-            current_config_hash=subjects["config_hash"],
-            current_ui_schema_hash=subjects["ui_presentation_schema_hash"],
-        )
+        return load_final_verdict(wire, current_subject_hashes=_verdict_subjects())
 
     def test_exact_fields_all_hashes_and_gate_recompute(self) -> None:
         wire = self._wire()
@@ -204,12 +207,10 @@ class TestFinalVerdict:
 
     def test_stale_producer_rejected(self) -> None:
         wire = self._wire()
+        subjects = _verdict_subjects()
+        stale_subjects = {**subjects, "parser_artifact_hash": "0" * 64}
         with pytest.raises(StaleVerdictError):
-            load_final_verdict(
-                wire, current_parser_hash="0" * 64,
-                current_detector_hash="b" * 64, current_assembler_hash="c" * 64,
-                current_config_hash="e" * 64, current_ui_schema_hash="d" * 64,
-            )
+            load_final_verdict(wire, current_subject_hashes=stale_subjects)
 
     def test_direct_formal_and_inconsistent_false_false_rejected(self) -> None:
         base = self._wire()

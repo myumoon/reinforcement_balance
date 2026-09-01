@@ -5,9 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from Tools.Artifacts.artifact_store import ArtifactStore
 from reinbalance_survivors_contracts.artifact_dag import validate_artifact_dag
@@ -18,6 +18,8 @@ from reinbalance_survivors_contracts.artifact_identity import (
 )
 from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
 
+from survivors.capture.captured_frame import CapturedFrame
+from survivors.perception_snapshot import FormalReplayEvidence
 from survivors.capture_dataset import (
     DatasetWriter,
     SessionManifest,
@@ -46,9 +48,24 @@ from survivors.perception_session_split import SessionSplit, validate_split
 CalibrationProvider = Callable[
     [tuple[SessionManifest, ...], Mapping[str, bytes]], Sequence[CalibrationResidual]
 ]
-FinalReplayProvider = Callable[
-    [tuple[SessionManifest, ...], Mapping[str, bytes]], Sequence[SnapshotReplayTick]
-]
+
+
+class FormalAssembler(Protocol):
+    """runner が dataset の raw frame から ground-truth tick を生成するアセンブラプロトコル。
+
+    runner が frame の選択（dataset から）と detector_artifact_hash の設定（restored package から）
+    を制御し、assembler は frame の解釈のみを担当します。外部 provider の自己申告を排除します。
+    raw 証拠は V1 型を変えず FormalReplayEvidence として分離して返します。
+    """
+
+    def assemble_frame(
+        self, frame: CapturedFrame, session_id: str, frame_index: int
+    ) -> tuple[PerceptionSnapshot | None, float, FormalReplayEvidence | None]:
+        """(snapshot, latency_ms, evidence) を返す。snapshot が None の場合 frame はスキップ。"""
+        ...
+
+
+FormalAssemblerFactory = Callable[[Mapping[str, bytes]], FormalAssembler]
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +74,7 @@ class FormalBenchmarkRequest:
     dependency_refs: Mapping[str, ArtifactRef]
     capture_store_root: Path
     calibration_provider: CalibrationProvider
-    final_replay_provider: FinalReplayProvider
+    formal_assembler_factory: FormalAssemblerFactory
     calibration_logical_id: str = "perception/calibration/profile.json"
     verdict_logical_id: str = "perception/final/verdict.json"
 
@@ -89,7 +106,7 @@ _PACKAGE_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     }),
     "target_config": frozenset({"schema_version", "development_only", "formal_eligible", "threshold_hash"}),
 }
-_CLI_PROVIDER_FACTORY: Callable[[Mapping[str, bytes]], tuple[CalibrationProvider, FinalReplayProvider]] | None = None
+_CLI_PROVIDER_FACTORY: Callable[[Mapping[str, bytes]], tuple[CalibrationProvider, FormalAssemblerFactory]] | None = None
 
 
 def _restore_dependencies(request: FormalBenchmarkRequest) -> dict[str, bytes]:
@@ -294,6 +311,7 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         [manifest.session_id for manifest in calibration_manifests],
         [manifest.session_id for manifest in final_manifests],
         calibration_session_hashes=calibration_hashes,
+        formal=True,
     )
 
     # seal identity の lineage_seal_hash 自身は含めず、seal wire hash を verdict subject にする。
@@ -318,83 +336,48 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         request, payloads, profile, lineage_seal_hash=lineage_seal_hash
     )
 
-    replay_ticks = list(request.final_replay_provider(final_manifests, restored))
-    expected_ticks = [
-        # 04-09 assembler の canonical frame identity は session/frame/world index。
-        ExpectedTick(session.session_id, f"{session.session_id}:{frame_id}:{frame_id}")
-        for session in validated_split.sessions
-        if session.kind == "final_e2e_test"
-        for frame_id in session.expected_frame_ids
-    ]
-    # formal runner: typed SnapshotReplayTick のみ受理する。
-    for tick in replay_ticks:
-        if not isinstance(tick, SnapshotReplayTick):
-            raise TypeError(
-                f"formal replay provider must yield SnapshotReplayTick, got {type(tick).__name__}"
-            )
-    # session_kind / source_policy / raw fields を validated split の session record と照合する。
+    # runner が dataset の raw frame から tick を生成する（外部 provider を排除）。
+    # runner が制御するもの: どの frame を処理するか（dataset から）、detector hash（restored package から）、
+    # session_kind / source_policy（validated split から）。
+    # assembler が制御するもの: frame の解釈のみ（観測値）。
+    assembler = request.formal_assembler_factory(restored)
+    parser_decl_hash = json.loads(restored["parser_package"])["artifact_hash"]
+    detector_decl_hash = json.loads(restored["detector_package"])["artifact_hash"]
     final_session_records = {
         s.session_id: s for s in validated_split.sessions if s.kind == "final_e2e_test"
     }
-    for tick in replay_ticks:
-        record = final_session_records.get(tick.session_id)
-        if record is None:
-            raise ValueError(
-                f"tick session {tick.session_id!r} is not in the validated final sessions"
+    replay_ticks: list[SnapshotReplayTick] = []
+    expected_ticks: list[ExpectedTick] = []
+    formal_evidence: dict[str, FormalReplayEvidence] = {}
+    for manifest in final_manifests:
+        record = final_session_records[manifest.session_id]
+        for frame in manifest.frames:
+            fid = f"{manifest.session_id}:{frame.session_frame_index}:{frame.session_frame_index}"
+            expected_ticks.append(ExpectedTick(manifest.session_id, fid))
+            snapshot, latency_ms, evidence = assembler.assemble_frame(
+                frame, manifest.session_id, frame.session_frame_index
             )
-        if tick.session_kind != record.kind:
-            raise ValueError(
-                f"tick {tick.session_id}/{tick.frame_id}: session_kind {tick.session_kind!r} "
-                f"does not match split record kind {record.kind!r}"
-            )
-        if tick.source_policy != record.source_policy:
-            raise ValueError(
-                f"tick {tick.session_id}/{tick.frame_id}: source_policy {tick.source_policy!r} "
-                f"does not match split record source_policy {record.source_policy!r}"
-            )
-        # formal replay では raw_card_ids / raw_inventory が必須（hash 独立検証のため）。
-        for label, snapshot in (("ground_truth", tick.ground_truth), ("predicted", tick.predicted)):
             if snapshot is None:
                 continue
-            ui = snapshot.ui_presentation
-            if ui.raw_card_ids is None or ui.raw_inventory is None:
+            # runner が detector hash を設定（assembler は変更できない）
+            snapshot = replace(snapshot, detector_artifact_hash=detector_decl_hash)
+            if evidence is None:
                 raise ValueError(
-                    f"tick {tick.session_id}/{tick.frame_id} {label}: "
-                    "raw_card_ids and raw_inventory are required in formal replay"
+                    f"assembler returned no formal evidence: "
+                    f"session={manifest.session_id} frame={frame.session_frame_index}"
                 )
-    # replay の parser_artifact_hash / detector_artifact_hash が登録済みパッケージ宣言と一致することを確認する。
-    parser_decl_hash = json.loads(restored["parser_package"])["artifact_hash"]
-    detector_decl_hash = json.loads(restored["detector_package"])["artifact_hash"]
-    for tick in replay_ticks:
-        for label, snapshot in (("ground_truth", tick.ground_truth), ("predicted", tick.predicted)):
-            if snapshot is None:
-                continue
-            actual_parser = snapshot.ui_presentation.parser_artifact_hash
-            if actual_parser != parser_decl_hash:
+            if snapshot.ui_presentation.parser_artifact_hash != parser_decl_hash:
                 raise ValueError(
-                    f"tick {tick.session_id}/{tick.frame_id} {label}: "
-                    f"parser_artifact_hash ({actual_parser[:8]}…) does not match "
-                    f"parser_package artifact_hash ({parser_decl_hash[:8]}…)"
+                    f"snapshot parser_artifact_hash ({snapshot.ui_presentation.parser_artifact_hash[:8]}…) "
+                    f"does not match parser_package ({parser_decl_hash[:8]}…)"
                 )
-            # detector_artifact_hash はスナップショット構造内（SnapshotReplayTick の自己申告ではない）で確認する。
-            # ponytail: detector 観測内容の真正性はこのチェックでは保証できない。provider が宣言 hash を
-            # コピーして任意の deploy_obs を注入することは防げない。完全な provenance 検証には runner 側で
-            # restored detector package を実行し観測を生成する実装（runner-side execution）が必要。
-            # 今 PR は code-only（正式実行なし）のため、hash の構造的検証のみとし実行は follow-up とする。
-            actual_detector = snapshot.detector_artifact_hash
-            if not actual_detector:
-                raise ValueError(
-                    f"tick {tick.session_id}/{tick.frame_id} {label}: "
-                    "detector_artifact_hash is empty; formal replay snapshots must carry detector identity"
-                )
-            if actual_detector != detector_decl_hash:
-                raise ValueError(
-                    f"tick {tick.session_id}/{tick.frame_id} {label}: "
-                    f"snapshot.detector_artifact_hash ({actual_detector[:8]}…) does not match "
-                    f"detector_package artifact_hash ({detector_decl_hash[:8]}…)"
-                )
+            formal_evidence[snapshot.frame_id] = evidence
+            replay_ticks.append(SnapshotReplayTick(
+                manifest.session_id, record.kind, record.source_policy,
+                snapshot.frame_id, snapshot, snapshot, latency_ms,
+            ))
     report = _formalize_benchmark_report(
-        run_benchmark(replay_ticks, expected_ticks=expected_ticks)
+        run_benchmark(replay_ticks, expected_ticks=expected_ticks, formal_evidence=formal_evidence)
     )
     verdict = _create_formal_final_verdict(
         report, seal_id=seal.seal_id,
@@ -533,7 +516,7 @@ def main(argv: list[str] | None = None) -> int:
             FormalBenchmarkRequest(
                 store=store, dependency_refs=refs,
                 capture_store_root=Path(required["capture_store"]),
-                calibration_provider=lambda *_: (), final_replay_provider=lambda *_: (),
+                calibration_provider=lambda *_: (), formal_assembler_factory=lambda *_: None,
             )
         )
         if _CLI_PROVIDER_FACTORY is None:
@@ -544,7 +527,7 @@ def main(argv: list[str] | None = None) -> int:
                 store=store, dependency_refs=refs,
                 capture_store_root=Path(required["capture_store"]),
                 calibration_provider=calibration_provider,
-                final_replay_provider=final_provider,
+                formal_assembler_factory=final_provider,
             )
         )
     except Exception as exc:  # fail closed: dependency failure never prints Verified

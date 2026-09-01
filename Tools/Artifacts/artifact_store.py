@@ -209,6 +209,12 @@ class ArtifactStore:
         self.logical_root.mkdir(parents=True, exist_ok=True)
         self.materialized_root.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _strip_win_prefix(path: Path) -> Path:
+        """Windows 拡張長パスの \\?\ プレフィックスを正規化して比較できるようにする。"""
+        s = str(path)
+        return Path(s[4:]) if s.startswith("\\\\?\\") else path
+
     def object_path(self, uri_or_hash: str) -> Path:
         sha256 = (
             parse_artifact_uri(uri_or_hash)
@@ -219,7 +225,8 @@ class ArtifactStore:
             raise ArtifactStoreError("object path requires a 64-hex sha256")
         path = (self.objects_root / sha256[:2] / sha256).resolve()
         try:
-            path.relative_to(self.objects_root.resolve())
+            # \\?\ プレフィックスを両辺で除去してから比較する（Windows 拡張長パス対策）
+            self._strip_win_prefix(path).relative_to(self._strip_win_prefix(self.objects_root.resolve()))
         except ValueError as exc:
             raise ArtifactStoreError("object path escapes store root") from exc
         return path

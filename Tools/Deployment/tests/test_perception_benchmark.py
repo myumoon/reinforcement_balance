@@ -14,7 +14,10 @@ from survivors.perception_benchmark import (
     ExpectedTick,
     bootstrap_cluster_ci,
     run_benchmark,
+    _is_valid_ground_target,
+    _is_usable_pred_target,
 )
+from survivors.perception_snapshot import NormalizedRoi, UiButtonTargetV1, UiCandidateTargetV1
 
 
 def _rec(
@@ -435,3 +438,40 @@ class TestThresholdGate:
         report = run_benchmark([])
         assert report.passed is False
         assert len(report.blocking_reasons) > 0
+
+
+class TestRoiValidityFilter:
+    """validity=False または capability=False の target が正解 geometry を汚染しないことを検証する。"""
+
+    _VALID_ROI = NormalizedRoi(0.1, 0.1, 0.5, 0.5)
+    _ZERO_ROI = NormalizedRoi(0.0, 0.0, 0.0, 0.0)
+
+    def test_invalid_candidate_not_valid_ground(self) -> None:
+        """validity=False の candidate は ground target として無効。"""
+        cand = UiCandidateTargetV1("x", 0, "item_card", self._VALID_ROI, False, 0.9)
+        assert not _is_valid_ground_target(cand)
+
+    def test_zero_roi_candidate_not_valid_ground(self) -> None:
+        """ゼロ面積 ROI の candidate は ground target として無効。"""
+        cand = UiCandidateTargetV1("x", 0, "item_card", self._ZERO_ROI, True, 0.9)
+        assert not _is_valid_ground_target(cand)
+
+    def test_valid_candidate_is_valid_ground(self) -> None:
+        """validity=True かつ非ゼロ ROI の candidate は ground target として有効。"""
+        cand = UiCandidateTargetV1("x", 0, "item_card", self._VALID_ROI, True, 0.9)
+        assert _is_valid_ground_target(cand)
+
+    def test_invalid_candidate_not_usable_pred(self) -> None:
+        """validity=False の predicted candidate は usable でない（欠損扱い）。"""
+        cand = UiCandidateTargetV1("x", 0, "item_card", self._VALID_ROI, False, 0.9)
+        assert not _is_usable_pred_target(cand)
+
+    def test_incapable_button_not_usable_pred(self) -> None:
+        """capability=False の predicted button は usable でない（FP カウントしない）。"""
+        btn = UiButtonTargetV1("ack_chest", self._VALID_ROI, True, False, 0.8)
+        assert not _is_usable_pred_target(btn)
+
+    def test_capable_valid_button_is_usable_pred(self) -> None:
+        """validity=True かつ capability=True の button は usable。"""
+        btn = UiButtonTargetV1("ack_chest", self._VALID_ROI, True, True, 0.8)
+        assert _is_usable_pred_target(btn)

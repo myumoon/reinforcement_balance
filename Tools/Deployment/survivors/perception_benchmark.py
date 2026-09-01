@@ -5,13 +5,14 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Final, Literal, Sequence
+from typing import Any, Final, Literal, Mapping, Sequence
 
 import numpy as np
 
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
 
 from .perception_snapshot import (
+    FormalReplayEvidence,
     PerceptionSnapshot,
     UiButtonTargetV1,
     UiCandidateTargetV1,
@@ -60,6 +61,8 @@ THRESHOLD_ROI_CENTER_P99: Final[float] = 0.01
 THRESHOLD_ROI_INSIDE: Final[float] = 0.999
 THRESHOLD_CONFIDENCE: Final[float] = 0.99
 THRESHOLD_CROSS_FRAME_EQUIVALENCE: Final[float] = 0.999
+FORMAL_MIN_SCREEN_STATE_COUNT: Final[int] = 2    # 最低 2 種類の screen_state が必要
+FORMAL_MIN_SCREEN_STATE_RECORDS: Final[int] = 3   # 各 screen_state に最低 3 件必要
 
 
 def _strict_float(value: object, label: str) -> float:
@@ -297,6 +300,28 @@ def _target_key(target: UiCandidateTargetV1 | UiButtonTargetV1) -> tuple[Any, ..
     return ("button", target.semantic_action)
 
 
+def _is_valid_ground_target(target: UiCandidateTargetV1 | UiButtonTargetV1) -> bool:
+    """ground truth として正解 geometry に使える target か。
+
+    validity=False または面積ゼロ ROI（縮退点）は正解の基準に使えないため除外します。
+    """
+    roi = target.roi
+    return target.validity and (roi.right > roi.left or roi.bottom > roi.top)
+
+
+def _is_usable_pred_target(target: UiCandidateTargetV1 | UiButtonTargetV1) -> bool:
+    """predicted として中心誤差・inside 計算に使える target か。
+
+    validity=False、面積ゼロ ROI、button の capability=False は欠損・FP として扱います。
+    """
+    roi = target.roi
+    if not target.validity or (roi.right <= roi.left and roi.bottom <= roi.top):
+        return False
+    if isinstance(target, UiButtonTargetV1):
+        return target.capability
+    return True
+
+
 def _recomputed_snapshot_hashes(snapshot: PerceptionSnapshot) -> tuple[str, str, str]:
     """typed presentation から source/state/binding hash を正式 gate 内で再計算する。"""
     ui = snapshot.ui_presentation
@@ -332,19 +357,7 @@ def _recomputed_snapshot_hashes(snapshot: PerceptionSnapshot) -> tuple[str, str,
             for value in ui.buttons
         ],
     }
-    # candidate_set_hash / inventory_hash を typed 内容から独立再計算して照合する。
-    # raw_card_ids / raw_inventory は formal 経路 (build_ui_presentation_from_hud) のみ設定。
-    if ui.raw_card_ids is not None:
-        expected_candidate_hash = canonical_hash({
-            "screen_state": ui.screen_state,
-            "card_ids": sorted(c or "unknown" for c in ui.raw_card_ids),
-        })
-        if expected_candidate_hash != ui.candidate_set_hash:
-            raise ValueError("candidate_set_hash does not match typed card IDs")
-    if ui.raw_inventory is not None:
-        expected_inventory_hash = canonical_hash({"slots": list(ui.raw_inventory)})
-        if expected_inventory_hash != ui.inventory_hash:
-            raise ValueError("inventory_hash does not match typed inventory")
+    # raw evidence チェックは _verify_formal_evidence（呼び出し側で制御）に分離。
     source_hash = canonical_hash(source_payload)
     state_hash = canonical_hash(state_payload)
     if source_hash != ui.source_content_hash or source_hash != snapshot.source_content_hash:
@@ -361,6 +374,26 @@ def _recomputed_snapshot_hashes(snapshot: PerceptionSnapshot) -> tuple[str, str,
         }
     )
     return source_hash, state_hash, binding_hash
+
+
+def _verify_formal_evidence(
+    ui: "UiPresentationSnapshotV1",
+    evidence: FormalReplayEvidence,
+    label: str,
+) -> None:
+    """FormalReplayEvidence を使って UI hash を独立再計算し、改ざんを検出する。
+
+    V1 型を変えず benchmark 専用の raw 証拠を分離した契約で hash binding を検証します。
+    """
+    expected_candidate_hash = canonical_hash({
+        "screen_state": ui.screen_state,
+        "card_ids": sorted(c or "unknown" for c in evidence.raw_card_ids),
+    })
+    if expected_candidate_hash != ui.candidate_set_hash:
+        raise ValueError(f"{label}: candidate_set_hash does not match formal evidence card IDs")
+    expected_inventory_hash = canonical_hash({"slots": list(evidence.raw_inventory)})
+    if expected_inventory_hash != ui.inventory_hash:
+        raise ValueError(f"{label}: inventory_hash does not match formal evidence inventory")
 
 
 def _append_record(
@@ -382,8 +415,15 @@ def _append_record(
     )
 
 
-def replay_snapshots(ticks: Sequence[SnapshotReplayTick]) -> list[BenchmarkRecord]:
-    """typed snapshot から全 metric record と UI geometry gate を内部生成する。"""
+def replay_snapshots(
+    ticks: Sequence[SnapshotReplayTick],
+    formal_evidence: "Mapping[str, FormalReplayEvidence] | None" = None,
+) -> list[BenchmarkRecord]:
+    """typed snapshot から全 metric record と UI geometry gate を内部生成する。
+
+    formal_evidence が指定された場合、各 tick の ground_truth hash を
+    FormalReplayEvidence で独立再計算して改ざんを検出します。
+    """
     records: list[BenchmarkRecord] = []
     previous_targets: dict[
         tuple[str, tuple[Any, ...]],
@@ -392,6 +432,18 @@ def replay_snapshots(ticks: Sequence[SnapshotReplayTick]) -> list[BenchmarkRecor
     for tick in ticks:
         ground = tick.ground_truth
         predicted = tick.predicted
+        # evidence check を先に行い、raw hash 不一致を具体的なエラーで捕捉する。
+        # その後 _recomputed_snapshot_hashes で構造的整合性を検証する。
+        if formal_evidence is not None:
+            evidence = formal_evidence.get(ground.frame_id)
+            if evidence is None:
+                raise ValueError(f"formal evidence missing for frame {ground.frame_id!r}")
+            _verify_formal_evidence(ground.ui_presentation, evidence, f"ground/{ground.frame_id}")
+            if predicted is not None:
+                pred_evidence = formal_evidence.get(predicted.frame_id)
+                if pred_evidence is None:
+                    raise ValueError(f"formal evidence missing for predicted frame {predicted.frame_id!r}")
+                _verify_formal_evidence(predicted.ui_presentation, pred_evidence, f"predicted/{predicted.frame_id}")
         _recomputed_snapshot_hashes(ground)
         if predicted is not None:
             _recomputed_snapshot_hashes(predicted)
@@ -432,11 +484,17 @@ def replay_snapshots(ticks: Sequence[SnapshotReplayTick]) -> list[BenchmarkRecor
                        pred_ui.inventory_hash if pred_ui else None, pred_conf)
         _append_record(records, tick, "choice_top1", ground_ui.candidate_set_hash,
                        pred_ui.candidate_set_hash if pred_ui else None, pred_conf)
-        ground_targets = {_target_key(target): target for target in (*ground_ui.candidates, *ground_ui.buttons)}
-        pred_targets = {_target_key(target): target for target in (*pred_ui.candidates, *pred_ui.buttons)} if pred_ui else {}
-        for key, ground_target in ground_targets.items():
+        # validity=True かつ非ゼロ面積 ROI の target のみを正解 geometry として使う。
+        valid_ground_targets = {
+            _target_key(t): t
+            for t in (*ground_ui.candidates, *ground_ui.buttons)
+            if _is_valid_ground_target(t)
+        }
+        pred_targets = {_target_key(t): t for t in (*pred_ui.candidates, *pred_ui.buttons)} if pred_ui else {}
+        for key, ground_target in valid_ground_targets.items():
             pred_target = pred_targets.get(key)
-            if pred_target is None:
+            # predicted が存在しない、または usable でない（validity=False/capability=False/ゼロ ROI）→ 欠損扱い
+            if pred_target is None or not _is_usable_pred_target(pred_target):
                 _append_record(records, tick, "ui_roi_center_error", 0.0, None, 0.0)
                 _append_record(records, tick, "ui_inside_region", True, None, 0.0)
                 _append_record(records, tick, "confidence", 1.0, None, 0.0)
@@ -481,7 +539,13 @@ def replay_snapshots(ticks: Sequence[SnapshotReplayTick]) -> list[BenchmarkRecor
             previous_targets[(tick.session_id, key)] = (
                 ground, ground_target, predicted, pred_target,
             )
-        false_positive_keys = set(pred_targets) - set(ground_targets)
+        # FP = usable predicted targets that do not correspond to any valid ground target
+        # validity=False / zero-ROI / non-capable predicted targets are not counted as FP
+        # （ground が invalid でも予測が invalid なら FP にしない）
+        false_positive_keys = {
+            key for key, target in pred_targets.items()
+            if _is_usable_pred_target(target)
+        } - set(valid_ground_targets)
         _append_record(records, tick, "ui_false_positive", False, bool(false_positive_keys), pred_conf)
     return records
 
@@ -553,6 +617,25 @@ def _metric_gate(metrics: dict[str, Any]) -> list[str]:
             blocking.append("screen_state cluster CI lower bound outside formal threshold")
     if metrics["roi_false_positive_count"] > 0:
         blocking.append("invalid/ambiguous ROI false-positive count is non-zero")
+    # per-screen-state slice gate: 最低 FORMAL_MIN_SCREEN_STATE_COUNT 種類の状態が
+    # それぞれ FORMAL_MIN_SCREEN_STATE_RECORDS 件以上必要
+    # ponytail: 各状態の session-cluster CI は追加せず、まず件数だけ検証
+    state_record_counts = {
+        k.removeprefix("screen_state:"): v
+        for k, v in counts.items()
+        if k.startswith("screen_state:")
+    }
+    unique_states = len(state_record_counts)
+    if unique_states < FORMAL_MIN_SCREEN_STATE_COUNT:
+        blocking.append(
+            f"only {unique_states} screen state(s) observed; "
+            f"at least {FORMAL_MIN_SCREEN_STATE_COUNT} required"
+        )
+    for state, count in sorted(state_record_counts.items()):
+        if count < FORMAL_MIN_SCREEN_STATE_RECORDS:
+            blocking.append(
+                f"screen_state '{state}': {count} records < {FORMAL_MIN_SCREEN_STATE_RECORDS} required"
+            )
     return blocking
 
 
@@ -566,8 +649,15 @@ def recompute_gate_from_metrics(metrics: dict[str, Any]) -> tuple[bool, list[str
     # bool/NaN/Inf を再ロード境界でも拒否する。nested count/slice は個別検証する。
     if not isinstance(metrics["slice_counts"], dict):
         raise ValueError("slice_counts must be a dict")
+    # 固定 field count に加えて、値別 screen_state count の動的キーを受理する。
+    # 空の状態名や型不正は拒否し、保存済み verdict の再計算境界を狭く保つ。
     if not all(
-        key in _FIELD_KINDS and type(value) is int and value >= 0
+        (
+            key in _FIELD_KINDS
+            or (key.startswith("screen_state:") and bool(key.removeprefix("screen_state:")))
+        )
+        and type(value) is int
+        and value >= 0
         for key, value in metrics["slice_counts"].items()
     ):
         raise ValueError("slice_counts must contain non-negative integer values")
@@ -613,6 +703,7 @@ def _run_benchmark_common(
     values: Sequence[BenchmarkRecord] | Sequence[SnapshotReplayTick],
     *, expected_ticks: Sequence[ExpectedTick] | None, development_only: bool,
     formal_eligible: bool, rng_seed: int, n_bootstrap: int, alpha: float,
+    formal_evidence: Mapping[str, FormalReplayEvidence] | None = None,
 ) -> BenchmarkReport:
     if type(rng_seed) is not int:
         raise ValueError("rng_seed must be an int")
@@ -623,7 +714,7 @@ def _run_benchmark_common(
         raise ValueError("alpha must be finite and in (0, 1)")
     raw_values = list(values)
     if raw_values and all(isinstance(value, SnapshotReplayTick) for value in raw_values):
-        records = replay_snapshots(raw_values)  # type: ignore[arg-type]
+        records = replay_snapshots(raw_values, formal_evidence=formal_evidence)  # type: ignore[arg-type]
     elif all(isinstance(value, BenchmarkRecord) for value in raw_values):
         records = list(raw_values)  # type: ignore[assignment]
     else:
@@ -709,6 +800,10 @@ def _run_benchmark_common(
     invalid_choice = sum(record.predicted in {None, ""} for record in by_field["choice_top1"])
     choice_denominator = len(by_field["choice_top1"])
     slice_counts = {name: len(rows) for name, rows in by_field.items()}
+    # screen_state 値ごとの件数を "screen_state:{value}" キーで追加（per-state gate 用）
+    for record in by_field.get("screen_state", []):
+        key = f"screen_state:{record.ground_truth}"
+        slice_counts[key] = slice_counts.get(key, 0) + 1
     session_screen: dict[str, list[float]] = defaultdict(list)
     for record in ss:
         session_screen[record.session_id].append(float(record.ground_truth == record.predicted))
@@ -746,17 +841,23 @@ def _run_benchmark_common(
 def run_benchmark(
     values: Sequence[BenchmarkRecord] | Sequence[SnapshotReplayTick], *,
     expected_ticks: Sequence[ExpectedTick] | None = None,
+    formal_evidence: Mapping[str, FormalReplayEvidence] | None = None,
     rng_seed: int = 0, n_bootstrap: int = 1000, alpha: float = 0.05,
 ) -> BenchmarkReport:
-    """synthetic 入口。development_only は公開引数にせず常に True に固定する。"""
+    """synthetic 入口。development_only は公開引数にせず常に True に固定する。
+
+    formal_evidence が指定された場合は replay_snapshots へ渡して hash 独立検証を有効化します。
+    """
     return _run_benchmark_common(
         values, expected_ticks=expected_ticks, development_only=True,
-        formal_eligible=False, rng_seed=rng_seed, n_bootstrap=n_bootstrap, alpha=alpha,
+        formal_eligible=False, formal_evidence=formal_evidence,
+        rng_seed=rng_seed, n_bootstrap=n_bootstrap, alpha=alpha,
     )
 
 
 def _run_formal_benchmark(
     values: Sequence[SnapshotReplayTick], *, expected_ticks: Sequence[ExpectedTick],
+    formal_evidence: Mapping[str, FormalReplayEvidence] | None = None,
     rng_seed: int = 0, n_bootstrap: int = 1000, alpha: float = 0.05,
 ) -> BenchmarkReport:
     """verified formal runner 専用 factory。事前計算 record/bool は受理しない。"""
@@ -764,8 +865,8 @@ def _run_formal_benchmark(
         raise TypeError("formal benchmark accepts only typed SnapshotReplayTick values")
     return _formalize_benchmark_report(
         run_benchmark(
-            values, expected_ticks=expected_ticks, rng_seed=rng_seed,
-            n_bootstrap=n_bootstrap, alpha=alpha,
+            values, expected_ticks=expected_ticks, formal_evidence=formal_evidence,
+            rng_seed=rng_seed, n_bootstrap=n_bootstrap, alpha=alpha,
         )
     )
 

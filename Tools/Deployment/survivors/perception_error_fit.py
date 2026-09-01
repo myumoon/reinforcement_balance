@@ -16,6 +16,7 @@ from reinbalance_survivors_contracts.perception_error import (
     ITEM_CATEGORY_SIZE,
     PerceptionErrorProfile,
 )
+from Tools.Artifacts.artifact_store import ArtifactStoreError
 
 from .perception_benchmark import BenchmarkReport, recompute_gate_from_metrics
 
@@ -63,6 +64,13 @@ _RESIDUAL_FIELDS: Final[frozenset[str]] = frozenset(
         "item_category", "enemy_category",
     }
 )
+_FORMAL_REQUIRED_RESIDUAL_FIELDS: Final[frozenset[str]] = frozenset({
+    "coord_noise", "hp_ratio",
+    "burst_enter", "burst_exit", "burst_dropout",
+    "item_category", "enemy_category",
+})
+_FORMAL_RESIDUAL_MIN_SAMPLES: Final[int] = 3
+_FORMAL_RESIDUAL_MIN_SESSIONS: Final[int] = 2
 _FORMAL_FACTORY_TOKEN = object()
 
 
@@ -250,8 +258,13 @@ def fit_error_profile(
     final_e2e_session_ids: Sequence[str],
     *,
     calibration_session_hashes: Mapping[str, str] | None = None,
+    formal: bool = False,
 ) -> FittedPerceptionErrorProfile:
-    """exact calibration residual 集合から既存 consumer-compatible profile を fit する。"""
+    """exact calibration residual 集合から既存 consumer-compatible profile を fit する。
+
+    formal=True の場合は必須 field 集合と最低サンプル数／セッション数を厳格に検証します。
+    疎な synthetic fit が必要なら formal=False（既定）で呼び出してください。
+    """
     if not residuals:
         raise EmptyResidualError("at least one calibration residual is required")
     if not all(isinstance(residual, CalibrationResidual) for residual in residuals):
@@ -294,6 +307,26 @@ def fit_error_profile(
         raise EmptyResidualError(
             f"residual fields are underpowered (minimum 2 samples): {underpowered}"
         )
+
+    if formal:
+        missing_required = _FORMAL_REQUIRED_RESIDUAL_FIELDS - set(by_field)
+        if missing_required:
+            raise EmptyResidualError(
+                f"formal fit missing required residual fields: {sorted(missing_required)}"
+            )
+        for fname in sorted(_FORMAL_REQUIRED_RESIDUAL_FIELDS):
+            rows = by_field[fname]
+            if len(rows) < _FORMAL_RESIDUAL_MIN_SAMPLES:
+                raise EmptyResidualError(
+                    f"formal fit: field {fname!r} underpowered "
+                    f"({len(rows)} samples < {_FORMAL_RESIDUAL_MIN_SAMPLES} required)"
+                )
+            sessions = {r.session_id for r in rows}
+            if len(sessions) < _FORMAL_RESIDUAL_MIN_SESSIONS:
+                raise EmptyResidualError(
+                    f"formal fit: field {fname!r} from too few sessions "
+                    f"({len(sessions)} < {_FORMAL_RESIDUAL_MIN_SESSIONS} required)"
+                )
 
     def weighted_rows(name: str) -> tuple[list[float], list[float]]:
         rows = by_field.get(name, [])
@@ -440,17 +473,19 @@ class FinalLineageSeal:
             raise FinalSessionAlreadyOpenedError(f"final session {session_id!r} already opened")
         if self._store is not None:
             marker = canonical_json_bytes(
-                {"schema_version": "perception_final_open.v1", "seal_id": self.seal_id,
-                 "session_id": session_id, "session_hash": expected_hash}
+                {"schema_version": "perception_final_open.v1",
+                 "session_id": session_id, "content_hash": expected_hash}
             )
+            # final session の予約は seal に依存しない global create-once marker にする。
+            # threshold 等で seal が変わっても、同じ実測 session の再利用を拒否できる。
             try:
                 self._store.put_bytes_create_once(
-                    logical_id=f"perception/lineage/{self.seal_id}/opened/{session_id}.json",
+                    logical_id=f"perception/lineage/opened/{session_id}.json",
                     data=marker, media_type="application/json",
                 )
-            except Exception as exc:
+            except ArtifactStoreError as exc:
                 raise FinalSessionAlreadyOpenedError(
-                    f"final session {session_id!r} already opened or marker publish failed"
+                    f"final session {session_id!r} already opened"
                 ) from exc
         self.opened_session_ids.append(session_id)
 
@@ -683,27 +718,30 @@ def _write_formal_final_verdict(
 
 
 def load_final_verdict(
-    data: dict[str, Any], *, current_parser_hash: str, current_detector_hash: str,
-    current_assembler_hash: str, current_config_hash: str,
-    current_ui_schema_hash: str,
+    data: dict[str, Any], *,
+    current_subject_hashes: Mapping[str, str],
 ) -> PerceptionFinalVerdict:
-    """exact schema/hash を検証し、保存済み metric から gate を必ず再計算する。"""
+    """exact schema/hash を検証し、保存済み metric から gate を必ず再計算する。
+
+    current_subject_hashes は _HASH_FIELDS の全 13 フィールドを含む必要があります。
+    5 フィールドのみを検証する旧インターフェースを廃止し、完全な subject mapping の一致を要求します。
+    """
     if not isinstance(data, dict) or set(data) != _FINAL_VERDICT_REQUIRED_FIELDS:
         raise ValueError("final verdict fields must exactly match the v2 schema")
     if data["schema_version"] != FINAL_VERDICT_SCHEMA_VERSION:
         raise ValueError("unsupported final verdict schema_version")
     for name in ("verdict_id", "seal_id", *_HASH_FIELDS):
         _require_sha256(data[name], name)
-    current = {
-        "parser_artifact_hash": current_parser_hash,
-        "detector_artifact_hash": current_detector_hash,
-        "assembler_schema_hash": current_assembler_hash,
-        "config_hash": current_config_hash,
-        "ui_presentation_schema_hash": current_ui_schema_hash,
-    }
-    for name, value in current.items():
+    if set(current_subject_hashes) != set(_HASH_FIELDS):
+        missing = sorted(set(_HASH_FIELDS) - set(current_subject_hashes))
+        extra = sorted(set(current_subject_hashes) - set(_HASH_FIELDS))
+        raise ValueError(
+            f"current_subject_hashes must exactly cover all _HASH_FIELDS "
+            f"(missing: {missing}, extra: {extra})"
+        )
+    for name, value in current_subject_hashes.items():
         _require_sha256(value, f"current {name}")
-    stale = [name for name, value in current.items() if data[name] != value]
+    stale = [name for name in _HASH_FIELDS if data[name] != current_subject_hashes[name]]
     if stale:
         raise StaleVerdictError(f"final perception verdict is stale: {stale}")
     if any(type(data[name]) is not bool for name in ("passed", "development_only", "formal_perception_verdict_eligible")):

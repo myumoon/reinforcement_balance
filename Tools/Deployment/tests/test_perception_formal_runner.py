@@ -16,6 +16,7 @@ from survivors.capture.captured_frame import CapturedFrame
 from survivors.capture_dataset import DatasetWriter, SplitFreezer
 from survivors.perception_benchmark import SnapshotReplayTick
 from survivors.perception_error_fit import CalibrationResidual
+from survivors.perception_snapshot import FormalReplayEvidence
 from survivors.real_obs_assembler import RealObsAssembler
 from survivors.vision.entity_tracker import (
     PlayerAnchorState,
@@ -137,38 +138,67 @@ def _hud_world(session_id: str, frame_index: int, timestamp_ns: int, screen_stat
     return hud, world
 
 
+_CALIBRATION_REQUIRED_FIELDS = frozenset({
+    "coord_noise", "hp_ratio",
+    "burst_enter", "burst_exit", "burst_dropout",
+    "item_category", "enemy_category",
+})
+_CALIBRATION_SAMPLES_PER_FIELD_PER_SESSION = 3  # formal 要件（3 samples × ≥2 sessions）を満たす最小値
+
+
 def _calibration_provider(manifests, _restored):
-    return [
-        CalibrationResidual(
-            manifest.session_id, f"f{index}", "hp_ratio", residual,
-            1.0, 0, 1.0,
-        )
-        for manifest in manifests
-        for index, residual in enumerate((-0.01, 0.01))
-    ]
+    """formal=True で fit_error_profile が必須 field をすべて受理できる残差を返す。
 
-
-def _replay_provider(manifests, _restored):
-    schema = DeployObsSchema.default_v1()
-    ticks = []
+    各 field で 3 サンプル × manifests（cal sessions）分の残差を生成します。
+    item_category / enemy_category は confusion matrix 用に category を設定します。
+    """
+    rows = []
     for manifest in manifests:
-        assembler = RealObsAssembler()
-        for frame_index, (timestamp, state) in enumerate((
-            (1_000_000_000, "gameplay"),
-            (1_801_000_000_000, "level_up_items"),
-        )):
-            snapshot = assembler.assemble(
-                *_hud_world(manifest.session_id, frame_index, timestamp, state),
-                schema, (1920, 1080),
-            )
-            assert snapshot is not None
-            # detector_artifact_hash は PerceptionSnapshot 側（SnapshotReplayTick ではない）へ設定する。
-            snapshot = replace(snapshot, detector_artifact_hash="2" * 64)
-            ticks.append(SnapshotReplayTick(
-                manifest.session_id, "final_e2e_test", "lossless",
-                snapshot.frame_id, snapshot, snapshot, 1.0,
-            ))
-    return ticks
+        sid = manifest.session_id
+        for field in _CALIBRATION_REQUIRED_FIELDS:
+            for frame_idx in range(_CALIBRATION_SAMPLES_PER_FIELD_PER_SESSION):
+                gt_cat = (frame_idx % 3) if "category" in field else None
+                pred_cat = (frame_idx % 3) if "category" in field else None
+                rows.append(CalibrationResidual(
+                    sid, f"{field}-{frame_idx}", field, 0.01,
+                    1.0, 0, 0.0, gt_cat, pred_cat,
+                ))
+    return rows
+
+
+_TIMESTAMPS = [1_000_000_000, 1_801_000_000_000]
+_STATES = ["gameplay", "level_up_items"]
+
+
+class _MockAssembler:
+    """テスト用の FormalAssembler：CapturedFrame の session_frame_index を使って合成観測を生成する。
+
+    セッション間でタイムスタンプが逆転するため、セッションごとに独立した RealObsAssembler を保持する。
+    FormalReplayEvidence として raw_card_ids / raw_inventory を HUD から抽出して返します。
+    """
+
+    def __init__(self) -> None:
+        self._assemblers: dict[str, RealObsAssembler] = {}
+        self._schema = DeployObsSchema.default_v1()
+
+    def assemble_frame(self, frame, session_id: str, frame_index: int):
+        if frame_index >= len(_TIMESTAMPS):
+            return None, 0.0, None
+        if session_id not in self._assemblers:
+            self._assemblers[session_id] = RealObsAssembler()
+        hud, world = _hud_world(session_id, frame_index, _TIMESTAMPS[frame_index], _STATES[frame_index])
+        snapshot = self._assemblers[session_id].assemble(hud, world, self._schema, (1920, 1080))
+        assert snapshot is not None
+        evidence = FormalReplayEvidence(
+            raw_card_ids=tuple(c.item_id for c in sorted(hud.cards, key=lambda c: c.slot_index)),
+            raw_inventory=hud.inventory,
+        )
+        return snapshot, 1.0, evidence
+
+
+def _assembler_factory(_restored):
+    """テスト用の FormalAssemblerFactory：runner に渡す mock assembler を返す。"""
+    return _MockAssembler()
 
 
 def _request(tmp_path: Path):
@@ -179,7 +209,7 @@ def _request(tmp_path: Path):
         dependency_refs=_dependency_refs(store, split),
         capture_store_root=capture_root,
         calibration_provider=_calibration_provider,
-        final_replay_provider=_replay_provider,
+        formal_assembler_factory=_assembler_factory,
     )
     return request
 
@@ -187,10 +217,12 @@ def _request(tmp_path: Path):
 def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path) -> None:
     result = run_formal_pipeline(_request(tmp_path))
 
-    assert result.profile.field_sample_counts == {"hp_ratio": 6}
+    # 3 cal sessions × 3 samples/session × 7 required fields
+    expected_counts = {field: 9 for field in _CALIBRATION_REQUIRED_FIELDS}
+    assert result.profile.field_sample_counts == expected_counts
     assert result.verdict.development_only is False
     assert result.verdict.formal_perception_verdict_eligible is True
-    assert result.verdict.passed is True
+    assert result.verdict.passed is True, result.verdict.blocking_reasons
     assert result.calibration_ref.sha256 == result.descriptors[1].files[0].sha256
     assert result.verdict_ref.sha256 == result.descriptors[2].files[0].sha256
     assert result.descriptors[1].node_kind == "perception_calibration_profile"
@@ -215,8 +247,7 @@ def test_typed_replay_recomputes_ui_hashes_and_rejects_tamper(tmp_path: Path) ->
         DatasetWriter.restore(request.capture_store_root, f"final-{index}")
         for index in range(3)
     )
-    ticks = list(_replay_provider(manifests, {}))
-    from dataclasses import replace
+    ticks, evidence = _run_assembler_for_test(manifests)
     from survivors.perception_benchmark import ExpectedTick, run_benchmark
 
     target = ticks[1].predicted.ui_presentation
@@ -228,25 +259,44 @@ def test_typed_replay_recomputes_ui_hashes_and_rejects_tamper(tmp_path: Path) ->
         run_benchmark(ticks, expected_ticks=expected)
 
 
-def test_formal_runner_rejects_precomputed_benchmark_records(tmp_path: Path) -> None:
-    """formal runner が SnapshotReplayTick 以外を返す provider を拒否する。
+def _run_assembler_for_test(
+    manifests: "Sequence[Any]", detector_hash: str = "2" * 64
+) -> "tuple[list[SnapshotReplayTick], dict[str, FormalReplayEvidence]]":
+    """unit test 用：mock assembler を使って SnapshotReplayTick リストと evidence を生成する。
 
-    run_formal_pipeline は typed snapshot のみを受理し、事前計算値では formal verdict を
-    生成できない構造である必要があります。
+    run_formal_pipeline が内部で行うのと同等の tick 生成を再現します。
     """
-    import dataclasses
+    assembler = _MockAssembler()
+    ticks = []
+    evidence: dict[str, FormalReplayEvidence] = {}
+    for manifest in manifests:
+        for frame in manifest.frames:
+            snapshot, latency, ev = assembler.assemble_frame(
+                frame, manifest.session_id, frame.session_frame_index
+            )
+            if snapshot is None:
+                continue
+            snapshot = replace(snapshot, detector_artifact_hash=detector_hash)
+            if ev is not None:
+                evidence[snapshot.frame_id] = ev
+            ticks.append(SnapshotReplayTick(
+                manifest.session_id, "final_e2e_test", "lossless",
+                snapshot.frame_id, snapshot, snapshot, latency,
+            ))
+    return ticks, evidence
 
+
+def test_formal_runner_assembler_cannot_override_detector_hash(tmp_path: Path) -> None:
+    """assembler が任意 detector hash を設定しても runner が restored package hash で上書きする。
+
+    verdict の detector_artifact_hash は ArtifactStore 内の detector package ファイル自体の
+    SHA-256（_subject_hashes 経由）であり、assembler の自己申告とは無関係です。
+    """
     request = _request(tmp_path)
-
-    class _FakeTick:
-        """SnapshotReplayTick でない偽オブジェクト（事前計算値の代わり）。"""
-
-    def _bad_provider(manifests, restored):
-        return [_FakeTick()]
-
-    bad_request = dataclasses.replace(request, final_replay_provider=_bad_provider)
-    with pytest.raises(TypeError, match="SnapshotReplayTick"):
-        run_formal_pipeline(bad_request)
+    result = run_formal_pipeline(request)
+    # verdict.detector_artifact_hash = ArtifactStore 内 detector_package JSON の sha256
+    expected = request.dependency_refs["detector_package"].sha256
+    assert result.verdict.detector_artifact_hash == expected
 
 
 def test_candidate_set_hash_tamper_caught_by_raw_card_ids(tmp_path: Path) -> None:
@@ -260,19 +310,19 @@ def test_candidate_set_hash_tamper_caught_by_raw_card_ids(tmp_path: Path) -> Non
         DatasetWriter.restore(request.capture_store_root, f"final-{index}")
         for index in range(3)
     )
-    ticks = list(_replay_provider(manifests, {}))
+    ticks, evidence = _run_assembler_for_test(manifests)
     from dataclasses import replace
     from survivors.perception_benchmark import ExpectedTick, run_benchmark
 
     target = ticks[0].ground_truth.ui_presentation
-    # raw_card_ids は実値のまま、candidate_set_hash だけ偽値に差し替える。
-    # raw_card_ids チェックが先に発火して coherent 偽値でも検出する。
+    # evidence（raw_card_ids）は実値のまま、candidate_set_hash だけ偽値に差し替える。
+    # formal_evidence を渡すと evidence check が先に発火して coherent 偽値でも検出する。
     bad_ui = replace(target, candidate_set_hash="f" * 64)
     bad_snapshot = replace(ticks[0].ground_truth, ui_presentation=bad_ui)
     ticks[0] = replace(ticks[0], ground_truth=bad_snapshot)
     expected = [ExpectedTick(tick.session_id, tick.frame_id) for tick in ticks]
-    with pytest.raises(ValueError, match="candidate_set_hash does not match typed card IDs"):
-        run_benchmark(ticks, expected_ticks=expected)
+    with pytest.raises(ValueError, match="candidate_set_hash does not match formal evidence card IDs"):
+        run_benchmark(ticks, expected_ticks=expected, formal_evidence=evidence)
 
 
 def test_inventory_hash_tamper_caught_by_raw_inventory(tmp_path: Path) -> None:
@@ -282,7 +332,7 @@ def test_inventory_hash_tamper_caught_by_raw_inventory(tmp_path: Path) -> None:
         DatasetWriter.restore(request.capture_store_root, f"final-{index}")
         for index in range(3)
     )
-    ticks = list(_replay_provider(manifests, {}))
+    ticks, evidence = _run_assembler_for_test(manifests)
     from survivors.perception_benchmark import ExpectedTick, run_benchmark
 
     target = ticks[0].ground_truth.ui_presentation
@@ -290,33 +340,38 @@ def test_inventory_hash_tamper_caught_by_raw_inventory(tmp_path: Path) -> None:
     bad_snapshot = replace(ticks[0].ground_truth, ui_presentation=bad_ui)
     ticks[0] = replace(ticks[0], ground_truth=bad_snapshot)
     expected = [ExpectedTick(tick.session_id, tick.frame_id) for tick in ticks]
-    with pytest.raises(ValueError, match="inventory_hash does not match typed inventory"):
-        run_benchmark(ticks, expected_ticks=expected)
+    with pytest.raises(ValueError, match="inventory_hash does not match formal evidence inventory"):
+        run_benchmark(ticks, expected_ticks=expected, formal_evidence=evidence)
 
 
-def test_detector_artifact_hash_mismatch_rejected_by_formal_runner(tmp_path: Path) -> None:
-    """formal runner が誤 detector_artifact_hash のスナップショットを拒否する。
+def test_runner_pins_detector_artifact_hash_from_restored_package(tmp_path: Path) -> None:
+    """runner は assembler output に依らず detector_artifact_hash を restored package から固定する。
 
-    SnapshotReplayTick ではなく PerceptionSnapshot 内の detector_artifact_hash を
-    検証するため、provider が後から hash を書き換えても検出できます。
+    外部 provider（assembler）が任意の detector hash を返しても、runner が
+    restored package の宣言 hash で上書きするため、verdict には常に
+    宣言済み detector の hash が記録されます。
     """
     import dataclasses
 
+    detector_decl_hash = "2" * 64  # _dependency_refs の detector_package artifact_hash と一致
+
+    class _MaliciousAssembler:
+        """悪意ある assembler：detector_artifact_hash を "b" * 64 に偽装しようとする。"""
+
+        def __init__(self) -> None:
+            self._inner = _MockAssembler()
+
+        def assemble_frame(self, frame, session_id: str, frame_index: int):
+            snapshot, latency, evidence = self._inner.assemble_frame(frame, session_id, frame_index)
+            if snapshot is not None:
+                snapshot = replace(snapshot, detector_artifact_hash="b" * 64)
+            return snapshot, latency, evidence
+
     request = _request(tmp_path)
-    manifests = tuple(
-        DatasetWriter.restore(request.capture_store_root, f"final-{index}")
-        for index in range(3)
-    )
-
-    def _bad_detector_provider(final_manifests, restored):
-        for tick in _replay_provider(final_manifests, restored):
-            # detector_artifact_hash を誤値に差し替えた snapshot へ置き換える。
-            bad_snapshot = replace(tick.ground_truth, detector_artifact_hash="f" * 64)
-            yield replace(tick, ground_truth=bad_snapshot, predicted=bad_snapshot)
-
-    bad_request = dataclasses.replace(request, final_replay_provider=_bad_detector_provider)
-    with pytest.raises(ValueError, match="detector_artifact_hash"):
-        run_formal_pipeline(bad_request)
+    bad_request = dataclasses.replace(request, formal_assembler_factory=lambda _: _MaliciousAssembler())
+    result = run_formal_pipeline(bad_request)
+    # verdict.detector_artifact_hash は ArtifactStore 内 package の sha256（assembler 出力ではない）
+    assert result.verdict.detector_artifact_hash == request.dependency_refs["detector_package"].sha256
 
 
 def test_canonical_logical_ids_not_set_when_batch_commit_fails(tmp_path: Path) -> None:
