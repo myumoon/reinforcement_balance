@@ -63,6 +63,15 @@ THRESHOLD_CONFIDENCE: Final[float] = 0.99
 THRESHOLD_CROSS_FRAME_EQUIVALENCE: Final[float] = 0.999
 FORMAL_MIN_SCREEN_STATE_COUNT: Final[int] = 2    # 最低 2 種類の screen_state が必要
 FORMAL_MIN_SCREEN_STATE_RECORDS: Final[int] = 3   # 各 screen_state に最低 3 件必要
+FORMAL_MIN_NAMED_SLICE_RECORDS: Final[int] = 3
+_NAMED_SLICE_MIN_CATEGORIES: Final[Mapping[str, int]] = {
+    "screen_state": 2, "time_band": 2, "foreground_class": 2, "event": 3,
+}
+_REQUIRED_NAMED_SLICES: Final[frozenset[str]] = frozenset({
+    "time_band:early", "time_band:late",
+    "foreground_class:enemy_boss", "foreground_class:hazard",
+    "event:boss", "event:hazard", "event:level_up",
+})
 
 
 def _strict_float(value: object, label: str) -> float:
@@ -306,7 +315,7 @@ def _is_valid_ground_target(target: UiCandidateTargetV1 | UiButtonTargetV1) -> b
     validity=False または面積ゼロ ROI（縮退点）は正解の基準に使えないため除外します。
     """
     roi = target.roi
-    return target.validity and (roi.right > roi.left or roi.bottom > roi.top)
+    return target.validity and roi.right > roi.left and roi.bottom > roi.top
 
 
 def _is_usable_pred_target(target: UiCandidateTargetV1 | UiButtonTargetV1) -> bool:
@@ -315,11 +324,39 @@ def _is_usable_pred_target(target: UiCandidateTargetV1 | UiButtonTargetV1) -> bo
     validity=False、面積ゼロ ROI、button の capability=False は欠損・FP として扱います。
     """
     roi = target.roi
-    if not target.validity or (roi.right <= roi.left and roi.bottom <= roi.top):
+    if not target.validity or roi.right <= roi.left or roi.bottom <= roi.top:
         return False
     if isinstance(target, UiButtonTargetV1):
         return target.capability
     return True
+
+
+def _named_slice_labels(snapshot: PerceptionSnapshot) -> frozenset[str]:
+    """ground-truth snapshot から formal gate 用の named slice label を派生する。"""
+    labels = {f"screen_state:{snapshot.screen_state}"}
+    context = snapshot.item_context
+    if context is not None:
+        if context.elapsed_time < 600.0:
+            labels.add("time_band:early")
+        elif context.elapsed_time < 1200.0:
+            labels.add("time_band:mid")
+        else:
+            labels.add("time_band:late")
+        if context.boss_flag:
+            labels.update(("foreground_class:enemy_boss", "event:boss"))
+        if context.hazard_flag:
+            labels.update(("foreground_class:hazard", "event:hazard"))
+        if not context.boss_flag and not context.hazard_flag and context.enemy_density > 0:
+            labels.add("foreground_class:enemy_normal")
+    # UI state 由来 event は closed vocabulary の代表イベントへ正規化する。
+    # boss/hazard は world context、level-up/chest/death は screen state から独立集計する。
+    if snapshot.screen_state.startswith("level_up"):
+        labels.add("event:level_up")
+    elif snapshot.screen_state == "chest":
+        labels.add("event:chest")
+    elif snapshot.screen_state == "death":
+        labels.add("event:death")
+    return frozenset(labels)
 
 
 def _recomputed_snapshot_hashes(snapshot: PerceptionSnapshot) -> tuple[str, str, str]:
@@ -617,25 +654,34 @@ def _metric_gate(metrics: dict[str, Any]) -> list[str]:
             blocking.append("screen_state cluster CI lower bound outside formal threshold")
     if metrics["roi_false_positive_count"] > 0:
         blocking.append("invalid/ambiguous ROI false-positive count is non-zero")
-    # per-screen-state slice gate: 最低 FORMAL_MIN_SCREEN_STATE_COUNT 種類の状態が
-    # それぞれ FORMAL_MIN_SCREEN_STATE_RECORDS 件以上必要
-    # ponytail: 各状態の session-cluster CI は追加せず、まず件数だけ検証
-    state_record_counts = {
-        k.removeprefix("screen_state:"): v
-        for k, v in counts.items()
-        if k.startswith("screen_state:")
-    }
-    unique_states = len(state_record_counts)
-    if unique_states < FORMAL_MIN_SCREEN_STATE_COUNT:
-        blocking.append(
-            f"only {unique_states} screen state(s) observed; "
-            f"at least {FORMAL_MIN_SCREEN_STATE_COUNT} required"
-        )
-    for state, count in sorted(state_record_counts.items()):
-        if count < FORMAL_MIN_SCREEN_STATE_RECORDS:
+    # 宣言済み rare slice は欠落も最低件数未満も blocking にする。
+    # 観測済みの動的 category も同じ最低件数を課し、希少例の素通しを防ぐ。
+    for name in sorted(_REQUIRED_NAMED_SLICES):
+        count = counts.get(name, 0)
+        if count == 0:
+            blocking.append(f"required named slice '{name}' has 0 records (blocking)")
+        elif count < FORMAL_MIN_NAMED_SLICE_RECORDS:
             blocking.append(
-                f"screen_state '{state}': {count} records < {FORMAL_MIN_SCREEN_STATE_RECORDS} required"
+                f"named slice '{name}': {count} records < "
+                f"{FORMAL_MIN_NAMED_SLICE_RECORDS} required"
             )
+    for prefix, minimum_categories in _NAMED_SLICE_MIN_CATEGORIES.items():
+        category_counts = {
+            key.removeprefix(f"{prefix}:"): value
+            for key, value in counts.items()
+            if key.startswith(f"{prefix}:")
+        }
+        if len(category_counts) < minimum_categories:
+            blocking.append(
+                f"only {len(category_counts)} {prefix} category(s) observed; "
+                f"at least {minimum_categories} required"
+            )
+        for category, count in sorted(category_counts.items()):
+            if count < FORMAL_MIN_NAMED_SLICE_RECORDS:
+                blocking.append(
+                    f"{prefix} '{category}': {count} records < "
+                    f"{FORMAL_MIN_NAMED_SLICE_RECORDS} required"
+                )
     return blocking
 
 
@@ -649,12 +695,15 @@ def recompute_gate_from_metrics(metrics: dict[str, Any]) -> tuple[bool, list[str
     # bool/NaN/Inf を再ロード境界でも拒否する。nested count/slice は個別検証する。
     if not isinstance(metrics["slice_counts"], dict):
         raise ValueError("slice_counts must be a dict")
-    # 固定 field count に加えて、値別 screen_state count の動的キーを受理する。
-    # 空の状態名や型不正は拒否し、保存済み verdict の再計算境界を狭く保つ。
+    # 固定 field count に加えて、許可済み prefix の named slice key を受理する。
+    # 空 category や型不正は拒否し、保存済み verdict の再計算境界を狭く保つ。
     if not all(
         (
             key in _FIELD_KINDS
-            or (key.startswith("screen_state:") and bool(key.removeprefix("screen_state:")))
+            or any(
+                key.startswith(f"{prefix}:") and bool(key.removeprefix(f"{prefix}:"))
+                for prefix in _NAMED_SLICE_MIN_CATEGORIES
+            )
         )
         and type(value) is int
         and value >= 0
@@ -713,7 +762,14 @@ def _run_benchmark_common(
     if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not math.isfinite(float(alpha)) or not 0.0 < float(alpha) < 1.0:
         raise ValueError("alpha must be finite and in (0, 1)")
     raw_values = list(values)
+    named_slice_counts: dict[str, int] = defaultdict(int)
     if raw_values and all(isinstance(value, SnapshotReplayTick) for value in raw_values):
+        # V1 snapshot を変更せず、ground-truth tick から汎用 named slice label を派生する。
+        # 同じ tick 内の複数 metric record ではなく slice ごとに一度だけ数える。
+        for tick in raw_values:
+            assert isinstance(tick, SnapshotReplayTick)
+            for label in _named_slice_labels(tick.ground_truth):
+                named_slice_counts[label] += 1
         records = replay_snapshots(raw_values, formal_evidence=formal_evidence)  # type: ignore[arg-type]
     elif all(isinstance(value, BenchmarkRecord) for value in raw_values):
         records = list(raw_values)  # type: ignore[assignment]
@@ -804,6 +860,8 @@ def _run_benchmark_common(
     for record in by_field.get("screen_state", []):
         key = f"screen_state:{record.ground_truth}"
         slice_counts[key] = slice_counts.get(key, 0) + 1
+    for key, count in named_slice_counts.items():
+        slice_counts[key] = count
     session_screen: dict[str, list[float]] = defaultdict(list)
     for record in ss:
         session_screen[record.session_id].append(float(record.ground_truth == record.predicted))

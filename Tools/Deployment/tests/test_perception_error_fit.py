@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from Tools.Artifacts.artifact_store import ArtifactStore
-from survivors.perception_benchmark import BenchmarkRecord, run_benchmark
+from survivors.perception_benchmark import BenchmarkRecord, recompute_gate_from_metrics, run_benchmark
 from survivors.perception_error_fit import (
     FINAL_VERDICT_SCHEMA_VERSION,
     CalibrationResidual,
@@ -88,6 +88,16 @@ def _full_report():
             "screen_state", "level_up_items", "level_up_items", 1.0, 1.0,
         ))
     report = run_benchmark(rows, n_bootstrap=20)
+    # BenchmarkRecord-only fixture には V1 snapshot context がないため named slice を明示する。
+    # 必須名・category 数・最低 3 件をすべて満たし、verdict loader の再計算も維持する。
+    report.slice_counts.update({
+        "time_band:early": 3, "time_band:late": 3,
+        "foreground_class:enemy_boss": 3, "foreground_class:hazard": 3,
+        "event:boss": 3, "event:hazard": 3, "event:level_up": 3,
+    })
+    report.passed, report.blocking_reasons = recompute_gate_from_metrics(
+        report.metrics_wire()
+    )
     assert report.passed
     return report
 

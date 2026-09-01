@@ -456,6 +456,20 @@ class TestRoiValidityFilter:
         cand = UiCandidateTargetV1("x", 0, "item_card", self._ZERO_ROI, True, 0.9)
         assert not _is_valid_ground_target(cand)
 
+    def test_zero_width_roi_not_valid_for_ground_or_pred(self) -> None:
+        """幅ゼロ・高さ正の線状 ROI は ground/pred の両方で無効。"""
+        roi = NormalizedRoi(0.2, 0.1, 0.2, 0.5)
+        cand = UiCandidateTargetV1("x", 0, "item_card", roi, True, 0.9)
+        assert not _is_valid_ground_target(cand)
+        assert not _is_usable_pred_target(cand)
+
+    def test_zero_height_roi_not_valid_for_ground_or_pred(self) -> None:
+        """幅正・高さゼロの線状 ROI は ground/pred の両方で無効。"""
+        roi = NormalizedRoi(0.1, 0.2, 0.5, 0.2)
+        cand = UiCandidateTargetV1("x", 0, "item_card", roi, True, 0.9)
+        assert not _is_valid_ground_target(cand)
+        assert not _is_usable_pred_target(cand)
+
     def test_valid_candidate_is_valid_ground(self) -> None:
         """validity=True かつ非ゼロ ROI の candidate は ground target として有効。"""
         cand = UiCandidateTargetV1("x", 0, "item_card", self._VALID_ROI, True, 0.9)

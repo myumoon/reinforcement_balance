@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -14,8 +15,8 @@ from benchmark_survivors_perception import FormalBenchmarkRequest, run_formal_pi
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from survivors.capture.captured_frame import CapturedFrame
 from survivors.capture_dataset import DatasetWriter, SplitFreezer
-from survivors.perception_benchmark import SnapshotReplayTick
-from survivors.perception_error_fit import CalibrationResidual
+from survivors.perception_benchmark import SnapshotReplayTick, recompute_gate_from_metrics
+from survivors.perception_error_fit import CalibrationResidual, FinalSessionAlreadyOpenedError
 from survivors.perception_snapshot import FormalReplayEvidence
 from survivors.real_obs_assembler import RealObsAssembler
 from survivors.vision.entity_tracker import (
@@ -57,8 +58,8 @@ def _capture_fixture(tmp_path: Path) -> tuple[Path, object]:
     final_ids = [f"final-{index}" for index in range(3)]
     for session_index, session_id in enumerate((*calibration_ids, *final_ids)):
         with DatasetWriter(capture_root, session_id, PROFILE_HASH, "synthetic-build") as writer:
-            writer.write_frame(_captured_frame(session_index, 0, 1_000_000_000))
-            writer.write_frame(_captured_frame(session_index, 1, 1_801_000_000_000))
+            for frame_index, timestamp_ns in enumerate(_TIMESTAMPS):
+                writer.write_frame(_captured_frame(session_index, frame_index, timestamp_ns))
             published = writer.publish(operator_checkpoint="synthetic-formal-fixture")
         # fixture は実 formal session を開封せず、manifest gate だけを synthetic に再現する。
         manifest_path = published.session_path / "session_manifest.json"
@@ -115,25 +116,33 @@ def _dependency_refs(store: ArtifactStore, split) -> dict[str, object]:
     return refs
 
 
-def _hud_world(session_id: str, frame_index: int, timestamp_ns: int, screen_state: str):
+def _hud_world(
+    session_id: str, frame_index: int, timestamp_ns: int, screen_state: str,
+    parser_artifact_hash: str = "9" * 64,
+):
     card = ParsedCard(0, "whip", "weapon", 2, 1.0, "fixture", (100, 100, 400, 500))
     inventory = ("whip",) + (None,) * 11
     # canonical hash を実際の計算関数で生成し、_recomputed_snapshot_hashes の照合に通す。
     real_inventory_hash = _compute_inventory_hash(inventory)
     real_candidate_set_hash = _compute_candidate_set_hash(screen_state, (card,))
+    elapsed_time = 20.0 if frame_index < 2 else 1300.0
     hud = HudStateV1(
-        "hud_state.v1", session_id, frame_index, timestamp_ns, "9" * 64,
-        screen_state, 1.0, "fixture", 20.0, 1.0, "fixture", False,
+        "hud_state.v1", session_id, frame_index, timestamp_ns, parser_artifact_hash,
+        screen_state, 1.0, "fixture", elapsed_time, 1.0, "fixture", False,
         0.75, 1.0, "fixture", 0.5, 1.0, "fixture", 4, 1.0, "fixture",
         inventory, 1.0, real_inventory_hash, (card,), real_candidate_set_hash,
         (), False, False, False, 1.0, "fixture",
     )
-    entity = TrackedEntityV1(
-        1, 2, "enemy_normal", "enemy", 1.0, 1, frame_index,
+    boss = TrackedEntityV1(
+        1, 2, "enemy_boss", "enemy", 1.0, 1, frame_index,
         0.7, 0.5, 0.2, 0.0, 0.0, 0.0, True, False,
     )
+    hazard = TrackedEntityV1(
+        2, 3, "hazard_area", "hazard", 1.0, 1, frame_index,
+        0.6, 0.5, 0.1, 0.0, 0.0, 0.0, True, False,
+    )
     world = TrackedWorldStateV1(
-        frame_index, timestamp_ns, [entity], PlayerAnchorState(0.5, 0.5, 1.0, False)
+        frame_index, timestamp_ns, [boss, hazard], PlayerAnchorState(0.5, 0.5, 1.0, False)
     )
     return hud, world
 
@@ -166,8 +175,11 @@ def _calibration_provider(manifests, _restored):
     return rows
 
 
-_TIMESTAMPS = [1_000_000_000, 1_801_000_000_000]
-_STATES = ["gameplay", "level_up_items"]
+_TIMESTAMPS = [
+    1_000_000_000, 2_000_000_000,
+    1_800_000_000_000, 1_801_000_000_000,
+]
+_STATES = ["gameplay", "level_up_items", "gameplay", "level_up_fallback"]
 
 
 class _MockAssembler:
@@ -177,16 +189,20 @@ class _MockAssembler:
     FormalReplayEvidence として raw_card_ids / raw_inventory を HUD から抽出して返します。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, parser_artifact_hash: str = "9" * 64) -> None:
         self._assemblers: dict[str, RealObsAssembler] = {}
         self._schema = DeployObsSchema.default_v1()
+        self._parser_artifact_hash = parser_artifact_hash
 
     def assemble_frame(self, frame, session_id: str, frame_index: int):
         if frame_index >= len(_TIMESTAMPS):
             return None, 0.0, None
         if session_id not in self._assemblers:
             self._assemblers[session_id] = RealObsAssembler()
-        hud, world = _hud_world(session_id, frame_index, _TIMESTAMPS[frame_index], _STATES[frame_index])
+        hud, world = _hud_world(
+            session_id, frame_index, _TIMESTAMPS[frame_index], _STATES[frame_index],
+            self._parser_artifact_hash,
+        )
         snapshot = self._assemblers[session_id].assemble(hud, world, self._schema, (1920, 1080))
         assert snapshot is not None
         evidence = FormalReplayEvidence(
@@ -196,9 +212,12 @@ class _MockAssembler:
         return snapshot, 1.0, evidence
 
 
-def _assembler_factory(_restored):
+def _assembler_factory(restored):
     """テスト用の FormalAssemblerFactory：runner に渡す mock assembler を返す。"""
-    return _MockAssembler()
+    # fixture も自己申告値でなく、restored package object の content hash を使用する。
+    # runner/verdict と同一 identity を snapshot の parser binding に設定する。
+    parser_content_hash = hashlib.sha256(restored["parser_package"]).hexdigest()
+    return _MockAssembler(parser_content_hash)
 
 
 def _request(tmp_path: Path):
@@ -227,6 +246,23 @@ def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path) ->
     assert result.verdict_ref.sha256 == result.descriptors[2].files[0].sha256
     assert result.descriptors[1].node_kind == "perception_calibration_profile"
     assert result.descriptors[2].node_kind == "perception_final_verdict"
+    assert result.verdict.metrics["slice_counts"]["time_band:early"] == 3
+    assert result.verdict.metrics["slice_counts"]["event:hazard"] == 6
+
+    # 必須 named slice の欠落と rare slice の最低件数未満を再計算 gate が拒否する。
+    # persisted metrics 改変でも同じ blocking 判定になることを確認する。
+    missing = dict(result.verdict.metrics)
+    missing["slice_counts"] = dict(missing["slice_counts"])
+    del missing["slice_counts"]["event:boss"]
+    passed, reasons = recompute_gate_from_metrics(missing)
+    assert passed is False
+    assert any("event:boss" in reason and "0 records" in reason for reason in reasons)
+    underpowered = dict(result.verdict.metrics)
+    underpowered["slice_counts"] = dict(underpowered["slice_counts"])
+    underpowered["slice_counts"]["event:boss"] = 1
+    passed, reasons = recompute_gate_from_metrics(underpowered)
+    assert passed is False
+    assert any("event:boss" in reason and "1 records" in reason for reason in reasons)
 
 
 def test_dependency_tamper_fails_before_any_runner_output(tmp_path: Path) -> None:
@@ -348,18 +384,16 @@ def test_runner_pins_detector_artifact_hash_from_restored_package(tmp_path: Path
     """runner は assembler output に依らず detector_artifact_hash を restored package から固定する。
 
     外部 provider（assembler）が任意の detector hash を返しても、runner が
-    restored package の宣言 hash で上書きするため、verdict には常に
-    宣言済み detector の hash が記録されます。
+    restored package の content hash で上書きするため、verdict には常に
+    ArtifactStore object と同一の detector hash が記録されます。
     """
     import dataclasses
-
-    detector_decl_hash = "2" * 64  # _dependency_refs の detector_package artifact_hash と一致
 
     class _MaliciousAssembler:
         """悪意ある assembler：detector_artifact_hash を "b" * 64 に偽装しようとする。"""
 
-        def __init__(self) -> None:
-            self._inner = _MockAssembler()
+        def __init__(self, parser_artifact_hash: str) -> None:
+            self._inner = _MockAssembler(parser_artifact_hash)
 
         def assemble_frame(self, frame, session_id: str, frame_index: int):
             snapshot, latency, evidence = self._inner.assemble_frame(frame, session_id, frame_index)
@@ -368,7 +402,12 @@ def test_runner_pins_detector_artifact_hash_from_restored_package(tmp_path: Path
             return snapshot, latency, evidence
 
     request = _request(tmp_path)
-    bad_request = dataclasses.replace(request, formal_assembler_factory=lambda _: _MaliciousAssembler())
+    bad_request = dataclasses.replace(
+        request,
+        formal_assembler_factory=lambda restored: _MaliciousAssembler(
+            hashlib.sha256(restored["parser_package"]).hexdigest()
+        ),
+    )
     result = run_formal_pipeline(bad_request)
     # verdict.detector_artifact_hash は ArtifactStore 内 package の sha256（assembler 出力ではない）
     assert result.verdict.detector_artifact_hash == request.dependency_refs["detector_package"].sha256
@@ -407,3 +446,27 @@ def test_canonical_logical_ids_not_set_when_batch_commit_fails(tmp_path: Path) -
     ver_index = request.store._logical_index_path(canonical_ver)
     assert not cal_index.exists(), "calibration canonical logical_id must not be set before batch commit"
     assert not ver_index.exists(), "verdict canonical logical_id must not be set before batch commit"
+
+
+def test_final_sessions_are_reserved_before_provider_and_remain_consumed(tmp_path: Path) -> None:
+    """final 集合を provider/publish 前に予約し、後続失敗でも消費済みにする。"""
+    import dataclasses
+
+    request = _request(tmp_path)
+
+    def _failing_provider(manifests, restored):
+        for index in range(3):
+            marker = request.store._logical_index_path(
+                f"perception/lineage/opened/final-{index}.json"
+            )
+            assert marker.exists()
+        assert not request.store._logical_index_path(request.verdict_logical_id).exists()
+        raise RuntimeError("provider failed after reservation")
+
+    failing_request = dataclasses.replace(
+        request, calibration_provider=_failing_provider
+    )
+    with pytest.raises(RuntimeError, match="provider failed after reservation"):
+        run_formal_pipeline(failing_request)
+    with pytest.raises(FinalSessionAlreadyOpenedError):
+        run_formal_pipeline(request)

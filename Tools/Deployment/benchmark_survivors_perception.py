@@ -38,6 +38,7 @@ from survivors.perception_error_fit import (
     PerceptionFinalVerdict,
     _create_formal_final_verdict,
     _create_formal_lineage_seal,
+    _reserve_final_session,
     _write_formal_calibration_profile,
     _write_formal_final_verdict,
     fit_error_profile,
@@ -282,7 +283,8 @@ def _descriptor_chain(
 
 def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResult:
     """formal runner の実経路。依存検証失敗時は ArtifactStore へ何も書かない。"""
-    # Phase A は read-only。ここで失敗しても seal/profile/verdict は一切 publish されない。
+    # dependency/session restore は read-only で完了させ、その後 final marker だけを先行予約する。
+    # 予約後の失敗では session は消費済みだが、seal/profile/verdict は publish されない。
     restored = _restore_dependencies(request)
     _, manifests, validated_split = _restore_split_and_sessions(
         request, restored["capture_dataset"]
@@ -298,6 +300,13 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         for session in validated_split.sessions
         if session.kind == "final_e2e_test"
     )
+    # restore 済み manifest の実ファイル hash を再検証してから final 集合を予約する。
+    # create-once 競合を provider/staging/canonical publish より先に確定させる。
+    for manifest in final_manifests:
+        _reserve_final_session(
+            request.store, manifest.session_id,
+            manifest.manifest_sha256, manifest.session_path / "session_manifest.json",
+        )
     residuals = list(request.calibration_provider(calibration_manifests, restored))
     calibration_hashes = {
         manifest.session_id: manifest.manifest_sha256
@@ -341,8 +350,10 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     # session_kind / source_policy（validated split から）。
     # assembler が制御するもの: frame の解釈のみ（観測値）。
     assembler = request.formal_assembler_factory(restored)
-    parser_decl_hash = json.loads(restored["parser_package"])["artifact_hash"]
-    detector_decl_hash = json.loads(restored["detector_package"])["artifact_hash"]
+    # 検証済み store object の content hash を snapshot identity に固定する。
+    # package JSON 内の自己申告 artifact_hash は formal identity の根拠にしない。
+    parser_content_hash = request.dependency_refs["parser_package"].sha256
+    detector_content_hash = request.dependency_refs["detector_package"].sha256
     final_session_records = {
         s.session_id: s for s in validated_split.sessions if s.kind == "final_e2e_test"
     }
@@ -360,16 +371,16 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
             if snapshot is None:
                 continue
             # runner が detector hash を設定（assembler は変更できない）
-            snapshot = replace(snapshot, detector_artifact_hash=detector_decl_hash)
+            snapshot = replace(snapshot, detector_artifact_hash=detector_content_hash)
             if evidence is None:
                 raise ValueError(
                     f"assembler returned no formal evidence: "
                     f"session={manifest.session_id} frame={frame.session_frame_index}"
                 )
-            if snapshot.ui_presentation.parser_artifact_hash != parser_decl_hash:
+            if snapshot.ui_presentation.parser_artifact_hash != parser_content_hash:
                 raise ValueError(
                     f"snapshot parser_artifact_hash ({snapshot.ui_presentation.parser_artifact_hash[:8]}…) "
-                    f"does not match parser_package ({parser_decl_hash[:8]}…)"
+                    f"does not match parser_package content ({parser_content_hash[:8]}…)"
                 )
             formal_evidence[snapshot.frame_id] = evidence
             replay_ticks.append(SnapshotReplayTick(
@@ -379,6 +390,13 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     report = _formalize_benchmark_report(
         run_benchmark(replay_ticks, expected_ticks=expected_ticks, formal_evidence=formal_evidence)
     )
+    # final session は既に消費済みだが、gate 不合格 verdict は ArtifactStore へ公開しない。
+    # staging/batch commit/canonical publish は gate 成功が確定した後だけ開始する。
+    if not report.passed:
+        raise ValueError(
+            "formal perception gate failed; verdict was not published: "
+            + "; ".join(report.blocking_reasons)
+        )
     verdict = _create_formal_final_verdict(
         report, seal_id=seal.seal_id,
         final_session_ids=[manifest.session_id for manifest in final_manifests],
@@ -436,10 +454,6 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     verdict_ref = _write_formal_final_verdict(
         verdict, store=request.store, logical_id=request.verdict_logical_id
     )
-    for manifest in final_manifests:
-        persisted_seal.open_session(
-            manifest.session_id, manifest.session_path / "session_manifest.json"
-        )
     return FormalBenchmarkResult(
         validated_split, profile, verdict, calibration_ref, verdict_ref, descriptors
     )

@@ -461,32 +461,11 @@ class FinalLineageSeal:
         expected_hash = self.final_session_hashes.get(session_id)
         if expected_hash is None:
             raise FinalSessionNotInSealError(f"session {session_id!r} is not sealed")
-        path = Path(session_manifest_path).resolve()
-        if not path.is_file():
-            raise HashMismatchError(f"missing final session manifest: {path}")
-        actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        if actual_hash != expected_hash:
-            raise HashMismatchError(
-                f"final session {session_id!r} hash mismatch: {actual_hash} != {expected_hash}"
-            )
         if session_id in self.opened_session_ids:
             raise FinalSessionAlreadyOpenedError(f"final session {session_id!r} already opened")
-        if self._store is not None:
-            marker = canonical_json_bytes(
-                {"schema_version": "perception_final_open.v1",
-                 "session_id": session_id, "content_hash": expected_hash}
-            )
-            # final session の予約は seal に依存しない global create-once marker にする。
-            # threshold 等で seal が変わっても、同じ実測 session の再利用を拒否できる。
-            try:
-                self._store.put_bytes_create_once(
-                    logical_id=f"perception/lineage/opened/{session_id}.json",
-                    data=marker, media_type="application/json",
-                )
-            except ArtifactStoreError as exc:
-                raise FinalSessionAlreadyOpenedError(
-                    f"final session {session_id!r} already opened"
-                ) from exc
+        _reserve_final_session(
+            self._store, session_id, expected_hash, session_manifest_path
+        )
         self.opened_session_ids.append(session_id)
 
     def to_wire(self) -> dict[str, Any]:
@@ -498,6 +477,36 @@ class FinalLineageSeal:
             **{name: getattr(self, name) for name in _SEAL_SUBJECT_HASH_FIELDS},
         }
 
+
+def _reserve_final_session(
+    store: Any, session_id: str, expected_hash: str, session_manifest_path: Path
+) -> None:
+    """manifest を再検証し、formal final session を global create-once 予約する。"""
+    path = Path(session_manifest_path).resolve()
+    if not path.is_file():
+        raise HashMismatchError(f"missing final session manifest: {path}")
+    actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual_hash != expected_hash:
+        raise HashMismatchError(
+            f"final session {session_id!r} hash mismatch: {actual_hash} != {expected_hash}"
+        )
+    if store is None:
+        return
+    marker = canonical_json_bytes(
+        {"schema_version": "perception_final_open.v1",
+         "session_id": session_id, "content_hash": expected_hash}
+    )
+    # session marker は seal identity に依存せず、失敗時にも消費済みとして残す。
+    # provider/publish より前の atomic create-once が競合 session の再利用を防ぐ。
+    try:
+        store.put_bytes_create_once(
+            logical_id=f"perception/lineage/opened/{session_id}.json",
+            data=marker, media_type="application/json",
+        )
+    except ArtifactStoreError as exc:
+        raise FinalSessionAlreadyOpenedError(
+            f"final session {session_id!r} already opened"
+        ) from exc
 
 def _create_lineage_seal(
     *, final_session_hashes: Mapping[str, str], development_only: bool, store: Any,
