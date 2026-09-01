@@ -52,7 +52,7 @@ CalibrationProvider = Callable[
 
 
 class FormalAssembler(Protocol):
-    """runner が dataset の raw frame から ground-truth tick を生成するアセンブラプロトコル。
+    """runner が raw frame から正解と予測を別々に生成するアセンブラプロトコル。
 
     runner が frame の選択（dataset から）と detector_artifact_hash の設定（restored package から）
     を制御し、assembler は frame の解釈のみを担当します。外部 provider の自己申告を排除します。
@@ -61,8 +61,13 @@ class FormalAssembler(Protocol):
 
     def assemble_frame(
         self, frame: CapturedFrame, session_id: str, frame_index: int
-    ) -> tuple[PerceptionSnapshot | None, float, FormalReplayEvidence | None]:
-        """(snapshot, latency_ms, evidence) を返す。snapshot が None の場合 frame はスキップ。"""
+    ) -> tuple[
+        PerceptionSnapshot | None,
+        PerceptionSnapshot | None,
+        float,
+        FormalReplayEvidence | None,
+    ]:
+        """(ground_truth, predicted, latency_ms, evidence) を返す。正解 None はスキップ。"""
         ...
 
 
@@ -365,27 +370,40 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         for frame in manifest.frames:
             fid = f"{manifest.session_id}:{frame.session_frame_index}:{frame.session_frame_index}"
             expected_ticks.append(ExpectedTick(manifest.session_id, fid))
-            snapshot, latency_ms, evidence = assembler.assemble_frame(
+            ground_truth, predicted, latency_ms, evidence = assembler.assemble_frame(
                 frame, manifest.session_id, frame.session_frame_index
             )
-            if snapshot is None:
+            if ground_truth is None:
                 continue
-            # runner が detector hash を設定（assembler は変更できない）
-            snapshot = replace(snapshot, detector_artifact_hash=detector_content_hash)
+            # runner が gt/pred 双方の detector identity を固定する。
+            # assembler の自己申告値を formal gate の根拠として受理しない。
+            ground_truth = replace(
+                ground_truth, detector_artifact_hash=detector_content_hash
+            )
+            if predicted is not None:
+                predicted = replace(
+                    predicted, detector_artifact_hash=detector_content_hash
+                )
             if evidence is None:
                 raise ValueError(
                     f"assembler returned no formal evidence: "
                     f"session={manifest.session_id} frame={frame.session_frame_index}"
                 )
-            if snapshot.ui_presentation.parser_artifact_hash != parser_content_hash:
+            snapshots = (ground_truth,) if predicted is None else (ground_truth, predicted)
+            if any(
+                snapshot.ui_presentation.parser_artifact_hash != parser_content_hash
+                for snapshot in snapshots
+            ):
                 raise ValueError(
-                    f"snapshot parser_artifact_hash ({snapshot.ui_presentation.parser_artifact_hash[:8]}…) "
-                    f"does not match parser_package content ({parser_content_hash[:8]}…)"
+                    "snapshot parser_artifact_hash does not match "
+                    f"parser_package content ({parser_content_hash[:8]}…)"
                 )
-            formal_evidence[snapshot.frame_id] = evidence
+            # 同一 tick の gt/pred は V1 契約上同じ frame_id に束縛される。
+            # replay_snapshots がこの evidence を双方の UI hash に対して検証する。
+            formal_evidence[ground_truth.frame_id] = evidence
             replay_ticks.append(SnapshotReplayTick(
                 manifest.session_id, record.kind, record.source_policy,
-                snapshot.frame_id, snapshot, snapshot, latency_ms,
+                ground_truth.frame_id, ground_truth, predicted, latency_ms,
             ))
     report = _formalize_benchmark_report(
         run_benchmark(replay_ticks, expected_ticks=expected_ticks, formal_evidence=formal_evidence)

@@ -15,7 +15,11 @@ from benchmark_survivors_perception import FormalBenchmarkRequest, run_formal_pi
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from survivors.capture.captured_frame import CapturedFrame
 from survivors.capture_dataset import DatasetWriter, SplitFreezer
-from survivors.perception_benchmark import SnapshotReplayTick, recompute_gate_from_metrics
+from survivors.perception_benchmark import (
+    SnapshotReplayTick,
+    recompute_gate_from_metrics,
+    replay_snapshots,
+)
 from survivors.perception_error_fit import CalibrationResidual, FinalSessionAlreadyOpenedError
 from survivors.perception_snapshot import FormalReplayEvidence
 from survivors.real_obs_assembler import RealObsAssembler
@@ -119,8 +123,9 @@ def _dependency_refs(store: ArtifactStore, split) -> dict[str, object]:
 def _hud_world(
     session_id: str, frame_index: int, timestamp_ns: int, screen_state: str,
     parser_artifact_hash: str = "9" * 64,
+    card_roi: tuple[int, int, int, int] = (100, 100, 400, 500),
 ):
-    card = ParsedCard(0, "whip", "weapon", 2, 1.0, "fixture", (100, 100, 400, 500))
+    card = ParsedCard(0, "whip", "weapon", 2, 1.0, "fixture", card_roi)
     inventory = ("whip",) + (None,) * 11
     # canonical hash を実際の計算関数で生成し、_recomputed_snapshot_hashes の照合に通す。
     real_inventory_hash = _compute_inventory_hash(inventory)
@@ -196,7 +201,7 @@ class _MockAssembler:
 
     def assemble_frame(self, frame, session_id: str, frame_index: int):
         if frame_index >= len(_TIMESTAMPS):
-            return None, 0.0, None
+            return None, None, 0.0, None
         if session_id not in self._assemblers:
             self._assemblers[session_id] = RealObsAssembler()
         hud, world = _hud_world(
@@ -209,7 +214,9 @@ class _MockAssembler:
             raw_card_ids=tuple(c.item_id for c in sorted(hud.cards, key=lambda c: c.slot_index)),
             raw_inventory=hud.inventory,
         )
-        return snapshot, 1.0, evidence
+        # synthetic fixture は正解と予測の内容を一致させる。
+        # runner が別入力として扱う契約を守るため、両方を明示的に返す。
+        return snapshot, snapshot, 1.0, evidence
 
 
 def _assembler_factory(restored):
@@ -265,6 +272,86 @@ def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path) ->
     assert any("event:boss" in reason and "1 records" in reason for reason in reasons)
 
 
+def test_formal_runner_blocks_when_prediction_differs_from_ground_truth(tmp_path: Path) -> None:
+    """予測 HP を大きく外すと自己比較せず formal gate が公開を拒否する。
+
+    UI hash は変更しないため、同じ raw evidence による gt/pred 双方の独立検証と
+    HP 精度 gate の失敗を同時に確認できます。
+    """
+    request = _request(tmp_path)
+
+    class _WrongHpAssembler:
+        """正解 snapshot を維持し、予測側の HP だけを誤らせる wrapper。"""
+
+        def __init__(self, parser_artifact_hash: str) -> None:
+            self._inner = _MockAssembler(parser_artifact_hash)
+
+        def assemble_frame(self, frame, session_id: str, frame_index: int):
+            ground_truth, predicted, latency, evidence = self._inner.assemble_frame(
+                frame, session_id, frame_index
+            )
+            if predicted is not None and predicted.item_context is not None:
+                predicted = replace(
+                    predicted,
+                    item_context=replace(predicted.item_context, hp_ratio=0.0),
+                )
+            return ground_truth, predicted, latency, evidence
+
+    wrong_request = replace(
+        request,
+        formal_assembler_factory=lambda restored: _WrongHpAssembler(
+            hashlib.sha256(restored["parser_package"]).hexdigest()
+        ),
+    )
+    with pytest.raises(ValueError, match="HP MAE outside formal threshold"):
+        run_formal_pipeline(wrong_request)
+
+    # gate 不合格時は canonical verdict を公開しない。
+    # 自己比較で pass していた旧 runner への直接的な回帰防止です。
+    assert not request.store._logical_index_path(request.verdict_logical_id).exists()
+
+
+def test_replay_excludes_zero_area_ground_rois_from_geometry_records() -> None:
+    """幅ゼロ・高さゼロの各 ground ROI を実 replay record 経路で除外する。
+
+    対応 predicted が usable でも geometry 成功値は生成せず、余剰予測として
+    ui_false_positive に記録されることを確認します。
+    """
+    schema = DeployObsSchema.default_v1()
+    ticks: list[SnapshotReplayTick] = []
+    for index, ground_roi in enumerate(((200, 100, 200, 500), (100, 200, 400, 200))):
+        session_id = f"zero-roi-{index}"
+        ground_hud, world = _hud_world(
+            session_id, 0, 1_000_000_000, "level_up_items", card_roi=ground_roi
+        )
+        predicted_hud, _ = _hud_world(
+            session_id, 0, 1_000_000_000, "level_up_items"
+        )
+        ground_truth = RealObsAssembler().assemble(
+            ground_hud, world, schema, (1920, 1080)
+        )
+        predicted = RealObsAssembler().assemble(
+            predicted_hud, world, schema, (1920, 1080)
+        )
+        assert ground_truth is not None and predicted is not None
+        ticks.append(SnapshotReplayTick(
+            session_id, "final_e2e_test", "lossless",
+            ground_truth.frame_id, ground_truth, predicted, 1.0,
+        ))
+
+    records = replay_snapshots(ticks)
+    geometry = {
+        record.field for record in records
+        if record.field in {"ui_inside_region", "ui_roi_center_error"}
+    }
+    false_positives = [
+        record for record in records if record.field == "ui_false_positive"
+    ]
+    assert geometry == set()
+    assert len(false_positives) == 2
+    assert all(record.predicted is True for record in false_positives)
+
+
 def test_dependency_tamper_fails_before_any_runner_output(tmp_path: Path) -> None:
     request = _request(tmp_path)
     before_indexes = set(request.store.logical_root.glob("*.json"))
@@ -307,17 +394,21 @@ def _run_assembler_for_test(
     evidence: dict[str, FormalReplayEvidence] = {}
     for manifest in manifests:
         for frame in manifest.frames:
-            snapshot, latency, ev = assembler.assemble_frame(
+            ground_truth, predicted, latency, ev = assembler.assemble_frame(
                 frame, manifest.session_id, frame.session_frame_index
             )
-            if snapshot is None:
+            if ground_truth is None:
                 continue
-            snapshot = replace(snapshot, detector_artifact_hash=detector_hash)
+            ground_truth = replace(
+                ground_truth, detector_artifact_hash=detector_hash
+            )
+            if predicted is not None:
+                predicted = replace(predicted, detector_artifact_hash=detector_hash)
             if ev is not None:
-                evidence[snapshot.frame_id] = ev
+                evidence[ground_truth.frame_id] = ev
             ticks.append(SnapshotReplayTick(
                 manifest.session_id, "final_e2e_test", "lossless",
-                snapshot.frame_id, snapshot, snapshot, latency,
+                ground_truth.frame_id, ground_truth, predicted, latency,
             ))
     return ticks, evidence
 
@@ -396,10 +487,14 @@ def test_runner_pins_detector_artifact_hash_from_restored_package(tmp_path: Path
             self._inner = _MockAssembler(parser_artifact_hash)
 
         def assemble_frame(self, frame, session_id: str, frame_index: int):
-            snapshot, latency, evidence = self._inner.assemble_frame(frame, session_id, frame_index)
-            if snapshot is not None:
-                snapshot = replace(snapshot, detector_artifact_hash="b" * 64)
-            return snapshot, latency, evidence
+            ground_truth, predicted, latency, evidence = self._inner.assemble_frame(
+                frame, session_id, frame_index
+            )
+            if ground_truth is not None:
+                ground_truth = replace(ground_truth, detector_artifact_hash="b" * 64)
+            if predicted is not None:
+                predicted = replace(predicted, detector_artifact_hash="b" * 64)
+            return ground_truth, predicted, latency, evidence
 
     request = _request(tmp_path)
     bad_request = dataclasses.replace(
