@@ -53,6 +53,28 @@ _FORMAL_RUNTIME_PARENT_KINDS = frozenset(
     {"item_selector_release", "combat_student_release", "perception_final_verdict"}
 )
 
+# perception_error_fit._HASH_FIELDS と同一の wire-level formal 契約。
+# Common consumer は Deployment producer を import できないため、境界側でも exact
+# vocabulary を固定し、欠落・追加・自己申告の非 SHA-256 値を fail-closed にする。
+_FORMAL_PERCEPTION_SUBJECT_HASH_FIELDS = frozenset({
+    "parser_artifact_hash",
+    "detector_artifact_hash",
+    "model_hash",
+    "build_hash",
+    "assembler_schema_hash",
+    "ui_presentation_schema_hash",
+    "ui_presentation_golden_fixture_hash",
+    "config_hash",
+    "capture_dataset_hash",
+    "calibration_profile_hash",
+    "threshold_hash",
+    "atlas_vocabulary_hash",
+    "assembler_impl_hash",
+    "roi_resolver_input_hash",
+    "benchmark_fit_code_hash",
+    "lineage_seal_hash",
+})
+
 
 _KIND_ORDER = {
     "source_descriptor": 0,
@@ -238,8 +260,23 @@ def validate_formal_runtime_dag(
         runtime_subjects = runtime.identity_metadata.get("perception_subject_hashes")
         if (
             not isinstance(verdict_subjects, Mapping)
-            or not verdict_subjects
-            or verdict_subjects != runtime_subjects
+            or set(verdict_subjects) != _FORMAL_PERCEPTION_SUBJECT_HASH_FIELDS
+        ):
+            raise ArtifactDagValidationError(
+                "perception_final_verdict subject_hashes must exactly match the formal contract"
+            )
+        if not all(
+            type(value) is str
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
+            for value in verdict_subjects.values()
+        ):
+            raise ArtifactDagValidationError(
+                "perception_final_verdict subject_hashes must be lowercase SHA-256 values"
+            )
+        if (
+            not isinstance(runtime_subjects, Mapping)
+            or dict(verdict_subjects) != dict(runtime_subjects)
         ):
             raise ArtifactDagValidationError(
                 "runtime perception subject hashes do not match final verdict"

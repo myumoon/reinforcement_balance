@@ -64,10 +64,21 @@ THRESHOLD_CONFIDENCE: Final[float] = 0.99
 THRESHOLD_CROSS_FRAME_EQUIVALENCE: Final[float] = 0.999
 FORMAL_MIN_SCREEN_STATE_COUNT: Final[int] = 2    # 最低 2 種類の screen_state が必要
 FORMAL_MIN_SCREEN_STATE_RECORDS: Final[int] = 3   # 各 screen_state に最低 3 件必要
+_FORMAL_FOREGROUND_CLASSES: Final[tuple[str, ...]] = (
+    "player_anchor",
+    "enemy_normal",
+    "enemy_elite",
+    "enemy_boss",
+    "gem_blue",
+    "gem_green",
+    "gem_red",
+    "pickup_heal",
+    "pickup_special",
+    "hazard_projectile",
+    "hazard_area",
+)
 _FORMAL_SLICE_COUNT_FLOORS: Final[Mapping[str, int]] = {
-    "foreground_class:enemy_normal": 200,
-    "foreground_class:enemy_boss": 200,
-    "foreground_class:hazard": 200,
+    **{f"foreground_class:{name}": 200 for name in _FORMAL_FOREGROUND_CLASSES},
     "event:boss": 100,
     "event:hazard": 100,
     "event:level_up": 100,
@@ -83,9 +94,10 @@ _FORMAL_SLICE_SESSION_FLOORS: Final[Mapping[str, int]] = {
 }
 _FORMAL_SLICE_THRESHOLDS: Final[Mapping[str, float]] = {
     **{name: 0.995 for name in _FORMAL_TIME_BANDS},
-    "foreground_class:enemy_normal": 0.990,
-    "foreground_class:enemy_boss": 0.990,
-    "foreground_class:hazard": 0.990,
+    **{
+        f"foreground_class:{name}": 0.990
+        for name in _FORMAL_FOREGROUND_CLASSES
+    },
     "event:boss": 0.990,
     "event:hazard": 0.990,
     "event:level_up": 0.995,
@@ -371,22 +383,46 @@ def _named_slice_counts(snapshot: PerceptionSnapshot) -> dict[str, int]:
         else:
             counts["time_band:late"] = 1
         if context.boss_flag:
-            counts["foreground_class:enemy_boss"] = 1
             counts["event:boss"] = 1
         if context.hazard_flag:
-            counts["foreground_class:hazard"] = 1
             counts["event:hazard"] = 1
-        if not context.boss_flag and not context.hazard_flag and context.enemy_density > 0:
-            counts["foreground_class:enemy_normal"] = 1
-    # annotation loader は一 frame 内の正確な entity 数を diagnostics へ格納できる。
+    # annotation loader は一 frame 内の正確な entity 数と immutable entity ID/class
+    # 対応を diagnostics へ格納する。両方がある場合は count inflation を拒否する。
+    entity_classes = snapshot.diagnostics.get("foreground_entity_classes")
+    derived_counts: dict[str, int] = defaultdict(int)
+    if entity_classes is not None:
+        if not isinstance(entity_classes, Mapping):
+            raise ValueError("foreground_entity_classes must be a mapping")
+        for entity_id, class_name in entity_classes.items():
+            if (
+                type(entity_id) is not str
+                or not entity_id
+                or type(class_name) is not str
+                or class_name not in _FORMAL_FOREGROUND_CLASSES
+            ):
+                raise ValueError("foreground_entity_classes entries are invalid")
+            derived_counts[class_name] += 1
     annotated_counts = snapshot.diagnostics.get("foreground_entity_counts")
     if annotated_counts is not None:
         if not isinstance(annotated_counts, Mapping):
             raise ValueError("foreground_entity_counts must be a mapping")
         for class_name, count in annotated_counts.items():
-            if type(class_name) is not str or not class_name or type(count) is not int or count < 0:
+            if (
+                type(class_name) is not str
+                or class_name not in _FORMAL_FOREGROUND_CLASSES
+                or type(count) is not int
+                or count < 0
+            ):
                 raise ValueError("foreground_entity_counts entries are invalid")
-            counts[f"foreground_class:{class_name}"] = count
+        if entity_classes is not None and {
+            name: count for name, count in annotated_counts.items() if count > 0
+        } != dict(derived_counts):
+            raise ValueError(
+                "foreground_entity_counts do not match annotated entity classes"
+            )
+    effective_counts = annotated_counts if annotated_counts is not None else derived_counts
+    for class_name, count in effective_counts.items():
+        counts[f"foreground_class:{class_name}"] = count
     # UI state 由来 event は closed vocabulary の代表イベントへ正規化する。
     # boss/hazard は world context、level-up/chest/death は screen state から独立集計する。
     if snapshot.screen_state.startswith("level_up"):
@@ -398,6 +434,49 @@ def _named_slice_counts(snapshot: PerceptionSnapshot) -> dict[str, int]:
     elif snapshot.screen_state in {"result", "target_reached_transition"}:
         counts["event:result"] = 1
     return counts
+
+
+def _foreground_classification_values(
+    ground: PerceptionSnapshot,
+    predicted: PerceptionSnapshot | None,
+) -> dict[str, list[float]]:
+    """annotation entity ID ごとの foreground class 正誤を返す。
+
+    entity count だけから overall accuracy を流用しない。formal CI を成立させるには
+    ground/prediction の diagnostics が同じ entity ID vocabulary を持つ必要がある。
+    """
+    ground_entities = ground.diagnostics.get("foreground_entity_classes")
+    if ground_entities is None:
+        return {}
+    if not isinstance(ground_entities, Mapping):
+        raise ValueError("foreground_entity_classes must be a mapping")
+    predicted_entities = (
+        predicted.diagnostics.get("foreground_entity_classes")
+        if predicted is not None else {}
+    )
+    if not isinstance(predicted_entities, Mapping):
+        raise ValueError("predicted foreground_entity_classes must be a mapping")
+    values: dict[str, list[float]] = defaultdict(list)
+    for entity_id, class_name in ground_entities.items():
+        if (
+            type(entity_id) is not str
+            or not entity_id
+            or type(class_name) is not str
+            or class_name not in _FORMAL_FOREGROUND_CLASSES
+        ):
+            raise ValueError("foreground_entity_classes entries are invalid")
+        values[f"foreground_class:{class_name}"].append(
+            float(predicted_entities.get(entity_id) == class_name)
+        )
+    for entity_id, class_name in predicted_entities.items():
+        if (
+            type(entity_id) is not str
+            or not entity_id
+            or type(class_name) is not str
+            or class_name not in _FORMAL_FOREGROUND_CLASSES
+        ):
+            raise ValueError("predicted foreground_entity_classes entries are invalid")
+    return values
 
 
 def _recomputed_snapshot_hashes(snapshot: PerceptionSnapshot) -> tuple[str, str, str]:
@@ -844,11 +923,43 @@ def _run_benchmark_common(
                 tick.predicted is not None
                 and tick.ground_truth.screen_state == tick.predicted.screen_state
             )
+            foreground_values = _foreground_classification_values(
+                tick.ground_truth, tick.predicted
+            )
             for label, count in slice_counts_for_tick.items():
                 named_slice_counts[label] += count
                 if count > 0:
                     named_slice_sessions[label].add(tick.session_id)
-                    named_slice_values[label][tick.session_id].append(correctness)
+                    if label.startswith("foreground_class:"):
+                        named_slice_values[label][tick.session_id].extend(
+                            foreground_values.get(label, ())
+                        )
+                    elif label == "event:boss":
+                        ground_context = tick.ground_truth.item_context
+                        predicted_context = (
+                            tick.predicted.item_context
+                            if tick.predicted is not None else None
+                        )
+                        named_slice_values[label][tick.session_id].append(float(
+                            ground_context is not None
+                            and ground_context.boss_flag is True
+                            and predicted_context is not None
+                            and predicted_context.boss_flag is True
+                        ))
+                    elif label == "event:hazard":
+                        ground_context = tick.ground_truth.item_context
+                        predicted_context = (
+                            tick.predicted.item_context
+                            if tick.predicted is not None else None
+                        )
+                        named_slice_values[label][tick.session_id].append(float(
+                            ground_context is not None
+                            and ground_context.hazard_flag is True
+                            and predicted_context is not None
+                            and predicted_context.hazard_flag is True
+                        ))
+                    else:
+                        named_slice_values[label][tick.session_id].append(correctness)
         records = replay_snapshots(raw_values, formal_evidence=formal_evidence)  # type: ignore[arg-type]
     elif all(isinstance(value, BenchmarkRecord) for value in raw_values):
         records = list(raw_values)  # type: ignore[assignment]

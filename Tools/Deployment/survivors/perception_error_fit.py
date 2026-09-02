@@ -93,6 +93,11 @@ def _require_sha256(value: object, label: str) -> str:
     return value  # type: ignore[return-value]
 
 
+def _current_fit_code_hash() -> str:
+    """現在ロードされている fit 実装ファイルの content hash。"""
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
 def _strict_number(value: object, label: str) -> float:
     if (
         isinstance(value, bool)
@@ -391,7 +396,7 @@ def fit_error_profile(
 
     all_weights = [max(row.confidence / (1.0 + row.age_frames), 1e-12) for row in residuals]
     latency_values = [row.latency_frames for row in residuals]
-    fit_code_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    fit_code_hash = _current_fit_code_hash()
     return FittedPerceptionErrorProfile(
         latency_mean_frames=_weighted_mean(latency_values, all_weights),
         latency_std_frames=_weighted_std(latency_values, all_weights),

@@ -6,21 +6,34 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from Tools.Artifacts.artifact_store import ArtifactStore
-from benchmark_survivors_perception import FormalBenchmarkRequest, run_formal_pipeline
+from benchmark_survivors_perception import (
+    FormalBenchmarkRequest,
+    RestoredFormalArtifact,
+    _annotation_evidence_index,
+    _ground_truth_semantic_hash,
+    _replay_sessions,
+    _subject_hashes,
+    _verified_annotation_payloads,
+    run_formal_pipeline,
+)
+from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from survivors.capture.captured_frame import CapturedFrame
 from survivors.capture_dataset import DatasetWriter, SplitFreezer
 from survivors.perception_benchmark import (
     SnapshotReplayTick,
+    _foreground_classification_values,
     recompute_gate_from_metrics,
     replay_snapshots,
 )
 from survivors.perception_error_fit import CalibrationResidual, FinalSessionAlreadyOpenedError
+from survivors.perception_session_split import validate_split
 from survivors.perception_snapshot import FormalReplayEvidence
 from survivors.real_obs_assembler import RealObsAssembler
 from survivors.vision.entity_tracker import (
@@ -264,6 +277,20 @@ def test_formal_entry_rejects_ref_only_synthetic_fixture_before_provider(
         run_formal_pipeline(request)
     assert called is False
     assert set(request.store.logical_root.glob("*.json")) == before
+
+
+def test_final_metadata_preflight_does_not_open_or_hash_png(tmp_path: Path) -> None:
+    capture_root, _split = _capture_fixture(tmp_path)
+    full = DatasetWriter.restore(capture_root, "final-0")
+    png_path = full.session_path / full.frame_records[0].object_path
+    png_path.unlink()
+
+    metadata = DatasetWriter.restore(capture_root, "final-0", metadata_only=True)
+
+    assert metadata.frame_records == full.frame_records
+    assert metadata.frames == ()
+    with pytest.raises(ValueError, match="missing object"):
+        DatasetWriter.restore(capture_root, "final-0")
 
 
 def test_formal_predictor_cannot_return_ground_truth_residual_or_evidence(
@@ -558,6 +585,249 @@ def test_annotation_evidence_is_not_applied_to_prediction(
     )
     module.replay_snapshots(ticks, formal_evidence=evidence)
     assert calls == [f"ground/{tick.frame_id}" for tick in ticks]
+
+
+def test_all_foreground_classes_use_entity_semantic_correctness(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    manifest = DatasetWriter.restore(request.capture_store_root, "final-0")
+    frame = manifest.frames[0]
+    ground, predicted, _latency, _evidence = _MockAssembler().assemble_frame(
+        frame, manifest.session_id, frame.session_frame_index
+    )
+    assert ground is not None and predicted is not None
+    classes = (
+        "player_anchor", "enemy_normal", "enemy_elite", "enemy_boss",
+        "gem_blue", "gem_green", "gem_red", "pickup_heal",
+        "pickup_special", "hazard_projectile", "hazard_area",
+    )
+    for class_name in classes:
+        wrong_class = "enemy_elite" if class_name == "enemy_normal" else "enemy_normal"
+        annotated = replace(
+            ground,
+            diagnostics={
+                "foreground_entity_counts": {class_name: 1},
+                "foreground_entity_classes": {"entity-0": class_name},
+            },
+        )
+        wrong = replace(
+            predicted,
+            diagnostics={"foreground_entity_classes": {"entity-0": wrong_class}},
+        )
+        values = _foreground_classification_values(annotated, wrong)
+        assert values[f"foreground_class:{class_name}"] == [0.0]
+
+
+def test_loader_cannot_self_authenticate_different_ground_truth(tmp_path: Path) -> None:
+    """loader が evidence を返せず、immutable annotation の GT hash と不一致なら拒否する。"""
+    request = _request(tmp_path)
+    manifest = DatasetWriter.restore(request.capture_store_root, "final-0")
+    frame = manifest.frames[0]
+    original_ground, predicted, _latency, evidence = _MockAssembler().assemble_frame(
+        frame, manifest.session_id, frame.session_frame_index
+    )
+    assert original_ground is not None and predicted is not None and evidence is not None
+    bound_frame_id = f"{manifest.session_id}:{frame.session_frame_index}"
+    original_ground = replace(
+        original_ground,
+        frame_id=bound_frame_id,
+        ui_presentation=replace(
+            original_ground.ui_presentation, frame_id=bound_frame_id
+        ),
+    )
+    predicted = replace(
+        predicted,
+        frame_id=bound_frame_id,
+        ui_presentation=replace(predicted.ui_presentation, frame_id=bound_frame_id),
+    )
+    forged_ui = replace(
+        original_ground.ui_presentation, screen_state="forged-screen-state"
+    )
+    forged_ground = replace(
+        original_ground,
+        screen_state="forged-screen-state",
+        ui_presentation=forged_ui,
+    )
+
+    class ForgedLoader:
+        def load_frame(self, _frame, _session_id, _frame_index):
+            return forged_ground
+
+    class Predictor:
+        def predict_frame(self, _frame, _session_id, _frame_index):
+            return replace(predicted, detector_artifact_hash="2" * 64), 1.0
+
+    annotation = {
+        (manifest.session_id, frame.session_frame_index): (
+            evidence,
+            _ground_truth_semantic_hash(original_ground),
+        )
+    }
+    with pytest.raises(ValueError, match="immutable annotation"):
+        _replay_sessions(
+            (replace(manifest, frames=(frame,)),),
+            {
+                manifest.session_id: SimpleNamespace(
+                    kind="final_e2e_test", source_policy="lossless"
+                )
+            },
+            Predictor(),
+            ForgedLoader(),
+            annotation,
+            parser_hash="9" * 64,
+            detector_hash="2" * 64,
+        )
+
+
+def test_annotation_payload_must_match_descriptor_and_session_manifest(
+    tmp_path: Path,
+) -> None:
+    capture_root, split = _capture_fixture(tmp_path)
+    store = ArtifactStore(tmp_path / "annotation-artifacts")
+    split_ref = store.put(
+        logical_id="capture/split.json",
+        source_path=split.manifest_path,
+        media_type="application/json",
+    )
+    refs = [split_ref]
+    bindings = {}
+    manifests = {}
+    for units in split.splits.values():
+        for unit in units:
+            session_id = unit.session_id
+            session_root = capture_root / "capture_sessions" / session_id
+            annotation_path = session_root / "annotations.jsonl"
+            annotation_path.write_text(
+                json.dumps({
+                    "schema_version": "perception_formal_annotation.v1",
+                    "session_id": session_id,
+                    "frame_index": 0,
+                    "raw_card_ids": ["whip"],
+                    "raw_inventory": ["whip"],
+                    "ground_truth_semantic_hash": "1" * 64,
+                }, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            annotation_ref = store.put(
+                logical_id=f"capture/{session_id}/annotations.jsonl",
+                source_path=annotation_path,
+                media_type="application/x-ndjson",
+            )
+            manifest_ref = store.put(
+                logical_id=f"capture/{session_id}/session_manifest.json",
+                source_path=session_root / "session_manifest.json",
+                media_type="application/json",
+            )
+            refs.extend((annotation_ref, manifest_ref))
+            bindings[session_id] = {
+                "annotation_logical_id": annotation_ref.logical_id,
+                "annotation_sha256": annotation_ref.sha256,
+                "session_manifest_logical_id": manifest_ref.logical_id,
+                "session_manifest_sha256": manifest_ref.sha256,
+            }
+            manifests[session_id] = DatasetWriter.restore(
+                capture_root, session_id, metadata_only=True
+            )
+    descriptor = ArtifactDescriptor(
+        logical_id="capture/formal-source",
+        node_kind="source_descriptor",
+        producer_id="test",
+        producer_version="v1",
+        identity_metadata={
+            "manifest_logical_id": split_ref.logical_id,
+            "annotation_bindings": bindings,
+        },
+        parents=(),
+        files=tuple(refs),
+    )
+    restored = {
+        "capture_dataset": RestoredFormalArtifact(
+            descriptor,
+            descriptor,
+            {
+                ref.logical_id: store.object_path(ref.store_uri).read_bytes()
+                for ref in refs
+            },
+            None,
+        )
+    }
+    validated = validate_split(split, manifests)
+    request = FormalBenchmarkRequest(
+        store=store,
+        capture_store_root=capture_root,
+        dependency_descriptors={"capture_dataset": descriptor},
+    )
+    selected = {"cal-0"}
+    payloads = _verified_annotation_payloads(
+        request, restored, validated, selected
+    )
+    assert set(_annotation_evidence_index(payloads)) == {("cal-0", 0)}
+
+    annotation_path = capture_root / "capture_sessions/cal-0/annotations.jsonl"
+    annotation_path.write_bytes(annotation_path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="immutable descriptor"):
+        _verified_annotation_payloads(request, restored, validated, selected)
+
+
+def test_subject_hashes_use_current_fit_file_hash(monkeypatch, tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path / "subject-artifacts")
+    capture_ref = _package_ref(store, "capture.json", {"capture": True})
+    target_ref = _package_ref(store, "target.json", {"target": True})
+
+    def descriptor(logical_id, ref):
+        return ArtifactDescriptor(
+            logical_id=logical_id,
+            node_kind="source_descriptor",
+            producer_id="test",
+            producer_version="v1",
+            identity_metadata={"manifest_logical_id": ref.logical_id},
+            parents=(),
+            files=(ref,),
+        )
+
+    request = FormalBenchmarkRequest(
+        store=store,
+        capture_store_root=tmp_path,
+        dependency_descriptors={
+            "capture_dataset": descriptor("capture", capture_ref),
+            "target_config": descriptor("target", target_ref),
+        },
+    )
+    payloads = {
+        "parser_package": {"parser_artifact_hash": "1" * 64},
+        "detector_package": {
+            "detector_artifact_hash": "2" * 64,
+            "model_hash": "3" * 64,
+            "build_hash": "4" * 64,
+        },
+        "assembler_config": {
+            "assembler_schema_hash": "5" * 64,
+            "ui_presentation_schema_hash": "6" * 64,
+            "ui_presentation_golden_fixture_hash": "7" * 64,
+            "atlas_vocabulary_hash": "8" * 64,
+            "assembler_impl_hash": "9" * 64,
+            "roi_resolver_input_hash": "a" * 64,
+        },
+        "target_config": {"threshold_hash": "b" * 64},
+    }
+    monkeypatch.setattr(
+        "benchmark_survivors_perception._current_fit_code_hash",
+        lambda: "f" * 64,
+    )
+    subjects = _subject_hashes(
+        request,
+        payloads,
+        calibration_profile_hash="c" * 64,
+        lineage_seal_hash="d" * 64,
+    )
+    assert subjects["benchmark_fit_code_hash"] == "f" * 64
+    assert set(subjects) == {
+        "parser_artifact_hash", "detector_artifact_hash", "model_hash", "build_hash",
+        "assembler_schema_hash", "ui_presentation_schema_hash",
+        "ui_presentation_golden_fixture_hash", "config_hash", "capture_dataset_hash",
+        "calibration_profile_hash", "threshold_hash", "atlas_vocabulary_hash",
+        "assembler_impl_hash", "roi_resolver_input_hash", "benchmark_fit_code_hash",
+        "lineage_seal_hash",
+    }
 
 
 @pytest.mark.skip(reason="formal release descriptors/sessions are intentionally unavailable")

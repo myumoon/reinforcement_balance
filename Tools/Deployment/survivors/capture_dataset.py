@@ -434,14 +434,14 @@ class DatasetWriter:
                     or record.game_build_id != wire["game_build_id"]
                 ):
                     raise ValueError("profile/build mixing in session metadata")
-                object_path = _resolve_relative(
-                    session_path, record.object_path, "object_path"
-                )
-                if not object_path.is_file():
-                    raise ValueError(f"missing object: {record.object_path}")
-                if _sha256_file(object_path) != record.object_sha256:
-                    raise ValueError(f"object hash mismatch: {record.object_path}")
                 if not metadata_only:
+                    object_path = _resolve_relative(
+                        session_path, record.object_path, "object_path"
+                    )
+                    if not object_path.is_file():
+                        raise ValueError(f"missing object: {record.object_path}")
+                    if _sha256_file(object_path) != record.object_sha256:
+                        raise ValueError(f"object hash mismatch: {record.object_path}")
                     pixels = _decode_lossless_png(object_path.read_bytes())
                     frames.append(
                         CapturedFrame(

@@ -37,7 +37,9 @@ from survivors.perception_benchmark import (
 )
 from survivors.perception_error_fit import (
     _HASH_FIELDS,
+    _current_fit_code_hash,
     CalibrationResidual,
+    FinalLineageSeal,
     FittedPerceptionErrorProfile,
     PerceptionFinalVerdict,
     _create_formal_final_verdict,
@@ -79,7 +81,8 @@ class FormalGroundTruthLoader(Protocol):
 
     def load_frame(
         self, frame: CapturedFrame, session_id: str, frame_index: int
-    ) -> tuple[PerceptionSnapshot | None, FormalReplayEvidence | None]:
+    ) -> PerceptionSnapshot | None:
+        """verified annotation bytes から ground-truth snapshot だけを返す。"""
         ...
 
 
@@ -87,7 +90,7 @@ FormalPredictorFactory = Callable[
     [Mapping[str, RestoredFormalArtifact]], FormalPredictor
 ]
 FormalGroundTruthFactory = Callable[
-    [Path, Mapping[str, RestoredFormalArtifact]], FormalGroundTruthLoader
+    [Mapping[str, bytes], Mapping[str, Mapping[str, Any]]], FormalGroundTruthLoader
 ]
 
 
@@ -330,6 +333,204 @@ def _restore_split_and_sessions(
     return split, manifests, validated
 
 
+def _verified_annotation_payloads(
+    request: FormalBenchmarkRequest,
+    restored: Mapping[str, RestoredFormalArtifact],
+    validated_split: SessionSplit,
+    session_ids: set[str],
+) -> dict[str, bytes]:
+    """capture descriptor に封印された session annotation を local capture と照合する。"""
+    capture = restored["capture_dataset"]
+    bindings = capture.descriptor.identity_metadata.get("annotation_bindings")
+    session_hashes = {
+        session.session_id: session.session_hash
+        for session in validated_split.sessions
+        if session.kind in {"error_calibration", "final_e2e_test"}
+    }
+    if not isinstance(bindings, Mapping) or set(bindings) != set(session_hashes):
+        raise ValueError(
+            "capture descriptor annotation_bindings must exactly cover formal sessions"
+        )
+    if not session_ids <= set(session_hashes):
+        raise ValueError("annotation restore requested an unknown formal session")
+    refs_by_id = {ref.logical_id: ref for ref in capture.descriptor.files}
+    annotation_ids: set[str] = set()
+    manifest_ids: set[str] = set()
+    expected_fields = {
+        "annotation_logical_id", "annotation_sha256",
+        "session_manifest_logical_id", "session_manifest_sha256",
+    }
+    for session_id, session_hash in sorted(session_hashes.items()):
+        binding = bindings[session_id]
+        if not isinstance(binding, Mapping) or set(binding) != expected_fields:
+            raise ValueError(f"annotation binding for {session_id!r} has an invalid schema")
+        annotation_id = binding["annotation_logical_id"]
+        manifest_id = binding["session_manifest_logical_id"]
+        if (
+            type(annotation_id) is not str
+            or type(manifest_id) is not str
+            or annotation_id in annotation_ids
+            or manifest_id in manifest_ids
+        ):
+            raise ValueError("annotation/session manifest logical ids must be unique strings")
+        annotation_ids.add(annotation_id)
+        manifest_ids.add(manifest_id)
+        annotation_ref = refs_by_id.get(annotation_id)
+        manifest_ref = refs_by_id.get(manifest_id)
+        if annotation_ref is None or manifest_ref is None:
+            raise ValueError("annotation binding does not reference immutable descriptor files")
+        if (
+            binding["annotation_sha256"] != annotation_ref.sha256
+            or binding["session_manifest_sha256"] != manifest_ref.sha256
+            or manifest_ref.sha256 != session_hash
+        ):
+            raise ValueError("annotation binding hash does not match descriptor/session lineage")
+
+    payloads: dict[str, bytes] = {}
+    for session_id in sorted(session_ids):
+        session_hash = session_hashes[session_id]
+        binding = bindings[session_id]
+        annotation_id = binding["annotation_logical_id"]
+        manifest_id = binding["session_manifest_logical_id"]
+        annotation_ref = refs_by_id.get(annotation_id)
+        manifest_ref = refs_by_id.get(manifest_id)
+        assert annotation_ref is not None and manifest_ref is not None
+        annotation_bytes = capture.files.get(annotation_id)
+        manifest_bytes = capture.files.get(manifest_id)
+        if annotation_bytes is None or manifest_bytes is None:
+            raise ValueError("annotation binding content was not restored")
+        session_root = request.capture_store_root / "capture_sessions" / session_id
+        local_annotation = session_root / "annotations.jsonl"
+        local_manifest = session_root / "session_manifest.json"
+        if (
+            not local_annotation.is_file()
+            or local_annotation.read_bytes() != annotation_bytes
+            or hashlib.sha256(annotation_bytes).hexdigest() != annotation_ref.sha256
+        ):
+            raise ValueError("local annotation is not bound to immutable descriptor content")
+        if (
+            not local_manifest.is_file()
+            or local_manifest.read_bytes() != manifest_bytes
+            or hashlib.sha256(manifest_bytes).hexdigest() != session_hash
+        ):
+            raise ValueError("local session manifest is not independently descriptor-bound")
+        payloads[session_id] = annotation_bytes
+    return payloads
+
+
+def _annotation_evidence_index(
+    annotation_payloads: Mapping[str, bytes],
+) -> dict[tuple[str, int], tuple[FormalReplayEvidence, str]]:
+    """immutable annotation JSONL から runner 自身が raw UI evidence を構築する。"""
+    evidence: dict[tuple[str, int], tuple[FormalReplayEvidence, str]] = {}
+    expected_fields = {
+        "schema_version", "session_id", "frame_index",
+        "raw_card_ids", "raw_inventory", "ground_truth_semantic_hash",
+    }
+    for expected_session_id, payload in sorted(annotation_payloads.items()):
+        try:
+            lines = payload.decode("utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            raise ValueError("formal annotation evidence is not UTF-8") from exc
+        for line_number, line in enumerate(lines, start=1):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"invalid formal annotation evidence at line {line_number}"
+                ) from exc
+            if (
+                not isinstance(row, dict)
+                or set(row) != expected_fields
+                or row.get("schema_version") != "perception_formal_annotation.v1"
+                or row.get("session_id") != expected_session_id
+                or type(row.get("frame_index")) is not int
+                or row["frame_index"] < 0
+            ):
+                raise ValueError("formal annotation evidence row has an invalid schema")
+            raw_card_ids = row["raw_card_ids"]
+            raw_inventory = row["raw_inventory"]
+            if not all(
+                isinstance(values, list)
+                and all(value is None or type(value) is str for value in values)
+                for values in (raw_card_ids, raw_inventory)
+            ):
+                raise ValueError("formal annotation evidence values are invalid")
+            semantic_hash = row["ground_truth_semantic_hash"]
+            if (
+                type(semantic_hash) is not str
+                or len(semantic_hash) != 64
+                or any(character not in "0123456789abcdef" for character in semantic_hash)
+            ):
+                raise ValueError("formal annotation ground truth hash is not a SHA-256")
+            key = (expected_session_id, row["frame_index"])
+            if key in evidence:
+                raise ValueError("duplicate formal annotation evidence frame")
+            evidence[key] = (
+                FormalReplayEvidence(tuple(raw_card_ids), tuple(raw_inventory)),
+                semantic_hash,
+            )
+    return evidence
+
+
+def _ground_truth_semantic_hash(snapshot: PerceptionSnapshot) -> str:
+    """benchmark が読む GT semantic 全体を annotation-bound hash に正規化する。"""
+    context = snapshot.item_context
+    context_payload = None
+    if context is not None:
+        context_payload = {
+            "elapsed_time": context.elapsed_time,
+            "level": context.level,
+            "hp_ratio": context.hp_ratio,
+            "xp_ratio": context.xp_ratio,
+            "enemy_density": context.enemy_density,
+            "nearest_enemy_screen_dist": context.nearest_enemy_screen_dist,
+            "boss_flag": context.boss_flag,
+            "hazard_flag": context.hazard_flag,
+        }
+    ui = snapshot.ui_presentation
+    payload = {
+        "frame_id": snapshot.frame_id,
+        "captured_ns": snapshot.captured_ns,
+        "screen_state": snapshot.screen_state,
+        "item_context": context_payload,
+        "inventory_hash": ui.inventory_hash,
+        "candidate_set_hash": ui.candidate_set_hash,
+        "candidates": [
+            {
+                "choice_id": target.choice_id,
+                "choice_index": target.choice_index,
+                "semantic_kind": target.semantic_kind,
+                "validity": target.validity,
+                "roi": [
+                    target.roi.left, target.roi.top,
+                    target.roi.right, target.roi.bottom,
+                ],
+            }
+            for target in ui.candidates
+        ],
+        "buttons": [
+            {
+                "semantic_action": target.semantic_action,
+                "capability": target.capability,
+                "validity": target.validity,
+                "roi": [
+                    target.roi.left, target.roi.top,
+                    target.roi.right, target.roi.bottom,
+                ],
+            }
+            for target in ui.buttons
+        ],
+        "foreground_entity_counts": dict(
+            snapshot.diagnostics.get("foreground_entity_counts", {})
+        ),
+        "foreground_entity_classes": dict(
+            snapshot.diagnostics.get("foreground_entity_classes", {})
+        ),
+    }
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
 def _package_payloads(
     restored: Mapping[str, RestoredFormalArtifact],
 ) -> dict[str, Mapping[str, Any]]:
@@ -343,7 +544,6 @@ def _package_payloads(
 def _subject_hashes(
     request: FormalBenchmarkRequest,
     restored_payloads: Mapping[str, Mapping[str, Any]],
-    profile: FittedPerceptionErrorProfile,
     *, calibration_profile_hash: str, lineage_seal_hash: str,
 ) -> dict[str, str]:
     parser = restored_payloads["parser_package"]
@@ -371,7 +571,8 @@ def _subject_hashes(
         "atlas_vocabulary_hash": assembler.get("atlas_vocabulary_hash"),
         "assembler_impl_hash": assembler.get("assembler_impl_hash"),
         "roi_resolver_input_hash": assembler.get("roi_resolver_input_hash"),
-        "benchmark_fit_code_hash": profile.fit_code_hash,
+        # persisted profile の自己申告値ではなく、recovery 時も現在の実ファイルから再計算する。
+        "benchmark_fit_code_hash": _current_fit_code_hash(),
         "lineage_seal_hash": lineage_seal_hash,
     }
     for name, value in values.items():
@@ -629,6 +830,9 @@ def _replay_sessions(
     session_records: Mapping[str, Any],
     predictor: FormalPredictor,
     ground_truth_loader: FormalGroundTruthLoader,
+    annotation_evidence: Mapping[
+        tuple[str, int], tuple[FormalReplayEvidence, str]
+    ],
     *,
     parser_hash: str,
     detector_hash: str,
@@ -641,7 +845,7 @@ def _replay_sessions(
         for frame in manifest.frames:
             frame_id = f"{manifest.session_id}:{frame.session_frame_index}"
             expected.append(ExpectedTick(manifest.session_id, frame_id))
-            ground, evidence = ground_truth_loader.load_frame(
+            ground = ground_truth_loader.load_frame(
                 frame, manifest.session_id, frame.session_frame_index
             )
             if ground is None:
@@ -651,10 +855,18 @@ def _replay_sessions(
                     frame, manifest.session_id, frame.session_frame_index
                 )
             )
-            if evidence is None:
+            annotation = annotation_evidence.get(
+                (manifest.session_id, frame.session_frame_index)
+            )
+            if annotation is None:
                 raise ValueError(f"annotation evidence missing for {frame_id}")
+            evidence, expected_ground_hash = annotation
             if ground.frame_id != frame_id:
                 raise ValueError("annotation ground truth frame_id is not capture-bound")
+            if _ground_truth_semantic_hash(ground) != expected_ground_hash:
+                raise ValueError(
+                    "ground truth semantics do not match immutable annotation content"
+                )
             if predicted is not None and predicted.frame_id != frame_id:
                 raise ValueError("prediction frame_id is not capture-bound")
             snapshots = (ground,) if predicted is None else (ground, predicted)
@@ -750,6 +962,7 @@ def _recover_committed_result(
     request: FormalBenchmarkRequest,
     validated_split: SessionSplit,
     run_key: str,
+    restored_payloads: Mapping[str, Mapping[str, Any]],
 ) -> FormalBenchmarkResult | None:
     """batch commit 済み state から canonical alias だけを idempotent 回復する。"""
     batch_ref = request.store.resolve(f"perception/batch_commit/{run_key}")
@@ -791,13 +1004,54 @@ def _recover_committed_result(
     verdict_wire = payload["verdict"]
     if not isinstance(verdict_wire, dict):
         raise ValueError("formal batch verdict must be an object")
+    seal_id = verdict_wire.get("seal_id")
+    if (
+        type(seal_id) is not str
+        or len(seal_id) != 64
+        or any(character not in "0123456789abcdef" for character in seal_id)
+    ):
+        raise ValueError("formal batch verdict seal_id is not a SHA-256")
+    seal_ref = refs.get(f"perception/package/lineage/{seal_id}/seal.json")
+    if seal_ref is None:
+        raise ValueError("formal batch is missing the exact lineage seal ArtifactRef")
+    current_subject_hashes = _subject_hashes(
+        request,
+        restored_payloads,
+        calibration_profile_hash=descriptors[1].identity_hash,
+        lineage_seal_hash=seal_ref.sha256,
+    )
+    seal_wire = _load_json_ref(request.store, seal_ref)
+    try:
+        seal = FinalLineageSeal(**seal_wire, _store=request.store)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("committed lineage seal content is invalid") from exc
+    expected_final_hashes = {
+        session.session_id: session.session_hash
+        for session in validated_split.sessions
+        if session.kind == "final_e2e_test"
+    }
+    if (
+        seal.development_only is not False
+        or seal.seal_id != seal_id
+        or dict(seal.final_session_hashes) != expected_final_hashes
+    ):
+        raise ValueError("committed lineage seal does not match final sessions")
+    seal.verify_hashes(**{
+        name: value for name, value in current_subject_hashes.items()
+        if name != "lineage_seal_hash"
+    })
     verdict = load_final_verdict(
         verdict_wire,
-        current_subject_hashes={name: verdict_wire[name] for name in _HASH_FIELDS},
+        current_subject_hashes=current_subject_hashes,
     )
+    final_metadata = descriptors[2].identity_metadata
     if (
         descriptors[1].identity_hash != verdict.calibration_profile_hash
         or descriptors[2].identity_metadata.get("verdict_id") != verdict.verdict_id
+        or final_metadata.get("seal_id") != verdict.seal_id
+        or final_metadata.get("passed") is not True
+        or final_metadata.get("development_only") is not False
+        or final_metadata.get("subject_hashes") != current_subject_hashes
     ):
         raise ValueError("formal batch descriptor/content identities do not match")
 
@@ -843,8 +1097,11 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     _, manifests, validated_split = _restore_split_and_sessions(
         request, capture_bytes
     )
+    payloads = _package_payloads(restored)
     run_key = _batch_run_key(request, validated_split)
-    recovered = _recover_committed_result(request, validated_split, run_key)
+    recovered = _recover_committed_result(
+        request, validated_split, run_key, payloads
+    )
     if recovered is not None:
         return recovered
     if _CLI_PROVIDER_FACTORY is None or _GROUND_TRUTH_FACTORY is None:
@@ -852,7 +1109,6 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
             "formal pipeline requires prediction-only provider and reviewed annotation loader"
         )
 
-    payloads = _package_payloads(restored)
     detector_payload = payloads["detector_package"]
     parser_payload = payloads["parser_package"]
     parser_hash = parser_payload["parser_artifact_hash"]
@@ -866,13 +1122,8 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         raise ValueError("capture sessions are not bound to verified game build content")
 
     predictor = _CLI_PROVIDER_FACTORY(restored)
-    ground_truth_loader = _GROUND_TRUTH_FACTORY(
-        request.capture_store_root, restored
-    )
     if not hasattr(predictor, "predict_frame"):
         raise TypeError("formal provider must implement prediction-only predict_frame")
-    if not hasattr(ground_truth_loader, "load_frame"):
-        raise TypeError("formal annotation loader must implement load_frame")
 
     records_by_id = {session.session_id: session for session in validated_split.sessions}
     calibration_manifests = tuple(
@@ -885,10 +1136,25 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         for session in validated_split.sessions
         if session.kind == "final_e2e_test"
     )
+    calibration_annotation_payloads = _verified_annotation_payloads(
+        request,
+        restored,
+        validated_split,
+        {manifest.session_id for manifest in calibration_manifests},
+    )
+    calibration_evidence = _annotation_evidence_index(
+        calibration_annotation_payloads
+    )
+    calibration_ground_truth_loader = _GROUND_TRUTH_FACTORY(
+        calibration_annotation_payloads, payloads
+    )
+    if not hasattr(calibration_ground_truth_loader, "load_frame"):
+        raise TypeError("formal annotation loader must implement load_frame")
 
     # Phase A: calibration だけを replay/fit し、profile package を commit/freeze する。
     calibration_ticks, _, _ = _replay_sessions(
-        calibration_manifests, records_by_id, predictor, ground_truth_loader,
+        calibration_manifests, records_by_id, predictor,
+        calibration_ground_truth_loader, calibration_evidence,
         parser_hash=parser_hash, detector_hash=detector_hash,
     )
     residuals = _derive_calibration_residuals(calibration_ticks)
@@ -904,7 +1170,7 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         formal=True,
     )
     provisional_subjects = _subject_hashes(
-        request, payloads, profile,
+        request, payloads,
         calibration_profile_hash="0" * 64,
         lineage_seal_hash="0" * 64,
     )
@@ -954,7 +1220,7 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         for manifest in final_metadata_manifests
     }
     preseal_subjects = _subject_hashes(
-        request, payloads, profile,
+        request, payloads,
         calibration_profile_hash=profile_node.identity_hash,
         lineage_seal_hash="0" * 64,
     )
@@ -971,7 +1237,7 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     seal_bytes = canonical_json_bytes(seal.to_wire())
     lineage_seal_hash = hashlib.sha256(seal_bytes).hexdigest()
     subjects = _subject_hashes(
-        request, payloads, profile,
+        request, payloads,
         calibration_profile_hash=profile_node.identity_hash,
         lineage_seal_hash=lineage_seal_hash,
     )
@@ -986,8 +1252,21 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         DatasetWriter.restore(request.capture_store_root, manifest.session_id)
         for manifest in final_metadata_manifests
     )
+    final_annotation_payloads = _verified_annotation_payloads(
+        request,
+        restored,
+        validated_split,
+        {manifest.session_id for manifest in final_manifests},
+    )
+    final_evidence = _annotation_evidence_index(final_annotation_payloads)
+    final_ground_truth_loader = _GROUND_TRUTH_FACTORY(
+        final_annotation_payloads, payloads
+    )
+    if not hasattr(final_ground_truth_loader, "load_frame"):
+        raise TypeError("formal annotation loader must implement load_frame")
     final_ticks, expected_ticks, evidence = _replay_sessions(
-        final_manifests, records_by_id, predictor, ground_truth_loader,
+        final_manifests, records_by_id, predictor,
+        final_ground_truth_loader, final_evidence,
         parser_hash=parser_hash, detector_hash=detector_hash,
     )
     report = _formalize_benchmark_report(run_benchmark(

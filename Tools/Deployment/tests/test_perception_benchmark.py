@@ -421,13 +421,16 @@ class TestRareSliceGate:
         for name, value in tuple(metrics.items()):
             if isinstance(value, float) and not np.isfinite(value):
                 metrics[name] = 0.0
+        foreground_classes = (
+            "player_anchor", "enemy_normal", "enemy_elite", "enemy_boss",
+            "gem_blue", "gem_green", "gem_red", "pickup_heal",
+            "pickup_special", "hazard_projectile", "hazard_area",
+        )
         metrics["slice_counts"].update({
             "time_band:early": 20,
             "time_band:mid": 20,
             "time_band:late": 20,
-            "foreground_class:enemy_normal": 199,
-            "foreground_class:enemy_boss": 200,
-            "foreground_class:hazard": 200,
+            **{f"foreground_class:{name}": 200 for name in foreground_classes},
             "event:boss": 100,
             "event:hazard": 100,
             "event:level_up": 100,
@@ -435,6 +438,7 @@ class TestRareSliceGate:
             "event:death": 20,
             "event:result": 20,
         })
+        metrics["slice_counts"]["foreground_class:enemy_elite"] = 199
         metrics["slice_session_counts"] = {
             "time_band:early": 2,
             "time_band:mid": 2,
@@ -442,8 +446,29 @@ class TestRareSliceGate:
         }
         passed, reasons = recompute_gate_from_metrics(metrics, formal=True)
         assert passed is False
-        assert any("enemy_normal" in reason and "200" in reason for reason in reasons)
+        assert any("enemy_elite" in reason and "200" in reason for reason in reasons)
         assert any("CI" in reason for reason in reasons)
+
+    def test_formal_gate_requires_every_world_class_map_foreground_class(self) -> None:
+        report = run_benchmark([
+            _rec("screen_state", "gameplay", "gameplay", session=f"s{i % 2}", frame=str(i))
+            for i in range(20)
+        ])
+        metrics = report.metrics_wire()
+        for name, value in tuple(metrics.items()):
+            if isinstance(value, float) and not np.isfinite(value):
+                metrics[name] = 0.0
+        passed, reasons = recompute_gate_from_metrics(metrics, formal=True)
+        assert passed is False
+        for class_name in (
+            "player_anchor", "enemy_normal", "enemy_elite", "enemy_boss",
+            "gem_blue", "gem_green", "gem_red", "pickup_heal",
+            "pickup_special", "hazard_projectile", "hazard_area",
+        ):
+            assert any(
+                f"foreground_class:{class_name}" in reason and "200" in reason
+                for reason in reasons
+            )
 
 
 
