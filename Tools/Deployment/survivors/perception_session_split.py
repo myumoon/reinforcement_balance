@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from dataclasses import dataclass
@@ -74,10 +75,15 @@ class SessionRecord:
     source_policy: SourcePolicy
     expected_frame_ids: tuple[str, ...] = ()
     session_manifest_path: Path | None = None
+    # session_hash はmanifest SHA（session_id に依存）。
+    # content_fingerprint はframe object hash列（session_id非依存）でコピー検出に使う。
+    content_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         _require_nonempty(self.session_id, "session_id")
         _require_sha256(self.session_hash, "session_hash")
+        if self.content_fingerprint:
+            _require_sha256(self.content_fingerprint, "content_fingerprint")
         _require_sha256(self.build_hash, "build_hash")
         _require_sha256(self.target_profile_hash, "target_profile_hash")
         if self.kind not in _ALL_KINDS:
@@ -201,6 +207,11 @@ def _record_from_manifest(
     duration_seconds = (timestamps[-1] - timestamps[0]) / 1_000_000_000.0
     # game_build_id は capture 契約上 hash とは限らないため canonical hash へ固定する。
     build_hash = hashlib.sha256(manifest.game_build_id.encode("utf-8")).hexdigest()
+    # session_id・manifest SHA に非依存なフレーム内容フィンガープリント（コピー検出用）
+    sorted_frames = sorted(manifest.frame_records, key=lambda r: r.frame_id)
+    content_fingerprint = hashlib.sha256(
+        b"".join(bytes.fromhex(r.object_sha256) for r in sorted_frames)
+    ).hexdigest()
     return SessionRecord(
         session_id=manifest.session_id,
         session_hash=manifest.manifest_sha256,
@@ -212,6 +223,7 @@ def _record_from_manifest(
         source_policy=_source_policy(manifest),
         expected_frame_ids=tuple(str(value) for value in frame_ids),
         session_manifest_path=manifest_path,
+        content_fingerprint=content_fingerprint,
     )
 
 
@@ -269,13 +281,21 @@ def _validate_records(
 
     seen_ids: set[str] = set()
     seen_hashes: set[str] = set()
+    seen_fingerprints: set[str] = set()
     for record in records:
         if record.session_id in seen_ids:
             raise SplitOverlapError(f"duplicate session_id {record.session_id!r}")
         if record.session_hash in seen_hashes:
             raise SplitOverlapError(f"duplicate session_hash {record.session_hash!r}")
+        # content_fingerprint は session_id 非依存。同一フレーム列を別 session として登録するコピーを検出する。
+        if record.content_fingerprint and record.content_fingerprint in seen_fingerprints:
+            raise SplitOverlapError(
+                f"duplicate frame content fingerprint for session {record.session_id!r}"
+            )
         seen_ids.add(record.session_id)
         seen_hashes.add(record.session_hash)
+        if record.content_fingerprint:
+            seen_fingerprints.add(record.content_fingerprint)
 
     benchmark = [record for record in records if record.kind in _BENCHMARK_KINDS]
     if benchmark:

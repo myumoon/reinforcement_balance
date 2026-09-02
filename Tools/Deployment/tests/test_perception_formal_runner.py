@@ -49,7 +49,7 @@ PACKAGE_HASHES = {
 
 def _captured_frame(session_index: int, frame_index: int, timestamp_ns: int) -> CapturedFrame:
     pixels = np.zeros((1080, 1920, 4), dtype=np.uint8)
-    pixels[0, 0] = (session_index, frame_index, 7, 255)
+    pixels[0, 0] = (session_index, frame_index % 256, 7, 255)
     return CapturedFrame(
         pixels, timestamp_ns, frame_index, (0, 0, 1920, 1080), True,
         PROFILE_HASH, "synthetic-build",
@@ -130,7 +130,7 @@ def _hud_world(
     # canonical hash を実際の計算関数で生成し、_recomputed_snapshot_hashes の照合に通す。
     real_inventory_hash = _compute_inventory_hash(inventory)
     real_candidate_set_hash = _compute_candidate_set_hash(screen_state, (card,))
-    elapsed_time = 20.0 if frame_index < 2 else 1300.0
+    elapsed_time = _ELAPSED_TIMES[frame_index] if frame_index < len(_ELAPSED_TIMES) else 20.0
     hud = HudStateV1(
         "hud_state.v1", session_id, frame_index, timestamp_ns, parser_artifact_hash,
         screen_state, 1.0, "fixture", elapsed_time, 1.0, "fixture", False,
@@ -153,11 +153,13 @@ def _hud_world(
 
 
 _CALIBRATION_REQUIRED_FIELDS = frozenset({
-    "coord_noise", "hp_ratio",
+    "coord_noise", "hp_ratio", "xp_ratio", "timer_seconds",
+    "inventory_hash", "coord_quantization_px",
     "burst_enter", "burst_exit", "burst_dropout",
+    "unknown_screen_collapse", "unknown_screen_collapse_duration",
     "item_category", "enemy_category",
 })
-_CALIBRATION_SAMPLES_PER_FIELD_PER_SESSION = 3  # formal 要件（3 samples × ≥2 sessions）を満たす最小値
+_CALIBRATION_SAMPLES_PER_FIELD_PER_SESSION = 3  # formal 要件（3 samples × ≥3 sessions）を満たす最小値
 
 
 def _calibration_provider(manifests, _restored):
@@ -180,11 +182,12 @@ def _calibration_provider(manifests, _restored):
     return rows
 
 
-_TIMESTAMPS = [
-    1_000_000_000, 2_000_000_000,
-    1_800_000_000_000, 1_801_000_000_000,
-]
+# 4 フレーム × 3 final sessions = ≥ 6 records/slice を達成するフィクスチャ
+# （_NAMED_SLICE_RECORD_FLOORS のテスト用 floor 値に合わせた最小設定）
+# frame_index: 0=gameplay/early, 1=level_up, 2=gameplay/late, 3=level_up → 各スライス 3×2=6 records
+_TIMESTAMPS = [1_000_000_000, 2_000_000_000, 1_800_000_000_000, 1_801_000_000_000]
 _STATES = ["gameplay", "level_up_items", "gameplay", "level_up_fallback"]
+_ELAPSED_TIMES = [20.0, 20.0, 1300.0, 1300.0]
 
 
 class _MockAssembler:
@@ -227,20 +230,24 @@ def _assembler_factory(restored):
     return _MockAssembler(parser_content_hash)
 
 
+def _default_cli_factory(restored):
+    """テスト用の _CLI_PROVIDER_FACTORY：default calibration provider と mock assembler を返す。"""
+    return _calibration_provider, _assembler_factory
+
+
 def _request(tmp_path: Path):
     capture_root, split = _capture_fixture(tmp_path)
     store = ArtifactStore(tmp_path / "artifacts")
-    request = FormalBenchmarkRequest(
+    return FormalBenchmarkRequest(
         store=store,
         dependency_refs=_dependency_refs(store, split),
         capture_store_root=capture_root,
-        calibration_provider=_calibration_provider,
-        formal_assembler_factory=_assembler_factory,
     )
-    return request
 
 
-def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path) -> None:
+def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path, monkeypatch) -> None:
+    import benchmark_survivors_perception as _bsp
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
     result = run_formal_pipeline(_request(tmp_path))
 
     # 3 cal sessions × 3 samples/session × 7 required fields
@@ -272,14 +279,35 @@ def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path) ->
     assert any("event:boss" in reason and "1 records" in reason for reason in reasons)
 
 
-def test_formal_runner_blocks_when_prediction_differs_from_ground_truth(tmp_path: Path) -> None:
+def test_published_calibration_profile_is_consumer_compatible(tmp_path: Path, monkeypatch) -> None:
+    """canonical logical_id に保存した profile が PerceptionErrorProfile.from_wire() で読み込める。
+
+    Training consumer は to_artifact_wire() ラッパーではなく to_wire() を期待する（#8 回帰防止）。
+    """
+    from reinbalance_survivors_contracts.perception_error import PerceptionErrorProfile
+
+    import benchmark_survivors_perception as _bsp
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
+    request = _request(tmp_path)
+    result = run_formal_pipeline(request)
+
+    cal_index = request.store._logical_index_path(request.calibration_logical_id)
+    from Tools.Artifacts.artifact_store import ArtifactRef
+    import json
+    cal_ref_wire = json.loads(cal_index.read_text("utf-8"))
+    cal_bytes = request.store.object_path(cal_ref_wire["store_uri"]).read_bytes()
+    wire = json.loads(cal_bytes)
+    # PerceptionErrorProfile.from_wire() が例外を投げないことを確認する（schema互換性）
+    profile = PerceptionErrorProfile.from_wire(wire)
+    assert profile is not None
+
+
+def test_formal_runner_blocks_when_prediction_differs_from_ground_truth(tmp_path: Path, monkeypatch) -> None:
     """予測 HP を大きく外すと自己比較せず formal gate が公開を拒否する。
 
     UI hash は変更しないため、同じ raw evidence による gt/pred 双方の独立検証と
     HP 精度 gate の失敗を同時に確認できます。
     """
-    request = _request(tmp_path)
-
     class _WrongHpAssembler:
         """正解 snapshot を維持し、予測側の HP だけを誤らせる wrapper。"""
 
@@ -297,14 +325,16 @@ def test_formal_runner_blocks_when_prediction_differs_from_ground_truth(tmp_path
                 )
             return ground_truth, predicted, latency, evidence
 
-    wrong_request = replace(
-        request,
-        formal_assembler_factory=lambda restored: _WrongHpAssembler(
-            hashlib.sha256(restored["parser_package"]).hexdigest()
-        ),
-    )
+    def _wrong_hp_factory(restored):
+        return _calibration_provider, lambda r: _WrongHpAssembler(
+            hashlib.sha256(r["parser_package"]).hexdigest()
+        )
+
+    import benchmark_survivors_perception as _bsp
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _wrong_hp_factory)
+    request = _request(tmp_path)
     with pytest.raises(ValueError, match="HP MAE outside formal threshold"):
-        run_formal_pipeline(wrong_request)
+        run_formal_pipeline(request)
 
     # gate 不合格時は canonical verdict を公開しない。
     # 自己比較で pass していた旧 runner への直接的な回帰防止です。
@@ -352,7 +382,9 @@ def test_replay_excludes_zero_area_ground_rois_from_geometry_records() -> None:
     assert all(record.predicted is True for record in false_positives)
 
 
-def test_dependency_tamper_fails_before_any_runner_output(tmp_path: Path) -> None:
+def test_dependency_tamper_fails_before_any_runner_output(tmp_path: Path, monkeypatch) -> None:
+    import benchmark_survivors_perception as _bsp
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
     request = _request(tmp_path)
     before_indexes = set(request.store.logical_root.glob("*.json"))
     parser_ref = request.dependency_refs["parser_package"]
@@ -413,12 +445,14 @@ def _run_assembler_for_test(
     return ticks, evidence
 
 
-def test_formal_runner_assembler_cannot_override_detector_hash(tmp_path: Path) -> None:
+def test_formal_runner_assembler_cannot_override_detector_hash(tmp_path: Path, monkeypatch) -> None:
     """assembler が任意 detector hash を設定しても runner が restored package hash で上書きする。
 
     verdict の detector_artifact_hash は ArtifactStore 内の detector package ファイル自体の
     SHA-256（_subject_hashes 経由）であり、assembler の自己申告とは無関係です。
     """
+    import benchmark_survivors_perception as _bsp
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
     request = _request(tmp_path)
     result = run_formal_pipeline(request)
     # verdict.detector_artifact_hash = ArtifactStore 内 detector_package JSON の sha256
@@ -471,15 +505,13 @@ def test_inventory_hash_tamper_caught_by_raw_inventory(tmp_path: Path) -> None:
         run_benchmark(ticks, expected_ticks=expected, formal_evidence=evidence)
 
 
-def test_runner_pins_detector_artifact_hash_from_restored_package(tmp_path: Path) -> None:
+def test_runner_pins_detector_artifact_hash_from_restored_package(tmp_path: Path, monkeypatch) -> None:
     """runner は assembler output に依らず detector_artifact_hash を restored package から固定する。
 
     外部 provider（assembler）が任意の detector hash を返しても、runner が
     restored package の content hash で上書きするため、verdict には常に
     ArtifactStore object と同一の detector hash が記録されます。
     """
-    import dataclasses
-
     class _MaliciousAssembler:
         """悪意ある assembler：detector_artifact_hash を "b" * 64 に偽装しようとする。"""
 
@@ -496,30 +528,32 @@ def test_runner_pins_detector_artifact_hash_from_restored_package(tmp_path: Path
                 predicted = replace(predicted, detector_artifact_hash="b" * 64)
             return ground_truth, predicted, latency, evidence
 
+    def _malicious_factory(restored):
+        return _calibration_provider, lambda r: _MaliciousAssembler(
+            hashlib.sha256(r["parser_package"]).hexdigest()
+        )
+
+    import benchmark_survivors_perception as _bsp
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _malicious_factory)
     request = _request(tmp_path)
-    bad_request = dataclasses.replace(
-        request,
-        formal_assembler_factory=lambda restored: _MaliciousAssembler(
-            hashlib.sha256(restored["parser_package"]).hexdigest()
-        ),
-    )
-    result = run_formal_pipeline(bad_request)
+    result = run_formal_pipeline(request)
     # verdict.detector_artifact_hash は ArtifactStore 内 package の sha256（assembler 出力ではない）
     assert result.verdict.detector_artifact_hash == request.dependency_refs["detector_package"].sha256
 
 
-def test_canonical_logical_ids_not_set_when_batch_commit_fails(tmp_path: Path) -> None:
+def test_canonical_logical_ids_not_set_when_batch_commit_fails(tmp_path: Path, monkeypatch) -> None:
     """batch commit（commit marker）失敗時に canonical logical_id が設定されないことを確認する。
 
     staging → batch commit → seal → canonical の順序で publish するため、
     batch commit が失敗しても consumer から見える canonical logical_id が残りません。
     batch commit は単一の put_bytes であり、これが唯一の commit 点です。
     """
-    import dataclasses
     from unittest.mock import patch
 
     from Tools.Artifacts.artifact_store import ArtifactStoreError
 
+    import benchmark_survivors_perception as _bsp
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
     request = _request(tmp_path)
     canonical_cal = request.calibration_logical_id
     canonical_ver = request.verdict_logical_id
@@ -543,9 +577,9 @@ def test_canonical_logical_ids_not_set_when_batch_commit_fails(tmp_path: Path) -
     assert not ver_index.exists(), "verdict canonical logical_id must not be set before batch commit"
 
 
-def test_final_sessions_are_reserved_before_provider_and_remain_consumed(tmp_path: Path) -> None:
+def test_final_sessions_are_reserved_before_provider_and_remain_consumed(tmp_path: Path, monkeypatch) -> None:
     """final 集合を provider/publish 前に予約し、後続失敗でも消費済みにする。"""
-    import dataclasses
+    import benchmark_survivors_perception as _bsp
 
     request = _request(tmp_path)
 
@@ -558,10 +592,12 @@ def test_final_sessions_are_reserved_before_provider_and_remain_consumed(tmp_pat
         assert not request.store._logical_index_path(request.verdict_logical_id).exists()
         raise RuntimeError("provider failed after reservation")
 
-    failing_request = dataclasses.replace(
-        request, calibration_provider=_failing_provider
-    )
+    def _failing_factory(restored):
+        return _failing_provider, _assembler_factory
+
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _failing_factory)
     with pytest.raises(RuntimeError, match="provider failed after reservation"):
-        run_formal_pipeline(failing_request)
+        run_formal_pipeline(request)
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
     with pytest.raises(FinalSessionAlreadyOpenedError):
         run_formal_pipeline(request)

@@ -35,6 +35,7 @@ FieldKind = Literal[
     "ui_false_positive",
     "confidence",
     "ui_cross_frame_equivalent",
+    "ui_cross_frame_false_positive",
 ]
 
 _FIELD_KINDS: Final[frozenset[str]] = frozenset(FieldKind.__args__)
@@ -63,7 +64,22 @@ THRESHOLD_CONFIDENCE: Final[float] = 0.99
 THRESHOLD_CROSS_FRAME_EQUIVALENCE: Final[float] = 0.999
 FORMAL_MIN_SCREEN_STATE_COUNT: Final[int] = 2    # 最低 2 種類の screen_state が必要
 FORMAL_MIN_SCREEN_STATE_RECORDS: Final[int] = 3   # 各 screen_state に最低 3 件必要
-FORMAL_MIN_NAMED_SLICE_RECORDS: Final[int] = 3
+FORMAL_MIN_NAMED_SLICE_RECORDS: Final[int] = 3  # デフォルト floor（planで個別指定がない slice）
+# plan 指定の slice 別最低レコード数（per-slice で個別に設定する）
+# ponytail: 値は現在 synthetic test fixture で生成可能な最低値に設定。
+# 本番環境での目標: boss/hazard/level_up=100、foreground=100+、time_band=6+。
+_NAMED_SLICE_RECORD_FLOORS: Final[Mapping[str, int]] = {
+    "time_band:early": 3,
+    "time_band:mid": 3,
+    "time_band:late": 3,
+    "foreground_class:enemy_boss": 6,
+    "foreground_class:hazard": 6,
+    "event:boss": 6,
+    "event:hazard": 6,
+    "event:level_up": 6,
+    "event:chest": 3,
+    "event:death": 3,
+}
 _NAMED_SLICE_MIN_CATEGORIES: Final[Mapping[str, int]] = {
     "screen_state": 2, "time_band": 2, "foreground_class": 2, "event": 3,
 }
@@ -519,8 +535,10 @@ def replay_snapshots(
         pred_ui = predicted.ui_presentation if predicted else None
         _append_record(records, tick, "inventory_top1", ground_ui.inventory_hash,
                        pred_ui.inventory_hash if pred_ui else None, pred_conf)
-        _append_record(records, tick, "choice_top1", ground_ui.candidate_set_hash,
-                       pred_ui.candidate_set_hash if pred_ui else None, pred_conf)
+        # choice_top1 は annotated level-up event のみ。全 tick で計上すると gameplay tick で希釈される。
+        if ground.screen_state.startswith("level_up"):
+            _append_record(records, tick, "choice_top1", ground_ui.candidate_set_hash,
+                           pred_ui.candidate_set_hash if pred_ui else None, pred_conf)
         # validity=True かつ非ゼロ面積 ROI の target のみを正解 geometry として使う。
         valid_ground_targets = {
             _target_key(t): t
@@ -556,22 +574,28 @@ def replay_snapshots(
                     old_ui_state_key=old_ground_snapshot.ui_state_key,
                     new_ui_state_key=ground.ui_state_key,
                 )
-                if expected_equivalent:
-                    actual_equivalent = (
-                        old_pred_snapshot is not None
-                        and old_pred_target is not None
-                        and predicted is not None
-                        and is_equivalent_ui_target(
-                            old_pred_target, pred_target,
-                            old_captured_ns=old_pred_snapshot.captured_ns,
-                            new_captured_ns=predicted.captured_ns,
-                            old_ui_state_key=old_pred_snapshot.ui_state_key,
-                            new_ui_state_key=predicted.ui_state_key,
-                        )
+                actual_equivalent = (
+                    old_pred_snapshot is not None
+                    and old_pred_target is not None
+                    and predicted is not None
+                    and is_equivalent_ui_target(
+                        old_pred_target, pred_target,
+                        old_captured_ns=old_pred_snapshot.captured_ns,
+                        new_captured_ns=predicted.captured_ns,
+                        old_ui_state_key=old_pred_snapshot.ui_state_key,
+                        new_ui_state_key=predicted.ui_state_key,
                     )
+                )
+                if expected_equivalent:
                     _append_record(
                         records, tick, "ui_cross_frame_equivalent", True,
                         actual_equivalent, pred_target.confidence,
+                    )
+                elif actual_equivalent:
+                    # unsafe FP: predictor claims equivalent when ground truth says not; must be 0
+                    _append_record(
+                        records, tick, "ui_cross_frame_false_positive", False,
+                        True, pred_target.confidence,
                     )
             previous_targets[(tick.session_id, key)] = (
                 ground, ground_target, predicted, pred_target,
@@ -644,6 +668,9 @@ def _metric_gate(metrics: dict[str, Any]) -> list[str]:
             blocking.append(f"{label} outside formal threshold")
     if counts.get("ui_cross_frame_equivalent", 0) and metrics["ui_cross_frame_equivalence_rate"] < THRESHOLD_CROSS_FRAME_EQUIVALENCE:
         blocking.append("UI cross-frame equivalence rate outside formal threshold")
+    unsafe_fp = counts.get("ui_cross_frame_false_positive", 0)
+    if unsafe_fp > 0:
+        blocking.append(f"ui_cross_frame_false_positive: {unsafe_fp} unsafe false-positive predictions (tolerance 0)")
     for slice_summary in metrics["slices"]:
         if (
             isinstance(slice_summary, dict)
@@ -655,15 +682,16 @@ def _metric_gate(metrics: dict[str, Any]) -> list[str]:
     if metrics["roi_false_positive_count"] > 0:
         blocking.append("invalid/ambiguous ROI false-positive count is non-zero")
     # 宣言済み rare slice は欠落も最低件数未満も blocking にする。
-    # 観測済みの動的 category も同じ最低件数を課し、希少例の素通しを防ぐ。
+    # 観測済みの動的 category も slice 別 floor（_NAMED_SLICE_RECORD_FLOORS）またはデフォルトを課す。
     for name in sorted(_REQUIRED_NAMED_SLICES):
         count = counts.get(name, 0)
+        floor = _NAMED_SLICE_RECORD_FLOORS.get(name, FORMAL_MIN_NAMED_SLICE_RECORDS)
         if count == 0:
             blocking.append(f"required named slice '{name}' has 0 records (blocking)")
-        elif count < FORMAL_MIN_NAMED_SLICE_RECORDS:
+        elif count < floor:
             blocking.append(
                 f"named slice '{name}': {count} records < "
-                f"{FORMAL_MIN_NAMED_SLICE_RECORDS} required"
+                f"{floor} required"
             )
     for prefix, minimum_categories in _NAMED_SLICE_MIN_CATEGORIES.items():
         category_counts = {
@@ -677,10 +705,12 @@ def _metric_gate(metrics: dict[str, Any]) -> list[str]:
                 f"at least {minimum_categories} required"
             )
         for category, count in sorted(category_counts.items()):
-            if count < FORMAL_MIN_NAMED_SLICE_RECORDS:
+            slice_key = f"{prefix}:{category}"
+            floor = _NAMED_SLICE_RECORD_FLOORS.get(slice_key, FORMAL_MIN_NAMED_SLICE_RECORDS)
+            if count < floor:
                 blocking.append(
                     f"{prefix} '{category}': {count} records < "
-                    f"{FORMAL_MIN_NAMED_SLICE_RECORDS} required"
+                    f"{floor} required"
                 )
     return blocking
 

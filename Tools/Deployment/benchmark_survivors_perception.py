@@ -76,11 +76,15 @@ FormalAssemblerFactory = Callable[[Mapping[str, bytes]], FormalAssembler]
 
 @dataclass(frozen=True, slots=True)
 class FormalBenchmarkRequest:
+    """formal benchmark 実行リクエスト。
+
+    provider/assembler はここに持たない。run_formal_pipeline が _CLI_PROVIDER_FACTORY
+    から hash-bound entrypoint をロードする。callback 注入は development-only API に限定する。
+    """
+
     store: ArtifactStore
     dependency_refs: Mapping[str, ArtifactRef]
     capture_store_root: Path
-    calibration_provider: CalibrationProvider
-    formal_assembler_factory: FormalAssemblerFactory
     calibration_logical_id: str = "perception/calibration/profile.json"
     verdict_logical_id: str = "perception/final/verdict.json"
 
@@ -112,7 +116,23 @@ _PACKAGE_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     }),
     "target_config": frozenset({"schema_version", "development_only", "formal_eligible", "threshold_hash"}),
 }
-_CLI_PROVIDER_FACTORY: Callable[[Mapping[str, bytes]], tuple[CalibrationProvider, FormalAssemblerFactory]] | None = None
+def _load_cli_provider_factory() -> (
+    Callable[[Mapping[str, bytes]], tuple[CalibrationProvider, FormalAssemblerFactory]] | None
+):
+    """インストール済みパッケージから hash-bound formal provider を動的にロードする。
+
+    survivors.formal_perception_provider が未インストールの場合は None を返す。
+    本番環境では parser/detector package とともにインストールし、
+    None 以外の factory が返るようにすること。
+    """
+    try:
+        from survivors.formal_perception_provider import build_formal_provider  # type: ignore[import]
+        return build_formal_provider
+    except ImportError:
+        return None
+
+
+_CLI_PROVIDER_FACTORY: Callable[[Mapping[str, bytes]], tuple[CalibrationProvider, FormalAssemblerFactory]] | None = _load_cli_provider_factory()
 
 
 def _restore_dependencies(request: FormalBenchmarkRequest) -> dict[str, bytes]:
@@ -177,14 +197,24 @@ def _restore_split_and_sessions(
     )
     if split.manifest_sha256 != split_ref.sha256:
         raise ValueError("capture split manifest is not exact-hash bound to ArtifactRef")
+    # Phase 1: final session は metadata_only で restore してから reservation し、
+    # その後に PNG デコード（full restore）する。競合 runner が reservation 前に
+    # 同じ PNG を読まないよう、デコードと予約の順序を逆転させる。
+    # calibration session は reservation 不要なので最初から full restore する。
+    final_session_ids: set[str] = {
+        unit.session_id
+        for unit in split.splits.get("final_e2e_test", ())
+    }
+
     manifests: dict[str, SessionManifest] = {}
-    for units in split.splits.values():
+    for split_name, units in split.splits.items():
         for unit in units:
             if unit.session_id in manifests:
-                # typed validate_split also rejects this; stop before a second restore/open.
                 raise ValueError(f"duplicate session in split: {unit.session_id}")
+            is_final = unit.session_id in final_session_ids
             manifests[unit.session_id] = DatasetWriter.restore(
-                request.capture_store_root, unit.session_id
+                request.capture_store_root, unit.session_id,
+                metadata_only=is_final,  # final は予約前に PNG をデコードしない
             )
     validated = validate_split(split, manifests)
     for session in validated.sessions:
@@ -258,7 +288,8 @@ def _descriptor_chain(
         identity_metadata={"split_manifest_hash": request.dependency_refs["capture_dataset"].sha256},
         files=(request.dependency_refs["capture_dataset"],),
     )
-    profile_bytes = canonical_json_bytes(profile.to_artifact_wire())
+    # consumer-compatible wire（to_wire()）が canonical ref のコンテンツ（#8対応）
+    profile_bytes = canonical_json_bytes(profile.to_wire())
     profile_node = ArtifactDescriptor(
         logical_id=request.calibration_logical_id,
         node_kind="perception_calibration_profile",
@@ -288,9 +319,15 @@ def _descriptor_chain(
 
 def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResult:
     """formal runner の実経路。依存検証失敗時は ArtifactStore へ何も書かない。"""
+    if _CLI_PROVIDER_FACTORY is None:
+        raise ValueError(
+            "formal pipeline requires an installed provider factory; "
+            "install survivors.formal_perception_provider or patch _CLI_PROVIDER_FACTORY in tests"
+        )
     # dependency/session restore は read-only で完了させ、その後 final marker だけを先行予約する。
     # 予約後の失敗では session は消費済みだが、seal/profile/verdict は publish されない。
     restored = _restore_dependencies(request)
+    calibration_provider, assembler_factory = _CLI_PROVIDER_FACTORY(restored)
     _, manifests, validated_split = _restore_split_and_sessions(
         request, restored["capture_dataset"]
     )
@@ -312,7 +349,13 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
             request.store, manifest.session_id,
             manifest.manifest_sha256, manifest.session_path / "session_manifest.json",
         )
-    residuals = list(request.calibration_provider(calibration_manifests, restored))
+    # reservation 完了後に final session を full restore（PNG デコード）する。
+    # metadata_only=True で restore した manifest を PNG 付きで差し替える。
+    final_manifests = tuple(
+        DatasetWriter.restore(request.capture_store_root, manifest.session_id)
+        for manifest in final_manifests
+    )
+    residuals = list(calibration_provider(calibration_manifests, restored))
     calibration_hashes = {
         manifest.session_id: manifest.manifest_sha256
         for manifest in calibration_manifests
@@ -354,7 +397,7 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     # runner が制御するもの: どの frame を処理するか（dataset から）、detector hash（restored package から）、
     # session_kind / source_policy（validated split から）。
     # assembler が制御するもの: frame の解釈のみ（観測値）。
-    assembler = request.formal_assembler_factory(restored)
+    assembler = assembler_factory(restored)
     # 検証済み store object の content hash を snapshot identity に固定する。
     # package JSON 内の自己申告 artifact_hash は formal identity の根拠にしない。
     parser_content_hash = request.dependency_refs["parser_package"].sha256
@@ -443,12 +486,30 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         raise ValueError("staged refs sha256 differ from prevalidated descriptor refs")
     validate_artifact_dag(descriptors)
 
-    # 2) batch commit manifest を単一 put_bytes で発行する（= commit 点）。
-    #    calibration と verdict の sha256 を同時に可視化する publication manifest index。
-    #    同一 lineage の再実行は同一 sha256 → idempotent。
+    # 2a0) descriptor manifest を immutable object として publish する。
+    for desc in descriptors:
+        desc_bytes = canonical_json_bytes(desc.to_wire())
+        request.store.put_bytes(
+            logical_id=f"perception/staging/descriptor/{desc.logical_id}",
+            data=desc_bytes, media_type="application/json",
+        )
+
+    # 2a) seal を batch commit より前にステージングする。
+    #     batch commit 直後の consumer が seal を見つけられるよう commit 点の前に公開する。
+    seal_bytes = canonical_json_bytes(seal.to_wire())
+    staged_seal_sha = lineage_seal_hash  # seal wire の sha256 = lineage_seal_hash
+    request.store.put_bytes(
+        logical_id=f"perception/staging/seal/{seal.seal_id}",
+        data=seal_bytes, media_type="application/json",
+    )
+
+    # 2b) batch commit manifest を単一 put_bytes で発行する（= commit 点）。
+    #     calibration / verdict / seal の sha256 を同時に可視化する。
+    #     同一 lineage の再実行は同一 sha256 → idempotent。
     batch_commit_payload = canonical_json_bytes({
         "schema_version": "perception_formal_batch_commit.v1",
         "seal_id": seal.seal_id,
+        "seal_artifact_sha256": staged_seal_sha,
         "calibration_artifact_sha256": staged_cal_ref.sha256,
         "verdict_artifact_sha256": staged_ver_ref.sha256,
     })
@@ -467,7 +528,8 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     if persisted_seal.seal_id != seal.seal_id:
         raise ValueError("persisted lineage seal identity changed after validation")
     calibration_ref = _write_formal_calibration_profile(
-        profile, store=request.store, logical_id=request.calibration_logical_id
+        profile, store=request.store, logical_id=request.calibration_logical_id,
+        subject_hashes=subjects,
     )
     verdict_ref = _write_formal_final_verdict(
         verdict, store=request.store, logical_id=request.verdict_logical_id
@@ -542,24 +604,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         refs = {name: _load_ref(required[name]) for name in _DEPENDENCY_NAMES}
         store = ArtifactStore(required["artifact_store"])
-        # CLI replay engines are supplied by the integrated parser/detector package adapter.
-        # Unit tests inject only this adapter; the pipeline below remains identical.
-        restored_preview = _restore_dependencies(
-            FormalBenchmarkRequest(
-                store=store, dependency_refs=refs,
-                capture_store_root=Path(required["capture_store"]),
-                calibration_provider=lambda *_: (), formal_assembler_factory=lambda *_: None,
-            )
-        )
-        if _CLI_PROVIDER_FACTORY is None:
-            raise ValueError("formal parser/detector replay adapter is not installed")
-        calibration_provider, final_provider = _CLI_PROVIDER_FACTORY(restored_preview)
         result = run_formal_pipeline(
             FormalBenchmarkRequest(
                 store=store, dependency_refs=refs,
                 capture_store_root=Path(required["capture_store"]),
-                calibration_provider=calibration_provider,
-                formal_assembler_factory=final_provider,
             )
         )
     except Exception as exc:  # fail closed: dependency failure never prints Verified

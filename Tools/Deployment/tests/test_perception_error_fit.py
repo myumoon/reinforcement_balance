@@ -92,8 +92,8 @@ def _full_report():
     # 必須名・category 数・最低 3 件をすべて満たし、verdict loader の再計算も維持する。
     report.slice_counts.update({
         "time_band:early": 3, "time_band:late": 3,
-        "foreground_class:enemy_boss": 3, "foreground_class:hazard": 3,
-        "event:boss": 3, "event:hazard": 3, "event:level_up": 3,
+        "foreground_class:enemy_boss": 6, "foreground_class:hazard": 6,
+        "event:boss": 6, "event:hazard": 6, "event:level_up": 6,
     })
     report.passed, report.blocking_reasons = recompute_gate_from_metrics(
         report.metrics_wire()

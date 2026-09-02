@@ -332,29 +332,30 @@ class ArtifactStore:
         sha256 = ref.sha256
         destination = self.object_path(ref.store_uri)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            existing = self.verify(ref)
-            if not existing.ok:
-                raise ArtifactStoreError(
-                    f"existing object {ref.store_uri} is corrupt: {existing.reason}"
+        with _thread_lock(destination):  # 同一 SHA への並行書込みを直列化する
+            if destination.exists():
+                existing = self.verify(ref)
+                if not existing.ok:
+                    raise ArtifactStoreError(
+                        f"existing object {ref.store_uri} is corrupt: {existing.reason}"
+                    )
+            else:
+                fd, temp_name = tempfile.mkstemp(
+                    prefix=f".{sha256}.", suffix=".tmp", dir=str(destination.parent)
                 )
-        else:
-            fd, temp_name = tempfile.mkstemp(
-                prefix=f".{sha256}.", suffix=".tmp", dir=str(destination.parent)
-            )
-            temp_path = Path(temp_name)
-            try:
-                with os.fdopen(fd, "wb") as handle:
-                    handle.write(data)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                temp_bytes = temp_path.read_bytes()
-                if sha256_hex(temp_bytes) != sha256 or len(temp_bytes) != len(data):
-                    raise ArtifactStoreError("temporary object failed hash/size verification")
-                _durable_replace(temp_path, destination)
-            finally:
-                if temp_path.exists():
-                    temp_path.unlink()
+                temp_path = Path(temp_name)
+                try:
+                    with os.fdopen(fd, "wb") as handle:
+                        handle.write(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    temp_bytes = temp_path.read_bytes()
+                    if sha256_hex(temp_bytes) != sha256 or len(temp_bytes) != len(data):
+                        raise ArtifactStoreError("temporary object failed hash/size verification")
+                    _durable_replace(temp_path, destination)
+                finally:
+                    if temp_path.exists():
+                        temp_path.unlink()
         verification = self.verify(ref)
         if not verification.ok:
             raise ArtifactStoreError(

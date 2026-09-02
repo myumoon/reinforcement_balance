@@ -65,12 +65,14 @@ _RESIDUAL_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 _FORMAL_REQUIRED_RESIDUAL_FIELDS: Final[frozenset[str]] = frozenset({
-    "coord_noise", "hp_ratio",
+    "coord_noise", "hp_ratio", "xp_ratio", "timer_seconds",
+    "inventory_hash", "coord_quantization_px",
     "burst_enter", "burst_exit", "burst_dropout",
+    "unknown_screen_collapse", "unknown_screen_collapse_duration",
     "item_category", "enemy_category",
 })
 _FORMAL_RESIDUAL_MIN_SAMPLES: Final[int] = 3
-_FORMAL_RESIDUAL_MIN_SESSIONS: Final[int] = 2
+_FORMAL_RESIDUAL_MIN_SESSIONS: Final[int] = 3
 _FORMAL_FACTORY_TOKEN = object()
 
 
@@ -700,15 +702,33 @@ def _create_formal_final_verdict(
 
 def _write_formal_calibration_profile(
     profile: FittedPerceptionErrorProfile, *, store: Any, logical_id: str,
+    subject_hashes: Mapping[str, str] | None = None,
 ) -> Any:
+    """consumer-compatible wire（to_wire()）を canonical logical_id へ保存する。
+
+    Training consumer は PerceptionErrorProfile.from_wire() でそのまま読み込める。
+    artifact metadata（session hashes/fit hash/subject hashes）は to_artifact_wire() 形式で
+    別の staging logical_id へ保存し、canonical ref には含めない。
+    """
     if not isinstance(profile, FittedPerceptionErrorProfile) or store is None:
         raise FormalVerdictPromotionError("formal calibration writer requires fitted profile and ArtifactStore")
+    # consumer-compatible format at canonical logical_id
     ref = store.put_bytes(
-        logical_id=logical_id, data=canonical_json_bytes(profile.to_artifact_wire()),
+        logical_id=logical_id, data=canonical_json_bytes(profile.to_wire()),
         media_type="application/json",
     )
     if not store.verify(ref).ok:
         raise HashMismatchError("calibration profile publish revalidation failed")
+    # artifact metadata with subject hashes preserved at a separate staging path for provenance
+    artifact_wire = profile.to_artifact_wire()
+    if subject_hashes:
+        artifact_wire["subject_hashes"] = dict(subject_hashes)
+    artifact_bytes = canonical_json_bytes(artifact_wire)
+    artifact_sha = hashlib.sha256(artifact_bytes).hexdigest()
+    store.put_bytes(
+        logical_id=f"perception/staging/calibration_artifact/{artifact_sha}",
+        data=artifact_bytes, media_type="application/json",
+    )
     return ref
 
 

@@ -383,8 +383,14 @@ class DatasetWriter:
 
     @classmethod
     def restore(
-        cls, store_root: os.PathLike[str] | str | None, session_id: str
+        cls, store_root: os.PathLike[str] | str | None, session_id: str,
+        *, metadata_only: bool = False,
     ) -> SessionManifest:
+        """session manifest を restore する。
+
+        metadata_only=True の場合、PNG デコードをスキップして frame_records のみを返す。
+        reservation（create-once 予約）の前に final session のメタデータだけを読む用途に使う。
+        """
         root = _validated_store_root(store_root)
         safe_session_id = _validated_component(session_id, "session_id")
         session_path = _resolve_relative(
@@ -435,18 +441,19 @@ class DatasetWriter:
                     raise ValueError(f"missing object: {record.object_path}")
                 if _sha256_file(object_path) != record.object_sha256:
                     raise ValueError(f"object hash mismatch: {record.object_path}")
-                pixels = _decode_lossless_png(object_path.read_bytes())
-                frames.append(
-                    CapturedFrame(
-                        frame_bgra=pixels,
-                        captured_monotonic_ns=record.captured_monotonic_ns,
-                        session_frame_index=record.frame_id,
-                        client_rect_screen_px=record.client_rect_screen_px,
-                        foreground=record.foreground,
-                        target_profile_hash=record.target_profile_hash,
-                        game_build_id=record.game_build_id,
+                if not metadata_only:
+                    pixels = _decode_lossless_png(object_path.read_bytes())
+                    frames.append(
+                        CapturedFrame(
+                            frame_bgra=pixels,
+                            captured_monotonic_ns=record.captured_monotonic_ns,
+                            session_frame_index=record.frame_id,
+                            client_rect_screen_px=record.client_rect_screen_px,
+                            foreground=record.foreground,
+                            target_profile_hash=record.target_profile_hash,
+                            game_build_id=record.game_build_id,
+                        )
                     )
-                )
                 records.append(record)
                 seen_ids.add(record.frame_id)
                 last_timestamp = record.captured_monotonic_ns
