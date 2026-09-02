@@ -36,8 +36,11 @@ def _seal_subjects() -> dict[str, str]:
     return {
         "parser_artifact_hash": "a" * 64,
         "detector_artifact_hash": "b" * 64,
+        "model_hash": "8" * 64,
+        "build_hash": "9" * 64,
         "assembler_schema_hash": "c" * 64,
         "ui_presentation_schema_hash": "d" * 64,
+        "ui_presentation_golden_fixture_hash": "0" * 64,
         "config_hash": "e" * 64,
         "capture_dataset_hash": "f" * 64,
         "calibration_profile_hash": "1" * 64,
@@ -151,6 +154,23 @@ class TestFit:
         with pytest.raises(InvalidResidualError):
             CalibrationResidual(**args)
 
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("burst_enter", -0.01),
+            ("burst_exit", 1.01),
+            ("burst_dropout", 2.0),
+            ("unknown_screen_collapse", -1.0),
+            ("unknown_screen_collapse_duration", -0.01),
+            ("coord_quantization_px", -0.01),
+        ],
+    )
+    def test_probability_and_nonnegative_residual_boundaries_reject(
+        self, field: str, value: float
+    ) -> None:
+        with pytest.raises(InvalidResidualError):
+            CalibrationResidual("c", "f", field, value, 0.9, 0, 0.0)
+
 
 class TestLineageSeal:
     def _manifest(self, tmp_path: Path, name: str, content: bytes = b"manifest") -> tuple[Path, str]:
@@ -226,7 +246,8 @@ class TestFinalVerdict:
         base = self._wire()
         kwargs = {name: base[name] for name in (
             "verdict_id", "seal_id", "final_session_ids", "parser_artifact_hash",
-            "detector_artifact_hash", "assembler_schema_hash", "ui_presentation_schema_hash",
+            "detector_artifact_hash", "model_hash", "build_hash", "assembler_schema_hash",
+            "ui_presentation_schema_hash", "ui_presentation_golden_fixture_hash",
             "config_hash", "capture_dataset_hash", "calibration_profile_hash", "threshold_hash",
             "atlas_vocabulary_hash", "assembler_impl_hash", "roi_resolver_input_hash",
             "benchmark_fit_code_hash", "lineage_seal_hash", "metrics", "passed", "blocking_reasons",

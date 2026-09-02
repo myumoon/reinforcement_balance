@@ -14,6 +14,7 @@ import pytest
 from survivors.capture_dataset import FrameRecord, SessionManifest, SplitManifest, SplitUnit
 from survivors.perception_session_split import (
     ClockRegressionError,
+    DuplicateFrameError,
     MissingBenchmarkSplitError,
     MixedBuildError,
     SessionRecord,
@@ -49,7 +50,7 @@ def _manifest(tmp_path: Path, session_id: str) -> SessionManifest:
     )
     return SessionManifest(
         1, session_id, _PH, "build-1", False, "synthetic", "lossless_png",
-        "frames.jsonl", "d" * 64, len(records), session_path,
+        "frames.jsonl", hashlib.sha256(f"metadata:{session_id}".encode()).hexdigest(), len(records), session_path,
         manifest_hash, records, (),
     )
 
@@ -63,6 +64,8 @@ def _session(
     source_policy: str = "raw",
     duration_seconds: float = 1800.0,
     session_hash: str | None = None,
+    frame_content_hashes: tuple[str, ...] = (),
+    capture_lineage: tuple[str, ...] = (),
 ) -> SessionRecord:
     if session_hash is None:
         session_hash = hashlib.sha256(session_id.encode()).hexdigest()
@@ -75,6 +78,8 @@ def _session(
         duration_seconds=duration_seconds,
         kind=kind,  # type: ignore[arg-type]
         source_policy=source_policy,  # type: ignore[arg-type]
+        frame_content_hashes=frame_content_hashes,
+        capture_lineage=capture_lineage,
     )
 
 
@@ -130,6 +135,39 @@ class TestSplitOverlap:
         duplicate = _session("same", "model_train")
         with pytest.raises(SplitOverlapError, match="session_id"):
             validate_split([duplicate, duplicate])
+
+    def test_one_shared_frame_across_otherwise_different_sessions_fails(self) -> None:
+        """完全一致でなく一フレームだけの intersection も拒否する。"""
+        shared = "9" * 64
+        sessions = [
+            _session(
+                "cal", "error_calibration",
+                frame_content_hashes=("1" * 64, shared),
+                capture_lineage=("3" * 64, "4" * 64),
+            ),
+            _session(
+                "final", "final_e2e_test",
+                frame_content_hashes=(shared, "2" * 64),
+                capture_lineage=("5" * 64, "6" * 64),
+            ),
+        ]
+        with pytest.raises(DuplicateFrameError, match="frame content"):
+            validate_split(sessions, min_benchmark_sessions=1)
+
+    def test_one_shared_capture_lineage_across_transcodes_fails(self) -> None:
+        lineage = "8" * 64
+        sessions = [
+            _session(
+                "cal", "error_calibration",
+                frame_content_hashes=("1" * 64,), capture_lineage=(lineage,),
+            ),
+            _session(
+                "final", "final_e2e_test",
+                frame_content_hashes=("2" * 64,), capture_lineage=(lineage,),
+            ),
+        ]
+        with pytest.raises(DuplicateFrameError, match="capture lineage"):
+            validate_split(sessions, min_benchmark_sessions=1)
 
 
 class TestMixedBuild:

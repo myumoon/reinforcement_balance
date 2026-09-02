@@ -13,6 +13,7 @@ from survivors.perception_benchmark import (
     BenchmarkReport,
     ExpectedTick,
     bootstrap_cluster_ci,
+    recompute_gate_from_metrics,
     run_benchmark,
     _is_valid_ground_target,
     _is_usable_pred_target,
@@ -407,6 +408,43 @@ class TestRareSliceGate:
         r1 = run_benchmark(records, rng_seed=0)
         r2 = run_benchmark(records, rng_seed=0)
         assert r1.screen_state_f1 == r2.screen_state_f1
+
+    def test_formal_gate_requires_real_data_floors_and_slice_ci(self) -> None:
+        report = run_benchmark([
+            _rec(
+                "screen_state", "gameplay", "gameplay",
+                session=f"s{i % 2}", frame=str(i),
+            )
+            for i in range(20)
+        ])
+        metrics = report.metrics_wire()
+        for name, value in tuple(metrics.items()):
+            if isinstance(value, float) and not np.isfinite(value):
+                metrics[name] = 0.0
+        metrics["slice_counts"].update({
+            "time_band:early": 20,
+            "time_band:mid": 20,
+            "time_band:late": 20,
+            "foreground_class:enemy_normal": 199,
+            "foreground_class:enemy_boss": 200,
+            "foreground_class:hazard": 200,
+            "event:boss": 100,
+            "event:hazard": 100,
+            "event:level_up": 100,
+            "event:chest": 30,
+            "event:death": 20,
+            "event:result": 20,
+        })
+        metrics["slice_session_counts"] = {
+            "time_band:early": 2,
+            "time_band:mid": 2,
+            "time_band:late": 2,
+        }
+        passed, reasons = recompute_gate_from_metrics(metrics, formal=True)
+        assert passed is False
+        assert any("enemy_normal" in reason and "200" in reason for reason in reasons)
+        assert any("CI" in reason for reason in reasons)
+
 
 
 class TestThresholdGate:

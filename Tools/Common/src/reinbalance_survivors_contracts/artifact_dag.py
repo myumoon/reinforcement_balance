@@ -14,6 +14,7 @@ __all__ = [
     "ArtifactDagReport",
     "ALLOWED_PARENT_KINDS",
     "validate_artifact_dag",
+    "validate_formal_runtime_dag",
 ]
 
 
@@ -47,6 +48,10 @@ _REQUIRED_PARENT_KINDS: dict[str, frozenset[str]] = {
     "goal_evidence": frozenset({"canary_campaign", "restore_test_verdict"}),
     "perception_final_verdict": frozenset({"perception_calibration_profile"}),
 }
+
+_FORMAL_RUNTIME_PARENT_KINDS = frozenset(
+    {"item_selector_release", "combat_student_release", "perception_final_verdict"}
+)
 
 
 _KIND_ORDER = {
@@ -187,3 +192,56 @@ def validate_artifact_dag(
         node_count=len(identity_to_node),
         topological_identity_hashes=tuple(topological),
     )
+
+
+def validate_formal_runtime_dag(
+    descriptors: Sequence[ArtifactDescriptor | Mapping[str, Any]],
+) -> ArtifactDagReport:
+    """formal runtime bundle の parent と perception verdict 内容を検証する。
+
+    汎用 DAG validator は development bundle の部分 parent を許容する。formal
+    publish/restore 境界では本 validator を追加で通し、model 二種と exact final
+    verdict、passed/development/subject binding を全て必須にする。
+    """
+    nodes = tuple(_coerce_descriptor(value) for value in descriptors)
+    report = validate_artifact_dag(nodes)
+    by_identity = {node.identity_hash: node for node in nodes}
+    runtimes = [node for node in nodes if node.node_kind == "runtime_bundle"]
+    if not runtimes:
+        raise ArtifactDagValidationError("formal runtime DAG requires runtime_bundle")
+    for runtime in runtimes:
+        parents = [by_identity[parent.identity_hash] for parent in runtime.parents]
+        parent_kinds = {parent.node_kind for parent in parents}
+        missing = _FORMAL_RUNTIME_PARENT_KINDS - parent_kinds
+        if missing:
+            raise ArtifactDagValidationError(
+                "formal runtime_bundle missing required parent kind(s): "
+                + ", ".join(sorted(missing))
+            )
+        verdicts = [
+            parent for parent in parents
+            if parent.node_kind == "perception_final_verdict"
+        ]
+        if len(verdicts) != 1:
+            raise ArtifactDagValidationError(
+                "formal runtime_bundle requires exactly one perception_final_verdict"
+            )
+        verdict_metadata = verdicts[0].identity_metadata
+        if (
+            verdict_metadata.get("passed") is not True
+            or verdict_metadata.get("development_only") is not False
+        ):
+            raise ArtifactDagValidationError(
+                "perception_final_verdict must be passed and production-only"
+            )
+        verdict_subjects = verdict_metadata.get("subject_hashes")
+        runtime_subjects = runtime.identity_metadata.get("perception_subject_hashes")
+        if (
+            not isinstance(verdict_subjects, Mapping)
+            or not verdict_subjects
+            or verdict_subjects != runtime_subjects
+        ):
+            raise ArtifactDagValidationError(
+                "runtime perception subject hashes do not match final verdict"
+            )
+    return report

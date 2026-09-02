@@ -28,8 +28,11 @@ FINAL_VERDICT_SCHEMA_VERSION: Final[str] = "perception_final_verdict.v2"
 _HASH_FIELDS: Final[tuple[str, ...]] = (
     "parser_artifact_hash",
     "detector_artifact_hash",
+    "model_hash",
+    "build_hash",
     "assembler_schema_hash",
     "ui_presentation_schema_hash",
+    "ui_presentation_golden_fixture_hash",
     "config_hash",
     "capture_dataset_hash",
     "calibration_profile_hash",
@@ -156,6 +159,15 @@ class CalibrationResidual:
         if self.field not in _RESIDUAL_FIELDS:
             raise InvalidResidualError(f"unsupported residual field {self.field!r}")
         object.__setattr__(self, "residual", _strict_number(self.residual, "residual"))
+        if self.field in {
+            "burst_enter", "burst_exit", "burst_dropout",
+            "unknown_screen_collapse",
+        } and not 0.0 <= self.residual <= 1.0:
+            raise InvalidResidualError(f"{self.field} residual must be in [0, 1]")
+        if self.field in {
+            "coord_quantization_px", "unknown_screen_collapse_duration",
+        } and self.residual < 0.0:
+            raise InvalidResidualError(f"{self.field} residual must be non-negative")
         confidence = _strict_number(self.confidence, "confidence")
         if not 0.0 <= confidence <= 1.0:
             raise InvalidResidualError("confidence must be in [0, 1]")
@@ -211,6 +223,31 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
             "field_sample_counts": dict(self.field_sample_counts),
             "fit_code_hash": self.fit_code_hash,
         }
+
+    @classmethod
+    def from_artifact_wire(
+        cls, data: Mapping[str, Any]
+    ) -> "FittedPerceptionErrorProfile":
+        expected = {
+            "schema_version", "profile", "profile_hash",
+            "calibration_session_hashes", "field_sample_counts", "fit_code_hash",
+        }
+        if not isinstance(data, Mapping) or set(data) != expected:
+            raise ValueError("calibration artifact fields do not match schema")
+        if data["schema_version"] != CALIBRATION_ARTIFACT_SCHEMA_VERSION:
+            raise ValueError("unsupported calibration artifact schema")
+        profile = PerceptionErrorProfile.from_wire(data["profile"])
+        if profile.profile_hash != data["profile_hash"]:
+            raise HashMismatchError("calibration artifact profile hash mismatch")
+        fitted = cls(
+            **profile.to_wire(),
+            calibration_session_hashes=data["calibration_session_hashes"],
+            field_sample_counts=data["field_sample_counts"],
+            fit_code_hash=data["fit_code_hash"],
+        )
+        if fitted.to_artifact_wire() != dict(data):
+            raise HashMismatchError("calibration artifact failed canonical reconstruction")
+        return fitted
 
     @property
     def artifact_hash(self) -> str:
@@ -355,21 +392,20 @@ def fit_error_profile(
     all_weights = [max(row.confidence / (1.0 + row.age_frames), 1e-12) for row in residuals]
     latency_values = [row.latency_frames for row in residuals]
     fit_code_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    clamp = lambda value: min(1.0, max(0.0, value))
     return FittedPerceptionErrorProfile(
-        latency_mean_frames=max(0.0, _weighted_mean(latency_values, all_weights)),
-        latency_std_frames=max(0.0, _weighted_std(latency_values, all_weights)),
-        burst_enter_prob=clamp(mean("burst_enter")),
-        burst_exit_prob=clamp(mean("burst_exit", 1.0)),
-        burst_dropout_prob=clamp(mean("burst_dropout")),
-        coord_noise_std=max(0.0, std("coord_noise")),
-        coord_quantization_px=max(0.0, mean("coord_quantization_px")),
-        hud_hp_misread_std=max(0.0, std("hp_ratio")),
-        hud_xp_stale_prob=clamp(probability("xp_ratio", 0.1)),
-        hud_timer_stale_prob=clamp(probability("timer_seconds", 1.0)),
-        hud_inventory_stale_prob=clamp(probability("inventory_hash", 0.5)),
-        unknown_screen_collapse_prob=clamp(mean("unknown_screen_collapse")),
-        unknown_screen_collapse_duration_frames=max(0.0, mean("unknown_screen_collapse_duration")),
+        latency_mean_frames=_weighted_mean(latency_values, all_weights),
+        latency_std_frames=_weighted_std(latency_values, all_weights),
+        burst_enter_prob=mean("burst_enter"),
+        burst_exit_prob=mean("burst_exit", 1.0),
+        burst_dropout_prob=mean("burst_dropout"),
+        coord_noise_std=std("coord_noise"),
+        coord_quantization_px=mean("coord_quantization_px"),
+        hud_hp_misread_std=std("hp_ratio"),
+        hud_xp_stale_prob=probability("xp_ratio", 0.1),
+        hud_timer_stale_prob=probability("timer_seconds", 1.0),
+        hud_inventory_stale_prob=probability("inventory_hash", 0.5),
+        unknown_screen_collapse_prob=mean("unknown_screen_collapse"),
+        unknown_screen_collapse_duration_frames=mean("unknown_screen_collapse_duration"),
         item_confusion_matrix=_confusion_matrix(by_field.get("item_category", [])),
         enemy_confusion_matrix=_confusion_matrix(by_field.get("enemy_category", [])),
         calibration_session_ids=cal_ids,
@@ -403,8 +439,11 @@ class FinalLineageSeal:
     final_session_hashes: Mapping[str, str]
     parser_artifact_hash: str
     detector_artifact_hash: str
+    model_hash: str
+    build_hash: str
     assembler_schema_hash: str
     ui_presentation_schema_hash: str
+    ui_presentation_golden_fixture_hash: str
     config_hash: str
     capture_dataset_hash: str
     calibration_profile_hash: str
@@ -588,8 +627,11 @@ class PerceptionFinalVerdict:
     final_session_ids: list[str]
     parser_artifact_hash: str
     detector_artifact_hash: str
+    model_hash: str
+    build_hash: str
     assembler_schema_hash: str
     ui_presentation_schema_hash: str
+    ui_presentation_golden_fixture_hash: str
     config_hash: str
     capture_dataset_hash: str
     calibration_profile_hash: str
@@ -662,7 +704,9 @@ def _create_final_verdict(
 ) -> PerceptionFinalVerdict:
     if set(subject_hashes) != set(_HASH_FIELDS):
         raise ValueError("final verdict requires the complete hash subject set")
-    passed, blocking = recompute_gate_from_metrics(report.metrics_wire())
+    passed, blocking = recompute_gate_from_metrics(
+        report.metrics_wire(), formal=formal_eligible
+    )
     if report.passed != passed or report.blocking_reasons != blocking:
         raise StaleVerdictError("BenchmarkReport gate fields do not match metric recomputation")
     identity = _verdict_identity_payload(report, seal_id, final_session_ids, subject_hashes)
@@ -698,38 +742,6 @@ def _create_formal_final_verdict(
         report, seal_id=seal_id, final_session_ids=final_session_ids,
         development_only=False, formal_eligible=True, **subject_hashes,
     )
-
-
-def _write_formal_calibration_profile(
-    profile: FittedPerceptionErrorProfile, *, store: Any, logical_id: str,
-    subject_hashes: Mapping[str, str] | None = None,
-) -> Any:
-    """consumer-compatible wire（to_wire()）を canonical logical_id へ保存する。
-
-    Training consumer は PerceptionErrorProfile.from_wire() でそのまま読み込める。
-    artifact metadata（session hashes/fit hash/subject hashes）は to_artifact_wire() 形式で
-    別の staging logical_id へ保存し、canonical ref には含めない。
-    """
-    if not isinstance(profile, FittedPerceptionErrorProfile) or store is None:
-        raise FormalVerdictPromotionError("formal calibration writer requires fitted profile and ArtifactStore")
-    # consumer-compatible format at canonical logical_id
-    ref = store.put_bytes(
-        logical_id=logical_id, data=canonical_json_bytes(profile.to_wire()),
-        media_type="application/json",
-    )
-    if not store.verify(ref).ok:
-        raise HashMismatchError("calibration profile publish revalidation failed")
-    # artifact metadata with subject hashes preserved at a separate staging path for provenance
-    artifact_wire = profile.to_artifact_wire()
-    if subject_hashes:
-        artifact_wire["subject_hashes"] = dict(subject_hashes)
-    artifact_bytes = canonical_json_bytes(artifact_wire)
-    artifact_sha = hashlib.sha256(artifact_bytes).hexdigest()
-    store.put_bytes(
-        logical_id=f"perception/staging/calibration_artifact/{artifact_sha}",
-        data=artifact_bytes, media_type="application/json",
-    )
-    return ref
 
 
 def _write_formal_final_verdict(
@@ -777,7 +789,9 @@ def load_final_verdict(
         raise ValueError("verdict flags must be exact bool values")
     if not isinstance(data["blocking_reasons"], list) or not all(type(value) is str for value in data["blocking_reasons"]):
         raise ValueError("blocking_reasons must be a string list")
-    passed, blocking = recompute_gate_from_metrics(data["metrics"])
+    passed, blocking = recompute_gate_from_metrics(
+        data["metrics"], formal=not data["development_only"]
+    )
     if data["passed"] != passed or data["blocking_reasons"] != blocking:
         raise StaleVerdictError("stored pass/blocking result does not match metric gate")
     identity_payload = {

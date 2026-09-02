@@ -3,6 +3,7 @@ import pytest
 from reinbalance_survivors_contracts.artifact_dag import (
     ArtifactDagValidationError,
     validate_artifact_dag,
+    validate_formal_runtime_dag,
 )
 from reinbalance_survivors_contracts.artifact_identity import (
     ArtifactDescriptor,
@@ -35,6 +36,22 @@ def _node(logical_id, node_kind, parents=(), ch="a"):
         identity_metadata={"stable_config_hash": _hash("f")},
         parents=parents,
         files=(_file(f"{logical_id}.bin", ch),),
+    )
+
+
+def _formal_verdict(profile):
+    return ArtifactDescriptor(
+        logical_id="perception-verdict",
+        node_kind="perception_final_verdict",
+        producer_id="test-producer",
+        producer_version="v1",
+        identity_metadata={
+            "passed": True,
+            "development_only": False,
+            "subject_hashes": {"model_hash": _hash("9")},
+        },
+        parents=(profile.node_ref(),),
+        files=(_file("perception-verdict.json", "c"),),
     )
 
 
@@ -103,6 +120,42 @@ def test_perception_profile_and_final_verdict_real_descriptors_pass_consumer_dag
         profile.identity_hash,
         verdict.identity_hash,
     )
+
+
+def test_formal_runtime_requires_passed_production_perception_verdict():
+    source = _node("source", "source_descriptor", ch="a")
+    teacher = _node("teacher", "teacher_validation_verdict", (source.node_ref(),), "b")
+    dataset = _node("dataset", "choice_dataset_release", (teacher.node_ref(),), "c")
+    item = _node("item", "item_selector_release", (dataset.node_ref(),), "d")
+    combat = _node("combat", "combat_student_release", (dataset.node_ref(),), "e")
+    profile = _node("profile", "perception_calibration_profile", (source.node_ref(),), "1")
+    verdict = _formal_verdict(profile)
+    runtime = ArtifactDescriptor(
+        logical_id="runtime",
+        node_kind="runtime_bundle",
+        producer_id="test-producer",
+        producer_version="v1",
+        identity_metadata={"perception_subject_hashes": {"model_hash": _hash("9")}},
+        parents=(item.node_ref(), combat.node_ref(), verdict.node_ref()),
+        files=(_file("runtime.bin", "2"),),
+    )
+    assert validate_formal_runtime_dag(
+        [source, teacher, dataset, item, combat, profile, verdict, runtime]
+    ).node_count == 8
+
+    missing = ArtifactDescriptor(
+        logical_id="runtime-no-perception",
+        node_kind="runtime_bundle",
+        producer_id="test-producer",
+        producer_version="v1",
+        identity_metadata={"perception_subject_hashes": {"model_hash": _hash("9")}},
+        parents=(item.node_ref(), combat.node_ref()),
+        files=(_file("runtime-no-perception.bin", "3"),),
+    )
+    with pytest.raises(ArtifactDagValidationError, match="perception_final_verdict"):
+        validate_formal_runtime_dag(
+            [source, teacher, dataset, item, combat, profile, verdict, missing]
+        )
 
 
 def test_child_verdict_parent_reference_is_valid_storage_direction():

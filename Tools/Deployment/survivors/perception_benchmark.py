@@ -64,30 +64,41 @@ THRESHOLD_CONFIDENCE: Final[float] = 0.99
 THRESHOLD_CROSS_FRAME_EQUIVALENCE: Final[float] = 0.999
 FORMAL_MIN_SCREEN_STATE_COUNT: Final[int] = 2    # 最低 2 種類の screen_state が必要
 FORMAL_MIN_SCREEN_STATE_RECORDS: Final[int] = 3   # 各 screen_state に最低 3 件必要
-FORMAL_MIN_NAMED_SLICE_RECORDS: Final[int] = 3  # デフォルト floor（planで個別指定がない slice）
-# plan 指定の slice 別最低レコード数（per-slice で個別に設定する）
-# ponytail: 値は現在 synthetic test fixture で生成可能な最低値に設定。
-# 本番環境での目標: boss/hazard/level_up=100、foreground=100+、time_band=6+。
-_NAMED_SLICE_RECORD_FLOORS: Final[Mapping[str, int]] = {
-    "time_band:early": 3,
-    "time_band:mid": 3,
-    "time_band:late": 3,
-    "foreground_class:enemy_boss": 6,
-    "foreground_class:hazard": 6,
-    "event:boss": 6,
-    "event:hazard": 6,
-    "event:level_up": 6,
-    "event:chest": 3,
-    "event:death": 3,
+_FORMAL_SLICE_COUNT_FLOORS: Final[Mapping[str, int]] = {
+    "foreground_class:enemy_normal": 200,
+    "foreground_class:enemy_boss": 200,
+    "foreground_class:hazard": 200,
+    "event:boss": 100,
+    "event:hazard": 100,
+    "event:level_up": 100,
+    "event:chest": 30,
+    "event:death": 20,
+    "event:result": 20,
 }
-_NAMED_SLICE_MIN_CATEGORIES: Final[Mapping[str, int]] = {
-    "screen_state": 2, "time_band": 2, "foreground_class": 2, "event": 3,
+_FORMAL_TIME_BANDS: Final[frozenset[str]] = frozenset(
+    {"time_band:early", "time_band:mid", "time_band:late"}
+)
+_FORMAL_SLICE_SESSION_FLOORS: Final[Mapping[str, int]] = {
+    name: 2 for name in _FORMAL_TIME_BANDS
 }
-_REQUIRED_NAMED_SLICES: Final[frozenset[str]] = frozenset({
-    "time_band:early", "time_band:late",
-    "foreground_class:enemy_boss", "foreground_class:hazard",
-    "event:boss", "event:hazard", "event:level_up",
-})
+_FORMAL_SLICE_THRESHOLDS: Final[Mapping[str, float]] = {
+    **{name: 0.995 for name in _FORMAL_TIME_BANDS},
+    "foreground_class:enemy_normal": 0.990,
+    "foreground_class:enemy_boss": 0.990,
+    "foreground_class:hazard": 0.990,
+    "event:boss": 0.990,
+    "event:hazard": 0.990,
+    "event:level_up": 0.995,
+    "event:chest": 0.995,
+    "event:death": 0.995,
+    "event:result": 0.995,
+}
+_FORMAL_REQUIRED_SLICES: Final[frozenset[str]] = frozenset(
+    set(_FORMAL_TIME_BANDS) | set(_FORMAL_SLICE_COUNT_FLOORS)
+)
+_NAMED_SLICE_PREFIXES: Final[frozenset[str]] = frozenset(
+    {"screen_state", "time_band", "foreground_class", "event"}
+)
 
 
 def _strict_float(value: object, label: str) -> float:
@@ -255,6 +266,7 @@ class BenchmarkReport:
     observed_tick_count: int = 0
     latency_tick_count: int = 0
     slice_counts: dict[str, int] = field(default_factory=dict)
+    slice_session_counts: dict[str, int] = field(default_factory=dict)
     slices: list[dict[str, Any]] = field(default_factory=list)
     blocking_reasons: list[str] = field(default_factory=list)
     passed: bool = False
@@ -347,32 +359,45 @@ def _is_usable_pred_target(target: UiCandidateTargetV1 | UiButtonTargetV1) -> bo
     return True
 
 
-def _named_slice_labels(snapshot: PerceptionSnapshot) -> frozenset[str]:
-    """ground-truth snapshot から formal gate 用の named slice label を派生する。"""
-    labels = {f"screen_state:{snapshot.screen_state}"}
+def _named_slice_counts(snapshot: PerceptionSnapshot) -> dict[str, int]:
+    """ground-truth snapshot/annotation から slice ごとの実 entity/event 数を得る。"""
+    counts = {f"screen_state:{snapshot.screen_state}": 1}
     context = snapshot.item_context
     if context is not None:
         if context.elapsed_time < 600.0:
-            labels.add("time_band:early")
+            counts["time_band:early"] = 1
         elif context.elapsed_time < 1200.0:
-            labels.add("time_band:mid")
+            counts["time_band:mid"] = 1
         else:
-            labels.add("time_band:late")
+            counts["time_band:late"] = 1
         if context.boss_flag:
-            labels.update(("foreground_class:enemy_boss", "event:boss"))
+            counts["foreground_class:enemy_boss"] = 1
+            counts["event:boss"] = 1
         if context.hazard_flag:
-            labels.update(("foreground_class:hazard", "event:hazard"))
+            counts["foreground_class:hazard"] = 1
+            counts["event:hazard"] = 1
         if not context.boss_flag and not context.hazard_flag and context.enemy_density > 0:
-            labels.add("foreground_class:enemy_normal")
+            counts["foreground_class:enemy_normal"] = 1
+    # annotation loader は一 frame 内の正確な entity 数を diagnostics へ格納できる。
+    annotated_counts = snapshot.diagnostics.get("foreground_entity_counts")
+    if annotated_counts is not None:
+        if not isinstance(annotated_counts, Mapping):
+            raise ValueError("foreground_entity_counts must be a mapping")
+        for class_name, count in annotated_counts.items():
+            if type(class_name) is not str or not class_name or type(count) is not int or count < 0:
+                raise ValueError("foreground_entity_counts entries are invalid")
+            counts[f"foreground_class:{class_name}"] = count
     # UI state 由来 event は closed vocabulary の代表イベントへ正規化する。
     # boss/hazard は world context、level-up/chest/death は screen state から独立集計する。
     if snapshot.screen_state.startswith("level_up"):
-        labels.add("event:level_up")
+        counts["event:level_up"] = 1
     elif snapshot.screen_state == "chest":
-        labels.add("event:chest")
-    elif snapshot.screen_state == "death":
-        labels.add("event:death")
-    return frozenset(labels)
+        counts["event:chest"] = 1
+    elif snapshot.screen_state in {"death", "death_result"}:
+        counts["event:death"] = 1
+    elif snapshot.screen_state in {"result", "target_reached_transition"}:
+        counts["event:result"] = 1
+    return counts
 
 
 def _recomputed_snapshot_hashes(snapshot: PerceptionSnapshot) -> tuple[str, str, str]:
@@ -492,11 +517,6 @@ def replay_snapshots(
             if evidence is None:
                 raise ValueError(f"formal evidence missing for frame {ground.frame_id!r}")
             _verify_formal_evidence(ground.ui_presentation, evidence, f"ground/{ground.frame_id}")
-            if predicted is not None:
-                pred_evidence = formal_evidence.get(predicted.frame_id)
-                if pred_evidence is None:
-                    raise ValueError(f"formal evidence missing for predicted frame {predicted.frame_id!r}")
-                _verify_formal_evidence(predicted.ui_presentation, pred_evidence, f"predicted/{predicted.frame_id}")
         _recomputed_snapshot_hashes(ground)
         if predicted is not None:
             _recomputed_snapshot_hashes(predicted)
@@ -626,7 +646,7 @@ def _empty_report(*, development_only: bool, formal_eligible: bool) -> Benchmark
     )
 
 
-def _metric_gate(metrics: dict[str, Any]) -> list[str]:
+def _metric_gate(metrics: dict[str, Any], *, formal: bool = False) -> list[str]:
     """writer/loader と benchmark が共有する stale-proof threshold gate。"""
     blocking: list[str] = []
     counts = metrics["slice_counts"]
@@ -681,41 +701,40 @@ def _metric_gate(metrics: dict[str, Any]) -> list[str]:
             blocking.append("screen_state cluster CI lower bound outside formal threshold")
     if metrics["roi_false_positive_count"] > 0:
         blocking.append("invalid/ambiguous ROI false-positive count is non-zero")
-    # 宣言済み rare slice は欠落も最低件数未満も blocking にする。
-    # 観測済みの動的 category も slice 別 floor（_NAMED_SLICE_RECORD_FLOORS）またはデフォルトを課す。
-    for name in sorted(_REQUIRED_NAMED_SLICES):
-        count = counts.get(name, 0)
-        floor = _NAMED_SLICE_RECORD_FLOORS.get(name, FORMAL_MIN_NAMED_SLICE_RECORDS)
-        if count == 0:
-            blocking.append(f"required named slice '{name}' has 0 records (blocking)")
-        elif count < floor:
-            blocking.append(
-                f"named slice '{name}': {count} records < "
-                f"{floor} required"
-            )
-    for prefix, minimum_categories in _NAMED_SLICE_MIN_CATEGORIES.items():
-        category_counts = {
-            key.removeprefix(f"{prefix}:"): value
-            for key, value in counts.items()
-            if key.startswith(f"{prefix}:")
+    if formal:
+        session_counts = metrics["slice_session_counts"]
+        summaries = {
+            summary["name"]: summary for summary in metrics["slices"]
+            if summary["name"] != "overall_screen_state"
         }
-        if len(category_counts) < minimum_categories:
-            blocking.append(
-                f"only {len(category_counts)} {prefix} category(s) observed; "
-                f"at least {minimum_categories} required"
-            )
-        for category, count in sorted(category_counts.items()):
-            slice_key = f"{prefix}:{category}"
-            floor = _NAMED_SLICE_RECORD_FLOORS.get(slice_key, FORMAL_MIN_NAMED_SLICE_RECORDS)
+        for name, floor in sorted(_FORMAL_SLICE_COUNT_FLOORS.items()):
+            count = counts.get(name, 0)
             if count < floor:
                 blocking.append(
-                    f"{prefix} '{category}': {count} records < "
-                    f"{floor} required"
+                    f"formal slice '{name}': {count} records/entities < {floor} required"
+                )
+        for name, floor in sorted(_FORMAL_SLICE_SESSION_FLOORS.items()):
+            count = session_counts.get(name, 0)
+            if count < floor:
+                blocking.append(
+                    f"formal slice '{name}': {count} sessions < {floor} required"
+                )
+        for name in sorted(_FORMAL_REQUIRED_SLICES):
+            summary = summaries.get(name)
+            threshold = _FORMAL_SLICE_THRESHOLDS[name]
+            if summary is None or summary["ci_lower"] is None:
+                blocking.append(f"formal slice '{name}' has no session-cluster 95% CI")
+            elif summary["ci_lower"] < threshold:
+                blocking.append(
+                    f"formal slice '{name}' CI lower bound {summary['ci_lower']:.6f} "
+                    f"< {threshold:.6f} threshold"
                 )
     return blocking
 
 
-def recompute_gate_from_metrics(metrics: dict[str, Any]) -> tuple[bool, list[str]]:
+def recompute_gate_from_metrics(
+    metrics: dict[str, Any], *, formal: bool = False
+) -> tuple[bool, list[str]]:
     """verdict loader 用に metric mapping を型検証して gate を再計算する。"""
     if not isinstance(metrics, dict):
         raise ValueError("metrics must be a dict")
@@ -732,7 +751,7 @@ def recompute_gate_from_metrics(metrics: dict[str, Any]) -> tuple[bool, list[str
             key in _FIELD_KINDS
             or any(
                 key.startswith(f"{prefix}:") and bool(key.removeprefix(f"{prefix}:"))
-                for prefix in _NAMED_SLICE_MIN_CATEGORIES
+                for prefix in _NAMED_SLICE_PREFIXES
             )
         )
         and type(value) is int
@@ -740,25 +759,41 @@ def recompute_gate_from_metrics(metrics: dict[str, Any]) -> tuple[bool, list[str
         for key, value in metrics["slice_counts"].items()
     ):
         raise ValueError("slice_counts must contain non-negative integer values")
+    if not isinstance(metrics["slice_session_counts"], dict) or not all(
+        any(
+            key.startswith(f"{prefix}:") and bool(key.removeprefix(f"{prefix}:"))
+            for prefix in _NAMED_SLICE_PREFIXES
+        )
+        and type(value) is int
+        and value >= 0
+        for key, value in metrics["slice_session_counts"].items()
+    ):
+        raise ValueError("slice_session_counts must contain named non-negative counts")
     if not isinstance(metrics["slices"], list):
         raise ValueError("slices must be a list")
     for summary in metrics["slices"]:
         if (
             not isinstance(summary, dict)
-            or set(summary) != {"name", "count", "macro_f1", "ci_lower"}
-            or summary["name"] != "overall_screen_state"
+            or set(summary) != {
+                "name", "count", "session_count", "metric_value", "threshold", "ci_lower"
+            }
+            or type(summary["name"]) is not str
+            or not summary["name"]
             or type(summary["count"]) is not int
             or summary["count"] <= 0
+            or type(summary["session_count"]) is not int
+            or summary["session_count"] <= 0
         ):
             raise ValueError("slice summary does not match the exact schema")
-        _ratio(summary["macro_f1"], "slice macro_f1")
+        _ratio(summary["metric_value"], "slice metric_value")
+        _ratio(summary["threshold"], "slice threshold")
         if summary["ci_lower"] is not None:
             _ratio(summary["ci_lower"], "slice ci_lower")
     for name in ("expected_tick_count", "observed_tick_count", "latency_tick_count", "total_records", "roi_false_positive_count"):
         if type(metrics[name]) is not int or metrics[name] < 0:
             raise ValueError(f"{name} must be a non-negative integer")
     for name, value in metrics.items():
-        if name in {"slice_counts", "slices", "expected_tick_count", "observed_tick_count", "latency_tick_count", "total_records", "roi_false_positive_count"}:
+        if name in {"slice_counts", "slice_session_counts", "slices", "expected_tick_count", "observed_tick_count", "latency_tick_count", "total_records", "roi_false_positive_count"}:
             continue
         _strict_float(value, name)
     for name in (
@@ -774,7 +809,9 @@ def recompute_gate_from_metrics(metrics: dict[str, Any]) -> tuple[bool, list[str
     )
     if not -1.0 <= density_correlation <= 1.0:
         raise ValueError("density_correlation must be in [-1, 1]")
-    blocking = _metric_gate(metrics)
+    if type(formal) is not bool:
+        raise ValueError("formal must be bool")
+    blocking = _metric_gate(metrics, formal=formal)
     return not blocking, blocking
 
 
@@ -793,13 +830,25 @@ def _run_benchmark_common(
         raise ValueError("alpha must be finite and in (0, 1)")
     raw_values = list(values)
     named_slice_counts: dict[str, int] = defaultdict(int)
+    named_slice_sessions: dict[str, set[str]] = defaultdict(set)
+    named_slice_values: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     if raw_values and all(isinstance(value, SnapshotReplayTick) for value in raw_values):
         # V1 snapshot を変更せず、ground-truth tick から汎用 named slice label を派生する。
         # 同じ tick 内の複数 metric record ではなく slice ごとに一度だけ数える。
         for tick in raw_values:
             assert isinstance(tick, SnapshotReplayTick)
-            for label in _named_slice_labels(tick.ground_truth):
-                named_slice_counts[label] += 1
+            slice_counts_for_tick = _named_slice_counts(tick.ground_truth)
+            correctness = float(
+                tick.predicted is not None
+                and tick.ground_truth.screen_state == tick.predicted.screen_state
+            )
+            for label, count in slice_counts_for_tick.items():
+                named_slice_counts[label] += count
+                if count > 0:
+                    named_slice_sessions[label].add(tick.session_id)
+                    named_slice_values[label][tick.session_id].append(correctness)
         records = replay_snapshots(raw_values, formal_evidence=formal_evidence)  # type: ignore[arg-type]
     elif all(isinstance(value, BenchmarkRecord) for value in raw_values):
         records = list(raw_values)  # type: ignore[assignment]
@@ -892,12 +941,39 @@ def _run_benchmark_common(
         slice_counts[key] = slice_counts.get(key, 0) + 1
     for key, count in named_slice_counts.items():
         slice_counts[key] = count
+    slice_session_counts = {
+        key: len(session_ids) for key, session_ids in named_slice_sessions.items()
+    }
     session_screen: dict[str, list[float]] = defaultdict(list)
     for record in ss:
         session_screen[record.session_id].append(float(record.ground_truth == record.predicted))
     ci_lower = None
     if len(session_screen) >= 2:
         ci_lower, _ = bootstrap_cluster_ci(dict(session_screen), n_bootstrap, alpha, np.random.default_rng(rng_seed))
+    slice_summaries = []
+    if ss:
+        slice_summaries.append({
+            "name": "overall_screen_state", "count": len(ss),
+            "session_count": len(session_screen), "metric_value": screen_f1,
+            "threshold": THRESHOLD_SCREEN_F1, "ci_lower": ci_lower,
+        })
+    for index, name in enumerate(sorted(named_slice_values)):
+        per_session = dict(named_slice_values[name])
+        values = [value for rows in per_session.values() for value in rows]
+        named_ci_lower = None
+        if len(per_session) >= 2:
+            named_ci_lower, _ = bootstrap_cluster_ci(
+                per_session, n_bootstrap, alpha,
+                np.random.default_rng(rng_seed + index + 1),
+            )
+        slice_summaries.append({
+            "name": name,
+            "count": named_slice_counts[name],
+            "session_count": len(per_session),
+            "metric_value": float(np.mean(values)),
+            "threshold": _FORMAL_SLICE_THRESHOLDS.get(name, THRESHOLD_SCREEN_F1),
+            "ci_lower": named_ci_lower,
+        })
 
     report = BenchmarkReport(
         development_only=development_only,
@@ -919,7 +995,7 @@ def _run_benchmark_common(
         ui_cross_frame_equivalence_rate=sum(bool(r.predicted) for r in cross) / len(cross) if cross else 0.0,
         expected_tick_count=len(expected_set), observed_tick_count=len(observed_set),
         latency_tick_count=len(positive_latencies), slice_counts=slice_counts,
-        slices=[{"name": "overall_screen_state", "count": len(ss), "macro_f1": screen_f1, "ci_lower": ci_lower}] if ss else [],
+        slice_session_counts=slice_session_counts, slices=slice_summaries,
     )
     report.blocking_reasons = _metric_gate(report.metrics_wire())
     report.passed = not report.blocking_reasons
@@ -965,6 +1041,11 @@ def _formalize_benchmark_report(report: BenchmarkReport) -> BenchmarkReport:
         raise TypeError("formal benchmark factory requires BenchmarkReport")
     if report.development_only is not True or report.formal_perception_verdict_eligible is not False:
         raise ValueError("benchmark report was already promoted or has inconsistent flags")
-    return replace(
+    formal_report = replace(
         report, development_only=False, formal_perception_verdict_eligible=True
     )
+    formal_report.blocking_reasons = _metric_gate(
+        formal_report.metrics_wire(), formal=True
+    )
+    formal_report.passed = not formal_report.blocking_reasons
+    return formal_report

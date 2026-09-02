@@ -29,6 +29,10 @@ class SplitOverlapError(ValueError):
     """session identity/content が split 内外で重複している。"""
 
 
+class DuplicateFrameError(SplitOverlapError):
+    """個別 frame content または元 capture lineage が split 間で重複している。"""
+
+
 class MixedBuildError(ValueError):
     """benchmark session の build/profile/resolution が混在している。"""
 
@@ -78,12 +82,32 @@ class SessionRecord:
     # session_hash はmanifest SHA（session_id に依存）。
     # content_fingerprint はframe object hash列（session_id非依存）でコピー検出に使う。
     content_fingerprint: str = ""
+    # 個別 frame 単位の content hash と、transcode 前の capture identity。
+    # 集合全体の fingerprint だけでは部分重複を検出できないため両方を保持する。
+    frame_content_hashes: tuple[str, ...] = ()
+    capture_lineage: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_nonempty(self.session_id, "session_id")
         _require_sha256(self.session_hash, "session_hash")
         if self.content_fingerprint:
             _require_sha256(self.content_fingerprint, "content_fingerprint")
+        for label, values in (
+            ("frame_content_hashes", self.frame_content_hashes),
+            ("capture_lineage", self.capture_lineage),
+        ):
+            if not isinstance(values, tuple):
+                raise ValueError(f"{label} must be a tuple")
+            for index, value in enumerate(values):
+                _require_sha256(value, f"{label}[{index}]")
+            if len(values) != len(set(values)):
+                raise DuplicateFrameError(f"duplicate value within {label}")
+        if self.frame_content_hashes and len(self.frame_content_hashes) != len(
+            self.capture_lineage
+        ):
+            raise ValueError(
+                "frame_content_hashes and capture_lineage must have equal lengths"
+            )
         _require_sha256(self.build_hash, "build_hash")
         _require_sha256(self.target_profile_hash, "target_profile_hash")
         if self.kind not in _ALL_KINDS:
@@ -205,13 +229,30 @@ def _record_from_manifest(
         raise MixedBuildError("resolution changes within one session")
 
     duration_seconds = (timestamps[-1] - timestamps[0]) / 1_000_000_000.0
-    # game_build_id は capture 契約上 hash とは限らないため canonical hash へ固定する。
-    build_hash = hashlib.sha256(manifest.game_build_id.encode("utf-8")).hexdigest()
+    # formal capture は実 build artifact SHA を game_build_id に保持する。旧 development
+    # capture の human-readable id だけ canonical hash 化して互換性を維持する。
+    build_hash = (
+        manifest.game_build_id
+        if _SHA256_RE.fullmatch(manifest.game_build_id)
+        else hashlib.sha256(manifest.game_build_id.encode("utf-8")).hexdigest()
+    )
     # session_id・manifest SHA に非依存なフレーム内容フィンガープリント（コピー検出用）
     sorted_frames = sorted(manifest.frame_records, key=lambda r: r.frame_id)
+    frame_content_hashes = tuple(r.object_sha256 for r in sorted_frames)
     content_fingerprint = hashlib.sha256(
-        b"".join(bytes.fromhex(r.object_sha256) for r in sorted_frames)
+        b"".join(bytes.fromhex(value) for value in frame_content_hashes)
     ).hexdigest()
+    capture_lineage = tuple(
+        hashlib.sha256(
+            b"\0".join(
+                (
+                    manifest.metadata_sha256.encode("ascii"),
+                    str(record.frame_id).encode("ascii"),
+                )
+            )
+        ).hexdigest()
+        for record in sorted_frames
+    )
     return SessionRecord(
         session_id=manifest.session_id,
         session_hash=manifest.manifest_sha256,
@@ -224,6 +265,8 @@ def _record_from_manifest(
         expected_frame_ids=tuple(str(value) for value in frame_ids),
         session_manifest_path=manifest_path,
         content_fingerprint=content_fingerprint,
+        frame_content_hashes=frame_content_hashes,
+        capture_lineage=capture_lineage,
     )
 
 
@@ -282,6 +325,8 @@ def _validate_records(
     seen_ids: set[str] = set()
     seen_hashes: set[str] = set()
     seen_fingerprints: set[str] = set()
+    seen_frame_hashes: dict[str, str] = {}
+    seen_capture_lineage: dict[str, str] = {}
     for record in records:
         if record.session_id in seen_ids:
             raise SplitOverlapError(f"duplicate session_id {record.session_id!r}")
@@ -289,13 +334,33 @@ def _validate_records(
             raise SplitOverlapError(f"duplicate session_hash {record.session_hash!r}")
         # content_fingerprint は session_id 非依存。同一フレーム列を別 session として登録するコピーを検出する。
         if record.content_fingerprint and record.content_fingerprint in seen_fingerprints:
-            raise SplitOverlapError(
+            raise DuplicateFrameError(
                 f"duplicate frame content fingerprint for session {record.session_id!r}"
             )
+        for frame_hash in record.frame_content_hashes:
+            previous_session = seen_frame_hashes.get(frame_hash)
+            if previous_session is not None:
+                raise DuplicateFrameError(
+                    "duplicate frame content across sessions: "
+                    f"{previous_session!r} and {record.session_id!r}"
+                )
+        for lineage_hash in record.capture_lineage:
+            previous_session = seen_capture_lineage.get(lineage_hash)
+            if previous_session is not None:
+                raise DuplicateFrameError(
+                    "duplicate capture lineage across sessions: "
+                    f"{previous_session!r} and {record.session_id!r}"
+                )
         seen_ids.add(record.session_id)
         seen_hashes.add(record.session_hash)
         if record.content_fingerprint:
             seen_fingerprints.add(record.content_fingerprint)
+        seen_frame_hashes.update(
+            (frame_hash, record.session_id) for frame_hash in record.frame_content_hashes
+        )
+        seen_capture_lineage.update(
+            (lineage_hash, record.session_id) for lineage_hash in record.capture_lineage
+        )
 
     benchmark = [record for record in records if record.kind in _BENCHMARK_KINDS]
     if benchmark:

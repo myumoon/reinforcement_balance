@@ -327,6 +327,14 @@ class ArtifactStore:
             self._record_logical_id_unlocked(ref, index_path)
         return ref
 
+    def resolve(self, logical_id: str) -> ArtifactRef | None:
+        """logical id の immutable ref を読み、index schema を再検証して返す。"""
+        index_path = self._logical_index_path(logical_id)
+        with _exclusive_file_lock(self._logical_lock_path(logical_id)):
+            if not index_path.exists():
+                return None
+            return ArtifactRef.from_wire(self._read_logical_index(index_path))
+
     def _publish_object_bytes(self, ref: ArtifactRef, data: bytes) -> None:
         """content object を temp+fsync+replace で公開し、公開後 hash を再検証する。"""
         sha256 = ref.sha256
