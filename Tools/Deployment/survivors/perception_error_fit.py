@@ -93,9 +93,25 @@ def _require_sha256(value: object, label: str) -> str:
     return value  # type: ignore[return-value]
 
 
+# residual 導出は runner (benchmark_survivors_perception)、metric gate は
+# perception_benchmark、fit は本ファイルに分散する。producer closure hash はこの三者を
+# 束ねて計算し、いずれか一つでも変更すると calibration profile / final verdict の subject が
+# 必ず変わるようにする（fit ファイル単独 hash では runner/metric 変更を捕捉できない）。
+_PRODUCER_CLOSURE_FILES: Final[tuple[str, ...]] = (
+    "survivors/perception_error_fit.py",
+    "survivors/perception_benchmark.py",
+    "benchmark_survivors_perception.py",
+)
+
+
 def _current_fit_code_hash() -> str:
-    """現在ロードされている fit 実装ファイルの content hash。"""
-    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    """producer closure（fit + benchmark runner + metric gate）の content hash。"""
+    deployment_root = Path(__file__).resolve().parent.parent  # Tools/Deployment
+    digests: list[str] = []
+    for relative in _PRODUCER_CLOSURE_FILES:
+        path = deployment_root / relative
+        digests.append(hashlib.sha256(path.read_bytes()).hexdigest())
+    return hashlib.sha256("\0".join(digests).encode("ascii")).hexdigest()
 
 
 def _strict_number(value: object, label: str) -> float:

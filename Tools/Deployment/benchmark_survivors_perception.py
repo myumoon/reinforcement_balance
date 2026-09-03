@@ -39,6 +39,7 @@ from survivors.perception_benchmark import (
     ExpectedTick,
     SnapshotReplayTick,
     _formalize_benchmark_report,
+    formal_threshold_content_hash,
     run_benchmark,
 )
 from survivors.perception_error_fit import (
@@ -112,8 +113,23 @@ class FormalBenchmarkRequest:
     capture_store_root: Path
     dependency_descriptors: Mapping[str, ArtifactDescriptor] = field(default_factory=dict)
     restore_verdicts: Mapping[str, ArtifactDescriptor] = field(default_factory=dict)
-    calibration_logical_id: str = "perception/calibration/profile.json"
-    verdict_logical_id: str = "perception/final/verdict.json"
+    # 固定 logical ID を避け、run key（依存 identity + session hash から導出）を含む
+    # immutable な logical ID を発行する。parser/model/threshold/config/session を変えて
+    # 再評価しても run key が変わり、ArtifactStore が旧 logical ID の別内容を拒否しない。
+    calibration_namespace: str = "perception/calibration"
+    verdict_namespace: str = "perception/final"
+
+    def calibration_logical_id(self, run_key: str) -> str:
+        """run key ごとに一意な calibration profile の immutable logical ID。"""
+        return f"{self.calibration_namespace}/{run_key}/profile.json"
+
+    def calibration_provenance_logical_id(self, run_key: str) -> str:
+        """run key ごとに一意な calibration provenance の immutable logical ID。"""
+        return f"{self.calibration_namespace}/{run_key}/provenance.json"
+
+    def verdict_logical_id(self, run_key: str) -> str:
+        """run key ごとに一意な final verdict の immutable logical ID。"""
+        return f"{self.verdict_namespace}/{run_key}/verdict.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -679,6 +695,7 @@ def _calibration_descriptor_chain(
     request: FormalBenchmarkRequest,
     profile: FittedPerceptionErrorProfile,
     provenance_subject_hashes: Mapping[str, str],
+    calibration_logical_id: str,
 ) -> tuple[ArtifactDescriptor, ArtifactDescriptor]:
     capture_ref = _manifest_ref(request.dependency_descriptors["capture_dataset"])
     source = ArtifactDescriptor(
@@ -694,7 +711,7 @@ def _calibration_descriptor_chain(
         profile, provenance_subject_hashes
     )
     profile_node = ArtifactDescriptor(
-        logical_id=request.calibration_logical_id,
+        logical_id=calibration_logical_id,
         node_kind="perception_calibration_profile",
         producer_id="perception_error_fit",
         producer_version="v2",
@@ -723,11 +740,12 @@ def _descriptor_chain(
     calibration_descriptors: tuple[ArtifactDescriptor, ArtifactDescriptor],
     request: FormalBenchmarkRequest,
     verdict: PerceptionFinalVerdict,
+    verdict_logical_id: str,
 ) -> tuple[ArtifactDescriptor, ...]:
     source, profile_node = calibration_descriptors
     verdict_bytes = canonical_json_bytes(verdict.to_wire())
     final_node = ArtifactDescriptor(
-        logical_id=request.verdict_logical_id,
+        logical_id=verdict_logical_id,
         node_kind="perception_final_verdict",
         producer_id="benchmark_survivors_perception",
         producer_version="v2",
@@ -1245,23 +1263,110 @@ def _recover_committed_result(
     if _load_json_ref(request.store, verdict_file) != verdict.to_wire():
         raise ValueError("committed verdict file does not match verdict payload")
     calibration_ref = request.store.put_bytes(
-        logical_id=request.calibration_logical_id,
+        logical_id=request.calibration_logical_id(run_key),
         data=request.store.object_path(profile_file.store_uri).read_bytes(),
         media_type="application/json",
     )
     request.store.put_bytes(
-        logical_id=f"{request.calibration_logical_id}.provenance.json",
+        logical_id=request.calibration_provenance_logical_id(run_key),
         data=request.store.object_path(provenance_file.store_uri).read_bytes(),
         media_type="application/json",
     )
     verdict_ref = request.store.put_bytes(
-        logical_id=request.verdict_logical_id,
+        logical_id=request.verdict_logical_id(run_key),
         data=request.store.object_path(verdict_file.store_uri).read_bytes(),
         media_type="application/json",
     )
     return FormalBenchmarkResult(
         validated_split, profile, verdict, calibration_ref, verdict_ref, descriptors
     )
+
+
+def _record_final_outcome(
+    store: ArtifactStore, run_key: str, seal_id: str,
+    *, passed: bool, blocking_reasons: Sequence[str],
+) -> None:
+    """final 評価の結果を seal に紐づく immutable outcome として永続化する。
+
+    成功・失敗いずれも同じ run_key/seal に対する監査可能な結果として残し、消費済み
+    session がどの seal に対して開封され、どの結果になったかを後から復元できるようにする。
+    logical_id は run_key/seal_id で content-addressed なので idempotent。
+    """
+    outcome = canonical_json_bytes({
+        "schema_version": "perception_final_outcome.v1",
+        "run_key": run_key,
+        "seal_id": seal_id,
+        "passed": passed,
+        "blocking_reasons": list(blocking_reasons),
+    })
+    store.put_bytes(
+        logical_id=f"perception/final_outcome/{run_key}/{seal_id}.json",
+        data=outcome,
+        media_type="application/json",
+    )
+
+
+def verify_formal_runtime_release(
+    descriptors: Sequence[ArtifactDescriptor],
+    store: ArtifactStore,
+) -> None:
+    """runtime publish/restore 境界: DAG gate と final verdict payload を Store から検証する。
+
+    汎用 DAG validator は development runtime bundle の部分 parent を許容するため、runtime
+    公開/復元では本関数を必ず通す。descriptor metadata の自己申告 passed=true を信用せず、
+    perception_final_verdict の verdict.json を ArtifactStore から復元し、共有 load_final_verdict で
+    厳格に再解釈して passed/development_only/subject hashes を descriptor・runtime と突き合わせる。
+    """
+    if not isinstance(store, ArtifactStore):
+        raise TypeError("formal runtime verification requires ArtifactStore")
+    nodes = tuple(descriptors)
+    validate_formal_runtime_dag(nodes)
+    by_identity = {node.identity_hash: node for node in nodes}
+    for runtime in (node for node in nodes if node.node_kind == "runtime_bundle"):
+        runtime_subjects = runtime.identity_metadata.get("perception_subject_hashes")
+        if not isinstance(runtime_subjects, Mapping):
+            raise ValueError("runtime bundle is missing perception_subject_hashes")
+        verdict_descriptors = [
+            by_identity[parent.identity_hash]
+            for parent in runtime.parents
+            if by_identity[parent.identity_hash].node_kind == "perception_final_verdict"
+        ]
+        # validate_formal_runtime_dag が exactly-one を保証済み。
+        verdict_descriptor = verdict_descriptors[0]
+        json_files = [
+            ref for ref in verdict_descriptor.files
+            if ref.media_type == "application/json"
+        ]
+        if len(json_files) != 1:
+            raise ValueError(
+                "perception_final_verdict must publish exactly one JSON verdict file"
+            )
+        verdict_ref = json_files[0]
+        if not store.verify(verdict_ref).ok:
+            raise ValueError(
+                "perception_final_verdict file is not restorable from ArtifactStore"
+            )
+        verdict_wire = _load_json_ref(store, verdict_ref)
+        # runtime subject hashes を current 値として stale/subject binding を厳格再計算する。
+        verdict = load_final_verdict(
+            verdict_wire, current_subject_hashes=dict(runtime_subjects)
+        )
+        if verdict.development_only is not False or verdict.passed is not True:
+            raise ValueError(
+                "restored perception verdict is not a passed production verdict"
+            )
+        metadata = verdict_descriptor.identity_metadata
+        payload_subjects = {name: getattr(verdict, name) for name in _HASH_FIELDS}
+        if (
+            metadata.get("verdict_id") != verdict.verdict_id
+            or metadata.get("seal_id") != verdict.seal_id
+            or metadata.get("passed") is not True
+            or metadata.get("development_only") is not False
+            or metadata.get("subject_hashes") != payload_subjects
+        ):
+            raise ValueError(
+                "perception_final_verdict descriptor metadata does not match restored payload"
+            )
 
 
 def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResult:
@@ -1281,7 +1386,17 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         request, capture_bytes
     )
     payloads = _package_payloads(restored)
+    # threshold Artifact（target_config.threshold_hash）が実際の gate 定数と一致することを
+    # 検証する。コード上の閾値と Artifact が乖離したまま pass/fail 判定できないようにする。
+    if payloads["target_config"]["threshold_hash"] != formal_threshold_content_hash():
+        raise ValueError(
+            "target_config threshold_hash does not match the formal gate threshold constants"
+        )
     run_key = _batch_run_key(request, validated_split)
+    # run key ごとの immutable logical ID。履歴 Artifact を上書きしない。
+    calibration_logical_id = request.calibration_logical_id(run_key)
+    calibration_provenance_logical_id = request.calibration_provenance_logical_id(run_key)
+    verdict_logical_id = request.verdict_logical_id(run_key)
     recovered = _recover_committed_result(
         request, validated_split, run_key, payloads
     )
@@ -1367,7 +1482,7 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         if name not in {"calibration_profile_hash", "lineage_seal_hash"}
     }
     calibration_descriptors = _calibration_descriptor_chain(
-        request, profile, provenance_subjects
+        request, profile, provenance_subjects, calibration_logical_id
     )
     profile_node = calibration_descriptors[1]
     profile_bytes = canonical_json_bytes(profile.to_wire())
@@ -1392,12 +1507,12 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         media_type="application/json",
     )
     calibration_ref = request.store.put_bytes(
-        logical_id=request.calibration_logical_id,
+        logical_id=calibration_logical_id,
         data=profile_bytes,
         media_type="application/json",
     )
     request.store.put_bytes(
-        logical_id=f"{request.calibration_logical_id}.provenance.json",
+        logical_id=calibration_provenance_logical_id,
         data=provenance_bytes,
         media_type="application/json",
     )
@@ -1430,7 +1545,19 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         lineage_seal_hash=lineage_seal_hash,
     )
 
-    # Phase C: calibration freeze と seal 完了後にだけ final を予約・full restore する。
+    # audit boundary: exact config・calibration hash・全 final session hash を含む seal を、
+    # 最初の final session を開封する前に create-once 永続化する。seal_id は seal identity
+    # から導出されるため logical_id は content-addressed で、再実行でも同一内容の idempotent
+    # put になる。final 評価が失敗/crash しても、消費済み session がどの seal に対して開封
+    # されたか復元できる。
+    seal_logical_id = f"perception/package/lineage/{seal.seal_id}/seal.json"
+    seal_ref = request.store.put_bytes(
+        logical_id=seal_logical_id, data=seal_bytes, media_type="application/json",
+    )
+    if not request.store.verify(seal_ref).ok:
+        raise ValueError("lineage seal failed ArtifactStore revalidation before opening sessions")
+
+    # Phase C: calibration freeze と seal 永続化後にだけ final を予約・full restore する。
     for manifest in final_metadata_manifests:
         _reserve_final_session(
             request.store, manifest.session_id, manifest.manifest_sha256,
@@ -1461,25 +1588,33 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         final_ticks, expected_ticks=expected_ticks, formal_evidence=evidence
     ))
     if not report.passed:
+        # 失敗も同じ lineage に immutable outcome として追記する。seal は既に永続化済みで、
+        # どの session が失敗 seal に対して開封されたか復元できる。
+        _record_final_outcome(
+            request.store, run_key, seal.seal_id,
+            passed=False, blocking_reasons=report.blocking_reasons,
+        )
         raise ValueError(
             "formal perception gate failed; calibration remains frozen: "
             + "; ".join(report.blocking_reasons)
         )
+    _record_final_outcome(
+        request.store, run_key, seal.seal_id, passed=True, blocking_reasons=[],
+    )
     verdict = _create_formal_final_verdict(
         report, seal_id=seal.seal_id,
         final_session_ids=[manifest.session_id for manifest in final_manifests],
         **subjects,
     )
-    descriptors = _descriptor_chain(calibration_descriptors, request, verdict)
+    descriptors = _descriptor_chain(
+        calibration_descriptors, request, verdict, verdict_logical_id
+    )
     verdict_bytes = canonical_json_bytes(verdict.to_wire())
     final_node = descriptors[2]
     staged_refs.extend([
         _put_descriptor_file(request.store, final_node.files[0], verdict_bytes),
-        request.store.put_bytes(
-            logical_id=f"perception/package/lineage/{seal.seal_id}/seal.json",
-            data=seal_bytes,
-            media_type="application/json",
-        ),
+        # seal は final session 開封前に永続化済み。batch commit にも同一 ref を含める。
+        seal_ref,
         *(
             _put_descriptor(request.store, descriptor)
             for descriptor in descriptors
@@ -1514,7 +1649,7 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         media_type="application/json",
     )
     verdict_ref = request.store.put_bytes(
-        logical_id=request.verdict_logical_id,
+        logical_id=verdict_logical_id,
         data=verdict_bytes,
         media_type="application/json",
     )

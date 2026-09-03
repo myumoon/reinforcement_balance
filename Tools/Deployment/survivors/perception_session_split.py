@@ -100,8 +100,11 @@ class SessionRecord:
                 raise ValueError(f"{label} must be a tuple")
             for index, value in enumerate(values):
                 _require_sha256(value, f"{label}[{index}]")
-            if len(values) != len(set(values)):
-                raise DuplicateFrameError(f"duplicate value within {label}")
+        # frame_content_hashes（生ピクセル hash）は pause/menu 等の正当な静止 frame で
+        # session 内に重複しうるため一意性を要求しない。source 由来の capture_lineage だけ
+        # frame ごとに異なる immutable identity を要求し、session 内一意にする。
+        if len(self.capture_lineage) != len(set(self.capture_lineage)):
+            raise DuplicateFrameError("duplicate value within capture_lineage")
         if self.frame_content_hashes and len(self.frame_content_hashes) != len(
             self.capture_lineage
         ):
@@ -242,12 +245,16 @@ def _record_from_manifest(
     content_fingerprint = hashlib.sha256(
         b"".join(bytes.fromhex(value) for value in frame_content_hashes)
     ).hexdigest()
+    # capture_lineage は session metadata から再生成せず、frame 固有の immutable source
+    # identity（stored pixel content hash + 収録 monotonic timestamp）から導出する。
+    # timestamp は session 内で strict monotonic に検証済みなので session 内で一意になり、
+    # 同じ source frame を別 session の metadata へ入れ替えても lineage が保存される。
     capture_lineage = tuple(
         hashlib.sha256(
             b"\0".join(
                 (
-                    manifest.metadata_sha256.encode("ascii"),
-                    str(record.frame_id).encode("ascii"),
+                    record.object_sha256.encode("ascii"),
+                    str(record.captured_monotonic_ns).encode("ascii"),
                 )
             )
         ).hexdigest()
@@ -325,7 +332,6 @@ def _validate_records(
     seen_ids: set[str] = set()
     seen_hashes: set[str] = set()
     seen_fingerprints: set[str] = set()
-    seen_frame_hashes: dict[str, str] = {}
     seen_capture_lineage: dict[str, str] = {}
     for record in records:
         if record.session_id in seen_ids:
@@ -337,13 +343,9 @@ def _validate_records(
             raise DuplicateFrameError(
                 f"duplicate frame content fingerprint for session {record.session_id!r}"
             )
-        for frame_hash in record.frame_content_hashes:
-            previous_session = seen_frame_hashes.get(frame_hash)
-            if previous_session is not None:
-                raise DuplicateFrameError(
-                    "duplicate frame content across sessions: "
-                    f"{previous_session!r} and {record.session_id!r}"
-                )
+        # 生ピクセル hash 単体の split 間一致は pause/menu 等で正当に起こりうるため
+        # 重複検出には使わない。source 由来の capture_lineage の intersection だけで
+        # split/session 間の frame 再利用（同一 source-capture の使い回し）を検出する。
         for lineage_hash in record.capture_lineage:
             previous_session = seen_capture_lineage.get(lineage_hash)
             if previous_session is not None:
@@ -355,9 +357,6 @@ def _validate_records(
         seen_hashes.add(record.session_hash)
         if record.content_fingerprint:
             seen_fingerprints.add(record.content_fingerprint)
-        seen_frame_hashes.update(
-            (frame_hash, record.session_id) for frame_hash in record.frame_content_hashes
-        )
         seen_capture_lineage.update(
             (lineage_hash, record.session_id) for lineage_hash in record.capture_lineage
         )

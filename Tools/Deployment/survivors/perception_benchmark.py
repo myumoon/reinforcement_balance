@@ -113,6 +113,42 @@ _NAMED_SLICE_PREFIXES: Final[frozenset[str]] = frozenset(
 )
 
 
+def formal_threshold_content_hash() -> str:
+    """formal gate が実際に使う全 threshold/floor 定数の canonical hash。
+
+    threshold Artifact の hash（target_config）と、実際に pass/fail を決めるコード上の
+    定数が乖離しないよう、両者を突き合わせるための共有 identity。定数を変更したのに
+    threshold Artifact を再発行しない、あるいはその逆の乖離を fail-closed で検出させる。
+    """
+    return canonical_hash({
+        "schema_version": "perception_formal_thresholds.v1",
+        "screen_state_f1": THRESHOLD_SCREEN_F1,
+        "timer_exact": THRESHOLD_TIMER_EXACT,
+        "level_exact": THRESHOLD_LEVEL_EXACT,
+        "inventory_top1": THRESHOLD_INVENTORY_TOP1,
+        "choice_top1": THRESHOLD_CHOICE_TOP1,
+        "hp_mae": THRESHOLD_HP_MAE,
+        "xp_mae": THRESHOLD_XP_MAE,
+        "density_corr": THRESHOLD_DENSITY_CORR,
+        "nearest_med": THRESHOLD_NEAREST_MED,
+        "lat_p95_ms": THRESHOLD_LAT_P95_MS,
+        "lat_p99_ms": THRESHOLD_LAT_P99_MS,
+        "invalid_tick": THRESHOLD_INVALID_TICK,
+        "levelup_invalid": THRESHOLD_LEVELUP_INVALID,
+        "roi_center_p99": THRESHOLD_ROI_CENTER_P99,
+        "roi_inside": THRESHOLD_ROI_INSIDE,
+        "confidence": THRESHOLD_CONFIDENCE,
+        "cross_frame_equivalence": THRESHOLD_CROSS_FRAME_EQUIVALENCE,
+        "min_screen_state_count": FORMAL_MIN_SCREEN_STATE_COUNT,
+        "min_screen_state_records": FORMAL_MIN_SCREEN_STATE_RECORDS,
+        "foreground_classes": list(_FORMAL_FOREGROUND_CLASSES),
+        "slice_count_floors": dict(sorted(_FORMAL_SLICE_COUNT_FLOORS.items())),
+        "slice_session_floors": dict(sorted(_FORMAL_SLICE_SESSION_FLOORS.items())),
+        "slice_thresholds": dict(sorted(_FORMAL_SLICE_THRESHOLDS.items())),
+        "time_bands": sorted(_FORMAL_TIME_BANDS),
+    })
+
+
 def _strict_float(value: object, label: str) -> float:
     if (
         isinstance(value, bool)

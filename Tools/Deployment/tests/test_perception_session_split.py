@@ -136,8 +136,12 @@ class TestSplitOverlap:
         with pytest.raises(SplitOverlapError, match="session_id"):
             validate_split([duplicate, duplicate])
 
-    def test_one_shared_frame_across_otherwise_different_sessions_fails(self) -> None:
-        """完全一致でなく一フレームだけの intersection も拒否する。"""
+    def test_shared_raw_pixels_with_distinct_capture_lineage_allowed(self) -> None:
+        """生ピクセルが split 間で偶然一致しても、source-capture identity が異なれば許可する。
+
+        pause/menu 等の正当な静止 frame は別 session で byte-identical になりうるため、
+        重複判定は raw pixel hash ではなく source 由来の capture_lineage の intersection に限定する。
+        """
         shared = "9" * 64
         sessions = [
             _session(
@@ -151,8 +155,28 @@ class TestSplitOverlap:
                 capture_lineage=("5" * 64, "6" * 64),
             ),
         ]
-        with pytest.raises(DuplicateFrameError, match="frame content"):
-            validate_split(sessions, min_benchmark_sessions=1)
+        result = validate_split(sessions, min_benchmark_sessions=1)
+        assert isinstance(result, SessionSplit)
+        assert len(result.sessions) == 2
+
+    def test_session_internal_identical_pixels_allowed(self) -> None:
+        """同一 session 内の byte-identical frame（静止画面）を拒否しない。"""
+        shared = "7" * 64
+        sessions = [
+            _session(
+                "cal", "error_calibration",
+                frame_content_hashes=(shared, shared),
+                capture_lineage=("3" * 64, "4" * 64),
+            ),
+            _session(
+                "final", "final_e2e_test",
+                frame_content_hashes=(shared, shared),
+                capture_lineage=("5" * 64, "6" * 64),
+            ),
+        ]
+        result = validate_split(sessions, min_benchmark_sessions=1)
+        assert isinstance(result, SessionSplit)
+        assert len(result.sessions) == 2
 
     def test_one_shared_capture_lineage_across_transcodes_fails(self) -> None:
         lineage = "8" * 64
