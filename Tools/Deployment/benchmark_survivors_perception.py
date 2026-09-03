@@ -12,13 +12,19 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol
 
 from Tools.Artifacts.artifact_store import ArtifactStore
-from reinbalance_survivors_contracts.artifact_dag import validate_artifact_dag
+from reinbalance_survivors_contracts.artifact_dag import (
+    validate_artifact_dag,
+    validate_formal_runtime_dag,
+)
 from reinbalance_survivors_contracts.artifact_identity import (
+    RESTORE_TEST_VERDICT_SCHEMA_VERSION,
     ArtifactDescriptor,
     ArtifactRef,
+    RestoreTestVerdict,
     artifact_uri,
 )
 from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
+from reinbalance_survivors_contracts.ui_intent import ContractValidationError
 
 from survivors.capture.captured_frame import CapturedFrame
 from survivors.perception_snapshot import FormalReplayEvidence
@@ -120,6 +126,10 @@ class FormalBenchmarkResult:
     descriptors: tuple[ArtifactDescriptor, ...]
 
 
+# consumer(perception_error_wrapper)が latency/stale age を進める frame period と同一。
+# latency_ms → frame 変換をこの固定基準へ束縛し、profile の frame 単位を consumer と一致させる。
+_CONSUMER_FRAME_PERIOD_MS: float = 1000.0 / 60.0
+
 _DEPENDENCY_NAMES = frozenset(
     {
         "capture_dataset", "parser_package", "detector_package",
@@ -179,19 +189,79 @@ _GROUND_TRUTH_FACTORY: FormalGroundTruthFactory | None = _load_ground_truth_fact
 def _validate_restore_verdict(
     dependency: ArtifactDescriptor, verdict: ArtifactDescriptor
 ) -> None:
+    """restore verdict の真正性を共有 RestoreTestVerdict 契約で厳格に検証する。
+
+    呼出側 descriptor の自己申告 metadata を証明として信用せず、固定 producer/schema・
+    manifest hash・verify mode・subject descriptor・checked object 数を dependency の実
+    content と突き合わせる。RestoreTestVerdict で再構築して identity_hash が一致することを
+    確認し、任意 descriptor を restore verdict に偽装できないようにする。
+    """
     if verdict.node_kind != "restore_test_verdict":
         raise ValueError("formal dependency requires restore_test_verdict")
+    if verdict.producer_id != "artifact-restore-test":
+        raise ValueError("restore verdict producer_id is not the fixed restore-test producer")
+    if verdict.producer_version != RESTORE_TEST_VERDICT_SCHEMA_VERSION:
+        raise ValueError("restore verdict producer_version is not the fixed schema version")
+    if tuple(verdict.files) != ():
+        raise ValueError("restore verdict must not declare content files")
     if tuple(verdict.parents) != (dependency.node_ref(),):
         raise ValueError("restore verdict is not bound to exact dependency descriptor")
     metadata = verdict.identity_metadata
+    expected_metadata_keys = {
+        "restore_test_schema_version", "subject_logical_id", "subject_node_kind",
+        "subject_identity_hash", "manifest_hash", "verify_mode",
+        "checked_object_count", "passed", "blocking_reasons",
+    }
+    if set(metadata) != expected_metadata_keys:
+        raise ValueError("restore verdict identity_metadata does not match the shared contract")
+    non_identity = verdict.non_identity_metadata
+    primary_root = non_identity.get("primary_root")
+    backup_root = non_identity.get("backup_root")
     if (
-        metadata.get("passed") is not True
-        or metadata.get("blocking_reasons") != []
-        or metadata.get("subject_identity_hash") != dependency.identity_hash
-        or type(metadata.get("checked_object_count")) is not int
+        type(primary_root) is not str or not primary_root
+        or type(backup_root) is not str or not backup_root
+    ):
+        raise ValueError("restore verdict is missing primary/backup restore roots")
+    # 共有 RestoreTestVerdict loader で厳格に再構築し、descriptor identity を照合する。
+    # 再構築時に verify_mode/manifest hash 型・schema などが契約通りか検証される。
+    try:
+        reconstructed = RestoreTestVerdict(
+            logical_id=verdict.logical_id,
+            subject=dependency.node_ref(),
+            manifest_hash=metadata["manifest_hash"],
+            primary_root=primary_root,
+            backup_root=backup_root,
+            verify_mode=metadata["verify_mode"],
+            checked_object_count=metadata["checked_object_count"],
+            passed=metadata["passed"],
+            blocking_reasons=metadata["blocking_reasons"],
+            producer_id=verdict.producer_id,
+            producer_version=verdict.producer_version,
+            schema_version=metadata["restore_test_schema_version"],
+        )
+    except (ContractValidationError, ValueError, TypeError) as exc:
+        raise ValueError(
+            f"restore verdict failed strict RestoreTestVerdict validation: {exc}"
+        ) from exc
+    if reconstructed.to_descriptor().identity_hash != verdict.identity_hash:
+        raise ValueError("restore verdict identity does not match its RestoreTestVerdict contract")
+    if (
+        metadata["subject_logical_id"] != dependency.logical_id
+        or metadata["subject_node_kind"] != dependency.node_kind
+        or metadata["subject_identity_hash"] != dependency.identity_hash
+    ):
+        raise ValueError("restore verdict subject descriptor does not match the dependency")
+    if metadata["manifest_hash"] != _manifest_ref(dependency).sha256:
+        raise ValueError("restore verdict manifest_hash is not bound to the dependency manifest")
+    if metadata["verify_mode"] != "full":
+        raise ValueError("formal dependency requires a full restore verification")
+    if metadata["passed"] is not True or metadata["blocking_reasons"] != []:
+        raise ValueError("restore verdict did not pass exact dependency contents")
+    if (
+        type(metadata["checked_object_count"]) is not int
         or metadata["checked_object_count"] < len(dependency.files)
     ):
-        raise ValueError("restore verdict did not pass exact dependency contents")
+        raise ValueError("restore verdict did not check every dependency object")
 
 
 def _manifest_ref(descriptor: ArtifactDescriptor) -> ArtifactRef:
@@ -698,10 +768,36 @@ def _prediction_confidence(snapshot: PerceptionSnapshot | None) -> float:
     )
 
 
-def _category_index(value: str) -> int:
+# enemy category は DeployObs に対応 field がないため、benchmark 内で完結する
+# versioned な厳格 vocabulary を固定する。末尾は必ず unknown で、未定義値は unknown へ写像する。
+_ENEMY_VOCABULARY: tuple[str, ...] = ("normal", "hazard", "boss", "unknown")
+
+
+def _weapon_category_index(value: str) -> int:
+    """item/choice ID を共有 weapon vocabulary の index へ写像する。
+
+    consumer の DeployObs weapon_category と同じ closed vocabulary を使い、
+    SHA-256 modulo のような意味を持たない量子化を避ける。未定義値は unknown。
+    """
+    from reinbalance_survivors_contracts.perception_error import ITEM_CATEGORY_SIZE
+    from survivors.deploy_obs_adapter import WEAPON_VOCABULARY
+
+    if len(WEAPON_VOCABULARY) != ITEM_CATEGORY_SIZE:
+        raise ValueError("weapon vocabulary size does not match ITEM_CATEGORY_SIZE")
+    if value in WEAPON_VOCABULARY:
+        return WEAPON_VOCABULARY.index(value)
+    return WEAPON_VOCABULARY.index("unknown")
+
+
+def _enemy_category_index(value: str) -> int:
+    """enemy 記述子を厳格 enemy vocabulary の index へ写像する。未定義は unknown。"""
     from reinbalance_survivors_contracts.perception_error import ITEM_CATEGORY_SIZE
 
-    return int(hashlib.sha256(value.encode("utf-8")).hexdigest(), 16) % ITEM_CATEGORY_SIZE
+    if len(_ENEMY_VOCABULARY) != ITEM_CATEGORY_SIZE:
+        raise ValueError("enemy vocabulary size does not match ITEM_CATEGORY_SIZE")
+    if value in _ENEMY_VOCABULARY:
+        return _ENEMY_VOCABULARY.index(value)
+    return _ENEMY_VOCABULARY.index("unknown")
 
 
 def _unpack_prediction_result(
@@ -717,38 +813,86 @@ def _unpack_prediction_result(
     return predicted, float(latency_ms)
 
 
+def _ui_target_key(target: Any) -> tuple[Any, ...]:
+    """candidate/button を先頭要素だけでなく一意に照合するためのキー。"""
+    if hasattr(target, "choice_id"):
+        return ("candidate", target.choice_id, target.choice_index, target.semantic_kind)
+    return ("button", target.semantic_action)
+
+
+def _valid_ui_targets(snapshot: PerceptionSnapshot | None) -> dict[tuple[Any, ...], Any]:
+    """非ゼロ面積・validity=True の UI target を key→target で返す。"""
+    if snapshot is None:
+        return {}
+    ui = snapshot.ui_presentation
+    result: dict[tuple[Any, ...], Any] = {}
+    for target in (*ui.candidates, *ui.buttons):
+        roi = target.roi
+        if target.validity and roi.right > roi.left and roi.bottom > roi.top:
+            result[_ui_target_key(target)] = target
+    return result
+
+
+def _target_center(target: Any) -> tuple[float, float]:
+    roi = target.roi
+    return ((roi.left + roi.right) / 2.0, (roi.top + roi.bottom) / 2.0)
+
+
+def _collapse_run_lengths(flags: Sequence[bool]) -> list[int]:
+    """連続 True（collapse）の run 長さ一覧を返す。"""
+    runs: list[int] = []
+    current = 0
+    for flag in flags:
+        if flag:
+            current += 1
+        elif current:
+            runs.append(current)
+            current = 0
+    if current:
+        runs.append(current)
+    return runs
+
+
 def _derive_calibration_residuals(
     ticks: list[SnapshotReplayTick],
+    *,
+    resolution_wh: tuple[int, int],
+    frame_period_ms: float = _CONSUMER_FRAME_PERIOD_MS,
 ) -> list[CalibrationResidual]:
-    """runner-owned GT/prediction pair から全 calibration residual を導出する。"""
+    """runner-owned GT/prediction pair から全 calibration residual を導出する。
+
+    latency は frozen frame period で frame 数へ変換し、burst/dropout/collapse は
+    session を frame 順に並べた状態遷移（enter/exit 条件付き確率と run 長）から算出する。
+    availability/dropout の母数には confidence 重みを使わず full weight にすることで、
+    欠測 frame（confidence=0）が dropout をゼロへ潰す不具合を防ぐ。
+    """
+    if frame_period_ms <= 0.0:
+        raise ValueError("frame_period_ms must be positive")
+    width, height = resolution_wh
+    if width <= 0 or height <= 0:
+        raise ValueError("resolution_wh must contain positive integers")
     residuals: list[CalibrationResidual] = []
+
+    def append(
+        session_id: str, frame_id: str, field: str, value: float,
+        confidence: float, latency_frames: float, **categories: int,
+    ) -> None:
+        residuals.append(CalibrationResidual(
+            session_id, frame_id, field, value, confidence, 0,
+            latency_frames, **categories,
+        ))
+
+    # --- per-frame observation residuals（prediction confidence 重み） ---
     for tick in ticks:
         ground = tick.ground_truth
         predicted = tick.predicted
         ground_context = ground.item_context
         predicted_context = predicted.item_context if predicted is not None else None
         confidence = _prediction_confidence(predicted)
-        missing = float(predicted is None)
+        latency_frames = tick.latency_ms / frame_period_ms
+        session_id = tick.session_id
+        frame_id = tick.frame_id
 
-        def append(field: str, value: float, **categories: int) -> None:
-            residuals.append(CalibrationResidual(
-                tick.session_id, tick.frame_id, field, value, confidence,
-                0, tick.latency_ms, **categories,
-            ))
-
-        ground_nearest = (
-            ground_context.nearest_enemy_screen_dist
-            if ground_context is not None
-            and ground_context.nearest_enemy_screen_dist is not None
-            else 0.0
-        )
-        predicted_nearest = (
-            predicted_context.nearest_enemy_screen_dist
-            if predicted_context is not None
-            and predicted_context.nearest_enemy_screen_dist is not None
-            else ground_nearest
-        )
-        append("coord_noise", abs(ground_nearest - predicted_nearest))
         for field, attribute in (
             ("hp_ratio", "hp_ratio"),
             ("xp_ratio", "xp_ratio"),
@@ -759,53 +903,44 @@ def _derive_calibration_residuals(
                 getattr(predicted_context, attribute)
                 if predicted_context is not None else ground_value
             )
-            append(field, float(predicted_value - ground_value))
+            append(session_id, frame_id, field, float(predicted_value - ground_value),
+                   confidence, latency_frames)
         append(
-            "inventory_hash",
+            session_id, frame_id, "inventory_hash",
             float(
                 predicted is None
                 or predicted.ui_presentation.inventory_hash
                 != ground.ui_presentation.inventory_hash
             ),
+            confidence, latency_frames,
         )
-        ground_targets = ground.ui_presentation.candidates
-        predicted_targets = predicted.ui_presentation.candidates if predicted else ()
-        if ground_targets and predicted_targets:
-            ground_center = (
-                (ground_targets[0].roi.left + ground_targets[0].roi.right) / 2,
-                (ground_targets[0].roi.top + ground_targets[0].roi.bottom) / 2,
-            )
-            predicted_center = (
-                (predicted_targets[0].roi.left + predicted_targets[0].roi.right) / 2,
-                (predicted_targets[0].roi.top + predicted_targets[0].roi.bottom) / 2,
-            )
-            quantization = (
-                (predicted_center[0] - ground_center[0]) ** 2
-                + (predicted_center[1] - ground_center[1]) ** 2
-            ) ** 0.5 * 1920.0
-        else:
-            quantization = missing
-        append("coord_quantization_px", quantization)
-        append("burst_enter", missing)
-        append("burst_exit", 1.0 - missing)
-        append("burst_dropout", missing)
-        collapsed = float(
-            predicted is None
-            or (
-                ground.screen_state != "unknown"
-                and predicted.screen_state == "unknown"
-            )
-        )
-        append("unknown_screen_collapse", collapsed)
-        append("unknown_screen_collapse_duration", collapsed)
-        ground_item = ground_targets[0].choice_id if ground_targets else "unknown"
-        predicted_item = (
-            predicted_targets[0].choice_id if predicted_targets else "unknown"
-        )
+        # 全対応 UI target を key で一意照合し、signed x/y residual を収集する。
+        # coord_noise は正規化 signed residual、coord_quantization_px は実 resolution
+        # の幅/高さを各軸へ適用した pixel 誤差（別 metric）。
+        ground_targets = _valid_ui_targets(ground)
+        predicted_targets = _valid_ui_targets(predicted)
+        for key, ground_target in ground_targets.items():
+            predicted_target = predicted_targets.get(key)
+            if predicted_target is None:
+                continue
+            gx, gy = _target_center(ground_target)
+            px, py = _target_center(predicted_target)
+            dx = px - gx
+            dy = py - gy
+            append(session_id, frame_id, "coord_noise", float(dx), confidence, latency_frames)
+            append(session_id, frame_id, "coord_noise", float(dy), confidence, latency_frames)
+            append(session_id, frame_id, "coord_quantization_px", abs(float(dx)) * width,
+                   confidence, latency_frames)
+            append(session_id, frame_id, "coord_quantization_px", abs(float(dy)) * height,
+                   confidence, latency_frames)
+        ground_choice = ground.ui_presentation.candidates
+        predicted_choice = predicted.ui_presentation.candidates if predicted else ()
+        ground_item = ground_choice[0].choice_id if ground_choice else "unknown"
+        predicted_item = predicted_choice[0].choice_id if predicted_choice else "unknown"
         append(
-            "item_category", 0.0,
-            ground_truth_category=_category_index(ground_item),
-            predicted_category=_category_index(predicted_item),
+            session_id, frame_id, "item_category", 0.0, confidence, latency_frames,
+            ground_truth_category=_weapon_category_index(ground_item),
+            predicted_category=_weapon_category_index(predicted_item),
         )
         ground_enemy = (
             "boss" if ground_context and ground_context.boss_flag
@@ -818,10 +953,45 @@ def _derive_calibration_residuals(
             else "normal"
         )
         append(
-            "enemy_category", 0.0,
-            ground_truth_category=_category_index(ground_enemy),
-            predicted_category=_category_index(predicted_enemy),
+            session_id, frame_id, "enemy_category", 0.0, confidence, latency_frames,
+            ground_truth_category=_enemy_category_index(ground_enemy),
+            predicted_category=_enemy_category_index(predicted_enemy),
         )
+
+    # --- per-session state-transition residuals（full weight = confidence 1.0） ---
+    by_session: dict[str, list[SnapshotReplayTick]] = {}
+    for tick in ticks:
+        by_session.setdefault(tick.session_id, []).append(tick)
+    for session_id, session_ticks in by_session.items():
+        missing = [tick.predicted is None for tick in session_ticks]
+        collapsed = [
+            tick.predicted is None
+            or (
+                tick.ground_truth.screen_state != "unknown"
+                and tick.predicted.screen_state == "unknown"
+            )
+            for tick in session_ticks
+        ]
+        for index, tick in enumerate(session_ticks):
+            frame_id = tick.frame_id
+            # burst_dropout は marginal dropout rate（欠測 frame も full weight で母数に残す）
+            append(session_id, frame_id, "burst_dropout", float(missing[index]), 1.0, 0.0)
+            if index + 1 < len(session_ticks):
+                if not missing[index]:
+                    # present→missing の enter 条件付き確率
+                    append(session_id, frame_id, "burst_enter",
+                           float(missing[index + 1]), 1.0, 0.0)
+                else:
+                    # missing→present の exit 条件付き確率
+                    append(session_id, frame_id, "burst_exit",
+                           float(not missing[index + 1]), 1.0, 0.0)
+                if not collapsed[index]:
+                    # non-collapse→collapse の開始確率
+                    append(session_id, frame_id, "unknown_screen_collapse",
+                           float(collapsed[index + 1]), 1.0, 0.0)
+        for run_index, run_length in enumerate(_collapse_run_lengths(collapsed)):
+            append(session_id, f"{session_id}:collapse_run:{run_index}",
+                   "unknown_screen_collapse_duration", float(run_length), 1.0, 0.0)
     return residuals
 
 
@@ -1001,6 +1171,10 @@ def _recover_committed_result(
     profile = FittedPerceptionErrorProfile.from_artifact_wire(
         payload["profile_artifact"]
     )
+    if profile.development_only is not False:
+        raise ValueError(
+            "committed formal batch references a development-only calibration profile"
+        )
     verdict_wire = payload["verdict"]
     if not isinstance(verdict_wire, dict):
         raise ValueError("formal batch verdict must be an object")
@@ -1093,6 +1267,15 @@ def _recover_committed_result(
 def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResult:
     """descriptor/restore/package/annotation-bound formal benchmark state machine。"""
     restored = _restore_dependencies(request)
+    # fail closed: 正式依存（parser/detector package から供給される provider と
+    # reviewed annotation loader）が欠落している環境では、calibration/final session の
+    # manifest・frame・PNG を一切開封する前に停止する。recovery 経路も formal 実行環境を
+    # 要求するため、この検証は session 復元より前に置く。
+    if _CLI_PROVIDER_FACTORY is None or _GROUND_TRUTH_FACTORY is None:
+        raise ValueError(
+            "formal pipeline requires prediction-only provider and reviewed annotation "
+            "loader before opening any session"
+        )
     capture_bytes = _capture_manifest_bytes(restored)
     _, manifests, validated_split = _restore_split_and_sessions(
         request, capture_bytes
@@ -1104,10 +1287,6 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     )
     if recovered is not None:
         return recovered
-    if _CLI_PROVIDER_FACTORY is None or _GROUND_TRUTH_FACTORY is None:
-        raise ValueError(
-            "formal pipeline requires prediction-only provider and reviewed annotation loader"
-        )
 
     detector_payload = payloads["detector_package"]
     parser_payload = payloads["parser_package"]
@@ -1157,7 +1336,16 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         calibration_ground_truth_loader, calibration_evidence,
         parser_hash=parser_hash, detector_hash=detector_hash,
     )
-    residuals = _derive_calibration_residuals(calibration_ticks)
+    benchmark_resolutions = {
+        session.resolution_wh
+        for session in validated_split.sessions
+        if session.kind in {"error_calibration", "final_e2e_test"}
+    }
+    if len(benchmark_resolutions) != 1:
+        raise ValueError("benchmark sessions must share exactly one resolution")
+    residuals = _derive_calibration_residuals(
+        calibration_ticks, resolution_wh=next(iter(benchmark_resolutions))
+    )
     calibration_hashes = {
         manifest.session_id: manifest.manifest_sha256
         for manifest in calibration_manifests

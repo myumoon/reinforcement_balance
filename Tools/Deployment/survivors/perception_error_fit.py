@@ -202,6 +202,9 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
     calibration_session_hashes: Mapping[str, str] = field(default_factory=dict)
     field_sample_counts: Mapping[str, int] = field(default_factory=dict)
     fit_code_hash: str = ""
+    # synthetic/bootstrap 由来の fit を formal 成果物と混同させないための provenance flag。
+    # 既定 True（development-only）。formal fit だけが False をセットできる。
+    development_only: bool = True
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -216,6 +219,8 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
         if not counts or not all(type(name) is str and type(count) is int and count > 0 for name, count in counts.items()):
             raise ValueError("field_sample_counts must contain positive integer counts")
         _require_sha256(self.fit_code_hash, "fit_code_hash")
+        if type(self.development_only) is not bool:
+            raise ValueError("development_only must be bool")
         object.__setattr__(self, "calibration_session_hashes", MappingProxyType(hashes))
         object.__setattr__(self, "field_sample_counts", MappingProxyType(counts))
 
@@ -227,6 +232,7 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
             "calibration_session_hashes": dict(self.calibration_session_hashes),
             "field_sample_counts": dict(self.field_sample_counts),
             "fit_code_hash": self.fit_code_hash,
+            "development_only": self.development_only,
         }
 
     @classmethod
@@ -236,11 +242,14 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
         expected = {
             "schema_version", "profile", "profile_hash",
             "calibration_session_hashes", "field_sample_counts", "fit_code_hash",
+            "development_only",
         }
         if not isinstance(data, Mapping) or set(data) != expected:
             raise ValueError("calibration artifact fields do not match schema")
         if data["schema_version"] != CALIBRATION_ARTIFACT_SCHEMA_VERSION:
             raise ValueError("unsupported calibration artifact schema")
+        if type(data["development_only"]) is not bool:
+            raise ValueError("calibration artifact development_only must be bool")
         profile = PerceptionErrorProfile.from_wire(data["profile"])
         if profile.profile_hash != data["profile_hash"]:
             raise HashMismatchError("calibration artifact profile hash mismatch")
@@ -249,6 +258,7 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
             calibration_session_hashes=data["calibration_session_hashes"],
             field_sample_counts=data["field_sample_counts"],
             fit_code_hash=data["fit_code_hash"],
+            development_only=data["development_only"],
         )
         if fitted.to_artifact_wire() != dict(data):
             raise HashMismatchError("calibration artifact failed canonical reconstruction")
@@ -418,6 +428,7 @@ def fit_error_profile(
         calibration_session_hashes=hashes,
         field_sample_counts=sample_counts,
         fit_code_hash=fit_code_hash,
+        development_only=not formal,
     )
 
 

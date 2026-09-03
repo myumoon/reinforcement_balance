@@ -476,6 +476,12 @@ def _foreground_classification_values(
             or class_name not in _FORMAL_FOREGROUND_CLASSES
         ):
             raise ValueError("predicted foreground_entity_classes entries are invalid")
+        # ground truth に存在しない entity ID、または ground と異なる class を予測した
+        # 場合は false positive として当該予測 class の value 列へ 0.0 を計上する。
+        # これがないと predictor が架空 entity を出しても foreground class CI を
+        # 100% に保てるため、ground-only 集計に FP を必ず含める。
+        if ground_entities.get(entity_id) != class_name:
+            values[f"foreground_class:{class_name}"].append(0.0)
     return values
 
 
@@ -648,21 +654,26 @@ def replay_snapshots(
         for key, ground_target in valid_ground_targets.items():
             pred_target = pred_targets.get(key)
             # predicted が存在しない、または usable でない（validity=False/capability=False/ゼロ ROI）→ 欠損扱い
-            if pred_target is None or not _is_usable_pred_target(pred_target):
+            usable = pred_target is not None and _is_usable_pred_target(pred_target)
+            if not usable:
                 _append_record(records, tick, "ui_roi_center_error", 0.0, None, 0.0)
                 _append_record(records, tick, "ui_inside_region", True, None, 0.0)
                 _append_record(records, tick, "confidence", 1.0, None, 0.0)
-                continue
-            ground_center = ((ground_target.roi.left + ground_target.roi.right) / 2,
-                             (ground_target.roi.top + ground_target.roi.bottom) / 2)
-            pred_center = ((pred_target.roi.left + pred_target.roi.right) / 2,
-                           (pred_target.roi.top + pred_target.roi.bottom) / 2)
-            center_error = math.hypot(pred_center[0] - ground_center[0], pred_center[1] - ground_center[1])
-            inside = (ground_target.roi.left <= pred_center[0] <= ground_target.roi.right
-                      and ground_target.roi.top <= pred_center[1] <= ground_target.roi.bottom)
-            _append_record(records, tick, "ui_roi_center_error", 0.0, center_error, pred_target.confidence)
-            _append_record(records, tick, "ui_inside_region", True, inside, pred_target.confidence)
-            _append_record(records, tick, "confidence", 1.0, pred_target.confidence, pred_target.confidence)
+            else:
+                ground_center = ((ground_target.roi.left + ground_target.roi.right) / 2,
+                                 (ground_target.roi.top + ground_target.roi.bottom) / 2)
+                pred_center = ((pred_target.roi.left + pred_target.roi.right) / 2,
+                               (pred_target.roi.top + pred_target.roi.bottom) / 2)
+                center_error = math.hypot(pred_center[0] - ground_center[0], pred_center[1] - ground_center[1])
+                inside = (ground_target.roi.left <= pred_center[0] <= ground_target.roi.right
+                          and ground_target.roi.top <= pred_center[1] <= ground_target.roi.bottom)
+                _append_record(records, tick, "ui_roi_center_error", 0.0, center_error, pred_target.confidence)
+                _append_record(records, tick, "ui_inside_region", True, inside, pred_target.confidence)
+                _append_record(records, tick, "confidence", 1.0, pred_target.confidence, pred_target.confidence)
+            # cross-frame equivalence は expected を ground truth だけから先に判定する。
+            # current prediction が欠測・unusable でも equivalence 期待 frame では
+            # ui_cross_frame_equivalent=False を必ず記録し、失敗 frame が分母から抜けて
+            # equivalence rate が過大評価されるのを防ぐ。
             previous = previous_targets.get((tick.session_id, key))
             if previous is not None:
                 old_ground_snapshot, old_ground_target, old_pred_snapshot, old_pred_target = previous
@@ -674,7 +685,8 @@ def replay_snapshots(
                     new_ui_state_key=ground.ui_state_key,
                 )
                 actual_equivalent = (
-                    old_pred_snapshot is not None
+                    usable
+                    and old_pred_snapshot is not None
                     and old_pred_target is not None
                     and predicted is not None
                     and is_equivalent_ui_target(
@@ -685,19 +697,25 @@ def replay_snapshots(
                         new_ui_state_key=predicted.ui_state_key,
                     )
                 )
+                equiv_confidence = pred_target.confidence if usable else 0.0
                 if expected_equivalent:
                     _append_record(
                         records, tick, "ui_cross_frame_equivalent", True,
-                        actual_equivalent, pred_target.confidence,
+                        actual_equivalent, equiv_confidence,
                     )
                 elif actual_equivalent:
                     # unsafe FP: predictor claims equivalent when ground truth says not; must be 0
                     _append_record(
                         records, tick, "ui_cross_frame_false_positive", False,
-                        True, pred_target.confidence,
+                        True, equiv_confidence,
                     )
+            # ground target は常に previous として保持し、prediction は usable な場合だけ
+            # 保持する。欠測 prediction を previous に残すと次 frame の equivalence 判定が
+            # 過去欠測を equivalent 扱いにしてしまうため None にする。
             previous_targets[(tick.session_id, key)] = (
-                ground, ground_target, predicted, pred_target,
+                ground, ground_target,
+                predicted if usable else None,
+                pred_target if usable else None,
             )
         # FP = usable predicted targets that do not correspond to any valid ground target
         # validity=False / zero-ROI / non-capable predicted targets are not counted as FP
@@ -913,6 +931,15 @@ def _run_benchmark_common(
     named_slice_values: dict[str, dict[str, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
+    # foreground_class は entity ID で session ごとに distinct 集計する（同一 entity が
+    # 200 frame 続いても 1 と数える）。event は連続表示を 1 occurrence として数えるため
+    # rising edge（absent→present 遷移）だけをカウントし、長時間表示で floor を満たせないようにする。
+    foreground_entity_ids: dict[str, dict[str, set[str]]] = defaultdict(
+        lambda: defaultdict(set)
+    )
+    foreground_frame_counts: dict[str, int] = defaultdict(int)
+    event_occurrence_counts: dict[str, int] = defaultdict(int)
+    event_prev_present: dict[tuple[str, str], bool] = {}
     if raw_values and all(isinstance(value, SnapshotReplayTick) for value in raw_values):
         # V1 snapshot を変更せず、ground-truth tick から汎用 named slice label を派生する。
         # 同じ tick 内の複数 metric record ではなく slice ごとに一度だけ数える。
@@ -926,40 +953,77 @@ def _run_benchmark_common(
             foreground_values = _foreground_classification_values(
                 tick.ground_truth, tick.predicted
             )
+            ground_entity_classes = tick.ground_truth.diagnostics.get(
+                "foreground_entity_classes"
+            )
             for label, count in slice_counts_for_tick.items():
-                named_slice_counts[label] += count
-                if count > 0:
+                present = count > 0
+                if present:
                     named_slice_sessions[label].add(tick.session_id)
-                    if label.startswith("foreground_class:"):
+                if label.startswith("foreground_class:"):
+                    class_name = label.split(":", 1)[1]
+                    entity_ids = (
+                        {
+                            entity_id
+                            for entity_id, cls in ground_entity_classes.items()
+                            if cls == class_name
+                        }
+                        if isinstance(ground_entity_classes, Mapping) else set()
+                    )
+                    if entity_ids:
+                        # immutable entity ID で dedup（同一 entity の重複計上を防ぐ）
+                        foreground_entity_ids[label][tick.session_id].update(entity_ids)
+                    else:
+                        # entity ID 無しの集計（foreground_entity_counts のみ）は dedup 不能。
+                        # frame 単位でしか数えられないため fallback として加算する。
+                        foreground_frame_counts[label] += count
+                    if present:
                         named_slice_values[label][tick.session_id].extend(
                             foreground_values.get(label, ())
                         )
-                    elif label == "event:boss":
-                        ground_context = tick.ground_truth.item_context
-                        predicted_context = (
-                            tick.predicted.item_context
-                            if tick.predicted is not None else None
-                        )
-                        named_slice_values[label][tick.session_id].append(float(
-                            ground_context is not None
-                            and ground_context.boss_flag is True
-                            and predicted_context is not None
-                            and predicted_context.boss_flag is True
-                        ))
-                    elif label == "event:hazard":
-                        ground_context = tick.ground_truth.item_context
-                        predicted_context = (
-                            tick.predicted.item_context
-                            if tick.predicted is not None else None
-                        )
-                        named_slice_values[label][tick.session_id].append(float(
-                            ground_context is not None
-                            and ground_context.hazard_flag is True
-                            and predicted_context is not None
-                            and predicted_context.hazard_flag is True
-                        ))
-                    else:
+                elif label.startswith("event:"):
+                    key = (tick.session_id, label)
+                    if present and not event_prev_present.get(key, False):
+                        event_occurrence_counts[label] += 1
+                    event_prev_present[key] = present
+                    if present:
+                        if label == "event:boss":
+                            ground_context = tick.ground_truth.item_context
+                            predicted_context = (
+                                tick.predicted.item_context
+                                if tick.predicted is not None else None
+                            )
+                            named_slice_values[label][tick.session_id].append(float(
+                                ground_context is not None
+                                and ground_context.boss_flag is True
+                                and predicted_context is not None
+                                and predicted_context.boss_flag is True
+                            ))
+                        elif label == "event:hazard":
+                            ground_context = tick.ground_truth.item_context
+                            predicted_context = (
+                                tick.predicted.item_context
+                                if tick.predicted is not None else None
+                            )
+                            named_slice_values[label][tick.session_id].append(float(
+                                ground_context is not None
+                                and ground_context.hazard_flag is True
+                                and predicted_context is not None
+                                and predicted_context.hazard_flag is True
+                            ))
+                        else:
+                            named_slice_values[label][tick.session_id].append(correctness)
+                else:
+                    # screen_state / time_band は frame 単位で数える（count floor 非対象）。
+                    named_slice_counts[label] += count
+                    if present:
                         named_slice_values[label][tick.session_id].append(correctness)
+        for label, sessions in foreground_entity_ids.items():
+            named_slice_counts[label] += sum(len(ids) for ids in sessions.values())
+        for label, count in foreground_frame_counts.items():
+            named_slice_counts[label] += count
+        for label, occurrences in event_occurrence_counts.items():
+            named_slice_counts[label] += occurrences
         records = replay_snapshots(raw_values, formal_evidence=formal_evidence)  # type: ignore[arg-type]
     elif all(isinstance(value, BenchmarkRecord) for value in raw_values):
         records = list(raw_values)  # type: ignore[assignment]
