@@ -430,10 +430,15 @@ def fit_error_profile(
         return _weighted_mean(indicators, weights)
 
     # latency は (session_id, frame_id) ごとに 1 観測。burst/collapse 遷移行は
-    # latency_frames=0.0 で生成されるため、母集団に含めると実測値を希釈する。
+    # session レベルで生成される別 field（burst_enter/exit/dropout 等）のため除外する。
+    # 0 frame latency は per-tick 観測として有効なので値によるフィルタは使わない。
+    _LATENCY_TRANSITION_FIELDS: Final[frozenset[str]] = frozenset({
+        "burst_enter", "burst_exit", "burst_dropout",
+        "unknown_screen_collapse", "unknown_screen_collapse_duration",
+    })
     tick_latency: dict[tuple[str, str], float] = {}
     for row in residuals:
-        if row.latency_frames <= 0.0:
+        if row.field in _LATENCY_TRANSITION_FIELDS:
             continue
         key = (row.session_id, row.frame_id)
         if key in tick_latency and tick_latency[key] != row.latency_frames:

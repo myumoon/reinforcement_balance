@@ -921,32 +921,31 @@ def _derive_calibration_residuals(
         predicted = tick.predicted
         ground_context = ground.item_context
         predicted_context = predicted.item_context if predicted is not None else None
-        confidence = _prediction_confidence(predicted)
         latency_frames = tick.latency_ms / frame_period_ms
         session_id = tick.session_id
         frame_id = tick.frame_id
 
-        for field, attribute in (
-            ("hp_ratio", "hp_ratio"),
-            ("xp_ratio", "xp_ratio"),
-            ("timer_seconds", "elapsed_time"),
-        ):
-            ground_value = getattr(ground_context, attribute) if ground_context else 0.0
-            predicted_value = (
-                getattr(predicted_context, attribute)
-                if predicted_context is not None else ground_value
+        # ground/predicted の両方が有効な場合だけ連続 residual を生成する。
+        # predicted が欠測（None）の場合は dropout/availability へ分類されるため
+        # 0 残差として数えず、このループをスキップする。
+        if predicted_context is not None and ground_context is not None:
+            for field, attribute in (
+                ("hp_ratio", "hp_ratio"),
+                ("xp_ratio", "xp_ratio"),
+                ("timer_seconds", "elapsed_time"),
+            ):
+                ground_value = getattr(ground_context, attribute)
+                predicted_value = getattr(predicted_context, attribute)
+                append(session_id, frame_id, field, float(predicted_value - ground_value),
+                       1.0, latency_frames)
+            append(
+                session_id, frame_id, "inventory_hash",
+                float(
+                    predicted.ui_presentation.inventory_hash
+                    != ground.ui_presentation.inventory_hash
+                ),
+                1.0, latency_frames,
             )
-            append(session_id, frame_id, field, float(predicted_value - ground_value),
-                   confidence, latency_frames)
-        append(
-            session_id, frame_id, "inventory_hash",
-            float(
-                predicted is None
-                or predicted.ui_presentation.inventory_hash
-                != ground.ui_presentation.inventory_hash
-            ),
-            confidence, latency_frames,
-        )
         # coord_noise / coord_quantization_px は consumer wrapper と同じ
         # player_screen_pos / nearest_enemy_offset DeployObs segment から導出する。
         # UI ROI 中心誤差は ROI benchmark metric 専用に残し、共有 profile には混ぜない。
@@ -963,12 +962,15 @@ def _derive_calibration_residuals(
                 if predicted is not None else g_val
             )
             for i in range(seg_size):
-                if g_val[i] <= 0.0:
+                # ground と predicted 両方の validity が有効な場合だけ residual を生成する。
+                if g_val[i] <= 0.0 or p_val[i] <= 0.0:
                     continue
                 dx = float(p_vals[i] - g_vals[i])
-                append(session_id, frame_id, "coord_noise", dx, confidence, latency_frames)
+                coord_confidence = float(p_val[i])
+                append(session_id, frame_id, "coord_noise", dx, coord_confidence, latency_frames)
+                # DeployObs は [-1, 1] domain なので 1 unit = dimension / 2 px。
                 append(session_id, frame_id, "coord_quantization_px",
-                       abs(dx) * pixel_dims[i % 2], confidence, latency_frames)
+                       abs(dx) * pixel_dims[i % 2] / 2.0, coord_confidence, latency_frames)
         # item_category は assembler が DeployObs へ格納した weapon_category から導出する。
         # level-up candidate choice_id ではなく、consumer wrapper と同一の分類を使う。
         if _wc_off is not None:
@@ -978,7 +980,7 @@ def _derive_calibration_residuals(
                 if predicted is not None else g_cat
             )
             append(
-                session_id, frame_id, "item_category", 0.0, confidence, latency_frames,
+                session_id, frame_id, "item_category", 0.0, 1.0, latency_frames,
                 ground_truth_category=g_cat,
                 predicted_category=p_cat,
             )
@@ -993,7 +995,7 @@ def _derive_calibration_residuals(
             else "normal"
         )
         append(
-            session_id, frame_id, "enemy_category", 0.0, confidence, latency_frames,
+            session_id, frame_id, "enemy_category", 0.0, 1.0, latency_frames,
             ground_truth_category=_enemy_category_index(ground_enemy),
             predicted_category=_enemy_category_index(predicted_enemy),
         )

@@ -16,6 +16,7 @@ from benchmark_survivors_perception import (
     FormalBenchmarkRequest,
     RestoredFormalArtifact,
     _annotation_evidence_index,
+    _derive_calibration_residuals,
     _ground_truth_semantic_hash,
     _replay_sessions,
     _subject_hashes,
@@ -31,6 +32,7 @@ from survivors.perception_benchmark import (
     _foreground_classification_values,
     recompute_gate_from_metrics,
     replay_snapshots,
+    run_benchmark,
 )
 from survivors.perception_error_fit import CalibrationResidual, FinalSessionAlreadyOpenedError
 from survivors.perception_session_split import validate_split
@@ -929,3 +931,85 @@ def test_final_sessions_are_reserved_before_provider_and_remain_consumed(tmp_pat
     monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
     with pytest.raises(FinalSessionAlreadyOpenedError):
         run_formal_pipeline(request)
+
+
+def _make_tick(session_id: str, frame_idx: int, screen_state: str) -> SnapshotReplayTick:
+    """指定 screen_state の最小 SnapshotReplayTick を生成するヘルパー（回帰テスト用）。"""
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud, world = _hud_world(session_id, frame_idx, frame_idx * 1_000_000_000, screen_state)
+    snapshot = assembler.assemble(hud, world, schema, (1920, 1080))
+    assert snapshot is not None
+    return SnapshotReplayTick(
+        session_id, "final_e2e_test", "lossless",
+        snapshot.frame_id, snapshot, snapshot, 0.0,
+    )
+
+
+def test_event_rising_edge_counts_two_occurrences_not_four() -> None:
+    """event:level_up は rising-edge (False→True) のみ計上し、継続 True は重複しない。
+
+    gameplay→level_up→gameplay→level_up→gameplay の 2 occurrence 入力に対して
+    count=4 でなく count=2 になることを確認する（P1-1 regression）。
+    """
+    states = ["gameplay", "level_up_items", "gameplay", "level_up_items", "gameplay"]
+    ticks = [_make_tick("sess", i, s) for i, s in enumerate(states)]
+    report = run_benchmark(ticks)
+    assert report.slice_counts.get("event:level_up", 0) == 2
+
+
+def test_coord_quantization_uses_half_dimension_for_normalized_domain() -> None:
+    """coord_quantization_px は [-1,1] domain なので 1 unit = dimension/2 px で変換する。
+
+    正規化差 0.02、幅 1920 の場合、19.2px（38.4px ではない）になることを確認する（P1-4 regression）。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    width, height = 1920, 1080
+    session_id = "coord-test"
+    hud_g, world = _hud_world(session_id, 0, 1_000_000_000, "gameplay")
+    ground = assembler.assemble(hud_g, world, schema, (width, height))
+    assert ground is not None
+    ps_off, ps_sz = schema.layout["player_screen_pos"]
+    # x 方向に 0.02 の正規化差を注入する（[−1,1] domain → 1920/2 * 0.02 = 19.2 px 期待値）。
+    pred_values = np.array(ground.deploy_obs.values, dtype=float)
+    pred_values[ps_off] += 0.02
+    pred_deploy = replace(ground.deploy_obs, values=pred_values)
+    predicted = replace(ground, deploy_obs=pred_deploy)
+    tick = SnapshotReplayTick(session_id, "error_calibration", "lossless", ground.frame_id,
+                              ground, predicted, 0.0)
+    residuals = _derive_calibration_residuals([tick], resolution_wh=(width, height))
+    quant_residuals = [r for r in residuals if r.field == "coord_quantization_px"]
+    assert quant_residuals, "coord_quantization_px residual が生成されていない"
+    assert any(abs(r.residual - 19.2) < 0.5 for r in quant_residuals), (
+        f"expected ~19.2 px but got {[r.residual for r in quant_residuals]}"
+    )
+
+
+def test_invalid_predicted_validity_excludes_coord_residual() -> None:
+    """predicted validity=0 の座標は coord residual を生成しない（P1-5 regression）。
+
+    invalid な predicted が noise sample として混入しないことを確認する。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    width, height = 1920, 1080
+    session_id = "validity-test"
+    hud_g, world = _hud_world(session_id, 0, 1_000_000_000, "gameplay")
+    ground = assembler.assemble(hud_g, world, schema, (width, height))
+    assert ground is not None
+    # predicted validity を全 coord segment で 0 にして invalid にする。
+    pred_validity = np.zeros_like(ground.deploy_obs.validity)
+    pred_deploy = replace(ground.deploy_obs, validity=pred_validity)
+    predicted = replace(ground, deploy_obs=pred_deploy)
+    tick = SnapshotReplayTick(session_id, "error_calibration", "lossless", ground.frame_id,
+                              ground, predicted, 0.0)
+    residuals = _derive_calibration_residuals([tick], resolution_wh=(width, height))
+    coord_residuals = [
+        r for r in residuals
+        if r.field in {"coord_noise", "coord_quantization_px"}
+        and r.session_id == session_id and r.frame_id == ground.frame_id
+    ]
+    assert coord_residuals == [], (
+        f"invalid predicted validity でも {len(coord_residuals)} 件の coord residual が生成された"
+    )

@@ -18,7 +18,9 @@ from games.survivors.deployable_policy_trainer import (
     FormalDependencies, sequence_distillation_loss,
 )
 from survivors.perception_error_fit import (
-    FittedPerceptionErrorProfile, _FORMAL_FACTORY_TOKEN, _current_fit_code_hash,
+    CALIBRATION_ARTIFACT_SCHEMA_VERSION,
+    FittedPerceptionErrorProfile,
+    _current_fit_code_hash,
 )
 SCHEMA = DeployObsSchema.default_v1()
 def _dataset() -> CombatDistillationDataset:
@@ -149,18 +151,21 @@ def _formal_profile(session_id: str = "cal-1") -> FittedPerceptionErrorProfile:
     """development_only=False の最小 FittedPerceptionErrorProfile。
 
     FormalDependencies.validate() の development_only 検証を通過するための
-    最小フィクスチャ。formal runner pipeline と同じ factory token を使う。
+    最小フィクスチャ。artifact wire を経由して構築し、Deployment private token への
+    cross-module 依存を避ける。
     """
     cal_hash = canonical_hash({"synthetic_session_id": session_id})
-    return FittedPerceptionErrorProfile(
-        calibration_session_ids=[session_id],
-        final_e2e_session_ids=[],
-        calibration_session_hashes={session_id: cal_hash},
-        field_sample_counts={"hp_ratio": 2},
-        fit_code_hash=_current_fit_code_hash(),
-        development_only=False,
-        _factory_token=_FORMAL_FACTORY_TOKEN,
-    )
+    base = PerceptionErrorProfile(calibration_session_ids=[session_id])
+    wire = {
+        "schema_version": CALIBRATION_ARTIFACT_SCHEMA_VERSION,
+        "profile": base.to_wire(),
+        "profile_hash": base.profile_hash,
+        "calibration_session_hashes": {session_id: cal_hash},
+        "field_sample_counts": {"hp_ratio": 2},
+        "fit_code_hash": _current_fit_code_hash(),
+        "development_only": False,
+    }
+    return FittedPerceptionErrorProfile.from_artifact_wire(wire)
 
 
 def test_formal_dependency_object_rejects_bootstrap_profile_source() -> None:
@@ -379,10 +384,12 @@ def test_load_formal_deps_cli_reads_all_required_fields(tmp_path: Path) -> None:
             "dependency_versions": {}, "operator": "pytest", "timestamp": "2026-08-09T00:00:00Z",
         }, hashes,
     )
-    profile = PerceptionErrorProfile(calibration_session_ids=["cal-1"])
+    # perception_profile は calibration artifact wire 全体（FittedPerceptionErrorProfile）。
+    # 基底 PerceptionErrorProfile.to_wire() では development_only が失われ CLI が拒否する。
+    profile = _formal_profile("cal-1")
     valid_data = {
         "fidelity_verdict": verdict.to_wire(),
-        "perception_profile": profile.to_wire(),
+        "perception_profile": profile.to_artifact_wire(),
         "required_perception_profile_hash": profile.profile_hash,
         "current_gating_producer_hashes": hashes,
         "profile_source": "measured",

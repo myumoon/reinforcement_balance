@@ -1027,14 +1027,8 @@ def _run_benchmark_common(
                     key = (tick.session_id, label)
                     if present and not event_prev_present.get(key, False):
                         event_occurrence_counts[label] += 1
-                    event_prev_present[key] = present
-            # 不在 event label を False へ戻して次 tick の rising-edge 検出を正しくする。
-            # _named_slice_counts は存在する label しか返さないため、不在 label を
-            # 明示的にリセットしないと「前回 True → 今回不在 → 次回 True」が検出されない。
-            for _evt in _EVENT_LABELS:
-                if _evt not in slice_counts_for_tick:
-                    event_prev_present[(tick.session_id, _evt)] = False
-                    if present:
+                        # rising-edge のみ metric を記録する。不在 → 不在 や present → present
+                        # は重複計上となるためスキップし、1 occurrence = 1 sample を保証する。
                         if label == "event:boss":
                             ground_context = tick.ground_truth.item_context
                             predicted_context = (
@@ -1061,11 +1055,18 @@ def _run_benchmark_common(
                             ))
                         else:
                             named_slice_values[label][tick.session_id].append(correctness)
+                    event_prev_present[key] = present
                 else:
                     # screen_state / time_band は frame 単位で数える（count floor 非対象）。
                     named_slice_counts[label] += count
                     if present:
                         named_slice_values[label][tick.session_id].append(correctness)
+            # 不在 event label を False へ戻して次 tick の rising-edge 検出を正しくする。
+            # _named_slice_counts は存在する label しか返さないため、不在 label を
+            # 明示的にリセットしないと「前回 True → 今回不在 → 次回 True」が検出されない。
+            for _evt in _EVENT_LABELS:
+                if _evt not in slice_counts_for_tick:
+                    event_prev_present[(tick.session_id, _evt)] = False
         for label, sessions in foreground_entity_ids.items():
             named_slice_counts[label] += sum(len(ids) for ids in sessions.values())
         for label, count in foreground_frame_counts.items():

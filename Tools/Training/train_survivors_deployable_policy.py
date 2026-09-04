@@ -79,7 +79,7 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read formal dependencies: {exc}") from exc
     from reinbalance_survivors_contracts.fidelity_verdict import FidelityVerdict
-    from reinbalance_survivors_contracts.perception_error import PerceptionErrorProfile
+    from survivors.perception_error_fit import FittedPerceptionErrorProfile
     if not isinstance(data, dict):
         raise ValueError("formal dependencies must be a JSON object")
     _REQUIRED_KEYS = frozenset(
@@ -94,7 +94,9 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
         raise ValueError(f"formal dependencies missing keys: {sorted(missing)}")
     try:
         verdict = FidelityVerdict.from_wire(data["fidelity_verdict"])
-        profile = PerceptionErrorProfile.from_wire(data["perception_profile"])
+        # calibration artifact wire 全体を読み込み development_only を保持する。
+        # 基底 PerceptionErrorProfile.from_wire() では provenance が失われ formal guard が拒否する。
+        profile = FittedPerceptionErrorProfile.from_artifact_wire(data["perception_profile"])
         required_hash = data["required_perception_profile_hash"]
         current_hashes = data["current_gating_producer_hashes"]
         profile_source = data["profile_source"]

@@ -256,3 +256,59 @@ class TestFinalVerdict:
             PerceptionFinalVerdict(**kwargs, development_only=False, formal_perception_verdict_eligible=True)
         with pytest.raises(FormalVerdictPromotionError):
             PerceptionFinalVerdict(**kwargs, development_only=False, formal_perception_verdict_eligible=False)
+
+
+def test_latency_includes_zero_and_mixes_correctly() -> None:
+    """latency_frames=0 の per-tick 観測は有効として含め、平均が正しく計算される（P1-2 regression）。
+
+    [0.0, 6.0] の 2 観測を fit すると期待平均は 3.0（6.0 ではない）。
+    burst/collapse 遷移 field は field 種別で除外し、値によるフィルタは使わない。
+    """
+    rows = [
+        CalibrationResidual("c0", "f0", "hp_ratio", 0.0, 1.0, 0, 0.0),
+        CalibrationResidual("c0", "f1", "hp_ratio", 0.0, 1.0, 0, 6.0),
+    ]
+    profile = fit_error_profile(rows, ["c0"], [], calibration_session_hashes={"c0": "a" * 64})
+    assert profile.latency_mean_frames == pytest.approx(3.0), (
+        f"expected 3.0 but got {profile.latency_mean_frames} "
+        f"(0-latency observations are being incorrectly excluded)"
+    )
+
+
+def test_latency_all_zero_is_valid() -> None:
+    """latency_frames=0 の観測だけからなる場合でも mean=0.0 として fit できる（P1-2 regression）。"""
+    rows = [
+        CalibrationResidual("c0", "f0", "hp_ratio", 0.0, 1.0, 0, 0.0),
+        CalibrationResidual("c0", "f1", "hp_ratio", 0.0, 1.0, 0, 0.0),
+    ]
+    profile = fit_error_profile(rows, ["c0"], [], calibration_session_hashes={"c0": "a" * 64})
+    assert profile.latency_mean_frames == pytest.approx(0.0)
+
+
+def test_latency_burst_fields_excluded_regardless_of_value() -> None:
+    """burst_enter 等の遷移 field は latency 集計から除外され、hp_ratio の 0 latency だけが残る。
+
+    value=0 フィルタではなく field 種別でフィルタしているため、burst field の
+    非ゼロ latency も除外され、hp_ratio の 0 latency は含まれることを同時に確認する。
+    各 field に 2 sample 以上用意して underpowered rejection を回避する。
+    """
+    rows = [
+        # 遷移 field（除外対象）: burst_enter に latency=5.0（2 サンプル）
+        CalibrationResidual("c0", "f0", "burst_enter", 0.5, 1.0, 0, 5.0),
+        CalibrationResidual("c0", "f1", "burst_enter", 0.5, 1.0, 0, 5.0),
+        # per-tick 観測: latency=0.0（有効、含まれるべき）（2 frame）
+        CalibrationResidual("c0", "f0", "hp_ratio", 0.0, 1.0, 0, 0.0),
+        CalibrationResidual("c0", "f2", "hp_ratio", 0.0, 1.0, 0, 0.0),
+        # その他 transition fields（除外対象）（2 サンプル）
+        CalibrationResidual("c0", "f0", "burst_exit", 0.5, 1.0, 0, 5.0),
+        CalibrationResidual("c0", "f1", "burst_exit", 0.5, 1.0, 0, 5.0),
+        CalibrationResidual("c0", "f0", "burst_dropout", 0.5, 1.0, 0, 5.0),
+        CalibrationResidual("c0", "f1", "burst_dropout", 0.5, 1.0, 0, 5.0),
+        CalibrationResidual("c0", "f0", "unknown_screen_collapse", 0.5, 1.0, 0, 0.0),
+        CalibrationResidual("c0", "f1", "unknown_screen_collapse", 0.5, 1.0, 0, 0.0),
+        CalibrationResidual("c0", "f0", "unknown_screen_collapse_duration", 5.0, 1.0, 0, 0.0),
+        CalibrationResidual("c0", "f1", "unknown_screen_collapse_duration", 5.0, 1.0, 0, 0.0),
+    ]
+    profile = fit_error_profile(rows, ["c0"], [], calibration_session_hashes={"c0": "a" * 64})
+    # hp_ratio の f0/f2 だけが latency 集計に残り mean=0.0
+    assert profile.latency_mean_frames == pytest.approx(0.0)
