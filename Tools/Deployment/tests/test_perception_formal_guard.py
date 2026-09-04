@@ -7,9 +7,11 @@ verdict gate へ到達できないことを、実 formal session/依存なしで
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
-from benchmark_survivors_perception import _validate_restore_verdict
+from benchmark_survivors_perception import _validate_restore_verdict, verify_formal_runtime_release
 from reinbalance_survivors_contracts.artifact_identity import (
     RESTORE_TEST_VERDICT_SCHEMA_VERSION,
     ArtifactDescriptor,
@@ -17,10 +19,13 @@ from reinbalance_survivors_contracts.artifact_identity import (
     RestoreTestVerdict,
     artifact_uri,
 )
+from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 from survivors.perception_benchmark import BenchmarkRecord, run_benchmark
 from survivors.perception_error_fit import (
+    _FORMAL_FACTORY_TOKEN,
     _HASH_FIELDS,
     CalibrationResidual,
+    FINAL_VERDICT_SCHEMA_VERSION,
     FittedPerceptionErrorProfile,
     FormalVerdictPromotionError,
     _create_formal_final_verdict,
@@ -157,3 +162,306 @@ def test_restore_verdict_manifest_hash_must_match_dependency() -> None:
     verdict = _restore_verdict(dependency, manifest_hash="c" * 64).to_descriptor()
     with pytest.raises(ValueError, match="manifest_hash"):
         _validate_restore_verdict(dependency, verdict)
+
+
+# --- P1-1: fit_error_profile 常時 development_only=True ガード ---
+
+def test_fit_error_profile_public_api_always_development_only() -> None:
+    """公開 fit_error_profile() は _factory_token なしで常に development_only=True を返す。"""
+    residuals = [
+        CalibrationResidual(f"s{i % 3}", f"f{i}", "hp_ratio", 0.01, 1.0, 0)
+        for i in range(6)
+    ]
+    profile = fit_error_profile(residuals, ["s0", "s1", "s2"], [])
+    assert profile.development_only is True
+
+
+def test_fitted_profile_development_only_false_without_token_raises() -> None:
+    """_factory_token なしで development_only=False を直接構築すると拒否される。"""
+    residuals = [
+        CalibrationResidual(f"s{i % 3}", f"f{i}", "hp_ratio", 0.01, 1.0, 0)
+        for i in range(6)
+    ]
+    profile = fit_error_profile(residuals, ["s0", "s1", "s2"], [])
+    with pytest.raises(FormalVerdictPromotionError):
+        FittedPerceptionErrorProfile(
+            calibration_session_ids=list(profile.calibration_session_ids),
+            final_e2e_session_ids=[],
+            calibration_session_hashes=dict(profile.calibration_session_hashes),
+            field_sample_counts=dict(profile.field_sample_counts),
+            fit_code_hash=profile.fit_code_hash,
+            development_only=False,  # factory token なし → 拒否される
+            _factory_token=None,
+        )
+
+
+# --- P2: verify_formal_runtime_release focused tests ---
+
+def _h(ch: str) -> str:
+    """64文字の固定 hex SHA-256 代替値を返す。"""
+    return ch * 64
+
+
+def _formal_subjects() -> dict[str, str]:
+    return {name: _h(format(i % 16, "x")) for i, name in enumerate(_HASH_FIELDS)}
+
+
+def _passing_formal_verdict_wire(subjects: dict[str, str]) -> dict[str, Any]:
+    """formal gate を通過する PerceptionFinalVerdict wire を構築する。
+
+    実 ArtifactStore / formal runner を使わずに verify_formal_runtime_release の
+    store 復元・load_final_verdict 経路を通すための最小フィクスチャ。
+    """
+    from survivors.perception_benchmark import (
+        _FORMAL_SLICE_COUNT_FLOORS,
+        _FORMAL_SLICE_SESSION_FLOORS,
+        _FORMAL_SLICE_THRESHOLDS,
+        _FORMAL_REQUIRED_SLICES,
+        THRESHOLD_SCREEN_F1,
+        THRESHOLD_TIMER_EXACT,
+        THRESHOLD_LEVEL_EXACT,
+        THRESHOLD_INVENTORY_TOP1,
+        THRESHOLD_CHOICE_TOP1,
+        THRESHOLD_DENSITY_CORR,
+        THRESHOLD_CONFIDENCE,
+        _empty_report,
+        recompute_gate_from_metrics,
+    )
+    metrics: dict[str, Any] = dict(
+        _empty_report(development_only=True, formal_eligible=False).metrics_wire()
+    )
+    metrics.update({
+        "total_records": 1000,
+        "screen_state_f1": THRESHOLD_SCREEN_F1,
+        "timer_exact_rate": THRESHOLD_TIMER_EXACT,
+        "level_exact_rate": THRESHOLD_LEVEL_EXACT,
+        "inventory_top1_rate": THRESHOLD_INVENTORY_TOP1,
+        "choice_top1_rate": THRESHOLD_CHOICE_TOP1,
+        "hp_mae": 0.0,
+        "xp_mae": 0.0,
+        "density_correlation": THRESHOLD_DENSITY_CORR,
+        "nearest_normalized_median_error": 0.0,
+        "latency_p95_ms": 0.0,
+        "latency_p99_ms": 0.0,
+        "invalid_tick_rate": 0.0,
+        "levelup_invalid_choice_rate": 0.0,
+        "roi_center_p99": 0.0,
+        "roi_inside_region_rate": 1.0,
+        "roi_false_positive_count": 0,
+        "confidence_mean": THRESHOLD_CONFIDENCE,
+        "ui_cross_frame_equivalence_rate": 0.0,
+        "expected_tick_count": 10,
+        "observed_tick_count": 10,
+        "latency_tick_count": 10,
+    })
+    required_base = {
+        "screen_state", "timer_seconds", "level", "hp_ratio", "xp_ratio",
+        "inventory_top1", "choice_top1", "entity_density", "nearest_distance",
+        "ui_roi_center_error", "ui_inside_region", "ui_false_positive", "confidence",
+    }
+    sc: dict[str, int] = {name: 1 for name in required_base}
+    for name, floor in _FORMAL_SLICE_COUNT_FLOORS.items():
+        sc[name] = floor
+    metrics["slice_counts"] = sc
+    ssc: dict[str, int] = {}
+    for name, floor in _FORMAL_SLICE_SESSION_FLOORS.items():
+        ssc[name] = floor
+    metrics["slice_session_counts"] = ssc
+    slices = []
+    for name in sorted(_FORMAL_REQUIRED_SLICES):
+        thr = _FORMAL_SLICE_THRESHOLDS[name]
+        slices.append({
+            "name": name, "count": sc.get(name, 1), "session_count": 2,
+            "metric_value": thr, "threshold": thr, "ci_lower": thr,
+        })
+    metrics["slices"] = slices
+    passed, blocking = recompute_gate_from_metrics(metrics, formal=True)
+    assert passed and not blocking, f"fixture fails formal gate: {blocking}"
+    seal_id = _h("a")
+    identity = {
+        "seal_id": seal_id,
+        "final_session_ids": ["final-0"],
+        "subject_hashes": {name: subjects[name] for name in _HASH_FIELDS},
+        "metrics": metrics,
+    }
+    verdict_id = canonical_hash(identity)
+    return {
+        "schema_version": FINAL_VERDICT_SCHEMA_VERSION,
+        "verdict_id": verdict_id,
+        "seal_id": seal_id,
+        "final_session_ids": ["final-0"],
+        **subjects,
+        "metrics": metrics,
+        "passed": True,
+        "blocking_reasons": [],
+        "development_only": False,
+        "formal_perception_verdict_eligible": True,
+    }
+
+
+def _file(lid: str, ch: str) -> ArtifactRef:
+    h = _h(ch)
+    return ArtifactRef(
+        logical_id=lid, sha256=h, size_bytes=16,
+        media_type="application/octet-stream", store_uri=artifact_uri(h),
+    )
+
+
+def _node(lid: str, kind: str, parents: tuple = (), ch: str = "0") -> ArtifactDescriptor:
+    return ArtifactDescriptor(
+        logical_id=lid, node_kind=kind,
+        producer_id="test-producer", producer_version="v1",
+        identity_metadata={"stable_config_hash": _h("f")},
+        parents=parents,
+        files=(_file(f"{lid}.bin", ch),),
+    )
+
+
+def _build_runtime_dag(
+    verdict_desc: ArtifactDescriptor,
+    subjects: dict[str, str],
+    profile: ArtifactDescriptor,
+) -> list[ArtifactDescriptor]:
+    """validate_formal_runtime_dag を通過する最小 descriptor 列を構築する。"""
+    src = _node("source", "source_descriptor", ch="1")
+    teacher = _node("teacher", "teacher_validation_verdict", (src.node_ref(),), "2")
+    dataset = _node("dataset", "choice_dataset_release", (teacher.node_ref(),), "3")
+    item = _node("item", "item_selector_release", (dataset.node_ref(),), "4")
+    combat = _node("combat", "combat_student_release", (dataset.node_ref(),), "5")
+    runtime = ArtifactDescriptor(
+        logical_id="runtime", node_kind="runtime_bundle",
+        producer_id="test-producer", producer_version="v1",
+        identity_metadata={"perception_subject_hashes": subjects},
+        parents=(item.node_ref(), combat.node_ref(), verdict_desc.node_ref()),
+        files=(_file("runtime.bin", "7"),),
+    )
+    return [src, teacher, dataset, item, combat, profile, verdict_desc, runtime]
+
+
+def _store_verdict_and_build_descriptor(
+    store: Any, subjects: dict[str, str], wire: dict[str, Any]
+) -> tuple[ArtifactDescriptor, ArtifactDescriptor]:
+    """verdict wire を ArtifactStore に保存し、(profile, verdict) descriptor を返す。"""
+    ref = store.put_bytes(
+        logical_id="perception/verdict/v.json",
+        data=canonical_json_bytes(wire),
+        media_type="application/json",
+    )
+    src_ref = _node("source", "source_descriptor", ch="1")
+    profile = _node("profile", "perception_calibration_profile", (src_ref.node_ref(),), "6")
+    verdict = ArtifactDescriptor(
+        logical_id="perception-verdict",
+        node_kind="perception_final_verdict",
+        producer_id="test-producer",
+        producer_version="v1",
+        identity_metadata={
+            "verdict_id": wire["verdict_id"],
+            "seal_id": wire["seal_id"],
+            "passed": True,
+            "development_only": False,
+            "subject_hashes": {name: subjects[name] for name in _HASH_FIELDS},
+        },
+        parents=(profile.node_ref(),),
+        files=(ref,),
+    )
+    return profile, verdict
+
+
+def test_verify_formal_runtime_release_happy_path(tmp_path: Any) -> None:
+    """passed=True production verdict は verify_formal_runtime_release を通過する。"""
+    from Tools.Artifacts.artifact_store import ArtifactStore
+    store = ArtifactStore(str(tmp_path / "store"))
+    subjects = _formal_subjects()
+    wire = _passing_formal_verdict_wire(subjects)
+    profile, verdict_desc = _store_verdict_and_build_descriptor(store, subjects, wire)
+    dag = _build_runtime_dag(verdict_desc, subjects, profile)
+    verify_formal_runtime_release(dag, store)  # 例外なし
+
+
+def test_verify_formal_runtime_release_rejects_development_only(tmp_path: Any) -> None:
+    """development_only=True の verdict は拒否される。"""
+    from Tools.Artifacts.artifact_store import ArtifactStore
+    store = ArtifactStore(str(tmp_path / "store"))
+    subjects = _formal_subjects()
+    wire = _passing_formal_verdict_wire(subjects)
+    # wire の development_only を True にして store に保存
+    wire["development_only"] = True
+    wire["formal_perception_verdict_eligible"] = False
+    ref = store.put_bytes(
+        logical_id="perception/verdict/dev.json",
+        data=canonical_json_bytes(wire),
+        media_type="application/json",
+    )
+    src_ref = _node("source", "source_descriptor", ch="1")
+    profile = _node("profile", "perception_calibration_profile", (src_ref.node_ref(),), "6")
+    verdict_desc = ArtifactDescriptor(
+        logical_id="perception-verdict",
+        node_kind="perception_final_verdict",
+        producer_id="test-producer", producer_version="v1",
+        identity_metadata={
+            "verdict_id": wire["verdict_id"], "seal_id": wire["seal_id"],
+            "passed": True, "development_only": False,
+            "subject_hashes": {name: subjects[name] for name in _HASH_FIELDS},
+        },
+        parents=(profile.node_ref(),), files=(ref,),
+    )
+    dag = _build_runtime_dag(verdict_desc, subjects, profile)
+    with pytest.raises(ValueError, match="production verdict"):
+        verify_formal_runtime_release(dag, store)
+
+
+def test_verify_formal_runtime_release_rejects_subject_mismatch(tmp_path: Any) -> None:
+    """runtime の perception_subject_hashes が verdict と一致しない場合は拒否される。"""
+    from Tools.Artifacts.artifact_store import ArtifactStore
+    store = ArtifactStore(str(tmp_path / "store"))
+    subjects = _formal_subjects()
+    wire = _passing_formal_verdict_wire(subjects)
+    profile, verdict_desc = _store_verdict_and_build_descriptor(store, subjects, wire)
+    wrong_subjects = {name: _h("e") for name in _HASH_FIELDS}
+    # runtime_bundle の perception_subject_hashes を verdict と異なる値にする
+    src = _node("source", "source_descriptor", ch="1")
+    teacher = _node("teacher", "teacher_validation_verdict", (src.node_ref(),), "2")
+    dataset = _node("dataset", "choice_dataset_release", (teacher.node_ref(),), "3")
+    item = _node("item", "item_selector_release", (dataset.node_ref(),), "4")
+    combat = _node("combat", "combat_student_release", (dataset.node_ref(),), "5")
+    runtime = ArtifactDescriptor(
+        logical_id="runtime", node_kind="runtime_bundle",
+        producer_id="test-producer", producer_version="v1",
+        identity_metadata={"perception_subject_hashes": wrong_subjects},
+        parents=(item.node_ref(), combat.node_ref(), verdict_desc.node_ref()),
+        files=(_file("runtime.bin", "7"),),
+    )
+    dag = [src, teacher, dataset, item, combat, profile, verdict_desc, runtime]
+    with pytest.raises(Exception):  # StaleVerdictError or ArtifactDagValidationError
+        verify_formal_runtime_release(dag, store)
+
+
+def test_verify_formal_runtime_release_rejects_missing_file(tmp_path: Any) -> None:
+    """ArtifactStore に verdict ファイルが存在しない場合は拒否される。"""
+    from Tools.Artifacts.artifact_store import ArtifactStore
+    store = ArtifactStore(str(tmp_path / "store"))
+    subjects = _formal_subjects()
+    wire = _passing_formal_verdict_wire(subjects)
+    missing_sha256 = _h("9")
+    ghost_ref = ArtifactRef(
+        logical_id="perception/verdict/ghost.json",
+        sha256=missing_sha256, size_bytes=16,
+        media_type="application/json",
+        store_uri=artifact_uri(missing_sha256),
+    )
+    src_ref = _node("source", "source_descriptor", ch="1")
+    profile = _node("profile", "perception_calibration_profile", (src_ref.node_ref(),), "6")
+    verdict_desc = ArtifactDescriptor(
+        logical_id="perception-verdict",
+        node_kind="perception_final_verdict",
+        producer_id="test-producer", producer_version="v1",
+        identity_metadata={
+            "verdict_id": wire["verdict_id"], "seal_id": wire["seal_id"],
+            "passed": True, "development_only": False,
+            "subject_hashes": {name: subjects[name] for name in _HASH_FIELDS},
+        },
+        parents=(profile.node_ref(),), files=(ghost_ref,),
+    )
+    dag = _build_runtime_dag(verdict_desc, subjects, profile)
+    with pytest.raises(ValueError):
+        verify_formal_runtime_release(dag, store)

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch as th
 import torch.nn.functional as F
+from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from reinbalance_survivors_contracts.fidelity_verdict import FidelityMetric, FidelityVerdict, GATING_KEYS
 from reinbalance_survivors_contracts.perception_error import PerceptionErrorProfile
@@ -15,6 +16,9 @@ from games.survivors.combat_distillation_dataset import CombatDistillationDatase
 from games.survivors.deployable_policy_trainer import (
     CurriculumConfig, DeployableCombatPolicy, DeployablePolicyTrainer,
     FormalDependencies, sequence_distillation_loss,
+)
+from survivors.perception_error_fit import (
+    FittedPerceptionErrorProfile, _FORMAL_FACTORY_TOKEN, _current_fit_code_hash,
 )
 SCHEMA = DeployObsSchema.default_v1()
 def _dataset() -> CombatDistillationDataset:
@@ -141,6 +145,24 @@ def test_step_zero_rejects_missing_formal_dependencies_and_dataset_leakage() -> 
     with pytest.raises(ValueError, match="split leakage"):
         development.train_step(leaked)
     assert development.training_steps == 0
+def _formal_profile(session_id: str = "cal-1") -> FittedPerceptionErrorProfile:
+    """development_only=False の最小 FittedPerceptionErrorProfile。
+
+    FormalDependencies.validate() の development_only 検証を通過するための
+    最小フィクスチャ。formal runner pipeline と同じ factory token を使う。
+    """
+    cal_hash = canonical_hash({"synthetic_session_id": session_id})
+    return FittedPerceptionErrorProfile(
+        calibration_session_ids=[session_id],
+        final_e2e_session_ids=[],
+        calibration_session_hashes={session_id: cal_hash},
+        field_sample_counts={"hp_ratio": 2},
+        fit_code_hash=_current_fit_code_hash(),
+        development_only=False,
+        _factory_token=_FORMAL_FACTORY_TOKEN,
+    )
+
+
 def test_formal_dependency_object_rejects_bootstrap_profile_source() -> None:
     """fixture/bootstrap profile は formal dependency object 自体で拒否される。
     profile 内容を measured と推測せず、source kind の明示を必須にする。
@@ -150,11 +172,13 @@ def test_formal_dependency_object_rejects_bootstrap_profile_source() -> None:
             fidelity_verdict={}, current_gating_producer_hashes={}, perception_profile=None,
             required_perception_profile_hash="0" * 64, profile_source="bootstrap",
         )
+    # development_only=True のプロファイルは validate() で production ガードに拒否される。
+    dev_only_profile = PerceptionErrorProfile()
     bootstrap = FormalDependencies(
-        fidelity_verdict={}, current_gating_producer_hashes={}, perception_profile=PerceptionErrorProfile(),
-        required_perception_profile_hash=PerceptionErrorProfile().profile_hash,
+        fidelity_verdict={}, current_gating_producer_hashes={}, perception_profile=dev_only_profile,
+        required_perception_profile_hash=dev_only_profile.profile_hash,
     )
-    with pytest.raises(ValueError, match="calibration"):
+    with pytest.raises(ValueError, match="production"):
         bootstrap.validate()
 def test_formal_dependencies_reject_stale_fidelity_and_profile() -> None:
     """current producer hash 差と frozen measured profile hash 差を別々に拒否する。
@@ -176,7 +200,7 @@ def test_formal_dependencies_reject_stale_fidelity_and_profile() -> None:
             "dependency_versions": {}, "operator": "pytest", "timestamp": "2026-08-09T00:00:00Z",
         }, hashes,
     )
-    profile = PerceptionErrorProfile(calibration_session_ids=["cal-1"])
+    profile = _formal_profile("cal-1")
     dependencies = FormalDependencies(verdict, hashes, profile, profile.profile_hash)
     assert dependencies.validate() == {
         "fidelity_verdict": verdict.identity_hash, "perception_profile": profile.profile_hash,
@@ -191,7 +215,8 @@ def test_formal_dependencies_reject_stale_fidelity_and_profile() -> None:
 
 def _make_formal_deps() -> FormalDependencies:
     """テスト用の valid FormalDependencies を返す。
-    verify_current_fidelity が通る verdict を一か所で構築し、複数 test から参照します。
+    verify_current_fidelity が通る verdict と development_only=False profile を
+    一か所で構築し、複数 test から参照します。
     """
     digits = "abcdef0123456789"
     hashes = {name: digits[index % len(digits)] * 64 for index, name in enumerate(GATING_KEYS)}
@@ -209,7 +234,7 @@ def _make_formal_deps() -> FormalDependencies:
             "dependency_versions": {}, "operator": "pytest", "timestamp": "2026-08-09T00:00:00Z",
         }, hashes,
     )
-    profile = PerceptionErrorProfile(calibration_session_ids=["cal-1"])
+    profile = _formal_profile("cal-1")
     return FormalDependencies(verdict, hashes, profile, profile.profile_hash)
 
 

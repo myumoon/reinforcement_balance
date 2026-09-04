@@ -219,10 +219,11 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
     field_sample_counts: Mapping[str, int] = field(default_factory=dict)
     fit_code_hash: str = ""
     # synthetic/bootstrap 由来の fit を formal 成果物と混同させないための provenance flag。
-    # 既定 True（development-only）。formal fit だけが False をセットできる。
+    # 既定 True（development-only）。_fit_formal_error_profile だけが False をセットできる。
     development_only: bool = True
+    _factory_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _factory_token: object | None) -> None:
         super().__post_init__()
         hashes = dict(self.calibration_session_hashes)
         if set(hashes) != set(self.calibration_session_ids):
@@ -237,6 +238,10 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
         _require_sha256(self.fit_code_hash, "fit_code_hash")
         if type(self.development_only) is not bool:
             raise ValueError("development_only must be bool")
+        if not self.development_only and _factory_token is not _FORMAL_FACTORY_TOKEN:
+            raise FormalVerdictPromotionError(
+                "formal fitted profile requires the verified formal factory"
+            )
         object.__setattr__(self, "calibration_session_hashes", MappingProxyType(hashes))
         object.__setattr__(self, "field_sample_counts", MappingProxyType(counts))
 
@@ -275,6 +280,7 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
             field_sample_counts=data["field_sample_counts"],
             fit_code_hash=data["fit_code_hash"],
             development_only=data["development_only"],
+            _factory_token=_FORMAL_FACTORY_TOKEN if not data["development_only"] else None,
         )
         if fitted.to_artifact_wire() != dict(data):
             raise HashMismatchError("calibration artifact failed canonical reconstruction")
@@ -329,11 +335,14 @@ def fit_error_profile(
     *,
     calibration_session_hashes: Mapping[str, str] | None = None,
     formal: bool = False,
+    _factory_token: object | None = None,
 ) -> FittedPerceptionErrorProfile:
     """exact calibration residual 集合から既存 consumer-compatible profile を fit する。
 
     formal=True の場合は必須 field 集合と最低サンプル数／セッション数を厳格に検証します。
     疎な synthetic fit が必要なら formal=False（既定）で呼び出してください。
+    公開 API は常に development_only=True を返します。formal profile は
+    _fit_formal_error_profile() 経由でのみ生成できます。
     """
     if not residuals:
         raise EmptyResidualError("at least one calibration residual is required")
@@ -420,12 +429,25 @@ def fit_error_profile(
         indicators = [float(abs(value) > threshold) for value in values]
         return _weighted_mean(indicators, weights)
 
-    all_weights = [max(row.confidence / (1.0 + row.age_frames), 1e-12) for row in residuals]
-    latency_values = [row.latency_frames for row in residuals]
+    # latency は (session_id, frame_id) ごとに 1 観測。burst/collapse 遷移行は
+    # latency_frames=0.0 で生成されるため、母集団に含めると実測値を希釈する。
+    tick_latency: dict[tuple[str, str], float] = {}
+    for row in residuals:
+        if row.latency_frames <= 0.0:
+            continue
+        key = (row.session_id, row.frame_id)
+        if key in tick_latency and tick_latency[key] != row.latency_frames:
+            raise InvalidResidualError(
+                f"conflicting latency for tick {key!r}: "
+                f"{tick_latency[key]} vs {row.latency_frames}"
+            )
+        tick_latency[key] = row.latency_frames
+    latency_values = list(tick_latency.values())
+    latency_weights = [1.0] * len(latency_values)
     fit_code_hash = _current_fit_code_hash()
     return FittedPerceptionErrorProfile(
-        latency_mean_frames=_weighted_mean(latency_values, all_weights),
-        latency_std_frames=_weighted_std(latency_values, all_weights),
+        latency_mean_frames=_weighted_mean(latency_values, latency_weights) if latency_values else 0.0,
+        latency_std_frames=_weighted_std(latency_values, latency_weights) if latency_values else 0.0,
         burst_enter_prob=mean("burst_enter"),
         burst_exit_prob=mean("burst_exit", 1.0),
         burst_dropout_prob=mean("burst_dropout"),
@@ -444,7 +466,28 @@ def fit_error_profile(
         calibration_session_hashes=hashes,
         field_sample_counts=sample_counts,
         fit_code_hash=fit_code_hash,
-        development_only=not formal,
+        development_only=_factory_token is not _FORMAL_FACTORY_TOKEN,
+        _factory_token=_factory_token,
+    )
+
+
+def _fit_formal_error_profile(
+    residuals: Sequence[CalibrationResidual],
+    calibration_session_ids: Sequence[str],
+    final_e2e_session_ids: Sequence[str],
+    *,
+    calibration_session_hashes: Mapping[str, str] | None = None,
+) -> FittedPerceptionErrorProfile:
+    """Formal runner 専用 factory。development_only=False を生成できる唯一の経路。
+
+    split・restore・provenance 検証済みの formal runner pipeline だけが呼ぶ。
+    公開 fit_error_profile() は常に development_only=True を返す。
+    """
+    return fit_error_profile(
+        residuals, calibration_session_ids, final_e2e_session_ids,
+        calibration_session_hashes=calibration_session_hashes,
+        formal=True,
+        _factory_token=_FORMAL_FACTORY_TOKEN,
     )
 
 

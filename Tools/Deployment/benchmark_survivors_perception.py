@@ -42,6 +42,7 @@ from survivors.perception_benchmark import (
     formal_threshold_content_hash,
     run_benchmark,
 )
+from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from survivors.perception_error_fit import (
     _HASH_FIELDS,
     _current_fit_code_hash,
@@ -51,8 +52,8 @@ from survivors.perception_error_fit import (
     PerceptionFinalVerdict,
     _create_formal_final_verdict,
     _create_formal_lineage_seal,
+    _fit_formal_error_profile,
     _reserve_final_session,
-    fit_error_profile,
     load_final_verdict,
 )
 from survivors.perception_session_split import SessionSplit, validate_split
@@ -891,6 +892,20 @@ def _derive_calibration_residuals(
         raise ValueError("resolution_wh must contain positive integers")
     residuals: list[CalibrationResidual] = []
 
+    # consumer wrapper と同じ segment を使って coord / category residual を導出する。
+    # schema は一度だけ読み込み、ループ内で再利用する。
+    _deploy_schema = DeployObsSchema.default_v1()
+    from reinbalance_survivors_contracts.perception_error import ITEM_CATEGORY_SIZE as _ITEM_CAT_SIZE
+    _coord_segs: list[tuple[int, int]] = [
+        _deploy_schema.layout[name]
+        for name in ("player_screen_pos", "nearest_enemy_offset")
+        if name in _deploy_schema.layout
+    ]
+    _wc_off: int | None = (
+        _deploy_schema.layout["weapon_category"][0]
+        if "weapon_category" in _deploy_schema.layout else None
+    )
+
     def append(
         session_id: str, frame_id: str, field: str, value: float,
         confidence: float, latency_frames: float, **categories: int,
@@ -932,34 +947,41 @@ def _derive_calibration_residuals(
             ),
             confidence, latency_frames,
         )
-        # 全対応 UI target を key で一意照合し、signed x/y residual を収集する。
-        # coord_noise は正規化 signed residual、coord_quantization_px は実 resolution
-        # の幅/高さを各軸へ適用した pixel 誤差（別 metric）。
-        ground_targets = _valid_ui_targets(ground)
-        predicted_targets = _valid_ui_targets(predicted)
-        for key, ground_target in ground_targets.items():
-            predicted_target = predicted_targets.get(key)
-            if predicted_target is None:
-                continue
-            gx, gy = _target_center(ground_target)
-            px, py = _target_center(predicted_target)
-            dx = px - gx
-            dy = py - gy
-            append(session_id, frame_id, "coord_noise", float(dx), confidence, latency_frames)
-            append(session_id, frame_id, "coord_noise", float(dy), confidence, latency_frames)
-            append(session_id, frame_id, "coord_quantization_px", abs(float(dx)) * width,
-                   confidence, latency_frames)
-            append(session_id, frame_id, "coord_quantization_px", abs(float(dy)) * height,
-                   confidence, latency_frames)
-        ground_choice = ground.ui_presentation.candidates
-        predicted_choice = predicted.ui_presentation.candidates if predicted else ()
-        ground_item = ground_choice[0].choice_id if ground_choice else "unknown"
-        predicted_item = predicted_choice[0].choice_id if predicted_choice else "unknown"
-        append(
-            session_id, frame_id, "item_category", 0.0, confidence, latency_frames,
-            ground_truth_category=_weapon_category_index(ground_item),
-            predicted_category=_weapon_category_index(predicted_item),
-        )
+        # coord_noise / coord_quantization_px は consumer wrapper と同じ
+        # player_screen_pos / nearest_enemy_offset DeployObs segment から導出する。
+        # UI ROI 中心誤差は ROI benchmark metric 専用に残し、共有 profile には混ぜない。
+        pixel_dims = (width, height)
+        for seg_offset, seg_size in _coord_segs:
+            g_vals = ground.deploy_obs.values[seg_offset:seg_offset + seg_size]
+            g_val = ground.deploy_obs.validity[seg_offset:seg_offset + seg_size]
+            p_vals = (
+                predicted.deploy_obs.values[seg_offset:seg_offset + seg_size]
+                if predicted is not None else g_vals
+            )
+            p_val = (
+                predicted.deploy_obs.validity[seg_offset:seg_offset + seg_size]
+                if predicted is not None else g_val
+            )
+            for i in range(seg_size):
+                if g_val[i] <= 0.0:
+                    continue
+                dx = float(p_vals[i] - g_vals[i])
+                append(session_id, frame_id, "coord_noise", dx, confidence, latency_frames)
+                append(session_id, frame_id, "coord_quantization_px",
+                       abs(dx) * pixel_dims[i % 2], confidence, latency_frames)
+        # item_category は assembler が DeployObs へ格納した weapon_category から導出する。
+        # level-up candidate choice_id ではなく、consumer wrapper と同一の分類を使う。
+        if _wc_off is not None:
+            g_cat = round(float(ground.deploy_obs.values[_wc_off]) * (_ITEM_CAT_SIZE - 1))
+            p_cat = (
+                round(float(predicted.deploy_obs.values[_wc_off]) * (_ITEM_CAT_SIZE - 1))
+                if predicted is not None else g_cat
+            )
+            append(
+                session_id, frame_id, "item_category", 0.0, confidence, latency_frames,
+                ground_truth_category=g_cat,
+                predicted_category=p_cat,
+            )
         ground_enemy = (
             "boss" if ground_context and ground_context.boss_flag
             else "hazard" if ground_context and ground_context.hazard_flag
@@ -1465,12 +1487,11 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         manifest.session_id: manifest.manifest_sha256
         for manifest in calibration_manifests
     }
-    profile = fit_error_profile(
+    profile = _fit_formal_error_profile(
         residuals,
         [manifest.session_id for manifest in calibration_manifests],
         [manifest.session_id for manifest in final_metadata_manifests],
         calibration_session_hashes=calibration_hashes,
-        formal=True,
     )
     provisional_subjects = _subject_hashes(
         request, payloads,

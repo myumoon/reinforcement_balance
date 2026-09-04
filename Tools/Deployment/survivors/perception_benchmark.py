@@ -111,6 +111,12 @@ _FORMAL_REQUIRED_SLICES: Final[frozenset[str]] = frozenset(
 _NAMED_SLICE_PREFIXES: Final[frozenset[str]] = frozenset(
     {"screen_state", "time_band", "foreground_class", "event"}
 )
+# _named_slice_counts が返す全 event label の closed vocabulary。
+# rising-edge 検出で「不在 frame を False へ戻す」ために使う。
+_EVENT_LABELS: Final[frozenset[str]] = frozenset({
+    "event:boss", "event:hazard", "event:level_up",
+    "event:chest", "event:death", "event:result",
+})
 
 
 def formal_threshold_content_hash() -> str:
@@ -1022,6 +1028,12 @@ def _run_benchmark_common(
                     if present and not event_prev_present.get(key, False):
                         event_occurrence_counts[label] += 1
                     event_prev_present[key] = present
+            # 不在 event label を False へ戻して次 tick の rising-edge 検出を正しくする。
+            # _named_slice_counts は存在する label しか返さないため、不在 label を
+            # 明示的にリセットしないと「前回 True → 今回不在 → 次回 True」が検出されない。
+            for _evt in _EVENT_LABELS:
+                if _evt not in slice_counts_for_tick:
+                    event_prev_present[(tick.session_id, _evt)] = False
                     if present:
                         if label == "event:boss":
                             ground_context = tick.ground_truth.item_context
