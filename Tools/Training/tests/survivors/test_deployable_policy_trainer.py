@@ -2,12 +2,17 @@
 UE5 を使わず、固定 sequence と最小 state holder で step-0 sealing と完全再開を確認する。
 """
 from __future__ import annotations
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch as th
 import torch.nn.functional as F
+from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from reinbalance_survivors_contracts.fidelity_verdict import FidelityMetric, FidelityVerdict, GATING_KEYS
 from reinbalance_survivors_contracts.perception_error import PerceptionErrorProfile
@@ -15,6 +20,11 @@ from games.survivors.combat_distillation_dataset import CombatDistillationDatase
 from games.survivors.deployable_policy_trainer import (
     CurriculumConfig, DeployableCombatPolicy, DeployablePolicyTrainer,
     FormalDependencies, sequence_distillation_loss,
+)
+from reinbalance_survivors_contracts.perception_profile import (
+    CALIBRATION_ARTIFACT_SCHEMA_VERSION,
+    FittedPerceptionErrorProfile,
+    _FORMAL_FACTORY_TOKEN,
 )
 SCHEMA = DeployObsSchema.default_v1()
 def _dataset() -> CombatDistillationDataset:
@@ -141,6 +151,26 @@ def test_step_zero_rejects_missing_formal_dependencies_and_dataset_leakage() -> 
     with pytest.raises(ValueError, match="split leakage"):
         development.train_step(leaked)
     assert development.training_steps == 0
+def _formal_profile(session_id: str = "cal-1") -> FittedPerceptionErrorProfile:
+    """テスト専用 development_only=False フィクスチャ。
+
+    wire ローダー経由の synthetic formal profile 作成は禁止されたため、
+    テストコードのみが参照できる _FORMAL_FACTORY_TOKEN を直接渡す。
+    production code は絶対に使用しないこと。
+    """
+    cal_hash = canonical_hash({"synthetic_session_id": session_id})
+    base = PerceptionErrorProfile(calibration_session_ids=[session_id])
+    dummy_fit_hash = "a" * 64
+    return FittedPerceptionErrorProfile(
+        **base.to_wire(),
+        calibration_session_hashes={session_id: cal_hash},
+        field_sample_counts={"hp_ratio": 2},
+        fit_code_hash=dummy_fit_hash,
+        development_only=False,
+        _factory_token=_FORMAL_FACTORY_TOKEN,
+    )
+
+
 def test_formal_dependency_object_rejects_bootstrap_profile_source() -> None:
     """fixture/bootstrap profile は formal dependency object 自体で拒否される。
     profile 内容を measured と推測せず、source kind の明示を必須にする。
@@ -150,11 +180,13 @@ def test_formal_dependency_object_rejects_bootstrap_profile_source() -> None:
             fidelity_verdict={}, current_gating_producer_hashes={}, perception_profile=None,
             required_perception_profile_hash="0" * 64, profile_source="bootstrap",
         )
+    # development_only=True のプロファイルは validate() で production ガードに拒否される。
+    dev_only_profile = PerceptionErrorProfile()
     bootstrap = FormalDependencies(
-        fidelity_verdict={}, current_gating_producer_hashes={}, perception_profile=PerceptionErrorProfile(),
-        required_perception_profile_hash=PerceptionErrorProfile().profile_hash,
+        fidelity_verdict={}, current_gating_producer_hashes={}, perception_profile=dev_only_profile,
+        required_perception_profile_hash=dev_only_profile.profile_hash,
     )
-    with pytest.raises(ValueError, match="calibration"):
+    with pytest.raises(ValueError, match="production"):
         bootstrap.validate()
 def test_formal_dependencies_reject_stale_fidelity_and_profile() -> None:
     """current producer hash 差と frozen measured profile hash 差を別々に拒否する。
@@ -176,7 +208,7 @@ def test_formal_dependencies_reject_stale_fidelity_and_profile() -> None:
             "dependency_versions": {}, "operator": "pytest", "timestamp": "2026-08-09T00:00:00Z",
         }, hashes,
     )
-    profile = PerceptionErrorProfile(calibration_session_ids=["cal-1"])
+    profile = _formal_profile("cal-1")
     dependencies = FormalDependencies(verdict, hashes, profile, profile.profile_hash)
     assert dependencies.validate() == {
         "fidelity_verdict": verdict.identity_hash, "perception_profile": profile.profile_hash,
@@ -191,7 +223,8 @@ def test_formal_dependencies_reject_stale_fidelity_and_profile() -> None:
 
 def _make_formal_deps() -> FormalDependencies:
     """テスト用の valid FormalDependencies を返す。
-    verify_current_fidelity が通る verdict を一か所で構築し、複数 test から参照します。
+    verify_current_fidelity が通る verdict と development_only=False profile を
+    一か所で構築し、複数 test から参照します。
     """
     digits = "abcdef0123456789"
     hashes = {name: digits[index % len(digits)] * 64 for index, name in enumerate(GATING_KEYS)}
@@ -209,8 +242,93 @@ def _make_formal_deps() -> FormalDependencies:
             "dependency_versions": {}, "operator": "pytest", "timestamp": "2026-08-09T00:00:00Z",
         }, hashes,
     )
-    profile = PerceptionErrorProfile(calibration_session_ids=["cal-1"])
+    profile = _formal_profile("cal-1")
     return FormalDependencies(verdict, hashes, profile, profile.profile_hash)
+
+
+def _producer_formal_deps_file(tmp_path: Path) -> tuple[Path, object, FormalDependencies]:
+    """producer公開refを使うformal dependencies fixtureを作る。"""
+    from benchmark_survivors_perception import (
+        FormalBenchmarkRequest,
+        _publish_calibration_aliases,
+    )
+    from reinbalance_survivors_contracts.artifact_store import ArtifactStore
+
+    dependencies = _make_formal_deps()
+    store = ArtifactStore(tmp_path / "artifact-store")
+    request = FormalBenchmarkRequest(store=store, capture_store_root=tmp_path / "captures")
+    raw_ref, artifact_ref = _publish_calibration_aliases(
+        request, "producer-integration", dependencies.perception_profile
+    )
+    assert json.loads(store.object_path(raw_ref.store_uri).read_bytes()) == (
+        dependencies.perception_profile.to_wire()
+    )
+    assert json.loads(store.object_path(artifact_ref.store_uri).read_bytes()) == (
+        dependencies.perception_profile.to_artifact_wire()
+    )
+    payload = {
+        "fidelity_verdict": dependencies.fidelity_verdict.to_wire(),
+        "perception_profile_store_root": str(store.root),
+        "perception_profile_artifact_logical_id": artifact_ref.logical_id,
+        "required_perception_profile_hash": dependencies.required_perception_profile_hash,
+        "current_gating_producer_hashes": dict(
+            dependencies.current_gating_producer_hashes
+        ),
+        "profile_source": dependencies.profile_source,
+    }
+    path = tmp_path / "formal-deps.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path, artifact_ref, dependencies
+
+
+def test_load_formal_deps_reads_producer_artifact_envelope(tmp_path: Path) -> None:
+    """producerのraw互換出力ではなく別refのartifact envelopeをformal loaderへ渡す。"""
+    from train_survivors_deployable_policy import _load_formal_deps
+
+    path, artifact_ref, expected = _producer_formal_deps_file(tmp_path)
+    loaded = _load_formal_deps(path)
+
+    assert loaded is not None
+    assert artifact_ref.logical_id.endswith("/profile.artifact.json")
+    assert loaded.perception_profile.to_artifact_wire() == (
+        expected.perception_profile.to_artifact_wire()
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["perception_profile_artifact_logical_id"] = (
+        artifact_ref.logical_id.replace("/profile.artifact.json", "/profile.json")
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="calibration artifact fields do not match schema"):
+        _load_formal_deps(path)
+
+
+def test_store_formal_deps_load_from_training_cwd_without_pythonpath(
+    tmp_path: Path,
+) -> None:
+    """documented cwdからrepo-root package名に依存せずstore形式をロードできる。"""
+    path, _, _ = _producer_formal_deps_file(tmp_path)
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; "
+                "from train_survivors_deployable_policy import _load_formal_deps; "
+                "assert not _load_formal_deps(Path(__import__('sys').argv[1]))"
+                ".perception_profile.development_only"
+            ),
+            str(path),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_curriculum_corruption_scale_applied_in_train_step() -> None:
@@ -354,10 +472,20 @@ def test_load_formal_deps_cli_reads_all_required_fields(tmp_path: Path) -> None:
             "dependency_versions": {}, "operator": "pytest", "timestamp": "2026-08-09T00:00:00Z",
         }, hashes,
     )
-    profile = PerceptionErrorProfile(calibration_session_ids=["cal-1"])
+    # CLI テストでは development_only=True のプロファイルを使う。
+    # formal profile (development_only=False) は wire 経由でのロードが禁止されており、
+    # ArtifactStore 検証経路のみで取得可能。validate() のテストは別テストで行う。
+    cal_hash = canonical_hash({"synthetic_session_id": "cal-1"})
+    profile = FittedPerceptionErrorProfile(
+        **PerceptionErrorProfile(calibration_session_ids=["cal-1"]).to_wire(),
+        calibration_session_hashes={"cal-1": cal_hash},
+        field_sample_counts={"hp_ratio": 2},
+        fit_code_hash="a" * 64,
+        development_only=True,
+    )
     valid_data = {
         "fidelity_verdict": verdict.to_wire(),
-        "perception_profile": profile.to_wire(),
+        "perception_profile": profile.to_artifact_wire(),
         "required_perception_profile_hash": profile.profile_hash,
         "current_gating_producer_hashes": hashes,
         "profile_source": "measured",

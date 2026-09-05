@@ -48,9 +48,14 @@ class FormalDependencies:
     def validate(self) -> dict[str, str]:
         """current integration verdict と measured profile freshness を step 0 で検証する。
         blocking verdict、producer hash 差、空 calibration、期待 profile hash 差を全て停止します。
+        development_only=True の profile は production formal training で拒否します。
         """
         profile = self.perception_profile
         assert profile is not None
+        if not (hasattr(profile, "development_only") and profile.development_only is False):
+            raise ValueError(
+                "formal training requires a production (development_only=False) perception profile"
+            )
         if profile.profile_hash != self.required_perception_profile_hash:
             raise ValueError("measured perception profile is stale")
         if not profile.calibration_session_ids:

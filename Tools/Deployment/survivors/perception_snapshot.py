@@ -94,10 +94,22 @@ class UiButtonTargetV1:
             raise ValueError("invalid button target")
         object.__setattr__(self, "confidence", _finite_ratio(self.confidence, "button confidence"))
 @dataclass(frozen=True)
+class FormalReplayEvidence:
+    """formal replay 専用の raw 入力値（独立 hash 検証に使う）。
+
+    UiPresentationSnapshotV1 の V1 契約を変えず、benchmark runner が
+    candidate_set_hash / inventory_hash を独立検証するための証拠を持ちます。
+    """
+    raw_card_ids: tuple[str | None, ...]
+    raw_inventory: tuple[str | None, ...]
+
+
+@dataclass(frozen=True)
 class UiPresentationSnapshotV1:
     """一フレーム分の UI presentation を immutable に保持する。
 
     semantic hash と連続値込み source hash を分離し、安全な cross-frame 比較を可能にします。
+    04-09 で確定した V1 インターフェース。benchmark 専用フィールドは FormalReplayEvidence へ。
     """
     schema_hash: str; snapshot_id: str; frame_id: str; parser_artifact_hash: str
     screen_state: str; candidate_set_hash: str; inventory_hash: str
@@ -150,6 +162,9 @@ class PerceptionSnapshot:
     deploy_obs: DeployObservation; item_context: ItemDecisionFeatures | None
     choices: tuple[CandidateFeatures, ...]; ui_presentation: UiPresentationSnapshotV1
     diagnostics: Mapping[str, Any]
+    # 04-09 assembler が world detector パッケージ identity を束縛するフィールド。
+    # formal replay 経路でのみ設定。空文字はsynthetic（development_only）を意味する。
+    detector_artifact_hash: str = ""
     ui_policy_input: UiPolicyInputV1 | None = None
     def __post_init__(self) -> None:
         """atomic identity と ROI leakage 禁止を検証する。
@@ -164,6 +179,11 @@ class PerceptionSnapshot:
             raise ValueError("invalid perception payload")
         if self.item_context is not None and not isinstance(self.item_context, ItemDecisionFeatures):
             raise ValueError("invalid item_context")
+        if self.detector_artifact_hash and (
+            len(self.detector_artifact_hash) != 64
+            or not all(c in "0123456789abcdef" for c in self.detector_artifact_hash)
+        ):
+            raise ValueError("detector_artifact_hash must be a 64-char hex SHA-256 or empty")
         if self.ui_policy_input is not None and not isinstance(self.ui_policy_input, UiPolicyInputV1):
             raise ValueError("ui_policy_input must be UiPolicyInputV1 or None")
         if not isinstance(self.choices, tuple) or not all(isinstance(value, CandidateFeatures) for value in self.choices):

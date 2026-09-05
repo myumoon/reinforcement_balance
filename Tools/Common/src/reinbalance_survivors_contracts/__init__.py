@@ -53,6 +53,13 @@ from .artifact_identity import (
     is_sha256_hex,
     parse_artifact_uri,
 )
+from .artifact_store import (
+    ArtifactStore,
+    ArtifactStoreError,
+    ObjectRecord,
+    ObjectVerification,
+    StoreAuditReport,
+)
 from .deploy_obs import (
     DEPLOY_OBS_SCHEMA_VERSION,
     DeployObsField,
@@ -69,6 +76,14 @@ from .item_decision import (
 from .perception_error import (
     PERCEPTION_ERROR_SCHEMA_VERSION,
     PerceptionErrorProfile,
+)
+from .perception_profile import (
+    CALIBRATION_ARTIFACT_SCHEMA_VERSION,
+    CalibrationResidual,
+    FittedPerceptionErrorProfile,
+    FormalVerdictPromotionError,
+    HashMismatchError,
+    InvalidResidualError,
 )
 from .target_action import (
     ACTION_SEMANTICS_SCHEMA_VERSION,
@@ -134,6 +149,11 @@ __all__ = [
     "ArtifactDagValidationError",
     "ArtifactDagReport",
     "validate_artifact_dag",
+    "ArtifactStore",
+    "ArtifactStoreError",
+    "ObjectRecord",
+    "ObjectVerification",
+    "StoreAuditReport",
     # deploy obs（DeployObs）
     "DEPLOY_OBS_SCHEMA_VERSION",
     "DeployObsField",
