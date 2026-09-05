@@ -1103,3 +1103,60 @@ def test_age_frames_propagated_from_ui_state_age() -> None:
     assert all(r.confidence == pytest.approx(0.7) for r in hp_residuals), (
         f"expected confidence=0.7, got {[r.confidence for r in hp_residuals]}"
     )
+
+
+def test_coord_age_comes_from_deploy_obs_age_not_item_context() -> None:
+    """coord residual の age_frames は deploy_obs.age から取得する（P1-4 regression）。
+
+    item_context が None（ゲームプレイ中の標準状態）でも age_frames は 0 にならず、
+    deploy_obs.age 平面から正しく変換されることを確認する。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    width, height = 1920, 1080
+    session_id = "coord-age-test"
+    from benchmark_survivors_perception import _CONSUMER_FRAME_PERIOD_MS
+    frame_period_ms = _CONSUMER_FRAME_PERIOD_MS
+    # player_screen_pos の max_age_ms = 500.0（schema.default_v1 による）
+    ps_max_age_ms = 500.0
+    # age = 0.5 → 0.5 * 500 / frame_period_ms フレーム分の遅延
+    age_normalized = 0.5
+    expected_age = round(age_normalized * ps_max_age_ms / frame_period_ms)
+    hud_g, world = _hud_world(session_id, 0, 1_000_000_000, "gameplay")
+    ground = assembler.assemble(hud_g, world, schema, (width, height))
+    assert ground is not None
+    ps_off, ps_sz = schema.layout["player_screen_pos"]
+    ne_off, ne_sz = schema.layout["nearest_enemy_offset"]
+    # predicted の coord segment age 平面を両方とも age_normalized に設定する。
+    # 値は ground と同一（residual=0）にして coord_noise residual のみを取得する。
+    pred_age = np.array(ground.deploy_obs.age, dtype=float)
+    pred_age[ps_off:ps_off + ps_sz] = age_normalized
+    pred_age[ne_off:ne_off + ne_sz] = age_normalized
+    # validity は有効値（>0）にする。
+    pred_validity = np.array(ground.deploy_obs.validity, dtype=float)
+    pred_validity[ps_off:ps_off + ps_sz] = 1.0
+    pred_validity[ne_off:ne_off + ne_sz] = 1.0
+    pred_deploy = replace(ground.deploy_obs, age=pred_age, validity=pred_validity)
+    # item_context は None のまま（ゲームプレイ中の標準状態）。
+    predicted = replace(ground, deploy_obs=pred_deploy, item_context=None)
+    # ground の validity も有効にする。
+    gnd_validity = np.array(ground.deploy_obs.validity, dtype=float)
+    gnd_validity[ps_off:ps_off + ps_sz] = 1.0
+    gnd_validity[ne_off:ne_off + ne_sz] = 1.0
+    gnd_deploy = replace(ground.deploy_obs, validity=gnd_validity)
+    ground_with_valid = replace(ground, deploy_obs=gnd_deploy, item_context=None)
+    tick = SnapshotReplayTick(
+        session_id, "error_calibration", "lossless",
+        ground.frame_id, ground_with_valid, predicted, 0.0,
+    )
+    residuals = _derive_calibration_residuals([tick], resolution_wh=(width, height))
+    coord_residuals = [
+        r for r in residuals
+        if r.field in {"coord_noise", "coord_quantization_px"}
+    ]
+    assert coord_residuals, "coord residual が生成されていない"
+    assert all(r.age_frames == expected_age for r in coord_residuals), (
+        f"expected age_frames={expected_age} (from deploy_obs.age), "
+        f"got {[r.age_frames for r in coord_residuals]}. "
+        "item_context=None でも age_frames は 0 であってはならない。"
+    )

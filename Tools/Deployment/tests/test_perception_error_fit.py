@@ -116,6 +116,36 @@ class TestFit:
         with pytest.raises(EmptyResidualError, match="underpowered"):
             fit_error_profile([_residual("cal")], ["cal"], [])
 
+    def test_zero_confidence_rows_do_not_count_as_samples(self) -> None:
+        """confidence=0 の行は有効サンプルとして数えない（P1-3 regression）。
+
+        3 session × confidence=0 の行だけでは formal fit が通過してはならない。
+        """
+        zero_rows = [
+            CalibrationResidual(f"s{i}", "f0", "hp_ratio", 0.0, 0.0, 0, 1.0)
+            for i in range(3)
+        ]
+        with pytest.raises(EmptyResidualError):
+            fit_error_profile(zero_rows, ["s0", "s1", "s2"], [], formal=True)
+
+    def test_confusion_matrix_unobserved_category_is_all_zeros(self) -> None:
+        """観測のないカテゴリは identity 行ではなく all-zeros で表現される（P1-3 regression）。
+
+        identity fallback は confidence=0 の未観測を完全正解として扱うため除去した。
+        """
+        profile = fit_error_profile(
+            [
+                _residual("c0", "item_category", 0.0, ground_truth_category=0, predicted_category=1),
+                _residual("c0", "item_category", 0.0, ground_truth_category=0, predicted_category=1),
+            ], ["c0"], [],
+        )
+        # カテゴリ 0 は観測あり → 正規化行（0 → 1 へ誤分類）
+        assert profile.item_confusion_matrix[0][1] == pytest.approx(1.0)
+        # カテゴリ 1 以降は未観測 → all-zeros（identity row ではない）
+        assert profile.item_confusion_matrix[1][1] == pytest.approx(0.0), (
+            "unobserved category must not use identity fallback"
+        )
+
     def test_every_calibration_session_requires_samples(self) -> None:
         with pytest.raises(EmptyResidualError, match="0 residuals"):
             fit_error_profile([_residual("c0")], ["c0", "c1"], [])
@@ -312,3 +342,28 @@ def test_latency_burst_fields_excluded_regardless_of_value() -> None:
     profile = fit_error_profile(rows, ["c0"], [], calibration_session_hashes={"c0": "a" * 64})
     # hp_ratio の f0/f2 だけが latency 集計に残り mean=0.0
     assert profile.latency_mean_frames == pytest.approx(0.0)
+
+
+def test_producer_closure_includes_common_perception_profile() -> None:
+    """_PRODUCER_CLOSURE_FILES に Common/perception_profile.py が含まれる（P1-5 regression）。
+
+    Common の validation/wire/schema 変更で fit_code_hash が変わることを保証する。
+    """
+    from pathlib import Path
+    from survivors.perception_error_fit import _PRODUCER_CLOSURE_FILES, _current_fit_code_hash
+    deployment_root = Path(__file__).resolve().parent.parent  # Tools/Deployment
+    # perception_profile.py が closure に含まれているか確認する。
+    has_profile = any(
+        "perception_profile.py" in rel for rel in _PRODUCER_CLOSURE_FILES
+    )
+    assert has_profile, (
+        "perception_profile.py must be in _PRODUCER_CLOSURE_FILES so that "
+        "Common validation/schema changes invalidate calibration profiles"
+    )
+    # closure 内の全ファイルが実際に存在して hash を計算できるか確認する。
+    for rel in _PRODUCER_CLOSURE_FILES:
+        path = deployment_root / rel
+        assert path.is_file(), f"closure file does not exist: {rel} -> {path}"
+    # hash 計算が例外なく完了する。
+    code_hash = _current_fit_code_hash()
+    assert len(code_hash) == 64 and all(c in "0123456789abcdef" for c in code_hash)

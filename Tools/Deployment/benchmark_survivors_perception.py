@@ -897,14 +897,20 @@ def _derive_calibration_residuals(
     # schema は一度だけ読み込み、ループ内で再利用する。
     _deploy_schema = DeployObsSchema.default_v1()
     from reinbalance_survivors_contracts.perception_error import ITEM_CATEGORY_SIZE as _ITEM_CAT_SIZE
-    _coord_segs: list[tuple[int, int]] = [
-        _deploy_schema.layout[name]
+    _field_by_name = {field.name: field for field in _deploy_schema.fields}
+    # (offset, size, max_age_ms) — age plane は [0,1] 正規化なので変換に max_age_ms が必要。
+    _coord_segs: list[tuple[int, int, float]] = [
+        (*_deploy_schema.layout[name], _field_by_name[name].max_age_ms)
         for name in ("player_screen_pos", "nearest_enemy_offset")
         if name in _deploy_schema.layout
     ]
     _wc_off: int | None = (
         _deploy_schema.layout["weapon_category"][0]
         if "weapon_category" in _deploy_schema.layout else None
+    )
+    _wc_max_age_ms: float = (
+        _field_by_name["weapon_category"].max_age_ms
+        if "weapon_category" in _field_by_name else 1000.0
     )
 
     def append(
@@ -958,17 +964,18 @@ def _derive_calibration_residuals(
         # coord_noise / coord_quantization_px は consumer wrapper と同じ
         # player_screen_pos / nearest_enemy_offset DeployObs segment から導出する。
         # UI ROI 中心誤差は ROI benchmark metric 専用に残し、共有 profile には混ぜない。
-        coord_age_frames = (
-            round(predicted_context.world_age * 1000 / frame_period_ms)
-            if predicted_context is not None and predicted_context.world_age is not None
-            else 0
-        )
+        # age は segment ごとに deploy_obs.age[seg_offset] × max_age_ms / frame_period_ms で
+        # 計算する（item_context.world_age はゲームプレイ中 None のため使用しない）。
         pixel_dims = (width, height)
-        for seg_offset, seg_size in _coord_segs:
+        for seg_offset, seg_size, seg_max_age_ms in _coord_segs:
             g_vals = ground.deploy_obs.values[seg_offset:seg_offset + seg_size]
             g_val = ground.deploy_obs.validity[seg_offset:seg_offset + seg_size]
             p_vals = predicted.deploy_obs.values[seg_offset:seg_offset + seg_size]
             p_val = predicted.deploy_obs.validity[seg_offset:seg_offset + seg_size]
+            # age plane は segment 内で均一なため先頭要素で代表する。
+            seg_age_frames = round(
+                float(predicted.deploy_obs.age[seg_offset]) * seg_max_age_ms / frame_period_ms
+            )
             for i in range(seg_size):
                 # ground と predicted 両方の validity が有効な場合だけ residual を生成する。
                 if g_val[i] <= 0.0 or p_val[i] <= 0.0:
@@ -976,20 +983,18 @@ def _derive_calibration_residuals(
                 dx = float(p_vals[i] - g_vals[i])
                 coord_confidence = float(p_val[i])
                 append(session_id, frame_id, "coord_noise", dx, coord_confidence, latency_frames,
-                       age_frames=coord_age_frames)
+                       age_frames=seg_age_frames)
                 # DeployObs は [-1, 1] domain なので 1 unit = dimension / 2 px。
                 append(session_id, frame_id, "coord_quantization_px",
                        abs(dx) * pixel_dims[i % 2] / 2.0, coord_confidence, latency_frames,
-                       age_frames=coord_age_frames)
+                       age_frames=seg_age_frames)
         # item_category は assembler が DeployObs へ格納した weapon_category から導出する。
         # level-up candidate choice_id ではなく、consumer wrapper と同一の分類を使う。
         if _wc_off is not None:
             wc_validity = float(predicted.deploy_obs.validity[_wc_off])
             if wc_validity > 0.0:
-                wc_age_frames = (
-                    round(predicted_context.world_age * 1000 / frame_period_ms)
-                    if predicted_context is not None and predicted_context.world_age is not None
-                    else 0
+                wc_age_frames = round(
+                    float(predicted.deploy_obs.age[_wc_off]) * _wc_max_age_ms / frame_period_ms
                 )
                 g_cat = round(float(ground.deploy_obs.values[_wc_off]) * (_ITEM_CAT_SIZE - 1))
                 p_cat = round(float(predicted.deploy_obs.values[_wc_off]) * (_ITEM_CAT_SIZE - 1))
@@ -1235,9 +1240,19 @@ def _recover_committed_result(
     }
     if not descriptor_ref_ids <= set(refs):
         raise ValueError("formal batch did not stage every descriptor ArtifactRef")
-    profile = FittedPerceptionErrorProfile.from_artifact_wire(
-        payload["profile_artifact"]
-    )
+    # ストア検証済みのバイト列から formal profile をロードする。
+    # from_artifact_wire() は development_only=False を拒否するため使用しない。
+    profile_file = descriptors[1].files[0]
+    profile_ref = refs.get(profile_file.logical_id)
+    if profile_ref is None:
+        raise ValueError("formal batch is missing calibration profile ArtifactRef in refs")
+    profile_verification = request.store.verify(profile_ref)
+    if not profile_verification.ok:
+        raise ValueError(
+            f"calibration profile store verification failed: {profile_verification.reason}"
+        )
+    profile_bytes = request.store.object_path(profile_ref.store_uri).read_bytes()
+    profile = FittedPerceptionErrorProfile._from_verified_bytes(profile_bytes, profile_ref.sha256)
     if profile.development_only is not False:
         raise ValueError(
             "committed formal batch references a development-only calibration profile"
@@ -1281,8 +1296,14 @@ def _recover_committed_result(
         name: value for name, value in current_subject_hashes.items()
         if name != "lineage_seal_hash"
     })
+    verdict_file = descriptors[2].files[0]
+    verdict_ref = refs.get(verdict_file.logical_id)
+    if verdict_ref is None:
+        raise ValueError("formal batch is missing verdict ArtifactRef in refs")
     verdict = _load_formal_verdict_from_verified_store(
         verdict_wire,
+        store=request.store,
+        ref=verdict_ref,
         current_subject_hashes=current_subject_hashes,
     )
     final_metadata = descriptors[2].identity_metadata
@@ -1296,9 +1317,7 @@ def _recover_committed_result(
     ):
         raise ValueError("formal batch descriptor/content identities do not match")
 
-    profile_file = descriptors[1].files[0]
     provenance_file = descriptors[1].files[1]
-    verdict_file = descriptors[2].files[0]
     if _load_json_ref(request.store, profile_file) != profile.to_wire():
         raise ValueError("committed raw profile does not match profile artifact")
     provenance = _load_json_ref(request.store, provenance_file)
@@ -1397,8 +1416,12 @@ def verify_formal_runtime_release(
             )
         verdict_wire = _load_json_ref(store, verdict_ref)
         # runtime subject hashes を current 値として stale/subject binding を厳格再計算する。
+        # store/ref を渡し _load_formal_verdict_from_verified_store 内部で再検証する。
         verdict = _load_formal_verdict_from_verified_store(
-            verdict_wire, current_subject_hashes=dict(runtime_subjects)
+            verdict_wire,
+            store=store,
+            ref=verdict_ref,
+            current_subject_hashes=dict(runtime_subjects),
         )
         if verdict.development_only is not False or verdict.passed is not True:
             raise ValueError(

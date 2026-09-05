@@ -101,6 +101,9 @@ _PRODUCER_CLOSURE_FILES: Final[tuple[str, ...]] = (
     "survivors/perception_error_fit.py",
     "survivors/perception_benchmark.py",
     "benchmark_survivors_perception.py",
+    # Common の共有型定義（validation/wire/schema）も fit 契約の一部。
+    # deployment_root 基準で ../Common/ へアクセスする。
+    "../Common/src/reinbalance_survivors_contracts/perception_profile.py",
 )
 
 
@@ -167,13 +170,14 @@ def _confusion_matrix(rows: Sequence[CalibrationResidual]) -> list[list[float]]:
             residual.confidence / (1.0 + residual.age_frames)
         )
     matrix: list[list[float]] = []
-    for index, row in enumerate(counts):
-        if row.sum() == 0.0:
-            values = [0.0] * ITEM_CATEGORY_SIZE
-            values[index] = 1.0
+    for row in counts:
+        row_sum = row.sum()
+        if row_sum == 0.0:
+            # 未観測カテゴリは all-zeros（identity fallback は confidence=0 の未観測を
+            # 完全正解として扱い formal underpowered 要件を偽って通過させるため除去）。
+            matrix.append([0.0] * ITEM_CATEGORY_SIZE)
         else:
-            values = [float(value / row.sum()) for value in row]
-        matrix.append(values)
+            matrix.append([float(value / row_sum) for value in row])
     return matrix
 
 
@@ -226,9 +230,12 @@ def fit_error_profile(
         for session_id, content_hash in hashes.items():
             _require_sha256(content_hash, f"calibration_session_hashes[{session_id!r}]")
 
+    # confidence=0 の行は有効な観測として扱わない。formal power チェックも
+    # 実効サンプル（confidence>0 かつ valid な観測）のみを数える。
     by_field: dict[str, list[CalibrationResidual]] = {}
     for residual in residuals:
-        by_field.setdefault(residual.field, []).append(residual)
+        if residual.confidence > 0.0:
+            by_field.setdefault(residual.field, []).append(residual)
     sample_counts = {name: len(rows) for name, rows in by_field.items()}
     underpowered = {name: count for name, count in sample_counts.items() if count < 2}
     if underpowered:
@@ -257,10 +264,11 @@ def fit_error_profile(
                 )
 
     def weighted_rows(name: str) -> tuple[list[float], list[float]]:
+        # by_field は confidence>0 の行だけを含む。weight は正値が保証される。
         rows = by_field.get(name, [])
         return (
             [row.residual for row in rows],
-            [max(row.confidence / (1.0 + row.age_frames), 1e-12) for row in rows],
+            [row.confidence / (1.0 + row.age_frames) for row in rows],
         )
 
     def mean(name: str, default: float = 0.0) -> float:
@@ -678,6 +686,10 @@ def _write_formal_final_verdict(
 ) -> Any:
     if verdict.development_only or not verdict.formal_perception_verdict_eligible or store is None:
         raise FormalVerdictPromotionError("formal writer accepts only factory-built formal verdicts")
+    if not verdict.passed:
+        raise FormalVerdictPromotionError(
+            "formal final verdict must have passed=True before publish"
+        )
     ref = store.put_bytes(
         logical_id=logical_id, data=canonical_json_bytes(verdict.to_wire()),
         media_type="application/json",
@@ -746,14 +758,20 @@ def load_final_verdict(
 
 def _load_formal_verdict_from_verified_store(
     data: dict[str, Any], *,
+    store: Any,
+    ref: Any,
     current_subject_hashes: Mapping[str, str],
 ) -> PerceptionFinalVerdict:
-    """ArtifactStore コンテンツ検証後に限り formal verdict をロードする。
+    """ArtifactStore の store.verify(ref) を内部で実行してから formal verdict をロードする。
 
-    verify_formal_runtime_release や _validate_restore_verdict など、
-    DAG全体の検証（content hash 確認済み）を完了した後のみ呼び出すこと。
-    raw wire から直接呼び出すと formal provenance の信頼性が失われる。
+    store と ref を必須にすることで、呼び出し元の事前検証に依存しない
+    fail-closed 境界を維持する。raw dict だけを受け取る旧呼び出しは拒否される。
     """
+    verification = store.verify(ref)
+    if not verification.ok:
+        raise HashMismatchError(
+            f"formal verdict store verification failed: {verification.reason}"
+        )
     # load_final_verdict と同じ検証を実施する（development_only チェックのみ緩和）。
     if not isinstance(data, dict) or set(data) != _FINAL_VERDICT_REQUIRED_FIELDS:
         raise ValueError("final verdict fields must exactly match the v2 schema")

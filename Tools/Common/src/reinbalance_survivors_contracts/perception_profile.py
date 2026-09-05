@@ -7,12 +7,13 @@ fail-closed にする（formal profile はストア検証経路のみで取得�
 
 from __future__ import annotations
 
+import json as _json
 import math
 from dataclasses import InitVar, dataclass, field
 from types import MappingProxyType
 from typing import Any, Final, Mapping
 
-from .canonical_json import canonical_hash
+from .canonical_json import canonical_hash, sha256_hex
 from .perception_error import ITEM_CATEGORY_SIZE, PerceptionErrorProfile
 
 CALIBRATION_ARTIFACT_SCHEMA_VERSION: Final[str] = "perception_calibration_profile.v1"
@@ -192,6 +193,52 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
             _factory_token=None,
         )
         # data["development_only"] は True 確認済み（False は上で raise 済み）。
+        if fitted.to_artifact_wire() != dict(data):
+            raise HashMismatchError("calibration artifact failed canonical reconstruction")
+        return fitted
+
+    @classmethod
+    def _from_verified_bytes(
+        cls, data_bytes: bytes, expected_sha256: str
+    ) -> "FittedPerceptionErrorProfile":
+        """ArtifactStore の content-hash 検証後に限り formal profile をロードする。
+
+        呼び出し元は store.verify(ref) が True であることを確認してから渡すこと。
+        expected_sha256 との不一致は HashMismatchError を送出し fail-closed にする。
+        formal profile（development_only=False）には _FORMAL_FACTORY_TOKEN を付与する。
+        """
+        actual = sha256_hex(data_bytes)
+        if actual != expected_sha256:
+            raise HashMismatchError(
+                f"calibration artifact content hash mismatch: expected {expected_sha256!r}, got {actual!r}"
+            )
+        try:
+            data: Any = _json.loads(data_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, _json.JSONDecodeError) as exc:
+            raise ValueError(f"calibration artifact is not valid JSON: {exc}") from exc
+        expected_keys = {
+            "schema_version", "profile", "profile_hash",
+            "calibration_session_hashes", "field_sample_counts", "fit_code_hash",
+            "development_only",
+        }
+        if not isinstance(data, Mapping) or set(data) != expected_keys:
+            raise ValueError("calibration artifact fields do not match schema")
+        if data["schema_version"] != CALIBRATION_ARTIFACT_SCHEMA_VERSION:
+            raise ValueError("unsupported calibration artifact schema")
+        if type(data["development_only"]) is not bool:
+            raise ValueError("calibration artifact development_only must be bool")
+        profile = PerceptionErrorProfile.from_wire(data["profile"])
+        if profile.profile_hash != data["profile_hash"]:
+            raise HashMismatchError("calibration artifact profile hash mismatch")
+        factory_token = _FORMAL_FACTORY_TOKEN if data["development_only"] is False else None
+        fitted = cls(
+            **profile.to_wire(),
+            calibration_session_hashes=data["calibration_session_hashes"],
+            field_sample_counts=data["field_sample_counts"],
+            fit_code_hash=data["fit_code_hash"],
+            development_only=data["development_only"],
+            _factory_token=factory_token,
+        )
         if fitted.to_artifact_wire() != dict(data):
             raise HashMismatchError("calibration artifact failed canonical reconstruction")
         return fitted

@@ -71,6 +71,11 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
 
     path が None のときは development mode として None を返し、
     存在しないパスや不正 JSON は fail closed にします。
+
+    formal profile のロード形式は2種類を受け付けます:
+    - 開発用: "perception_profile" に artifact wire を直接埋め込む（development_only=True のみ）。
+    - 正式用: "perception_profile_store_root" + "perception_profile_artifact_logical_id" で
+              ArtifactStore を開き、store.verify() 検証後にロードする。
     """
     if path is None:
         return None
@@ -82,21 +87,47 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
     from reinbalance_survivors_contracts.perception_profile import FittedPerceptionErrorProfile
     if not isinstance(data, dict):
         raise ValueError("formal dependencies must be a JSON object")
-    _REQUIRED_KEYS = frozenset(
+    _STORE_KEYS = frozenset(
+        {"fidelity_verdict", "perception_profile_store_root",
+         "perception_profile_artifact_logical_id", "required_perception_profile_hash",
+         "current_gating_producer_hashes", "profile_source"}
+    )
+    _WIRE_KEYS = frozenset(
         {"fidelity_verdict", "perception_profile", "required_perception_profile_hash",
          "current_gating_producer_hashes", "profile_source"}
     )
-    extra = set(data) - _REQUIRED_KEYS
-    if extra:
-        raise ValueError(f"formal dependencies unknown keys: {sorted(extra)}")
-    missing = _REQUIRED_KEYS - set(data)
-    if missing:
-        raise ValueError(f"formal dependencies missing keys: {sorted(missing)}")
+    if set(data) == _STORE_KEYS:
+        use_store = True
+    elif set(data) == _WIRE_KEYS:
+        use_store = False
+    else:
+        extra = set(data) - (_STORE_KEYS | _WIRE_KEYS)
+        missing = (_WIRE_KEYS - set(data)) & (_STORE_KEYS - set(data))
+        raise ValueError(
+            f"formal dependencies unknown or missing keys "
+            f"(unknown/extra: {sorted(extra)}, missing from both formats: {sorted(missing)})"
+        )
     try:
         verdict = FidelityVerdict.from_wire(data["fidelity_verdict"])
-        # calibration artifact wire 全体を読み込み development_only を保持する。
-        # 基底 PerceptionErrorProfile.from_wire() では provenance が失われ formal guard が拒否する。
-        profile = FittedPerceptionErrorProfile.from_artifact_wire(data["perception_profile"])
+        if use_store:
+            from Tools.Artifacts.artifact_store import ArtifactStore, ArtifactStoreError
+            try:
+                store = ArtifactStore(data["perception_profile_store_root"])
+                ref = store.resolve(data["perception_profile_artifact_logical_id"])
+            except (ArtifactStoreError, OSError) as exc:
+                raise ValueError(f"cannot open calibration profile artifact store: {exc}") from exc
+            if ref is None:
+                raise ValueError(
+                    f"calibration profile not found in store: "
+                    f"{data['perception_profile_artifact_logical_id']!r}"
+                )
+            if not store.verify(ref).ok:
+                raise ValueError("calibration profile ArtifactStore verification failed")
+            profile_bytes = store.object_path(ref.store_uri).read_bytes()
+            profile = FittedPerceptionErrorProfile._from_verified_bytes(profile_bytes, ref.sha256)
+        else:
+            # 開発用: wire 直接埋め込み（development_only=True のみ受け付ける）。
+            profile = FittedPerceptionErrorProfile.from_artifact_wire(data["perception_profile"])
         required_hash = data["required_perception_profile_hash"]
         current_hashes = data["current_gating_producer_hashes"]
         profile_source = data["profile_source"]

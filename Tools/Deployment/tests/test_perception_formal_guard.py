@@ -28,7 +28,9 @@ from survivors.perception_error_fit import (
     FINAL_VERDICT_SCHEMA_VERSION,
     FittedPerceptionErrorProfile,
     FormalVerdictPromotionError,
+    HashMismatchError,
     _create_formal_final_verdict,
+    _load_formal_verdict_from_verified_store,
     _write_formal_final_verdict,
     create_synthetic_final_verdict,
     fit_error_profile,
@@ -102,6 +104,28 @@ def test_synthetic_verdict_rejected_by_formal_writer(tmp_path) -> None:
     with pytest.raises(FormalVerdictPromotionError):
         _write_formal_final_verdict(
             verdict, store=store, logical_id="perception/guard/verdict.json"
+        )
+
+
+def test_formal_writer_rejects_failed_verdict(tmp_path) -> None:
+    """passed=False の formal verdict は _write_formal_final_verdict が拒否する（P1-2a regression）。
+
+    passed=False のまま perception/final/... へ発行できないことを確認する。
+    """
+    from Tools.Artifacts.artifact_store import ArtifactStore
+    from benchmark_survivors_perception import _formalize_benchmark_report
+    # _finite_records は formal 閾値を満たさないため formal 化すると passed=False になる。
+    synthetic_report = run_benchmark(_finite_records())
+    formal_report = _formalize_benchmark_report(synthetic_report)
+    assert formal_report.passed is False, "このテストには passed=False の formal レポートが必要"
+    verdict = _create_formal_final_verdict(
+        formal_report, seal_id="0" * 64, final_session_ids=["final-0"], **_all_subjects()
+    )
+    assert verdict.passed is False
+    store = ArtifactStore(str(tmp_path / "store"))
+    with pytest.raises(FormalVerdictPromotionError, match="passed"):
+        _write_formal_final_verdict(
+            verdict, store=store, logical_id="perception/final/failed.json"
         )
 
 
@@ -434,6 +458,84 @@ def test_verify_formal_runtime_release_rejects_subject_mismatch(tmp_path: Any) -
     dag = [src, teacher, dataset, item, combat, profile, verdict_desc, runtime]
     with pytest.raises(Exception):  # StaleVerdictError or ArtifactDagValidationError
         verify_formal_runtime_release(dag, store)
+
+
+def test_from_verified_bytes_allows_formal_profile() -> None:
+    """_from_verified_bytes はストア検証後に formal profile をロードできる（P1-1 regression）。
+
+    from_artifact_wire() が拒否する development_only=False の wire を、
+    content-hash 検証付きの _from_verified_bytes() は受け付けることを確認する。
+    """
+    import hashlib
+
+    # dev profile を作り artifact wire を取得する。
+    residuals = [
+        CalibrationResidual(f"s{i}", "f0", "hp_ratio", 0.01, 1.0, 0)
+        for i in range(2)
+    ]
+    dev_profile = fit_error_profile(residuals, ["s0", "s1"], [])
+    assert dev_profile.development_only is True
+    # development_only=True 版: _from_verified_bytes でもロードできる。
+    wire = dev_profile.to_artifact_wire()
+    wire_bytes = canonical_json_bytes(wire)
+    sha256 = hashlib.sha256(wire_bytes).hexdigest()
+    restored_dev = FittedPerceptionErrorProfile._from_verified_bytes(wire_bytes, sha256)
+    assert restored_dev.development_only is True
+    # development_only=False に書き換えた wire: from_artifact_wire は拒否するが
+    # _from_verified_bytes は content-hash が正しければロードできる（formal token 付与）。
+    formal_wire = dict(wire)
+    formal_wire["development_only"] = False
+    formal_bytes = canonical_json_bytes(formal_wire)
+    formal_sha256 = hashlib.sha256(formal_bytes).hexdigest()
+    with pytest.raises(FormalVerdictPromotionError):
+        FittedPerceptionErrorProfile.from_artifact_wire(formal_wire)
+    restored_formal = FittedPerceptionErrorProfile._from_verified_bytes(formal_bytes, formal_sha256)
+    assert restored_formal.development_only is False
+    # hash 不一致は HashMismatchError を送出する。
+    with pytest.raises(HashMismatchError):
+        FittedPerceptionErrorProfile._from_verified_bytes(wire_bytes, "a" * 64)
+
+
+def test_load_formal_verdict_from_verified_store_requires_store_and_ref(tmp_path: Any) -> None:
+    """_load_formal_verdict_from_verified_store は store/ref 引数が必須（P1-2b regression）。
+
+    raw dict だけでは formal token を付与できず、store.verify(ref) 失敗時も拒否される。
+    """
+    from Tools.Artifacts.artifact_store import ArtifactStore
+    from survivors.perception_error_fit import (
+        _load_formal_verdict_from_verified_store,
+        HashMismatchError,
+    )
+    from reinbalance_survivors_contracts.artifact_identity import ArtifactRef, artifact_uri
+
+    store = ArtifactStore(str(tmp_path / "store"))
+    subjects = _formal_subjects()
+    wire = _passing_formal_verdict_wire(subjects)
+    # store に保存して valid ref を作る。
+    from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
+    data_bytes = canonical_json_bytes(wire)
+    real_ref = store.put_bytes(
+        logical_id="perception/verdict/test.json",
+        data=data_bytes, media_type="application/json",
+    )
+    current_subjects = dict(subjects)
+    # 正常系: store/ref が揃えばロードできる。
+    verdict = _load_formal_verdict_from_verified_store(
+        wire, store=store, ref=real_ref, current_subject_hashes=current_subjects
+    )
+    assert verdict.development_only is False
+    # 存在しない ref で呼んだ場合は HashMismatchError を送出する。
+    ghost_sha = "9" * 64
+    ghost_ref = ArtifactRef(
+        logical_id="perception/verdict/ghost.json",
+        sha256=ghost_sha, size_bytes=16,
+        media_type="application/json",
+        store_uri=artifact_uri(ghost_sha),
+    )
+    with pytest.raises(HashMismatchError):
+        _load_formal_verdict_from_verified_store(
+            wire, store=store, ref=ghost_ref, current_subject_hashes=current_subjects
+        )
 
 
 def test_verify_formal_runtime_release_rejects_missing_file(tmp_path: Any) -> None:
