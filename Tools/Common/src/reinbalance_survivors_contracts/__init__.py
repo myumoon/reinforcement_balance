@@ -70,6 +70,14 @@ from .perception_error import (
     PERCEPTION_ERROR_SCHEMA_VERSION,
     PerceptionErrorProfile,
 )
+from .perception_profile import (
+    CALIBRATION_ARTIFACT_SCHEMA_VERSION,
+    CalibrationResidual,
+    FittedPerceptionErrorProfile,
+    FormalVerdictPromotionError,
+    HashMismatchError,
+    InvalidResidualError,
+)
 from .target_action import (
     ACTION_SEMANTICS_SCHEMA_VERSION,
     TARGET_PROFILE_SCHEMA_VERSION,

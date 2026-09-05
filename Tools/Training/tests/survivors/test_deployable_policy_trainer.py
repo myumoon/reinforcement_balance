@@ -17,10 +17,10 @@ from games.survivors.deployable_policy_trainer import (
     CurriculumConfig, DeployableCombatPolicy, DeployablePolicyTrainer,
     FormalDependencies, sequence_distillation_loss,
 )
-from survivors.perception_error_fit import (
+from reinbalance_survivors_contracts.perception_profile import (
     CALIBRATION_ARTIFACT_SCHEMA_VERSION,
     FittedPerceptionErrorProfile,
-    _current_fit_code_hash,
+    _FORMAL_FACTORY_TOKEN,
 )
 SCHEMA = DeployObsSchema.default_v1()
 def _dataset() -> CombatDistillationDataset:
@@ -148,24 +148,23 @@ def test_step_zero_rejects_missing_formal_dependencies_and_dataset_leakage() -> 
         development.train_step(leaked)
     assert development.training_steps == 0
 def _formal_profile(session_id: str = "cal-1") -> FittedPerceptionErrorProfile:
-    """development_only=False の最小 FittedPerceptionErrorProfile。
+    """テスト専用 development_only=False フィクスチャ。
 
-    FormalDependencies.validate() の development_only 検証を通過するための
-    最小フィクスチャ。artifact wire を経由して構築し、Deployment private token への
-    cross-module 依存を避ける。
+    wire ローダー経由の synthetic formal profile 作成は禁止されたため、
+    テストコードのみが参照できる _FORMAL_FACTORY_TOKEN を直接渡す。
+    production code は絶対に使用しないこと。
     """
     cal_hash = canonical_hash({"synthetic_session_id": session_id})
     base = PerceptionErrorProfile(calibration_session_ids=[session_id])
-    wire = {
-        "schema_version": CALIBRATION_ARTIFACT_SCHEMA_VERSION,
-        "profile": base.to_wire(),
-        "profile_hash": base.profile_hash,
-        "calibration_session_hashes": {session_id: cal_hash},
-        "field_sample_counts": {"hp_ratio": 2},
-        "fit_code_hash": _current_fit_code_hash(),
-        "development_only": False,
-    }
-    return FittedPerceptionErrorProfile.from_artifact_wire(wire)
+    dummy_fit_hash = "a" * 64
+    return FittedPerceptionErrorProfile(
+        **base.to_wire(),
+        calibration_session_hashes={session_id: cal_hash},
+        field_sample_counts={"hp_ratio": 2},
+        fit_code_hash=dummy_fit_hash,
+        development_only=False,
+        _factory_token=_FORMAL_FACTORY_TOKEN,
+    )
 
 
 def test_formal_dependency_object_rejects_bootstrap_profile_source() -> None:
@@ -384,9 +383,17 @@ def test_load_formal_deps_cli_reads_all_required_fields(tmp_path: Path) -> None:
             "dependency_versions": {}, "operator": "pytest", "timestamp": "2026-08-09T00:00:00Z",
         }, hashes,
     )
-    # perception_profile は calibration artifact wire 全体（FittedPerceptionErrorProfile）。
-    # 基底 PerceptionErrorProfile.to_wire() では development_only が失われ CLI が拒否する。
-    profile = _formal_profile("cal-1")
+    # CLI テストでは development_only=True のプロファイルを使う。
+    # formal profile (development_only=False) は wire 経由でのロードが禁止されており、
+    # ArtifactStore 検証経路のみで取得可能。validate() のテストは別テストで行う。
+    cal_hash = canonical_hash({"synthetic_session_id": "cal-1"})
+    profile = FittedPerceptionErrorProfile(
+        **PerceptionErrorProfile(calibration_session_ids=["cal-1"]).to_wire(),
+        calibration_session_hashes={"cal-1": cal_hash},
+        field_sample_counts={"hp_ratio": 2},
+        fit_code_hash="a" * 64,
+        development_only=True,
+    )
     valid_data = {
         "fidelity_verdict": verdict.to_wire(),
         "perception_profile": profile.to_artifact_wire(),

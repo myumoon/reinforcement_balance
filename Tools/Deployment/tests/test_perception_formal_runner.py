@@ -1013,3 +1013,93 @@ def test_invalid_predicted_validity_excludes_coord_residual() -> None:
     assert coord_residuals == [], (
         f"invalid predicted validity でも {len(coord_residuals)} 件の coord residual が生成された"
     )
+
+
+def test_predicted_none_skips_all_continuous_residuals() -> None:
+    """predicted=None のフレームは coord/item_category/enemy_category/hp/xp/timer/inventory を生成しない。
+
+    欠測フレームが ground truth を prediction として代入したゼロ残差で calibration を
+    汚染しないことを確認する（P1 #2 regression）。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    width, height = 1920, 1080
+    session_id = "none-predicted-test"
+    hud_g, world = _hud_world(session_id, 0, 1_000_000_000, "gameplay")
+    ground = assembler.assemble(hud_g, world, schema, (width, height))
+    assert ground is not None
+    # predicted=None: detector/parser が出力できなかったフレームを模擬する。
+    tick = SnapshotReplayTick(
+        session_id, "error_calibration", "lossless",
+        ground.frame_id, ground, None, 0.0,
+    )
+    residuals = _derive_calibration_residuals([tick], resolution_wh=(width, height))
+    continuous_fields = {
+        "coord_noise", "coord_quantization_px",
+        "hp_ratio", "xp_ratio", "timer_seconds", "inventory_hash",
+        "item_category", "enemy_category",
+    }
+    bad = [r for r in residuals if r.field in continuous_fields]
+    assert bad == [], (
+        f"predicted=None なのに {len(bad)} 件の連続 residual が生成された: "
+        f"{[r.field for r in bad]}"
+    )
+
+
+def test_age_frames_propagated_from_ui_state_age() -> None:
+    """hp_ratio/xp_ratio/timer の age_frames は predicted の ui_state_age から変換する。
+
+    age_frames が常に 0 に固定されると fit_error_profile の confidence weighting が
+    完全に無効になる（P1 #3 regression）。item_context を合成して直接注入する。
+    """
+    from reinbalance_survivors_contracts.item_decision import CandidateFeatures, ItemDecisionFeatures
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    width, height = 1920, 1080
+    session_id = "age-test"
+    from benchmark_survivors_perception import _CONSUMER_FRAME_PERIOD_MS
+    frame_period_ms = _CONSUMER_FRAME_PERIOD_MS
+    age_ms = 4.0 * frame_period_ms  # 4 フレーム分の遅延
+    hud_g, world = _hud_world(session_id, 0, 1_000_000_000, "gameplay")
+    ground = assembler.assemble(hud_g, world, schema, (width, height))
+    assert ground is not None
+    # ItemDecisionFeatures を直接構築して ui_state_age を制御する。
+    # CandidateFeatures は padding 1 枚で最小有効な choice_count=0 にする。
+    real_cand = CandidateFeatures(
+        kind="weapon", item_id="whip", new_level=1, owned=False,
+        is_new=True, is_evolve=False, is_union=False, has_prerequisite=False, slot_capacity=0,
+    )
+    padding_cand = CandidateFeatures(
+        kind="padding", item_id="__padding__", new_level=0, owned=False,
+        is_new=False, is_evolve=False, is_union=False, has_prerequisite=False, slot_capacity=0,
+    )
+    synthetic_context = ItemDecisionFeatures(
+        decision_id="age-test-decision",
+        feature_schema="context_only_v1",
+        elapsed_time=60.0, level=2, hp_ratio=1.0, xp_ratio=0.5,
+        weapon_slots=(1, 0, 0, 0, 0, 0), passive_slots=(0, 0, 0, 0, 0, 0),
+        empty_slot_count=11, evolution_readiness=0.0, choice_count=1, card_mask=(True, False),
+        fallback_kind="none",
+        ui_state_validity=0.7,
+        ui_state_age=age_ms / 1000.0,
+        candidates=(real_cand,), max_item_cards=2,
+    )
+    # ground も item_context を持つ必要がある（guard: predicted_context is not None and ground_context is not None）。
+    # age は predicted の ui_state_age から取るので ground の値は 0 にする。
+    ground_context = replace(synthetic_context, ui_state_age=0.0, ui_state_validity=1.0, decision_id="age-test-ground")
+    ground_with_ctx = replace(ground, item_context=ground_context)
+    predicted = replace(ground_with_ctx, item_context=synthetic_context)
+    tick = SnapshotReplayTick(
+        session_id, "error_calibration", "lossless",
+        ground.frame_id, ground_with_ctx, predicted, 0.0,
+    )
+    residuals = _derive_calibration_residuals([tick], resolution_wh=(width, height))
+    hp_residuals = [r for r in residuals if r.field == "hp_ratio"]
+    expected_age = round(age_ms / frame_period_ms)
+    assert hp_residuals, "hp_ratio residual が生成されていない"
+    assert all(r.age_frames == expected_age for r in hp_residuals), (
+        f"expected age_frames={expected_age}, got {[r.age_frames for r in hp_residuals]}"
+    )
+    assert all(r.confidence == pytest.approx(0.7) for r in hp_residuals), (
+        f"expected confidence=0.7, got {[r.confidence for r in hp_residuals]}"
+    )

@@ -16,13 +16,22 @@ from reinbalance_survivors_contracts.perception_error import (
     ITEM_CATEGORY_SIZE,
     PerceptionErrorProfile,
 )
+from reinbalance_survivors_contracts.perception_profile import (
+    CALIBRATION_ARTIFACT_SCHEMA_VERSION,
+    CalibrationResidual,
+    FittedPerceptionErrorProfile,
+    FormalVerdictPromotionError,
+    HashMismatchError,
+    InvalidResidualError,
+    _FORMAL_FACTORY_TOKEN,
+)
+# _RESIDUAL_FIELDS は CalibrationResidual (Common) が使うためここでは不要
 from Tools.Artifacts.artifact_store import ArtifactStoreError
 
 from .perception_benchmark import BenchmarkReport, recompute_gate_from_metrics
 
 LINEAGE_SEAL_SCHEMA_VERSION: Final[str] = "perception_lineage_seal.v2"
 CALIBRATION_VERDICT_SCHEMA_VERSION: Final[str] = "perception_calibration_verdict.v1"
-CALIBRATION_ARTIFACT_SCHEMA_VERSION: Final[str] = "perception_calibration_profile.v1"
 FINAL_VERDICT_SCHEMA_VERSION: Final[str] = "perception_final_verdict.v2"
 
 _HASH_FIELDS: Final[tuple[str, ...]] = (
@@ -59,14 +68,6 @@ _SEAL_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
         *_SEAL_SUBJECT_HASH_FIELDS,
     }
 )
-_RESIDUAL_FIELDS: Final[frozenset[str]] = frozenset(
-    {
-        "hp_ratio", "xp_ratio", "timer_seconds", "inventory_hash", "coord_noise",
-        "coord_quantization_px", "burst_enter", "burst_exit", "burst_dropout",
-        "unknown_screen_collapse", "unknown_screen_collapse_duration",
-        "item_category", "enemy_category",
-    }
-)
 _FORMAL_REQUIRED_RESIDUAL_FIELDS: Final[frozenset[str]] = frozenset({
     "coord_noise", "hp_ratio", "xp_ratio", "timer_seconds",
     "inventory_hash", "coord_quantization_px",
@@ -76,7 +77,6 @@ _FORMAL_REQUIRED_RESIDUAL_FIELDS: Final[frozenset[str]] = frozenset({
 })
 _FORMAL_RESIDUAL_MIN_SAMPLES: Final[int] = 3
 _FORMAL_RESIDUAL_MIN_SESSIONS: Final[int] = 3
-_FORMAL_FACTORY_TOKEN = object()
 
 
 def _is_sha256(value: object) -> bool:
@@ -114,16 +114,6 @@ def _current_fit_code_hash() -> str:
     return hashlib.sha256("\0".join(digests).encode("ascii")).hexdigest()
 
 
-def _strict_number(value: object, label: str) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float, np.integer, np.floating))
-        or not math.isfinite(float(value))
-    ):
-        raise InvalidResidualError(f"{label} must be a finite number (bool is forbidden)")
-    return float(value)
-
-
 class FinalSessionAlreadyOpenedError(ValueError):
     """final session の create-once marker が既に存在する。"""
 
@@ -140,10 +130,6 @@ class StaleVerdictError(ValueError):
     """producer/profile/threshold hash または gate 結果が stale である。"""
 
 
-class HashMismatchError(ValueError):
-    """実 artifact content hash が seal/verdict の exact hash と一致しない。"""
-
-
 class SessionOverlapError(ValueError):
     """calibration/final session identity が重複している。"""
 
@@ -152,143 +138,6 @@ class EmptyResidualError(ValueError):
     """residual が 0 件、または calibration session の一部が無標本である。"""
 
 
-class InvalidResidualError(ValueError):
-    """residual field/type/range が fit 契約外である。"""
-
-
-class FormalVerdictPromotionError(ValueError):
-    """synthetic public constructor から formal flag を構築しようとした。"""
-
-
-@dataclass(frozen=True, slots=True)
-class CalibrationResidual:
-    session_id: str
-    frame_id: str
-    field: str
-    residual: float
-    confidence: float
-    age_frames: int
-    latency_frames: float = 0.0
-    ground_truth_category: int | None = None
-    predicted_category: int | None = None
-
-    def __post_init__(self) -> None:
-        if type(self.session_id) is not str or not self.session_id:
-            raise InvalidResidualError("session_id must be a non-empty string")
-        if type(self.frame_id) is not str or not self.frame_id:
-            raise InvalidResidualError("frame_id must be a non-empty string")
-        if self.field not in _RESIDUAL_FIELDS:
-            raise InvalidResidualError(f"unsupported residual field {self.field!r}")
-        object.__setattr__(self, "residual", _strict_number(self.residual, "residual"))
-        if self.field in {
-            "burst_enter", "burst_exit", "burst_dropout",
-            "unknown_screen_collapse",
-        } and not 0.0 <= self.residual <= 1.0:
-            raise InvalidResidualError(f"{self.field} residual must be in [0, 1]")
-        if self.field in {
-            "coord_quantization_px", "unknown_screen_collapse_duration",
-        } and self.residual < 0.0:
-            raise InvalidResidualError(f"{self.field} residual must be non-negative")
-        confidence = _strict_number(self.confidence, "confidence")
-        if not 0.0 <= confidence <= 1.0:
-            raise InvalidResidualError("confidence must be in [0, 1]")
-        object.__setattr__(self, "confidence", confidence)
-        if type(self.age_frames) is not int or self.age_frames < 0:
-            raise InvalidResidualError("age_frames must be a non-negative integer")
-        latency = _strict_number(self.latency_frames, "latency_frames")
-        if latency < 0.0:
-            raise InvalidResidualError("latency_frames must be non-negative")
-        object.__setattr__(self, "latency_frames", latency)
-        category_pair = (self.ground_truth_category, self.predicted_category)
-        if (category_pair[0] is None) != (category_pair[1] is None):
-            raise InvalidResidualError("category ground truth/prediction must be provided together")
-        if category_pair[0] is not None:
-            if self.field not in {"item_category", "enemy_category"}:
-                raise InvalidResidualError("category labels require a category residual field")
-            if any(type(value) is not int or not 0 <= value < ITEM_CATEGORY_SIZE for value in category_pair):
-                raise InvalidResidualError("category labels are outside the fixed vocabulary")
-        elif self.field in {"item_category", "enemy_category"}:
-            raise InvalidResidualError("category residual fields require category labels")
-
-
-@dataclass(frozen=True)
-class FittedPerceptionErrorProfile(PerceptionErrorProfile):
-    """既存 profile wire を維持しつつ fit artifact metadata を保持する subtype。"""
-
-    calibration_session_hashes: Mapping[str, str] = field(default_factory=dict)
-    field_sample_counts: Mapping[str, int] = field(default_factory=dict)
-    fit_code_hash: str = ""
-    # synthetic/bootstrap 由来の fit を formal 成果物と混同させないための provenance flag。
-    # 既定 True（development-only）。_fit_formal_error_profile だけが False をセットできる。
-    development_only: bool = True
-    _factory_token: InitVar[object | None] = None
-
-    def __post_init__(self, _factory_token: object | None) -> None:
-        super().__post_init__()
-        hashes = dict(self.calibration_session_hashes)
-        if set(hashes) != set(self.calibration_session_ids):
-            raise ValueError("calibration_session_hashes must exactly match calibration ids")
-        for session_id, content_hash in hashes.items():
-            if type(session_id) is not str or not session_id:
-                raise ValueError("calibration session hash key must be non-empty")
-            _require_sha256(content_hash, f"calibration_session_hashes[{session_id!r}]")
-        counts = dict(self.field_sample_counts)
-        if not counts or not all(type(name) is str and type(count) is int and count > 0 for name, count in counts.items()):
-            raise ValueError("field_sample_counts must contain positive integer counts")
-        _require_sha256(self.fit_code_hash, "fit_code_hash")
-        if type(self.development_only) is not bool:
-            raise ValueError("development_only must be bool")
-        if not self.development_only and _factory_token is not _FORMAL_FACTORY_TOKEN:
-            raise FormalVerdictPromotionError(
-                "formal fitted profile requires the verified formal factory"
-            )
-        object.__setattr__(self, "calibration_session_hashes", MappingProxyType(hashes))
-        object.__setattr__(self, "field_sample_counts", MappingProxyType(counts))
-
-    def to_artifact_wire(self) -> dict[str, Any]:
-        return {
-            "schema_version": CALIBRATION_ARTIFACT_SCHEMA_VERSION,
-            "profile": self.to_wire(),
-            "profile_hash": self.profile_hash,
-            "calibration_session_hashes": dict(self.calibration_session_hashes),
-            "field_sample_counts": dict(self.field_sample_counts),
-            "fit_code_hash": self.fit_code_hash,
-            "development_only": self.development_only,
-        }
-
-    @classmethod
-    def from_artifact_wire(
-        cls, data: Mapping[str, Any]
-    ) -> "FittedPerceptionErrorProfile":
-        expected = {
-            "schema_version", "profile", "profile_hash",
-            "calibration_session_hashes", "field_sample_counts", "fit_code_hash",
-            "development_only",
-        }
-        if not isinstance(data, Mapping) or set(data) != expected:
-            raise ValueError("calibration artifact fields do not match schema")
-        if data["schema_version"] != CALIBRATION_ARTIFACT_SCHEMA_VERSION:
-            raise ValueError("unsupported calibration artifact schema")
-        if type(data["development_only"]) is not bool:
-            raise ValueError("calibration artifact development_only must be bool")
-        profile = PerceptionErrorProfile.from_wire(data["profile"])
-        if profile.profile_hash != data["profile_hash"]:
-            raise HashMismatchError("calibration artifact profile hash mismatch")
-        fitted = cls(
-            **profile.to_wire(),
-            calibration_session_hashes=data["calibration_session_hashes"],
-            field_sample_counts=data["field_sample_counts"],
-            fit_code_hash=data["fit_code_hash"],
-            development_only=data["development_only"],
-            _factory_token=_FORMAL_FACTORY_TOKEN if not data["development_only"] else None,
-        )
-        if fitted.to_artifact_wire() != dict(data):
-            raise HashMismatchError("calibration artifact failed canonical reconstruction")
-        return fitted
-
-    @property
-    def artifact_hash(self) -> str:
-        return canonical_hash(self.to_artifact_wire())
 
 
 def _weighted_mean(values: Sequence[float], weights: Sequence[float]) -> float:
@@ -882,8 +731,69 @@ def load_final_verdict(
     }
     if canonical_hash(identity_payload) != data["verdict_id"]:
         raise HashMismatchError("verdict_id does not bind metrics and complete subject hashes")
+    # wire ローダーは formal token を付与しない。formal verdict はストア検証経路のみで取得する。
+    if not data["development_only"]:
+        raise FormalVerdictPromotionError(
+            "formal final verdict cannot be loaded from raw wire; "
+            "use _load_formal_verdict_from_verified_store() instead"
+        )
     return PerceptionFinalVerdict(
         **{name: data[name] for name in _FINAL_VERDICT_REQUIRED_FIELDS if name != "schema_version"},
         schema_version=data["schema_version"],
-        _factory_token=_FORMAL_FACTORY_TOKEN if not data["development_only"] else None,
+        _factory_token=None,
+    )
+
+
+def _load_formal_verdict_from_verified_store(
+    data: dict[str, Any], *,
+    current_subject_hashes: Mapping[str, str],
+) -> PerceptionFinalVerdict:
+    """ArtifactStore コンテンツ検証後に限り formal verdict をロードする。
+
+    verify_formal_runtime_release や _validate_restore_verdict など、
+    DAG全体の検証（content hash 確認済み）を完了した後のみ呼び出すこと。
+    raw wire から直接呼び出すと formal provenance の信頼性が失われる。
+    """
+    # load_final_verdict と同じ検証を実施する（development_only チェックのみ緩和）。
+    if not isinstance(data, dict) or set(data) != _FINAL_VERDICT_REQUIRED_FIELDS:
+        raise ValueError("final verdict fields must exactly match the v2 schema")
+    if data["schema_version"] != FINAL_VERDICT_SCHEMA_VERSION:
+        raise ValueError("unsupported final verdict schema_version")
+    for name in ("verdict_id", "seal_id", *_HASH_FIELDS):
+        _require_sha256(data[name], name)
+    if set(current_subject_hashes) != set(_HASH_FIELDS):
+        missing = sorted(set(_HASH_FIELDS) - set(current_subject_hashes))
+        extra = sorted(set(current_subject_hashes) - set(_HASH_FIELDS))
+        raise ValueError(
+            f"current_subject_hashes must exactly cover all _HASH_FIELDS "
+            f"(missing: {missing}, extra: {extra})"
+        )
+    for name, value in current_subject_hashes.items():
+        _require_sha256(value, f"current {name}")
+    stale = [name for name in _HASH_FIELDS if data[name] != current_subject_hashes[name]]
+    if stale:
+        raise StaleVerdictError(f"final perception verdict is stale: {stale}")
+    if any(type(data[name]) is not bool for name in ("passed", "development_only", "formal_perception_verdict_eligible")):
+        raise ValueError("verdict flags must be exact bool values")
+    if not isinstance(data["blocking_reasons"], list) or not all(type(value) is str for value in data["blocking_reasons"]):
+        raise ValueError("blocking_reasons must be a string list")
+    passed, blocking = recompute_gate_from_metrics(
+        data["metrics"], formal=not data["development_only"]
+    )
+    if data["passed"] != passed or data["blocking_reasons"] != blocking:
+        raise StaleVerdictError("stored pass/blocking result does not match metric gate")
+    identity_payload = {
+        "seal_id": data["seal_id"],
+        "final_session_ids": sorted(data["final_session_ids"]),
+        "subject_hashes": {name: data[name] for name in _HASH_FIELDS},
+        "metrics": data["metrics"],
+    }
+    if canonical_hash(identity_payload) != data["verdict_id"]:
+        raise HashMismatchError("verdict_id does not bind metrics and complete subject hashes")
+    # ストア検証経路から呼ばれるため formal token を付与する。
+    factory_token = _FORMAL_FACTORY_TOKEN if not data["development_only"] else None
+    return PerceptionFinalVerdict(
+        **{name: data[name] for name in _FINAL_VERDICT_REQUIRED_FIELDS if name != "schema_version"},
+        schema_version=data["schema_version"],
+        _factory_token=factory_token,
     )

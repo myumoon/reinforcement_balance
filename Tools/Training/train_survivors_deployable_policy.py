@@ -79,7 +79,7 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read formal dependencies: {exc}") from exc
     from reinbalance_survivors_contracts.fidelity_verdict import FidelityVerdict
-    from survivors.perception_error_fit import FittedPerceptionErrorProfile
+    from reinbalance_survivors_contracts.perception_profile import FittedPerceptionErrorProfile
     if not isinstance(data, dict):
         raise ValueError("formal dependencies must be a JSON object")
     _REQUIRED_KEYS = frozenset(

@@ -53,6 +53,7 @@ from survivors.perception_error_fit import (
     _create_formal_final_verdict,
     _create_formal_lineage_seal,
     _fit_formal_error_profile,
+    _load_formal_verdict_from_verified_store,
     _reserve_final_session,
     load_final_verdict,
 )
@@ -908,10 +909,11 @@ def _derive_calibration_residuals(
 
     def append(
         session_id: str, frame_id: str, field: str, value: float,
-        confidence: float, latency_frames: float, **categories: int,
+        confidence: float, latency_frames: float, *,
+        age_frames: int = 0, **categories: int,
     ) -> None:
         residuals.append(CalibrationResidual(
-            session_id, frame_id, field, value, confidence, 0,
+            session_id, frame_id, field, value, confidence, age_frames,
             latency_frames, **categories,
         ))
 
@@ -929,6 +931,8 @@ def _derive_calibration_residuals(
         # predicted が欠測（None）の場合は dropout/availability へ分類されるため
         # 0 残差として数えず、このループをスキップする。
         if predicted_context is not None and ground_context is not None:
+            hud_age_frames = round(predicted_context.ui_state_age * 1000 / frame_period_ms)
+            hud_confidence = predicted_context.ui_state_validity
             for field, attribute in (
                 ("hp_ratio", "hp_ratio"),
                 ("xp_ratio", "xp_ratio"),
@@ -937,68 +941,89 @@ def _derive_calibration_residuals(
                 ground_value = getattr(ground_context, attribute)
                 predicted_value = getattr(predicted_context, attribute)
                 append(session_id, frame_id, field, float(predicted_value - ground_value),
-                       1.0, latency_frames)
+                       hud_confidence, latency_frames, age_frames=hud_age_frames)
             append(
                 session_id, frame_id, "inventory_hash",
                 float(
                     predicted.ui_presentation.inventory_hash
                     != ground.ui_presentation.inventory_hash
                 ),
-                1.0, latency_frames,
+                hud_confidence, latency_frames, age_frames=hud_age_frames,
             )
+        # predicted が欠測の場合は以降の連続 residual をすべてスキップする。
+        # ground truth で prediction を代替するとゼロ残差が混入するため、
+        # dropout/availability 系（下のセッションループ）のみに記録する。
+        if predicted is None:
+            continue
         # coord_noise / coord_quantization_px は consumer wrapper と同じ
         # player_screen_pos / nearest_enemy_offset DeployObs segment から導出する。
         # UI ROI 中心誤差は ROI benchmark metric 専用に残し、共有 profile には混ぜない。
+        coord_age_frames = (
+            round(predicted_context.world_age * 1000 / frame_period_ms)
+            if predicted_context is not None and predicted_context.world_age is not None
+            else 0
+        )
         pixel_dims = (width, height)
         for seg_offset, seg_size in _coord_segs:
             g_vals = ground.deploy_obs.values[seg_offset:seg_offset + seg_size]
             g_val = ground.deploy_obs.validity[seg_offset:seg_offset + seg_size]
-            p_vals = (
-                predicted.deploy_obs.values[seg_offset:seg_offset + seg_size]
-                if predicted is not None else g_vals
-            )
-            p_val = (
-                predicted.deploy_obs.validity[seg_offset:seg_offset + seg_size]
-                if predicted is not None else g_val
-            )
+            p_vals = predicted.deploy_obs.values[seg_offset:seg_offset + seg_size]
+            p_val = predicted.deploy_obs.validity[seg_offset:seg_offset + seg_size]
             for i in range(seg_size):
                 # ground と predicted 両方の validity が有効な場合だけ residual を生成する。
                 if g_val[i] <= 0.0 or p_val[i] <= 0.0:
                     continue
                 dx = float(p_vals[i] - g_vals[i])
                 coord_confidence = float(p_val[i])
-                append(session_id, frame_id, "coord_noise", dx, coord_confidence, latency_frames)
+                append(session_id, frame_id, "coord_noise", dx, coord_confidence, latency_frames,
+                       age_frames=coord_age_frames)
                 # DeployObs は [-1, 1] domain なので 1 unit = dimension / 2 px。
                 append(session_id, frame_id, "coord_quantization_px",
-                       abs(dx) * pixel_dims[i % 2] / 2.0, coord_confidence, latency_frames)
+                       abs(dx) * pixel_dims[i % 2] / 2.0, coord_confidence, latency_frames,
+                       age_frames=coord_age_frames)
         # item_category は assembler が DeployObs へ格納した weapon_category から導出する。
         # level-up candidate choice_id ではなく、consumer wrapper と同一の分類を使う。
         if _wc_off is not None:
-            g_cat = round(float(ground.deploy_obs.values[_wc_off]) * (_ITEM_CAT_SIZE - 1))
-            p_cat = (
-                round(float(predicted.deploy_obs.values[_wc_off]) * (_ITEM_CAT_SIZE - 1))
-                if predicted is not None else g_cat
+            wc_validity = float(predicted.deploy_obs.validity[_wc_off])
+            if wc_validity > 0.0:
+                wc_age_frames = (
+                    round(predicted_context.world_age * 1000 / frame_period_ms)
+                    if predicted_context is not None and predicted_context.world_age is not None
+                    else 0
+                )
+                g_cat = round(float(ground.deploy_obs.values[_wc_off]) * (_ITEM_CAT_SIZE - 1))
+                p_cat = round(float(predicted.deploy_obs.values[_wc_off]) * (_ITEM_CAT_SIZE - 1))
+                append(
+                    session_id, frame_id, "item_category", 0.0, wc_validity, latency_frames,
+                    age_frames=wc_age_frames,
+                    ground_truth_category=g_cat,
+                    predicted_category=p_cat,
+                )
+        # enemy_category は predicted_context の world_validity が有効な場合のみ生成する。
+        if (predicted_context is not None
+                and predicted_context.world_validity is not None
+                and predicted_context.world_validity > 0.0):
+            ground_enemy = (
+                "boss" if ground_context and ground_context.boss_flag
+                else "hazard" if ground_context and ground_context.hazard_flag
+                else "normal"
+            )
+            predicted_enemy = (
+                "boss" if predicted_context.boss_flag
+                else "hazard" if predicted_context.hazard_flag
+                else "normal"
+            )
+            ec_confidence = predicted_context.world_validity
+            ec_age_frames = (
+                round(predicted_context.world_age * 1000 / frame_period_ms)
+                if predicted_context.world_age is not None else 0
             )
             append(
-                session_id, frame_id, "item_category", 0.0, 1.0, latency_frames,
-                ground_truth_category=g_cat,
-                predicted_category=p_cat,
+                session_id, frame_id, "enemy_category", 0.0, ec_confidence, latency_frames,
+                age_frames=ec_age_frames,
+                ground_truth_category=_enemy_category_index(ground_enemy),
+                predicted_category=_enemy_category_index(predicted_enemy),
             )
-        ground_enemy = (
-            "boss" if ground_context and ground_context.boss_flag
-            else "hazard" if ground_context and ground_context.hazard_flag
-            else "normal"
-        )
-        predicted_enemy = (
-            "boss" if predicted_context and predicted_context.boss_flag
-            else "hazard" if predicted_context and predicted_context.hazard_flag
-            else "normal"
-        )
-        append(
-            session_id, frame_id, "enemy_category", 0.0, 1.0, latency_frames,
-            ground_truth_category=_enemy_category_index(ground_enemy),
-            predicted_category=_enemy_category_index(predicted_enemy),
-        )
 
     # --- per-session state-transition residuals（full weight = confidence 1.0） ---
     by_session: dict[str, list[SnapshotReplayTick]] = {}
@@ -1256,7 +1281,7 @@ def _recover_committed_result(
         name: value for name, value in current_subject_hashes.items()
         if name != "lineage_seal_hash"
     })
-    verdict = load_final_verdict(
+    verdict = _load_formal_verdict_from_verified_store(
         verdict_wire,
         current_subject_hashes=current_subject_hashes,
     )
@@ -1372,7 +1397,7 @@ def verify_formal_runtime_release(
             )
         verdict_wire = _load_json_ref(store, verdict_ref)
         # runtime subject hashes を current 値として stale/subject binding を厳格再計算する。
-        verdict = load_final_verdict(
+        verdict = _load_formal_verdict_from_verified_store(
             verdict_wire, current_subject_hashes=dict(runtime_subjects)
         )
         if verdict.development_only is not False or verdict.passed is not True:
