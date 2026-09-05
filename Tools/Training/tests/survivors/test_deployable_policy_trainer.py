@@ -2,6 +2,10 @@
 UE5 を使わず、固定 sequence と最小 state holder で step-0 sealing と完全再開を確認する。
 """
 from __future__ import annotations
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
@@ -240,6 +244,91 @@ def _make_formal_deps() -> FormalDependencies:
     )
     profile = _formal_profile("cal-1")
     return FormalDependencies(verdict, hashes, profile, profile.profile_hash)
+
+
+def _producer_formal_deps_file(tmp_path: Path) -> tuple[Path, object, FormalDependencies]:
+    """producer公開refを使うformal dependencies fixtureを作る。"""
+    from benchmark_survivors_perception import (
+        FormalBenchmarkRequest,
+        _publish_calibration_aliases,
+    )
+    from reinbalance_survivors_contracts.artifact_store import ArtifactStore
+
+    dependencies = _make_formal_deps()
+    store = ArtifactStore(tmp_path / "artifact-store")
+    request = FormalBenchmarkRequest(store=store, capture_store_root=tmp_path / "captures")
+    raw_ref, artifact_ref = _publish_calibration_aliases(
+        request, "producer-integration", dependencies.perception_profile
+    )
+    assert json.loads(store.object_path(raw_ref.store_uri).read_bytes()) == (
+        dependencies.perception_profile.to_wire()
+    )
+    assert json.loads(store.object_path(artifact_ref.store_uri).read_bytes()) == (
+        dependencies.perception_profile.to_artifact_wire()
+    )
+    payload = {
+        "fidelity_verdict": dependencies.fidelity_verdict.to_wire(),
+        "perception_profile_store_root": str(store.root),
+        "perception_profile_artifact_logical_id": artifact_ref.logical_id,
+        "required_perception_profile_hash": dependencies.required_perception_profile_hash,
+        "current_gating_producer_hashes": dict(
+            dependencies.current_gating_producer_hashes
+        ),
+        "profile_source": dependencies.profile_source,
+    }
+    path = tmp_path / "formal-deps.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path, artifact_ref, dependencies
+
+
+def test_load_formal_deps_reads_producer_artifact_envelope(tmp_path: Path) -> None:
+    """producerのraw互換出力ではなく別refのartifact envelopeをformal loaderへ渡す。"""
+    from train_survivors_deployable_policy import _load_formal_deps
+
+    path, artifact_ref, expected = _producer_formal_deps_file(tmp_path)
+    loaded = _load_formal_deps(path)
+
+    assert loaded is not None
+    assert artifact_ref.logical_id.endswith("/profile.artifact.json")
+    assert loaded.perception_profile.to_artifact_wire() == (
+        expected.perception_profile.to_artifact_wire()
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["perception_profile_artifact_logical_id"] = (
+        artifact_ref.logical_id.replace("/profile.artifact.json", "/profile.json")
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="calibration artifact fields do not match schema"):
+        _load_formal_deps(path)
+
+
+def test_store_formal_deps_load_from_training_cwd_without_pythonpath(
+    tmp_path: Path,
+) -> None:
+    """documented cwdからrepo-root package名に依存せずstore形式をロードできる。"""
+    path, _, _ = _producer_formal_deps_file(tmp_path)
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; "
+                "from train_survivors_deployable_policy import _load_formal_deps; "
+                "assert not _load_formal_deps(Path(__import__('sys').argv[1]))"
+                ".perception_profile.development_only"
+            ),
+            str(path),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_curriculum_corruption_scale_applied_in_train_step() -> None:

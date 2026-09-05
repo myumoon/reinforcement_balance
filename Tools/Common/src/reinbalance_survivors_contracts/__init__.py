@@ -53,6 +53,13 @@ from .artifact_identity import (
     is_sha256_hex,
     parse_artifact_uri,
 )
+from .artifact_store import (
+    ArtifactStore,
+    ArtifactStoreError,
+    ObjectRecord,
+    ObjectVerification,
+    StoreAuditReport,
+)
 from .deploy_obs import (
     DEPLOY_OBS_SCHEMA_VERSION,
     DeployObsField,
@@ -142,6 +149,11 @@ __all__ = [
     "ArtifactDagValidationError",
     "ArtifactDagReport",
     "validate_artifact_dag",
+    "ArtifactStore",
+    "ArtifactStoreError",
+    "ObjectRecord",
+    "ObjectVerification",
+    "StoreAuditReport",
     # deploy obs（DeployObs）
     "DEPLOY_OBS_SCHEMA_VERSION",
     "DeployObsField",

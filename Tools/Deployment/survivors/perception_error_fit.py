@@ -26,7 +26,7 @@ from reinbalance_survivors_contracts.perception_profile import (
     _FORMAL_FACTORY_TOKEN,
 )
 # _RESIDUAL_FIELDS は CalibrationResidual (Common) が使うためここでは不要
-from Tools.Artifacts.artifact_store import ArtifactStoreError
+from reinbalance_survivors_contracts.artifact_store import ArtifactStoreError
 
 from .perception_benchmark import BenchmarkReport, recompute_gate_from_metrics
 

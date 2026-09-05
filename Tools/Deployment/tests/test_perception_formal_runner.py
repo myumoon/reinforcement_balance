@@ -16,14 +16,20 @@ from benchmark_survivors_perception import (
     FormalBenchmarkRequest,
     RestoredFormalArtifact,
     _annotation_evidence_index,
+    _calibration_descriptor_chain,
+    _calibration_provenance_bytes,
+    _descriptor_chain,
     _derive_calibration_residuals,
     _ground_truth_semantic_hash,
+    _put_descriptor_file,
     _replay_sessions,
+    _recover_committed_result,
     _subject_hashes,
     _verified_annotation_payloads,
     run_formal_pipeline,
 )
 from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
+from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from survivors.capture.captured_frame import CapturedFrame
 from survivors.capture_dataset import DatasetWriter, SplitFreezer
@@ -34,8 +40,17 @@ from survivors.perception_benchmark import (
     replay_snapshots,
     run_benchmark,
 )
-from survivors.perception_error_fit import CalibrationResidual, FinalSessionAlreadyOpenedError
-from survivors.perception_session_split import validate_split
+from survivors.perception_error_fit import (
+    _FORMAL_FACTORY_TOKEN,
+    _HASH_FIELDS,
+    CalibrationResidual,
+    FinalSessionAlreadyOpenedError,
+    FittedPerceptionErrorProfile,
+    PerceptionFinalVerdict,
+    _create_formal_lineage_seal,
+    _load_formal_verdict_from_verified_store,
+)
+from survivors.perception_session_split import SessionRecord, SessionSplit, validate_split
 from survivors.perception_snapshot import FormalReplayEvidence
 from survivors.real_obs_assembler import RealObsAssembler
 from survivors.vision.entity_tracker import (
@@ -362,6 +377,204 @@ def test_published_calibration_profile_is_consumer_compatible(tmp_path: Path, mo
     # PerceptionErrorProfile.from_wire() が例外を投げないことを確認する（schema互換性）
     profile = PerceptionErrorProfile.from_wire(wire)
     assert profile is not None
+
+
+def test_committed_batch_second_recovery_uses_profile_artifact_envelope(
+    tmp_path: Path,
+) -> None:
+    """producer descriptorの実payloadから2回復旧してもformal profileを再発行できる。"""
+    from test_perception_formal_guard import _passing_formal_verdict_wire
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    capture_ref = store.put_bytes(
+        logical_id="fixtures/capture.json",
+        data=b"{}",
+        media_type="application/json",
+    )
+    target_ref = store.put_bytes(
+        logical_id="fixtures/target.json",
+        data=b"{}",
+        media_type="application/json",
+    )
+
+    def source_descriptor(logical_id, ref):
+        """fixture refを最小source descriptorへ束縛する。"""
+        return ArtifactDescriptor(
+            logical_id=logical_id,
+            node_kind="source_descriptor",
+            producer_id="pytest",
+            producer_version="v1",
+            identity_metadata={"content_hash": ref.sha256},
+            files=(ref,),
+        )
+
+    request = FormalBenchmarkRequest(
+        store=store,
+        capture_store_root=tmp_path / "captures",
+        dependency_descriptors={
+            "capture_dataset": source_descriptor("capture", capture_ref),
+            "target_config": source_descriptor("target", target_ref),
+        },
+    )
+    payloads = {
+        "parser_package": {"parser_artifact_hash": "1" * 64},
+        "detector_package": {
+            "detector_artifact_hash": "2" * 64,
+            "model_hash": "3" * 64,
+            "build_hash": "4" * 64,
+        },
+        "assembler_config": {
+            "assembler_schema_hash": "5" * 64,
+            "ui_presentation_schema_hash": "6" * 64,
+            "ui_presentation_golden_fixture_hash": "7" * 64,
+            "atlas_vocabulary_hash": "8" * 64,
+            "assembler_impl_hash": "9" * 64,
+            "roi_resolver_input_hash": "a" * 64,
+        },
+        "target_config": {"threshold_hash": "b" * 64},
+    }
+    profile = FittedPerceptionErrorProfile(
+        calibration_session_ids=["cal-0"],
+        final_e2e_session_ids=["final-0"],
+        calibration_session_hashes={"cal-0": "c" * 64},
+        field_sample_counts={"hp_ratio": 2},
+        fit_code_hash="d" * 64,
+        development_only=False,
+        _factory_token=_FORMAL_FACTORY_TOKEN,
+    )
+    run_key = "e" * 64
+    provisional = _subject_hashes(
+        request,
+        payloads,
+        calibration_profile_hash="0" * 64,
+        lineage_seal_hash="0" * 64,
+    )
+    provenance_subjects = {
+        name: value
+        for name, value in provisional.items()
+        if name not in {"calibration_profile_hash", "lineage_seal_hash"}
+    }
+    calibration_descriptors = _calibration_descriptor_chain(
+        request,
+        profile,
+        provenance_subjects,
+        request.calibration_logical_id(run_key),
+    )
+    profile_node = calibration_descriptors[1]
+    raw_file = next(ref for ref in profile_node.files if ref.logical_id.endswith("/profile.json"))
+    artifact_file = next(
+        ref for ref in profile_node.files if ref.logical_id.endswith("/profile.artifact.json")
+    )
+    provenance_file = next(
+        ref for ref in profile_node.files if ref.logical_id.endswith("/provenance.json")
+    )
+    profile_refs = [
+        _put_descriptor_file(store, raw_file, canonical_json_bytes(profile.to_wire())),
+        _put_descriptor_file(
+            store, artifact_file, canonical_json_bytes(profile.to_artifact_wire())
+        ),
+        _put_descriptor_file(
+            store,
+            provenance_file,
+            _calibration_provenance_bytes(profile, provenance_subjects),
+        ),
+    ]
+
+    final_hash = "f" * 64
+    preseal_subjects = _subject_hashes(
+        request,
+        payloads,
+        calibration_profile_hash=profile_node.identity_hash,
+        lineage_seal_hash="0" * 64,
+    )
+    seal = _create_formal_lineage_seal(
+        final_session_hashes={"final-0": final_hash},
+        store=store,
+        _publish=False,
+        **{
+            name: value
+            for name, value in preseal_subjects.items()
+            if name != "lineage_seal_hash"
+        },
+    )
+    seal_ref = store.put_bytes(
+        logical_id=f"perception/package/lineage/{seal.seal_id}/seal.json",
+        data=canonical_json_bytes(seal.to_wire()),
+        media_type="application/json",
+    )
+    subjects = _subject_hashes(
+        request,
+        payloads,
+        calibration_profile_hash=profile_node.identity_hash,
+        lineage_seal_hash=seal_ref.sha256,
+    )
+    verdict_wire = _passing_formal_verdict_wire(subjects)
+    verdict_wire["seal_id"] = seal.seal_id
+    verdict_wire["verdict_id"] = canonical_hash({
+        "seal_id": seal.seal_id,
+        "final_session_ids": verdict_wire["final_session_ids"],
+        "subject_hashes": {name: verdict_wire[name] for name in _HASH_FIELDS},
+        "metrics": verdict_wire["metrics"],
+    })
+    stored_verdict = store.put_bytes(
+        logical_id="fixtures/verdict.json",
+        data=canonical_json_bytes(verdict_wire),
+        media_type="application/json",
+    )
+    verdict = _load_formal_verdict_from_verified_store(
+        verdict_wire,
+        store=store,
+        ref=stored_verdict,
+        current_subject_hashes=subjects,
+    )
+    assert isinstance(verdict, PerceptionFinalVerdict)
+    descriptors = _descriptor_chain(
+        calibration_descriptors,
+        request,
+        verdict,
+        request.verdict_logical_id(run_key),
+    )
+    verdict_ref = _put_descriptor_file(
+        store, descriptors[2].files[0], canonical_json_bytes(verdict_wire)
+    )
+    refs = [capture_ref, *profile_refs, seal_ref, verdict_ref]
+    store.put_bytes(
+        logical_id=f"perception/batch_commit/{run_key}",
+        data=canonical_json_bytes({
+            "schema_version": "perception_formal_batch_commit.v2",
+            "run_key": run_key,
+            "descriptors": [descriptor.to_wire() for descriptor in descriptors],
+            "descriptor_hashes": [descriptor.identity_hash for descriptor in descriptors],
+            "refs": [ref.to_wire() for ref in refs],
+            "profile_artifact": profile.to_artifact_wire(),
+            "verdict": verdict_wire,
+        }),
+        media_type="application/json",
+    )
+    split = SessionSplit((SessionRecord(
+        session_id="final-0",
+        session_hash=final_hash,
+        build_hash="4" * 64,
+        target_profile_hash="0" * 64,
+        resolution_wh=(1920, 1080),
+        duration_seconds=1800.0,
+        kind="final_e2e_test",
+        source_policy="lossless",
+    ),))
+
+    first = _recover_committed_result(request, split, run_key, payloads)
+    second = _recover_committed_result(request, split, run_key, payloads)
+
+    assert first is not None and second is not None
+    assert second.profile.to_artifact_wire() == profile.to_artifact_wire()
+    assert second.calibration_artifact_ref == first.calibration_artifact_ref
+    assert store.resolve(request.calibration_logical_id(run_key)) == second.calibration_ref
+    assert json.loads(store.object_path(second.calibration_ref.store_uri).read_bytes()) == (
+        profile.to_wire()
+    )
+    assert json.loads(
+        store.object_path(second.calibration_artifact_ref.store_uri).read_bytes()
+    ) == profile.to_artifact_wire()
 
 
 @pytest.mark.skip(reason="formal release descriptors/sessions are intentionally unavailable")

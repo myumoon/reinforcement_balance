@@ -460,40 +460,47 @@ def test_verify_formal_runtime_release_rejects_subject_mismatch(tmp_path: Any) -
         verify_formal_runtime_release(dag, store)
 
 
-def test_from_verified_bytes_allows_formal_profile() -> None:
-    """_from_verified_bytes はストア検証後に formal profile をロードできる（P1-1 regression）。
+def test_from_store_artifact_loads_formal_profile(tmp_path: Any) -> None:
+    """formal profile はstoreのlogical refとcontent検証を通った場合だけ復元できる。"""
+    from reinbalance_survivors_contracts.artifact_store import ArtifactStore
 
-    from_artifact_wire() が拒否する development_only=False の wire を、
-    content-hash 検証付きの _from_verified_bytes() は受け付けることを確認する。
-    """
+    profile = FittedPerceptionErrorProfile(
+        calibration_session_ids=["cal-0"],
+        calibration_session_hashes={"cal-0": "b" * 64},
+        field_sample_counts={"hp_ratio": 2},
+        fit_code_hash="c" * 64,
+        development_only=False,
+        _factory_token=_FORMAL_FACTORY_TOKEN,
+    )
+    store = ArtifactStore(tmp_path / "store")
+    ref = store.put_bytes(
+        logical_id="perception/calibration/formal/profile.artifact.json",
+        data=canonical_json_bytes(profile.to_artifact_wire()),
+        media_type="application/json",
+    )
+
+    restored = FittedPerceptionErrorProfile.from_store_artifact(store, ref)
+
+    assert restored.to_artifact_wire() == profile.to_artifact_wire()
+    assert restored.development_only is False
+
+
+def test_self_signed_profile_bytes_cannot_promote_development_fixture() -> None:
+    """development flagを改ざんしてSHAを自己計算してもformal tokenを発行しない。"""
     import hashlib
 
-    # dev profile を作り artifact wire を取得する。
     residuals = [
         CalibrationResidual(f"s{i}", "f0", "hp_ratio", 0.01, 1.0, 0)
         for i in range(2)
     ]
-    dev_profile = fit_error_profile(residuals, ["s0", "s1"], [])
-    assert dev_profile.development_only is True
-    # development_only=True 版: _from_verified_bytes でもロードできる。
-    wire = dev_profile.to_artifact_wire()
-    wire_bytes = canonical_json_bytes(wire)
-    sha256 = hashlib.sha256(wire_bytes).hexdigest()
-    restored_dev = FittedPerceptionErrorProfile._from_verified_bytes(wire_bytes, sha256)
-    assert restored_dev.development_only is True
-    # development_only=False に書き換えた wire: from_artifact_wire は拒否するが
-    # _from_verified_bytes は content-hash が正しければロードできる（formal token 付与）。
-    formal_wire = dict(wire)
-    formal_wire["development_only"] = False
-    formal_bytes = canonical_json_bytes(formal_wire)
-    formal_sha256 = hashlib.sha256(formal_bytes).hexdigest()
+    wire = fit_error_profile(residuals, ["s0", "s1"], []).to_artifact_wire()
+    wire["development_only"] = False
+    data = canonical_json_bytes(wire)
+
     with pytest.raises(FormalVerdictPromotionError):
-        FittedPerceptionErrorProfile.from_artifact_wire(formal_wire)
-    restored_formal = FittedPerceptionErrorProfile._from_verified_bytes(formal_bytes, formal_sha256)
-    assert restored_formal.development_only is False
-    # hash 不一致は HashMismatchError を送出する。
-    with pytest.raises(HashMismatchError):
-        FittedPerceptionErrorProfile._from_verified_bytes(wire_bytes, "a" * 64)
+        FittedPerceptionErrorProfile._from_verified_bytes(
+            data, hashlib.sha256(data).hexdigest()
+        )
 
 
 def test_load_formal_verdict_from_verified_store_requires_store_and_ref(tmp_path: Any) -> None:

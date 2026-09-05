@@ -110,7 +110,10 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
     try:
         verdict = FidelityVerdict.from_wire(data["fidelity_verdict"])
         if use_store:
-            from Tools.Artifacts.artifact_store import ArtifactStore, ArtifactStoreError
+            from reinbalance_survivors_contracts.artifact_store import (
+                ArtifactStore,
+                ArtifactStoreError,
+            )
             try:
                 store = ArtifactStore(data["perception_profile_store_root"])
                 ref = store.resolve(data["perception_profile_artifact_logical_id"])
@@ -121,10 +124,7 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
                     f"calibration profile not found in store: "
                     f"{data['perception_profile_artifact_logical_id']!r}"
                 )
-            if not store.verify(ref).ok:
-                raise ValueError("calibration profile ArtifactStore verification failed")
-            profile_bytes = store.object_path(ref.store_uri).read_bytes()
-            profile = FittedPerceptionErrorProfile._from_verified_bytes(profile_bytes, ref.sha256)
+            profile = FittedPerceptionErrorProfile.from_store_artifact(store, ref)
         else:
             # 開発用: wire 直接埋め込み（development_only=True のみ受け付ける）。
             profile = FittedPerceptionErrorProfile.from_artifact_wire(data["perception_profile"])

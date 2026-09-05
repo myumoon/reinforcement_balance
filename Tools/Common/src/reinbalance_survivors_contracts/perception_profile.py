@@ -13,6 +13,8 @@ from dataclasses import InitVar, dataclass, field
 from types import MappingProxyType
 from typing import Any, Final, Mapping
 
+from .artifact_identity import ArtifactRef
+from .artifact_store import ArtifactStore, ArtifactStoreError
 from .canonical_json import canonical_hash, sha256_hex
 from .perception_error import ITEM_CATEGORY_SIZE, PerceptionErrorProfile
 
@@ -164,6 +166,13 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
         development_only=False の wire は fail-closed として拒否する。
         formal profile はストア検証経路（from_store_artifact）のみで取得できる。
         """
+        return cls._from_artifact_mapping(data, factory_token=None)
+
+    @classmethod
+    def _from_artifact_mapping(
+        cls, data: Mapping[str, Any], *, factory_token: object | None
+    ) -> "FittedPerceptionErrorProfile":
+        """artifact envelopeを検証し、許可された経路だけformal tokenを渡す。"""
         expected = {
             "schema_version", "profile", "profile_hash",
             "calibration_session_hashes", "field_sample_counts", "fit_code_hash",
@@ -175,8 +184,7 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
             raise ValueError("unsupported calibration artifact schema")
         if type(data["development_only"]) is not bool:
             raise ValueError("calibration artifact development_only must be bool")
-        # wire ローダーは formal token を付与しない。development_only=False の wire は拒否する。
-        if data["development_only"] is False:
+        if data["development_only"] is False and factory_token is not _FORMAL_FACTORY_TOKEN:
             raise FormalVerdictPromotionError(
                 "formal calibration profile cannot be loaded from raw wire; "
                 "use the artifact store verification path"
@@ -189,10 +197,9 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
             calibration_session_hashes=data["calibration_session_hashes"],
             field_sample_counts=data["field_sample_counts"],
             fit_code_hash=data["fit_code_hash"],
-            development_only=True,
-            _factory_token=None,
+            development_only=data["development_only"],
+            _factory_token=factory_token,
         )
-        # data["development_only"] は True 確認済み（False は上で raise 済み）。
         if fitted.to_artifact_wire() != dict(data):
             raise HashMismatchError("calibration artifact failed canonical reconstruction")
         return fitted
@@ -201,12 +208,7 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
     def _from_verified_bytes(
         cls, data_bytes: bytes, expected_sha256: str
     ) -> "FittedPerceptionErrorProfile":
-        """ArtifactStore の content-hash 検証後に限り formal profile をロードする。
-
-        呼び出し元は store.verify(ref) が True であることを確認してから渡すこと。
-        expected_sha256 との不一致は HashMismatchError を送出し fail-closed にする。
-        formal profile（development_only=False）には _FORMAL_FACTORY_TOKEN を付与する。
-        """
+        """自己申告hash付きbytesを検査する。formal tokenは発行しない。"""
         actual = sha256_hex(data_bytes)
         if actual != expected_sha256:
             raise HashMismatchError(
@@ -216,32 +218,38 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
             data: Any = _json.loads(data_bytes.decode("utf-8"))
         except (UnicodeDecodeError, _json.JSONDecodeError) as exc:
             raise ValueError(f"calibration artifact is not valid JSON: {exc}") from exc
-        expected_keys = {
-            "schema_version", "profile", "profile_hash",
-            "calibration_session_hashes", "field_sample_counts", "fit_code_hash",
-            "development_only",
-        }
-        if not isinstance(data, Mapping) or set(data) != expected_keys:
-            raise ValueError("calibration artifact fields do not match schema")
-        if data["schema_version"] != CALIBRATION_ARTIFACT_SCHEMA_VERSION:
-            raise ValueError("unsupported calibration artifact schema")
-        if type(data["development_only"]) is not bool:
-            raise ValueError("calibration artifact development_only must be bool")
-        profile = PerceptionErrorProfile.from_wire(data["profile"])
-        if profile.profile_hash != data["profile_hash"]:
-            raise HashMismatchError("calibration artifact profile hash mismatch")
-        factory_token = _FORMAL_FACTORY_TOKEN if data["development_only"] is False else None
-        fitted = cls(
-            **profile.to_wire(),
-            calibration_session_hashes=data["calibration_session_hashes"],
-            field_sample_counts=data["field_sample_counts"],
-            fit_code_hash=data["fit_code_hash"],
-            development_only=data["development_only"],
-            _factory_token=factory_token,
-        )
-        if fitted.to_artifact_wire() != dict(data):
-            raise HashMismatchError("calibration artifact failed canonical reconstruction")
-        return fitted
+        return cls._from_artifact_mapping(data, factory_token=None)
+
+    @classmethod
+    def from_store_artifact(
+        cls, store: ArtifactStore, ref: ArtifactRef
+    ) -> "FittedPerceptionErrorProfile":
+        """storeのlogical bindingとcontentを検証してformal profileを復元する。"""
+        if not isinstance(store, ArtifactStore) or not isinstance(ref, ArtifactRef):
+            raise TypeError("formal calibration profile requires ArtifactStore and ArtifactRef")
+        try:
+            resolved = store.resolve(ref.logical_id)
+            verification = store.verify(ref)
+            data_bytes = store.object_path(ref.store_uri).read_bytes()
+        except (ArtifactStoreError, OSError) as exc:
+            raise HashMismatchError(f"calibration artifact store read failed: {exc}") from exc
+        if resolved != ref:
+            raise HashMismatchError("calibration artifact ref is not bound to its logical id")
+        if not verification.ok:
+            raise HashMismatchError(
+                f"calibration artifact store verification failed: {verification.reason}"
+            )
+        if (
+            ref.media_type != "application/json"
+            or len(data_bytes) != ref.size_bytes
+            or sha256_hex(data_bytes) != ref.sha256
+        ):
+            raise HashMismatchError("calibration artifact content changed after verification")
+        try:
+            data: Any = _json.loads(data_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, _json.JSONDecodeError) as exc:
+            raise ValueError(f"calibration artifact is not valid JSON: {exc}") from exc
+        return cls._from_artifact_mapping(data, factory_token=_FORMAL_FACTORY_TOKEN)
 
     @property
     def artifact_hash(self) -> str:

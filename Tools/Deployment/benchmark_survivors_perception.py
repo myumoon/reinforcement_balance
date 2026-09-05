@@ -11,7 +11,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol
 
-from Tools.Artifacts.artifact_store import ArtifactStore
+from reinbalance_survivors_contracts.artifact_store import ArtifactStore
 from reinbalance_survivors_contracts.artifact_dag import (
     validate_artifact_dag,
     validate_formal_runtime_dag,
@@ -125,6 +125,10 @@ class FormalBenchmarkRequest:
         """run key ごとに一意な calibration profile の immutable logical ID。"""
         return f"{self.calibration_namespace}/{run_key}/profile.json"
 
+    def calibration_artifact_logical_id(self, run_key: str) -> str:
+        """formal consumer向けartifact envelopeのimmutable logical ID。"""
+        return f"{self.calibration_namespace}/{run_key}/profile.artifact.json"
+
     def calibration_provenance_logical_id(self, run_key: str) -> str:
         """run key ごとに一意な calibration provenance の immutable logical ID。"""
         return f"{self.calibration_namespace}/{run_key}/provenance.json"
@@ -140,6 +144,7 @@ class FormalBenchmarkResult:
     profile: FittedPerceptionErrorProfile
     verdict: PerceptionFinalVerdict
     calibration_ref: ArtifactRef
+    calibration_artifact_ref: ArtifactRef
     verdict_ref: ArtifactRef
     descriptors: tuple[ArtifactDescriptor, ...]
 
@@ -709,6 +714,7 @@ def _calibration_descriptor_chain(
         files=(capture_ref,),
     )
     profile_bytes = canonical_json_bytes(profile.to_wire())
+    artifact_bytes = canonical_json_bytes(profile.to_artifact_wire())
     provenance_bytes = _calibration_provenance_bytes(
         profile, provenance_subject_hashes
     )
@@ -727,6 +733,10 @@ def _calibration_descriptor_chain(
             _predicted_ref(
                 f"perception/package/calibration/{hashlib.sha256(profile_bytes).hexdigest()}/profile.json",
                 profile_bytes,
+            ),
+            _predicted_ref(
+                f"perception/package/calibration/{hashlib.sha256(artifact_bytes).hexdigest()}/profile.artifact.json",
+                artifact_bytes,
             ),
             _predicted_ref(
                 f"perception/package/calibration/{hashlib.sha256(provenance_bytes).hexdigest()}/provenance.json",
@@ -1162,6 +1172,37 @@ def _load_json_ref(store: ArtifactStore, ref: ArtifactRef) -> dict[str, Any]:
     return value
 
 
+def _descriptor_file_named(
+    descriptor: ArtifactDescriptor, filename: str
+) -> ArtifactRef:
+    """descriptorから指定名の一意なfile refを取得する。"""
+    matches = [ref for ref in descriptor.files if ref.logical_id.endswith(f"/{filename}")]
+    if len(matches) != 1:
+        raise ValueError(f"descriptor must contain exactly one {filename}")
+    return matches[0]
+
+
+def _publish_calibration_aliases(
+    request: FormalBenchmarkRequest,
+    run_key: str,
+    profile: FittedPerceptionErrorProfile,
+) -> tuple[ArtifactRef, ArtifactRef]:
+    """互換raw profileとformal artifact envelopeを別logical IDへpublishする。"""
+    if profile.development_only:
+        raise ValueError("formal calibration aliases require a formal profile")
+    raw_ref = request.store.put_bytes(
+        logical_id=request.calibration_logical_id(run_key),
+        data=canonical_json_bytes(profile.to_wire()),
+        media_type="application/json",
+    )
+    artifact_ref = request.store.put_bytes(
+        logical_id=request.calibration_artifact_logical_id(run_key),
+        data=canonical_json_bytes(profile.to_artifact_wire()),
+        media_type="application/json",
+    )
+    return raw_ref, artifact_ref
+
+
 def _batch_run_key(
     request: FormalBenchmarkRequest, validated_split: SessionSplit
 ) -> str:
@@ -1240,23 +1281,20 @@ def _recover_committed_result(
     }
     if not descriptor_ref_ids <= set(refs):
         raise ValueError("formal batch did not stage every descriptor ArtifactRef")
-    # ストア検証済みのバイト列から formal profile をロードする。
-    # from_artifact_wire() は development_only=False を拒否するため使用しない。
-    profile_file = descriptors[1].files[0]
-    profile_ref = refs.get(profile_file.logical_id)
-    if profile_ref is None:
-        raise ValueError("formal batch is missing calibration profile ArtifactRef in refs")
-    profile_verification = request.store.verify(profile_ref)
-    if not profile_verification.ok:
-        raise ValueError(
-            f"calibration profile store verification failed: {profile_verification.reason}"
-        )
-    profile_bytes = request.store.object_path(profile_ref.store_uri).read_bytes()
-    profile = FittedPerceptionErrorProfile._from_verified_bytes(profile_bytes, profile_ref.sha256)
+    raw_profile_file = _descriptor_file_named(descriptors[1], "profile.json")
+    artifact_file = _descriptor_file_named(descriptors[1], "profile.artifact.json")
+    stored_artifact_ref = refs.get(artifact_file.logical_id)
+    if stored_artifact_ref is None:
+        raise ValueError("formal batch is missing calibration artifact envelope ref")
+    profile = FittedPerceptionErrorProfile.from_store_artifact(
+        request.store, stored_artifact_ref
+    )
     if profile.development_only is not False:
         raise ValueError(
             "committed formal batch references a development-only calibration profile"
         )
+    if payload["profile_artifact"] != profile.to_artifact_wire():
+        raise ValueError("formal batch profile artifact does not match stored envelope")
     verdict_wire = payload["verdict"]
     if not isinstance(verdict_wire, dict):
         raise ValueError("formal batch verdict must be an object")
@@ -1317,8 +1355,8 @@ def _recover_committed_result(
     ):
         raise ValueError("formal batch descriptor/content identities do not match")
 
-    provenance_file = descriptors[1].files[1]
-    if _load_json_ref(request.store, profile_file) != profile.to_wire():
+    provenance_file = _descriptor_file_named(descriptors[1], "provenance.json")
+    if _load_json_ref(request.store, raw_profile_file) != profile.to_wire():
         raise ValueError("committed raw profile does not match profile artifact")
     provenance = _load_json_ref(request.store, provenance_file)
     if (
@@ -1330,10 +1368,8 @@ def _recover_committed_result(
         raise ValueError("committed calibration provenance/package binding is invalid")
     if _load_json_ref(request.store, verdict_file) != verdict.to_wire():
         raise ValueError("committed verdict file does not match verdict payload")
-    calibration_ref = request.store.put_bytes(
-        logical_id=request.calibration_logical_id(run_key),
-        data=request.store.object_path(profile_file.store_uri).read_bytes(),
-        media_type="application/json",
+    calibration_ref, calibration_artifact_ref = _publish_calibration_aliases(
+        request, run_key, profile
     )
     request.store.put_bytes(
         logical_id=request.calibration_provenance_logical_id(run_key),
@@ -1346,7 +1382,13 @@ def _recover_committed_result(
         media_type="application/json",
     )
     return FormalBenchmarkResult(
-        validated_split, profile, verdict, calibration_ref, verdict_ref, descriptors
+        split=validated_split,
+        profile=profile,
+        verdict=verdict,
+        calibration_ref=calibration_ref,
+        calibration_artifact_ref=calibration_artifact_ref,
+        verdict_ref=verdict_ref,
+        descriptors=descriptors,
     )
 
 
@@ -1557,10 +1599,24 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     )
     profile_node = calibration_descriptors[1]
     profile_bytes = canonical_json_bytes(profile.to_wire())
+    artifact_bytes = canonical_json_bytes(profile.to_artifact_wire())
     provenance_bytes = _calibration_provenance_bytes(profile, provenance_subjects)
     staged_refs = [
-        _put_descriptor_file(request.store, profile_node.files[0], profile_bytes),
-        _put_descriptor_file(request.store, profile_node.files[1], provenance_bytes),
+        _put_descriptor_file(
+            request.store,
+            _descriptor_file_named(profile_node, "profile.json"),
+            profile_bytes,
+        ),
+        _put_descriptor_file(
+            request.store,
+            _descriptor_file_named(profile_node, "profile.artifact.json"),
+            artifact_bytes,
+        ),
+        _put_descriptor_file(
+            request.store,
+            _descriptor_file_named(profile_node, "provenance.json"),
+            provenance_bytes,
+        ),
         *(
             _put_descriptor(request.store, descriptor)
             for descriptor in calibration_descriptors
@@ -1577,10 +1633,8 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         data=calibration_commit,
         media_type="application/json",
     )
-    calibration_ref = request.store.put_bytes(
-        logical_id=calibration_logical_id,
-        data=profile_bytes,
-        media_type="application/json",
+    calibration_ref, calibration_artifact_ref = _publish_calibration_aliases(
+        request, run_key, profile
     )
     request.store.put_bytes(
         logical_id=calibration_provenance_logical_id,
@@ -1725,7 +1779,13 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         media_type="application/json",
     )
     return FormalBenchmarkResult(
-        validated_split, profile, verdict, calibration_ref, verdict_ref, descriptors
+        split=validated_split,
+        profile=profile,
+        verdict=verdict,
+        calibration_ref=calibration_ref,
+        calibration_artifact_ref=calibration_artifact_ref,
+        verdict_ref=verdict_ref,
+        descriptors=descriptors,
     )
 
 
