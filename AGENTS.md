@@ -88,3 +88,6 @@ python train.py --game survivors --total-steps 500000
 
 プランは `.claude/docs/plans/{日時}_{プラン名}.md` として作成してください。
 プランの工程が多くフォルダが必要であれば `.claude/docs/plans/{日時}_{タスク名}/{index:02d}_{プラン名}.md` としてください。
+
+## agmsg
+[@agmsgの呼び出し](~/.agents/skills/agmsg-send/SKILL.md)
