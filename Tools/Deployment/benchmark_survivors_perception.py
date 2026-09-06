@@ -24,6 +24,9 @@ from reinbalance_survivors_contracts.artifact_identity import (
     artifact_uri,
 )
 from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
+from reinbalance_survivors_contracts.perception_profile import (
+    CALIBRATION_COMMIT_SCHEMA_VERSION,
+)
 from reinbalance_survivors_contracts.ui_intent import ContractValidationError
 
 from survivors.capture.captured_frame import CapturedFrame
@@ -1203,6 +1206,84 @@ def _publish_calibration_aliases(
     return raw_ref, artifact_ref
 
 
+def calibration_commit_logical_id(run_key: str) -> str:
+    """run key ごとの calibration commit logical ID を返す。
+
+    Training 側の formal_dependencies.json はこの logical ID を指定して
+    profile を読み込むため、producer と consumer が同じ命名を共有します。
+    """
+    return f"perception/calibration_commit/{run_key}"
+
+
+def _commit_calibration_package(
+    request: FormalBenchmarkRequest,
+    run_key: str,
+    profile: FittedPerceptionErrorProfile,
+    provenance_subjects: Mapping[str, str],
+    calibration_logical_id: str,
+    calibration_provenance_logical_id: str,
+) -> tuple[
+    tuple[ArtifactDescriptor, ArtifactDescriptor],
+    list[ArtifactRef],
+    ArtifactRef,
+    ArtifactRef,
+]:
+    """calibration descriptor chain と 3 ファイルを staging し commit を freeze する。
+
+    formal profile を「後から誰でも作れる store の中身」ではなく、producer が
+    発行した descriptor と calibration commit に束縛するための唯一の書き出し口です。
+    consumer（Training / recovery）はこの commit を入口に profile を復元します。
+    """
+    calibration_descriptors = _calibration_descriptor_chain(
+        request, profile, provenance_subjects, calibration_logical_id
+    )
+    profile_node = calibration_descriptors[1]
+    profile_bytes = canonical_json_bytes(profile.to_wire())
+    artifact_bytes = canonical_json_bytes(profile.to_artifact_wire())
+    provenance_bytes = _calibration_provenance_bytes(profile, provenance_subjects)
+    staged_refs = [
+        _put_descriptor_file(
+            request.store,
+            _descriptor_file_named(profile_node, "profile.json"),
+            profile_bytes,
+        ),
+        _put_descriptor_file(
+            request.store,
+            _descriptor_file_named(profile_node, "profile.artifact.json"),
+            artifact_bytes,
+        ),
+        _put_descriptor_file(
+            request.store,
+            _descriptor_file_named(profile_node, "provenance.json"),
+            provenance_bytes,
+        ),
+        *(
+            _put_descriptor(request.store, descriptor)
+            for descriptor in calibration_descriptors
+        ),
+    ]
+    calibration_commit = canonical_json_bytes({
+        "schema_version": CALIBRATION_COMMIT_SCHEMA_VERSION,
+        "run_key": run_key,
+        "profile_descriptor_hash": profile_node.identity_hash,
+        "refs": [ref.to_wire() for ref in staged_refs],
+    })
+    request.store.put_bytes(
+        logical_id=calibration_commit_logical_id(run_key),
+        data=calibration_commit,
+        media_type="application/json",
+    )
+    calibration_ref, calibration_artifact_ref = _publish_calibration_aliases(
+        request, run_key, profile
+    )
+    request.store.put_bytes(
+        logical_id=calibration_provenance_logical_id,
+        data=provenance_bytes,
+        media_type="application/json",
+    )
+    return calibration_descriptors, staged_refs, calibration_ref, calibration_artifact_ref
+
+
 def _batch_run_key(
     request: FormalBenchmarkRequest, validated_split: SessionSplit
 ) -> str:
@@ -1284,10 +1365,14 @@ def _recover_committed_result(
     raw_profile_file = _descriptor_file_named(descriptors[1], "profile.json")
     artifact_file = _descriptor_file_named(descriptors[1], "profile.artifact.json")
     stored_artifact_ref = refs.get(artifact_file.logical_id)
-    if stored_artifact_ref is None:
+    if stored_artifact_ref is None or stored_artifact_ref != artifact_file:
         raise ValueError("formal batch is missing calibration artifact envelope ref")
+    # formal token は「commit payload が固定した descriptor identity」を期待値に、
+    # 検証済み descriptor chain ごと渡した境界からのみ発行する。
     profile = FittedPerceptionErrorProfile.from_store_artifact(
-        request.store, stored_artifact_ref
+        request.store,
+        descriptors=descriptors,
+        expected_calibration_identity_hash=payload["descriptor_hashes"][1],
     )
     if profile.development_only is not False:
         raise ValueError(
@@ -1594,53 +1679,20 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         name: value for name, value in provisional_subjects.items()
         if name not in {"calibration_profile_hash", "lineage_seal_hash"}
     }
-    calibration_descriptors = _calibration_descriptor_chain(
-        request, profile, provenance_subjects, calibration_logical_id
+    (
+        calibration_descriptors,
+        staged_refs,
+        calibration_ref,
+        calibration_artifact_ref,
+    ) = _commit_calibration_package(
+        request,
+        run_key,
+        profile,
+        provenance_subjects,
+        calibration_logical_id,
+        calibration_provenance_logical_id,
     )
     profile_node = calibration_descriptors[1]
-    profile_bytes = canonical_json_bytes(profile.to_wire())
-    artifact_bytes = canonical_json_bytes(profile.to_artifact_wire())
-    provenance_bytes = _calibration_provenance_bytes(profile, provenance_subjects)
-    staged_refs = [
-        _put_descriptor_file(
-            request.store,
-            _descriptor_file_named(profile_node, "profile.json"),
-            profile_bytes,
-        ),
-        _put_descriptor_file(
-            request.store,
-            _descriptor_file_named(profile_node, "profile.artifact.json"),
-            artifact_bytes,
-        ),
-        _put_descriptor_file(
-            request.store,
-            _descriptor_file_named(profile_node, "provenance.json"),
-            provenance_bytes,
-        ),
-        *(
-            _put_descriptor(request.store, descriptor)
-            for descriptor in calibration_descriptors
-        ),
-    ]
-    calibration_commit = canonical_json_bytes({
-        "schema_version": "perception_calibration_commit.v1",
-        "run_key": run_key,
-        "profile_descriptor_hash": profile_node.identity_hash,
-        "refs": [ref.to_wire() for ref in staged_refs],
-    })
-    request.store.put_bytes(
-        logical_id=f"perception/calibration_commit/{run_key}",
-        data=calibration_commit,
-        media_type="application/json",
-    )
-    calibration_ref, calibration_artifact_ref = _publish_calibration_aliases(
-        request, run_key, profile
-    )
-    request.store.put_bytes(
-        logical_id=calibration_provenance_logical_id,
-        data=provenance_bytes,
-        media_type="application/json",
-    )
 
     # Phase B: committed calibration Artifact を subject に lineage seal を構築する。
     final_hashes = {

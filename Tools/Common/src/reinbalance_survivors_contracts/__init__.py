@@ -79,6 +79,8 @@ from .perception_error import (
 )
 from .perception_profile import (
     CALIBRATION_ARTIFACT_SCHEMA_VERSION,
+    CALIBRATION_COMMIT_SCHEMA_VERSION,
+    CALIBRATION_PROFILE_NODE_KIND,
     CalibrationResidual,
     FittedPerceptionErrorProfile,
     FormalVerdictPromotionError,

@@ -460,29 +460,270 @@ def test_verify_formal_runtime_release_rejects_subject_mismatch(tmp_path: Any) -
         verify_formal_runtime_release(dag, store)
 
 
-def test_from_store_artifact_loads_formal_profile(tmp_path: Any) -> None:
-    """formal profile はstoreのlogical refとcontent検証を通った場合だけ復元できる。"""
-    from reinbalance_survivors_contracts.artifact_store import ArtifactStore
+# --- M8/M9: from_store_artifact の formal token 発行境界 ---
 
-    profile = FittedPerceptionErrorProfile(
-        calibration_session_ids=["cal-0"],
-        calibration_session_hashes={"cal-0": "b" * 64},
-        field_sample_counts={"hp_ratio": 2},
-        fit_code_hash="c" * 64,
-        development_only=False,
-        _factory_token=_FORMAL_FACTORY_TOKEN,
+# formal fit が必須とする residual field 一式（各 field 3 session 以上・3 標本以上）。
+_FORMAL_FIT_FIELDS = (
+    "coord_noise", "hp_ratio", "xp_ratio", "timer_seconds",
+    "inventory_hash", "coord_quantization_px",
+    "burst_enter", "burst_exit", "burst_dropout",
+    "unknown_screen_collapse", "unknown_screen_collapse_duration",
+    "item_category", "enemy_category",
+)
+
+_BOUNDED_FIT_FIELDS = frozenset({
+    "burst_enter", "burst_exit", "burst_dropout", "unknown_screen_collapse",
+})
+
+
+def _formal_residuals(session_ids: tuple[str, ...]) -> list[CalibrationResidual]:
+    """formal fit の power 条件を満たす最小 residual 集合を作る。
+
+    13 の必須 field それぞれについて、3 つの異なる session から 1 標本ずつ作ります。
+    値は profile の値域制約（確率 field は [0,1]、非負 field は >=0）に収めます。
+    """
+    rows: list[CalibrationResidual] = []
+    for name in _FORMAL_FIT_FIELDS:
+        for index, session_id in enumerate(session_ids):
+            categories: dict[str, int] = {}
+            if name in {"item_category", "enemy_category"}:
+                categories = {"ground_truth_category": 0, "predicted_category": 0}
+            rows.append(
+                CalibrationResidual(
+                    session_id=session_id,
+                    frame_id=f"{name}-{index}",
+                    field=name,
+                    residual=0.25 if name in _BOUNDED_FIT_FIELDS else 0.01,
+                    confidence=0.9,
+                    age_frames=0,
+                    latency_frames=0.0,
+                    **categories,
+                )
+            )
+    return rows
+
+
+def _producer_calibration_commit(tmp_path: Any) -> tuple[Any, tuple, str, Any]:
+    """producerの実関数だけを使って formal calibration commit を store へ作る。
+
+    `_FORMAL_FACTORY_TOKEN` をテスト側から渡さず、formal fit runner と
+    `_commit_calibration_package()` という producer の本番経路だけを通します。
+    戻り値は (store, calibration descriptors, commit logical id, profile)。
+    """
+    from benchmark_survivors_perception import (
+        FormalBenchmarkRequest,
+        _commit_calibration_package,
+        calibration_commit_logical_id,
     )
-    store = ArtifactStore(tmp_path / "store")
-    ref = store.put_bytes(
-        logical_id="perception/calibration/formal/profile.artifact.json",
-        data=canonical_json_bytes(profile.to_artifact_wire()),
+    from reinbalance_survivors_contracts.artifact_store import ArtifactStore
+    from survivors.perception_error_fit import _fit_formal_error_profile
+
+    store = ArtifactStore(tmp_path / "producer-store")
+    capture_ref = store.put_bytes(
+        logical_id="perception/capture/manifest.json",
+        data=canonical_json_bytes({"sessions": ["cal-0", "cal-1", "cal-2"]}),
         media_type="application/json",
     )
+    capture_descriptor = ArtifactDescriptor(
+        logical_id="perception/capture/dataset",
+        node_kind="source_descriptor",
+        producer_id="capture-fixture",
+        producer_version="v1",
+        identity_metadata={"manifest_logical_id": capture_ref.logical_id},
+        files=(capture_ref,),
+    )
+    request = FormalBenchmarkRequest(
+        store=store,
+        capture_store_root=tmp_path / "captures",
+        dependency_descriptors={"capture_dataset": capture_descriptor},
+    )
+    session_ids = ("cal-0", "cal-1", "cal-2")
+    profile = _fit_formal_error_profile(
+        _formal_residuals(session_ids),
+        list(session_ids),
+        ["final-0"],
+        calibration_session_hashes={
+            session_id: canonical_hash({"session": session_id})
+            for session_id in session_ids
+        },
+    )
+    run_key = "producer-guard"
+    descriptors, _staged, _raw_ref, _artifact_ref = _commit_calibration_package(
+        request,
+        run_key,
+        profile,
+        {"capture_dataset_hash": capture_ref.sha256},
+        request.calibration_logical_id(run_key),
+        request.calibration_provenance_logical_id(run_key),
+    )
+    return store, descriptors, calibration_commit_logical_id(run_key), profile
 
-    restored = FittedPerceptionErrorProfile.from_store_artifact(store, ref)
 
-    assert restored.to_artifact_wire() == profile.to_artifact_wire()
+def test_from_store_artifact_loads_formal_profile(tmp_path: Any) -> None:
+    """producerのdescriptor chainとcalibration commitからだけformal profileを復元できる。
+
+    テストコードは `_FORMAL_FACTORY_TOKEN` を一切渡さず、producer の実出力のみを
+    入力にして formal（development_only=False）profile を取得します（M9(b)）。
+    """
+    store, descriptors, commit_logical_id, profile = _producer_calibration_commit(tmp_path)
+
+    restored = FittedPerceptionErrorProfile.from_store_artifact(
+        store,
+        descriptors=descriptors,
+        expected_calibration_identity_hash=descriptors[1].identity_hash,
+    )
     assert restored.development_only is False
+    assert restored.to_artifact_wire() == profile.to_artifact_wire()
+    assert restored.calibration_descriptor_hash == descriptors[1].identity_hash
+
+    from_commit = FittedPerceptionErrorProfile.from_calibration_commit(
+        store,
+        commit_logical_id=commit_logical_id,
+        expected_calibration_identity_hash=descriptors[1].identity_hash,
+    )
+    assert from_commit.to_artifact_wire() == profile.to_artifact_wire()
+    assert from_commit.calibration_descriptor_hash == descriptors[1].identity_hash
+
+
+def test_from_store_artifact_rejects_wrong_expected_identity(tmp_path: Any) -> None:
+    """期待 calibration identity が違えば producer 出力でも formal 化しない。"""
+    store, descriptors, commit_logical_id, _profile = _producer_calibration_commit(tmp_path)
+
+    with pytest.raises(FormalVerdictPromotionError, match="does not match the expected"):
+        FittedPerceptionErrorProfile.from_store_artifact(
+            store,
+            descriptors=descriptors,
+            expected_calibration_identity_hash="d" * 64,
+        )
+    with pytest.raises(FormalVerdictPromotionError, match="does not match the expected"):
+        FittedPerceptionErrorProfile.from_calibration_commit(
+            store,
+            commit_logical_id=commit_logical_id,
+            expected_calibration_identity_hash="d" * 64,
+        )
+
+
+def test_from_store_artifact_rejects_self_published_promoted_fixture(
+    tmp_path: Any,
+) -> None:
+    """公開 fit の改ざん envelope を store へ置いても formal token を発行しない（M9(a)）。
+
+    1. 正規 calibration commit の logical ID へ別内容を publish することはできない。
+    2. 攻撃者 store に自作 descriptor/commit を作っても、frozen config が固定した
+       expected calibration identity と一致しないため fail-closed になる。
+    """
+    from reinbalance_survivors_contracts.artifact_store import (
+        ArtifactStore,
+        ArtifactStoreError,
+    )
+
+    store, descriptors, commit_logical_id, _profile = _producer_calibration_commit(tmp_path)
+    frozen_identity = descriptors[1].identity_hash
+    profile_node = descriptors[1]
+    artifact_file = next(
+        ref for ref in profile_node.files
+        if ref.logical_id.endswith("/profile.artifact.json")
+    )
+
+    residuals = [
+        CalibrationResidual(f"s{index}", "f0", "hp_ratio", 0.01, 1.0, 0)
+        for index in range(2)
+    ]
+    forged_wire = fit_error_profile(residuals, ["s0", "s1"], []).to_artifact_wire()
+    assert forged_wire["development_only"] is True
+    forged_wire["development_only"] = False
+    forged_bytes = canonical_json_bytes(forged_wire)
+
+    # 1: producer が確定させた logical ID は別内容で上書きできない。
+    with pytest.raises(ArtifactStoreError):
+        store.put_bytes(
+            logical_id=artifact_file.logical_id,
+            data=forged_bytes,
+            media_type="application/json",
+        )
+
+    # 2: 攻撃者が自前の store/descriptor/commit を作っても expected identity が一致しない。
+    attacker = ArtifactStore(tmp_path / "attacker-store")
+    forged_refs = {
+        name: attacker.put_bytes(
+            logical_id=f"perception/package/calibration/forged/{name}",
+            data=payload,
+            media_type="application/json",
+        )
+        for name, payload in (
+            ("profile.json", canonical_json_bytes(forged_wire["profile"])),
+            ("profile.artifact.json", forged_bytes),
+            (
+                "provenance.json",
+                canonical_json_bytes({
+                    "schema_version": "perception_calibration_package.v1",
+                    "profile_artifact": forged_wire,
+                    "subject_hashes": {},
+                }),
+            ),
+        )
+    }
+    forged_source = ArtifactDescriptor(
+        logical_id="perception/capture/source",
+        node_kind="source_descriptor",
+        producer_id="perception_error_fit",
+        producer_version="v2",
+        identity_metadata={"split_manifest_hash": "e" * 64},
+        files=(forged_refs["profile.json"],),
+    )
+    forged_node = ArtifactDescriptor(
+        logical_id="perception/calibration/forged",
+        node_kind="perception_calibration_profile",
+        producer_id="perception_error_fit",
+        producer_version="v2",
+        identity_metadata={
+            "profile_hash": forged_wire["profile_hash"],
+            "fit_code_hash": forged_wire["fit_code_hash"],
+            "subject_hashes": {},
+        },
+        parents=(forged_source.node_ref(),),
+        files=tuple(forged_refs.values()),
+    )
+    with pytest.raises(FormalVerdictPromotionError, match="does not match the expected"):
+        FittedPerceptionErrorProfile.from_store_artifact(
+            attacker,
+            descriptors=(forged_source, forged_node),
+            expected_calibration_identity_hash=frozen_identity,
+        )
+
+    forged_commit_id = "perception/calibration_commit/forged"
+    attacker.put_bytes(
+        logical_id=forged_commit_id,
+        data=canonical_json_bytes({
+            "schema_version": "perception_calibration_commit.v1",
+            "run_key": "forged",
+            "profile_descriptor_hash": forged_node.identity_hash,
+            "refs": [
+                attacker.put_bytes(
+                    logical_id=(
+                        f"perception/package/descriptors/{descriptor.identity_hash}.json"
+                    ),
+                    data=canonical_json_bytes(descriptor.to_wire()),
+                    media_type="application/json",
+                ).to_wire()
+                for descriptor in (forged_source, forged_node)
+            ],
+        }),
+        media_type="application/json",
+    )
+    with pytest.raises(FormalVerdictPromotionError, match="does not match the expected"):
+        FittedPerceptionErrorProfile.from_calibration_commit(
+            attacker,
+            commit_logical_id=forged_commit_id,
+            expected_calibration_identity_hash=frozen_identity,
+        )
+    # 攻撃者 store には正規 commit logical ID 自体が存在しない。
+    with pytest.raises(FormalVerdictPromotionError, match="not found in store"):
+        FittedPerceptionErrorProfile.from_calibration_commit(
+            attacker,
+            commit_logical_id=commit_logical_id,
+            expected_calibration_identity_hash=frozen_identity,
+        )
 
 
 def test_self_signed_profile_bytes_cannot_promote_development_fixture() -> None:

@@ -74,8 +74,14 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
 
     formal profile のロード形式は2種類を受け付けます:
     - 開発用: "perception_profile" に artifact wire を直接埋め込む（development_only=True のみ）。
-    - 正式用: "perception_profile_store_root" + "perception_profile_artifact_logical_id" で
-              ArtifactStore を開き、store.verify() 検証後にロードする。
+    - 正式用: "perception_profile_store_root" + "perception_calibration_commit_logical_id"
+              + "required_calibration_descriptor_hash" で producer の calibration commit を開き、
+              descriptor identity が期待値と一致した場合だけロードする。
+
+    正式用は自由な logical ID を受け付けません。producer が freeze した calibration commit
+    のみを入口にし、期待 descriptor identity（profile/provenance のバイト列まで covered）を
+    frozen config 側で固定します。これにより development_only だけ書き換えた artifact を
+    store へ置いても formal 扱いにはなりません。
     """
     if path is None:
         return None
@@ -89,7 +95,8 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
         raise ValueError("formal dependencies must be a JSON object")
     _STORE_KEYS = frozenset(
         {"fidelity_verdict", "perception_profile_store_root",
-         "perception_profile_artifact_logical_id", "required_perception_profile_hash",
+         "perception_calibration_commit_logical_id",
+         "required_calibration_descriptor_hash", "required_perception_profile_hash",
          "current_gating_producer_hashes", "profile_source"}
     )
     _WIRE_KEYS = frozenset(
@@ -107,6 +114,7 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
             f"formal dependencies unknown or missing keys "
             f"(unknown/extra: {sorted(extra)}, missing from both formats: {sorted(missing)})"
         )
+    required_descriptor_hash: str | None = None
     try:
         verdict = FidelityVerdict.from_wire(data["fidelity_verdict"])
         if use_store:
@@ -114,17 +122,16 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
                 ArtifactStore,
                 ArtifactStoreError,
             )
+            required_descriptor_hash = data["required_calibration_descriptor_hash"]
             try:
                 store = ArtifactStore(data["perception_profile_store_root"])
-                ref = store.resolve(data["perception_profile_artifact_logical_id"])
             except (ArtifactStoreError, OSError) as exc:
                 raise ValueError(f"cannot open calibration profile artifact store: {exc}") from exc
-            if ref is None:
-                raise ValueError(
-                    f"calibration profile not found in store: "
-                    f"{data['perception_profile_artifact_logical_id']!r}"
-                )
-            profile = FittedPerceptionErrorProfile.from_store_artifact(store, ref)
+            profile = FittedPerceptionErrorProfile.from_calibration_commit(
+                store,
+                commit_logical_id=data["perception_calibration_commit_logical_id"],
+                expected_calibration_identity_hash=required_descriptor_hash,
+            )
         else:
             # 開発用: wire 直接埋め込み（development_only=True のみ受け付ける）。
             profile = FittedPerceptionErrorProfile.from_artifact_wire(data["perception_profile"])
@@ -141,6 +148,7 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
         perception_profile=profile,
         required_perception_profile_hash=required_hash,
         profile_source=profile_source,
+        required_calibration_descriptor_hash=required_descriptor_hash,
     )
 
 

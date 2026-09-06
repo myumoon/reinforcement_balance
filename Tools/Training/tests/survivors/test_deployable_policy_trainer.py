@@ -246,30 +246,64 @@ def _make_formal_deps() -> FormalDependencies:
     return FormalDependencies(verdict, hashes, profile, profile.profile_hash)
 
 
-def _producer_formal_deps_file(tmp_path: Path) -> tuple[Path, object, FormalDependencies]:
-    """producer公開refを使うformal dependencies fixtureを作る。"""
+def _producer_formal_deps_file(tmp_path: Path) -> tuple[Path, str, FormalDependencies]:
+    """producerのcalibration commitを使うformal dependencies fixtureを作る。
+
+    Training 側 loader は自由な logical ID ではなく producer が freeze した
+    calibration commit のみを入口にするため、fixture も本番と同じ
+    `_commit_calibration_package()` で store を作ります。
+    """
     from benchmark_survivors_perception import (
         FormalBenchmarkRequest,
-        _publish_calibration_aliases,
+        _commit_calibration_package,
+        calibration_commit_logical_id,
     )
+    from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
     from reinbalance_survivors_contracts.artifact_store import ArtifactStore
+    from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
 
     dependencies = _make_formal_deps()
     store = ArtifactStore(tmp_path / "artifact-store")
-    request = FormalBenchmarkRequest(store=store, capture_store_root=tmp_path / "captures")
-    raw_ref, artifact_ref = _publish_calibration_aliases(
-        request, "producer-integration", dependencies.perception_profile
+    capture_ref = store.put_bytes(
+        logical_id="perception/capture/manifest.json",
+        data=canonical_json_bytes({"sessions": ["cal-1"]}),
+        media_type="application/json",
     )
+    capture_descriptor = ArtifactDescriptor(
+        logical_id="perception/capture/dataset",
+        node_kind="source_descriptor",
+        producer_id="capture-fixture",
+        producer_version="v1",
+        identity_metadata={"manifest_logical_id": capture_ref.logical_id},
+        files=(capture_ref,),
+    )
+    request = FormalBenchmarkRequest(
+        store=store,
+        capture_store_root=tmp_path / "captures",
+        dependency_descriptors={"capture_dataset": capture_descriptor},
+    )
+    run_key = "producer-integration"
+    descriptors, _staged, raw_ref, artifact_ref = _commit_calibration_package(
+        request,
+        run_key,
+        dependencies.perception_profile,
+        {"capture_dataset_hash": capture_ref.sha256},
+        request.calibration_logical_id(run_key),
+        request.calibration_provenance_logical_id(run_key),
+    )
+    assert artifact_ref.logical_id.endswith("/profile.artifact.json")
     assert json.loads(store.object_path(raw_ref.store_uri).read_bytes()) == (
         dependencies.perception_profile.to_wire()
     )
     assert json.loads(store.object_path(artifact_ref.store_uri).read_bytes()) == (
         dependencies.perception_profile.to_artifact_wire()
     )
+    commit_logical_id = calibration_commit_logical_id(run_key)
     payload = {
         "fidelity_verdict": dependencies.fidelity_verdict.to_wire(),
         "perception_profile_store_root": str(store.root),
-        "perception_profile_artifact_logical_id": artifact_ref.logical_id,
+        "perception_calibration_commit_logical_id": commit_logical_id,
+        "required_calibration_descriptor_hash": descriptors[1].identity_hash,
         "required_perception_profile_hash": dependencies.required_perception_profile_hash,
         "current_gating_producer_hashes": dict(
             dependencies.current_gating_producer_hashes
@@ -278,28 +312,42 @@ def _producer_formal_deps_file(tmp_path: Path) -> tuple[Path, object, FormalDepe
     }
     path = tmp_path / "formal-deps.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
-    return path, artifact_ref, dependencies
+    return path, commit_logical_id, dependencies
 
 
 def test_load_formal_deps_reads_producer_artifact_envelope(tmp_path: Path) -> None:
-    """producerのraw互換出力ではなく別refのartifact envelopeをformal loaderへ渡す。"""
+    """producerのcalibration commitを経由したときだけformal profileをロードできる。"""
     from train_survivors_deployable_policy import _load_formal_deps
 
-    path, artifact_ref, expected = _producer_formal_deps_file(tmp_path)
+    path, commit_logical_id, expected = _producer_formal_deps_file(tmp_path)
     loaded = _load_formal_deps(path)
 
     assert loaded is not None
-    assert artifact_ref.logical_id.endswith("/profile.artifact.json")
+    assert commit_logical_id.startswith("perception/calibration_commit/")
     assert loaded.perception_profile.to_artifact_wire() == (
         expected.perception_profile.to_artifact_wire()
     )
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert loaded.required_calibration_descriptor_hash == (
+        stored["required_calibration_descriptor_hash"]
+    )
+    # descriptor 束縛まで含めて step-0 gate を通過する。
+    loaded.validate()
 
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["perception_profile_artifact_logical_id"] = (
-        artifact_ref.logical_id.replace("/profile.artifact.json", "/profile.json")
+    # 期待 calibration identity が frozen config と違えば fail-closed になる。
+    payload = dict(stored)
+    payload["required_calibration_descriptor_hash"] = "d" * 64
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match the expected"):
+        _load_formal_deps(path)
+
+    # 自由な logical ID（raw profile alias）は入口として受け付けない。
+    payload = dict(stored)
+    payload["perception_calibration_commit_logical_id"] = (
+        f"perception/calibration/{'producer-integration'}/profile.json"
     )
     path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ValueError, match="calibration artifact fields do not match schema"):
+    with pytest.raises(ValueError, match="calibration commit schema is not supported"):
         _load_formal_deps(path)
 
 

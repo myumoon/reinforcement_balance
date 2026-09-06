@@ -28,12 +28,15 @@ def _sha256(value: Any, label: str) -> str:
 class FormalDependencies:
     """正式 student run を解禁する current fidelity と measured profile の束縛。
     fixture/bootstrap を種別文字列で明示拒否し、profile hash は frozen config の期待値と比較します。
+    required_calibration_descriptor_hash は producer calibration descriptor の identity を
+    固定する期待値で、profile_hash が covered しない development_only 改変まで検出します。
     """
     fidelity_verdict: FidelityVerdict | Mapping[str, Any]
     current_gating_producer_hashes: Mapping[str, str]
     perception_profile: PerceptionErrorProfile | None
     required_perception_profile_hash: str
     profile_source: str = "measured"
+    required_calibration_descriptor_hash: str | None = None
     def __post_init__(self) -> None:
         """formal dependency の source kind と基本型を fail-closed 検証する。
         measured と明示されない profile は内容から推測せず、この境界で拒否します。
@@ -41,6 +44,11 @@ class FormalDependencies:
         if self.profile_source != "measured":
             raise ValueError("formal training requires a measured perception profile")
         _sha256(self.required_perception_profile_hash, "required_perception_profile_hash")
+        if self.required_calibration_descriptor_hash is not None:
+            _sha256(
+                self.required_calibration_descriptor_hash,
+                "required_calibration_descriptor_hash",
+            )
         if not isinstance(self.perception_profile, PerceptionErrorProfile):
             raise ValueError("formal training requires a measured perception profile")
         if not isinstance(self.current_gating_producer_hashes, Mapping):
@@ -49,6 +57,8 @@ class FormalDependencies:
         """current integration verdict と measured profile freshness を step 0 で検証する。
         blocking verdict、producer hash 差、空 calibration、期待 profile hash 差を全て停止します。
         development_only=True の profile は production formal training で拒否します。
+        期待 calibration descriptor identity が指定された場合、store 検証経路で束縛された
+        descriptor hash と一致しない profile も停止します。
         """
         profile = self.perception_profile
         assert profile is not None
@@ -58,6 +68,13 @@ class FormalDependencies:
             )
         if profile.profile_hash != self.required_perception_profile_hash:
             raise ValueError("measured perception profile is stale")
+        if self.required_calibration_descriptor_hash is not None and (
+            getattr(profile, "calibration_descriptor_hash", "")
+            != self.required_calibration_descriptor_hash
+        ):
+            raise ValueError(
+                "measured perception profile is not bound to the required calibration descriptor"
+            )
         if not profile.calibration_session_ids:
             raise ValueError("measured perception profile requires calibration sessions")
         checked = verify_current_fidelity(
