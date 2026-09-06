@@ -1,127 +1,187 @@
-"""CombatSession: GRU hidden state 管理と episode 境界を検証する。
+"""CombatSession: saved recurrent actor との parity と episode 境界を検証する。
 
-golden fixture model を使い、action sequence 再現性と stale / invalid 観測の
-safe handling をテストする。
+known obs sequence に対して、offline RecurrentPPO `predict` ループと
+CombatSession が同一の action 列と actor LSTM state を返すことを確認する。
+episode reset / death gap で state が破棄されることも併せて検証する。
 """
+from __future__ import annotations
+
 import numpy as np
 import pytest
-import torch
 
-from survivors.runtime.artifact_bundle import _CombatGRU
-from survivors.runtime.combat_session import CombatSession, StaleSnapshotError
+from survivors.runtime.combat_session import (
+    CombatDecision,
+    CombatSession,
+    StaleSnapshotError,
+)
 
-OBS_DIM = 4
-ACTION_DIM = 9
-HIDDEN_DIM = 8
-
-
-def _model() -> _CombatGRU:
-    return _CombatGRU(OBS_DIM, ACTION_DIM, HIDDEN_DIM)
+from . import _runtime_fixtures as fx
 
 
-def _random_obs() -> np.ndarray:
-    rng = np.random.default_rng(42)
-    return rng.standard_normal(OBS_DIM).astype(np.float32)
+def _obs_sequence(length: int = 6, *, seed: int = 7) -> list[np.ndarray]:
+    """決定的な観測列を返す。parity 比較の入力に使う。"""
+    rng = np.random.default_rng(seed)
+    return [
+        rng.normal(size=fx.DEPLOY_OBS_DIM).astype(np.float32) for _ in range(length)
+    ]
 
 
-class TestCombatSessionInit:
-    def test_properties_match_model(self):
-        session = CombatSession(_model())
-        assert session.observation_dim == OBS_DIM
-        assert session.action_dim == ACTION_DIM
-        assert session.hidden_dim == HIDDEN_DIM
+def _offline_reference(policy, observations):
+    """SB3 RecurrentPPO を素で回した参照 action / state 列を返す。
 
-    def test_wrong_type_raises(self):
-        with pytest.raises(ValueError, match="_CombatGRU"):
-            CombatSession(object())  # type: ignore[arg-type]
+    CombatSession を一切使わない独立経路。これと一致することが parity の定義。
+    """
+    model = policy.model
+    vecnormalize = policy.vecnormalize
+    state = None
+    starts = np.array([True])
+    actions: list[int] = []
+    states: list[tuple[np.ndarray, np.ndarray]] = []
+    for obs in observations:
+        normalized = np.asarray(
+            vecnormalize.normalize_obs(obs.reshape(1, -1)), dtype=np.float32
+        )
+        action, state = model.predict(
+            normalized, state=state, episode_start=starts, deterministic=True
+        )
+        starts = np.array([False])
+        actions.append(int(np.asarray(action).reshape(-1)[0]))
+        states.append((np.asarray(state[0]).copy(), np.asarray(state[1]).copy()))
+    return actions, states
 
 
-class TestDecide:
-    def test_returns_valid_action_index(self):
-        session = CombatSession(_model())
-        action = session.decide(_random_obs())
-        assert isinstance(action, int)
-        assert 0 <= action < ACTION_DIM
+class TestRecurrentActorParity:
+    """[指摘9] saved recurrent actor と action / LSTM state が一致する。"""
 
-    def test_nonfinite_obs_raises_stale(self):
-        session = CombatSession(_model())
-        obs = np.full(OBS_DIM, float("nan"), dtype=np.float32)
-        with pytest.raises(StaleSnapshotError, match="non-finite"):
+    def test_actions_match_offline_predict(self, golden_combat_policy):
+        observations = _obs_sequence()
+        session = CombatSession(golden_combat_policy)
+        session.reset_episode()
+        actual = [session.decide(obs).action_index for obs in observations]
+        expected, _ = _offline_reference(golden_combat_policy, observations)
+        assert actual == expected
+
+    def test_lstm_states_match_offline_predict(self, golden_combat_policy):
+        observations = _obs_sequence()
+        session = CombatSession(golden_combat_policy)
+        session.reset_episode()
+        actual_states = []
+        for obs in observations:
             session.decide(obs)
+            actual_states.append(session.lstm_state_copy())
+        _, expected_states = _offline_reference(golden_combat_policy, observations)
+        for actual, expected in zip(actual_states, expected_states):
+            assert actual is not None
+            np.testing.assert_array_equal(actual[0], expected[0])
+            np.testing.assert_array_equal(actual[1], expected[1])
 
-    def test_wrong_shape_raises_stale(self):
-        session = CombatSession(_model())
-        obs = np.zeros(OBS_DIM + 1, dtype=np.float32)
-        with pytest.raises(StaleSnapshotError, match="shape"):
-            session.decide(obs)
+    def test_lstm_state_shape_is_layers_one_hidden(self, golden_combat_policy):
+        """plan 指定の `[n_layers, 1, hidden]` 形状を保持する。"""
+        session = CombatSession(golden_combat_policy)
+        session.decide(_obs_sequence(1)[0])
+        state = session.lstm_state_copy()
+        assert state is not None
+        expected = golden_combat_policy.lstm_state_shape
+        assert state[0].shape == expected
+        assert state[1].shape == expected
 
-    def test_2d_obs_raises_stale(self):
-        session = CombatSession(_model())
-        obs = np.zeros((1, OBS_DIM), dtype=np.float32)
-        with pytest.raises(StaleSnapshotError, match="shape"):
-            session.decide(obs)
+    def test_vecnormalize_is_applied(self, golden_combat_policy):
+        """正規化前後で値が変わり、保存統計が実際に使われていること。"""
+        session = CombatSession(golden_combat_policy)
+        raw = np.full(fx.DEPLOY_OBS_DIM, 3.0, dtype=np.float32)
+        normalized = session.normalize_observation(raw)
+        assert not np.allclose(normalized.reshape(-1), raw)
 
-    def test_action_reproducible_from_same_init(self):
-        """同一初期状態から同じ obs で同じ action を返す。"""
-        model = _model()
-        obs = _random_obs()
-        s1 = CombatSession(model)
-        s2 = CombatSession(model)
-        assert s1.decide(obs) == s2.decide(obs)
-
-    def test_second_step_differs_from_first(self):
-        """hidden state が更新され、同じ obs でも 2 ステップ目は変わりうる。"""
-        session = CombatSession(_model())
-        obs = _random_obs()
-        _ = session.decide(obs)
-        h1 = session.hidden_state_copy()
-        # 1 step 後の hidden が変化している
-        assert not np.allclose(np.zeros(HIDDEN_DIM), h1)
+    def test_decide_returns_combat_decision(self, golden_combat_policy):
+        session = CombatSession(golden_combat_policy)
+        decision = session.decide(_obs_sequence(1)[0])
+        assert isinstance(decision, CombatDecision)
+        assert 0 <= decision.action_index < golden_combat_policy.action_dim
+        assert 0.0 <= decision.confidence <= 1.0
 
 
 class TestEpisodeReset:
-    def test_reset_zeros_hidden_state(self):
-        session = CombatSession(_model())
-        session.decide(_random_obs())
+    """episode 境界で actor LSTM state が破棄される。"""
+
+    def test_reset_clears_lstm_state(self, golden_combat_policy):
+        session = CombatSession(golden_combat_policy)
+        session.decide(_obs_sequence(1)[0])
+        assert session.lstm_state_copy() is not None
         session.reset_episode()
-        assert np.allclose(session.hidden_state_copy(), 0.0)
+        assert session.lstm_state_copy() is None
+        assert session.episode_start_pending is True
 
-    def test_episode_start_flag_resets_state(self):
-        """episode_start=True は reset_episode() 相当のリセットを行う。"""
-        session = CombatSession(_model())
-        session.decide(_random_obs())
-        h_after_step = session.hidden_state_copy().copy()
-        # reset して同じ obs を渡す
-        session.decide(_random_obs(), episode_start=True)
-        h_after_reset = session.hidden_state_copy()
-        # hidden は同じ obs / init state から計算されるので一致しない ≠ step 後の state
-        assert h_after_step.shape == h_after_reset.shape
-
-    def test_death_then_new_episode_same_sequence(self):
-        """episode リセット後に同じ obs 列を入力すると同じ action 列が返る。"""
-        model = _model()
-        obs_list = [_random_obs() for _ in range(3)]
-        s = CombatSession(model)
-        actions_first = [s.decide(o) for o in obs_list]
-        s.reset_episode()
-        actions_second = [s.decide(o) for o in obs_list]
-        assert actions_first == actions_second
-
-    def test_unknown_gap_no_ops_then_reset(self):
-        """セッション中の gap 後は reset_episode() を呼んで新 episode を始める。"""
-        session = CombatSession(_model())
-        session.decide(_random_obs())
+    def test_reset_restores_first_action(self, golden_combat_policy):
+        """reset 後は同じ観測に対して episode 先頭と同じ action を返す。"""
+        observations = _obs_sequence(4)
+        session = CombatSession(golden_combat_policy)
         session.reset_episode()
-        # リセット後は再び有効な action を返せる
-        action = session.decide(_random_obs())
-        assert 0 <= action < ACTION_DIM
+        first = session.decide(observations[0]).action_index
+        for obs in observations[1:]:
+            session.decide(obs)
+        session.reset_episode()
+        assert session.decide(observations[0]).action_index == first
+
+    def test_episode_start_flag_resets_mid_sequence(self, golden_combat_policy):
+        observations = _obs_sequence(3)
+        session = CombatSession(golden_combat_policy)
+        first = session.decide(observations[0], episode_start=True).action_index
+        session.decide(observations[1])
+        again = session.decide(observations[0], episode_start=True).action_index
+        assert again == first
+
+    def test_state_persists_without_reset(self, golden_combat_policy):
+        """reset しなければ記憶が残り、同じ観測でも state が進む。"""
+        observations = _obs_sequence(2)
+        session = CombatSession(golden_combat_policy)
+        session.decide(observations[0], episode_start=True)
+        first_state = session.lstm_state_copy()
+        session.decide(observations[0])
+        second_state = session.lstm_state_copy()
+        assert first_state is not None and second_state is not None
+        assert not np.array_equal(first_state[0], second_state[0])
 
 
-class TestHiddenStateCopy:
-    def test_copy_does_not_alias(self):
-        session = CombatSession(_model())
-        session.decide(_random_obs())
-        h1 = session.hidden_state_copy()
-        h1[:] = 0.0
-        h2 = session.hidden_state_copy()
-        assert not np.allclose(h2, 0.0)
+class TestInvalidObservations:
+    """stale / invalid 観測は StaleSnapshotError にする。"""
+
+    def test_wrong_shape_raises(self, golden_combat_policy):
+        session = CombatSession(golden_combat_policy)
+        with pytest.raises(StaleSnapshotError, match="obs shape"):
+            session.decide(np.zeros(3, dtype=np.float32))
+
+    def test_non_finite_raises(self, golden_combat_policy):
+        session = CombatSession(golden_combat_policy)
+        obs = np.zeros(fx.DEPLOY_OBS_DIM, dtype=np.float32)
+        obs[0] = np.nan
+        with pytest.raises(StaleSnapshotError, match="non-finite"):
+            session.decide(obs)
+
+    def test_infinite_value_raises(self, golden_combat_policy):
+        session = CombatSession(golden_combat_policy)
+        obs = np.zeros(fx.DEPLOY_OBS_DIM, dtype=np.float32)
+        obs[1] = np.inf
+        with pytest.raises(StaleSnapshotError, match="non-finite"):
+            session.decide(obs)
+
+    def test_non_policy_rejected(self):
+        with pytest.raises(ValueError, match="RecurrentCombatPolicy"):
+            CombatSession(object())  # type: ignore[arg-type]
+
+
+class TestLongRunStability:
+    """長時間の連続推論で NaN / 範囲外 action を出さない。"""
+
+    def test_sustained_actions_stay_in_range_and_finite(self, golden_combat_policy):
+        # 15 Hz × 30 分 = 27000 tick。CI 時間の都合で代表 1500 tick を回す。
+        session = CombatSession(golden_combat_policy)
+        session.reset_episode()
+        rng = np.random.default_rng(11)
+        for _ in range(1500):
+            obs = rng.normal(size=fx.DEPLOY_OBS_DIM).astype(np.float32)
+            decision = session.decide(obs)
+            assert 0 <= decision.action_index < golden_combat_policy.action_dim
+            assert np.isfinite(decision.confidence)
+        state = session.lstm_state_copy()
+        assert state is not None
+        assert np.all(np.isfinite(state[0])) and np.all(np.isfinite(state[1]))

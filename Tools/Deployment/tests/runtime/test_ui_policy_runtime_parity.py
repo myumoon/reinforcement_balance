@@ -13,7 +13,11 @@ from typing import Any
 
 import pytest
 
-from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
+from reinbalance_survivors_contracts.canonical_json import (
+    canonical_hash,
+    canonical_json_bytes,
+    sha256_hex,
+)
 from reinbalance_survivors_contracts.ui_intent import (
     ContractValidationError,
     DecisionOwner,
@@ -234,3 +238,234 @@ class TestIntentOwnershipRules:
                 ui_state_key="k" * 64,
             )
             assert intent.decision_owner == DecisionOwner.RUNTIME_SAFETY
+
+
+# ---------------------------------------------------------------------------
+# 共有 fixture と別 subprocess/cwd での byte-identical parity
+# ---------------------------------------------------------------------------
+
+# repository root は tests/runtime から 4 階層上。
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_FIXTURE_ROOT = _REPO_ROOT / "Tools" / "Common" / "tests" / "fixtures"
+_UI_POLICY_CASES = _FIXTURE_ROOT / "ui_policy_cases_v1.json"
+_UI_INTENTS = _FIXTURE_ROOT / "ui_intents_v1.json"
+
+# Training / Deployment いずれの package も import せず、共有契約だけで
+# canonical UiIntent JSONL を生成する driver。cwd だけを変えて 2 回実行する。
+_PARITY_DRIVER = r'''
+import json
+import sys
+from pathlib import Path
+
+from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
+from reinbalance_survivors_contracts.ui_policy import (
+    NonModelUiPolicyConfigV1,
+    UiPolicyInputV1,
+    decide_non_model_ui_intent,
+)
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+config = NonModelUiPolicyConfigV1.load_default()
+lines = []
+for case in data["cases"]:
+    policy_input = UiPolicyInputV1.from_wire(case["input"])
+    intent = decide_non_model_ui_intent(policy_input, config)
+    wire = intent.to_wire() if intent is not None else None
+    lines.append(canonical_json_bytes({"case": case["name"], "intent": wire}))
+
+leaked = sorted(
+    name for name in sys.modules
+    if name == "games" or name.startswith("games.")
+    or name == "survivors" or name.startswith("survivors.")
+)
+if leaked:
+    sys.stderr.write("forbidden Training/Deployment imports: " + ",".join(leaked))
+    raise SystemExit(2)
+
+sys.stdout.buffer.write(b"\n".join(lines))
+'''
+
+
+def _load_cases() -> dict:
+    """共有 ui_policy_cases_v1 fixture を読む。"""
+    return json.loads(_UI_POLICY_CASES.read_text(encoding="utf-8"))
+
+
+def _run_driver(driver_path: Path, cwd: Path) -> bytes:
+    """driver を指定 cwd の別 process で実行し stdout bytes を返す。"""
+    result = subprocess.run(
+        [sys.executable, str(driver_path), str(_UI_POLICY_CASES)],
+        cwd=str(cwd),
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    return result.stdout
+
+
+@pytest.fixture(scope="module")
+def parity_driver(tmp_path_factory) -> Path:
+    """共有契約だけを使う parity driver script を書き出す。"""
+    path = tmp_path_factory.mktemp("parity") / "emit_ui_intents.py"
+    path.write_text(_PARITY_DRIVER, encoding="utf-8")
+    return path
+
+
+class TestSharedFixtureParity:
+    """[指摘11] 共有 fixture の全 case で期待 intent と一致する。"""
+
+    def test_fixture_exists(self):
+        assert _UI_POLICY_CASES.is_file()
+        assert _UI_INTENTS.is_file()
+
+    def test_every_case_matches_expected_intent(self):
+        data = _load_cases()
+        config = NonModelUiPolicyConfigV1.load_default()
+        for case in data["cases"]:
+            policy_input = UiPolicyInputV1.from_wire(case["input"])
+            intent = decide_non_model_ui_intent(policy_input, config)
+            actual = intent.to_wire() if intent is not None else None
+            assert actual == case["expected"], case["name"]
+
+    def test_installed_config_hash_matches_fixture(self):
+        data = _load_cases()
+        assert NonModelUiPolicyConfigV1.load_default().config_hash == data["config_hash"]
+
+    def test_canonical_jsonl_sha256_matches_fixture(self):
+        """05-01 が生成する JSONL が 02-04 と同じ sha256 になる。"""
+        data = _load_cases()
+        config = NonModelUiPolicyConfigV1.load_default()
+        lines = []
+        for case in data["cases"]:
+            policy_input = UiPolicyInputV1.from_wire(case["input"])
+            intent = decide_non_model_ui_intent(policy_input, config)
+            wire = intent.to_wire() if intent is not None else None
+            lines.append(canonical_json_bytes({"case": case["name"], "intent": wire}))
+        assert sha256_hex(b"\n".join(lines)) == data["expected_jsonl_sha256"]
+
+
+class TestCrossProcessParity:
+    """[指摘11] 別 subprocess / 別 cwd から byte-identical JSONL を得る。"""
+
+    def test_training_and_deployment_cwd_produce_identical_bytes(self, parity_driver):
+        training_cwd = _REPO_ROOT / "Tools" / "Training"
+        deployment_cwd = _REPO_ROOT / "Tools" / "Deployment"
+        assert training_cwd.is_dir() and deployment_cwd.is_dir()
+        training_out = _run_driver(parity_driver, training_cwd)
+        deployment_out = _run_driver(parity_driver, deployment_cwd)
+        assert training_out == deployment_out
+        assert training_out
+
+    def test_cross_process_output_matches_fixture_sha256(self, parity_driver):
+        data = _load_cases()
+        out = _run_driver(parity_driver, _REPO_ROOT / "Tools" / "Deployment")
+        assert sha256_hex(out) == data["expected_jsonl_sha256"]
+
+    def test_repo_root_cwd_produces_identical_bytes(self, parity_driver):
+        """cwd 依存の相対 import が混ざっていないこと。"""
+        from_root = _run_driver(parity_driver, _REPO_ROOT)
+        from_deployment = _run_driver(parity_driver, _REPO_ROOT / "Tools" / "Deployment")
+        assert from_root == from_deployment
+
+    def test_driver_does_not_import_training_or_deployment(self, parity_driver):
+        """driver 内の leak 検査が実際に有効であること (成功終了で確認)。"""
+        result = subprocess.run(
+            [sys.executable, str(parity_driver), str(_UI_POLICY_CASES)],
+            cwd=str(_REPO_ROOT / "Tools" / "Training"),
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0
+        assert b"forbidden" not in result.stderr
+
+
+class TestUiIntentGoldenWire:
+    """[指摘11] 共有 ui_intents_v1 fixture の required / forbidden field を検証する。"""
+
+    def _fixture(self) -> dict:
+        return json.loads(_UI_INTENTS.read_text(encoding="utf-8"))
+
+    def test_valid_intents_round_trip(self):
+        for case in self._fixture()["valid"]:
+            intent = UiIntentV1.from_wire(case["wire"])
+            assert intent.to_wire() == case["wire"], case["name"]
+
+    def test_invalid_intents_are_rejected(self):
+        for case in self._fixture()["invalid"]:
+            with pytest.raises(ContractValidationError):
+                UiIntentV1.from_wire(case["wire"])
+
+    def test_valid_intent_bytes_are_stable(self):
+        for case in self._fixture()["valid"]:
+            intent = UiIntentV1.from_wire(case["wire"])
+            assert intent.canonical_bytes() == intent.canonical_bytes()
+            assert len(intent.intent_hash()) == 64
+
+
+class TestRuntimeInferencePerformance:
+    """[指摘11] combat 推論の p95 / p99 latency が decision 予算内に収まる。"""
+
+    def test_combat_decide_latency_percentiles(self, golden_combat_policy):
+        import statistics
+        import time
+
+        import numpy as np
+
+        from survivors.runtime.combat_session import CombatSession
+        from survivors.runtime.decision_scheduler import DEFAULT_INFERENCE_TIMEOUT_NS
+
+        session = CombatSession(golden_combat_policy)
+        session.reset_episode()
+        rng = np.random.default_rng(3)
+        observation_dim = golden_combat_policy.observation_dim
+
+        # 最初の数回は lazy init を含むため warm-up として捨てる。
+        for _ in range(20):
+            session.decide(rng.normal(size=observation_dim).astype("float32"))
+
+        samples: list[int] = []
+        for _ in range(300):
+            observation = rng.normal(size=observation_dim).astype("float32")
+            started = time.perf_counter_ns()
+            session.decide(observation)
+            samples.append(time.perf_counter_ns() - started)
+
+        samples.sort()
+        p95 = samples[int(len(samples) * 0.95) - 1]
+        p99 = samples[int(len(samples) * 0.99) - 1]
+        # CPU 実行での 1 tick 予算 (scheduler の inference timeout) を超えないこと。
+        assert p95 <= DEFAULT_INFERENCE_TIMEOUT_NS, f"p95={p95 / 1e6:.2f} ms"
+        assert p99 <= DEFAULT_INFERENCE_TIMEOUT_NS, f"p99={p99 / 1e6:.2f} ms"
+        assert statistics.median(samples) > 0
+
+
+class TestSustainedRunStability:
+    """[指摘11] 長時間 run で state 形状が保たれ NaN / 範囲外 action が出ない。"""
+
+    def test_long_run_keeps_state_shape_and_finite_values(self, golden_combat_policy):
+        import numpy as np
+
+        from survivors.runtime.combat_session import CombatSession
+
+        session = CombatSession(golden_combat_policy)
+        session.reset_episode()
+        rng = np.random.default_rng(23)
+        expected_shape = golden_combat_policy.lstm_state_shape
+        observation_dim = golden_combat_policy.observation_dim
+
+        # 15 Hz × 30 分 = 27000 tick 相当。CI 時間の都合で代表 3000 tick を回す。
+        for index in range(3000):
+            observation = rng.normal(size=observation_dim).astype("float32")
+            decision = session.decide(observation, episode_start=(index % 900 == 0))
+            assert 0 <= decision.action_index < golden_combat_policy.action_dim
+            assert np.isfinite(decision.confidence)
+            state = session.lstm_state_copy()
+            assert state is not None
+            # state が積み上がらず常に同じ形状であること (memory 増加なし)。
+            assert state[0].shape == expected_shape
+            assert state[1].shape == expected_shape
+
+        final = session.lstm_state_copy()
+        assert final is not None
+        assert np.all(np.isfinite(final[0]))
+        assert np.all(np.isfinite(final[1]))

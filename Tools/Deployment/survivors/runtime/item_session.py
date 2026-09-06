@@ -1,17 +1,20 @@
 """ItemSelector session: level-up 候補から choose_card UiIntentV1 を生成する。
 
-ItemSelectorArtifact の TorchScript model を使って候補を採点し、
-UiPresentationSnapshotV1 内の typed target に一意対応する UiIntentV1 を返す。
+ONNX ItemSelector で候補を採点し、artifact 側の calibrated confidence gate を
+通過した場合にだけ、UiPresentationSnapshotV1 内の typed target へ一意対応する
+UiIntentV1 を返す。gate 未達は intent を作らず caller に no_op を選ばせる。
+target の validity / semantic_kind / 一意 binding も併せて検証するため、
+無効な card や曖昧な候補集合に対して click 指示が生成されることはない。
 OS input には触れない。
 """
 from __future__ import annotations
 
 import hashlib
 import math
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 import numpy as np
-import torch as th
 
 from reinbalance_survivors_contracts.item_decision import (
     CandidateFeatures,
@@ -28,12 +31,29 @@ from survivors.perception_snapshot import (
     UiPresentationSnapshotV1,
 )
 
+# ItemSelector が選べるのは item card だけ。fallback reward は non-model policy の所管。
+_SELECTABLE_SEMANTIC_KIND = "item_card"
+
 
 class ItemSessionError(ValueError):
     """ItemSelector セッションの境界検証失敗。
 
-    候補不一致・target 未解決・snapshot binding 不整合時に送出する。
+    候補不一致・target 未解決・validity 違反・snapshot binding 不整合で送出する。
+    caller はこれを stop decision へ変換すること。
     """
+
+
+@dataclass(frozen=True)
+class ItemDecisionOutcome:
+    """ItemSession の 1 回分の決定結果。
+
+    intent が None の場合は confidence gate 未達であり、caller は no_op を返す。
+    intent がある場合だけ choose_card を実行してよい。
+    """
+
+    intent: UiIntentV1 | None
+    confidence: float
+    reason: str
 
 
 def _flatten_feature(value: Any, *, label: str) -> list[float]:
@@ -74,8 +94,8 @@ def _flatten_feature(value: Any, *, label: str) -> list[float]:
 def _encode_item_decision(
     item_context: ItemDecisionFeatures,
     nmax: int,
-) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
-    """ItemDecisionFeatures を model 入力 tensor に変換する。
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """ItemDecisionFeatures を model 入力配列に変換する。
 
     Training の encode_item_selector_row と同じ wire → float 変換を行う。
     context: [1, context_dim], candidates: [1, nmax, candidate_dim], mask: [1, nmax]
@@ -96,13 +116,47 @@ def _encode_item_decision(
     candidate_dim = len(candidate_vectors[0]) if candidate_vectors else 0
     # nmax へパディング
     padding_count = nmax - len(raw_candidates)
-    candidate_vectors.extend([[0.0] * candidate_dim] * padding_count)
-    mask = list(card_mask) + [False] * padding_count
+    if padding_count < 0:
+        raise ItemSessionError("candidate count exceeds ItemSelector nmax")
+    candidate_vectors.extend([[0.0] * candidate_dim for _ in range(padding_count)])
+    mask = list(card_mask) + [False] * (nmax - len(card_mask))
+    if len(mask) != nmax:
+        raise ItemSessionError("card_mask width does not match ItemSelector nmax")
 
-    context_tensor = th.tensor([context_vector], dtype=th.float32)
-    cand_tensor = th.tensor([candidate_vectors], dtype=th.float32)
-    mask_tensor = th.tensor([mask], dtype=th.bool)
-    return context_tensor, cand_tensor, mask_tensor
+    context_array = np.asarray([context_vector], dtype=np.float32)
+    candidate_array = np.asarray([candidate_vectors], dtype=np.float32)
+    mask_array = np.asarray([mask], dtype=bool)
+    return context_array, candidate_array, mask_array
+
+
+def _calibrated_probabilities(
+    scaled_logits: np.ndarray, mask: np.ndarray, temperature: float
+) -> np.ndarray:
+    """有効スロットだけで softmax を取り、較正済み確率分布を返す。
+
+    argmax の raw logit をそのまま信用すると、全候補が等価な場合でも
+    確信度 1.0 相当として扱ってしまう。masked slot を除外した確率にしてから
+    confidence gate へ渡す。
+    """
+    logits = np.asarray(scaled_logits, dtype=np.float64).reshape(-1)
+    valid = np.asarray(mask, dtype=bool).reshape(-1)
+    if logits.shape != valid.shape:
+        raise ItemSessionError("ItemSelector logits and mask shapes disagree")
+    if not valid.any():
+        raise ItemSessionError("ItemSelector received no valid candidate slot")
+    if not np.all(np.isfinite(logits[valid])):
+        raise ItemSessionError("ItemSelector produced non-finite valid logits")
+    if not math.isfinite(temperature) or temperature <= 0.0:
+        raise ItemSessionError("ItemSelector temperature must be positive and finite")
+
+    calibrated = logits / float(temperature)
+    calibrated = np.where(valid, calibrated, -np.inf)
+    shifted = calibrated - np.max(calibrated[valid])
+    exponentials = np.where(valid, np.exp(shifted), 0.0)
+    total = float(exponentials.sum())
+    if not math.isfinite(total) or total <= 0.0:
+        raise ItemSessionError("ItemSelector confidence distribution is degenerate")
+    return exponentials / total
 
 
 def _resolve_winner_target(
@@ -110,10 +164,11 @@ def _resolve_winner_target(
     item_context: ItemDecisionFeatures,
     ui_presentation: UiPresentationSnapshotV1,
 ) -> UiCandidateTargetV1:
-    """勝者 index を UiPresentationSnapshotV1 内の typed target に解決する。
+    """勝者 index を UiPresentationSnapshotV1 内の typed target に一意解決する。
 
-    padded_candidates の順序で winner_index を探し、UiPresentationSnapshotV1 内の
-    choice_id / choice_index が同一 snapshot の候補に一意対応しない場合は ItemSessionError。
+    choice_id / choice_index が同一 snapshot 内の有効な item_card target へ
+    ちょうど 1 件対応する場合だけ target を返す。0 件・複数件・validity=false・
+    fallback semantic のいずれでも ItemSessionError にし、caller が stop を返す。
     """
     padded = item_context.padded_candidates
     if not (0 <= winner_index < len(padded)):
@@ -122,33 +177,45 @@ def _resolve_winner_target(
     if winner_candidate.is_padding:
         raise ItemSessionError("ItemSelector chose a padding slot")
 
-    # UiPresentationSnapshotV1 で同じ choice_id / choice_index を持つ target を探す
-    matched: UiCandidateTargetV1 | None = None
-    for ui_cand in ui_presentation.candidates:
-        if (
-            ui_cand.choice_id == winner_candidate.item_id
-            and ui_cand.choice_index == winner_index
-        ):
-            matched = ui_cand
-            break
-    if matched is None:
+    matches = [
+        ui_cand
+        for ui_cand in ui_presentation.candidates
+        if ui_cand.choice_id == winner_candidate.item_id
+        and ui_cand.choice_index == winner_index
+    ]
+    if not matches:
         raise ItemSessionError(
             f"winner candidate {winner_candidate.item_id!r} not found in UiPresentationSnapshotV1"
+        )
+    if len(matches) > 1:
+        raise ItemSessionError(
+            f"winner candidate {winner_candidate.item_id!r} does not bind uniquely"
+        )
+    matched = matches[0]
+    if matched.validity is not True:
+        raise ItemSessionError(
+            f"winner target {matched.choice_id!r} is marked invalid by perception"
+        )
+    if matched.semantic_kind != _SELECTABLE_SEMANTIC_KIND:
+        raise ItemSessionError(
+            f"winner target semantic_kind {matched.semantic_kind!r} is not selectable by ItemSelector"
         )
     return matched
 
 
 class ItemSession:
-    """ItemSelectorArtifact を使って level-up 候補を採点するセッション。
+    """ItemSelector artifact を使って level-up 候補を採点するセッション。
 
-    TorchScript model でスコアを計算し、最高スコアの有効候補に対応する
-    UiIntentV1 (kind=CHOOSE_CARD) を返す。
+    artifact の temperature で較正した確率が confidence_threshold 以上で、かつ
+    target が有効かつ一意に解決できる場合だけ UiIntentV1 (kind=CHOOSE_CARD) を返す。
+    それ以外は intent を作らず、理由を添えて caller へ返す。
     """
 
     def __init__(self, artifact: Any) -> None:
-        """artifact の nmax と feature_schema を記録する。
+        """artifact の nmax / feature_schema / 較正パラメータを記録する。
 
-        artifact は ItemSelectorArtifact 互換 (nmax / feature_schema / predict() が必要)。
+        artifact は OnnxItemSelector 互換 (nmax / feature_schema / temperature /
+        confidence_threshold / predict() が必要)。
         """
         if artifact is None:
             raise ItemSessionError("ItemSession requires a non-None artifact")
@@ -157,6 +224,24 @@ class ItemSession:
         self._feature_schema: str = str(artifact.feature_schema)
         if self._nmax <= 0:
             raise ItemSessionError("ItemSelector nmax must be positive")
+        try:
+            self._temperature = float(artifact.temperature)
+            self._confidence_threshold = float(artifact.confidence_threshold)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ItemSessionError(
+                f"ItemSelector artifact lacks calibration parameters: {exc}"
+            ) from exc
+        if not math.isfinite(self._temperature) or self._temperature <= 0.0:
+            raise ItemSessionError("ItemSelector temperature must be positive and finite")
+        if not math.isfinite(self._confidence_threshold) or not (
+            0.0 <= self._confidence_threshold <= 1.0
+        ):
+            raise ItemSessionError("ItemSelector confidence_threshold must be within [0, 1]")
+
+    @property
+    def confidence_threshold(self) -> float:
+        """choose_card を許可する最低確信度を返す。"""
+        return self._confidence_threshold
 
     def decide(
         self,
@@ -166,11 +251,12 @@ class ItemSession:
         decision_policy_id: str,
         decision_rule_id: str,
         decision_config_hash: str,
-    ) -> UiIntentV1:
-        """候補を採点して CHOOSE_CARD UiIntentV1 を返す。
+    ) -> ItemDecisionOutcome:
+        """候補を採点して CHOOSE_CARD の可否を返す。
 
-        feature_schema が artifact と一致しない場合や target 解決失敗の場合は
-        ItemSessionError を送出する。caller は stop に変換すること。
+        confidence gate 未達なら intent=None を返し、caller は no_op にする。
+        feature_schema 不一致・target 解決失敗は ItemSessionError を送出し、
+        caller は stop に変換すること。
         """
         if not isinstance(item_context, ItemDecisionFeatures):
             raise ItemSessionError("item_context must be ItemDecisionFeatures")
@@ -181,10 +267,34 @@ class ItemSession:
                 f"feature_schema mismatch: {item_context.feature_schema!r} != {self._feature_schema!r}"
             )
 
-        context_t, cand_t, mask_t = _encode_item_decision(item_context, self._nmax)
-        scaled_logits = self._artifact.predict(context_t, cand_t, mask_t)
-        # masked_fill(-inf) 済みなので argmax は有効スロットを選ぶ
-        winner_index = int(scaled_logits[0].argmax().item())
+        context_a, cand_a, mask_a = _encode_item_decision(item_context, self._nmax)
+        try:
+            scaled_logits = np.asarray(
+                self._artifact.predict(context_a, cand_a, mask_a), dtype=np.float64
+            )
+        except ItemSessionError:
+            raise
+        except Exception as exc:  # noqa: BLE001  # adapter ごとに例外型が異なる
+            raise ItemSessionError(f"ItemSelector inference failed: {exc}") from exc
+        if scaled_logits.shape != (1, self._nmax):
+            raise ItemSessionError("ItemSelector output shape mismatch")
+
+        probabilities = _calibrated_probabilities(
+            scaled_logits[0], mask_a[0], self._temperature
+        )
+        winner_index = int(np.argmax(probabilities))
+        confidence = float(probabilities[winner_index])
+
+        if confidence < self._confidence_threshold:
+            # gate 未達 — card を選ばず次 tick へ委ねる。stop ではなく no_op が安全側。
+            return ItemDecisionOutcome(
+                intent=None,
+                confidence=confidence,
+                reason=(
+                    f"item confidence {confidence:.4f} below threshold "
+                    f"{self._confidence_threshold:.4f}"
+                ),
+            )
 
         target = _resolve_winner_target(winner_index, item_context, ui_presentation)
 
@@ -206,4 +316,6 @@ class ItemSession:
             )
         except ContractValidationError as exc:
             raise ItemSessionError(f"UiIntentV1 construction failed: {exc}") from exc
-        return intent
+        return ItemDecisionOutcome(
+            intent=intent, confidence=confidence, reason="item confidence gate passed"
+        )
