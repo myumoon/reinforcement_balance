@@ -725,6 +725,12 @@ def test_from_store_artifact_rejects_self_published_promoted_fixture(
             expected_calibration_identity_hash=frozen_identity,
         )
 
+    # 注: 期待hashを store/commit と同じ入力主体が決められる場合、この層の照合は
+    #     トートロジーになる。そのため期待hashは store locator とは別チャネルから
+    #     受け取ることを呼び出し元の契約としている。攻撃者が store・commit・期待hashを
+    #     全て自己整合的に用意する CLI-level の回帰は
+    #     Tools/Training/tests/survivors/test_deployable_policy_trainer.py が担保する。
+
 
 def test_self_signed_profile_bytes_cannot_promote_development_fixture() -> None:
     """development flagを改ざんしてSHAを自己計算してもformal tokenを発行しない。"""

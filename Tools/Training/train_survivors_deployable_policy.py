@@ -47,6 +47,15 @@ def _parser() -> argparse.ArgumentParser:
         help="Path to formal_dependencies JSON (required for formal training).",
     )
     parser.add_argument(
+        "--required-calibration-descriptor-hash", type=str, default=None,
+        help=(
+            "Expected producer calibration descriptor identity hash. This is the trust root "
+            "for store-format formal dependencies and MUST be supplied out of band (launch "
+            "script / CI config), never read from the formal_dependencies JSON that names the "
+            "artifact store root and calibration commit."
+        ),
+    )
+    parser.add_argument(
         "--updates", type=int, default=10,
         help="Number of optimizer update steps (development default: 10).",
     )
@@ -66,7 +75,27 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
+def _require_trusted_sha256(value: object) -> str:
+    """別チャネル由来の信頼済み SHA-256 期待値だけを受け付ける。
+
+    formal_dependencies.json の中身と違い、この値は store locator を書ける主体が
+    差し替えられない場所（CLI 引数・起動スクリプト・CI 設定）から来る前提です。
+    形式が SHA-256 でなければ、その場で fail closed にします。
+    """
+    if not isinstance(value, str) or len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError(
+            "required calibration descriptor hash must be a 64-character lowercase SHA-256"
+        )
+    return value
+
+
+def _load_formal_deps(
+    path: Path | None,
+    *,
+    required_calibration_descriptor_hash: str | None = None,
+) -> FormalDependencies | None:
     """formal_dependencies JSON を FormalDependencies へ変換する。
 
     path が None のときは development mode として None を返し、
@@ -74,14 +103,15 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
 
     formal profile のロード形式は2種類を受け付けます:
     - 開発用: "perception_profile" に artifact wire を直接埋め込む（development_only=True のみ）。
-    - 正式用: "perception_profile_store_root" + "perception_calibration_commit_logical_id"
-              + "required_calibration_descriptor_hash" で producer の calibration commit を開き、
-              descriptor identity が期待値と一致した場合だけロードする。
+    - 正式用: "perception_profile_store_root" + "perception_calibration_commit_logical_id" で
+              producer の calibration commit を開き、descriptor identity が
+              required_calibration_descriptor_hash と一致した場合だけロードする。
 
-    正式用は自由な logical ID を受け付けません。producer が freeze した calibration commit
-    のみを入口にし、期待 descriptor identity（profile/provenance のバイト列まで covered）を
-    frozen config 側で固定します。これにより development_only だけ書き換えた artifact を
-    store へ置いても formal 扱いにはなりません。
+    重要: 期待 descriptor identity は **この JSON からは読みません**。JSON は store の所在
+    （root と commit logical ID）しか指定できず、期待値は呼び出し元（CLI 引数
+    --required-calibration-descriptor-hash）という別チャネルから受け取ります。
+    両方を同じ入力から取ると、攻撃者が store・commit・期待値を自己整合的に用意でき、
+    照合がトートロジーになるためです。正式形式で期待値が無い場合は必ず失敗します。
     """
     if path is None:
         return None
@@ -95,8 +125,7 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
         raise ValueError("formal dependencies must be a JSON object")
     _STORE_KEYS = frozenset(
         {"fidelity_verdict", "perception_profile_store_root",
-         "perception_calibration_commit_logical_id",
-         "required_calibration_descriptor_hash", "required_perception_profile_hash",
+         "perception_calibration_commit_logical_id", "required_perception_profile_hash",
          "current_gating_producer_hashes", "profile_source"}
     )
     _WIRE_KEYS = frozenset(
@@ -114,6 +143,17 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
             f"formal dependencies unknown or missing keys "
             f"(unknown/extra: {sorted(extra)}, missing from both formats: {sorted(missing)})"
         )
+    # 期待値と store locator を同じ入力主体から取らないための境界。
+    if use_store and required_calibration_descriptor_hash is None:
+        raise ValueError(
+            "store-format formal dependencies require an out-of-band expected calibration "
+            "descriptor hash (--required-calibration-descriptor-hash); it must never be read "
+            "from the same JSON that names the artifact store and calibration commit"
+        )
+    if not use_store and required_calibration_descriptor_hash is not None:
+        raise ValueError(
+            "wire-format formal dependencies cannot be bound to a calibration descriptor hash"
+        )
     required_descriptor_hash: str | None = None
     try:
         verdict = FidelityVerdict.from_wire(data["fidelity_verdict"])
@@ -122,7 +162,9 @@ def _load_formal_deps(path: Path | None) -> FormalDependencies | None:
                 ArtifactStore,
                 ArtifactStoreError,
             )
-            required_descriptor_hash = data["required_calibration_descriptor_hash"]
+            required_descriptor_hash = _require_trusted_sha256(
+                required_calibration_descriptor_hash
+            )
             try:
                 store = ArtifactStore(data["perception_profile_store_root"])
             except (ArtifactStoreError, OSError) as exc:
@@ -243,7 +285,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         dataset = CombatDistillationDataset.load(args.dataset)
-        formal_deps = _load_formal_deps(args.formal_deps)
+        # 期待 calibration descriptor identity は CLI（別チャネル）からのみ渡す。
+        formal_deps = _load_formal_deps(
+            args.formal_deps,
+            required_calibration_descriptor_hash=args.required_calibration_descriptor_hash,
+        )
     except (OSError, ValueError) as exc:
         print(f"input validation failed: {exc}", file=sys.stderr)
         return 2

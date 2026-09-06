@@ -312,6 +312,10 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
 
         expected_calibration_identity_hash は descriptor の files（＝envelope の sha256）
         まで covered なので、development_only だけを書き換えた artifact は必ずここで落ちます。
+
+        呼び出し元の契約: expected_calibration_identity_hash は store / descriptors を
+        供給する入力とは **別チャネル**（例: CLI 引数、検証済み上流 artifact）から
+        取得すること。同じ入力から両方を取ると照合がトートロジーになります。
         """
         if not isinstance(store, ArtifactStore):
             raise TypeError("formal calibration profile requires an ArtifactStore")
@@ -421,6 +425,11 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
         commit が記録した descriptor object を読み直して DAG を復元してから
         from_store_artifact へ委譲します。commit が申告する profile_descriptor_hash が
         呼び出し元の期待値と違えば、その時点で fail-closed になります。
+
+        呼び出し元の契約: expected_calibration_identity_hash は、store / commit_logical_id
+        を指定できる入力とは **別チャネル** から取得した値でなければなりません。両方を
+        同じ入力（例: 1つの設定 JSON）から読むと、その入力を書ける主体が store・commit・
+        期待値を自己整合的に用意できてしまい、この照合は何も保証しなくなります。
         """
         if not isinstance(store, ArtifactStore):
             raise TypeError("formal calibration profile requires an ArtifactStore")
