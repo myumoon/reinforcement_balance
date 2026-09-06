@@ -369,6 +369,14 @@ package 前に `ValueError` を送出し、load 側でも同じ gate を繰り�
 `train_survivors_deployable_policy.py` は distillation 訓練の CLI エントリポイント。
 `--formal-deps` を省略すると development mode で動作し、生成 checkpoint は正式 package に昇格できない。
 
+`--formal-deps` に store 形式の JSON（`perception_profile_store_root` +
+`perception_calibration_commit_logical_id`）を渡す場合は、
+`--required-calibration-descriptor-hash` が必須。これは producer の
+`perception_calibration_profile` descriptor identity の期待値で、**JSON 側には書けない**。
+store の所在を指す JSON と期待値を同じ入力から読むと、その入力を書ける主体が
+store・commit・期待値を自己整合的に用意できてしまい照合が無意味になるため、
+期待値は起動スクリプト / CI 設定など別チャネルで管理・レビューする。
+
 `eval_survivors_deployable_policy.py` は packaged policy を synthetic dataset で再評価して
 actor KL / value Huber を JSON report として保存する evaluation CLI。
 

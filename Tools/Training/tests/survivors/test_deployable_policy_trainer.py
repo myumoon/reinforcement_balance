@@ -2,12 +2,18 @@
 UE5 を使わず、固定 sequence と最小 state holder で step-0 sealing と完全再開を確認する。
 """
 from __future__ import annotations
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 import numpy as np
 import pytest
 import torch as th
 import torch.nn.functional as F
+from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from reinbalance_survivors_contracts.fidelity_verdict import FidelityMetric, FidelityVerdict, GATING_KEYS
 from reinbalance_survivors_contracts.perception_error import PerceptionErrorProfile
@@ -15,6 +21,11 @@ from games.survivors.combat_distillation_dataset import CombatDistillationDatase
 from games.survivors.deployable_policy_trainer import (
     CurriculumConfig, DeployableCombatPolicy, DeployablePolicyTrainer,
     FormalDependencies, sequence_distillation_loss,
+)
+from reinbalance_survivors_contracts.perception_profile import (
+    CALIBRATION_ARTIFACT_SCHEMA_VERSION,
+    FittedPerceptionErrorProfile,
+    _FORMAL_FACTORY_TOKEN,
 )
 SCHEMA = DeployObsSchema.default_v1()
 def _dataset() -> CombatDistillationDataset:
@@ -141,6 +152,26 @@ def test_step_zero_rejects_missing_formal_dependencies_and_dataset_leakage() -> 
     with pytest.raises(ValueError, match="split leakage"):
         development.train_step(leaked)
     assert development.training_steps == 0
+def _formal_profile(session_id: str = "cal-1") -> FittedPerceptionErrorProfile:
+    """テスト専用 development_only=False フィクスチャ。
+
+    wire ローダー経由の synthetic formal profile 作成は禁止されたため、
+    テストコードのみが参照できる _FORMAL_FACTORY_TOKEN を直接渡す。
+    production code は絶対に使用しないこと。
+    """
+    cal_hash = canonical_hash({"synthetic_session_id": session_id})
+    base = PerceptionErrorProfile(calibration_session_ids=[session_id])
+    dummy_fit_hash = "a" * 64
+    return FittedPerceptionErrorProfile(
+        **base.to_wire(),
+        calibration_session_hashes={session_id: cal_hash},
+        field_sample_counts={"hp_ratio": 2},
+        fit_code_hash=dummy_fit_hash,
+        development_only=False,
+        _factory_token=_FORMAL_FACTORY_TOKEN,
+    )
+
+
 def test_formal_dependency_object_rejects_bootstrap_profile_source() -> None:
     """fixture/bootstrap profile は formal dependency object 自体で拒否される。
     profile 内容を measured と推測せず、source kind の明示を必須にする。
@@ -150,11 +181,13 @@ def test_formal_dependency_object_rejects_bootstrap_profile_source() -> None:
             fidelity_verdict={}, current_gating_producer_hashes={}, perception_profile=None,
             required_perception_profile_hash="0" * 64, profile_source="bootstrap",
         )
+    # development_only=True のプロファイルは validate() で production ガードに拒否される。
+    dev_only_profile = PerceptionErrorProfile()
     bootstrap = FormalDependencies(
-        fidelity_verdict={}, current_gating_producer_hashes={}, perception_profile=PerceptionErrorProfile(),
-        required_perception_profile_hash=PerceptionErrorProfile().profile_hash,
+        fidelity_verdict={}, current_gating_producer_hashes={}, perception_profile=dev_only_profile,
+        required_perception_profile_hash=dev_only_profile.profile_hash,
     )
-    with pytest.raises(ValueError, match="calibration"):
+    with pytest.raises(ValueError, match="production"):
         bootstrap.validate()
 def test_formal_dependencies_reject_stale_fidelity_and_profile() -> None:
     """current producer hash 差と frozen measured profile hash 差を別々に拒否する。
@@ -176,7 +209,7 @@ def test_formal_dependencies_reject_stale_fidelity_and_profile() -> None:
             "dependency_versions": {}, "operator": "pytest", "timestamp": "2026-08-09T00:00:00Z",
         }, hashes,
     )
-    profile = PerceptionErrorProfile(calibration_session_ids=["cal-1"])
+    profile = _formal_profile("cal-1")
     dependencies = FormalDependencies(verdict, hashes, profile, profile.profile_hash)
     assert dependencies.validate() == {
         "fidelity_verdict": verdict.identity_hash, "perception_profile": profile.profile_hash,
@@ -191,7 +224,8 @@ def test_formal_dependencies_reject_stale_fidelity_and_profile() -> None:
 
 def _make_formal_deps() -> FormalDependencies:
     """テスト用の valid FormalDependencies を返す。
-    verify_current_fidelity が通る verdict を一か所で構築し、複数 test から参照します。
+    verify_current_fidelity が通る verdict と development_only=False profile を
+    一か所で構築し、複数 test から参照します。
     """
     digits = "abcdef0123456789"
     hashes = {name: digits[index % len(digits)] * 64 for index, name in enumerate(GATING_KEYS)}
@@ -209,8 +243,396 @@ def _make_formal_deps() -> FormalDependencies:
             "dependency_versions": {}, "operator": "pytest", "timestamp": "2026-08-09T00:00:00Z",
         }, hashes,
     )
-    profile = PerceptionErrorProfile(calibration_session_ids=["cal-1"])
+    profile = _formal_profile("cal-1")
     return FormalDependencies(verdict, hashes, profile, profile.profile_hash)
+
+
+def _publish_calibration_store(
+    tmp_path: Path,
+    store_dir: str,
+    run_key: str,
+    profile: object,
+) -> tuple[object, str, str]:
+    """producer実関数でcalibration commitを1件publishする。
+
+    正規 producer の store と、攻撃者が自作する store の両方を同じ関数で作れるようにし、
+    「攻撃者も producer と同じ形の store/commit を用意できる」ことをテストで再現します。
+    戻り値は (store, commit logical ID, calibration descriptor identity hash)。
+    """
+    from benchmark_survivors_perception import (
+        FormalBenchmarkRequest,
+        _commit_calibration_package,
+        calibration_commit_logical_id,
+    )
+    from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
+    from reinbalance_survivors_contracts.artifact_store import ArtifactStore
+    from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
+
+    store = ArtifactStore(tmp_path / store_dir)
+    capture_ref = store.put_bytes(
+        logical_id="perception/capture/manifest.json",
+        data=canonical_json_bytes({"sessions": ["cal-1"], "store": store_dir}),
+        media_type="application/json",
+    )
+    capture_descriptor = ArtifactDescriptor(
+        logical_id="perception/capture/dataset",
+        node_kind="source_descriptor",
+        producer_id="capture-fixture",
+        producer_version="v1",
+        identity_metadata={"manifest_logical_id": capture_ref.logical_id},
+        files=(capture_ref,),
+    )
+    request = FormalBenchmarkRequest(
+        store=store,
+        capture_store_root=tmp_path / f"{store_dir}-captures",
+        dependency_descriptors={"capture_dataset": capture_descriptor},
+    )
+    descriptors, _staged, raw_ref, artifact_ref = _commit_calibration_package(
+        request,
+        run_key,
+        profile,
+        {"capture_dataset_hash": capture_ref.sha256},
+        request.calibration_logical_id(run_key),
+        request.calibration_provenance_logical_id(run_key),
+    )
+    assert artifact_ref.logical_id.endswith("/profile.artifact.json")
+    assert json.loads(store.object_path(raw_ref.store_uri).read_bytes()) == profile.to_wire()
+    assert json.loads(store.object_path(artifact_ref.store_uri).read_bytes()) == (
+        profile.to_artifact_wire()
+    )
+    return store, calibration_commit_logical_id(run_key), descriptors[1].identity_hash
+
+
+def _formal_deps_payload(
+    dependencies: FormalDependencies, store: object, commit_logical_id: str
+) -> dict:
+    """store形式のformal_dependencies payloadを組み立てる。
+
+    期待 calibration descriptor hash はこの JSON には入りません（別チャネル管理）。
+    """
+    return {
+        "fidelity_verdict": dependencies.fidelity_verdict.to_wire(),
+        "perception_profile_store_root": str(store.root),
+        "perception_calibration_commit_logical_id": commit_logical_id,
+        "required_perception_profile_hash": dependencies.required_perception_profile_hash,
+        "current_gating_producer_hashes": dict(
+            dependencies.current_gating_producer_hashes
+        ),
+        "profile_source": dependencies.profile_source,
+    }
+
+
+def _producer_formal_deps_file(
+    tmp_path: Path,
+) -> tuple[Path, str, str, FormalDependencies]:
+    """producerのcalibration commitを使うformal dependencies fixtureを作る。
+
+    Training 側 loader は自由な logical ID ではなく producer が freeze した
+    calibration commit のみを入口にするため、fixture も本番と同じ
+    `_commit_calibration_package()` で store を作ります。
+    戻り値は (JSONパス, commit logical ID, 別チャネルの期待 descriptor hash, 期待値)。
+    """
+    dependencies = _make_formal_deps()
+    store, commit_logical_id, descriptor_hash = _publish_calibration_store(
+        tmp_path, "artifact-store", "producer-integration", dependencies.perception_profile
+    )
+    path = tmp_path / "formal-deps.json"
+    path.write_text(
+        json.dumps(_formal_deps_payload(dependencies, store, commit_logical_id)),
+        encoding="utf-8",
+    )
+    return path, commit_logical_id, descriptor_hash, dependencies
+
+
+def test_load_formal_deps_reads_producer_artifact_envelope(tmp_path: Path) -> None:
+    """producerのcalibration commitを経由したときだけformal profileをロードできる。"""
+    from train_survivors_deployable_policy import _load_formal_deps
+
+    path, commit_logical_id, descriptor_hash, expected = _producer_formal_deps_file(tmp_path)
+    loaded = _load_formal_deps(
+        path, required_calibration_descriptor_hash=descriptor_hash
+    )
+
+    assert loaded is not None
+    assert commit_logical_id.startswith("perception/calibration_commit/")
+    assert loaded.perception_profile.to_artifact_wire() == (
+        expected.perception_profile.to_artifact_wire()
+    )
+    assert loaded.required_calibration_descriptor_hash == descriptor_hash
+    # descriptor 束縛まで含めて step-0 gate を通過する。
+    loaded.validate()
+
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    # 別チャネルの期待 identity が違えば fail-closed になる。
+    with pytest.raises(ValueError, match="does not match the expected"):
+        _load_formal_deps(path, required_calibration_descriptor_hash="d" * 64)
+
+    # 自由な logical ID（raw profile alias）は入口として受け付けない。
+    payload = dict(stored)
+    payload["perception_calibration_commit_logical_id"] = (
+        "perception/calibration/producer-integration/profile.json"
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="calibration commit schema is not supported"):
+        _load_formal_deps(path, required_calibration_descriptor_hash=descriptor_hash)
+
+
+def test_load_formal_deps_requires_out_of_band_descriptor_hash(tmp_path: Path) -> None:
+    """期待 descriptor hash をJSON内に書いても信頼根にはならない。
+
+    store形式は別チャネルの期待値が無ければ必ず失敗し、JSONへ期待値キーを
+    追加した場合も unknown key として拒否されます。
+    """
+    from train_survivors_deployable_policy import _load_formal_deps
+
+    path, _commit, descriptor_hash, _expected = _producer_formal_deps_file(tmp_path)
+
+    # 別チャネルの期待値なし = 正規 store でもロード不可。
+    with pytest.raises(ValueError, match="out-of-band expected calibration descriptor hash"):
+        _load_formal_deps(path)
+
+    # JSON 側へ期待値を書き足しても schema で弾かれる（自己申告を受け付けない）。
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["required_calibration_descriptor_hash"] = descriptor_hash
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown or missing keys"):
+        _load_formal_deps(path, required_calibration_descriptor_hash=descriptor_hash)
+
+
+def test_load_formal_deps_rejects_fully_self_consistent_attacker_input(
+    tmp_path: Path,
+) -> None:
+    """store・commit・descriptorを攻撃者が全て自作しても formal 化できない。
+
+    攻撃者は producer と同じ関数で自分の store に calibration commit を publish でき、
+    formal_dependencies.json も自由に書けます。それでも別チャネルの期待
+    descriptor hash（正規 calibration 実行の値）と一致しないため拒否されます。
+    """
+    from train_survivors_deployable_policy import _load_formal_deps
+
+    _path, _commit, trusted_hash, dependencies = _producer_formal_deps_file(tmp_path)
+
+    # 攻撃者: 自分の store / commit / descriptor を自己整合的に用意する。
+    forged_store, forged_commit, forged_hash = _publish_calibration_store(
+        tmp_path, "attacker-store", "attacker-run", dependencies.perception_profile
+    )
+    assert forged_hash != trusted_hash
+    forged_path = tmp_path / "attacker-deps.json"
+    forged_path.write_text(
+        json.dumps(_formal_deps_payload(dependencies, forged_store, forged_commit)),
+        encoding="utf-8",
+    )
+
+    # 攻撃者が自分の hash を渡せる経路は存在しない（CLI 側は正規値で固定）。
+    with pytest.raises(ValueError, match="does not match the expected"):
+        _load_formal_deps(
+            forged_path, required_calibration_descriptor_hash=trusted_hash
+        )
+
+
+def _forged_promoted_calibration_store(tmp_path: Path) -> tuple[Any, str, str]:
+    """公開fitのdevelopment artifactを改ざんし攻撃者自身のcommitごとpublishする。
+
+    fit_error_profile() の development fixture を development_only=False に書き換え、
+    攻撃者が source/profile descriptor と calibration commit まで自己整合的に作ります。
+    レビューで再現された攻撃入力をそのまま Training loader へ与えるための fixture です。
+    戻り値は (store, commit logical ID, 攻撃者側 descriptor identity hash)。
+    """
+    from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
+    from reinbalance_survivors_contracts.artifact_store import ArtifactStore
+    from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
+    from reinbalance_survivors_contracts.perception_profile import CalibrationResidual
+    from survivors.perception_error_fit import fit_error_profile
+
+    residuals = [
+        CalibrationResidual(f"s{index}", "f0", "hp_ratio", 0.01, 1.0, 0)
+        for index in range(2)
+    ]
+    wire = fit_error_profile(residuals, ["s0", "s1"], []).to_artifact_wire()
+    assert wire["development_only"] is True
+    wire["development_only"] = False
+    store = ArtifactStore(tmp_path / "forged-store")
+    refs = {
+        name: store.put_bytes(
+            logical_id=f"perception/package/calibration/forged/{name}",
+            data=payload,
+            media_type="application/json",
+        )
+        for name, payload in (
+            ("profile.json", canonical_json_bytes(wire["profile"])),
+            ("profile.artifact.json", canonical_json_bytes(wire)),
+            (
+                "provenance.json",
+                canonical_json_bytes({
+                    "schema_version": "perception_calibration_package.v1",
+                    "profile_artifact": wire,
+                    "subject_hashes": {},
+                }),
+            ),
+        )
+    }
+    source = ArtifactDescriptor(
+        logical_id="perception/capture/source",
+        node_kind="source_descriptor",
+        producer_id="perception_error_fit",
+        producer_version="v2",
+        identity_metadata={"split_manifest_hash": "e" * 64},
+        files=(refs["profile.json"],),
+    )
+    node = ArtifactDescriptor(
+        logical_id="perception/calibration/forged",
+        node_kind="perception_calibration_profile",
+        producer_id="perception_error_fit",
+        producer_version="v2",
+        identity_metadata={
+            "profile_hash": wire["profile_hash"],
+            "fit_code_hash": wire["fit_code_hash"],
+            "subject_hashes": {},
+        },
+        parents=(source.node_ref(),),
+        files=tuple(refs.values()),
+    )
+    commit_logical_id = "perception/calibration_commit/forged"
+    store.put_bytes(
+        logical_id=commit_logical_id,
+        data=canonical_json_bytes({
+            "schema_version": "perception_calibration_commit.v1",
+            "run_key": "forged",
+            "profile_descriptor_hash": node.identity_hash,
+            "refs": [
+                store.put_bytes(
+                    logical_id=(
+                        f"perception/package/descriptors/{descriptor.identity_hash}.json"
+                    ),
+                    data=canonical_json_bytes(descriptor.to_wire()),
+                    media_type="application/json",
+                ).to_wire()
+                for descriptor in (source, node)
+            ],
+        }),
+        media_type="application/json",
+    )
+    return store, commit_logical_id, node.identity_hash
+
+
+def test_load_formal_deps_rejects_promoted_development_fixture_store(
+    tmp_path: Path,
+) -> None:
+    """改ざんdevelopment fixture＋攻撃者commitを指すJSONは formal 化されない。
+
+    攻撃者は store_root / commit logical ID / store 内 descriptor を全て自作できますが、
+    期待 descriptor identity だけは JSON に書けないため、この経路は塞がれています。
+    """
+    from train_survivors_deployable_policy import _load_formal_deps
+
+    _path, _commit, trusted_hash, dependencies = _producer_formal_deps_file(tmp_path)
+    forged_store, forged_commit, forged_hash = _forged_promoted_calibration_store(tmp_path)
+    assert forged_hash != trusted_hash
+    forged_path = tmp_path / "forged-deps.json"
+    forged_path.write_text(
+        json.dumps(_formal_deps_payload(dependencies, forged_store, forged_commit)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="out-of-band expected calibration descriptor hash"):
+        _load_formal_deps(forged_path)
+    with pytest.raises(ValueError, match="does not match the expected"):
+        _load_formal_deps(
+            forged_path, required_calibration_descriptor_hash=trusted_hash
+        )
+    # 攻撃者hashをJSONへ書いても schema が受け付けない。
+    payload = json.loads(forged_path.read_text(encoding="utf-8"))
+    payload["required_calibration_descriptor_hash"] = forged_hash
+    forged_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown or missing keys"):
+        _load_formal_deps(
+            forged_path, required_calibration_descriptor_hash=trusted_hash
+        )
+
+
+def test_cli_requires_out_of_band_calibration_hash_for_store_deps(
+    tmp_path: Path, capsys: Any
+) -> None:
+    """CLIエントリポイントも別チャネルの期待hashなしでは formal 訓練を始めない。
+
+    攻撃者は formal_dependencies.json を丸ごと差し替えられますが、
+    --required-calibration-descriptor-hash を省略した時点で exit 2 になります。
+    """
+    from train_survivors_deployable_policy import main
+
+    path, _commit, _hash, _expected = _producer_formal_deps_file(tmp_path)
+    dataset_dir = tmp_path / "dataset"
+    _dataset().save(dataset_dir)
+    argv = [
+        "--dataset", str(dataset_dir),
+        "--output-dir", str(tmp_path / "out"),
+        "--formal-deps", str(path),
+    ]
+
+    assert main(argv) == 2
+    assert "out-of-band expected calibration descriptor hash" in capsys.readouterr().err
+
+
+def test_cli_rejects_attacker_store_when_trusted_hash_differs(
+    tmp_path: Path, capsys: Any
+) -> None:
+    """攻撃者storeを指すJSONでも、CLIの信頼済みhashと違えば exit 2 になる。"""
+    from train_survivors_deployable_policy import main
+
+    _path, _commit, trusted_hash, dependencies = _producer_formal_deps_file(tmp_path)
+    forged_store, forged_commit, forged_hash = _publish_calibration_store(
+        tmp_path, "attacker-store", "attacker-run", dependencies.perception_profile
+    )
+    assert forged_hash != trusted_hash
+    forged_path = tmp_path / "attacker-deps.json"
+    forged_path.write_text(
+        json.dumps(_formal_deps_payload(dependencies, forged_store, forged_commit)),
+        encoding="utf-8",
+    )
+    dataset_dir = tmp_path / "dataset"
+    _dataset().save(dataset_dir)
+
+    exit_code = main(
+        [
+            "--dataset", str(dataset_dir),
+            "--output-dir", str(tmp_path / "out"),
+            "--formal-deps", str(forged_path),
+            "--required-calibration-descriptor-hash", trusted_hash,
+        ]
+    )
+    assert exit_code == 2
+    assert "does not match the expected" in capsys.readouterr().err
+
+
+def test_store_formal_deps_load_from_training_cwd_without_pythonpath(
+    tmp_path: Path,
+) -> None:
+    """documented cwdからrepo-root package名に依存せずstore形式をロードできる。"""
+    path, _commit, descriptor_hash, _expected = _producer_formal_deps_file(tmp_path)
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; from pathlib import Path; "
+                "from train_survivors_deployable_policy import _load_formal_deps; "
+                "assert not _load_formal_deps("
+                "Path(sys.argv[1]), "
+                "required_calibration_descriptor_hash=sys.argv[2])"
+                ".perception_profile.development_only"
+            ),
+            str(path),
+            descriptor_hash,
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_curriculum_corruption_scale_applied_in_train_step() -> None:
@@ -354,10 +776,20 @@ def test_load_formal_deps_cli_reads_all_required_fields(tmp_path: Path) -> None:
             "dependency_versions": {}, "operator": "pytest", "timestamp": "2026-08-09T00:00:00Z",
         }, hashes,
     )
-    profile = PerceptionErrorProfile(calibration_session_ids=["cal-1"])
+    # CLI テストでは development_only=True のプロファイルを使う。
+    # formal profile (development_only=False) は wire 経由でのロードが禁止されており、
+    # ArtifactStore 検証経路のみで取得可能。validate() のテストは別テストで行う。
+    cal_hash = canonical_hash({"synthetic_session_id": "cal-1"})
+    profile = FittedPerceptionErrorProfile(
+        **PerceptionErrorProfile(calibration_session_ids=["cal-1"]).to_wire(),
+        calibration_session_hashes={"cal-1": cal_hash},
+        field_sample_counts={"hp_ratio": 2},
+        fit_code_hash="a" * 64,
+        development_only=True,
+    )
     valid_data = {
         "fidelity_verdict": verdict.to_wire(),
-        "perception_profile": profile.to_wire(),
+        "perception_profile": profile.to_artifact_wire(),
         "required_perception_profile_hash": profile.profile_hash,
         "current_gating_producer_hashes": hashes,
         "profile_source": "measured",
