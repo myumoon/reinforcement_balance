@@ -1,7 +1,15 @@
-"""ItemSelector runtime 単体テスト用の最小 package fixture を提供する。
+"""runtime test 用の共有 pytest fixture。
 
-やさしい説明: Torch や署名基盤を使わず、小さな埋め込み ONNX と共有 UI policy だけで
-ロード・推論・改ざん拒否を試せる箱を各テストへ作る。
+ItemSelector runtime 単体テスト用の最小 package fixture と、artifact bundle 用の
+formal 成果物一式（combat package・trust registry 込み）の両方を提供する。
+
+やさしい説明:
+    ItemSelector 側は Torch や署名基盤を使わず、小さな埋め込み ONNX と共有 UI policy
+    だけでロード・推論・改ざん拒否を試せる箱を各テストへ作る。artifact bundle 側は
+    ONNX export と package 書き出しが 1 件あたり数秒かかるため、session scope で 1 度
+    だけ組み立てて全テストで使い回す。異常系テストは、この一式を tmp_path へコピー
+    してから壊して使う。元の一式を直接壊すと、あとに続くテストまで巻き添えで失敗
+    するため。
 """
 
 from __future__ import annotations
@@ -23,6 +31,13 @@ from reinbalance_survivors_contracts.canonical_json import (
 )
 from reinbalance_survivors_contracts import ui_policy as installed_ui_policy
 from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1
+from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
+from reinbalance_survivors_contracts.artifact_store import ArtifactStore
+from reinbalance_survivors_contracts.target_action import TargetProfileRef
+
+from survivors.runtime.artifact_bundle import HostRuntimeProfile, TrustAnchor
+
+from . import _runtime_fixtures as fx
 
 
 _TINY_SELECTOR_ONNX = base64.b64decode(
@@ -195,3 +210,110 @@ def item_selector_package(tmp_path: Path) -> ItemSelectorPackageFixture:
     やさしい説明: 埋め込み済みモデルなので外部ダウンロードや重い export は行わない。
     """
     return _write_item_selector_package(tmp_path / "selector")
+
+
+@dataclass(frozen=True)
+class FormalBundleInputs:
+    """`RuntimeBundle.load()` を通過する成果物一式。
+
+    やさしい説明: 正常に起動できる状態の「箱・保管庫・系譜・許可証」をまとめたものです。
+    テストはここから 1 か所だけ壊して、その 1 点で起動が止まることを確かめます。
+    """
+
+    root: Path
+    combat_dir: Path
+    selector_dir: Path
+    store: ArtifactStore
+    descriptors: list[ArtifactDescriptor]
+    combat_manifest: dict[str, Any]
+    selector_manifest: dict[str, Any]
+    target_profile: TargetProfileRef
+    host_profile: HostRuntimeProfile
+    trust_anchor: TrustAnchor
+    registry_path: Path
+    target_capability_hash: str
+    choice_capability_hash: str
+
+    def as_load_kwargs(self, **overrides: Any) -> dict[str, Any]:
+        """`RuntimeBundle.load()` へ渡す keyword 引数を作る。
+
+        やさしい説明: 既定は「全部正常」の組み合わせです。`overrides` で 1 項目だけ
+        差し替えると、その 1 点だけが異常な入力を簡単に作れます。
+        """
+        kwargs: dict[str, Any] = {
+            "combat_package_dir": self.combat_dir,
+            "item_selector_dir": self.selector_dir,
+            "artifact_store": self.store,
+            "descriptors": self.descriptors,
+            "target_profile": self.target_profile,
+            "host_profile": self.host_profile,
+            "trust_anchor": self.trust_anchor,
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def copy_combat_package(self, destination: Path) -> Path:
+        """combat package を複製して、壊してよい作業用 directory を返す。"""
+        shutil.copytree(self.combat_dir, destination)
+        return destination
+
+
+def _build_formal_inputs(root: Path) -> FormalBundleInputs:
+    """正常系の成果物一式を root 配下に組み立てる。
+
+    やさしい説明: package を書き、保管庫へ登録し、系譜を作り、その系譜の identity を
+    署名済みの許可証一覧へ載せる、という実運用と同じ順序で用意します。
+    """
+    capability = fx.hash_of("target-capability")
+    choice_capability = fx.hash_of("choice-capability")
+    target_profile = fx.default_target_profile()
+    host_profile = fx.default_host_profile()
+
+    selector_manifest = fx.write_item_selector_package(
+        root / "selector", target_capability_hash=capability
+    )
+    model, model_config = fx.build_combat_model()
+    combat_manifest = fx.write_combat_package(root / "combat", model, model_config)
+
+    store = ArtifactStore(root / "store")
+    descriptors = fx.build_formal_descriptors(
+        store=store,
+        combat_manifest=combat_manifest,
+        item_selector_manifest=selector_manifest,
+        target_capability_hash=capability,
+        choice_capability_hash=choice_capability,
+    )
+    entry = fx.release_entry(
+        descriptors=descriptors,
+        combat_manifest=combat_manifest,
+        item_selector_manifest=selector_manifest,
+        target_profile=target_profile,
+        host_profile=host_profile,
+        target_capability_hash=capability,
+        choice_capability_hash=choice_capability,
+    )
+    registry_path = fx.write_trust_registry(root / "trust" / "releases.json", [entry])
+    trust_anchor = TrustAnchor.load(
+        registry_path, verification_public_keys=[fx.public_key_hex()]
+    )
+    return FormalBundleInputs(
+        root=root,
+        combat_dir=root / "combat",
+        selector_dir=root / "selector",
+        store=store,
+        descriptors=descriptors,
+        combat_manifest=combat_manifest,
+        selector_manifest=selector_manifest,
+        target_profile=target_profile,
+        host_profile=host_profile,
+        trust_anchor=trust_anchor,
+        registry_path=registry_path,
+        target_capability_hash=capability,
+        choice_capability_hash=choice_capability,
+    )
+
+
+@pytest.fixture(scope="session")
+def formal_inputs(tmp_path_factory: pytest.TempPathFactory) -> FormalBundleInputs:
+    """検証を通過する formal 成果物一式を session 単位で 1 度だけ組み立てる。"""
+    return _build_formal_inputs(tmp_path_factory.mktemp("formal"))
