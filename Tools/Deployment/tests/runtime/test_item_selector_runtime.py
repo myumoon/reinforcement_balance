@@ -277,16 +277,21 @@ def test_rejects_static_batch_or_candidate_count_onnx_axes(
         selector_type.load(broken.root)
 
 
-def test_rejects_huge_integer_manifest_temperature_without_raw_overflow(
-    item_selector_package: ItemSelectorPackageFixture, tmp_path: Path
+@pytest.mark.parametrize(
+    "field",
+    ["temperature", "student_output_temperature", "confidence_threshold"],
+)
+def test_rejects_huge_integer_manifest_scalar_without_raw_overflow(
+    item_selector_package: ItemSelectorPackageFixture, tmp_path: Path, field: str
 ) -> None:
-    """manifest.temperature の桁溢れ巨大整数を OverflowError ではなく fail-closed で拒否する。
+    """manifest の temperature/student_output_temperature/confidence_threshold の桁溢れ巨大整数を
+    OverflowError ではなく fail-closed で拒否する。
 
-    やさしい説明: 途方もなく大きい数値を書き込んでも、生の例外を漏らさずきちんと止まる。
+    やさしい説明: 途方もなく大きい数値をどの項目に書き込んでも、生の例外を漏らさずきちんと止まる。
     """
     error_type, selector_type = _runtime_types()
-    broken = item_selector_package.copy_to(tmp_path / "huge-temperature")
-    broken.manifest["temperature"] = 10**1000
+    broken = item_selector_package.copy_to(tmp_path / f"huge-{field}")
+    broken.manifest[field] = 10**1000
     broken.write_manifest()
 
     with pytest.raises(error_type):

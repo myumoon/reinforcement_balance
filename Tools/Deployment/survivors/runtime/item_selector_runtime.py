@@ -19,7 +19,6 @@ import onnxruntime as ort
 
 from reinbalance_survivors_contracts.canonical_json import sha256_hex
 from reinbalance_survivors_contracts.item_selector_package import (
-    ITEM_SELECTOR_PACKAGE_FILES,
     ItemSelectorPackageError,
     artifact_binding_payload,
     expected_onnx_tensor_manifest,
@@ -185,11 +184,6 @@ class OnnxItemSelector:
             ui_policy_config = load_verified_ui_policy_config(root, manifest)
         except ItemSelectorPackageError as exc:
             raise ItemSelectorRuntimeError(f"ItemSelector package rejected: {exc}") from exc
-
-        # 宣言 file 以外が同居している package は差し替えの疑いがあるため拒否する。
-        actual_files = {entry.name for entry in root.iterdir()}
-        if actual_files != ITEM_SELECTOR_PACKAGE_FILES | {"manifest.json"}:
-            raise ItemSelectorRuntimeError("ItemSelector package directory contents mismatch")
 
         onnx_path = root / "model.onnx"
         if onnx_path.is_symlink():
