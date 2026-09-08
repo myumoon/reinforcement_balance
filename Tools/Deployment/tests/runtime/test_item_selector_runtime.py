@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,13 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from conftest import ItemSelectorPackageFixture, _UNMASKED_SELECTOR_ONNX
+from conftest import (
+    ItemSelectorPackageFixture,
+    _STATIC_BATCH_SELECTOR_ONNX,
+    _STATIC_CANDIDATES_SELECTOR_ONNX,
+    _UNMASKED_SELECTOR_ONNX,
+)
+from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes, sha256_hex
 
 
 def _runtime_types():
@@ -217,6 +224,138 @@ def test_candidate_mask_excludes_masked_choice(
 
     assert logits[0, 1] < logits[0, 0]
     assert int(np.argmax(logits[0])) == 2
+
+
+def test_masked_candidate_not_selected_when_onnx_ignores_mask(
+    item_selector_package: ItemSelectorPackageFixture,
+    tmp_path: Path,
+) -> None:
+    """ONNX graph が candidate_mask を無視しても runtime 側で masked 候補を選択不能にする。
+
+    やさしい説明: モデルの中身がマスクを無視する不正な作りでも、外側の安全装置が
+    必ず masked 候補を除外することを確かめる。
+    """
+    _, selector_type = _runtime_types()
+    broken = item_selector_package.copy_to(tmp_path / "unmasked-onnx")
+    broken.replace_onnx(_UNMASKED_SELECTOR_ONNX, update_hashes=True)
+    selector = selector_type.load(broken.root)
+    candidates = np.array(
+        [[[1.0, 0.0, 0.0], [100.0, 100.0, 100.0], [2.0, 0.0, 0.0]]],
+        dtype=np.float32,
+    )
+    mask = np.array([[True, False, True]])
+
+    logits = selector.predict(np.zeros((1, 4), dtype=np.float32), candidates, mask)
+
+    assert not np.isfinite(logits[0, 1])
+    assert int(np.argmax(logits[0])) == 2
+
+
+@pytest.mark.parametrize(
+    ("case", "onnx_bytes"),
+    [
+        ("static_candidates", _STATIC_CANDIDATES_SELECTOR_ONNX),
+        ("static_batch", _STATIC_BATCH_SELECTOR_ONNX),
+    ],
+)
+def test_rejects_static_batch_or_candidate_count_onnx_axes(
+    item_selector_package: ItemSelectorPackageFixture,
+    tmp_path: Path,
+    case: str,
+    onnx_bytes: bytes,
+) -> None:
+    """batch 軸・候補数軸が固定値の ONNX を load 時に拒否する。
+
+    やさしい説明: 同時プレイ人数やカード枚数を後から変えられないモデルは、
+    宣言と食い違うため起動前に弾く。
+    """
+    error_type, selector_type = _runtime_types()
+    broken = item_selector_package.copy_to(tmp_path / f"static-{case}")
+    broken.replace_onnx(onnx_bytes, update_hashes=True)
+
+    with pytest.raises(error_type, match="dynamic dimension"):
+        selector_type.load(broken.root)
+
+
+def test_rejects_huge_integer_manifest_temperature_without_raw_overflow(
+    item_selector_package: ItemSelectorPackageFixture, tmp_path: Path
+) -> None:
+    """manifest.temperature の桁溢れ巨大整数を OverflowError ではなく fail-closed で拒否する。
+
+    やさしい説明: 途方もなく大きい数値を書き込んでも、生の例外を漏らさずきちんと止まる。
+    """
+    error_type, selector_type = _runtime_types()
+    broken = item_selector_package.copy_to(tmp_path / "huge-temperature")
+    broken.manifest["temperature"] = 10**1000
+    broken.write_manifest()
+
+    with pytest.raises(error_type):
+        selector_type.load(broken.root)
+
+
+def test_rejects_huge_integer_ui_policy_threshold_without_raw_overflow(
+    item_selector_package: ItemSelectorPackageFixture, tmp_path: Path
+) -> None:
+    """ui_policy_config.json の桁溢れ巨大整数閾値を OverflowError ではなく fail-closed で拒否する。
+
+    やさしい説明: 同梱の共有ルール設定側で桁溢れが起きても、同じく安全に止まることを確かめる。
+    """
+    error_type, selector_type = _runtime_types()
+    broken = item_selector_package.copy_to(tmp_path / "huge-threshold")
+    config = json.loads((broken.root / "ui_policy_config.json").read_text(encoding="utf-8"))
+    config["hp_chicken_threshold"] = 10**1000
+    tampered_bytes = canonical_json_bytes(config)
+    (broken.root / "ui_policy_config.json").write_bytes(tampered_bytes)
+    broken.manifest["files"]["ui_policy_config.json"] = sha256_hex(tampered_bytes)
+    core = dict(broken.manifest)
+    core.pop("artifact_identity")
+    broken.manifest["artifact_identity"] = canonical_hash(core)
+    broken.write_manifest()
+
+    with pytest.raises(error_type):
+        selector_type.load(broken.root)
+
+
+def test_load_verified_ui_policy_config_reads_file_once(
+    item_selector_package: ItemSelectorPackageFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """load_verified_ui_policy_config は ui_policy_config.json を一度しか読まない。
+
+    やさしい説明: 検証直後に外部ファイルへの symlink へ差し替えても、最初に読んだ
+    bytes だけで判定するため、二度目の未検証読取という root escape の入口が存在しない。
+    """
+    from reinbalance_survivors_contracts.item_selector_package import (
+        load_verified_ui_policy_config,
+    )
+
+    config_path = item_selector_package.root / "ui_policy_config.json"
+    outside = tmp_path / "outside-ui-policy.json"
+    outside.write_bytes(config_path.read_bytes())
+
+    real_read_bytes = Path.read_bytes
+    call_count = 0
+
+    def counting_read_bytes(self: Path, *args: object, **kwargs: object) -> bytes:
+        nonlocal call_count
+        if self == config_path:
+            call_count += 1
+            if call_count == 1:
+                data = real_read_bytes(self, *args, **kwargs)
+                config_path.unlink()
+                config_path.symlink_to(outside)
+                return data
+        return real_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes, raising=True)
+
+    config = load_verified_ui_policy_config(
+        item_selector_package.root, item_selector_package.manifest
+    )
+
+    assert call_count == 1
+    assert config.hp_chicken_threshold == pytest.approx(0.70)
 
 
 @pytest.mark.parametrize("input_name", ["context_features", "candidate_features", "candidate_mask"])

@@ -49,6 +49,34 @@ _UNMASKED_SELECTOR_ONNX = base64.b64decode(
     "YW5kaWRhdGVzQgQKABAR"
 )
 
+# 候補数軸を静的 4 に固定した ONNX（M2 static-onnx-axes-pass-loader 回帰用）。
+# やさしい説明: カード枚数を動かせないモデルを load 時に拒否できるかを試す不正な箱。
+_STATIC_CANDIDATES_SELECTOR_ONNX = base64.b64decode(
+    "CAg6pQMKOxILcmVkdWNlX2F4ZXMiCENvbnN0YW50KiIKBXZhbHVlKhYIARAHOgr/////"
+    "//////8BQgRheGVzoAEECkUKEmNhbmRpZGF0ZV9mZWF0dXJlcwoLcmVkdWNlX2F4ZXMS"
+    "BnNjb3JlcyIJUmVkdWNlU3VtKg8KCGtlZXBkaW1zGACgAQIKNhIMbWFza2VkX3ZhbHVl"
+    "IghDb25zdGFudCocCgV2YWx1ZSoQEAEiBABAHMZCBm1hc2tlZKABBAo1Cg5jYW5kaWRh"
+    "dGVfbWFzawoGc2NvcmVzCgxtYXNrZWRfdmFsdWUSBmxvZ2l0cyIFV2hlcmUSEnRpbnlf"
+    "aXRlbV9zZWxlY3RvclonChBjb250ZXh0X2ZlYXR1cmVzEhMKEQgBEg0KBxIFYmF0Y2gK"
+    "AggEWi0KEmNhbmRpZGF0ZV9mZWF0dXJlcxIXChUIARIRCgcSBWJhdGNoCgIIBAoCCANa"
+    "JQoOY2FuZGlkYXRlX21hc2sSEwoRCAkSDQoHEgViYXRjaAoCCARiHQoGbG9naXRzEhMK"
+    "EQgBEg0KBxIFYmF0Y2gKAggEQgQKABAR"
+)
+
+# batch 軸を静的 1 に固定した ONNX（M2 static-onnx-axes-pass-loader 回帰用）。
+# やさしい説明: 同時プレイ人数を 1 人からしか動かせないモデルを load 時に拒否できるか試す。
+_STATIC_BATCH_SELECTOR_ONNX = base64.b64decode(
+    "CAg6rwMKOxILcmVkdWNlX2F4ZXMiCENvbnN0YW50KiIKBXZhbHVlKhYIARAHOgr/////"
+    "//////8BQgRheGVzoAEECkUKEmNhbmRpZGF0ZV9mZWF0dXJlcwoLcmVkdWNlX2F4ZXMS"
+    "BnNjb3JlcyIJUmVkdWNlU3VtKg8KCGtlZXBkaW1zGACgAQIKNhIMbWFza2VkX3ZhbHVl"
+    "IghDb25zdGFudCocCgV2YWx1ZSoQEAEiBABAHMZCBm1hc2tlZKABBAo1Cg5jYW5kaWRh"
+    "dGVfbWFzawoGc2NvcmVzCgxtYXNrZWRfdmFsdWUSBmxvZ2l0cyIFV2hlcmUSEnRpbnlf"
+    "aXRlbV9zZWxlY3RvcloiChBjb250ZXh0X2ZlYXR1cmVzEg4KDAgBEggKAggBCgIIBFoy"
+    "ChJjYW5kaWRhdGVfZmVhdHVyZXMSHAoaCAESFgoCCAEKDBIKY2FuZGlkYXRlcwoCCANa"
+    "KgoOY2FuZGlkYXRlX21hc2sSGAoWCAkSEgoCCAEKDBIKY2FuZGlkYXRlc2IiCgZsb2dp"
+    "dHMSGAoWCAESEgoCCAEKDBIKY2FuZGlkYXRlc0IECgAQEQ=="
+)
+
 
 @dataclass(frozen=True)
 class ItemSelectorPackageFixture:

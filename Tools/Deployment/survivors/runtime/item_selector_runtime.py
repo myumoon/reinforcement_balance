@@ -60,7 +60,10 @@ def _positive_finite(value: Any, label: str) -> float:
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ItemSelectorRuntimeError(f"{label} must be a real number")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ItemSelectorRuntimeError(f"{label} must be positive and finite") from exc
     if not math.isfinite(number) or number <= 0.0:
         raise ItemSelectorRuntimeError(f"{label} must be positive and finite")
     return number
@@ -73,7 +76,10 @@ def _unit_interval(value: Any, label: str) -> float:
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ItemSelectorRuntimeError(f"{label} must be a real number")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ItemSelectorRuntimeError(f"{label} must be within [0, 1]") from exc
     if not math.isfinite(number) or not 0.0 <= number <= 1.0:
         raise ItemSelectorRuntimeError(f"{label} must be within [0, 1]")
     return number
@@ -110,11 +116,18 @@ def _assert_onnx_io_contract(session: ort.InferenceSession, manifest: Mapping[st
             # 候補数の軸は Nmax 以下で可変だが、feature 幅は必ず manifest と一致させる。
             # やさしい説明: カード枚数は変えられても、カード一枚の項目数は変えられない。
             strict = (entry["name"], axis) in _STRICT_ONNX_DIMENSIONS
-            if isinstance(expected_dim, int) and (
-                strict or isinstance(actual_dim, int)
-            ) and actual_dim != expected_dim:
+            if strict:
+                if actual_dim != expected_dim:
+                    raise ItemSelectorRuntimeError(
+                        f"ItemSelector ONNX tensor {entry['name']!r} shape mismatch"
+                    )
+                continue
+            # batch 軸・候補数軸は 1 件から Nmax 件まで任意の本数を受理できるよう、
+            # ONNX 側が固定値ではなく動的軸として宣言していることを要求する。
+            # やさしい説明: 決め打ちの人数・枚数でしか動かないモデルは起動前に弾く。
+            if isinstance(actual_dim, int):
                 raise ItemSelectorRuntimeError(
-                    f"ItemSelector ONNX tensor {entry['name']!r} shape mismatch"
+                    f"ItemSelector ONNX tensor {entry['name']!r} axis {axis} must be a dynamic dimension"
                 )
 
 
@@ -336,4 +349,7 @@ class OnnxItemSelector:
         scaled = logits / np.float32(self._student_output_temperature)
         if not np.all(np.isfinite(scaled[mask])):
             raise ItemSelectorRuntimeError("ItemSelector produced non-finite valid logits")
+        # ONNX graph が candidate_mask を無視しても、masked 位置は runtime 側で確実に選択不能にする。
+        # やさしい説明: モデルの中身を信用せず、外側の安全な層でマスクを掛け直す。
+        scaled = np.where(mask, scaled, np.float32(-np.inf))
         return scaled

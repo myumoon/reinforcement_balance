@@ -100,6 +100,18 @@ def _is_sha256(value: Any) -> bool:
     )
 
 
+def _safe_float(value: int | float) -> float | None:
+    """OverflowError を送出せず float 変換を試みる。
+
+    やさしい説明: JSON の巨大整数を float() にそのまま渡すと例外で落ちてしまうため、
+    変換できないときは None を返して呼び出し側が通常の検証エラーとして扱えるようにします。
+    """
+    try:
+        return float(value)
+    except OverflowError:
+        return None
+
+
 def policy_schema_hash(config: NonModelUiPolicyConfigV1) -> str:
     """共有 wire そのものから NonModelUiPolicyConfigV1 schema binding を返す。
 
@@ -197,20 +209,41 @@ def expected_onnx_tensor_manifest(
     return expected_inputs, expected_outputs
 
 
+def _read_json_bytes(path: Path, *, label: str) -> bytes:
+    """regular file であることを確認したうえで raw bytes を一度だけ読む。
+
+    やさしい説明: symlink 差し替え（TOCTOU）を防ぐため、パスの検証と読み取りを
+    1 回にまとめます。呼び出し側はこの bytes を JSON parse にも hash 照合にも
+    使い回し、同じファイルを二度読まないようにします。
+    """
+    if path.is_symlink() or not path.is_file():
+        raise ItemSelectorPackageError(f"{label} must be a regular file")
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise ItemSelectorPackageError(f"cannot load {label}: {exc}") from exc
+
+
+def _parse_json_object(data: bytes, *, label: str) -> dict[str, Any]:
+    """読み込み済み bytes を JSON object としてのみ解釈する。
+
+    やさしい説明: すでに読み終えた中身を辞書へ変換し、辞書以外は拒否します。
+    """
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ItemSelectorPackageError(f"cannot load {label}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ItemSelectorPackageError(f"{label} must be a JSON object")
+    return value
+
+
 def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
     """JSON object ファイルを読み、object 以外を拒否する。
 
     やさしい説明: JSON を読み込み、辞書でなければエラーにします。
     """
-    if path.is_symlink() or not path.is_file():
-        raise ItemSelectorPackageError(f"{label} must be a regular file")
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ItemSelectorPackageError(f"cannot load {label}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ItemSelectorPackageError(f"{label} must be a JSON object")
-    return value
+    return _parse_json_object(_read_json_bytes(path, label=label), label=label)
 
 
 def _require_regular_package_dir(package_dir: Path) -> Path:
@@ -264,19 +297,19 @@ def _validate_scalar_manifest(manifest: Mapping[str, Any]) -> None:
         raise ItemSelectorPackageError("feature schema must be non-empty")
     for field in ("temperature", "student_output_temperature"):
         value = manifest.get(field)
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or float(value) <= 0.0
-        ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ItemSelectorPackageError(f"{field} must be positive and finite")
+        converted = _safe_float(value)
+        if converted is None or not math.isfinite(converted) or converted <= 0.0:
             raise ItemSelectorPackageError(f"{field} must be positive and finite")
     threshold = manifest.get("confidence_threshold")
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+        raise ItemSelectorPackageError("confidence_threshold must be in [0, 1]")
+    converted_threshold = _safe_float(threshold)
     if (
-        isinstance(threshold, bool)
-        or not isinstance(threshold, (int, float))
-        or not math.isfinite(float(threshold))
-        or not 0.0 <= float(threshold) <= 1.0
+        converted_threshold is None
+        or not math.isfinite(converted_threshold)
+        or not 0.0 <= converted_threshold <= 1.0
     ):
         raise ItemSelectorPackageError("confidence_threshold must be in [0, 1]")
 
@@ -402,13 +435,14 @@ def load_verified_ui_policy_config(
     完全に同じかを確認します。違えば起動しません。
     """
     package = _require_regular_package_dir(package_dir)
-    config_wire = _read_json_object(package / "ui_policy_config.json", label="UI policy config")
+    config_bytes = _read_json_bytes(package / "ui_policy_config.json", label="UI policy config")
+    config_wire = _parse_json_object(config_bytes, label="UI policy config")
     try:
         config = NonModelUiPolicyConfigV1.from_wire(config_wire)
         installed = NonModelUiPolicyConfigV1.load_default()
     except ValueError as exc:
         raise ItemSelectorPackageError(f"UI policy config is invalid: {exc}") from exc
-    if canonical_json_bytes(config_wire) != (package / "ui_policy_config.json").read_bytes():
+    if canonical_json_bytes(config_wire) != config_bytes:
         raise ItemSelectorPackageError("UI policy config must use canonical JSON bytes")
     if config.to_wire() != installed.to_wire():
         raise ItemSelectorPackageError("installed policy config mismatch")
