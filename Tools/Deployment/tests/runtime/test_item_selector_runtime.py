@@ -483,3 +483,87 @@ def test_rejects_symlink_package_root(
 
     with pytest.raises(error_type):
         selector_type.load(linked_root)
+
+
+def _raise_permission_error_for(method_name: str, target: Path):
+    """指定 path に対してだけ PermissionError を送出する Path メソッド差し替えを返す。
+
+    やさしい説明: 目的の1ファイル/ディレクトリだけ権限エラーにし、他の path は素通りさせる。
+    """
+    real_method = getattr(Path, method_name)
+
+    def patched(self: Path, *args: object, **kwargs: object):
+        if self == target:
+            raise PermissionError(13, "permission denied (test)")
+        return real_method(self, *args, **kwargs)
+
+    return patched
+
+
+@pytest.mark.parametrize(
+    "method_name, target_name",
+    [("is_file", "manifest.json"), ("is_file", "model.pt")],
+)
+def test_stat_probe_permission_error_normalized_for_package_files(
+    item_selector_package: ItemSelectorPackageFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    method_name: str,
+    target_name: str,
+) -> None:
+    """manifest.json 読取と per-file 検証ループの stat probe 自体が権限エラーで失敗しても、
+    生の OSError ではなく ItemSelectorRuntimeError として拒否される。
+
+    やさしい説明: read_bytes() の直前にある「本当に regular file か」を確認する処理が
+    権限エラーで落ちても、read_bytes() 失敗時と同じ安全な例外に変換されることを確かめる。
+    """
+    error_type, selector_type = _runtime_types()
+    broken = item_selector_package.copy_to(
+        tmp_path / f"stat-error-{method_name}-{target_name.replace('.', '-')}"
+    )
+    target = broken.root / target_name
+    monkeypatch.setattr(
+        Path, method_name, _raise_permission_error_for(method_name, target), raising=True
+    )
+
+    with pytest.raises(error_type):
+        selector_type.load(broken.root)
+
+
+def test_stat_probe_permission_error_normalized_for_package_root(
+    item_selector_package: ItemSelectorPackageFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """package root の is_dir() stat probe が権限エラーで失敗しても ItemSelectorRuntimeError へ正規化する。
+
+    やさしい説明: 箱そのものが本当にディレクトリかを確認する処理が失敗しても安全に止まる。
+    """
+    error_type, selector_type = _runtime_types()
+    broken = item_selector_package.copy_to(tmp_path / "stat-error-root")
+    monkeypatch.setattr(
+        Path, "is_dir", _raise_permission_error_for("is_dir", broken.root), raising=True
+    )
+
+    with pytest.raises(error_type):
+        selector_type.load(broken.root)
+
+
+def test_onnx_symlink_probe_permission_error_normalized(
+    item_selector_package: ItemSelectorPackageFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """model.onnx の is_symlink() stat probe が権限エラーで失敗しても ItemSelectorRuntimeError へ正規化する。
+
+    やさしい説明: symlink かどうかを確認する処理自体が権限エラーで落ちても、生の例外を漏らさない。
+    """
+    error_type, selector_type = _runtime_types()
+    broken = item_selector_package.copy_to(tmp_path / "stat-error-onnx-symlink")
+    onnx_path = broken.root / "model.onnx"
+    monkeypatch.setattr(
+        Path, "is_symlink", _raise_permission_error_for("is_symlink", onnx_path), raising=True
+    )
+
+    with pytest.raises(error_type):
+        selector_type.load(broken.root)

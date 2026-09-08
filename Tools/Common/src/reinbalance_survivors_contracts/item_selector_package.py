@@ -216,9 +216,9 @@ def _read_json_bytes(path: Path, *, label: str) -> bytes:
     1 回にまとめます。呼び出し側はこの bytes を JSON parse にも hash 照合にも
     使い回し、同じファイルを二度読まないようにします。
     """
-    if path.is_symlink() or not path.is_file():
-        raise ItemSelectorPackageError(f"{label} must be a regular file")
     try:
+        if path.is_symlink() or not path.is_file():
+            raise ItemSelectorPackageError(f"{label} must be a regular file")
         return path.read_bytes()
     except OSError as exc:
         raise ItemSelectorPackageError(f"cannot load {label}: {exc}") from exc
@@ -252,7 +252,11 @@ def _require_regular_package_dir(package_dir: Path) -> Path:
     やさしい説明: 箱そのものを外部 directory への symlink にして中身を差し替える経路を塞ぐ。
     """
     package = Path(package_dir)
-    if package.is_symlink() or not package.is_dir():
+    try:
+        is_invalid = package.is_symlink() or not package.is_dir()
+    except OSError as exc:
+        raise ItemSelectorPackageError(f"cannot inspect artifact package: {exc}") from exc
+    if is_invalid:
         raise ItemSelectorPackageError("artifact package must be a regular directory")
     return package
 
@@ -411,9 +415,9 @@ def verify_item_selector_package_files(
     actual_hashes: dict[str, str] = {}
     for name in sorted(ITEM_SELECTOR_PACKAGE_FILES):
         path = package / name
-        if path.is_symlink() or not path.is_file():
-            raise ItemSelectorPackageError(f"package file must be a regular file: {name}")
         try:
+            if path.is_symlink() or not path.is_file():
+                raise ItemSelectorPackageError(f"package file must be a regular file: {name}")
             actual_hashes[name] = sha256_hex(path.read_bytes())
         except OSError as exc:
             raise ItemSelectorPackageError(f"cannot read package file {name}: {exc}") from exc

@@ -186,9 +186,9 @@ class OnnxItemSelector:
             raise ItemSelectorRuntimeError(f"ItemSelector package rejected: {exc}") from exc
 
         onnx_path = root / "model.onnx"
-        if onnx_path.is_symlink():
-            raise ItemSelectorRuntimeError("ItemSelector model.onnx must not be a symlink")
         try:
+            if onnx_path.is_symlink():
+                raise ItemSelectorRuntimeError("ItemSelector model.onnx must not be a symlink")
             onnx_bytes = onnx_path.read_bytes()
         except OSError as exc:
             raise ItemSelectorRuntimeError(f"cannot read ItemSelector ONNX model: {exc}") from exc
