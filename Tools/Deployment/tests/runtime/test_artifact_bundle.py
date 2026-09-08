@@ -654,6 +654,68 @@ def test_missing_package_directory_is_rejected(tmp_path: Path) -> None:
         ab._load_combat_package(tmp_path / "absent")
 
 
+def _raise_permission_error_for(method_name: str, target: Path):
+    """指定 path に対してだけ PermissionError を送出する Path メソッド差し替えを返す。
+
+    やさしい説明: 目的の1ファイル/ディレクトリだけ権限エラーにし、他の path は素通りさせる。
+    `item_selector_runtime` 側の同名テストヘルパーと同じパターン。
+    """
+    real_method = getattr(Path, method_name)
+
+    def patched(self: Path, *args: object, **kwargs: object):
+        if self == target:
+            raise PermissionError(13, "permission denied (test)")
+        return real_method(self, *args, **kwargs)
+
+    return patched
+
+
+@pytest.mark.parametrize(
+    "method_name, target_name",
+    [("is_symlink", "manifest.json"), ("is_file", "model.pt")],
+)
+def test_stat_probe_permission_error_normalized_for_package_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    target_name: str,
+) -> None:
+    """package file 解決の stat probe（is_symlink/is_file）自体が権限エラーで失敗しても、
+    生の OSError ではなく BundleLoadError として拒否される。
+
+    やさしい説明: read_bytes() の直前にある「本当に regular file か」を確認する処理が
+    権限エラーで落ちても、read_bytes() 失敗時と同じ安全な例外に変換されることを確かめる。
+    """
+    package = tmp_path / "combat"
+    model, model_config = fx.build_combat_model()
+    fx.write_combat_package(package, model, model_config)
+    target = package / target_name
+    monkeypatch.setattr(
+        Path, method_name, _raise_permission_error_for(method_name, target), raising=True
+    )
+
+    with pytest.raises(BundleLoadError):
+        ab._load_combat_package(package)
+
+
+def test_stat_probe_permission_error_normalized_for_combat_package_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """combat package root の is_dir() stat probe が権限エラーで失敗しても BundleLoadError へ正規化する。
+
+    やさしい説明: 箱そのものが本当にディレクトリかを確認する処理が失敗しても安全に止まる。
+    """
+    package = tmp_path / "combat"
+    model, model_config = fx.build_combat_model()
+    fx.write_combat_package(package, model, model_config)
+    monkeypatch.setattr(
+        Path, "is_dir", _raise_permission_error_for("is_dir", package), raising=True
+    )
+
+    with pytest.raises(BundleLoadError):
+        ab._load_combat_package(package)
+
+
 # --- DAG / store / capability -------------------------------------------------
 
 

@@ -202,11 +202,11 @@ def _resolve_package_file(root: Path, name: str) -> Path:
     if "/" in name or "\\" in name or name in ("", ".", ".."):
         raise BundleLoadError(f"package file name {name!r} must be a plain file name")
     candidate = root / name
-    if candidate.is_symlink():
-        raise BundleLoadError(f"package file {name!r} must not be a symlink")
-    if not candidate.is_file():
-        raise BundleLoadError(f"package file {name!r} is missing")
     try:
+        if candidate.is_symlink():
+            raise BundleLoadError(f"package file {name!r} must not be a symlink")
+        if not candidate.is_file():
+            raise BundleLoadError(f"package file {name!r} is missing")
         resolved_root = root.resolve(strict=True)
         resolved = candidate.resolve(strict=True)
     except OSError as exc:
@@ -686,7 +686,11 @@ def _load_combat_package(package_dir: Path) -> tuple[CombatPolicy, dict[str, Any
     つまり model.pt に仕込まれた任意コードが動く経路がありません。
     """
     root = Path(package_dir)
-    if not root.is_dir():
+    try:
+        is_missing = not root.is_dir()
+    except OSError as exc:
+        raise BundleLoadError(f"cannot inspect combat package directory: {exc}") from exc
+    if is_missing:
         raise BundleLoadError(f"combat package directory not found: {root}")
     manifest = _read_combat_manifest(root)
 
