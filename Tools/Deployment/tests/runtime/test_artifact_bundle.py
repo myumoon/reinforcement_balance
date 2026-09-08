@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from pathlib import Path
@@ -30,7 +31,6 @@ from reinbalance_survivors_contracts.target_action import ActionSemantics
 
 from survivors.runtime import artifact_bundle as ab
 from survivors.runtime.artifact_bundle import (
-    PRODUCTION_TRUST_ANCHOR_PUBLIC_KEYS,
     REQUIRED_ACTION_DIM,
     REQUIRED_DECISION_HZ,
     TRUST_REGISTRY_SIGNATURE_SUFFIX,
@@ -51,11 +51,15 @@ from .conftest import FormalBundleInputs
 # --- round-trip: 03-05 実契約 --------------------------------------------------
 
 
-def test_load_accepts_training_shaped_package(formal_inputs: FormalBundleInputs) -> None:
-    """03-05 契約どおりの package と信頼済み registry で live bundle が成立する。
+def test_load_accepts_training_shaped_package(
+    formal_inputs: FormalBundleInputs, pinned_production_trust_key: str
+) -> None:
+    """03-05 契約どおりの package と、本番鍵で署名された registry で live bundle が成立する。
 
     やさしい説明: 「全部正しいときはちゃんと起動する」ことを確かめる基準テストです。
     ここが通らないと、他の拒否テストが「そもそも何も起動できないだけ」になります。
+    `pinned_production_trust_key` は「発行者の鍵はこれ」という状態を作る fixture で、
+    これが無いと（=本番鍵未固定なら）このテストは起動しません。
     """
     bundle = RuntimeBundle.load(**formal_inputs.as_load_kwargs())
 
@@ -73,7 +77,7 @@ def test_load_accepts_training_shaped_package(formal_inputs: FormalBundleInputs)
 
 
 def test_startup_report_carries_real_hardware_values(
-    formal_inputs: FormalBundleInputs,
+    formal_inputs: FormalBundleInputs, pinned_production_trust_key: str
 ) -> None:
     """startup report に OS / GPU / driver / CUDA / capture backend の実値が載る。
 
@@ -96,7 +100,7 @@ def test_startup_report_carries_real_hardware_values(
 
 
 def test_loaded_model_reproduces_fixture_weights(
-    formal_inputs: FormalBundleInputs,
+    formal_inputs: FormalBundleInputs, pinned_production_trust_key: str
 ) -> None:
     """独立に組んだ fixture model と、ロードされた model の出力が一致する。
 
@@ -124,7 +128,7 @@ def test_loaded_model_reproduces_fixture_weights(
 
 
 def test_item_selector_round_trip_predicts_finite_logits(
-    formal_inputs: FormalBundleInputs,
+    formal_inputs: FormalBundleInputs, pinned_production_trust_key: str
 ) -> None:
     """bundle 経由の ItemSelector が ONNX Runtime で有限 logits を返す。
 
@@ -146,17 +150,92 @@ def test_item_selector_round_trip_predicts_finite_logits(
 # --- trust anchor -------------------------------------------------------------
 
 
-def test_load_without_trust_anchor_is_rejected(formal_inputs: FormalBundleInputs) -> None:
-    """trust anchor を渡さない呼び出しは live 起動できない。
+def test_load_does_not_accept_a_caller_supplied_trust_anchor(
+    formal_inputs: FormalBundleInputs, pinned_production_trust_key: str
+) -> None:
+    """`RuntimeBundle.load()` は trust anchor そのものを引数として受け取らない。
+
+    やさしい説明: このテストが今回の修正の骨格です。以前は呼び出し元が `TrustAnchor`
+    を直接渡せたため、自分で鍵を作り自分で「正規リリース一覧」を署名すれば、その場で
+    作った成果物でも本番起動できてしまいました。許可証を自分で発行できるなら許可証の
+    意味が無いので、引数そのものを廃止しました。ここでは (1) signature に
+    `trust_anchor` が存在しないこと、(2) 代わりに「場所」だけを渡す
+    `trust_registry_path` があること、(3) 昔の呼び方をしても TypeError で弾かれる
+    ことを確かめます。
+    """
+    parameters = inspect.signature(RuntimeBundle.load).parameters
+    assert "trust_anchor" not in parameters
+    assert "trust_registry_path" in parameters
+
+    caller_anchor = TrustAnchor.load(
+        formal_inputs.registry_path, verification_public_keys=[fx.public_key_hex()]
+    )
+    with pytest.raises(TypeError):
+        RuntimeBundle.load(
+            **formal_inputs.as_load_kwargs(), trust_anchor=caller_anchor
+        )
+
+
+def test_self_signed_registry_cannot_reach_live_startup(
+    formal_inputs: FormalBundleInputs,
+) -> None:
+    """整合した成果物一式でも、本番鍵が固定されていなければ live 起動しない。
+
+    やさしい説明: `formal_inputs` の一式は hash も系譜も完全に整合していて、テスト用の
+    鍵で正しく署名された registry も揃っています。それでも「その鍵を本番の発行者として
+    認める」という宣言が source 側に無い限り、起動は必ず拒否されます。
+    修正前のコードは、この自己署名 anchor をそのまま受け取って `live_eligible=True` を
+    返していました。
+    """
+    assert ab.PRODUCTION_TRUST_ANCHOR_PUBLIC_KEYS == ()
+    with pytest.raises(TrustAnchorError, match="no production trust anchor public key"):
+        RuntimeBundle.load(**formal_inputs.as_load_kwargs())
+
+
+def test_registry_signed_by_non_production_key_cannot_reach_live_startup(
+    formal_inputs: FormalBundleInputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本番鍵とは別の鍵で署名された registry は、内容が整合していても起動に使えない。
+
+    やさしい説明: 「鍵が 1 つも無いから止まる」ではなく「知らない鍵だから止まる」ことを
+    確かめます。registry の中身（release entry）は正規のものと完全に同一で、hash も
+    hardware profile もすべて一致します。違うのは署名した鍵だけです。攻撃者が自前の鍵で
+    どれだけ整合した一覧を作っても、source 固定鍵で検証できない以上は通りません。
+    """
+    monkeypatch.setattr(
+        ab, "PRODUCTION_TRUST_ANCHOR_PUBLIC_KEYS", (fx.public_key_hex(),)
+    )
+    entry = json.loads(formal_inputs.registry_path.read_bytes())["releases"][0]
+    forged_registry = fx.write_trust_registry(
+        tmp_path / "attacker" / "releases.json",
+        [entry],
+        seed=fx.UNTRUSTED_SIGNING_KEY_SEED,
+    )
+    with pytest.raises(TrustAnchorError, match="does not verify against any pinned key"):
+        RuntimeBundle.load(
+            **formal_inputs.as_load_kwargs(trust_registry_path=forged_registry)
+        )
+
+
+def test_load_without_registry_path_is_rejected(
+    formal_inputs: FormalBundleInputs,
+    pinned_production_trust_key: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """registry の所在が別チャネルで与えられていなければ live 起動できない。
 
     やさしい説明: 「一覧を見ないで起動する」という抜け道が無いことを確かめます。
+    path 未指定かつ環境変数も未設定なら、鍵が固定されていても起動しません。
     """
-    with pytest.raises(BundleLoadError, match="requires a TrustAnchor"):
-        RuntimeBundle.load(**formal_inputs.as_load_kwargs(trust_anchor=None))
+    monkeypatch.delenv(ab.TRUST_REGISTRY_PATH_ENV, raising=False)
+    with pytest.raises(TrustAnchorError, match="registry path is not set"):
+        RuntimeBundle.load(**formal_inputs.as_load_kwargs(trust_registry_path=None))
 
 
 def test_caller_produced_artifacts_are_never_live_eligible(
-    formal_inputs: FormalBundleInputs, tmp_path: Path
+    formal_inputs: FormalBundleInputs,
+    tmp_path: Path,
+    pinned_production_trust_key: str,
 ) -> None:
     """caller が自作した package / descriptor / store の組では live_eligible にならない。
 
@@ -185,7 +264,7 @@ def test_caller_produced_artifacts_are_never_live_eligible(
         choice_capability_hash=choice_capability,
     )
 
-    # 信頼 root は正規のもの（caller は署名できない）。
+    # 信頼 root は正規のもの（caller は署名できないうえ、anchor 自体も渡せない）。
     with pytest.raises(BundleLoadError, match="not registered in trusted release registry"):
         RuntimeBundle.load(
             combat_package_dir=forged / "combat",
@@ -194,7 +273,7 @@ def test_caller_produced_artifacts_are_never_live_eligible(
             descriptors=descriptors,
             target_profile=formal_inputs.target_profile,
             host_profile=formal_inputs.host_profile,
-            trust_anchor=formal_inputs.trust_anchor,
+            trust_registry_path=formal_inputs.registry_path,
         )
 
 
@@ -262,8 +341,8 @@ def test_production_trust_anchor_is_fail_closed(tmp_path: Path) -> None:
     やさしい説明: 鍵をまだ配っていないのに本番起動できてしまうと危険なので、既定では
     必ず失敗します。テスト用の鍵が本番鍵に紛れ込んでいないことも併せて確認します。
     """
-    assert PRODUCTION_TRUST_ANCHOR_PUBLIC_KEYS == ()
-    assert fx.public_key_hex() not in PRODUCTION_TRUST_ANCHOR_PUBLIC_KEYS
+    assert ab.PRODUCTION_TRUST_ANCHOR_PUBLIC_KEYS == ()
+    assert fx.public_key_hex() not in ab.PRODUCTION_TRUST_ANCHOR_PUBLIC_KEYS
     with pytest.raises(TrustAnchorError, match="no production trust anchor public key"):
         load_production_trust_anchor(tmp_path / "releases.json")
 
@@ -277,7 +356,10 @@ def test_production_trust_anchor_is_fail_closed(tmp_path: Path) -> None:
     ],
 )
 def test_registered_parent_identity_swap_is_rejected(
-    formal_inputs: FormalBundleInputs, tmp_path: Path, swapped_key: str
+    formal_inputs: FormalBundleInputs,
+    tmp_path: Path,
+    swapped_key: str,
+    pinned_production_trust_key: str,
 ) -> None:
     """registry が固定した parent identity と descriptor がずれれば起動しない。
 
@@ -287,10 +369,9 @@ def test_registered_parent_identity_swap_is_rejected(
     entry = dict(json.loads(formal_inputs.registry_path.read_bytes())["releases"][0])
     entry[swapped_key] = fx.hash_of("some-other-artifact")
     registry = fx.write_trust_registry(tmp_path / "swap" / "releases.json", [entry])
-    anchor = TrustAnchor.load(registry, verification_public_keys=[fx.public_key_hex()])
 
     with pytest.raises(BundleLoadError, match="identity_hash mismatch"):
-        RuntimeBundle.load(**formal_inputs.as_load_kwargs(trust_anchor=anchor))
+        RuntimeBundle.load(**formal_inputs.as_load_kwargs(trust_registry_path=registry))
 
 
 def test_duplicate_release_entries_are_rejected(
@@ -332,7 +413,10 @@ def test_unsupported_registry_schema_version_is_rejected(
     ],
 )
 def test_host_profile_value_mismatch_blocks_startup(
-    formal_inputs: FormalBundleInputs, field_name: str, wrong_value: Any
+    formal_inputs: FormalBundleInputs,
+    field_name: str,
+    wrong_value: Any,
+    pinned_production_trust_key: str,
 ) -> None:
     """実 hardware 値が信頼済みリリースの期待値と 1 項目でも違えば起動しない。
 
@@ -352,7 +436,7 @@ def test_host_profile_value_mismatch_blocks_startup(
 
 
 def test_host_profile_mismatch_lists_every_differing_field(
-    formal_inputs: FormalBundleInputs,
+    formal_inputs: FormalBundleInputs, pinned_production_trust_key: str
 ) -> None:
     """複数項目が違う場合は、そのすべてが報告される。"""
     mismatched = fx.default_host_profile(gpu_name="other-gpu", cuda_version="11.8")
@@ -387,7 +471,7 @@ def test_host_profile_wire_round_trip() -> None:
 
 
 def test_target_profile_ref_hash_mismatch_is_rejected(
-    formal_inputs: FormalBundleInputs,
+    formal_inputs: FormalBundleInputs, pinned_production_trust_key: str
 ) -> None:
     """target identity 参照が信頼済みリリースと違えば起動しない。"""
     from reinbalance_survivors_contracts.target_action import TargetProfileRef
@@ -455,7 +539,7 @@ def test_invalid_combat_manifest_is_rejected(
 
 
 def test_manifest_rejection_surfaces_through_bundle_load(
-    formal_inputs: FormalBundleInputs, tmp_path: Path
+    formal_inputs: FormalBundleInputs, tmp_path: Path, pinned_production_trust_key: str
 ) -> None:
     """manifest 改変は `RuntimeBundle.load()` 経由でも live 起動を止める。"""
     package = _mutated_package(
@@ -466,7 +550,7 @@ def test_manifest_rejection_surfaces_through_bundle_load(
 
 
 def test_valid_manifest_with_wrong_content_hash_is_rejected(
-    formal_inputs: FormalBundleInputs, tmp_path: Path
+    formal_inputs: FormalBundleInputs, tmp_path: Path, pinned_production_trust_key: str
 ) -> None:
     """manifest は正しい形でも、registry が固定した manifest hash と違えば拒否する。
 
@@ -573,14 +657,16 @@ def test_missing_package_directory_is_rejected(tmp_path: Path) -> None:
 # --- DAG / store / capability -------------------------------------------------
 
 
-def test_missing_descriptors_are_rejected(formal_inputs: FormalBundleInputs) -> None:
+def test_missing_descriptors_are_rejected(
+    formal_inputs: FormalBundleInputs, pinned_production_trust_key: str
+) -> None:
     """descriptor が空の bundle は起動しない。"""
     with pytest.raises(BundleLoadError, match="requires artifact descriptors"):
         RuntimeBundle.load(**formal_inputs.as_load_kwargs(descriptors=[]))
 
 
 def test_failed_perception_verdict_is_rejected(
-    formal_inputs: FormalBundleInputs, tmp_path: Path
+    formal_inputs: FormalBundleInputs, tmp_path: Path, pinned_production_trust_key: str
 ) -> None:
     """passed=False の perception final verdict では起動しない。"""
     from reinbalance_survivors_contracts.artifact_store import ArtifactStore
@@ -601,7 +687,7 @@ def test_failed_perception_verdict_is_rejected(
 
 
 def test_action_semantics_hash_mismatch_is_rejected(
-    formal_inputs: FormalBundleInputs,
+    formal_inputs: FormalBundleInputs, pinned_production_trust_key: str
 ) -> None:
     """action semantics が信頼済みリリースと違えば起動しない。"""
     other = ActionSemantics(
@@ -612,8 +698,14 @@ def test_action_semantics_hash_mismatch_is_rejected(
         RuntimeBundle.load(**formal_inputs.as_load_kwargs(action_semantics=other))
 
 
-def test_wrong_argument_types_are_rejected(formal_inputs: FormalBundleInputs) -> None:
-    """store / target profile / host profile の型を取り違えたら起動しない。"""
+def test_wrong_argument_types_are_rejected(
+    formal_inputs: FormalBundleInputs, pinned_production_trust_key: str
+) -> None:
+    """store / target profile / host profile の型を取り違えたら起動しない。
+
+    やさしい説明: これらの型検査は trust anchor を確立した **あと** に走ります。
+    信頼 root の確立が最初なので、鍵が固定されていなければ型の話に進む前に止まります。
+    """
     with pytest.raises(BundleLoadError, match="artifact_store must be"):
         RuntimeBundle.load(**formal_inputs.as_load_kwargs(artifact_store=object()))
     with pytest.raises(BundleLoadError, match="target_profile must be"):

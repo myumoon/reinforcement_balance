@@ -35,6 +35,7 @@ from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
 from reinbalance_survivors_contracts.artifact_store import ArtifactStore
 from reinbalance_survivors_contracts.target_action import TargetProfileRef
 
+from survivors.runtime import artifact_bundle as ab
 from survivors.runtime.artifact_bundle import HostRuntimeProfile, TrustAnchor
 
 from . import _runtime_fixtures as fx
@@ -239,6 +240,11 @@ class FormalBundleInputs:
 
         やさしい説明: 既定は「全部正常」の組み合わせです。`overrides` で 1 項目だけ
         差し替えると、その 1 点だけが異常な入力を簡単に作れます。
+
+        渡せるのは registry ファイルの **場所** だけで、`TrustAnchor` そのものは渡せ
+        ません。`RuntimeBundle.load()` は source 固定鍵で自分で anchor を作るため、
+        この kwargs だけで live 起動するには `PRODUCTION_TRUST_ANCHOR_PUBLIC_KEYS` に
+        test 鍵が固定されている必要があります（`pinned_production_trust_key` fixture）。
         """
         kwargs: dict[str, Any] = {
             "combat_package_dir": self.combat_dir,
@@ -247,7 +253,7 @@ class FormalBundleInputs:
             "descriptors": self.descriptors,
             "target_profile": self.target_profile,
             "host_profile": self.host_profile,
-            "trust_anchor": self.trust_anchor,
+            "trust_registry_path": self.registry_path,
         }
         kwargs.update(overrides)
         return kwargs
@@ -317,3 +323,23 @@ def _build_formal_inputs(root: Path) -> FormalBundleInputs:
 def formal_inputs(tmp_path_factory: pytest.TempPathFactory) -> FormalBundleInputs:
     """検証を通過する formal 成果物一式を session 単位で 1 度だけ組み立てる。"""
     return _build_formal_inputs(tmp_path_factory.mktemp("formal"))
+
+
+@pytest.fixture
+def pinned_production_trust_key(monkeypatch: pytest.MonkeyPatch) -> str:
+    """test 用署名鍵を、本番 trust anchor 鍵として当該 test の間だけ固定する。
+
+    やさしい説明: 本番の署名鍵はまだ発行されていないため、既定では
+    `PRODUCTION_TRUST_ANCHOR_PUBLIC_KEYS` は空で、`RuntimeBundle.load()` は必ず
+    失敗します（fail-closed）。正常系テストを回すには「発行者はこの鍵」という状態を
+    一時的に作る必要があるので、この fixture がそれを担います。
+
+    重要: これは **autouse にしません**。全テストへ自動適用すると、鍵が固定されて
+    いないときに起動を拒否するという最も重要な既定挙動を、どのテストも検証できなく
+    なるためです。鍵が無い/違う場合の拒否を確かめるテストは、この fixture を要求
+    しないことでその状態を再現します。`monkeypatch` は function scope なので、
+    test 終了時に空 tuple の既定へ自動的に戻ります。
+    """
+    key = fx.public_key_hex()
+    monkeypatch.setattr(ab, "PRODUCTION_TRUST_ANCHOR_PUBLIC_KEYS", (key,))
+    return key

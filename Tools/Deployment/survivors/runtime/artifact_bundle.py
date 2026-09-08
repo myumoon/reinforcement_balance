@@ -15,8 +15,12 @@ bundle を組み立てる。combat model は 03-05 が発行する `manifest.jso
 
     重要な設計方針として、呼び出し元がその場で自作した package / descriptor /
     ArtifactStore だけでは絶対に live 起動できません。別途配布された署名済み一覧に
-    その identity が載っていることが必須です。また pickle 等の任意コード実行を伴う
-    読み込みは一切使わず、JSON と `torch.load(weights_only=True)` だけを使います。
+    その identity が載っていることが必須です。さらに「誰の署名を信じるか」も呼び出し
+    元は選べません。`RuntimeBundle.load()` は trust anchor を引数で受け取らず、常に
+    `load_production_trust_anchor()` を通して source 固定鍵
+    `PRODUCTION_TRUST_ANCHOR_PUBLIC_KEYS` でのみ registry を検証します。
+    また pickle 等の任意コード実行を伴う読み込みは一切使わず、JSON と
+    `torch.load(weights_only=True)` だけを使います。
 """
 from __future__ import annotations
 
@@ -889,27 +893,38 @@ class RuntimeBundle:
         descriptors: Sequence[ArtifactDescriptor],
         target_profile: TargetProfileRef,
         host_profile: HostRuntimeProfile,
-        trust_anchor: TrustAnchor,
+        trust_registry_path: Path | str | None = None,
         action_semantics: ActionSemantics | None = None,
     ) -> "RuntimeBundle":
         """live-capable bundle を、信頼 root への exact 一致を前提にロードする。
 
         やさしい説明: 起動可否を次の順で判定します。
+        (0) 信頼 root（trust anchor）そのものを、source 固定の本番鍵で確立できるか、
         (1) 成果物の系譜（DAG）が正しいか、(2) その runtime bundle が別チャネル配布の
         署名済みリリース一覧に **載っているか**、(3) 保管庫に実体があるか、
         (4) 実際のハードウェアがリリース想定と一致するか、(5) 箱の中身の指紋が
         すべて一致するか。ここまで全部通って初めて `live_eligible=True` になります。
 
-        `trust_anchor` は必須です。呼び出し元が同じ呼び出しの中で自作した package /
-        descriptor / ArtifactStore の組み合わせだけでは、(2) を通過できないため
-        live 起動にはなりません。
+        重要: 呼び出し元は trust anchor そのものを渡せません。anchor は必ず
+        `load_production_trust_anchor()` を通して作られ、署名検証には source 側に
+        固定された `PRODUCTION_TRUST_ANCHOR_PUBLIC_KEYS` だけを使います。
+        `trust_registry_path` で渡せるのは「一覧ファイルの置き場所」だけであり、
+        誰の署名を信じるかは呼び出し元から一切変更できません。None のときは
+        環境変数 `TRUST_REGISTRY_PATH_ENV` から解決します。
+
+        やさしい説明（なぜこの形か）: 以前は呼び出し元が `TrustAnchor` を直接渡せた
+        ため、自分で鍵を作って自分で「正規リリース一覧」を署名すれば、その場で作った
+        成果物でも本番起動できてしまいました。許可証を自分で発行できてしまっては
+        許可証の意味が無いので、発行者の鍵は source 側に固定してあります。
+
+        本番鍵が未固定、registry path が未指定、署名が固定鍵で検証できない、のいずれ
+        でも `TrustAnchorError`（`BundleLoadError` の派生）で停止します。
         """
         semantics = action_semantics or ActionSemantics.default_v1()
-        if not isinstance(trust_anchor, TrustAnchor):
-            raise BundleLoadError(
-                "live bundle startup requires a TrustAnchor loaded from a separately "
-                "distributed, signed trusted release registry"
-            )
+        # (0) 信頼 root の確立。caller 由来の入力を見る前に、source 固定鍵で署名検証
+        # できた registry だけを anchor として採用する。失敗は TrustAnchorError
+        # （BundleLoadError の派生）としてそのまま伝播させる。
+        trust_anchor = load_production_trust_anchor(trust_registry_path)
         if not isinstance(artifact_store, ArtifactStore):
             raise BundleLoadError("artifact_store must be an ArtifactStore")
         if not isinstance(target_profile, TargetProfileRef):
