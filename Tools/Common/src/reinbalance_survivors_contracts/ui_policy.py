@@ -363,9 +363,14 @@ class NonModelUiPolicyConfigV1:
                 isinstance(value, str) and value != "",
                 f"{name} must be a non-empty string",
             )
+        try:
+            threshold_in_range = is_strict_number(self.hp_chicken_threshold) and (
+                0.0 <= float(self.hp_chicken_threshold) <= 1.0
+            )
+        except OverflowError:
+            threshold_in_range = False
         ensure(
-            is_strict_number(self.hp_chicken_threshold)
-            and 0.0 <= float(self.hp_chicken_threshold) <= 1.0,
+            threshold_in_range,
             "hp_chicken_threshold must be a real number in [0, 1]",
         )
         ensure(
