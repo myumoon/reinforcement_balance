@@ -13,15 +13,18 @@ version = "0.1.0"
 description = "Survivors deployment runtime (capture / perception / control). Consumes reinbalance-survivors-contracts."
 requires-python = ">=3.11"
 # 共有 contracts パッケージは、本パッケージより先に Tools/Common から editable で
-# インストールする：`pip install -e Tools/Common`。onnxruntime は ItemSelector
-# 推論、opencv は review MP4 用に固定する。torch は後続の artifact bundle で追加する。
+# インストールする：`pip install -e Tools/Common`。opencv は review MP4 用に固定する。
+# torch は 03-05 combat package (model.pt) のロード、onnxruntime は 02-03 ItemSelector
+# 推論、cryptography は trusted release registry の Ed25519 署名検証にだけ使う。
 dependencies = [
     "reinbalance-survivors-contracts==0.1.0",
     "numpy==1.26.4",
     "opencv-python==4.10.0.84",
     "PyYAML==6.0.2",
     "dxcam==0.3.0",
+    "torch==2.11.0",
     "onnxruntime==1.18.1",
+    "cryptography==49.0.0",
 ]
 
 [project.optional-dependencies]

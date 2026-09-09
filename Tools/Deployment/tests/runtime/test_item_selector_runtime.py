@@ -15,7 +15,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from conftest import (
+from .conftest import (
     ItemSelectorPackageFixture,
     _STATIC_BATCH_SELECTOR_ONNX,
     _STATIC_CANDIDATES_SELECTOR_ONNX,
