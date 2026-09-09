@@ -588,6 +588,46 @@ def test_model_file_hash_mismatch_is_rejected(
         ab._load_combat_package(package)
 
 
+def test_model_is_loaded_from_verified_bytes_not_reread_from_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hash 照合後に model.pt をすり替えても、すり替え後の重みは使われない（TOCTOU 回帰）。
+
+    やさしい説明: ハッシュ照合とファイル読み込みの間に中身がすり替わる競合を模して
+    います。`_verified_bytes()` が返した検証済み bytes をそのまま deserialize すれば
+    すり替えの影響を受けませんが、path から再読込していると差し替え後の重みが
+    使われてしまいます。
+    """
+    package = tmp_path / "combat"
+    model, model_config = fx.build_combat_model(seed=0)
+    fx.write_combat_package(package, model, model_config)
+
+    swapped_model, _ = fx.build_combat_model(seed=1)
+    original_verified_bytes = ab._verified_bytes
+
+    def _swap_model_file_after_verification(
+        root: Path, name: str, expected_sha256: str
+    ) -> tuple[Path, bytes]:
+        path, verified_bytes = original_verified_bytes(root, name, expected_sha256)
+        if name == ab.COMBAT_MODEL_FILENAME:
+            th.save(
+                {
+                    "model_config": model_config,
+                    "model_state_dict": swapped_model.state_dict(),
+                },
+                path,
+            )
+        return path, verified_bytes
+
+    monkeypatch.setattr(ab, "_verified_bytes", _swap_model_file_after_verification)
+
+    policy, _ = ab._load_combat_package(package)
+
+    loaded_state_dict = policy.model.state_dict()
+    for name, original_parameter in model.state_dict().items():
+        assert th.equal(loaded_state_dict[name], original_parameter)
+
+
 def test_model_payload_structure_mismatch_is_rejected(tmp_path: Path) -> None:
     """`model.pt` が `{model_config, model_state_dict}` 以外なら拒否する。"""
     package = tmp_path / "combat"

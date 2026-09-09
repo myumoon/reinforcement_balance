@@ -24,6 +24,7 @@ bundle を組み立てる。combat model は 03-05 が発行する `manifest.jso
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 from dataclasses import dataclass, field
@@ -694,9 +695,9 @@ def _load_combat_package(package_dir: Path) -> tuple[CombatPolicy, dict[str, Any
         raise BundleLoadError(f"combat package directory not found: {root}")
     manifest = _read_combat_manifest(root)
 
-    model_path, _ = _verified_bytes(root, COMBAT_MODEL_FILENAME, manifest["model_sha256"])
+    _, model_bytes = _verified_bytes(root, COMBAT_MODEL_FILENAME, manifest["model_sha256"])
     try:
-        payload = th.load(model_path, map_location="cpu", weights_only=True)
+        payload = th.load(io.BytesIO(model_bytes), map_location="cpu", weights_only=True)
     except Exception as exc:  # noqa: BLE001  # torch は多様な例外型を送出する
         raise BundleLoadError(f"cannot load combat model.pt: {exc}") from exc
 
