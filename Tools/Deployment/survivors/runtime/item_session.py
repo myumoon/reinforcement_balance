@@ -267,6 +267,10 @@ class ItemSession:
             raise ItemSessionError("item_context must be ItemDecisionFeatures")
         if not isinstance(ui_presentation, UiPresentationSnapshotV1):
             raise ItemSessionError("ui_presentation must be UiPresentationSnapshotV1")
+        if item_context.decision_id != ui_presentation.snapshot_id:
+            raise ItemSessionError(
+                "item_context decision_id does not match current UI snapshot"
+            )
         if item_context.feature_schema != self._feature_schema:
             raise ItemSessionError(
                 f"feature_schema mismatch: {item_context.feature_schema!r} != {self._feature_schema!r}"
