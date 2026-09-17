@@ -613,6 +613,82 @@ class TestSnapshotTimeAndValidityGates:
         assert runtime.combat_session.recurrent_state_copy() is None
         assert runtime.combat_session.episode_start_pending is True
 
+    def test_age_gate_rejection_still_resets_episode_start_state(self, runtime):
+        """レビュー再現: age gate 拒否でも episode_start=True の reset は必ず行われる。
+
+        やさしい説明: reset が age gate より後ろにあると、新 run 初回 tick が age gate
+        で弾かれるだけで前 episode の LSTM state が持ち越される回帰を捕えます。
+        """
+        first = _snap("gameplay", ts=1_000_000_000)
+        runtime.decide(first, now_ns=_fresh_now(first), episode_start=True)
+        assert runtime.combat_session.recurrent_state_copy() is not None
+
+        stale = _snap("gameplay", ts=5_000_000_000)
+        decision = runtime.decide(
+            stale, now_ns=stale.captured_ns + 10 * TICK_NS, episode_start=True
+        )
+
+        assert decision.kind == "no_op"
+        assert "age gate" in decision.reason
+        assert runtime.combat_session.recurrent_state_copy() is None
+        assert runtime.combat_session.episode_start_pending is True
+
+    def test_binding_gate_rejection_still_resets_episode_start_state(self, runtime):
+        """レビュー再現: binding gate 拒否でも episode_start=True の reset は必ず行われる。
+
+        やさしい説明: reset が binding gate より後ろにあると、束縛不一致で stop する
+        だけで前 episode の LSTM state が持ち越される回帰を捕えます。
+        """
+        first = _snap("gameplay", ts=1_000_000_000)
+        runtime.decide(first, now_ns=_fresh_now(first), episode_start=True)
+        assert runtime.combat_session.recurrent_state_copy() is not None
+
+        snapshot = _snap("gameplay", ts=5_000_000_000)
+        unbound_input = dataclasses.replace(
+            snapshot.ui_policy_input, source_snapshot_hash="x" * 64
+        )
+        unbound_snapshot = dataclasses.replace(snapshot, ui_policy_input=unbound_input)
+
+        decision = runtime.decide(
+            unbound_snapshot, now_ns=_fresh_now(unbound_snapshot), episode_start=True
+        )
+
+        assert decision.kind == "stop"
+        assert "binding" in decision.reason
+        assert runtime.combat_session.recurrent_state_copy() is None
+        assert runtime.combat_session.episode_start_pending is True
+
+    def test_gate_rejected_episode_start_recovers_full_parity_with_clean_run(
+        self, golden_combat_policy
+    ):
+        """レビュー再現: gate拒否直後のepisode_start=False推論が、clean runの初回推論と一致する。
+
+        やさしい説明: reset済みならAgentRuntime.decideのepisode_start引数に関わらず
+        combat_sessionの内部stateがNoneのまま推論されることを、実際のaction_index/
+        confidenceの一致で確認します（差があれば前episodeの記憶が漏れています）。
+        """
+        contaminated = AgentRuntime(RuntimeBundle.from_golden_fixture(golden_combat_policy))
+        prior = _snap("gameplay", ts=1_000_000_000)
+        contaminated.decide(prior, now_ns=_fresh_now(prior), episode_start=True)
+        assert contaminated.combat_session.recurrent_state_copy() is not None
+
+        healthy = _snap("gameplay", ts=5_000_000_000)
+        rejected = contaminated.decide(
+            healthy, now_ns=healthy.captured_ns + 10 * TICK_NS, episode_start=True
+        )
+        assert rejected.kind == "no_op"
+        assert "age gate" in rejected.reason
+
+        recovered = contaminated.decide(healthy, now_ns=_fresh_now(healthy))
+
+        clean = AgentRuntime(RuntimeBundle.from_golden_fixture(golden_combat_policy))
+        baseline = clean.decide(healthy, now_ns=_fresh_now(healthy), episode_start=True)
+
+        assert recovered.kind == "move"
+        assert baseline.kind == "move"
+        assert recovered.action_index == baseline.action_index
+        assert recovered.confidence == pytest.approx(baseline.confidence)
+
 
 class TestEpisodeBoundaryReset:
     """[指摘5] death / result / unknown gap で recurrent state を破棄する。

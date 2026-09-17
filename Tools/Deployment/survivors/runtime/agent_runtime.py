@@ -347,6 +347,14 @@ class AgentRuntime:
             )
 
         raw_state = snapshot.screen_state
+
+        # episode_start の reset は以降の全 gate より先に確定させる。
+        # stale/age/binding gate のどれか1つでもepisode_start=Trueのsnapshotを
+        # 拒否すると、reset がgateより後ろにある限り一切実行されず、前episodeの
+        # LSTM stateとepisode_start_pending=Falseが次runへ無言で持ち越されてしまう。
+        if episode_start:
+            self.reset_episode()
+
         if (
             not episode_start
             and self._last_snapshot_timestamp_ns is not None
@@ -379,12 +387,6 @@ class AgentRuntime:
                 started_ns,
                 scheduled_ns=current_ns,
             )
-
-        # episode_start のreset は checkpoint取得より先に確定させる。
-        # 先にcheckpointを取ると、reset後にtimeout/stopした場合の rollback が
-        # reset前(前episode)のLSTM stateとepisode_start=Falseを復元してしまう。
-        if episode_start:
-            self.reset_episode()
 
         checkpoint = (
             self._combat_session.recurrent_state_copy(),
