@@ -10,7 +10,9 @@ CANDIDATES=(
   "/home/$USER/miniconda-wsl/envs/reinbalance/bin/python"
   "/home/$USER/miniconda3/envs/reinbalance/bin/python"
   "/home/$USER/miniforge3/envs/reinbalance/bin/python"
+  "/c/Users/$USER/Anaconda3/envs/reinbalance/python.exe"
   "/mnt/c/Users/$USER/anaconda3/envs/reinbalance/python.exe"
+  "/mnt/c/Users/$USER/Anaconda3/envs/reinbalance/python.exe"
   "/mnt/c/Users/$USER/miniconda3/envs/reinbalance/python.exe"
 )
 
@@ -33,7 +35,9 @@ echo "Using: $PYTHON"
 # build-system の固定 setuptools は環境構築時に導入済みのものを使う。
 # 読み取り専用の共有 conda 環境を変更せず、current worktree の editable package を一時 user base へ置く。
 PYTEST_USER_BASE="${TMPDIR:-/tmp}/reinbalance-pytest-userbase-${UID}"
+PYTEST_BASETEMP="${PWD}/.claude/pytest-runtime-${UID}-$$"
 PYTHONUSERBASE="$PYTEST_USER_BASE" "$PYTHON" -m pip install \
   --user -e Tools/Common --no-build-isolation -q
 PYTHONPATH="${PWD}/Tools/Deployment${PYTHONPATH:+:${PYTHONPATH}}" \
-PYTHONUSERBASE="$PYTEST_USER_BASE" "$PYTHON" -m pytest "$@"
+PYTHONUSERBASE="$PYTEST_USER_BASE" "$PYTHON" -m pytest \
+  --basetemp="$PYTEST_BASETEMP" "$@"
