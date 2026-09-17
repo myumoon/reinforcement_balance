@@ -41,6 +41,20 @@ from survivors.runtime.artifact_bundle import HostRuntimeProfile, TrustAnchor
 from . import _runtime_fixtures as fx
 
 
+@pytest.fixture()
+def golden_combat_policy() -> ab.CombatPolicy:
+    """決定的な重みを持つ検証済み combat policy を返す。
+
+    やさしい説明: 03-05 の実契約と同じ GRU actor を小さく組み立て、runtime core の
+    state 継続と action parity を package I/O から切り離して確認します。
+    """
+    model, config = fx.build_combat_model(seed=7)
+    runtime_model = ab.CombatGruPolicy(**config)
+    runtime_model.load_state_dict(model.state_dict(), strict=True)
+    runtime_model.eval()
+    return ab.CombatPolicy(model=runtime_model, **config)
+
+
 _TINY_SELECTOR_ONNX = base64.b64decode(
     "CAg6wwMKOxILcmVkdWNlX2F4ZXMiCENvbnN0YW50KiIKBXZhbHVlKhYIARAHOgr/"
     "//////////8BQgRheGVzoAEECkUKEmNhbmRpZGF0ZV9mZWF0dXJlcwoLcmVkdWNl"
