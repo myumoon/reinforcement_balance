@@ -117,6 +117,29 @@ class CombatSession:
         self._recurrent_state = None
         self._episode_start = True
 
+    def restore_recurrent_state(
+        self, state: np.ndarray | None, *, episode_start: bool
+    ) -> None:
+        """timeout 前の recurrent state と episode flag を一対で復元する。
+
+        やさしい説明: 破棄した推論の記憶だけが残らないよう、runtime の rollback を原子的にします。
+        """
+        if (state is None) != episode_start:
+            raise ValueError("state and episode_start must be restored together")
+        if state is None:
+            self._recurrent_state = None
+            self._episode_start = True
+            return
+        restored = np.asarray(state)
+        if (
+            restored.dtype != np.float32
+            or restored.shape != self.recurrent_state_shape
+            or not np.all(np.isfinite(restored))
+        ):
+            raise ValueError("invalid recurrent state checkpoint")
+        self._recurrent_state = th.from_numpy(restored[0].copy())
+        self._episode_start = False
+
     def decide(self, obs_vector: np.ndarray, *, episode_start: bool = False) -> CombatDecision:
         """一つの observation から決定的な action を返す。
 
@@ -177,4 +200,3 @@ class CombatSession:
         やさしい説明: runtime 利用側の段階移行中も state の意味は一つに保ちます。
         """
         return self.recurrent_state_copy()
-
