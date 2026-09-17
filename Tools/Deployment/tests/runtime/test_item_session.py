@@ -89,7 +89,10 @@ def _item_candidate(item_id: str) -> CandidateFeatures:
 
 
 def _make_item_context(
-    candidates: list[CandidateFeatures], fallback_kind: str = "chicken"
+    candidates: list[CandidateFeatures],
+    fallback_kind: str = "chicken",
+    *,
+    decision_id: str = "s" * 64,
 ) -> ItemDecisionFeatures:
     """candidates から ItemDecisionFeatures を構築する。
 
@@ -98,7 +101,7 @@ def _make_item_context(
     choice_count = len(candidates)
     card_mask = [True] * choice_count + [False] * (NMAX - choice_count)
     return ItemDecisionFeatures(
-        decision_id="test-decision-1",
+        decision_id=decision_id,
         feature_schema=FEATURE_SCHEMA,
         elapsed_time=30.0,
         level=3,
@@ -316,6 +319,19 @@ class TestTargetValidity:
         selector = _FakeSelector(logits=(9.0, 0.0, 0.0))
         with pytest.raises(ItemSessionError, match="not found"):
             _decide(selector, candidates, ui)
+
+    def test_stale_decision_id_is_rejected_even_when_candidates_match(self):
+        """別 snapshot の item feature は候補が同じでも拒否する。
+
+        やさしい説明: 古いカード特徴を現在 frame の同名カードへ再束縛する回帰を捕えます。
+        """
+        candidates = [_item_candidate("whip"), _item_candidate("knife")]
+        ui = _make_ui_presentation(candidates)
+        context = _make_item_context(candidates, decision_id="d" * 64)
+        selector = _FakeSelector(logits=(9.0, 0.0, 0.0))
+
+        with pytest.raises(ItemSessionError, match="decision_id"):
+            ItemSession(selector).decide(context, ui, **_POLICY_ARGS)
 
     def test_ambiguous_binding_is_rejected(self):
         """同一 choice_id/index が複数あれば一意解決できないので拒否する。
