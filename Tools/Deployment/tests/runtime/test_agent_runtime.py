@@ -422,6 +422,35 @@ class TestTypedScreenStateRouting:
         assert runtime.screen_scheduler.evaluation_count == 0
         assert runtime.combat_session.recurrent_state_copy() is None
 
+    @pytest.mark.parametrize(
+        "raw_screen_state",
+        ["gameplay", "level_up_items", "chest", "target_reached_transition"],
+    )
+    def test_low_confidence_known_hud_is_not_rejected_as_binding_mismatch(
+        self, runtime, raw_screen_state
+    ):
+        """レビュー再現: 低confidenceで UNKNOWN に落ちた既知HUD名を binding不一致にしない。
+
+        やさしい説明: 生成側(real_obs_assembler)の confidence gate を無視して raw 名
+        だけで screen_state を比較すると、正規の低confidence UNKNOWNが不一致となり
+        reset前に stop してしまう回帰を捕えます。gameplay/level-up/chest/confirm の
+        全既知 raw 名で同じ経路を通ることを確認します。
+        """
+        hud, world = _hud_world(raw_screen_state, ts=9_000_000_000)
+        low_confidence_hud = dataclasses.replace(hud, screen_state_confidence=0.1)
+        schema = DeployObsSchema.default_v1()
+        snap = RealObsAssembler().assemble(low_confidence_hud, world, schema, (1000, 1000))
+        assert snap is not None
+        assert snap.ui_policy_input is not None
+        assert snap.ui_policy_input.screen_state == ScreenState.UNKNOWN
+
+        decision = runtime.decide(snap, now_ns=_fresh_now(snap), episode_start=True)
+
+        assert decision.kind == "no_op"
+        assert decision.reason == "unknown screen state; recurrent state reset"
+        assert runtime.combat_session.recurrent_state_copy() is None
+        assert runtime.combat_session.episode_start_pending is True
+
     def test_effect_owner_is_ui_state_machine(self, runtime):
         """test_effect_owner_is_ui_state_machine の契約を検証する。
 
@@ -544,6 +573,39 @@ class TestSnapshotTimeAndValidityGates:
 
         decision = runtime.decide(
             snapshot, now_ns=_fresh_now(snapshot), episode_start=True
+        )
+
+        assert decision.kind == "no_op"
+        assert decision.reason == "inference timeout gate failed"
+        assert runtime.combat_session.recurrent_state_copy() is None
+        assert runtime.combat_session.episode_start_pending is True
+
+    def test_episode_start_timeout_restores_reset_state_not_prior_episode(
+        self, golden_combat_policy
+    ):
+        """レビュー再現: episode_start timeout の rollback が reset前(前episode)の
+        state を復元してはいけない。
+
+        やさしい説明: checkpointをreset前に取ると、timeout時に前episodeのLSTM stateと
+        episode_start=Falseが蘇る回帰を捕えます。1回目の成功でprior episode stateを
+        作り、2回目のepisode_start=True呼び出しをtimeoutさせて検証します。
+        """
+        bundle = RuntimeBundle.from_golden_fixture(golden_combat_policy)
+        runtime = AgentRuntime(
+            bundle,
+            scheduler=DecisionScheduler(inference_timeout_ns=5),
+            clock_ns=_TickingClock(100, 105, 200, 400, 410),
+        )
+        first = _snap("gameplay", ts=1_000_000_000)
+        now = _fresh_now(first)
+        baseline = runtime.decide(first, now_ns=now, episode_start=True)
+        assert baseline.kind == "move"
+        assert runtime.combat_session.recurrent_state_copy() is not None
+        assert runtime.combat_session.episode_start_pending is False
+
+        second = _snap("gameplay", ts=5_000_000_000)
+        decision = runtime.decide(
+            second, now_ns=_fresh_now(second) + TICK_NS, episode_start=True
         )
 
         assert decision.kind == "no_op"

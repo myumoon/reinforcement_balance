@@ -380,14 +380,18 @@ class AgentRuntime:
                 scheduled_ns=current_ns,
             )
 
+        # episode_start のreset は checkpoint取得より先に確定させる。
+        # 先にcheckpointを取ると、reset後にtimeout/stopした場合の rollback が
+        # reset前(前episode)のLSTM stateとepisode_start=Falseを復元してしまう。
+        if episode_start:
+            self.reset_episode()
+
         checkpoint = (
             self._combat_session.recurrent_state_copy(),
             self._combat_session.episode_start_pending,
             self._last_snapshot_timestamp_ns,
             self._last_screen_state,
         )
-        if episode_start:
-            self.reset_episode()
 
         screen_intent: UiIntentV1 | None = None
         if isinstance(policy_input, UiPolicyInputV1):
@@ -519,11 +523,19 @@ class AgentRuntime:
                 snapshot.source_content_hash,
             ),
             ("ui_state_key", policy_input.ui_state_key, snapshot.ui_state_key),
-            ("screen_state", policy_input.screen_state, expected_screen_state),
         )
         for name, actual, expected in bindings:
             if actual != expected:
                 return f"{name} does not match PerceptionSnapshot"
+        # 生成側(real_obs_assembler)は screen_state_confidence が閾値未満だと
+        # 既知HUD名でも UNKNOWN に落とす。raw名からの期待値だけで比較すると
+        # その正規の低confidence UNKNOWNを不一致として誤検知するため、
+        # UNKNOWNは安全側の縮退として個別に許容する(他の値の不一致は従来通り拒否)。
+        if (
+            policy_input.screen_state != expected_screen_state
+            and policy_input.screen_state != ScreenState.UNKNOWN
+        ):
+            return "screen_state does not match PerceptionSnapshot"
         return None
 
     def _accept_snapshot(
