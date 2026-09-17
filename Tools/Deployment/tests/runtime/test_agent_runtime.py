@@ -383,6 +383,45 @@ class TestTypedScreenStateRouting:
         assert 0 <= decision.action_index < 9
         assert decision.ui_intent is None
 
+    @pytest.mark.parametrize(
+        ("screen_state", "field", "value"),
+        [
+            ("gameplay", "source_snapshot_hash", "x" * 64),
+            ("gameplay", "source_frame_hash", "x" * 64),
+            ("gameplay", "source_content_hash", "x" * 64),
+            ("gameplay", "ui_state_key", "x" * 64),
+            ("chest", "screen_state", ScreenState.GAMEPLAY),
+            ("level_up_items", "screen_state", ScreenState.GAMEPLAY),
+            ("target_reached_transition", "screen_state", ScreenState.GAMEPLAY),
+        ],
+    )
+    def test_unbound_ui_policy_input_is_rejected_before_routing(
+        self, runtime, screen_state, field, value
+    ):
+        """外側 snapshot と一致しない typed UI 入力を経路選択前に拒否する。
+
+        やさしい説明: 別 frame の状態を使って move/ui を選ぶ回帰を全 binding で捕えます。
+        """
+        snapshot = _snap(screen_state)
+        assert snapshot.ui_policy_input is not None
+        unbound_input = dataclasses.replace(
+            snapshot.ui_policy_input, **{field: value}
+        )
+        unbound_snapshot = dataclasses.replace(
+            snapshot, ui_policy_input=unbound_input
+        )
+
+        decision = runtime.decide(
+            unbound_snapshot,
+            now_ns=_fresh_now(unbound_snapshot),
+            episode_start=True,
+        )
+
+        assert decision.kind in {"no_op", "stop"}
+        assert "binding" in decision.reason
+        assert runtime.screen_scheduler.evaluation_count == 0
+        assert runtime.combat_session.recurrent_state_copy() is None
+
     def test_effect_owner_is_ui_state_machine(self, runtime):
         """test_effect_owner_is_ui_state_machine の契約を検証する。
 
@@ -440,6 +479,22 @@ class TestSnapshotTimeAndValidityGates:
         )
         assert decision.kind == "no_op"
 
+    def test_future_snapshot_does_not_poison_next_valid_snapshot(self, runtime):
+        """未来 timestamp の拒否後も次の正常 snapshot を処理する。
+
+        やさしい説明: age gate 前に replay cursor を進めて正常 frame まで stale 扱いする回帰を捕えます。
+        """
+        future = _snap("gameplay", ts=2_000_000_000)
+        rejected = runtime.decide(
+            future, now_ns=1_000_000_000, episode_start=True
+        )
+        assert rejected.kind == "no_op"
+        assert "age gate" in rejected.reason
+
+        valid = _snap("gameplay", ts=1_033_000_000)
+        accepted = runtime.decide(valid, now_ns=_fresh_now(valid))
+        assert accepted.kind == "move"
+
     def test_low_global_validity_does_not_return_move(self, runtime):
         """観測が信用できないときは movement action を返さない。
 
@@ -471,6 +526,30 @@ class TestSnapshotTimeAndValidityGates:
         decision = runtime.decide(snap, now_ns=_fresh_now(snap), episode_start=True)
         assert decision.kind == "no_op"
         assert "timeout" in decision.reason
+
+    def test_inference_timeout_does_not_commit_recurrent_state(
+        self, golden_combat_policy
+    ):
+        """timeout した combat 推論は recurrent state を確定しない。
+
+        やさしい説明: 破棄した action の内部記憶だけが次 tick へ残る回帰を捕えます。
+        """
+        bundle = RuntimeBundle.from_golden_fixture(golden_combat_policy)
+        runtime = AgentRuntime(
+            bundle,
+            scheduler=DecisionScheduler(inference_timeout_ns=5),
+            clock_ns=_TickingClock(100, 110, 120),
+        )
+        snapshot = _snap("gameplay")
+
+        decision = runtime.decide(
+            snapshot, now_ns=_fresh_now(snapshot), episode_start=True
+        )
+
+        assert decision.kind == "no_op"
+        assert decision.reason == "inference timeout gate failed"
+        assert runtime.combat_session.recurrent_state_copy() is None
+        assert runtime.combat_session.episode_start_pending is True
 
 
 class TestEpisodeBoundaryReset:
