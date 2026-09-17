@@ -10,7 +10,9 @@ CANDIDATES=(
   "/home/$USER/miniconda-wsl/envs/reinbalance/bin/python"
   "/home/$USER/miniconda3/envs/reinbalance/bin/python"
   "/home/$USER/miniforge3/envs/reinbalance/bin/python"
+  "/c/Users/$USER/Anaconda3/envs/reinbalance/python.exe"
   "/mnt/c/Users/$USER/anaconda3/envs/reinbalance/python.exe"
+  "/mnt/c/Users/$USER/Anaconda3/envs/reinbalance/python.exe"
   "/mnt/c/Users/$USER/miniconda3/envs/reinbalance/python.exe"
 )
 
