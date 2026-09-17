@@ -32,6 +32,7 @@ from reinbalance_survivors_contracts.ui_policy import (
     UiPolicyInputV1,
 )
 from survivors.perception_snapshot import PerceptionSnapshot
+from survivors.real_obs_assembler import _HUD_TO_SCREEN_STATE
 
 from .artifact_bundle import REQUIRED_ACTION_DIM, RuntimeBundle
 from .combat_session import CombatSession, StaleSnapshotError
@@ -345,16 +346,10 @@ class AgentRuntime:
                 inference_finished_ns=self._clock_ns(),
             )
 
-        if episode_start:
-            self.reset_episode()
-
         raw_state = snapshot.screen_state
-        # episode 境界は snapshot が古くても安全側へ state を破棄する。
-        if raw_state in _EPISODE_BOUNDARY_SCREEN_STATES:
-            self._combat_session.reset_episode(raw_state)
-            self._last_screen_state = raw_state
         if (
-            self._last_snapshot_timestamp_ns is not None
+            not episode_start
+            and self._last_snapshot_timestamp_ns is not None
             and snapshot.captured_ns <= self._last_snapshot_timestamp_ns
         ):
             return self._safety(
@@ -364,8 +359,6 @@ class AgentRuntime:
                 started_ns,
                 scheduled_ns=current_ns,
             )
-        self._last_snapshot_timestamp_ns = snapshot.captured_ns
-
         if not self._scheduler.is_snapshot_fresh(snapshot.captured_ns, current_ns):
             age_ns = self._scheduler.snapshot_age_ns(snapshot.captured_ns, current_ns)
             return self._safety(
@@ -377,6 +370,25 @@ class AgentRuntime:
             )
 
         policy_input = snapshot.ui_policy_input
+        binding_error = self._ui_policy_binding_error(snapshot, policy_input)
+        if binding_error is not None:
+            return self._safety(
+                snapshot,
+                "stop",
+                f"ui_policy_input binding gate failed: {binding_error}",
+                started_ns,
+                scheduled_ns=current_ns,
+            )
+
+        checkpoint = (
+            self._combat_session.recurrent_state_copy(),
+            self._combat_session.episode_start_pending,
+            self._last_snapshot_timestamp_ns,
+            self._last_screen_state,
+        )
+        if episode_start:
+            self.reset_episode()
+
         screen_intent: UiIntentV1 | None = None
         if isinstance(policy_input, UiPolicyInputV1):
             try:
@@ -384,6 +396,7 @@ class AgentRuntime:
                     policy_input, self._ui_policy_config
                 )
             except ContractValidationError as exc:
+                self._restore_runtime_checkpoint(checkpoint)
                 return self._safety(
                     snapshot,
                     "stop",
@@ -394,48 +407,65 @@ class AgentRuntime:
 
         # 画面遷移で episode が切れる場合は、判断より先に LSTM state を破棄する。
         if raw_state in _EPISODE_BOUNDARY_SCREEN_STATES:
-            return self._safety(
+            self._combat_session.reset_episode(raw_state)
+            self._last_screen_state = raw_state
+            return self._accept_snapshot(
                 snapshot,
-                "no_op",
-                f"episode boundary screen_state={raw_state!r}; recurrent state reset",
-                started_ns,
-                scheduled_ns=current_ns,
+                self._safety(
+                    snapshot,
+                    "no_op",
+                    f"episode boundary screen_state={raw_state!r}; recurrent state reset",
+                    started_ns,
+                    scheduled_ns=current_ns,
+                ),
             )
         if raw_state in _IDLE_SCREEN_STATES:
             self._last_screen_state = raw_state
-            return self._safety(
-                snapshot, "no_op", f"idle screen_state={raw_state!r}", started_ns,
-                scheduled_ns=current_ns,
+            return self._accept_snapshot(
+                snapshot,
+                self._safety(
+                    snapshot, "no_op", f"idle screen_state={raw_state!r}", started_ns,
+                    scheduled_ns=current_ns,
+                ),
             )
 
         if policy_input is None or not isinstance(policy_input, UiPolicyInputV1):
             # 型付き screen_state がない snapshot は経路を決められない。
             self._combat_session.reset_episode("missing_ui_policy_input")
             self._last_screen_state = raw_state
-            return self._safety(
-                snapshot, "no_op", "ui_policy_input is missing; cannot route decision",
-                started_ns, scheduled_ns=current_ns,
+            return self._accept_snapshot(
+                snapshot,
+                self._safety(
+                    snapshot, "no_op", "ui_policy_input is missing; cannot route decision",
+                    started_ns, scheduled_ns=current_ns,
+                ),
             )
 
         screen_state = policy_input.screen_state
         if screen_state == ScreenState.UNKNOWN:
             self._combat_session.reset_episode("unknown_screen_state")
             self._last_screen_state = raw_state
-            return self._safety(
-                snapshot, "no_op", "unknown screen state; recurrent state reset",
-                started_ns, scheduled_ns=current_ns,
+            return self._accept_snapshot(
+                snapshot,
+                self._safety(
+                    snapshot, "no_op", "unknown screen state; recurrent state reset",
+                    started_ns, scheduled_ns=current_ns,
+                ),
             )
         self._last_screen_state = raw_state
 
         if screen_state == ScreenState.GAMEPLAY:
             # 15 Hz deadline は combat 推論だけに適用する。
             if not self._scheduler.should_decide(current_ns):
-                return self._safety(
+                return self._accept_snapshot(
                     snapshot,
-                    "no_op",
-                    "off-cadence tick skipped by scheduler",
-                    started_ns,
-                    scheduled_ns=current_ns,
+                    self._safety(
+                        snapshot,
+                        "no_op",
+                        "off-cadence tick skipped by scheduler",
+                        started_ns,
+                        scheduled_ns=current_ns,
+                    ),
                 )
             scheduled_ns = self._scheduler.advance(current_ns)
             decision = self._decide_combat(
@@ -459,8 +489,67 @@ class AgentRuntime:
                 scheduled_ns=scheduled_ns,
             )
         return self._enforce_inference_timeout(
-            snapshot, decision, started_ns=started_ns, scheduled_ns=scheduled_ns
+            snapshot,
+            decision,
+            started_ns=started_ns,
+            scheduled_ns=scheduled_ns,
+            checkpoint=checkpoint,
         )
+
+    def _ui_policy_binding_error(
+        self,
+        snapshot: PerceptionSnapshot,
+        policy_input: UiPolicyInputV1 | None,
+    ) -> str | None:
+        """typed UI 入力が外側 snapshot と同じ frame に束縛されるか調べる。
+
+        やさしい説明: 別 frame の hash や screen state で経路を選ぶ前に不一致を止めます。
+        """
+        if policy_input is None:
+            return None
+        expected_screen_state = _HUD_TO_SCREEN_STATE.get(
+            snapshot.screen_state, ScreenState.UNKNOWN
+        )
+        bindings = (
+            ("source_snapshot_hash", policy_input.source_snapshot_hash, snapshot.snapshot_id),
+            ("source_frame_hash", policy_input.source_frame_hash, snapshot.frame_id),
+            (
+                "source_content_hash",
+                policy_input.source_content_hash,
+                snapshot.source_content_hash,
+            ),
+            ("ui_state_key", policy_input.ui_state_key, snapshot.ui_state_key),
+            ("screen_state", policy_input.screen_state, expected_screen_state),
+        )
+        for name, actual, expected in bindings:
+            if actual != expected:
+                return f"{name} does not match PerceptionSnapshot"
+        return None
+
+    def _accept_snapshot(
+        self, snapshot: PerceptionSnapshot, decision: AgentDecision
+    ) -> AgentDecision:
+        """全 gate を通過した snapshot の replay cursor を確定する。
+
+        やさしい説明: 拒否した未来 frame や timeout が次の正常 frame を stale にしないようにします。
+        """
+        self._last_snapshot_timestamp_ns = snapshot.captured_ns
+        return decision
+
+    def _restore_runtime_checkpoint(
+        self,
+        checkpoint: tuple[np.ndarray | None, bool, int | None, str | None],
+    ) -> None:
+        """拒否した推論より前の recurrent/replay state を復元する。
+
+        やさしい説明: action を破棄するときは、その action を生んだ内部記憶も一緒に戻します。
+        """
+        recurrent_state, episode_start, snapshot_timestamp_ns, screen_state = checkpoint
+        self._combat_session.restore_recurrent_state(
+            recurrent_state, episode_start=episode_start
+        )
+        self._last_snapshot_timestamp_ns = snapshot_timestamp_ns
+        self._last_screen_state = screen_state
 
     def _record_timing(
         self, decision: AgentDecision, scheduled_ns: int | None
@@ -484,6 +573,7 @@ class AgentRuntime:
         *,
         started_ns: int,
         scheduled_ns: int,
+        checkpoint: tuple[np.ndarray | None, bool, int | None, str | None],
     ) -> AgentDecision:
         """全 decision 経路へ同じ inference timeout gate を適用する。
 
@@ -495,6 +585,7 @@ class AgentRuntime:
                 started_ns, decision.inference_finished_ns
             )
         ):
+            self._restore_runtime_checkpoint(checkpoint)
             return self._safety(
                 snapshot,
                 "no_op",
@@ -502,7 +593,10 @@ class AgentRuntime:
                 started_ns,
                 scheduled_ns=scheduled_ns,
             )
-        return decision
+        if decision.kind == "stop":
+            self._restore_runtime_checkpoint(checkpoint)
+            return decision
+        return self._accept_snapshot(snapshot, decision)
 
     def _safety(
         self,
