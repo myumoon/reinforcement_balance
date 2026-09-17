@@ -5,15 +5,114 @@ episode 境界で `[1, 1, hidden]` の記憶と episode_start が必ず一緒に
 """
 from __future__ import annotations
 
+import gymnasium as gym
 import numpy as np
 import pytest
 import torch as th
+from sb3_contrib import RecurrentPPO
 
 from reinbalance_survivors_contracts.target_action import ActionSemantics
 from survivors.runtime.artifact_bundle import CombatPolicy
 from survivors.runtime.combat_session import CombatDecision, CombatSession, StaleSnapshotError
 
 from . import _runtime_fixtures as fx
+
+
+class _TinyRecurrentEnv(gym.Env):
+    """offline RecurrentPPO を構築する最小の離散 action 環境。
+
+    やさしい説明: 学習は行わず、実 predict API に必要な observation/action space だけを提供します。
+    """
+
+    observation_space = gym.spaces.Box(
+        low=-np.inf,
+        high=np.inf,
+        shape=(fx.DEFAULT_OBSERVATION_DIM,),
+        dtype=np.float32,
+    )
+    action_space = gym.spaces.Discrete(fx.REQUIRED_ACTION_DIM)
+
+    def reset(self, *, seed=None, options=None):
+        """ゼロ観測から episode を開始する。
+
+        やさしい説明: model 構築時の Gym API 契約だけを満たし、乱数や外部状態を持ちません。
+        """
+        super().reset(seed=seed)
+        return np.zeros(self.observation_space.shape, dtype=np.float32), {}
+
+    def step(self, action):
+        """学習には使わない固定遷移を返す。
+
+        やさしい説明: このテストは predict のみを呼ぶため、環境側の挙動を最小に保ちます。
+        """
+        del action
+        return (
+            np.zeros(self.observation_space.shape, dtype=np.float32),
+            0.0,
+            False,
+            False,
+            {},
+        )
+
+
+class _RecurrentPpoStepAdapter:
+    """実 RecurrentPPO.predict を CombatPolicy の一段推論形へ接続する。
+
+    やさしい説明: actor の hidden/cell を一つの state 軸へ詰め、CombatSession の伝播を比較します。
+    """
+
+    def __init__(self, model: RecurrentPPO) -> None:
+        """offline model と actor LSTM 次元を保持する。
+
+        やさしい説明: test adapter は同じ model の predict だけを使い、重みや action を再実装しません。
+        """
+        self._model = model
+        self._hidden_size = model.policy.lstm_actor.hidden_size
+
+    def initial_hidden_state(self, batch_size: int = 1) -> th.Tensor:
+        """hidden/cell を連結したゼロ state を返す。
+
+        やさしい説明: RecurrentPPO の state=None と同じ episode 先頭を CombatSession へ渡します。
+        """
+        return th.zeros((batch_size, 2 * self._hidden_size), dtype=th.float32)
+
+    def step(
+        self, observation: th.Tensor, packed_state: th.Tensor
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
+        """RecurrentPPO.predict を一回呼び action logits と次 state を返す。
+
+        やさしい説明: hidden/cell の両方を次 tick へ運び、session 側の欠落を観測できます。
+        """
+        hidden, cell = th.split(packed_state, self._hidden_size, dim=1)
+        actions, next_state = self._model.predict(
+            observation.detach().cpu().numpy(),
+            state=(hidden.numpy()[None, ...], cell.numpy()[None, ...]),
+            episode_start=np.zeros(observation.shape[0], dtype=bool),
+            deterministic=True,
+        )
+        action_indices = np.asarray(actions, dtype=np.int64).reshape(-1)
+        logits = th.zeros(
+            (observation.shape[0], fx.REQUIRED_ACTION_DIM), dtype=th.float32
+        )
+        logits[th.arange(observation.shape[0]), th.from_numpy(action_indices)] = 1.0
+        packed_next = np.concatenate(next_state, axis=-1)[0]
+        return logits, th.zeros(observation.shape[0]), th.from_numpy(packed_next.copy())
+
+
+def _offline_recurrent_ppo() -> RecurrentPPO:
+    """既知 seed の実 RecurrentPPO を返す。
+
+    やさしい説明: 学習を挟まず、同じ observation sequence なら predict 結果が固定される参照を作ります。
+    """
+    return RecurrentPPO(
+        "MlpLstmPolicy",
+        _TinyRecurrentEnv(),
+        n_steps=2,
+        batch_size=2,
+        seed=17,
+        device="cpu",
+        policy_kwargs={"lstm_hidden_size": 4, "n_lstm_layers": 1},
+    )
 
 
 def _obs_sequence(length: int = 6, *, seed: int = 7) -> list[np.ndarray]:
@@ -64,6 +163,48 @@ class TestRecurrentActorParity:
             state = session.recurrent_state_copy()
             assert state is not None
             actual_states.append(state)
+        assert actual_actions == expected_actions
+        for actual, expected in zip(actual_states, expected_states, strict=True):
+            np.testing.assert_array_equal(actual, expected)
+
+    def test_actions_and_states_match_real_recurrent_ppo_predict(self) -> None:
+        """実 offline RecurrentPPO.predict と全 action/state を比較する。
+
+        やさしい説明: model.step 同士の自己比較を避け、公開 predict API の state 表現まで照合します。
+        """
+        model = _offline_recurrent_ppo()
+        observations = _obs_sequence(length=4, seed=19)
+        expected_actions: list[int] = []
+        expected_states: list[np.ndarray] = []
+        state = None
+        episode_start = np.ones(1, dtype=bool)
+        for observation in observations:
+            action, state = model.predict(
+                observation,
+                state=state,
+                episode_start=episode_start,
+                deterministic=True,
+            )
+            expected_actions.append(int(np.asarray(action).item()))
+            expected_states.append(np.concatenate(state, axis=-1).copy())
+            episode_start.fill(False)
+
+        hidden_dim = 2 * model.policy.lstm_actor.hidden_size
+        policy = CombatPolicy(
+            model=_RecurrentPpoStepAdapter(model),  # type: ignore[arg-type]
+            observation_dim=fx.DEFAULT_OBSERVATION_DIM,
+            action_dim=fx.REQUIRED_ACTION_DIM,
+            hidden_dim=hidden_dim,
+        )
+        session = CombatSession(policy)
+        actual_actions: list[int] = []
+        actual_states: list[np.ndarray] = []
+        for observation in observations:
+            actual_actions.append(session.decide(observation).action_index)
+            recurrent_state = session.recurrent_state_copy()
+            assert recurrent_state is not None
+            actual_states.append(recurrent_state)
+
         assert actual_actions == expected_actions
         for actual, expected in zip(actual_states, expected_states, strict=True):
             np.testing.assert_array_equal(actual, expected)
