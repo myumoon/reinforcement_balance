@@ -9,16 +9,18 @@ OS input には触れない。
 """
 from __future__ import annotations
 
-import hashlib
-import math
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
-import numpy as np
-
-from reinbalance_survivors_contracts.item_decision import (
-    CandidateFeatures,
-    ItemDecisionFeatures,
+from reinbalance_survivors_contracts.item_decision import ItemDecisionFeatures
+from reinbalance_survivors_contracts.item_selector_decision import (
+    ItemSelectorDecisionError,
+)
+from reinbalance_survivors_contracts.item_selector_decision import (
+    flatten_feature as _shared_flatten_feature,
+)
+from reinbalance_survivors_contracts.item_selector_decision import (
+    resolve_calibrated_winner,
 )
 from reinbalance_survivors_contracts.ui_intent import (
     ContractValidationError,
@@ -78,94 +80,16 @@ def validate_ui_capability_owners(config: NonModelUiPolicyConfigV1) -> None:
 
 
 def _flatten_feature(value: Any, *, label: str) -> list[float]:
-    """wire representation を Training と同じルールで float vector に展開する。
+    """wire representation を共有 Common 実装で float vector に展開する。
 
-    Training 側 _flatten_feature と byte-identical な変換を行う。
-    Training package を import せずに共有 wire 契約だけを使う。
+    Training 側と byte-identical な変換ロジックは
+    ``reinbalance_survivors_contracts.item_selector_decision`` が唯一の source of truth。
+    ここでは呼び出し規約（例外型が ItemSessionError であること）だけを維持する。
     """
-    if isinstance(value, bool):
-        return [1.0 if value else 0.0]
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        number = float(value)
-        if not math.isfinite(number):
-            raise ItemSessionError(f"{label} must contain finite values")
-        return [number]
-    if isinstance(value, str):
-        if not value:
-            raise ItemSessionError(f"{label} strings must be non-empty")
-        # Training の _stable_string_feature と同一実装: SHA-256 先頭 64 bit → [-1, 1]
-        digest = hashlib.sha256(value.encode("utf-8")).digest()
-        integer = int.from_bytes(digest[:8], byteorder="big", signed=False)
-        return [(integer / float((1 << 64) - 1)) * 2.0 - 1.0]
-    if isinstance(value, Mapping):
-        result: list[float] = []
-        for key in value:
-            if not isinstance(key, str):
-                raise ItemSessionError(f"{label} mapping keys must be strings")
-            result.extend(_flatten_feature(value[key], label=f"{label}.{key}"))
-        return result
-    if isinstance(value, (list, tuple)):
-        result = []
-        for index, item in enumerate(value):
-            result.extend(_flatten_feature(item, label=f"{label}[{index}]"))
-        return result
-    raise ItemSessionError(f"{label} contains unsupported feature type")
-
-
-def _encode_item_decision(
-    item_context: ItemDecisionFeatures,
-    nmax: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """ItemDecisionFeatures を model 入力配列に変換する。
-
-    Training の encode_item_selector_row と同じ wire → float 変換を行う。
-    context: [1, context_dim], candidates: [1, nmax, candidate_dim], mask: [1, nmax]
-    """
-    wire = item_context.to_wire()
-    raw_context = wire["context_features"]
-    raw_candidates = wire["candidates"]
-    card_mask = raw_context["card_mask"]
-
-    context_vector = _flatten_feature(raw_context, label="context_features")
-
-    # candidate ごとに schema_version を除いた public fields を展開する
-    candidate_vectors: list[list[float]] = []
-    for idx, cand in enumerate(raw_candidates):
-        public = {k: v for k, v in cand.items() if k != "schema_version"}
-        candidate_vectors.append(_flatten_feature(public, label=f"candidate[{idx}]"))
-
-    candidate_dim = len(candidate_vectors[0]) if candidate_vectors else 0
-    # nmax へパディング
-    padding_count = nmax - len(raw_candidates)
-    if padding_count < 0:
-        raise ItemSessionError("candidate count exceeds ItemSelector nmax")
-    candidate_vectors.extend([[0.0] * candidate_dim for _ in range(padding_count)])
-    mask = list(card_mask) + [False] * (nmax - len(card_mask))
-    if len(mask) != nmax:
-        raise ItemSessionError("card_mask width does not match ItemSelector nmax")
-
-    context_array = np.asarray([context_vector], dtype=np.float32)
-    candidate_array = np.asarray([candidate_vectors], dtype=np.float32)
-    mask_array = np.asarray([mask], dtype=bool)
-    return context_array, candidate_array, mask_array
-
-
-def _calibrated_probabilities(
-    scaled_logits: np.ndarray, mask: np.ndarray, temperature: float
-) -> np.ndarray:
-    """有効スロットだけで softmax を取り、較正済み確率分布を返す。
-
-    argmax の raw logit をそのまま信用すると、全候補が等価な場合でも
-    確信度 1.0 相当として扱ってしまう。masked slot を除外した確率にしてから
-    confidence gate へ渡す。
-    """
-    logits = np.asarray(scaled_logits, dtype=np.float64).reshape(-1)
-    valid = np.asarray(mask, dtype=bool).reshape(-1)
-    calibrated = logits / float(temperature)
-    calibrated = np.where(valid, calibrated, -np.inf)
-    shifted = calibrated - np.max(calibrated[valid])
-    exponentials = np.where(valid, np.exp(shifted), 0.0)
-    return exponentials / float(exponentials.sum())
+    try:
+        return _shared_flatten_feature(value, label=label)
+    except ItemSelectorDecisionError as exc:
+        raise ItemSessionError(str(exc)) from exc
 
 
 def _resolve_winner_target(
@@ -276,20 +200,12 @@ class ItemSession:
                 f"feature_schema mismatch: {item_context.feature_schema!r} != {self._feature_schema!r}"
             )
 
-        context_a, cand_a, mask_a = _encode_item_decision(item_context, self._nmax)
         try:
-            scaled_logits = np.asarray(
-                self._artifact.predict(context_a, cand_a, mask_a), dtype=np.float64
-            )
-        except ItemSessionError:
-            raise
-        except Exception as exc:  # noqa: BLE001  # adapter ごとに例外型が異なる
-            raise ItemSessionError(f"ItemSelector inference failed: {exc}") from exc
-        probabilities = _calibrated_probabilities(
-            scaled_logits[0], mask_a[0], self._temperature
-        )
-        winner_index = int(np.argmax(probabilities))
-        confidence = float(probabilities[winner_index])
+            winner = resolve_calibrated_winner(item_context, self._artifact)
+        except ItemSelectorDecisionError as exc:
+            raise ItemSessionError(str(exc)) from exc
+        winner_index = winner.winner_index
+        confidence = winner.confidence
 
         if confidence < self._confidence_threshold:
             # gate 未達 — card を選ばず次 tick へ委ねる。stop ではなく no_op が安全側。
