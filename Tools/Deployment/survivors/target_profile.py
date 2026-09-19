@@ -15,6 +15,9 @@ from reinbalance_survivors_contracts.ui_intent import is_strict_number
 VERSION="survivors_target.v1"
 _SHA256=re.compile(r"[0-9a-f]{64}")
 CONFIG=Path(__file__).parents[1]/"configs"/"mad_forest_standard_v1.yaml"
+# 個人情報(GPU名やユーザー名など)を書き込むローカル専用ファイル。.env/ はgitignore対象なので、
+# ここに実測値を書いてもリポジトリ・公開PRには一切残らない。
+LOCAL_OVERLAY=Path(__file__).parents[3]/".env"/"target_profile.local.yaml"
 _SUCCESS_SEAL=object()
 SECTIONS={
  "base":frozenset({"platform","window_mode","client_resolution","ui_language","stage","character","modifiers","success_timer_seconds","post_timer_event_required"}),
@@ -93,3 +96,23 @@ class TargetProfile:
 
 def load_target_profile(path:Path=CONFIG):
     with path.open(encoding="utf-8") as f:return TargetProfile.from_wire(yaml.safe_load(f))
+
+def load_local_overlay(path:Path=LOCAL_OVERLAY)->dict:
+    """個人情報(ハードウェア/オペレーター名)をgit管理外のローカルファイルから読み込む。
+
+    ファイルが無ければ空の辞書を返すだけ。既存の load_target_profile の挙動には影響しない。
+    """
+    if not path.is_file():return {}
+    with path.open(encoding="utf-8") as f:return yaml.safe_load(f) or {}
+
+def merge_local_overlay(wire:Mapping[str,Any],overlay:Mapping[str,Any])->dict:
+    """git管理下のwireに、ローカル限定のhardware/manual_attestationを上書きマージする。
+
+    tracked側(公開リポジトリ)は安全なプレースホルダのままにしておき、実測値はoverlay
+    (ローカルファイル由来)から補う。overlayに無いキーはtracked側の値がそのまま残る。
+    """
+    merged=copy.deepcopy(dict(wire))
+    if "hardware" in overlay:merged["hardware"]={**merged.get("hardware",{}),**overlay["hardware"]}
+    manual=overlay.get("build",{}).get("manual_attestation")
+    if manual is not None:merged["build"]={**merged.get("build",{}),"manual_attestation":manual}
+    return merged
