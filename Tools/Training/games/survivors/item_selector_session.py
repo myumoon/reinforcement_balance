@@ -56,6 +56,10 @@ class _NumpyBridgedArtifact:
     """
 
     def __init__(self, artifact: ItemSelectorArtifact) -> None:
+        """torch artifact を保持し、Common Protocol が読む nmax/feature_schema/temperature を写す。
+
+        やさしい説明: predict() を呼ぶまでは torch へ触れず、metadata だけ先に公開します。
+        """
         self._artifact = artifact
         self.nmax = artifact.nmax
         self.feature_schema = artifact.feature_schema

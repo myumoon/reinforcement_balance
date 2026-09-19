@@ -38,12 +38,20 @@ class _FakeArtifact:
     def predict(
         self, context_features: np.ndarray, candidate_features: np.ndarray, candidate_mask: np.ndarray
     ) -> np.ndarray:
+        """logits をそのまま返すか、設定済みの predict_error を送出する。
+
+        やさしい説明: Protocol 準拠 fake として、正常系と例外正規化系の両方を1つで賄います。
+        """
         if self.predict_error is not None:
             raise self.predict_error
         return np.asarray([self.logits], dtype=np.float32)
 
 
 def _candidate(item_id: str) -> CandidateFeatures:
+    """item_id 以外を固定値にした最小 CandidateFeatures を返す。
+
+    やさしい説明: winner 選定テストでは候補間の差を item_id だけに絞ります。
+    """
     return CandidateFeatures(
         kind="item_card",
         item_id=item_id,
@@ -58,6 +66,10 @@ def _candidate(item_id: str) -> CandidateFeatures:
 
 
 def _item_context(*, feature_schema: str = FEATURE_SCHEMA) -> ItemDecisionFeatures:
+    """3 候補 (item_a/b/c) の ItemDecisionFeatures を返す。
+
+    やさしい説明: feature_schema だけ差し替えられるようにし、mismatch テストで再利用します。
+    """
     candidates = [_candidate("item_a"), _candidate("item_b"), _candidate("item_c")]
     return ItemDecisionFeatures(
         decision_id="s" * 64,
@@ -81,6 +93,10 @@ def _item_context(*, feature_schema: str = FEATURE_SCHEMA) -> ItemDecisionFeatur
 
 
 def test_resolves_argmax_winner_with_calibrated_confidence():
+    """test_resolves_argmax_winner_with_calibrated_confidence の契約を検証する。
+
+    やさしい説明: 最大 logit の候補が winner になり、確率が softmax 較正されることを確認します。
+    """
     winner = resolve_calibrated_winner(_item_context(), _FakeArtifact(logits=(0.1, 5.0, 0.2)))
     assert winner.winner_index == 1
     assert winner.confidence == pytest.approx(0.9847, abs=1e-3)
@@ -88,12 +104,20 @@ def test_resolves_argmax_winner_with_calibrated_confidence():
 
 
 def test_feature_schema_mismatch_is_rejected():
+    """test_feature_schema_mismatch_is_rejected の契約を検証する。
+
+    やさしい説明: artifact と context の feature_schema が食い違う場合は推論前に拒否します。
+    """
     artifact = _FakeArtifact(logits=(0.0, 0.0, 0.0), feature_schema="context_danger_v1")
     with pytest.raises(ItemSelectorDecisionError, match="feature_schema mismatch"):
         resolve_calibrated_winner(_item_context(), artifact)
 
 
 def test_arbitrary_predict_exception_is_normalized():
+    """test_arbitrary_predict_exception_is_normalized の契約を検証する。
+
+    やさしい説明: predict が任意の例外を送出しても ItemSelectorDecisionError に正規化されます。
+    """
     artifact = _FakeArtifact(logits=(0.0, 0.0, 0.0), predict_error=RuntimeError("onnx session closed"))
     with pytest.raises(ItemSelectorDecisionError, match="ItemSelector inference failed"):
         resolve_calibrated_winner(_item_context(), artifact)

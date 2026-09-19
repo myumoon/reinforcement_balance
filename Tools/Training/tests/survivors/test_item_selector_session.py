@@ -42,6 +42,10 @@ class _TorchFakeArtifact:
     def predict(
         self, context_features: th.Tensor, candidate_features: th.Tensor, candidate_mask: th.Tensor
     ) -> th.Tensor:
+        """torch tensor 入力であることを確認してから logits を返すか、predict_error を送出する。
+
+        やさしい説明: このセッション固有の torch tensor bridge 契約を fake 側でも強制します。
+        """
         if self.predict_error is not None:
             raise self.predict_error
         assert isinstance(context_features, th.Tensor)
@@ -51,6 +55,10 @@ class _TorchFakeArtifact:
 
 
 def _candidate(item_id: str) -> CandidateFeatures:
+    """item_id 以外を固定値にした最小 CandidateFeatures を返す。
+
+    やさしい説明: winner 選定テストでは候補間の差を item_id だけに絞ります。
+    """
     return CandidateFeatures(
         kind="item_card",
         item_id=item_id,
@@ -65,6 +73,10 @@ def _candidate(item_id: str) -> CandidateFeatures:
 
 
 def _item_context() -> ItemDecisionFeatures:
+    """2 候補 (wand/knife) の ItemDecisionFeatures を返す。
+
+    やさしい説明: confidence gate / feature_schema テストが共有する固定 context です。
+    """
     candidates = [_candidate("wand"), _candidate("knife")]
     return ItemDecisionFeatures(
         decision_id="s" * 64,
@@ -101,6 +113,10 @@ _HASH_KWARGS = dict(
 
 
 def test_decide_returns_choose_card_intent_when_confidence_gate_passes():
+    """test_decide_returns_choose_card_intent_when_confidence_gate_passes の契約を検証する。
+
+    やさしい説明: confidence gate を通過した winner が CHOOSE_CARD UiIntentV1 になることを確認します。
+    """
     session = ItemSelectorArtifactSession(_TorchFakeArtifact(logits=(0.1, 5.0)))
     outcome = session.decide(_item_context(), **_HASH_KWARGS)
     assert outcome.intent is not None
@@ -113,6 +129,10 @@ def test_decide_returns_choose_card_intent_when_confidence_gate_passes():
 
 
 def test_decide_returns_none_intent_when_confidence_gate_fails():
+    """test_decide_returns_none_intent_when_confidence_gate_fails の契約を検証する。
+
+    やさしい説明: confidence が threshold 未満なら intent を出さず reason だけ返すことを確認します。
+    """
     artifact = _TorchFakeArtifact(logits=(0.1, 0.2), confidence_threshold=0.99)
     session = ItemSelectorArtifactSession(artifact)
     outcome = session.decide(_item_context(), **_HASH_KWARGS)
@@ -121,6 +141,10 @@ def test_decide_returns_none_intent_when_confidence_gate_fails():
 
 
 def test_decide_rejects_feature_schema_mismatch():
+    """test_decide_rejects_feature_schema_mismatch の契約を検証する。
+
+    やさしい説明: artifact と context の feature_schema が食い違う場合は推論前に拒否します。
+    """
     artifact = _TorchFakeArtifact(logits=(0.0, 0.0), feature_schema="context_danger_v1")
     session = ItemSelectorArtifactSession(artifact)
     with pytest.raises(ItemSelectorSessionError, match="feature_schema mismatch"):
@@ -128,6 +152,10 @@ def test_decide_rejects_feature_schema_mismatch():
 
 
 def test_decide_normalizes_predict_exception():
+    """test_decide_normalizes_predict_exception の契約を検証する。
+
+    やさしい説明: predict が任意の例外を送出しても ItemSelectorSessionError に正規化されます。
+    """
     artifact = _TorchFakeArtifact(logits=(0.0, 0.0), predict_error=RuntimeError("torchscript trap"))
     session = ItemSelectorArtifactSession(artifact)
     with pytest.raises(ItemSelectorSessionError, match="ItemSelector inference failed"):

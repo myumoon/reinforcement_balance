@@ -36,7 +36,7 @@ from survivors.runtime.item_selector_runtime import OnnxItemSelector
 from survivors.runtime.item_session import ItemSession
 
 from . import _runtime_fixtures as fx
-from .test_agent_runtime import _fresh_now, _snap
+from .test_agent_runtime import _TickingClock, _fresh_now, _snap
 
 TICK_NS: Final[int] = DecisionScheduler().interval_ns
 
@@ -90,15 +90,19 @@ def _build_item_selector(package_dir: Path) -> OnnxItemSelector:
     return OnnxItemSelector.load(package_dir)
 
 
-def _build_runtime(package_dir: Path) -> AgentRuntime:
+def _build_runtime(
+    package_dir: Path, *, clock_ns: Callable[[], int] = time.perf_counter_ns
+) -> AgentRuntime:
     """combat + item selector を両方持つ現実的な AgentRuntime を組み立てる。
 
     やさしい説明: 決定的 JSONL テストが combat/UI 双方の経路を再現できるようにします。
+    clock_ns を差し替えると inference timeout 判定も壁時計に依存しなくなります
+    （デフォルトは AgentRuntime 自身の既定値 time.perf_counter_ns のままです）。
     """
     combat_policy = _build_combat_policy()
     selector = _build_item_selector(package_dir)
     bundle = RuntimeBundle.from_golden_fixture(combat_policy, item_selector=selector)
-    return AgentRuntime(bundle)
+    return AgentRuntime(bundle, clock_ns=clock_ns)
 
 
 def _item_context() -> ItemDecisionFeatures:
@@ -222,10 +226,16 @@ class TestDeterministicDecisionLog:
         """test_recorded_sequence_produces_reproducible_jsonl の契約を検証する。
 
         やさしい説明: combat / chest / level-up / death を含む sequence を 2 回再生して比較します。
+        decide() は 1 回につき clock_ns() を 2 回消費する (started_ns / inference_finished_ns)
+        ため、8 step 分の _TickingClock には 16 個の値を渡し、両 run で同一シーケンスを
+        与えて inference timeout 判定が壁時計のばらつきで揺れないようにします。
         """
 
         def run(run_index: int) -> bytes:
-            runtime = _build_runtime(tmp_path / f"package-{run_index}")
+            runtime = _build_runtime(
+                tmp_path / f"package-{run_index}",
+                clock_ns=_TickingClock(*range(0, 16_000, 1_000)),
+            )
             states = [
                 "gameplay", "gameplay", "chest", "gameplay",
                 "level_up_items", "gameplay", "death", "gameplay",
@@ -234,9 +244,7 @@ class TestDeterministicDecisionLog:
             decisions = []
             for step, state in enumerate(states):
                 snap = _snap(state, ts=base_ts + step * TICK_NS)
-                decision = runtime.decide(
-                    snap, now_ns=_fresh_now(snap) + step * TICK_NS, episode_start=(step == 0)
-                )
+                decision = runtime.decide(snap, now_ns=_fresh_now(snap), episode_start=(step == 0))
                 decisions.append(decision)
             return decisions_to_jsonl(decisions)
 
@@ -348,9 +356,12 @@ class TestThirtyMinuteSoak:
         base_ts = 1_000_000_000
         base_now = base_ts + 5_000_000
         exception_count = 0
-        invalid_decision_count = 0
         memory_samples: list[int] = []
 
+        # ponytail: tracemalloc は Python object しか追跡できず、torch/ONNX Runtime の
+        # native allocation は見えない (hidden=256 GRU を毎 tick 回しても数十 KB しか
+        # 見えないのはこのため)。native 側の growth まで見たくなったら psutil の RSS
+        # 計測に置き換える。
         tracemalloc.start()
         try:
             for tick in range(total_ticks):
@@ -364,11 +375,12 @@ class TestThirtyMinuteSoak:
                     exception_count += 1
                     continue
 
+                # AgentDecision.__post_init__ が action_index/confidence の不正値で
+                # 例外を送出する (上の except で exception_count に計上済み) ため、
+                # ここへ到達した decision は既に valid であることが構造上保証されている。
                 if decision.kind == "move":
-                    if not (0 <= decision.action_index < ab.REQUIRED_ACTION_DIM):
-                        invalid_decision_count += 1
-                    if not np.isfinite(decision.confidence):
-                        invalid_decision_count += 1
+                    assert 0 <= decision.action_index < ab.REQUIRED_ACTION_DIM
+                    assert np.isfinite(decision.confidence)
 
                 if is_boundary:
                     assert decision.kind == "no_op"
@@ -376,16 +388,13 @@ class TestThirtyMinuteSoak:
 
                 if tick % sample_every == 0:
                     gc.collect()
-                    _, peak = tracemalloc.get_traced_memory()
-                    memory_samples.append(peak)
+                    current, _ = tracemalloc.get_traced_memory()
+                    memory_samples.append(current)
         finally:
             tracemalloc.stop()
 
         assert exception_count == 0, f"{exception_count} decide() calls raised unexpectedly"
-        assert invalid_decision_count == 0, (
-            f"{invalid_decision_count} decisions had NaN confidence or out-of-range action_index"
-        )
         # 最初の数サンプルは warm-up ノイズなので除外し、以降の増加だけを見る。
         stable_samples = memory_samples[3:]
         growth = max(stable_samples) - min(stable_samples)
-        assert growth < 10 * 1024 * 1024, f"peak traced memory grew by {growth} bytes across the soak"
+        assert growth < 10 * 1024 * 1024, f"traced memory grew by {growth} bytes across the soak"
