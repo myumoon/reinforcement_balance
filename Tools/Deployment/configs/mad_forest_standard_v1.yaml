@@ -15,7 +15,7 @@ base:
   success_timer_seconds: 1800
   post_timer_event_required: true
 build:
-  build_id: 25016043
+  build_id: '25016043'
   executable_version: 6000.0.62.40709
   executable_hash: 5a4e7c2a0b411d3c3d736f427b884e95f3df168d30cd57694ce821164ccf9397
   distribution: steam
