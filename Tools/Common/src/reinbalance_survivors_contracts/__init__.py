@@ -73,6 +73,15 @@ from .item_decision import (
     ItemDecisionFeatures,
     ItemDecisionSchemaV1,
 )
+from .item_selector_decision import (
+    CalibratedItemSelectorArtifact,
+    CalibratedWinner,
+    ItemSelectorDecisionError,
+    calibrated_probabilities,
+    encode_item_decision,
+    flatten_feature,
+    resolve_calibrated_winner,
+)
 from .perception_error import (
     PERCEPTION_ERROR_SCHEMA_VERSION,
     PerceptionErrorProfile,
@@ -167,6 +176,14 @@ __all__ = [
     "ItemDecisionSchemaV1",
     "CandidateFeatures",
     "ItemDecisionFeatures",
+    # item selector decision（ItemSelector calibrated decision）
+    "ItemSelectorDecisionError",
+    "CalibratedItemSelectorArtifact",
+    "CalibratedWinner",
+    "flatten_feature",
+    "encode_item_decision",
+    "calibrated_probabilities",
+    "resolve_calibrated_winner",
     # perception error（perception 誤差）
     "PERCEPTION_ERROR_SCHEMA_VERSION",
     "PerceptionErrorProfile",
