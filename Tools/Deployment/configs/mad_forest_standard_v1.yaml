@@ -15,17 +15,17 @@ base:
   success_timer_seconds: 1800
   post_timer_event_required: true
 build:
-  build_id: TEST_FIXTURE_ONLY
-  executable_version: TEST_FIXTURE_ONLY
-  executable_hash: a5698d0b8cb6d1340f160c8426969d46b0d2e5627ef0b43c477cb9e25cb3424a
+  build_id: 25016043
+  executable_version: 6000.0.62.40709
+  executable_hash: 5a4e7c2a0b411d3c3d736f427b884e95f3df168d30cd57694ce821164ccf9397
   distribution: steam
   app_id: '1794680'
   content_revision: target-v1
   ui_revision: ja-target-v1
   manual_attestation: {operator: MANUAL_ATTESTATION_REQUIRED, date: MANUAL_ATTESTATION_REQUIRED, evidence_hash: MANUAL_ATTESTATION_REQUIRED}
 progression:
-  save_artifact_hash: 75afe43849b5bf6ac26cde0183b0d6a357c56f5d07106e07e24db4bf98cf2002
-  save_format_version: TEST_FIXTURE_ONLY
+  save_artifact_hash: 5a4e7c2a0b411d3c3d736f427b884e95f3df168d30cd57694ce821164ccf9397
+  save_format_version: 11105
   unlocked_characters: [antonio]
   unlocked_items: [whip]
   unlocked_stages: [mad_forest]
