@@ -25,7 +25,7 @@ def finalized_canonical(monkeypatch):
     data["progression"].update(save_artifact_hash=file_hash(b"canonical-save"),save_format_version="measured-v1")
     data["hardware"].update(os_build="26100",gpu_name="reference-gpu",vram_mb=12288,driver_version="1",cuda_version="12.4",pytorch_version="2.5")
     profile=TargetProfile.from_wire(data)
-    monkeypatch.setattr("survivors.target_audit.load_target_profile",lambda:profile)
+    monkeypatch.setattr("survivors.target_audit.load_runtime_profile",lambda:profile)
     return profile
 
 def lifecycle_audit(attempt,life):
@@ -128,7 +128,7 @@ def test_unfinalized_canonical_identity_fails_closed(tmp_path,monkeypatch,finali
     section,field,value=canonical_override
     if field is None: canonical[section]=value
     else: canonical[section][field]=value
-    monkeypatch.setattr("survivors.target_audit.load_target_profile",lambda:TargetProfile.from_wire(canonical))
+    monkeypatch.setattr("survivors.target_audit.load_runtime_profile",lambda:TargetProfile.from_wire(canonical))
     with pytest.raises(AuditError,match="canonical target identity not finalized"):
         audit_target(expected,copy.deepcopy(expected),evidence,attempt_id="attempt-1")
 

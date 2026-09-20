@@ -7,7 +7,7 @@ import math
 import pytest
 import yaml
 
-from survivors.target_profile import TargetProfile, SuccessObservation, load_target_profile, load_local_overlay, merge_local_overlay
+from survivors.target_profile import TargetProfile, SuccessObservation, load_target_profile, load_runtime_profile
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
 
 
@@ -64,18 +64,6 @@ def test_progression_item_vocabulary_is_closed(field,value):
     data=load_target_profile().to_wire(); data["progression"][field]=value
     with pytest.raises(ValueError): TargetProfile.from_wire(data)
 
-def test_local_overlay_missing_file_returns_empty(tmp_path):
-    assert load_local_overlay(tmp_path/"nonexistent.yaml") == {}
-
-def test_merge_local_overlay_fills_hardware_and_manual_attestation_without_mutating_input():
-    wire = load_target_profile().to_wire()
-    overlay = {"hardware": {"gpu_name": "RTX 4070"}, "build": {"manual_attestation": {"operator": "tester"}}}
-    merged = merge_local_overlay(wire, overlay)
-    assert merged["hardware"]["gpu_name"] == "RTX 4070"
-    assert merged["build"]["manual_attestation"] == {"operator": "tester"}
-    assert wire["hardware"]["gpu_name"] != "RTX 4070"  # 入力は変更しない
-    assert merged["hardware"]["profile_id"] == wire["hardware"]["profile_id"]  # overlayに無いキーは温存
-
-def test_merge_local_overlay_with_empty_overlay_is_noop():
-    wire = load_target_profile().to_wire()
-    assert merge_local_overlay(wire, {}) == wire
+def test_load_runtime_profile_raises_when_missing(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_runtime_profile(tmp_path/"nonexistent.yaml")

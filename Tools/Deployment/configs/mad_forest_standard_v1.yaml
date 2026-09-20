@@ -1,6 +1,8 @@
 # canonical target profile(Mad Forest/Antonio/30 分/日本語 UI 等)の正準値。build_id 等は test-fixture のプレースホルダ。
 #
 # 『これが正解ターゲット』という基準環境を固定した設定ファイルです。実機固有の値(build_id 等)は本番設定時に差し替える前提の仮値です。
+# このファイル自体は常にテンプレートのまま保ち、書き換えません。実測値は survivors/target_resolve.py が
+# .env/target_profile.resolved.yaml (git管理外) へ生成し、load_runtime_profile() がそちらを読みます。
 
 schema_version: survivors_target.v1
 provenance: test-fixture
@@ -15,17 +17,17 @@ base:
   success_timer_seconds: 1800
   post_timer_event_required: true
 build:
-  build_id: '25016043'
-  executable_version: 6000.0.62.40709
-  executable_hash: 5a4e7c2a0b411d3c3d736f427b884e95f3df168d30cd57694ce821164ccf9397
+  build_id: TEST_FIXTURE_ONLY
+  executable_version: TEST_FIXTURE_ONLY
+  executable_hash: a5698d0b8cb6d1340f160c8426969d46b0d2e5627ef0b43c477cb9e25cb3424a
   distribution: steam
   app_id: '1794680'
   content_revision: target-v1
   ui_revision: ja-target-v1
   manual_attestation: {operator: MANUAL_ATTESTATION_REQUIRED, date: MANUAL_ATTESTATION_REQUIRED, evidence_hash: MANUAL_ATTESTATION_REQUIRED}
 progression:
-  save_artifact_hash: 5a4e7c2a0b411d3c3d736f427b884e95f3df168d30cd57694ce821164ccf9397
-  save_format_version: 11105
+  save_artifact_hash: 75afe43849b5bf6ac26cde0183b0d6a357c56f5d07106e07e24db4bf98cf2002
+  save_format_version: TEST_FIXTURE_ONLY
   unlocked_characters: [antonio]
   unlocked_items: [whip]
   unlocked_stages: [mad_forest]

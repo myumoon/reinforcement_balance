@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 from reinbalance_survivors_contracts.launch_lifecycle import AuditVerdict, SaveVerdict, _verify_audit_evidence, _finalize_save_execution, _validate_store_volume
 from .target_profile import TargetProfile
-from .target_profile import load_target_profile
+from .target_profile import load_runtime_profile
 
 class AuditError(ValueError):pass
 _SHA256=re.compile(r"[0-9a-f]{64}")
@@ -63,7 +63,7 @@ def audit_target(expected:Mapping[str,Any],actual:Mapping[str,Any],evidence:Audi
     # Both sides must first satisfy the closed schema/taxonomy contract.
     try: TargetProfile.from_wire(expected); TargetProfile.from_wire(actual)
     except (ValueError,KeyError,TypeError) as exc: raise AuditError(str(exc)) from exc
-    canonical=load_target_profile().to_wire()
+    canonical=load_runtime_profile().to_wire()
     _assert_canonical_identity_finalized(canonical)
     if expected["provenance"]!="operator-attested" or actual["provenance"]!="operator-attested": raise AuditError("real target requires an operator-attested canonical profile")
     for section in canonical:
