@@ -13,7 +13,7 @@
 03_CollectTargetEvidence.bat
 ```
 
-`03` で証跡を集めたら、続けて `.env/2_finalize_target_profile.bat`（`Tools/Deployment/survivors/target_resolve.py` を起動）を実行してください。証跡 JSON・Steam ビルドマニフェスト・save ファイル・torch から実測値を機械的に集め、`.env/target_profile.resolved.yaml`（Git 管理外）を生成します。tracked の `Tools/Deployment/configs/mad_forest_standard_v1.yaml` は書き換えません。
+`03` で証跡を集めたら、`Tools/Deployment` をカレントディレクトリにして `python -m survivors.target_resolve` を実行してください。証跡 JSON・Steam ビルドマニフェスト・save ファイル・torch から実測値を機械的に集め、`.env/target_profile.resolved.yaml`（Git 管理外）を生成します。tracked の `Tools/Deployment/configs/mad_forest_standard_v1.yaml` は書き換えません。
 
 PR #308 が `main` にマージされた後だけ、最後に次を実行します。
 

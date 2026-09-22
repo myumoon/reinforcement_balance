@@ -104,5 +104,9 @@ def load_runtime_profile(path:Path=RESOLVED)->TargetProfile:
     確定版を読みます。まだ生成されていなければ、先に確定ツールを実行するよう案内して失敗します。
     """
     if not path.is_file():
-        raise FileNotFoundError(f"resolved target profile not found: {path}\n先に .env/2_finalize_target_profile.bat を実行してください。")
+        raise FileNotFoundError(
+            f"resolved target profile not found: {path}\n"
+            "先に Tools/Deployment をカレントディレクトリにして "
+            "python -m survivors.target_resolve を実行してください。"
+        )
     return load_target_profile(path)
