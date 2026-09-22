@@ -10,9 +10,10 @@ import pytest
 import yaml
 
 from survivors.target_audit import AuditError
-from survivors.target_profile import load_target_profile
+from survivors.target_profile import TargetProfile, load_target_profile
 from survivors.target_resolve import (
     Measurements,
+    _HEADER,
     build_measurements,
     build_resolved_wire,
     find_steam_appmanifest,
@@ -142,6 +143,13 @@ def test_build_resolved_wire_build_id_survives_yaml_roundtrip_as_str():
     wire = build_resolved_wire(load_target_profile().to_wire(), m, "a" * 64)
     reloaded = yaml.safe_load(yaml.safe_dump(wire, sort_keys=True, allow_unicode=True))
     assert isinstance(reloaded["build"]["build_id"], str) and reloaded["build"]["build_id"] == "25016043"
+
+
+def test_resolved_header_keeps_yaml_roundtrip_parseable():
+    wire = build_resolved_wire(load_target_profile().to_wire(), _measurements(), "a" * 64)
+    payload = _HEADER + yaml.safe_dump(wire, sort_keys=True, allow_unicode=True).encode("utf-8")
+    assert all(line.startswith("#") for line in _HEADER.decode("utf-8").splitlines())
+    assert TargetProfile.from_wire(yaml.safe_load(payload.decode("utf-8"))).to_wire() == wire
 
 
 def test_validate_resolved_wire_rejects_leftover_placeholder():
