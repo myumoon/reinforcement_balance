@@ -69,3 +69,13 @@ python -m spikes.feasibility_gate_cli \
 場合や、`--annotators`に重複名がある場合は、CLIは正常終了（終了コード0）した
 うえで判定を`FAIL`として発行する（本文中のtarget audit未合格・独立annotation
 担当不在の既存fail-closed業務仕様に従うため）。
+
+既知の制約: `merge_probe_evaluations()`のutility変換は
+`utility = utility_per_latency * latency_p95_ms`（`evaluate_probe()`の
+`utility_per_latency = mean(oracle_detectable) / latency_p95_ms`の逆算）を
+採用している。分子（oracle検出率の平均）がarchitecture非依存の合成fixtureでは
+4方式のutilityが同一値に潰れ、`issue_verdict()`のswitch条件
+（`max(utility/latency)`）がlatencyの短い順に単純化されてしまう。判定ロジック
+自体（`issue_verdict`/`GateEvidence`）はこのCLI追加の対象外で変更していないため、
+実測pilotデータでもこの潰れが起こるかは別途確認が必要であり、起こる場合は
+utility定義の見直しを別PRで検討する。

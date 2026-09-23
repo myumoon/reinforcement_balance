@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
+import yaml
+
 from reinbalance_survivors_contracts.ui_intent import ContractValidationError
 from spikes.pilot_evidence import build_gate_evidence
 from spikes.survivors_vertical_feasibility import write_verdict
@@ -86,7 +88,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             target_profile=target_profile,
         )
         write_verdict(evidence, args.output_json, args.output_markdown)
-    except (ContractValidationError, ValueError, TypeError, KeyError, FileNotFoundError) as exc:
+    except (ContractValidationError, ValueError, TypeError, KeyError,
+            FileNotFoundError, OSError, yaml.YAMLError) as exc:
         print(f"feasibility-gate-cli: rejected input: {exc}", file=sys.stderr)
         return 1
     return 0

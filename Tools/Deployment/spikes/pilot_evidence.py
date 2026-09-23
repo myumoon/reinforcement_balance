@@ -33,6 +33,14 @@ _PROBE_EVAL_KEYS = frozenset({
     "pixel_size", "recall_upper_bound", "latency_ms", "annotation_seconds", "architectures",
 })
 _PIXEL_SIZE_KEYS = frozenset({"p10_short_side", "median_short_side"})
+# evaluate_probe()がrecall_upper_bound（trunk）へ常に返す場面名の全集合。関数内部の
+# ローカル変数として定義されているため公開importができず、_ARCHITECTURESと同様に
+# ここで別途定数化する。
+_PROBE_SLICE_NAMES = frozenset({"small", "occluded", "late", "heavy", "boss", "gem"})
+# evaluate_probe()がarchitectures[name]へ常に返すキー全集合。
+_ARCHITECTURE_METRIC_KEYS = frozenset({
+    "latency_p95_ms", "utility_per_latency", "recall_upper_bound", "slice_metrics",
+})
 
 
 def _closed(mapping: Any, keys: frozenset, label: str) -> Mapping[str, Any]:
@@ -69,6 +77,17 @@ def _validate_session(session: Any, index: int) -> Mapping[str, Any]:
     return session
 
 
+def _finite_number(value: Any, label: str) -> float:
+    """値が真の有限数（int/float、boolは不可）であることを検証し、そのまま返す。
+
+    boolはPythonではintのサブクラスなので、この検証を経ずにsum()/mean()へ渡すと
+    True/Falseが1.0/0.0へ黙って変換され、GateEvidence.validate()側のbool拒否を
+    すり抜けてしまう。算術に使う前に必ずこの関数を通すことでそれを防ぐ。
+    """
+    ensure(is_strict_number(value) and math.isfinite(value), f"{label} must be a finite number")
+    return value
+
+
 def merge_probe_evaluations(evaluations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """複数の`evaluate_probe()`結果をGateEvidence用のフラットな指標へ変換・統合する。
 
@@ -89,14 +108,21 @@ def merge_probe_evaluations(evaluations: Sequence[Mapping[str, Any]]) -> dict[st
         label = f"probe evaluation[{index}]"
         _closed(evaluation, _PROBE_EVAL_KEYS, label)
         _closed(evaluation["pixel_size"], _PIXEL_SIZE_KEYS, f"{label}.pixel_size")
-        ensure({"late", "heavy"} <= set(evaluation["recall_upper_bound"]),
-               f"{label}.recall_upper_bound must contain late/heavy")
+        _finite_number(evaluation["pixel_size"]["p10_short_side"],
+                       f"{label}.pixel_size.p10_short_side")
+        _closed(evaluation["recall_upper_bound"], _PROBE_SLICE_NAMES, f"{label}.recall_upper_bound")
+        for slice_name in _PROBE_SLICE_NAMES:
+            _finite_number(evaluation["recall_upper_bound"][slice_name],
+                           f"{label}.recall_upper_bound.{slice_name}")
         ensure(set(evaluation["architectures"]) == _ARCHITECTURES,
                f"{label}.architectures must contain exactly {sorted(_ARCHITECTURES)}")
         for name in _ARCHITECTURES:
             metrics = evaluation["architectures"][name]
-            ensure({"latency_p95_ms", "utility_per_latency"} <= set(metrics),
-                   f"{label}.architectures[{name!r}] is missing latency_p95_ms/utility_per_latency")
+            _closed(metrics, _ARCHITECTURE_METRIC_KEYS, f"{label}.architectures[{name!r}]")
+            _finite_number(metrics["latency_p95_ms"],
+                           f"{label}.architectures[{name!r}].latency_p95_ms")
+            _finite_number(metrics["utility_per_latency"],
+                           f"{label}.architectures[{name!r}].utility_per_latency")
 
     def mean(numbers: Sequence[float]) -> float:
         return sum(numbers) / len(numbers)
