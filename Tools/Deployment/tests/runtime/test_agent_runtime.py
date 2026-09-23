@@ -83,6 +83,12 @@ class _ItemSelector:
         return np.array([[9.0, 0.0, 0.0]], dtype=np.float32)
 
 
+class _ContextDangerItemSelector(_ItemSelector):
+    """実 assembler の item feature schema を受ける selector double。"""
+
+    feature_schema = "context_danger_occupancy_v1"
+
+
 def _hud_world(screen_state: str = "gameplay", *, ts: int = 1_000_000_000):
     """テスト用 HUD + world state を返す。
 
@@ -110,6 +116,44 @@ def _snap(screen_state: str = "gameplay", *, ts: int = 1_000_000_000):
     snap = RealObsAssembler().assemble(hud, world, schema, (1000, 1000))
     assert snap is not None, f"assembler returned None for screen_state={screen_state!r}"
     return snap
+
+
+def _snap_with_invalid_leading_item_card():
+    """無効先頭 card を除いた item context を実 assembler で作る。
+
+    やさしい説明: 画面のカード番号とモデルの候補番号がずれる実際の経路を、テスト用に再現します。
+    """
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    gameplay_hud, gameplay_world = _hud_world("gameplay")
+    assert assembler.assemble(gameplay_hud, gameplay_world, schema, (1000, 1000)) is not None
+    hud, world = _hud_world("level_up_items", ts=1_100_000_000)
+    hud = dataclasses.replace(
+        hud,
+        cards=(
+            ParsedCard(0, "whip", "weapon", 2, .1, "low confidence", (100, 100, 400, 500)),
+            ParsedCard(1, "knife", "weapon", 2, .99, "ok", (500, 100, 800, 500)),
+        ),
+    )
+    snap = assembler.assemble(hud, world, schema, (1000, 1000))
+    assert snap is not None
+    return snap
+
+
+def test_item_decision_uses_ui_slot_after_invalid_card_is_excluded(golden_combat_policy) -> None:
+    """runtime が詰め直した model slot を元の有効 UI card に解決する。
+
+    やさしい説明: 先頭の無効カードを飛ばしても、停止せず次の有効カードをクリックします。
+    """
+    runtime = AgentRuntime(
+        RuntimeBundle.from_golden_fixture(golden_combat_policy, item_selector=_ContextDangerItemSelector())
+    )
+    snapshot = _snap_with_invalid_leading_item_card()
+    decision = runtime.decide(snapshot, now_ns=_fresh_now(snapshot), episode_start=True)
+    assert decision.kind == "ui", decision.reason
+    assert decision.ui_intent is not None
+    assert decision.ui_intent.kind == UiIntentKind.CHOOSE_CARD
+    assert decision.ui_intent.target_index == 1
 
 
 def _fresh_now(snapshot) -> int:

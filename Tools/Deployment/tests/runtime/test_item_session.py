@@ -127,19 +127,23 @@ def _make_ui_presentation(
     validity: bool = True,
     semantic_kind: str = "item_card",
     choice_id_override: dict[int, str] | None = None,
+    choice_index_override: dict[int, int] | None = None,
+    validity_override: dict[int, bool] | None = None,
 ) -> UiPresentationSnapshotV1:
     """UiPresentationSnapshotV1 を candidates から構築する。
 
-    validity / semantic_kind / choice_id を差し替えて異常系を作れる。
+    validity / semantic_kind / choice_id / choice_index を差し替えて異常系を作れる。
     """
     overrides = choice_id_override or {}
+    index_overrides = choice_index_override or {}
+    validity_overrides = validity_override or {}
     ui_candidates = tuple(
         UiCandidateTargetV1(
             choice_id=overrides.get(index, candidate.item_id),
-            choice_index=index,
+            choice_index=index_overrides.get(index, index),
             semantic_kind=semantic_kind,
             roi=NormalizedRoi(0.1, 0.1, 0.4, 0.4),
-            validity=validity,
+            validity=validity_overrides.get(index, validity),
             confidence=0.95,
         )
         for index, candidate in enumerate(candidates)
@@ -350,6 +354,31 @@ class TestTargetValidity:
         stub = SimpleNamespace(candidates=(duplicate, duplicate))
         with pytest.raises(ItemSessionError, match="does not bind uniquely"):
             _resolve_winner_target(0, _make_item_context(candidates), stub)
+
+    def test_permuted_ui_choice_index_resolves_by_item_identity(self):
+        """model slot と異なる UI choice_index でも item_id で解決する。
+
+        やさしい説明: モデルの候補順と画面上のカード番号が違っても、同じアイテムを選べます。
+        """
+        candidates = [_item_candidate("whip"), _item_candidate("knife")]
+        ui = _make_ui_presentation(candidates, choice_index_override={0: 1, 1: 0})
+        outcome = _decide(_FakeSelector(logits=(9.0, 0.0, 0.0)), candidates, ui)
+        assert outcome.intent is not None
+        assert outcome.intent.target_index == 1
+
+    def test_invalid_ui_card_excluded_from_model_slots_still_binds_valid_card(self):
+        """無効 UI card を除外して詰めた model slot を valid card へ束縛する。
+
+        やさしい説明: 先頭カードが無効でも、モデルが選んだ次の有効カードを画面の正しい番号で操作します。
+        """
+        model_candidates = [_item_candidate("knife")]
+        ui = _make_ui_presentation(
+            [_item_candidate("whip"), _item_candidate("knife")],
+            validity_override={0: False},
+        )
+        outcome = _decide(_FakeSelector(logits=(9.0, 0.0, 0.0)), model_candidates, ui)
+        assert outcome.intent is not None
+        assert outcome.intent.target_index == 1
 
     def test_padding_slot_choice_is_rejected(self):
         """test_padding_slot_choice_is_rejected の契約を検証する。
