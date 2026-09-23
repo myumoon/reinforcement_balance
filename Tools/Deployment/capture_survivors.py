@@ -21,7 +21,7 @@ from survivors.capture import (
     WindowLocator,
 )
 from survivors.capture_dataset import DatasetWriter
-from survivors.target_profile import load_target_profile
+from survivors.target_profile import load_runtime_profile
 
 
 SYNTHETIC_PROFILE_HASH = "0" * 64
@@ -68,7 +68,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _start_live_session() -> CaptureSession:
-    profile = load_target_profile()
+    profile = load_runtime_profile()
     policy = TargetWindowPolicy(
         process_executable="VampireSurvivors.exe",
         window_class="YYGameMakerYY",

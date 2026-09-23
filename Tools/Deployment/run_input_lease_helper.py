@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 from survivors.action_semantics import load_action_contract
 from survivors.input.controller import HelperUnavailable, InputLeaseController
-from survivors.target_profile import load_target_profile
+from survivors.target_profile import load_runtime_profile
 def _arguments() -> argparse.Namespace:
     """target binding と audit path だけを command line から読む。
     任意 VK・text・shortcut・click 座標の option は意図的に提供しません。
@@ -21,7 +21,7 @@ def main() -> int:
     Ctrl+Shift+F12 で arm した後も focus/PID/HWND gate と75ms期限が各 action に適用されます。
     """
     args = _arguments()
-    target = load_target_profile()
+    target = load_runtime_profile()
     action = load_action_contract()
     try:
         with InputLeaseController(

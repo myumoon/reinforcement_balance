@@ -15,6 +15,9 @@ from reinbalance_survivors_contracts.ui_intent import is_strict_number
 VERSION="survivors_target.v1"
 _SHA256=re.compile(r"[0-9a-f]{64}")
 CONFIG=Path(__file__).parents[1]/"configs"/"mad_forest_standard_v1.yaml"
+# 実機の実測値(build_id/ハッシュ/GPU名等)で確定した profile の生成先。.env/ はgitignore対象なので、
+# ここに実測値を書いてもリポジトリ・公開PRには一切残らない。生成は survivors/target_resolve.py が行う。
+RESOLVED=Path(__file__).parents[3]/".env"/"target_profile.resolved.yaml"
 _SUCCESS_SEAL=object()
 SECTIONS={
  "base":frozenset({"platform","window_mode","client_resolution","ui_language","stage","character","modifiers","success_timer_seconds","post_timer_event_required"}),
@@ -93,3 +96,17 @@ class TargetProfile:
 
 def load_target_profile(path:Path=CONFIG):
     with path.open(encoding="utf-8") as f:return TargetProfile.from_wire(yaml.safe_load(f))
+
+def load_runtime_profile(path:Path=RESOLVED)->TargetProfile:
+    """本番実行時に使う、実機の実測値で確定済みの profile を読む。
+
+    tracked のテンプレート(test-fixtureのプレースホルダ)ではなく、.env/ に生成された
+    確定版を読みます。まだ生成されていなければ、先に確定ツールを実行するよう案内して失敗します。
+    """
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"resolved target profile not found: {path}\n"
+            "先に Tools/Deployment をカレントディレクトリにして "
+            "python -m survivors.target_resolve を実行してください。"
+        )
+    return load_target_profile(path)

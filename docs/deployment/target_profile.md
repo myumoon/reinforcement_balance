@@ -8,6 +8,8 @@ semantic attestation は caller の真偽値ではない。versioned record に�
 
 repository の `mad_forest_standard_v1.yaml` は `provenance: test-fixture` であり real target の canonical 実測値を表さない。real-target audit は operator/date/evidence-hash を持つ `provenance: operator-attested` profile の expected 値へ observed metadata を束縛し、test fixture または未 attested profile を fail-closed にする。実 VS の値の採取・供給は real-target setup の deferred 作業である。
 
+実測値は `Tools/Deployment` をカレントディレクトリにして `python -m survivors.target_resolve` を実行すると、証跡 JSON・Steam ビルドマニフェスト・save ファイル・torch から機械的に集まり、tracked のテンプレートへは一切書き込まず `.env/target_profile.resolved.yaml`(Git 管理外)へ生成される。本番コードは `load_target_profile()` ではなく `load_runtime_profile()` を呼び、resolved ファイルが無ければ生成手順を案内して失敗する(fail-closed)。実機固有の build_id・ハッシュ・GPU 名等が public repository に残らないのはこのためである。
+
 ## 実機MachineInfoの採取と利用
 
 `Tools/Utility/MachineInfo/GetMachineInfo.ps1` は、実機の GPU、VRAM、ドライバー、OS build、Windows のディスプレイ拡大縮小を採取し、同じディレクトリの `output/machine_info_YYYYMMDD_HHMMSS.json` に保存する。この JSON は通常の UE5 シミュレータ訓練（`Tools/Training/train.py`）の入力ではなく、Vampire Survivors 実機の feasibility、capture、model/runtime、campaign を開始するための TargetProfile 証跡である。

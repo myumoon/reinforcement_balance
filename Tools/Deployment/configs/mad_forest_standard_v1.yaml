@@ -1,6 +1,8 @@
 # canonical target profile(Mad Forest/Antonio/30 分/日本語 UI 等)の正準値。build_id 等は test-fixture のプレースホルダ。
 #
 # 『これが正解ターゲット』という基準環境を固定した設定ファイルです。実機固有の値(build_id 等)は本番設定時に差し替える前提の仮値です。
+# このファイル自体は常にテンプレートのまま保ち、書き換えません。実測値は survivors/target_resolve.py が
+# .env/target_profile.resolved.yaml (git管理外) へ生成し、load_runtime_profile() がそちらを読みます。
 
 schema_version: survivors_target.v1
 provenance: test-fixture

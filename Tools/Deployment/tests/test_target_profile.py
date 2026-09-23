@@ -7,7 +7,7 @@ import math
 import pytest
 import yaml
 
-from survivors.target_profile import TargetProfile, SuccessObservation, load_target_profile
+from survivors.target_profile import TargetProfile, SuccessObservation, load_target_profile, load_runtime_profile
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
 
 
@@ -63,3 +63,7 @@ def test_nested_taxonomy_is_closed(section,field,value):
 def test_progression_item_vocabulary_is_closed(field,value):
     data=load_target_profile().to_wire(); data["progression"][field]=value
     with pytest.raises(ValueError): TargetProfile.from_wire(data)
+
+def test_load_runtime_profile_raises_when_missing(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_runtime_profile(tmp_path/"nonexistent.yaml")
