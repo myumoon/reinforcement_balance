@@ -127,19 +127,23 @@ def _make_ui_presentation(
     validity: bool = True,
     semantic_kind: str = "item_card",
     choice_id_override: dict[int, str] | None = None,
+    choice_index_override: dict[int, int] | None = None,
+    validity_override: dict[int, bool] | None = None,
 ) -> UiPresentationSnapshotV1:
     """UiPresentationSnapshotV1 を candidates から構築する。
 
-    validity / semantic_kind / choice_id を差し替えて異常系を作れる。
+    validity / semantic_kind / choice_id / choice_index を差し替えて異常系を作れる。
     """
     overrides = choice_id_override or {}
+    index_overrides = choice_index_override or {}
+    validity_overrides = validity_override or {}
     ui_candidates = tuple(
         UiCandidateTargetV1(
             choice_id=overrides.get(index, candidate.item_id),
-            choice_index=index,
+            choice_index=index_overrides.get(index, index),
             semantic_kind=semantic_kind,
             roi=NormalizedRoi(0.1, 0.1, 0.4, 0.4),
-            validity=validity,
+            validity=validity_overrides.get(index, validity),
             confidence=0.95,
         )
         for index, candidate in enumerate(candidates)
@@ -350,6 +354,46 @@ class TestTargetValidity:
         stub = SimpleNamespace(candidates=(duplicate, duplicate))
         with pytest.raises(ItemSessionError, match="does not bind uniquely"):
             _resolve_winner_target(0, _make_item_context(candidates), stub)
+
+    @pytest.mark.parametrize(
+        ("logits", "expected_target_index"),
+        [
+            ((9.0, 0.0, 0.0), 1),
+            ((0.0, 9.0, 0.0), 0),
+        ],
+    )
+    def test_permuted_ui_choice_index_resolves_by_item_identity(
+        self, logits, expected_target_index
+    ):
+        """model slot と異なる UI choice_index でも item_id で解決する。
+
+        やさしい説明: モデルがどちらの候補を選んでも（winner_index=0/1 の両方で）、
+        画面上の正しいカード番号を同じ非恒等 permutation の下で解決できることを確認します。
+        """
+        candidates = [_item_candidate("whip"), _item_candidate("knife")]
+        ui = _make_ui_presentation(candidates, choice_index_override={0: 1, 1: 0})
+        outcome = _decide(_FakeSelector(logits=logits), candidates, ui)
+        assert outcome.intent is not None
+        assert outcome.intent.target_index == expected_target_index
+
+    def test_invalid_ui_card_excluded_from_model_slots_still_binds_valid_card(self):
+        """無効 UI card を除外して詰めた model slot を valid card へ束縛する（Issue #324 再現）。
+
+        やさしい説明: 先頭カードが無効で card_mask=(True,True,False) に詰め直されても、
+        モデルが選んだ winner_index=0 が画面の choice_index=1（先頭の有効カード）を正しく操作します。
+        """
+        model_candidates = [_item_candidate("knife"), _item_candidate("shield")]
+        ui = _make_ui_presentation(
+            [
+                _item_candidate("whip"),
+                _item_candidate("knife"),
+                _item_candidate("shield"),
+            ],
+            validity_override={0: False},
+        )
+        outcome = _decide(_FakeSelector(logits=(9.0, 0.0, 0.0)), model_candidates, ui)
+        assert outcome.intent is not None
+        assert outcome.intent.target_index == 1
 
     def test_padding_slot_choice_is_rejected(self):
         """test_padding_slot_choice_is_rejected の契約を検証する。

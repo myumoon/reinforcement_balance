@@ -99,9 +99,8 @@ def _resolve_winner_target(
 ) -> UiCandidateTargetV1:
     """勝者 index を UiPresentationSnapshotV1 内の typed target に一意解決する。
 
-    choice_id / choice_index が同一 snapshot 内の有効な item_card target へ
-    ちょうど 1 件対応する場合だけ target を返す。0 件・複数件・validity=false・
-    fallback semantic のいずれでも ItemSessionError にし、caller が stop を返す。
+    choice_id が同一 snapshot 内の有効な item_card target へちょうど 1 件対応する場合だけ target を返す。
+    やさしい説明: モデルの候補順は無効カードを除いて詰め直されるため、画面の番号ではなく item_id で対応付けます。
     """
     padded = item_context.padded_candidates
     if not (0 <= winner_index < len(padded)):
@@ -114,7 +113,6 @@ def _resolve_winner_target(
         ui_cand
         for ui_cand in ui_presentation.candidates
         if ui_cand.choice_id == winner_candidate.item_id
-        and ui_cand.choice_index == winner_index
     ]
     if not matches:
         raise ItemSessionError(
