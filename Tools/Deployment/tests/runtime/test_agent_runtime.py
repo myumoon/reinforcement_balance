@@ -84,7 +84,12 @@ class _ItemSelector:
 
 
 class _ContextDangerItemSelector(_ItemSelector):
-    """実 assembler の item feature schema を受ける selector double。"""
+    """実 assembler の item feature schema を受ける selector double。
+
+    やさしい説明: RealObsAssembler が実際に出力する
+    ``context_danger_occupancy_v1`` スキーマの item context を、
+    先頭の valid card を選ぶ固定 logits でそのまま受け取れるようにします。
+    """
 
     feature_schema = "context_danger_occupancy_v1"
 
