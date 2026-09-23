@@ -223,14 +223,15 @@ def test_build_gate_evidence_rejects_session_missing_field():
         _build(sessions=sessions)
 
 
-def test_build_gate_evidence_rejects_non_finite_minutes():
-    """minutesが非有限（NaN）の場合をfail-closedにする。
+@pytest.mark.parametrize("non_finite", [float("nan"), float("inf")])
+def test_build_gate_evidence_rejects_non_finite_minutes(non_finite):
+    """minutesが非有限（NaN/inf）の場合をfail-closedにする。
 
-    is_strict_number()はNaNもfloatとして通してしまうため、math.isfinite()による
+    is_strict_number()はNaN/infもfloatとして通してしまうため、math.isfinite()による
     別チェックが実際に効いていることを確認する。
     """
     sessions = _sessions()
-    sessions[0] = {**sessions[0], "minutes": float("nan")}
+    sessions[0] = {**sessions[0], "minutes": non_finite}
     with pytest.raises(ContractValidationError):
         _build(sessions=sessions)
 
