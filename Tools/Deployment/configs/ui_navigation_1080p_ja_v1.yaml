@@ -1,0 +1,45 @@
+# gameplay/UI state machine(05-03)の timeout・retry・信頼度しきい値プロファイル。
+#
+# 1080p・日本語UIクライアントを想定した暫定プロファイルです。ここには
+# クリック座標(ピクセル/正規化座標)を一切含みません。クリック先は毎回
+# `PerceptionSnapshot.ui_presentation` から解決するため、座標を設定ファイルに
+# 固定してしまうと画面レイアウト変更時に誤クリックする恐れがあるからです。
+# 実機キャリブレーションで座標プロファイルが必要になった場合は、別の
+# capture-dataset フェーズで typed target の解決精度を検証したうえで追加します。
+
+schema_version: survivors.ui_navigation_profile.v1
+
+# 何連続フレーム同じ画面分類を観測したら状態遷移を確定するか(ヒステリシス)。
+debounce_frames: 3
+
+# UI click の再送(retry)を許す最大回数。0にすると retry を完全に禁止する。
+retry_budget: 1
+
+# UI click 送信後、ゲーム側が処理する時間を見込んで retry を待つ ack window
+# (ミリ秒)。capture/perception の遅延が1フレーム(16ms)を超える実機環境でも、
+# ゲームがまだ初回 click を処理し切っていないうちに retry して二重clickに
+# ならないための安全マージン(M4 fix)。
+retry_after_ms: 200
+
+# resolver が typed target を採用するために必要な最低信頼度(validity は別途必須)。
+min_target_confidence: 0.5
+
+# 各画面での ack 待ち timeout(ミリ秒)。超えると emergency stop へ fail-closed する。
+timeouts_ms:
+  level_up: 2000
+  chest: 5000
+  unknown: 1000
+  run_setup: 15000
+  target_reached: 5000
+
+# 日本語UIクライアントの画面ラベル(ログ/ドキュメント用途のみ。判定には使わない)。
+labels_ja:
+  gameplay: プレイ中
+  level_up_items: レベルアップ(カード選択)
+  level_up_fallback: レベルアップ(ゴールド/チキン)
+  chest: 宝箱
+  target_reached_transition: 目標到達(30:00)確認
+  death: 死亡
+  result: リザルト
+  paused: 一時停止
+  unknown: 不明画面
