@@ -88,15 +88,21 @@
   この window を空けるまでは precondition を満たしていても retry しません。
 - retry は `NavigationProfile.retry_budget`(既定 1)回まで。
 - 送信済み click に対して、`ui_state_key`/`candidate_set_hash`/
-  `inventory_hash` のいずれかが元の snapshot から変わっていれば、それを
-  「game 側の apply ack」と認識します(OS への送信受理である
-  `ExecutionOutcome.ack` とは別物です)。apply ack を検出した場合は
-  intent identity の変化とはみなさず、`ui_attempt` をクリアして今 tick の
-  intent を新規 initial resolve として扱います(再送はしません)。これにより
-  reroll/banish 成功後の次の選択や連続 level-up を、誤って emergency stop
-  しません。apply ack が観測できないまま候補/inventory/state key が変わった
-  場合や、retry の precondition を満たさない場合は、再送せず emergency stop
-  へ倒します。
+  `inventory_hash` のいずれかが元の snapshot から変わったら、それを
+  「game 側の apply ack」の**候補**とみなします(OS への送信受理である
+  `ExecutionOutcome.ack` とは別物です)。ただし UI フェード中の1フレームだけの
+  揺れと区別するため、同じ新しい組(`ui_state_key`/`candidate_set_hash`/
+  `inventory_hash`)が `NavigationProfile.debounce_frames` 回連続で観測され、
+  かつ ack 待ち window(`retry_after_ns`)も経過して初めて apply ack と確定
+  します。確定するまでは再送も新規 click もせず待ちます(M15 fix: 以前は
+  1フレームでも変化すれば無条件で apply ack と認定しており、フェード中の
+  ui_state_key の一瞬の揺れごとに無制限に再クリックしてしまっていました)。
+  確定した場合は intent identity の変化とはみなさず、`ui_attempt` をクリア
+  して今 tick の intent を新規 initial resolve として扱います(再送はしま
+  せん)。これにより reroll/banish 成功後の次の選択や連続 level-up を、誤って
+  emergency stop しません。apply ack が確定しないまま intent identity が
+  変わった場合や、retry の precondition を満たさない場合は、再送せず
+  emergency stop へ倒します。
 - `CONFIRM` intent だけ ROI クリックの代わりに `ENTER` キーを使います。それ
   以外(`CHOOSE_CARD`/`CHOOSE_FALLBACK`/`REROLL`/`SKIP`/`BANISH`/`ACK_CHEST`)は
   resolve 済み ROI の中心をクリックします。
@@ -136,8 +142,17 @@ PR の範囲外である 05-04 launcher です。
 - `death`/`result` へ直接移った(confirm 前に Reaper に倒された等) →
   `success_latched` を優先して `COMPLETE`。
 
-それ以外の確定的な画面変化(`UNKNOWN` 等、illegal transition)や、post-30
-event を確認できないままの timeout は、成功を確定させず **fail-closed**
+- `LEVEL_UP`/`CHEST` が確定した場合は、`GAMEPLAY` 中の modal screen 遷移
+  (`unexpected_ui_transition`)と同じ「想定外の遷移」として即座に
+  **fail-closed** します(状態間の一貫性を優先)。
+- `UNKNOWN`(`window_focused=False` による強制 UNKNOWN を含む)/`PAUSED` の
+  間は、confirm 済みかどうかに関わらず `_dispatch_ui_click` を一切呼ばず、
+  UI 入力 0 のまま timeout を待ちます(M15 fix: 以前は confirmed
+  UNKNOWN/PAUSED でも timeout の 5 秒間 Enter/click を送り続けており、
+  「unknown/paused/focus loss 中は入力 0」という不変条件に反していました)。
+
+それ以外の確定的な画面変化や、post-30 event を確認できないままの timeout は、
+成功を確定させず **fail-closed**
 (`campaign_run_mode=formal_single_attempt` では `FORMAL_RUN_TERMINAL_FAILURE`、
 `operator_debug_restart` では `DISARMED`)に倒します。
 

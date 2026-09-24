@@ -17,11 +17,13 @@
 - レベルアップ/宝箱/確認画面のクリックは、送信直後の ack 待ち window
   (``NavigationProfile.retry_after_ns``)を経過するまで retry せず、
   その後1回だけ再送(retry)を許す。送信済み snapshot から見て
-  ``ui_state_key``/``candidate_set_hash``/``inventory_hash`` が変わって
-  いれば、それを「game 側の apply ack」と認識して retry せず、以後の intent
-  を新規 initial resolve として扱う(reroll/banish 成功後の次選択や連続
-  level-up を誤って emergency stop しない)。それでも変化がなければ input を
-  止めて安全側(emergency stop)へ倒す(fail-closed)。
+  ``ui_state_key``/``candidate_set_hash``/``inventory_hash`` が変わっても、
+  同じ新しい組が ``debounce_frames`` 回連続で安定し、かつ ack 待ち window も
+  経過して初めて「game 側の apply ack」と確定し、以後の intent を新規
+  initial resolve として扱う(reroll/banish 成功後の次選択や連続 level-up を
+  誤って emergency stop しない一方、フェード中の1フレームだけの揺れでは
+  無制限に再クリックしない、M15 fix)。それでも変化がなければ input を止めて
+  安全側(emergency stop)へ倒す(fail-closed)。
 - unknown は 1s、paused は無期限(input 0 のまま画面変化を待つ)。どちらから
   復帰する場合も RECOVER で gameplay を再確認してから初めて移動を再開する。
   RECOVER/PAUSED/UNKNOWN は、対応する UiIntentV1 を持たない入力(例えば
@@ -167,6 +169,14 @@ class UiAttempt:
     original_snapshot: "PerceptionSnapshot"
     sent_ns: int
     retried: bool = False
+    # apply ack 安定確認用のバッファ(M15 fix)。
+    #
+    # やさしい説明: ui_state_key/candidate_set_hash/inventory_hash が
+    # original_snapshot と違う値へ「今 tick 何に変わったか」を覚えておく付箋です。
+    # 同じ新しい値が ``debounce_frames`` 回連続で観測されるまでは apply ack と
+    # 認定しないための一時カウンタで、値が安定しない限り増え続けません。
+    pending_ack_signature: tuple[str, str, str] | None = None
+    pending_ack_streak: int = 0
 
 
 @dataclass(frozen=True)
@@ -372,19 +382,19 @@ def _land_gameplay(context: StateContext, now_ns: int) -> tuple[StateContext, tu
     return new_context, ()
 
 
-def _apply_ack_observed(original_snapshot: "PerceptionSnapshot", snapshot: "PerceptionSnapshot") -> bool:
-    """直前に送信した click 対象の snapshot と比べ、game 側が適用した合図(apply ack)を検出する。
+def _ui_signature(snapshot: "PerceptionSnapshot") -> tuple[str, str, str]:
+    """apply ack 判定に使う (ui_state_key, candidate_set_hash, inventory_hash) の組を返す。
 
-    やさしい説明: OS への送信受理(``ExecutionOutcome.ack``)とは全く別の話です。
-    ここで見ているのは「ゲーム側が実際にクリックを処理したらしい」痕跡で、
-    ``ui_state_key``/``candidate_set_hash``/``inventory_hash`` のどれか1つでも
-    前回送信時の snapshot から変わっていれば、それを apply ack とみなします
-    (reroll/banish 成功後の新しい候補集合、連続 level-up での次の選択画面など)。
+    やさしい説明: この3値のうちどれか1つでも前回送信時の snapshot と違えば
+    「ゲーム側が実際にクリックを処理したらしい」候補ですが、それだけでは
+    UI フェード中の1フレームだけの揺れと区別できません。``_dispatch_ui_click``
+    側でこの組が ``debounce_frames`` 回連続で安定するまで待たせることで、
+    apply ack の誤検出(と、それによる無制限 re-click)を防ぎます(M15 fix)。
     """
     return (
-        snapshot.ui_state_key != original_snapshot.ui_state_key
-        or snapshot.ui_presentation.candidate_set_hash != original_snapshot.ui_presentation.candidate_set_hash
-        or snapshot.ui_presentation.inventory_hash != original_snapshot.ui_presentation.inventory_hash
+        snapshot.ui_state_key,
+        snapshot.ui_presentation.candidate_set_hash,
+        snapshot.ui_presentation.inventory_hash,
     )
 
 
@@ -401,16 +411,21 @@ def _dispatch_ui_click(
     やさしい説明: LEVEL_UP/CHEST/TARGET_REACHED_PENDING_TRANSITION のどれでも
     同じ規則で動きます。優先順位は次のとおりです。
 
-    1. 送信済み click に対して apply ack(``ui_state_key``/
-       ``candidate_set_hash``/``inventory_hash`` の変化)が観測できたら、
-       それを最優先で認識し、``ui_attempt`` をクリアして今 tick の intent を
-       *新規* initial resolve として扱う(再送はしない)。
-    2. apply ack が無いのに intent identity が変わっていたら fail-closed。
-    3. 既に retry 済みなら何もしない。
-    4. ack 待ち window(``retry_after_ns``)を経過するまでは retry しない
+    1. 送信済み click の対象から ``ui_state_key``/``candidate_set_hash``/
+       ``inventory_hash`` のいずれかが変わっていたら、apply ack の *候補* と
+       みなす。ただし同じ新しい組が ``debounce_frames`` 回連続で観測され、
+       かつ ack 待ち window(``retry_after_ns``)も経過して初めて確定させ、
+       ``ui_attempt`` をクリアして今 tick の intent を *新規* initial resolve
+       として扱う(M15 fix: 安定条件を満たすまでは再送も新規clickもしない。
+       1 フレームだけの揺れで無制限 re-click しないようにするため)。
+    2. 安定条件を満たしていない(＝まだ確定していない)間は、identity 判定より
+       先にここで待つ。intent identity 自体が変わっていない限り誤検出しない。
+    3. apply ack 候補が無いのに intent identity が変わっていたら fail-closed。
+    4. 既に retry 済みなら何もしない。
+    5. ack 待ち window(``retry_after_ns``)を経過するまでは retry しない
        (M4 fix: capture/perception 遅延中の二重click防止)。
-    5. 同一 snapshot の再利用は retry にならない。
-    6. precondition を満たす newer snapshot だけ、最大1回 retry する。
+    6. 同一 snapshot の再利用は retry にならない。
+    7. precondition を満たす newer snapshot だけ、最大1回 retry する。
     """
     if decision.kind != "ui" or decision.ui_intent is None:
         return context, ()  # move/no_op は UI 状態中は無視する(movement と競合させない)。
@@ -420,13 +435,27 @@ def _dispatch_ui_click(
     if intent.kind is UiIntentKind.NO_OP:
         return context, ()
 
-    if context.ui_attempt is not None and _apply_ack_observed(context.ui_attempt.original_snapshot, snapshot):
-        # game 側が前回 click を適用した合図: 今 tick は再送せず、intent を
-        # 新規 initial resolve として扱う。旧 intent が遅れて届いても
-        # source snapshot binding(mode="initial")が一致しないため再送されない。
-        return _dispatch_ui_click(
-            replace(context, ui_attempt=None), snapshot, decision, now_ns=now_ns, profile=profile
-        )
+    if context.ui_attempt is not None:
+        attempt = context.ui_attempt
+        current_signature = _ui_signature(snapshot)
+        if current_signature != _ui_signature(attempt.original_snapshot):
+            # apply ack の候補: 前と同じ新しい組が続けて観測されているかを数える。
+            if current_signature == attempt.pending_ack_signature:
+                ack_streak = attempt.pending_ack_streak + 1
+            else:
+                ack_streak = 1
+            ack_window_elapsed = now_ns - attempt.sent_ns >= profile.retry_after_ns
+            if ack_streak >= profile.debounce_frames and ack_window_elapsed:
+                # 安定条件を満たした: 本当に apply ack と確定し、今 tick の intent を
+                # 新規 initial resolve として扱う(旧 intent が遅れて届いても
+                # source snapshot binding(mode="initial")が一致しないため再送されない)。
+                return _dispatch_ui_click(
+                    replace(context, ui_attempt=None), snapshot, decision, now_ns=now_ns, profile=profile
+                )
+            # まだ確定していない揺れ: 再送も新規clickもせず、次tickの判定用に
+            # カウンタだけ更新して待つ(fail-closed にもしない)。
+            new_attempt = replace(attempt, pending_ack_signature=current_signature, pending_ack_streak=ack_streak)
+            return replace(context, ui_attempt=new_attempt), ()
 
     identity = _intent_identity(intent)
 
@@ -581,17 +610,33 @@ def _reduce_target_reached(
     できないままの timeout は、成功を確定させず fail-closed(campaign mode に
     応じて formal terminal failure か disarmed)に倒します(M7 fix: 以前は
     timeoutも未確認のconfirmed UNKNOWNも無条件でCOMPLETEにしていた)。
+
+    confirmed LEVEL_UP/CHEST は modal screen 側の ``unexpected_ui_transition``
+    と同じ「想定外の遷移」として即座に fail-closed にし、UNKNOWN/PAUSED
+    (``window_focused=False`` による強制 UNKNOWN を含む)の間は confirm 待ちで
+    あっても ``_dispatch_ui_click`` を一切呼ばず入力 0 のまま timeout を待ちます
+    (M15 fix: 以前は confirmed UNKNOWN/PAUSED でも timeout の 5 秒間 Enter/click
+    を送り続けており、plan18/96行目「unknown/paused/focus loss 中は入力 0」と
+    受け入れ条件102行目「unknown はfail-closed」に反していた)。
     """
     if confirmed and category is ControllerState.DEATH_RESULT:
         return _enter_death_result(context, now_ns)
     if confirmed and category is ControllerState.GAMEPLAY:
         # post-30 confirm を確認できた(gameplay 再開が確定) -> 成功確定。
         return _finalize_terminal(context, ControllerState.COMPLETE, now_ns=now_ns, reason="post_30_confirm_success")
+    if confirmed and category in (ControllerState.LEVEL_UP, ControllerState.CHEST):
+        # modal screen(_reduce_modal_ui_screen)の unexpected_ui_transition と
+        # 同じ「想定外の遷移」として即座に fail-closed にする(状態間の一貫性)。
+        return _emergency_stop(context, now_ns=now_ns, reason=f"unexpected_ui_transition:{category.value}")
 
     timeout_ns = profile.timeout_ns_for("target_reached")
     if now_ns - context.state_entered_ns >= timeout_ns:
         # post-30 event を確認できないまま timeout: 成功を確定させず fail-closed。
         return _emergency_stop(context, now_ns=now_ns, reason="target_reached_timeout_unconfirmed")
+
+    if category in (ControllerState.UNKNOWN, ControllerState.PAUSED):
+        # UNKNOWN(focus loss含む)/PAUSED中はUI入力を出さず、timeoutまで入力0で待つ。
+        return context, ()
 
     return _dispatch_ui_click(context, snapshot, decision, now_ns=now_ns, profile=profile)
 

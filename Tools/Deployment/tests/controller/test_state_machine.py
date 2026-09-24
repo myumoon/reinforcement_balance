@@ -418,9 +418,27 @@ class TestLevelUpOrderingAndRetry:
 
 
 class TestApplyAckRecognition:
-    """M12: apply ack(ui_state_key/candidate_set_hash/inventory_hash の変化)を
-    intent identity の変化と誤認しない。
+    """M12/M15: apply ack(ui_state_key/candidate_set_hash/inventory_hash の変化)を
+    intent identity の変化と誤認しない。ただし debounce_frames 連続で安定し、
+    かつ retry_after_ns 経過するまでは apply ack と確定しない(M15 fix: 1フレーム
+    だけの揺れで無制限に re-click しないように安定条件を必須にした)。
     """
+
+    @staticmethod
+    def _drive_until_ack_confirmed(sm: StateMachine, snapshot, decision, now: int) -> tuple[int, tuple]:
+        """同じ (snapshot, decision) を、apply ack が確定するまで送り続ける。
+
+        やさしい説明: debounce_frames 連続の安定観測と retry_after_ns 経過の
+        両方を満たすまで、テスト側で機械的に tick を送り進めるヘルパーです。
+        """
+        effects: tuple = ()
+        for _ in range(200):
+            now += _TICK_NS
+            effects = sm.step(snapshot, decision, now_ns=now)
+            if effects or sm.context.ui_attempt is None:
+                return now, effects
+        pytest.fail("apply ack (stabilized + ack window elapsed) was never confirmed")
+        return now, effects
 
     def _enter_level_up_with_candidate(
         self, sm: StateMachine, now: int, *, snapshot_id: str, choice_id: str, choice_index: int = 0
@@ -437,6 +455,51 @@ class TestApplyAckRecognition:
         decision = fx.make_ui_decision(lu, intent)
         return lu, intent, decision
 
+    def test_ui_state_key_jitter_alone_does_not_resend(self) -> None:
+        """M15: candidate_set_hash/inventory_hash は不変のまま ui_state_key だけが
+        A/B と揺れても、intent identity は変わらないので通常の retry 規則
+        (initial 1 + retry 最大1 = 合計2)しか送らない(無制限 re-click しない)。
+        """
+        sm = StateMachine()
+        now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT)
+        lu, intent, decision = self._enter_level_up_with_candidate(sm, now, snapshot_id="lu-a", choice_id="card-a")
+        for _ in range(3):
+            now += _TICK_NS
+            sm.step(lu, decision, now_ns=now)
+        assert sm.context.state is ControllerState.LEVEL_UP
+        now += _TICK_NS
+        first_click = sm.step(lu, decision, now_ns=now)
+        assert [e.kind for e in first_click] == ["release_all", "ui_click"]
+
+        # candidate_set_hash/inventory_hash を固定したまま ui_state_key だけを
+        # A/B と交互に変えた snapshot を 16ms 間隔で 20 tick 与える
+        # (blocking-findings-2.json の再現手順そのもの)。
+        lu_a = lu
+        lu_b = fx.make_perception_snapshot(
+            screen_state="level_up_items",
+            snapshot_id=lu.snapshot_id,
+            frame_id=lu.frame_id,
+            ui_state_key=fx._hash_of("ui-state-key-B"),
+            candidates=lu.ui_presentation.candidates,
+            candidate_set_hash=lu.ui_presentation.candidate_set_hash,
+            inventory_hash=lu.ui_presentation.inventory_hash,
+        )
+        click_count = 0
+        retry_seen = False
+        for tick in range(20):
+            wobbling = lu_a if tick % 2 == 0 else lu_b
+            now += _TICK_NS
+            effects = sm.step(wobbling, decision, now_ns=now)
+            if effects:
+                assert [e.kind for e in effects] == ["release_all", "ui_click"]
+                click_count += 1
+                if effects[1].mode == "retry":
+                    retry_seen = True
+        # 揺れている間、initial 1 + retry 最大1 = 合計2件までしか click しない。
+        assert click_count <= 1
+        assert sm.context.state is ControllerState.LEVEL_UP
+        assert not sm.context.terminal_locked
+
     def test_reroll_then_choose_new_candidate_is_not_emergency_stop(self) -> None:
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT)
@@ -449,13 +512,21 @@ class TestApplyAckRecognition:
         first_click = sm.step(lu, decision, now_ns=now)
         assert [e.kind for e in first_click] == ["release_all", "ui_click"]
 
-        # reroll成功でゲーム側が候補集合を入れ替えた(candidate_set_hash変化 = apply ack)。
+        # reroll成功でゲーム側が候補集合を入れ替えた(candidate_set_hash変化)。
         rerolled, _reroll_intent, reroll_decision = self._enter_level_up_with_candidate(
             sm, now, snapshot_id="lu-rerolled", choice_id="card-z"
         )
+        # 変化した直後の1tickだけでは apply ack と確定しない
+        # (debounce_frames 連続 + retry_after_ns 経過が必要、M15 fix)。
         now += _TICK_NS
-        effects = sm.step(rerolled, reroll_decision, now_ns=now)
-        # apply ack を認識し、intent identity 変化とみなして emergency stop しない。
+        immediate_effects = sm.step(rerolled, reroll_decision, now_ns=now)
+        assert immediate_effects == ()
+        assert sm.context.state is ControllerState.LEVEL_UP
+        assert sm.context.ui_attempt is not None
+
+        now, effects = self._drive_until_ack_confirmed(sm, rerolled, reroll_decision, now)
+        # 安定条件を満たして apply ack が確定し、intent identity 変化とみなして
+        # emergency stop しない。
         assert sm.context.state is ControllerState.LEVEL_UP
         assert not sm.context.terminal_locked
         assert [e.kind for e in effects] == ["release_all", "ui_click"]
@@ -476,8 +547,7 @@ class TestApplyAckRecognition:
         lu2, _intent2, decision2 = self._enter_level_up_with_candidate(
             sm, now, snapshot_id="lu-2nd", choice_id="shield", choice_index=2
         )
-        now += _TICK_NS
-        effects = sm.step(lu2, decision2, now_ns=now)
+        now, effects = self._drive_until_ack_confirmed(sm, lu2, decision2, now)
         assert sm.context.state is ControllerState.LEVEL_UP
         assert sm.context.state is not ControllerState.DISARMED
         assert [e.kind for e in effects] == ["release_all", "ui_click"]
@@ -498,8 +568,7 @@ class TestApplyAckRecognition:
 
         rerolled, _r, _rd = self._enter_level_up_with_candidate(sm, now, snapshot_id="lu-b-rerolled", choice_id="card-c")
         stale_decision = decision  # 古い intent(lu 基準)のまま。
-        now += _TICK_NS
-        effects = sm.step(rerolled, stale_decision, now_ns=now)
+        now, effects = self._drive_until_ack_confirmed(sm, rerolled, stale_decision, now)
         assert effects == ()
         assert sm.context.ui_attempt is None
         assert sm.context.state is ControllerState.LEVEL_UP
@@ -1146,6 +1215,88 @@ class TestTransitionTable:
         assert new_ctx.state is expected_to_state
         assert tuple(effect.kind for effect in effects) == expected_kinds
 
+    def _target_reached_confirm_button_step(
+        self,
+        *,
+        category_raw: str,
+        pending_category: ControllerState | None,
+        pending_streak: int,
+        window_focused: bool = True,
+    ):
+        """TARGET_REACHED 中に confirm button の ``ui`` decision を与えて1tick進める。
+
+        やさしい説明: TR 中は本来 confirm button を Enter で押し続けるはずですが、
+        M15 fix の対象は「UNKNOWN/PAUSED/focus loss の間はそれをしてはいけない」
+        ことなので、修正前なら ``ui_key`` effect が出てしまうシナリオをそのまま
+        与えて 0 件であることを確認するためのヘルパーです。
+        """
+        profile = NavigationProfile.default_v1()
+        snapshot = fx.make_perception_snapshot(
+            screen_state=category_raw,
+            snapshot_id=f"tt-tr-zero-input-{category_raw}",
+            buttons=(fx.make_button_target(semantic_action="confirm"),),
+        )
+        intent = fx.make_button_intent(snapshot, kind=UiIntentKind.CONFIRM, semantic_action="confirm")
+        decision = fx.make_ui_decision(snapshot, intent)
+        ctx = StateContext(
+            state=ControllerState.TARGET_REACHED_PENDING_TRANSITION,
+            campaign_run_mode=CampaignRunMode.OPERATOR_DEBUG_RESTART,
+            pending_category=pending_category,
+            pending_streak=pending_streak,
+            state_entered_ns=0,
+            success_latched=True,
+        )
+        return reduce(
+            ctx, snapshot, decision, now_ns=500_000_000, profile=profile, window_focused=window_focused
+        )
+
+    def test_target_reached_confirmed_unknown_sends_zero_ui_input(self) -> None:
+        # M15 fix: confirmed UNKNOWN の間、confirm button の ui_key を送り続けない
+        # (以前は timeout の5秒間 Enter を送り続けていた)。
+        profile = NavigationProfile.default_v1()
+        new_ctx, effects = self._target_reached_confirm_button_step(
+            category_raw="totally_unrecognized_table_probe",
+            pending_category=ControllerState.UNKNOWN,
+            pending_streak=profile.debounce_frames - 1,
+        )
+        assert new_ctx.state is ControllerState.TARGET_REACHED_PENDING_TRANSITION
+        assert effects == ()
+
+    def test_target_reached_confirmed_paused_sends_zero_ui_input(self) -> None:
+        # M15 fix: confirmed PAUSED の間も同様に入力0を維持する
+        # (PAUSED は他の状態では無期限待機・入力0が原則であり、それと矛盾しない)。
+        profile = NavigationProfile.default_v1()
+        new_ctx, effects = self._target_reached_confirm_button_step(
+            category_raw="paused",
+            pending_category=ControllerState.PAUSED,
+            pending_streak=profile.debounce_frames - 1,
+        )
+        assert new_ctx.state is ControllerState.TARGET_REACHED_PENDING_TRANSITION
+        assert effects == ()
+
+    def test_target_reached_focus_loss_sends_zero_ui_input(self) -> None:
+        # M15 fix: window_focused=False は強制的に UNKNOWN 分類になり、
+        # confirm 済みでなくても(debounce 未確定でも)入力0のまま待つ。
+        new_ctx, effects = self._target_reached_confirm_button_step(
+            category_raw="target_reached_transition",
+            pending_category=None,
+            pending_streak=0,
+            window_focused=False,
+        )
+        assert new_ctx.state is ControllerState.TARGET_REACHED_PENDING_TRANSITION
+        assert effects == ()
+
+    def test_target_reached_confirmed_level_up_fails_closed(self) -> None:
+        # modal screen の unexpected_ui_transition と挙動を揃える(状態間の一貫性)。
+        profile = NavigationProfile.default_v1()
+        new_ctx, effects = self._target_reached_confirm_button_step(
+            category_raw="level_up_items",
+            pending_category=ControllerState.LEVEL_UP,
+            pending_streak=profile.debounce_frames - 1,
+        )
+        assert new_ctx.state is ControllerState.DISARMED
+        assert tuple(effect.kind for effect in effects) == ("release_all",)
+
     @pytest.mark.parametrize("mode", [CampaignRunMode.OPERATOR_DEBUG_RESTART, CampaignRunMode.FORMAL_SINGLE_ATTEMPT])
     def test_target_reached_gameplay_confirm_completes_regardless_of_mode(self, mode: CampaignRunMode) -> None:
         new_ctx, effects = self._confirm(
@@ -1293,6 +1444,28 @@ class TestNoiseInvariantProperty:
                 schedule.extend([state] * rng.randint(1, 6))
         return schedule[:total_ticks]
 
+    @staticmethod
+    def _run_ids_for_schedule(schedule: list[str]) -> list[int]:
+        """同じ raw_state が連続する区間(1つの UI 訪問)に共通の run id を振る。
+
+        やさしい説明: M15 fix で追加した回帰テストです。以前はこの property test の
+        fixture が tick ごとに全く別の ``ui_state_key``/``candidate_set_hash`` を
+        生成していたため、`apply ack` バグ(1フレームの揺れで無制限 re-click)が
+        毎tick発生していても検出できませんでした。同じ raw_state が連続する区間では
+        同じ run id(＝同じ UI 訪問)を割り当てることで、fixture 側の
+        ``ui_state_key``/``candidate_set_hash`` を安定させ、retry の正常系
+        (initial 1 + retry 最大1)も実際に運動させて検証できるようにします。
+        """
+        run_ids: list[int] = []
+        current_run_id = -1
+        prev_raw: str | None = None
+        for raw in schedule:
+            if raw != prev_raw:
+                current_run_id += 1
+            run_ids.append(current_run_id)
+            prev_raw = raw
+        return run_ids
+
     def test_random_noisy_sequences_never_violate_safety_invariants(self) -> None:
         rng = random.Random(20260925)
         visited_states: set[ControllerState] = set()
@@ -1310,6 +1483,15 @@ class TestNoiseInvariantProperty:
             # せず)実質的に毎回訪問されるようにする(元は20trial*240tickで
             # RECOVER だけ未訪問になることがあった)。
             schedule = self._generate_schedule(random.Random(rng.random()), 360)
+            run_ids = self._run_ids_for_schedule(schedule)
+            # focus loss 注入専用の独立 RNG(共有 rng を消費すると schedule/move
+            # action の乱数列がずれ、RECOVER 訪問保証などが崩れるため分離する)。
+            focus_rng = random.Random(f"focus-loss-{trial}")
+            # M15 fix: 同一 UiAttempt(同じ original_snapshot に束縛された試行)
+            # あたりの click(ui_click/ui_key)が initial+retry の最大2件を
+            # 超えないことを、attempt の identity が変わるたびに数え直して検証する。
+            prev_attempt_key: tuple[str, tuple] | None = None
+            attempt_click_count = 0
 
             for tick, raw_state in enumerate(schedule):
                 now += _TICK_NS
@@ -1319,6 +1501,11 @@ class TestNoiseInvariantProperty:
                     snapshot_id=f"noise-{trial}-{tick}",
                     frame_id=f"noise-frame-{trial}-{tick}",
                     captured_ns=now,
+                    # 同じ raw_state の連続区間(run_ids[tick])では ui_state_key/
+                    # candidate_set_hash を安定させる(fixtureのui_state_keyが
+                    # tickごとに揺れる問題を修正、M15 fix)。
+                    ui_state_key=fx._hash_of(f"noise-uikey-{trial}-{run_ids[tick]}"),
+                    candidate_set_hash=fx._hash_of(f"noise-cand-{trial}-{run_ids[tick]}"),
                     candidates=(
                         (fx.make_candidate_target(choice_id="c0", choice_index=0),)
                         if raw_state == "level_up_items"
@@ -1348,16 +1535,49 @@ class TestNoiseInvariantProperty:
                 else:
                     decision = fx.make_no_op_decision(snapshot)
 
+                # M15 fix: TARGET_REACHED 中の一部tickでfocus lossを混ぜ、
+                # window_focused=False(強制UNKNOWN分類)でも confirm の
+                # ui_key を送らないことを property test でも検証する
+                # (blocking-findings-2.json 2件目の再現条件そのもの)。
+                window_focused = not (
+                    raw_state == "target_reached_transition"
+                    and pre_state is ControllerState.TARGET_REACHED_PENDING_TRANSITION
+                    and focus_rng.random() < 0.3
+                )
+                category_this_tick = classify_screen_state(raw_state, window_focused=window_focused)
+
                 if sm.context.terminal_locked:
-                    effects = sm.step(snapshot, decision, now_ns=now)
+                    effects = sm.step(snapshot, decision, now_ns=now, window_focused=window_focused)
                     assert effects == (), "terminal 確定後に effect が出てはならない"
                     continue
 
-                effects = sm.step(snapshot, decision, now_ns=now)
+                effects = sm.step(snapshot, decision, now_ns=now, window_focused=window_focused)
                 kinds = [effect.kind for effect in effects]
                 visited_states.add(sm.context.state)
                 ui_click_count += kinds.count("ui_click")
                 ui_key_count += kinds.count("ui_key")
+
+                # M15 fix: TARGET_REACHED 中に category が UNKNOWN/PAUSED
+                # (focus loss を含む)なら、confirm 待ちであっても ui_click/ui_key
+                # effect が絶対に0件であること。
+                if pre_state is ControllerState.TARGET_REACHED_PENDING_TRANSITION and category_this_tick in (
+                    ControllerState.UNKNOWN,
+                    ControllerState.PAUSED,
+                ):
+                    assert "ui_click" not in kinds and "ui_key" not in kinds
+
+                # M15 fix: 同一 UiAttempt(同じ original_snapshot に束縛された試行)
+                # あたりの click は initial+retry の最大2件まで
+                # (ui_state_key/candidate_set_hash が揺れても無制限 re-click しない)。
+                attempt = sm.context.ui_attempt
+                attempt_key = (
+                    (attempt.original_snapshot.snapshot_id, attempt.intent_identity) if attempt is not None else None
+                )
+                if attempt_key != prev_attempt_key:
+                    attempt_click_count = 0
+                prev_attempt_key = attempt_key
+                attempt_click_count += kinds.count("ui_click") + kinds.count("ui_key")
+                assert attempt_click_count <= 2, "同一UI状態訪問(1 attempt)あたりのclickはinitial+retryの最大2件まで"
 
                 for kind in kinds:
                     if kind == "move":
