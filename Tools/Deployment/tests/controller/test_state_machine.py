@@ -497,6 +497,50 @@ class TestApplyAckRecognition:
                     retry_seen = True
         # 揺れている間、initial 1 + retry 最大1 = 合計2件までしか click しない。
         assert click_count <= 1
+
+    def test_ui_state_key_oscillation_with_fresh_snapshots_never_exceeds_visit_budget(self) -> None:
+        """M4 再発防止: 毎tick新しいsnapshot_id・単調増加するcaptured_ns(実機の
+        実フレームと同じ)を持つui_state_keyのA/B交互揺れを120tick(約2秒、
+        level_up timeout未満)与えても、candidate_set_hash/target_indexが不変な
+        限りintent identityは変わらないため、``ui_visit_click_count``が2を
+        超えない。iteration2で見つかった『飛び飛びの観測でstreakが誤って
+        積み上がり、約208msごとに再クリックし続ける』回帰の直接の再現テスト
+        (同じsnapshot_idを使い回す既存のjitterテストでは、この経路は
+        retry自体が別の理由でブロックされるため再現できなかった)。
+        """
+        sm = StateMachine()
+        now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT)
+        lu, intent, decision = self._enter_level_up_with_candidate(sm, now, snapshot_id="lu-osc-0", choice_id="card-a")
+        for _ in range(3):
+            now += _TICK_NS
+            sm.step(lu, decision, now_ns=now)
+        assert sm.context.state is ControllerState.LEVEL_UP
+
+        key_a = lu.ui_state_key
+        key_b = fx._hash_of("ui-state-key-B")
+
+        def _snapshot(tick: int, key: str, captured_ns: int):
+            return fx.make_perception_snapshot(
+                screen_state="level_up_items",
+                snapshot_id=f"lu-osc-{tick}",
+                frame_id=f"lu-osc-{tick}-f",
+                captured_ns=captured_ns,
+                ui_state_key=key,
+                candidates=lu.ui_presentation.candidates,
+                candidate_set_hash=lu.ui_presentation.candidate_set_hash,
+                inventory_hash=lu.ui_presentation.inventory_hash,
+            )
+
+        for tick in range(1, 121):
+            key = key_a if tick % 2 == 0 else key_b
+            now += _TICK_NS
+            snapshot = _snapshot(tick, key, now)
+            tick_intent = fx.make_choose_card_intent(snapshot, target_index=0)
+            sm.step(snapshot, fx.make_ui_decision(snapshot, tick_intent), now_ns=now)
+            assert sm.context.ui_visit_click_count <= 2, (
+                f"tick={tick}: ui_visit_click_count={sm.context.ui_visit_click_count} が2を超えた"
+            )
+        assert sm.context.state is ControllerState.LEVEL_UP
         assert sm.context.state is ControllerState.LEVEL_UP
         assert not sm.context.terminal_locked
 
@@ -554,9 +598,15 @@ class TestApplyAckRecognition:
         assert effects[1].target.choice_id == "shield"
 
     def test_apply_ack_with_stale_intent_does_not_resend(self) -> None:
-        # apply ack を認識してもなお、今tickのintentが古いsnapshotに束縛された
-        # ままなら(遅延で旧intentが届いた等)、initial resolve のsource binding
-        # チェックに落ちて再送されない。
+        # 今tickのintentが古いsnapshot(lu基準)に束縛されたまま(遅延で旧intentが
+        # 届いた等)で、現在のsnapshotは既にreroll済み(rerolled)の場合、intent
+        # identityは元のattemptと同じ(どちらもlu/card-b基準)なのでノイズ扱いと
+        # なり、apply ack候補にもretryにもならず、resendが一度も起きない
+        # (M4 fix: identityが変わらない限りfall throughせず待つ)。
+        # `_drive_until_ack_confirmed`は「effectsが空でなくなるまで回す」設計
+        # なので、いずれ level_up timeout の fail-closed effect を拾って
+        # しまい「停滞し続ける」ことを検証できない。有限tick数で
+        # ui_click/ui_keyが一度も出ないことを直接確認する。
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         lu, _intent, decision = self._enter_level_up_with_candidate(sm, now, snapshot_id="lu-b", choice_id="card-b")
@@ -568,9 +618,12 @@ class TestApplyAckRecognition:
 
         rerolled, _r, _rd = self._enter_level_up_with_candidate(sm, now, snapshot_id="lu-b-rerolled", choice_id="card-c")
         stale_decision = decision  # 古い intent(lu 基準)のまま。
-        now, effects = self._drive_until_ack_confirmed(sm, rerolled, stale_decision, now)
-        assert effects == ()
-        assert sm.context.ui_attempt is None
+        for _ in range(20):
+            now += _TICK_NS
+            effects = sm.step(rerolled, stale_decision, now_ns=now)
+            kinds = [e.kind for e in effects]
+            assert "ui_click" not in kinds and "ui_key" not in kinds
+        assert sm.context.ui_attempt is not None
         assert sm.context.state is ControllerState.LEVEL_UP
         assert not sm.context.terminal_locked
 
@@ -1487,11 +1540,12 @@ class TestNoiseInvariantProperty:
             # focus loss 注入専用の独立 RNG(共有 rng を消費すると schedule/move
             # action の乱数列がずれ、RECOVER 訪問保証などが崩れるため分離する)。
             focus_rng = random.Random(f"focus-loss-{trial}")
-            # M15 fix: 同一 UiAttempt(同じ original_snapshot に束縛された試行)
-            # あたりの click(ui_click/ui_key)が initial+retry の最大2件を
-            # 超えないことを、attempt の identity が変わるたびに数え直して検証する。
-            prev_attempt_key: tuple[str, tuple] | None = None
-            attempt_click_count = 0
+            # M4/M15 fix: 同一 UI 訪問(apply ack で attempt が入れ替わっても
+            # 訪問をまたいで累積する StateContext.ui_visit_click_count)あたりの
+            # click(ui_click/ui_key)が2件を超えないことを、実際の生産コードが
+            # 持つカウンタ自身で検証する(attempt単位のヒューリスティックだと
+            # apply ack が繰り返し確定して attempt が入れ替わり続けるケースを
+            # 見逃す、というレビュー指摘の再発防止)。
 
             for tick, raw_state in enumerate(schedule):
                 now += _TICK_NS
@@ -1566,18 +1620,13 @@ class TestNoiseInvariantProperty:
                 ):
                     assert "ui_click" not in kinds and "ui_key" not in kinds
 
-                # M15 fix: 同一 UiAttempt(同じ original_snapshot に束縛された試行)
-                # あたりの click は initial+retry の最大2件まで
-                # (ui_state_key/candidate_set_hash が揺れても無制限 re-click しない)。
-                attempt = sm.context.ui_attempt
-                attempt_key = (
-                    (attempt.original_snapshot.snapshot_id, attempt.intent_identity) if attempt is not None else None
+                # M4/M15 fix: 同一 UI 訪問(apply ack で attempt が入れ替わっても
+                # 訪問をまたいで累積する StateContext.ui_visit_click_count)あたりの
+                # click は2件まで。attempt 単位のヒューリスティックではなく、
+                # 生産コードが実際に持つカウンタ自身を直接検証する。
+                assert sm.context.ui_visit_click_count <= 2, (
+                    "同一UI訪問(ui_visit_click_count)あたりのclickはinitial+retryの最大2件まで"
                 )
-                if attempt_key != prev_attempt_key:
-                    attempt_click_count = 0
-                prev_attempt_key = attempt_key
-                attempt_click_count += kinds.count("ui_click") + kinds.count("ui_key")
-                assert attempt_click_count <= 2, "同一UI状態訪問(1 attempt)あたりのclickはinitial+retryの最大2件まで"
 
                 for kind in kinds:
                     if kind == "move":

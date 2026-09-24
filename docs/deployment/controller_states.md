@@ -88,21 +88,27 @@
   この window を空けるまでは precondition を満たしていても retry しません。
 - retry は `NavigationProfile.retry_budget`(既定 1)回まで。
 - 送信済み click に対して、`ui_state_key`/`candidate_set_hash`/
-  `inventory_hash` のいずれかが元の snapshot から変わったら、それを
-  「game 側の apply ack」の**候補**とみなします(OS への送信受理である
-  `ExecutionOutcome.ack` とは別物です)。ただし UI フェード中の1フレームだけの
-  揺れと区別するため、同じ新しい組(`ui_state_key`/`candidate_set_hash`/
-  `inventory_hash`)が `NavigationProfile.debounce_frames` 回連続で観測され、
-  かつ ack 待ち window(`retry_after_ns`)も経過して初めて apply ack と確定
-  します。確定するまでは再送も新規 click もせず待ちます(M15 fix: 以前は
-  1フレームでも変化すれば無条件で apply ack と認定しており、フェード中の
-  ui_state_key の一瞬の揺れごとに無制限に再クリックしてしまっていました)。
-  確定した場合は intent identity の変化とはみなさず、`ui_attempt` をクリア
-  して今 tick の intent を新規 initial resolve として扱います(再送はしま
-  せん)。これにより reroll/banish 成功後の次の選択や連続 level-up を、誤って
-  emergency stop しません。apply ack が確定しないまま intent identity が
-  変わった場合や、retry の precondition を満たさない場合は、再送せず
-  emergency stop へ倒します。
+  `inventory_hash` のいずれかが元の snapshot から変わっても、今 tick の
+  intent identity(`candidate_set_hash`/`target_index` 等を含む)が元の
+  attempt と同じなら「選んでいる対象は変わっていないノイズ」と判断し、
+  apply ack の候補にしません(UI フェード中の1フレームだけの ui_state_key
+  の揺れで再クリックが繰り返されるのを防ぎます)。intent identity 自体が
+  実際に変わって初めて「game 側の apply ack」の**候補**とみなします(OS への
+  送信受理である `ExecutionOutcome.ack` とは別物です)。さらに、同じ新しい
+  組(`ui_state_key`/`candidate_set_hash`/`inventory_hash`)が
+  `NavigationProfile.debounce_frames` 回**連続**で観測され(signature が
+  元へ戻ったら連続カウントは破棄されます)、かつ ack 待ち window
+  (`retry_after_ns`)も経過して初めて apply ack と確定します。確定するまでは
+  再送も新規 click もせず待ちます。確定した場合は intent identity の変化と
+  はみなさず、`ui_attempt` をクリアして今 tick の intent を新規 initial
+  resolve として扱います(再送はしません)。これにより reroll/banish 成功後
+  の次の選択や連続 level-up を、誤って emergency stop しません。apply ack が
+  確定しないまま intent identity が変わった場合や、retry の precondition を
+  満たさない場合は、再送せず emergency stop へ倒します。
+- 上記のどの送信経路でも、同一 UI 訪問(LEVEL_UP/CHEST/TARGET_REACHED へ
+  入ってから抜けるまで)での総送信数は 2 件(initial+retry 相当)を超えたら
+  それ以上送りません。apply ack の再確定が繰り返されるような未知の経路が
+  残っていた場合の最後の安全弁です。
 - `CONFIRM` intent だけ ROI クリックの代わりに `ENTER` キーを使います。それ
   以外(`CHOOSE_CARD`/`CHOOSE_FALLBACK`/`REROLL`/`SKIP`/`BANISH`/`ACK_CHEST`)は
   resolve 済み ROI の中心をクリックします。

@@ -18,12 +18,15 @@
   (``NavigationProfile.retry_after_ns``)を経過するまで retry せず、
   その後1回だけ再送(retry)を許す。送信済み snapshot から見て
   ``ui_state_key``/``candidate_set_hash``/``inventory_hash`` が変わっても、
-  同じ新しい組が ``debounce_frames`` 回連続で安定し、かつ ack 待ち window も
-  経過して初めて「game 側の apply ack」と確定し、以後の intent を新規
-  initial resolve として扱う(reroll/banish 成功後の次選択や連続 level-up を
-  誤って emergency stop しない一方、フェード中の1フレームだけの揺れでは
-  無制限に再クリックしない、M15 fix)。それでも変化がなければ input を止めて
-  安全側(emergency stop)へ倒す(fail-closed)。
+  選んでいる対象(intent identity)自体が同じならノイズとして無視し、
+  identity も実際に変わり、かつ同じ新しい組が ``debounce_frames`` 回連続で
+  安定し、かつ ack 待ち window も経過して初めて「game 側の apply ack」と
+  確定し、以後の intent を新規 initial resolve として扱う(reroll/banish
+  成功後の次選択や連続 level-up を誤って emergency stop しない一方、
+  フェード中の1フレームだけの揺れでは無制限に再クリックしない)。さらに、
+  同一 UI 訪問での送信総数は理由を問わず 2 件までに固定する安全弁を持つ。
+  それでも変化がなければ input を止めて安全側(emergency stop)へ倒す
+  (fail-closed)。
 - unknown は 1s、paused は無期限(input 0 のまま画面変化を待つ)。どちらから
   復帰する場合も RECOVER で gameplay を再確認してから初めて移動を再開する。
   RECOVER/PAUSED/UNKNOWN は、対応する UiIntentV1 を持たない入力(例えば
@@ -201,6 +204,12 @@ class StateContext:
     terminal_state: ControllerState | None = None
     terminal_reason: str | None = None
     ui_attempt: UiAttempt | None = None
+    # 同一 UI 訪問(LEVEL_UP/CHEST/TARGET_REACHED へ入ってから抜けるまで)で
+    # 実際に送った click/key effect の総数(apply ack で attempt が入れ替わっても
+    # 訪問をまたいでは累積し続ける)。M4/M15 fix: apply ack 判定が signature の
+    # 誤検出で繰り返し確定してしまっても、1 訪問あたりの総送信数を機械的に
+    # 2(initial+retry)までへ固定する最後の安全弁。
+    ui_visit_click_count: int = 0
 
 
 def _intent_identity(intent: "UiIntentV1") -> tuple:
@@ -355,6 +364,7 @@ def _enter_target_reached(context: StateContext, now_ns: int) -> tuple[StateCont
             state_entered_ns=now_ns,
             success_latched=True,
             ui_attempt=None,
+            ui_visit_click_count=0,
         )
     )
     return new_context, ()
@@ -412,20 +422,32 @@ def _dispatch_ui_click(
     同じ規則で動きます。優先順位は次のとおりです。
 
     1. 送信済み click の対象から ``ui_state_key``/``candidate_set_hash``/
-       ``inventory_hash`` のいずれかが変わっていたら、apply ack の *候補* と
-       みなす。ただし同じ新しい組が ``debounce_frames`` 回連続で観測され、
-       かつ ack 待ち window(``retry_after_ns``)も経過して初めて確定させ、
-       ``ui_attempt`` をクリアして今 tick の intent を *新規* initial resolve
-       として扱う(M15 fix: 安定条件を満たすまでは再送も新規clickもしない。
-       1 フレームだけの揺れで無制限 re-click しないようにするため)。
-    2. 安定条件を満たしていない(＝まだ確定していない)間は、identity 判定より
-       先にここで待つ。intent identity 自体が変わっていない限り誤検出しない。
-    3. apply ack 候補が無いのに intent identity が変わっていたら fail-closed。
-    4. 既に retry 済みなら何もしない。
-    5. ack 待ち window(``retry_after_ns``)を経過するまでは retry しない
+       ``inventory_hash`` のいずれかが変わっていても、今 tick の intent
+       identity(``candidate_set_hash``/``target_index`` 等を含む)が元の
+       attempt と同じなら「選んでいる対象は変わっていないノイズ」と判断し、
+       apply ack の候補にはしない。5 以降の通常 retry 規則は
+       ``intent.ui_state_key == original_snapshot.ui_state_key`` を前提に
+       しているため素通りさせず、streak だけ破棄してこの tick は何もせず待つ
+       (M4 再発防止: signature だけの揺れで無制限 re-click も誤 fail-closed
+       もしない)。identity 自体が変わって初めて apply ack の *候補* とみなす。
+    2. apply ack 候補は、同じ新しい signature が ``debounce_frames`` 回連続で
+       観測され、かつ ack 待ち window(``retry_after_ns``)も経過して初めて
+       確定させ、``ui_attempt`` をクリアして今 tick の intent を *新規*
+       initial resolve として扱う(M15 fix)。signature が元へ戻ったら
+       streak は破棄する(飛び飛びの観測を連続と誤認しない)。
+    3. 安定条件を満たしていない(＝まだ確定していない)間は、identity 判定より
+       先にここで待つ。
+    4. apply ack 候補が無いのに intent identity が変わっていたら fail-closed。
+    5. 既に retry 済みなら何もしない。
+    6. ack 待ち window(``retry_after_ns``)を経過するまでは retry しない
        (M4 fix: capture/perception 遅延中の二重click防止)。
-    6. 同一 snapshot の再利用は retry にならない。
-    7. precondition を満たす newer snapshot だけ、最大1回 retry する。
+    7. 同一 snapshot の再利用は retry にならない。
+    8. precondition を満たす newer snapshot だけ、最大1回 retry する。
+    9. 上記のいずれの送信経路でも、同一 UI 訪問(``ui_visit_click_count``、
+       LEVEL_UP/CHEST/TARGET_REACHED へ入ってから抜けるまで)での総送信数が
+       2件(initial+retry 相当)を超えたら、それ以上は一切送らない(apply ack
+       が繰り返し確定してしまうような未知の経路が残っていても、この上限が
+       最後の安全弁になる)。
     """
     if decision.kind != "ui" or decision.ui_intent is None:
         return context, ()  # move/no_op は UI 状態中は無視する(movement と競合させない)。
@@ -435,36 +457,65 @@ def _dispatch_ui_click(
     if intent.kind is UiIntentKind.NO_OP:
         return context, ()
 
+    identity = _intent_identity(intent)
+
     if context.ui_attempt is not None:
         attempt = context.ui_attempt
         current_signature = _ui_signature(snapshot)
         if current_signature != _ui_signature(attempt.original_snapshot):
-            # apply ack の候補: 前と同じ新しい組が続けて観測されているかを数える。
-            if current_signature == attempt.pending_ack_signature:
-                ack_streak = attempt.pending_ack_streak + 1
+            if identity == attempt.intent_identity:
+                # signature(ui_state_key 等)は揺れたが、選んでいる対象
+                # (candidate_set_hash を含む identity)は変わっていない -> ノイズ。
+                # 下の通常 retry 規則は `intent.ui_state_key ==
+                # original_snapshot.ui_state_key` を前提にしているため、ここで
+                # 素通りさせると key が揺れているだけで
+                # ui_retry_precondition_failed の fail-closed を誤って引く。
+                # apply ack 候補にもせず、streak だけ破棄して今 tick は何もせず
+                # 待つ(M4 fix: identity 不変の揺れで無制限 re-click しない)。
+                if attempt.pending_ack_signature is not None:
+                    context = replace(
+                        context, ui_attempt=replace(attempt, pending_ack_signature=None, pending_ack_streak=0)
+                    )
+                return context, ()
             else:
-                ack_streak = 1
-            ack_window_elapsed = now_ns - attempt.sent_ns >= profile.retry_after_ns
-            if ack_streak >= profile.debounce_frames and ack_window_elapsed:
-                # 安定条件を満たした: 本当に apply ack と確定し、今 tick の intent を
-                # 新規 initial resolve として扱う(旧 intent が遅れて届いても
-                # source snapshot binding(mode="initial")が一致しないため再送されない)。
-                return _dispatch_ui_click(
-                    replace(context, ui_attempt=None), snapshot, decision, now_ns=now_ns, profile=profile
-                )
-            # まだ確定していない揺れ: 再送も新規clickもせず、次tickの判定用に
-            # カウンタだけ更新して待つ(fail-closed にもしない)。
-            new_attempt = replace(attempt, pending_ack_signature=current_signature, pending_ack_streak=ack_streak)
-            return replace(context, ui_attempt=new_attempt), ()
-
-    identity = _intent_identity(intent)
+                # identity 自体も変わった: 本物の apply ack 候補として安定を待つ。
+                if current_signature == attempt.pending_ack_signature:
+                    ack_streak = attempt.pending_ack_streak + 1
+                else:
+                    ack_streak = 1
+                ack_window_elapsed = now_ns - attempt.sent_ns >= profile.retry_after_ns
+                if ack_streak >= profile.debounce_frames and ack_window_elapsed:
+                    # 安定条件を満たした: 本当に apply ack と確定し、今 tick の intent を
+                    # 新規 initial resolve として扱う(旧 intent が遅れて届いても
+                    # source snapshot binding(mode="initial")が一致しないため再送されない)。
+                    # ui_visit_click_count は訪問をまたいで引き継ぐ(リセットしない)。
+                    return _dispatch_ui_click(
+                        replace(context, ui_attempt=None), snapshot, decision, now_ns=now_ns, profile=profile
+                    )
+                # まだ確定していない揺れ: 再送も新規clickもせず、次tickの判定用に
+                # カウンタだけ更新して待つ(fail-closed にもしない)。
+                new_attempt = replace(attempt, pending_ack_signature=current_signature, pending_ack_streak=ack_streak)
+                return replace(context, ui_attempt=new_attempt), ()
+        elif attempt.pending_ack_signature is not None:
+            # signature が original へ戻った: 途中経過の streak は無効化する
+            # (飛び飛びの観測を「連続」として誤って積み上げないため)。
+            context = replace(
+                context, ui_attempt=replace(attempt, pending_ack_signature=None, pending_ack_streak=0)
+            )
 
     if context.ui_attempt is None:
+        if context.ui_visit_click_count >= 2:
+            # 同一 UI 訪問での送信総数の安全弁(M4/M15 fix)。ここに来る場合は
+            # apply ack が繰り返し確定してしまった残存経路であり、これ以上は
+            # 送らず timeout 側の fail-closed に委ねる。
+            return context, ()
         target = resolve_ui_target(intent, snapshot, mode="initial", min_confidence=profile.min_target_confidence)
         if target is None:
             return context, ()  # 0件/複数件/invalid/confidence未達: effect を出さない。
         attempt = UiAttempt(intent_identity=identity, original_snapshot=snapshot, sent_ns=now_ns, retried=False)
-        new_context = replace(context, ui_attempt=attempt)
+        new_context = replace(
+            context, ui_attempt=attempt, ui_visit_click_count=context.ui_visit_click_count + 1
+        )
         return new_context, _send_effects(target, intent=intent, mode="initial")
 
     attempt = context.ui_attempt
@@ -484,6 +535,8 @@ def _dispatch_ui_click(
         return context, ()
     if profile.retry_budget < 1:
         return context, ()
+    if context.ui_visit_click_count >= 2:
+        return context, ()  # 同一 UI 訪問での送信総数の安全弁(M4/M15 fix)。
 
     target = resolve_ui_target(
         intent,
@@ -496,7 +549,11 @@ def _dispatch_ui_click(
         # newer snapshot だが precondition(同一 semantic/ui_state_key/IoU/中心許容量)を
         # 満たさない: 再送せず fail-closed する。
         return _emergency_stop(context, now_ns=now_ns, reason="ui_retry_precondition_failed")
-    new_context = replace(context, ui_attempt=replace(attempt, retried=True, sent_ns=now_ns))
+    new_context = replace(
+        context,
+        ui_attempt=replace(attempt, retried=True, sent_ns=now_ns),
+        ui_visit_click_count=context.ui_visit_click_count + 1,
+    )
     return new_context, _send_effects(target, intent=intent, mode="retry")
 
 
@@ -535,7 +592,7 @@ def _reduce_gameplay(
         if not confirmed:
             return context, ()
         new_context = _reset_pending(
-            replace(context, state=category, state_entered_ns=now_ns, ui_attempt=None)
+            replace(context, state=category, state_entered_ns=now_ns, ui_attempt=None, ui_visit_click_count=0)
         )
         return new_context, _GAMEPLAY_EXIT_EFFECTS
 
@@ -688,7 +745,11 @@ def _reduce_unknown(
     if category in (ControllerState.LEVEL_UP, ControllerState.CHEST):
         if not confirmed:
             return context, ()
-        new_context = _reset_pending(replace(context, state=category, state_entered_ns=now_ns))
+        # GAMEPLAY 直行の経路と対称に ui_attempt/ui_visit_click_count をリセットする
+        # (UNKNOWN 経由でも新しい訪問として扱う)。
+        new_context = _reset_pending(
+            replace(context, state=category, state_entered_ns=now_ns, ui_attempt=None, ui_visit_click_count=0)
+        )
         return new_context, ()
     # category は UNKNOWN のまま: timeout で fail-closed する。
     context = _reset_pending(context)
