@@ -1,17 +1,31 @@
 """閉じた semantic lease wire protocol と再送防止 validator。
 任意キーではなく9 actionだけを運び、nonce・順序・期限・対象 hash を注入前に一括検証します。
+UI操作(ROIクリック・Enter・Escape)向けの `UiLease` も同じ検証パターンで並走させます。
 """
 from __future__ import annotations
 from dataclasses import dataclass
 import json
+import math
 import re
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
+from reinbalance_survivors_contracts.canonical_json import canonical_hash
 from survivors.action_semantics import ActionContract
 SCHEMA_VERSION = "survivors_input_lease.v1"
+UI_SCHEMA_VERSION = "survivors_input_lease_ui.v1"
 _NONCE, _HASH = re.compile(r"[0-9a-f]{32}"), re.compile(r"[0-9a-f]{64}")
 _FIELDS = frozenset({"kind", "schema_version", "session_nonce", "sequence",
                      "issued_monotonic_ns", "expires_monotonic_ns", "target_hash",
                      "action_hash", "action_index", "target_pid", "target_hwnd"})
+_UI_ACTIONS = frozenset({"CLICK", "ENTER", "ESCAPE"})
+_UI_BASE_FIELDS = frozenset({"kind", "schema_version", "session_nonce", "sequence",
+                             "issued_monotonic_ns", "expires_monotonic_ns", "target_hash",
+                             "ui_action_hash", "ui_action", "target_pid", "target_hwnd"})
+_UI_COORD_FIELDS = frozenset({"normalized_x", "normalized_y"})
+def _is_valid_normalized(value: object) -> bool:
+    """0.0〜1.0 の有限 float だけを ROI 座標として認める。
+    NaN/Inf や整数・文字列混入をここで弾き、画面外座標を作らせません。
+    """
+    return type(value) is float and math.isfinite(value) and 0.0 <= value <= 1.0
 def _strict_positive_int(value: object) -> bool:
     """bool を除いた正の整数だけを認める。
     JSON の true が 1 として binding 検証を抜ける曖昧さを防ぎます。
@@ -73,17 +87,105 @@ class Lease:
         if data.get("kind") != "lease" or data.get("schema_version") != SCHEMA_VERSION:
             raise ValueError("invalid lease envelope")
         return cls(**{key: data[key] for key in _FIELDS - {"kind", "schema_version"}})
+@dataclass(frozen=True)
+class UiLease:
+    """1回のUI操作(ROIクリック/Enter/Escape)を最大150msだけ許可する immutable command。
+    movementの `Lease` と同じ session_nonce・sequence・PID/HWNDを共有し、helperが同一gateで検証できます。
+    """
+    session_nonce: str
+    sequence: int
+    issued_monotonic_ns: int
+    expires_monotonic_ns: int
+    target_hash: str
+    ui_action_hash: str
+    ui_action: Literal["CLICK", "ENTER", "ESCAPE"]
+    target_pid: int
+    target_hwnd: int
+    normalized_x: float | None = None
+    normalized_y: float | None = None
+    def __post_init__(self) -> None:
+        """型・値域・期限上限・CLICK座標の有無を fail-closed に検査する。
+        CLICK以外では座標fieldの存在自体を拒否し、閉じた行動空間を保ちます。
+        """
+        ints = (self.sequence, self.issued_monotonic_ns, self.expires_monotonic_ns,
+                self.target_pid, self.target_hwnd)
+        if not all(_strict_positive_int(value) for value in ints):
+            raise ValueError("ui lease integer fields must be positive strict integers")
+        if self.ui_action not in _UI_ACTIONS:
+            raise ValueError("ui_action must be one of CLICK, ENTER, ESCAPE")
+        if not isinstance(self.session_nonce, str) or not _NONCE.fullmatch(self.session_nonce):
+            raise ValueError("invalid session nonce")
+        if not isinstance(self.target_hash, str) or not _HASH.fullmatch(self.target_hash):
+            raise ValueError("invalid target hash")
+        if not isinstance(self.ui_action_hash, str) or not _HASH.fullmatch(self.ui_action_hash):
+            raise ValueError("invalid ui action hash")
+        if self.ui_action == "CLICK":
+            if not _is_valid_normalized(self.normalized_x) or not _is_valid_normalized(self.normalized_y):
+                raise ValueError("CLICK requires finite normalized_x/normalized_y in [0.0, 1.0]")
+        elif self.normalized_x is not None or self.normalized_y is not None:
+            raise ValueError("ENTER/ESCAPE must not carry normalized coordinates")
+        duration = self.expires_monotonic_ns - self.issued_monotonic_ns
+        if not 0 < duration <= 150_000_000:
+            raise ValueError("ui lease duration must be positive and at most 150ms")
+    def to_wire(self) -> dict[str, object]:
+        """closed schema の JSON-compatible mapping を返す。
+        CLICK以外では座標fieldを含めず、wire形状だけでも行動を判別できるようにします。
+        """
+        wire: dict[str, object] = {
+            "kind": "ui_lease", "schema_version": UI_SCHEMA_VERSION,
+            "session_nonce": self.session_nonce, "sequence": self.sequence,
+            "issued_monotonic_ns": self.issued_monotonic_ns,
+            "expires_monotonic_ns": self.expires_monotonic_ns,
+            "target_hash": self.target_hash, "ui_action_hash": self.ui_action_hash,
+            "ui_action": self.ui_action, "target_pid": self.target_pid,
+            "target_hwnd": self.target_hwnd,
+        }
+        if self.ui_action == "CLICK":
+            wire["normalized_x"] = self.normalized_x
+            wire["normalized_y"] = self.normalized_y
+        return wire
+    @classmethod
+    def from_wire(cls, data: Mapping[str, Any]) -> "UiLease":
+        """未知・欠落・action不整合な field を拒否して UiLease を復元する。
+        CLICKなら座標必須、それ以外なら座標禁止という閉じた集合を1か所で強制します。
+        """
+        if not isinstance(data, Mapping):
+            raise ValueError("unknown or missing ui lease fields")
+        expected = _UI_BASE_FIELDS | _UI_COORD_FIELDS if data.get("ui_action") == "CLICK" else _UI_BASE_FIELDS
+        if set(data) != expected:
+            raise ValueError("unknown or missing ui lease fields")
+        if data.get("kind") != "ui_lease" or data.get("schema_version") != UI_SCHEMA_VERSION:
+            raise ValueError("invalid ui lease envelope")
+        return cls(**{key: data[key] for key in expected - {"kind", "schema_version"}})
+def ui_action_contract() -> dict[str, object]:
+    """許可UI行動集合(CLICK/ENTER/ESCAPE)と座標範囲契約を辞書で返す。
+    この辞書をcanonical hash化した値が `ui_action_hash` の固定基準になります。
+    """
+    return {
+        "schema_version": UI_SCHEMA_VERSION,
+        "ui_actions": ["CLICK", "ENTER", "ESCAPE"],
+        "normalized_coordinate_range": {"min": 0.0, "max": 1.0},
+    }
+def ui_action_contract_hash() -> str:
+    """UI行動契約の canonical_hash を返す。
+    既存 action_hash と同じ改ざん検出パターンを、新しいhash機構を作らず再利用します。
+    """
+    return canonical_hash(ui_action_contract())
 class LeaseValidator:
     """session binding と strictly increasing sequence を保持する validator。
     すべての binding が通った後だけ sequence を進め、拒否 payload が状態を汚染しないようにします。
     """
     def __init__(self, session_nonce: str, target_hash: str, action_hash: str,
-                 target_pid: int, target_hwnd: int) -> None:
-        """期待する session・target・action identity と PID/HWND を固定する。
+                 target_pid: int, target_hwnd: int,
+                 ui_action_hash: str = ui_action_contract_hash()) -> None:
+        """期待する session・target・action/UI action identity と PID/HWND を固定する。
         起動時に controller と共有した値以外を後から受理しません。
+        `ui_action_hash` は省略時、固定のUI行動契約hashを既定値として使います。
         """
         if not _NONCE.fullmatch(session_nonce) or not _HASH.fullmatch(target_hash) or not _HASH.fullmatch(action_hash):
             raise ValueError("invalid validator binding")
+        if not _HASH.fullmatch(ui_action_hash):
+            raise ValueError("invalid validator ui action binding")
         if type(target_pid) is not int or target_pid <= 0:
             raise ValueError("invalid validator target_pid")
         if type(target_hwnd) is not int or target_hwnd <= 0:
@@ -91,23 +193,30 @@ class LeaseValidator:
         self._nonce = session_nonce
         self._target_hash = target_hash
         self._action_hash = action_hash
+        self._ui_action_hash = ui_action_hash
         self._target_pid = target_pid
         self._target_hwnd = target_hwnd
         self._last_sequence = 0
-    def accept(self, lease: Lease, now_ns: int) -> None:
-        """nonce・sequence・時刻・両 hash・PID/HWND を対称に検査して受理する。
+    def accept(self, lease: Lease | UiLease, now_ns: int) -> None:
+        """nonce・sequence・時刻・対応するhash・PID/HWND を対称に検査して受理する。
         stale/replay/expired/wrong-target/wrong-action/wrong-pid/wrong-hwnd のどれか1つでも
-        一致しなければ状態変更前に拒否します。
+        一致しなければ状態変更前に拒否します。lease種別に応じてaction_hashかui_action_hashだけを照合します。
         """
         if type(now_ns) is not int or now_ns <= 0:
             raise ValueError("invalid validation time")
+        if isinstance(lease, UiLease):
+            action_binding_failed = lease.ui_action_hash != self._ui_action_hash
+        elif isinstance(lease, Lease):
+            action_binding_failed = lease.action_hash != self._action_hash
+        else:
+            raise ValueError("unsupported lease type")
         failures = (
             lease.session_nonce != self._nonce,
             lease.sequence <= self._last_sequence,
             lease.issued_monotonic_ns > now_ns,
             lease.expires_monotonic_ns <= now_ns,
             lease.target_hash != self._target_hash,
-            lease.action_hash != self._action_hash,
+            action_binding_failed,
             lease.target_pid != self._target_pid,
             lease.target_hwnd != self._target_hwnd,
         )
