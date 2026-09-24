@@ -6,7 +6,9 @@ from multiprocessing.connection import Connection
 from queue import Queue
 import time
 from typing import Iterable
+from .win32_backend import map_normalized_to_screen
 ALLOWED_INPUTS = frozenset({"W", "A", "S", "D", "ENTER", "ESCAPE", "LEFT_CLICK"})
+_UI_ACTIONS = frozenset({"CLICK", "ENTER", "ESCAPE"})
 class DryRunBackend:
     """OSへ触れず入力状態だけを再現する test double。
     allowlist と差分 press/release は production backend と同じ規則で動作します。
@@ -29,6 +31,11 @@ class DryRunBackend:
         self._arm_chord = False
         self._arm_chord_previous = False
         self._operations = operations
+        # UI click用のclient rect fixture。Noneにすると client rect取得失敗を模擬できる
+        self.client_rect: tuple[int, int, int, int] | None = (0, 0, 800, 600)
+        # WindowFromPointの戻り先owner hwnd fixture。Noneなら常にtarget_hwndと一致する想定
+        self.window_from_point_hwnd: int | None = None
+        self.ui_calls: list[dict[str, object]] = []
     @property
     def held_leak_count(self) -> int:
         """release されていない入力数を返す。
@@ -74,6 +81,35 @@ class DryRunBackend:
                 "held_count": len(self.pressed),
                 "monotonic_ns": monotonic_ns if monotonic_ns is not None else time.monotonic_ns(),
             })
+    def apply_ui_action(
+        self, ui_action: str, normalized_x: float | None, normalized_y: float | None, *,
+        target_hwnd: int, sequence: int | None = None, monotonic_ns: int | None = None,
+    ) -> None:
+        """click/ENTER/ESCAPEを1組のatomic操作として観測記録する。
+        client rect未取得・境界矩形が縮退・WindowFromPoint不一致はfail closedでno-opにし、
+        production の `Win32InputBackend.apply_ui_action` と同じ判断を `self.pressed` に触れずに再現します。
+        """
+        if ui_action not in _UI_ACTIONS:
+            raise ValueError("ui action outside allowlist")
+        screen_x = screen_y = None
+        if ui_action == "CLICK":
+            rect = self.client_rect
+            if rect is None:
+                return
+            left, top, right, bottom = rect
+            width, height = right - left, bottom - top
+            if width <= 0 or height <= 0:
+                return
+            screen_x, screen_y = map_normalized_to_screen(rect, normalized_x, normalized_y)
+            owner = self.window_from_point_hwnd if self.window_from_point_hwnd is not None else target_hwnd
+            if owner != target_hwnd:
+                return
+        self.send_input_calls += 1
+        self.ui_calls.append({
+            "ui_action": ui_action, "sequence": sequence, "target_hwnd": target_hwnd,
+            "screen_x": screen_x, "screen_y": screen_y,
+            "monotonic_ns": monotonic_ns if monotonic_ns is not None else time.monotonic_ns(),
+        })
 def run_dry_run_helper_for_test(
     connection: Connection, operations: Queue, audit_path: str, session_nonce: str,
     target_hash: str, action_hash: str, target_pid: int, target_hwnd: int,

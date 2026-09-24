@@ -1,5 +1,5 @@
-"""helper process へ semantic action lease だけを送る controller。
-SendInput を所有せず、helper 死亡を検出した後は通常 action を永久に fail-closed にします。
+"""helper process へ semantic action lease と UI lease だけを送る controller。
+SendInput を所有せず、helper 死亡を検出した後は通常 action / UI action を永久に fail-closed にします。
 """
 from __future__ import annotations
 import atexit
@@ -9,14 +9,14 @@ import secrets
 import time
 from typing import Any, Callable
 from .helper import emergency_release_main, helper_main
-from .lease_protocol import Lease
+from .lease_protocol import Lease, UiLease, ui_action_contract_hash
 class HelperUnavailable(RuntimeError):
     """helper の死亡・timeout・IPC failure を表す例外。
     この状態へ遷移した controller では以後の semantic action を拒否します。
     """
 class InputLeaseController:
-    """semantic action と emergency key-up だけを公開する IPC client。
-    arbitrary VK・text・shortcut・座標 click の method や wire payload は提供しません。
+    """semantic action・UI action(ROIクリック/Enter/Escape)・emergency key-upだけを公開する IPC client。
+    arbitrary VK・text・shortcut・任意座標 click の method や wire payload は提供しません(I7)。
     """
     def __init__(
         self, *, target_hash: str, action_hash: str, target_pid: int, target_hwnd: int,
@@ -25,10 +25,13 @@ class InputLeaseController:
     ) -> None:
         """session nonce を作り独立 helper process を default-disarmed で起動する。
         process_target 差替えは死亡検出 test 用で、production default は Win32 helper 固定です。
+        ui_action_hash は設定不可の固定UI行動契約hashで、helper側 LeaseValidator と
+        同じ `ui_action_contract_hash()` から双方が独立に導出するため spawn 引数へは渡しません。
         """
         self._nonce = secrets.token_hex(16)
         self._target_hash = target_hash
         self._action_hash = action_hash
+        self._ui_action_hash = ui_action_contract_hash()
         self._target_pid = target_pid
         self._target_hwnd = target_hwnd
         self._sequence = 0
@@ -66,6 +69,47 @@ class InputLeaseController:
         if response.get("kind") != "ack" or response.get("sequence") != self._sequence:
             self._failed = True
             raise HelperUnavailable("helper rejected semantic action")
+        return response.get("applied") is True
+    def send_ui_click(self, normalized_x: float, normalized_y: float) -> bool:
+        """ROI正規化座標(0.0〜1.0)へのクリックを150ms以下のUiLeaseとしてhelperへ送る。
+        movementと同じsequence/nonceを共有し、任意座標や別windowへのクリックは公開しません。
+        戻り値Trueはgate通過の意味で、client rect取得失敗やWindowFromPoint不一致による
+        fail-closed no-opでもTrueになり得ます。遷移成否は画面の再観測で確認してください。
+        """
+        self._ensure_available()
+        self._sequence += 1
+        now = time.monotonic_ns()
+        lease = UiLease(
+            session_nonce=self._nonce, sequence=self._sequence,
+            issued_monotonic_ns=now, expires_monotonic_ns=now + 150_000_000,
+            target_hash=self._target_hash, ui_action_hash=self._ui_action_hash,
+            ui_action="CLICK", target_pid=self._target_pid, target_hwnd=self._target_hwnd,
+            normalized_x=normalized_x, normalized_y=normalized_y,
+        )
+        response = self._exchange(lease.to_wire())
+        if response.get("kind") != "ack" or response.get("sequence") != self._sequence:
+            self._failed = True
+            raise HelperUnavailable("helper rejected ui click")
+        return response.get("applied") is True
+    def send_ui_key(self, key: str) -> bool:
+        """allowlisted な"ENTER"/"ESCAPE"だけを150ms以下のUiLeaseとしてhelperへ送る。
+        任意VKやtext入力は受け付けず、UiLease自身のallowlistでも二重に拒否されます。
+        """
+        if key not in ("ENTER", "ESCAPE"):
+            raise ValueError("ui key must be ENTER or ESCAPE")
+        self._ensure_available()
+        self._sequence += 1
+        now = time.monotonic_ns()
+        lease = UiLease(
+            session_nonce=self._nonce, sequence=self._sequence,
+            issued_monotonic_ns=now, expires_monotonic_ns=now + 150_000_000,
+            target_hash=self._target_hash, ui_action_hash=self._ui_action_hash,
+            ui_action=key, target_pid=self._target_pid, target_hwnd=self._target_hwnd,
+        )
+        response = self._exchange(lease.to_wire())
+        if response.get("kind") != "ack" or response.get("sequence") != self._sequence:
+            self._failed = True
+            raise HelperUnavailable("helper rejected ui key")
         return response.get("applied") is True
     def emergency_release(self) -> bool:
         """helper が生存中なら emergency key-up を依頼し、死亡済みなら安全に false を返す。
