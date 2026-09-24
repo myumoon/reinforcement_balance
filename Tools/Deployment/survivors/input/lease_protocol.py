@@ -176,16 +176,14 @@ class LeaseValidator:
     すべての binding が通った後だけ sequence を進め、拒否 payload が状態を汚染しないようにします。
     """
     def __init__(self, session_nonce: str, target_hash: str, action_hash: str,
-                 target_pid: int, target_hwnd: int,
-                 ui_action_hash: str = ui_action_contract_hash()) -> None:
-        """期待する session・target・action/UI action identity と PID/HWND を固定する。
+                 target_pid: int, target_hwnd: int) -> None:
+        """期待する session・target・action identity と PID/HWND を固定する。
         起動時に controller と共有した値以外を後から受理しません。
-        `ui_action_hash` は省略時、固定のUI行動契約hashを既定値として使います。
+        `ui_action_hash` は controller 側の spawn 引数に含まれない固定契約値のため、
+        引数化せず `ui_action_contract_hash()` から自分で独立に導出します(M10)。
         """
         if not _NONCE.fullmatch(session_nonce) or not _HASH.fullmatch(target_hash) or not _HASH.fullmatch(action_hash):
             raise ValueError("invalid validator binding")
-        if not _HASH.fullmatch(ui_action_hash):
-            raise ValueError("invalid validator ui action binding")
         if type(target_pid) is not int or target_pid <= 0:
             raise ValueError("invalid validator target_pid")
         if type(target_hwnd) is not int or target_hwnd <= 0:
@@ -193,7 +191,7 @@ class LeaseValidator:
         self._nonce = session_nonce
         self._target_hash = target_hash
         self._action_hash = action_hash
-        self._ui_action_hash = ui_action_hash
+        self._ui_action_hash = ui_action_contract_hash()
         self._target_pid = target_pid
         self._target_hwnd = target_hwnd
         self._last_sequence = 0

@@ -113,23 +113,42 @@ def test_click_no_ops_when_window_from_point_owner_mismatches_target(tmp_path) -
     assert result["applied"] is True
     assert backend.send_input_calls == 0
     assert backend.ui_calls == []
-def test_enter_and_escape_do_not_require_client_rect() -> None:
+def test_enter_and_escape_do_not_require_client_rect(tmp_path) -> None:
     """ENTER/ESCAPEは座標を使わないため、client rect失敗の影響を受けない。
     座標系検査はCLICKだけに閉じていることを確認します。
     """
-    backend = DryRunBackend(foreground_pid=42, foreground_hwnd=84, focused=True, armed=True)
+    runtime, backend = _runtime(tmp_path, armed=True, focused=True)
     backend.client_rect = None
-    runtime = HelperRuntime(
-        validator=LeaseValidator("1" * 32, "a" * 64, "b" * 64, 42, 84),
-        backend=backend, audit=AuditLog(_tmp_audit_path()),
-    )
     result = runtime.handle_lease(_ui_lease(ui_action="ENTER"), now_ns=1_001_000_000)
     assert result["applied"] is True
     assert backend.send_input_calls == 1
-def _tmp_audit_path():
-    """モジュール内使い捨てaudit pathを作る小さな補助関数。
-    tmp_pathフィクスチャを使わない単体テストのために、専用の一時ディレクトリを都度用意します。
+@pytest.mark.parametrize(
+    "rect, nx, ny, expected",
+    [
+        ((0, 0, 800, 600), 0.0, 0.0, (0, 0)),
+        ((0, 0, 800, 600), 0.5, 0.5, (400, 300)),
+        ((0, 0, 800, 600), 1.0, 1.0, (799, 599)),
+        ((-1920, -200, -1120, 400), 0.0, 0.0, (-1920, -200)),
+        ((-1920, -200, -1120, 400), 1.0, 1.0, (-1121, 399)),
+        ((100, 50, 101, 51), 1.0, 1.0, (100, 50)),
+    ],
+)
+def test_map_normalized_to_screen_stays_inside_client_rect(rect, nx, ny, expected) -> None:
+    """ROI座標→screen座標の写像が、負原点のモニタや1px矩形でも常にclient rect内へ収まる(M14)。
+    実機クリック位置を決める唯一の式なので、端点と多重モニタ配置を固定値で検査します。
     """
-    import tempfile
-    from pathlib import Path
-    return Path(tempfile.mkdtemp()) / "audit.jsonl"
+    from survivors.input.win32_backend import map_normalized_to_screen
+    x, y = map_normalized_to_screen(rect, nx, ny)
+    assert (x, y) == expected
+    left, top, right, bottom = rect
+    assert left <= x < right and top <= y < bottom
+def test_dry_run_click_records_the_shared_mapping_result(tmp_path) -> None:
+    """dry-run backendのCLICK記録座標がproduction写像関数の結果と一致する(式の複製防止)。
+    両backendが同じ関数を使っていることを、非原点のclient rectで観測します。
+    """
+    from survivors.input.win32_backend import map_normalized_to_screen
+    runtime, backend = _runtime(tmp_path, armed=True, focused=True)
+    backend.client_rect = (1000, 200, 1640, 680)
+    runtime.handle_lease(_ui_lease(), now_ns=1_001_000_000)
+    call = backend.ui_calls[-1]
+    assert (call["screen_x"], call["screen_y"]) == map_normalized_to_screen(backend.client_rect, 0.5, 0.5)

@@ -22,17 +22,16 @@ class InputLeaseController:
         self, *, target_hash: str, action_hash: str, target_pid: int, target_hwnd: int,
         audit_path: Path | str, process_target: Callable[..., None] = helper_main,
         emergency_process_target: Callable[..., None] = emergency_release_main,
-        ui_action_hash: str = ui_action_contract_hash(),
     ) -> None:
         """session nonce を作り独立 helper process を default-disarmed で起動する。
         process_target 差替えは死亡検出 test 用で、production default は Win32 helper 固定です。
-        ui_action_hash は固定のUI行動契約hashで、helper側の既定値と一致するため
-        process spawn引数へは渡さず、双方が同じ関数から独立に導出します。
+        ui_action_hash は設定不可の固定UI行動契約hashで、helper側 LeaseValidator と
+        同じ `ui_action_contract_hash()` から双方が独立に導出するため spawn 引数へは渡しません。
         """
         self._nonce = secrets.token_hex(16)
         self._target_hash = target_hash
         self._action_hash = action_hash
-        self._ui_action_hash = ui_action_hash
+        self._ui_action_hash = ui_action_contract_hash()
         self._target_pid = target_pid
         self._target_hwnd = target_hwnd
         self._sequence = 0
@@ -74,6 +73,8 @@ class InputLeaseController:
     def send_ui_click(self, normalized_x: float, normalized_y: float) -> bool:
         """ROI正規化座標(0.0〜1.0)へのクリックを150ms以下のUiLeaseとしてhelperへ送る。
         movementと同じsequence/nonceを共有し、任意座標や別windowへのクリックは公開しません。
+        戻り値Trueはgate通過の意味で、client rect取得失敗やWindowFromPoint不一致による
+        fail-closed no-opでもTrueになり得ます。遷移成否は画面の再観測で確認してください。
         """
         self._ensure_available()
         self._sequence += 1

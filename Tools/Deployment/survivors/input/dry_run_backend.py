@@ -6,6 +6,7 @@ from multiprocessing.connection import Connection
 from queue import Queue
 import time
 from typing import Iterable
+from .win32_backend import map_normalized_to_screen
 ALLOWED_INPUTS = frozenset({"W", "A", "S", "D", "ENTER", "ESCAPE", "LEFT_CLICK"})
 _UI_ACTIONS = frozenset({"CLICK", "ENTER", "ESCAPE"})
 class DryRunBackend:
@@ -99,8 +100,7 @@ class DryRunBackend:
             width, height = right - left, bottom - top
             if width <= 0 or height <= 0:
                 return
-            screen_x = min(left + round(normalized_x * width), right - 1)
-            screen_y = min(top + round(normalized_y * height), bottom - 1)
+            screen_x, screen_y = map_normalized_to_screen(rect, normalized_x, normalized_y)
             owner = self.window_from_point_hwnd if self.window_from_point_hwnd is not None else target_hwnd
             if owner != target_hwnd:
                 return

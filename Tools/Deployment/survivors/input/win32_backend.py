@@ -17,6 +17,18 @@ _MOUSEEVENTF_VIRTUALDESK = 0x4000
 _SM_XVIRTUALSCREEN, _SM_YVIRTUALSCREEN = 76, 77
 _SM_CXVIRTUALSCREEN, _SM_CYVIRTUALSCREEN = 78, 79
 _GA_ROOT = 2
+def map_normalized_to_screen(
+    rect: tuple[int, int, int, int], normalized_x: float, normalized_y: float,
+) -> tuple[int, int]:
+    """0.0〜1.0のROI座標をscreen座標のclient rect内1点へ写像する純粋関数。
+    OS APIを呼ばないため単体テスト可能で、dry-run backendも同じ関数を使い式の乖離を防ぎます。
+    端の1.0でも矩形の外へはみ出さないよう `right/bottom - 1` で丸めます。
+    """
+    left, top, right, bottom = rect
+    width, height = right - left, bottom - top
+    screen_x = min(left + round(normalized_x * width), right - 1)
+    screen_y = min(top + round(normalized_y * height), bottom - 1)
+    return screen_x, screen_y
 class _MouseInput(ctypes.Structure):
     """Win32 MOUSEINPUT の ctypes layout。
     SendInput union へ渡す native field 幅を定義します。
@@ -154,18 +166,6 @@ class Win32InputBackend:
         if width <= 0 or height <= 0:
             return None
         return (top_left.x, top_left.y, top_left.x + width, top_left.y + height)
-    @staticmethod
-    def _map_normalized_to_screen(
-        rect: tuple[int, int, int, int], normalized_x: float, normalized_y: float,
-    ) -> tuple[int, int]:
-        """0.0〜1.0のROI座標をclient rect内のscreen座標へ写像する。
-        端の1.0でも矩形の外へはみ出さないよう `right/bottom - 1` で丸めます。
-        """
-        left, top, right, bottom = rect
-        width, height = right - left, bottom - top
-        screen_x = min(left + round(normalized_x * width), right - 1)
-        screen_y = min(top + round(normalized_y * height), bottom - 1)
-        return screen_x, screen_y
     def _root_owner_at(self, screen_x: int, screen_y: int) -> int:
         """指定screen座標にある window の root owner HWNDを返す。
         `target_hwnd` と比較し、他windowへ意図せずclickが飛ぶ状況をno-opにできるようにします。
@@ -202,7 +202,7 @@ class Win32InputBackend:
             rect = self._client_rect_to_screen(target_hwnd)
             if rect is None:
                 return
-            screen_x, screen_y = self._map_normalized_to_screen(rect, normalized_x, normalized_y)
+            screen_x, screen_y = map_normalized_to_screen(rect, normalized_x, normalized_y)
             if self._root_owner_at(screen_x, screen_y) != target_hwnd:
                 return
             events = [self._pointer_move_event(screen_x, screen_y),
