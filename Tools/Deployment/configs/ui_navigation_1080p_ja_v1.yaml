@@ -15,6 +15,12 @@ debounce_frames: 3
 # UI click の再送(retry)を許す最大回数。0にすると retry を完全に禁止する。
 retry_budget: 1
 
+# UI click 送信後、ゲーム側が処理する時間を見込んで retry を待つ ack window
+# (ミリ秒)。capture/perception の遅延が1フレーム(16ms)を超える実機環境でも、
+# ゲームがまだ初回 click を処理し切っていないうちに retry して二重clickに
+# ならないための安全マージン(M4 fix)。
+retry_after_ms: 200
+
 # resolver が typed target を採用するために必要な最低信頼度(validity は別途必須)。
 min_target_confidence: 0.5
 

@@ -68,11 +68,17 @@ _PROFILE_WIRE_KEYS = frozenset(
         "schema_version",
         "debounce_frames",
         "retry_budget",
+        "retry_after_ms",
         "min_target_confidence",
         "timeouts_ms",
         "labels_ja",
     }
 )
+
+# retry_after_ns の既定値(200ms)。capture/perception の遅延が1フレーム(16ms)を
+# 超える実機でも、初回 click をゲームがまだ処理し切っていないうちに retry して
+# 二重clickにならないための安全マージン(M4 fix)。
+_DEFAULT_RETRY_AFTER_NS = 200_000_000
 
 
 @dataclass(frozen=True)
@@ -90,6 +96,7 @@ class NavigationProfile:
     schema_version: str = NAVIGATION_PROFILE_SCHEMA_VERSION
     debounce_frames: int = 3
     retry_budget: int = 1
+    retry_after_ns: int = _DEFAULT_RETRY_AFTER_NS
     min_target_confidence: float = _MIN_TARGET_CONFIDENCE
     level_up_timeout_ns: int = 2_000_000_000
     chest_timeout_ns: int = 5_000_000_000
@@ -109,6 +116,8 @@ class NavigationProfile:
             raise ValueError("debounce_frames must be >= 1")
         if self.retry_budget < 0:
             raise ValueError("retry_budget must be >= 0")
+        if self.retry_after_ns < 0:
+            raise ValueError("retry_after_ns must be >= 0")
         if not (0.0 <= self.min_target_confidence <= 1.0):
             raise ValueError("min_target_confidence must be in [0, 1]")
         for name in (
@@ -156,10 +165,15 @@ class NavigationProfile:
             return int(timeouts_ms[key]) * 1_000_000
 
         defaults = cls()
+        retry_after_ms = data.get("retry_after_ms")
+        retry_after_ns = (
+            int(retry_after_ms) * 1_000_000 if retry_after_ms is not None else defaults.retry_after_ns
+        )
         return cls(
             schema_version=data.get("schema_version", NAVIGATION_PROFILE_SCHEMA_VERSION),
             debounce_frames=int(data.get("debounce_frames", defaults.debounce_frames)),
             retry_budget=int(data.get("retry_budget", defaults.retry_budget)),
+            retry_after_ns=retry_after_ns,
             min_target_confidence=float(
                 data.get("min_target_confidence", defaults.min_target_confidence)
             ),
@@ -226,6 +240,15 @@ class ExecutionOutcome:
     次に観測する `PerceptionSnapshot` の `ui_state_key`/`screen_state` の変化で
     別途確認してください(ack と適用成功を混同しないことが本モジュールの
     安全上の要点です)。
+
+    ``combat_reset``/``controller_stop``/``process_terminate`` の3種類は
+    そもそも OS への入力ではないため、``ack=True`` は「OS が受理した」ではなく
+    「この effect の実行責任は自分(``execute_effect``)ではなく呼び出し側に
+    委譲する、という通知を確かに発行した」という意味でしかありません。
+    ``combat_reset`` はモデル memory 破棄の合図、``controller_stop``/
+    ``process_terminate`` は controller の停止/ゲームプロセス終了要求であり、
+    実際の停止/終了処理を行う責任は呼び出し側(将来の 05-04 launcher)に
+    あります。``execute_effect`` 自身はこれらを何も実行しません。
     """
 
     effect: Effect
@@ -237,13 +260,20 @@ def _roi_center(roi: NormalizedRoi) -> tuple[float, float]:
     return ((roi.left + roi.right) / 2.0, (roi.top + roi.bottom) / 2.0)
 
 
-def _lookup_target(intent: UiIntentV1, presentation: UiPresentationSnapshotV1) -> UiTarget | None:
+def _lookup_target(
+    intent: UiIntentV1,
+    presentation: UiPresentationSnapshotV1,
+    *,
+    min_confidence: float = _MIN_TARGET_CONFIDENCE,
+) -> UiTarget | None:
     """intent の semantic identity に一致する typed target を1件だけ探す。
 
     やさしい説明: 「このindexのカード」「このIDのfallback」または
     「この名前のボタン」を UI 一覧から探します。0件・複数件・
     無効(validity=False)・信頼度不足・(ボタンなら)capability=False の
-    ときは None を返し、クリックを諦めます。
+    ときは None を返し、クリックを諦めます。信頼度の閾値は
+    ``min_confidence``(既定はモジュール定数だが、呼び出し側から
+    ``NavigationProfile.min_target_confidence`` を渡すことを想定する)。
 
     ``choose_card`` は契約上 ``target_id`` を持たず(``candidate_set_hash`` +
     ``target_index`` が identity)、``choose_fallback`` は逆に ``target_id`` +
@@ -279,30 +309,45 @@ def _lookup_target(intent: UiIntentV1, presentation: UiPresentationSnapshotV1) -
     if len(matches) != 1:
         return None
     target = matches[0]
-    if not target.validity or target.confidence < _MIN_TARGET_CONFIDENCE:
+    if not target.validity or target.confidence < min_confidence:
         return None
     if isinstance(target, UiButtonTargetV1) and not target.capability:
         return None
     return target
 
 
-def choose_card(intent: UiIntentV1, presentation: UiPresentationSnapshotV1) -> UiCandidateTargetV1 | None:
+def choose_card(
+    intent: UiIntentV1,
+    presentation: UiPresentationSnapshotV1,
+    *,
+    min_confidence: float = _MIN_TARGET_CONFIDENCE,
+) -> UiCandidateTargetV1 | None:
     """``choose_card`` intent を、target index と semantic_kind/candidate_set_hash が一致する候補へ解決する。"""
     if intent.kind is not UiIntentKind.CHOOSE_CARD:
         return None
-    target = _lookup_target(intent, presentation)
+    target = _lookup_target(intent, presentation, min_confidence=min_confidence)
     return target if isinstance(target, UiCandidateTargetV1) else None
 
 
-def choose_fallback(intent: UiIntentV1, presentation: UiPresentationSnapshotV1) -> UiCandidateTargetV1 | None:
+def choose_fallback(
+    intent: UiIntentV1,
+    presentation: UiPresentationSnapshotV1,
+    *,
+    min_confidence: float = _MIN_TARGET_CONFIDENCE,
+) -> UiCandidateTargetV1 | None:
     """``choose_fallback`` intent を、target id/index と semantic_kind が一致する候補へ解決する。"""
     if intent.kind is not UiIntentKind.CHOOSE_FALLBACK:
         return None
-    target = _lookup_target(intent, presentation)
+    target = _lookup_target(intent, presentation, min_confidence=min_confidence)
     return target if isinstance(target, UiCandidateTargetV1) else None
 
 
-def choose_button(intent: UiIntentV1, presentation: UiPresentationSnapshotV1) -> UiButtonTargetV1 | None:
+def choose_button(
+    intent: UiIntentV1,
+    presentation: UiPresentationSnapshotV1,
+    *,
+    min_confidence: float = _MIN_TARGET_CONFIDENCE,
+) -> UiButtonTargetV1 | None:
     """reroll/skip/banish/ack_chest/confirm intent を semantic/capability が一致するボタンへ解決する。"""
     if intent.kind not in (
         UiIntentKind.REROLL,
@@ -312,7 +357,7 @@ def choose_button(intent: UiIntentV1, presentation: UiPresentationSnapshotV1) ->
         UiIntentKind.CONFIRM,
     ):
         return None
-    target = _lookup_target(intent, presentation)
+    target = _lookup_target(intent, presentation, min_confidence=min_confidence)
     return target if isinstance(target, UiButtonTargetV1) else None
 
 
@@ -322,6 +367,7 @@ def resolve_ui_target(
     mode: Literal["initial", "retry"],
     *,
     original_snapshot: PerceptionSnapshot | None = None,
+    min_confidence: float = _MIN_TARGET_CONFIDENCE,
 ) -> UiTarget | None:
     """UiIntentV1 を、指定モードの照合規則で typed UI target へ解決する。
 
@@ -333,7 +379,10 @@ def resolve_ui_target(
     新しい snapshot が時系列で後であること、同じ ``ui_state_key`` であること、
     そして ``is_equivalent_ui_target`` が定める全 gate(semantic 一致・
     validity・信頼度・IoU・中心移動量)を満たすことを要求します。
-    1つでも欠けたら None を返し、二重送信を防ぎます。
+    1つでも欠けたら None を返し、二重送信を防ぎます。``min_confidence`` は
+    採用する最低信頼度で、呼び出し側(state machine)が
+    ``NavigationProfile.min_target_confidence`` を渡すことを想定します
+    (省略時はモジュール既定値)。
     """
     if intent.kind in (UiIntentKind.NO_OP, UiIntentKind.STOP):
         return None
@@ -345,7 +394,7 @@ def resolve_ui_target(
             or intent.source_content_hash != snapshot.source_content_hash
         ):
             return None
-        return _lookup_target(intent, snapshot.ui_presentation)
+        return _lookup_target(intent, snapshot.ui_presentation, min_confidence=min_confidence)
 
     if mode == "retry":
         if original_snapshot is None:
@@ -357,8 +406,8 @@ def resolve_ui_target(
             return None
         if intent.ui_state_key != original_snapshot.ui_state_key:
             return None
-        old_target = _lookup_target(intent, original_snapshot.ui_presentation)
-        new_target = _lookup_target(intent, snapshot.ui_presentation)
+        old_target = _lookup_target(intent, original_snapshot.ui_presentation, min_confidence=min_confidence)
+        new_target = _lookup_target(intent, snapshot.ui_presentation, min_confidence=min_confidence)
         if old_target is None or new_target is None:
             return None
         if not is_equivalent_ui_target(
@@ -382,6 +431,11 @@ def execute_effect(effect: Effect, controller: InputLeaseController) -> Executio
     ``combat_reset`` はモデル memory 破棄の合図であり OS 入力ではないため、
     ``controller_stop``/``process_terminate`` と同様に呼び出し側(launcher)への
     通知として ``ack=True`` を返すだけで、controller の API は呼びません。
+    この ``ack=True`` は「OS への送信を受理された」という意味ではなく、
+    「実行責任を呼び出し側へ委譲する通知を発行した」という意味だけです
+    (実際の controller 停止/プロセス終了処理は 05-04 launcher の責務であり、
+    このモジュールは一切実行しません。``ExecutionOutcome`` の docstring も
+    参照してください)。
     """
     if effect.kind == "move":
         assert effect.action_index is not None

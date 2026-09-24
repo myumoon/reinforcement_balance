@@ -25,6 +25,7 @@ from survivors.controller.state_machine import (
     classify_screen_state,
     reduce,
 )
+from survivors.controller.ui_navigation import NavigationProfile
 from survivors.perception_snapshot import NormalizedRoi
 
 from . import _state_machine_fixtures as fx
@@ -206,7 +207,9 @@ class TestLevelUpOrderingAndRetry:
         now, _gp = _arm_to_gameplay(sm, 0)
         now, lu, intent, decision, entry_effects = self._enter_level_up(sm, now)
         assert sm.context.state is ControllerState.LEVEL_UP
-        assert entry_effects == ()  # 遷移確定 tick そのものはまだ click しない。
+        # overall_review fix: GAMEPLAY を抜ける確定 tick 自体で release_all を
+        # 1回発行する(movement lease の自然失効任せにしない)。まだ click は出ない。
+        assert [e.kind for e in entry_effects] == ["release_all"]
         # 次の tick で click effect が出るが、move は一度も混ざらない。
         now += _TICK_NS
         effects = sm.step(lu, decision, now_ns=now)
@@ -255,12 +258,16 @@ class TestLevelUpOrderingAndRetry:
             effects = sm.step(lu, decision, now_ns=now)
             assert effects == ()
 
-    def test_retry_allowed_once_with_small_roi_jitter(self) -> None:
+    def test_retry_withheld_within_ack_wait_window(self) -> None:
+        # M4 fix: 初回 click 直後、ack 待ち window(既定 200ms)が経過するまでは
+        # newer snapshot で precondition を満たしていても retry してはならない
+        # (capture/perception 遅延中の二重click防止)。
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         now, lu, intent, decision, _ = self._enter_level_up(sm, now)
         now += _TICK_NS
         sm.step(lu, decision, now_ns=now)
+        sent_ns = now
 
         jittered = fx.make_perception_snapshot(
             screen_state="level_up_items",
@@ -281,7 +288,41 @@ class TestLevelUpOrderingAndRetry:
         retry_intent = fx.make_choose_card_intent(
             jittered, target_index=0, candidate_set_hash=lu.ui_presentation.candidate_set_hash
         )
+        # 16ms後(1フレーム後)、ack待ちwindow(200ms)にはまだ全く届かない。
+        now = sent_ns + _TICK_NS
+        effects = sm.step(jittered, fx.make_ui_decision(jittered, retry_intent), now_ns=now)
+        assert effects == ()
+        assert sm.context.ui_attempt.retried is False
+
+    def test_retry_allowed_once_after_ack_wait_window_with_small_roi_jitter(self) -> None:
+        sm = StateMachine()
+        now, gp = _arm_to_gameplay(sm, 0)
+        now, lu, intent, decision, _ = self._enter_level_up(sm, now)
         now += _TICK_NS
+        sm.step(lu, decision, now_ns=now)
+        sent_ns = now
+
+        jittered = fx.make_perception_snapshot(
+            screen_state="level_up_items",
+            snapshot_id="lu-1",
+            frame_id="lu-f1",
+            captured_ns=lu.captured_ns + 1,
+            ui_state_key=lu.ui_state_key,
+            candidate_set_hash=lu.ui_presentation.candidate_set_hash,
+            candidates=(
+                fx.make_candidate_target(
+                    choice_id="card-0",
+                    choice_index=0,
+                    roi=NormalizedRoi(0.101, 0.101, 0.201, 0.201),
+                    confidence=0.995,
+                ),
+            ),
+        )
+        retry_intent = fx.make_choose_card_intent(
+            jittered, target_index=0, candidate_set_hash=lu.ui_presentation.candidate_set_hash
+        )
+        # ack待ちwindow(既定200ms)を確実に超えてから retry を送る。
+        now = sent_ns + 250_000_000
         effects = sm.step(jittered, fx.make_ui_decision(jittered, retry_intent), now_ns=now)
         assert [effect.kind for effect in effects] == ["release_all", "ui_click"]
         assert effects[1].mode == "retry"
@@ -305,7 +346,7 @@ class TestLevelUpOrderingAndRetry:
         retry_intent2 = fx.make_choose_card_intent(
             jittered2, target_index=0, candidate_set_hash=lu.ui_presentation.candidate_set_hash
         )
-        now += _TICK_NS
+        now += 250_000_000
         effects = sm.step(jittered2, fx.make_ui_decision(jittered2, retry_intent2), now_ns=now)
         assert effects == ()
 
@@ -374,6 +415,95 @@ class TestLevelUpOrderingAndRetry:
             now += _TICK_NS
             sm.step(chest, fx.make_no_op_decision(chest), now_ns=now)
         assert sm.context.state is ControllerState.DISARMED
+
+
+class TestApplyAckRecognition:
+    """M12: apply ack(ui_state_key/candidate_set_hash/inventory_hash の変化)を
+    intent identity の変化と誤認しない。
+    """
+
+    def _enter_level_up_with_candidate(
+        self, sm: StateMachine, now: int, *, snapshot_id: str, choice_id: str, choice_index: int = 0
+    ):
+        lu = fx.make_perception_snapshot(
+            screen_state="level_up_items",
+            snapshot_id=snapshot_id,
+            frame_id=f"{snapshot_id}-f",
+            candidates=(
+                fx.make_candidate_target(choice_id=choice_id, choice_index=choice_index, confidence=0.995),
+            ),
+        )
+        intent = fx.make_choose_card_intent(lu, target_index=choice_index)
+        decision = fx.make_ui_decision(lu, intent)
+        return lu, intent, decision
+
+    def test_reroll_then_choose_new_candidate_is_not_emergency_stop(self) -> None:
+        sm = StateMachine()
+        now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT)
+        lu, intent, decision = self._enter_level_up_with_candidate(sm, now, snapshot_id="lu-a", choice_id="card-a")
+        for _ in range(3):
+            now += _TICK_NS
+            sm.step(lu, decision, now_ns=now)
+        assert sm.context.state is ControllerState.LEVEL_UP
+        now += _TICK_NS
+        first_click = sm.step(lu, decision, now_ns=now)
+        assert [e.kind for e in first_click] == ["release_all", "ui_click"]
+
+        # reroll成功でゲーム側が候補集合を入れ替えた(candidate_set_hash変化 = apply ack)。
+        rerolled, _reroll_intent, reroll_decision = self._enter_level_up_with_candidate(
+            sm, now, snapshot_id="lu-rerolled", choice_id="card-z"
+        )
+        now += _TICK_NS
+        effects = sm.step(rerolled, reroll_decision, now_ns=now)
+        # apply ack を認識し、intent identity 変化とみなして emergency stop しない。
+        assert sm.context.state is ControllerState.LEVEL_UP
+        assert not sm.context.terminal_locked
+        assert [e.kind for e in effects] == ["release_all", "ui_click"]
+        assert effects[1].mode == "initial"
+        assert effects[1].target.choice_id == "card-z"
+
+    def test_consecutive_level_up_after_apply_ack_is_new_initial_click(self) -> None:
+        sm = StateMachine()
+        now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.OPERATOR_DEBUG_RESTART)
+        lu, _intent, decision = self._enter_level_up_with_candidate(sm, now, snapshot_id="lu-1st", choice_id="knife")
+        for _ in range(3):
+            now += _TICK_NS
+            sm.step(lu, decision, now_ns=now)
+        now += _TICK_NS
+        sm.step(lu, decision, now_ns=now)  # 1回目の選択を送信。
+
+        # 選択が適用され、続けて2回目の level-up が提示された(連続 level-up)。
+        lu2, _intent2, decision2 = self._enter_level_up_with_candidate(
+            sm, now, snapshot_id="lu-2nd", choice_id="shield", choice_index=2
+        )
+        now += _TICK_NS
+        effects = sm.step(lu2, decision2, now_ns=now)
+        assert sm.context.state is ControllerState.LEVEL_UP
+        assert sm.context.state is not ControllerState.DISARMED
+        assert [e.kind for e in effects] == ["release_all", "ui_click"]
+        assert effects[1].target.choice_id == "shield"
+
+    def test_apply_ack_with_stale_intent_does_not_resend(self) -> None:
+        # apply ack を認識してもなお、今tickのintentが古いsnapshotに束縛された
+        # ままなら(遅延で旧intentが届いた等)、initial resolve のsource binding
+        # チェックに落ちて再送されない。
+        sm = StateMachine()
+        now, gp = _arm_to_gameplay(sm, 0)
+        lu, _intent, decision = self._enter_level_up_with_candidate(sm, now, snapshot_id="lu-b", choice_id="card-b")
+        for _ in range(3):
+            now += _TICK_NS
+            sm.step(lu, decision, now_ns=now)
+        now += _TICK_NS
+        sm.step(lu, decision, now_ns=now)
+
+        rerolled, _r, _rd = self._enter_level_up_with_candidate(sm, now, snapshot_id="lu-b-rerolled", choice_id="card-c")
+        stale_decision = decision  # 古い intent(lu 基準)のまま。
+        now += _TICK_NS
+        effects = sm.step(rerolled, stale_decision, now_ns=now)
+        assert effects == ()
+        assert sm.context.ui_attempt is None
+        assert sm.context.state is ControllerState.LEVEL_UP
+        assert not sm.context.terminal_locked
 
 
 class TestChestAndConfirmButtons:
@@ -453,13 +583,75 @@ class TestTargetReachedSuccessPriority:
                 break
         assert sm.context.state is ControllerState.COMPLETE
 
-    def test_target_reached_timeout_still_completes(self) -> None:
+    def test_target_reached_timeout_without_confirmation_fails_closed_debug(self) -> None:
+        # M7(b) fix: post-30 event(gameplay 再開 or death/result)を確認できない
+        # まま timeout した場合は、以前のように無条件で COMPLETE にはしない。
         sm = StateMachine()
         sm.arm(campaign_run_mode=CampaignRunMode.OPERATOR_DEBUG_RESTART, run_id="r", gameplay_attempt_id="a", now_ns=0)
         now, tr = self._reach_target(sm, 0)
         for _ in range(2000):
             now += _TICK_NS
             sm.step(tr, fx.make_no_op_decision(tr), now_ns=now)
+            if sm.context.state is not ControllerState.TARGET_REACHED_PENDING_TRANSITION:
+                break
+        assert sm.context.state is ControllerState.DISARMED
+        assert not sm.context.terminal_locked
+
+    def test_target_reached_timeout_without_confirmation_fails_closed_formal(self) -> None:
+        sm = StateMachine()
+        sm.arm(campaign_run_mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT, run_id="r", gameplay_attempt_id="a", now_ns=0)
+        now, tr = self._reach_target(sm, 0)
+        for _ in range(2000):
+            now += _TICK_NS
+            sm.step(tr, fx.make_no_op_decision(tr), now_ns=now)
+            if sm.context.terminal_locked:
+                break
+        assert sm.context.state is ControllerState.FORMAL_RUN_TERMINAL_FAILURE
+
+    def test_target_reached_confirmed_unknown_does_not_auto_complete(self) -> None:
+        # M7(b) fix: TARGET_REACHED -> UNKNOWN は illegal transition であり、
+        # 以前のように「target_reached 以外へ確定的に移った」というだけで
+        # 無条件に COMPLETE にしてはならない。
+        sm = StateMachine()
+        sm.arm(campaign_run_mode=CampaignRunMode.OPERATOR_DEBUG_RESTART, run_id="r", gameplay_attempt_id="a", now_ns=0)
+        now, tr = self._reach_target(sm, 0)
+        unk = fx.make_perception_snapshot(screen_state="totally_unrecognized_noise", snapshot_id="tr-to-unk")
+        for _ in range(3):
+            now += _TICK_NS
+            sm.step(unk, fx.make_no_op_decision(unk), now_ns=now)
+        assert sm.context.state is ControllerState.TARGET_REACHED_PENDING_TRANSITION
+        assert not sm.context.terminal_locked
+
+    def test_target_reached_latch_set_when_entered_via_unknown(self) -> None:
+        # M7(a) fix: GAMEPLAY -> 一瞬 UNKNOWN(画面切替中のノイズ)-> TARGET_REACHED
+        # という経路でも success_latched が一貫して立つ(以前は
+        # _reduce_unknown 経由だけ latch が立たず、直後の death が誤って
+        # pre-30 failure 扱いになっていた)。
+        sm = StateMachine()
+        sm.arm(campaign_run_mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT, run_id="r", gameplay_attempt_id="a", now_ns=0)
+        now = 0
+        gp = fx.make_perception_snapshot(screen_state="gameplay", snapshot_id="gp-tr-via-unknown")
+        for _ in range(6):
+            now += _TICK_NS
+            sm.step(gp, fx.make_move_decision(gp), now_ns=now)
+        noise = fx.make_perception_snapshot(screen_state="totally_unrecognized_noise", snapshot_id="noise-before-tr")
+        for _ in range(3):
+            now += _TICK_NS
+            sm.step(noise, fx.make_no_op_decision(noise), now_ns=now)
+        assert sm.context.state is ControllerState.UNKNOWN
+        tr = fx.make_perception_snapshot(
+            screen_state="target_reached_transition", snapshot_id="tr-via-unknown", buttons=()
+        )
+        for _ in range(3):
+            now += _TICK_NS
+            sm.step(tr, fx.make_no_op_decision(tr), now_ns=now)
+        assert sm.context.state is ControllerState.TARGET_REACHED_PENDING_TRANSITION
+        assert sm.context.success_latched is True
+
+        death = fx.make_perception_snapshot(screen_state="death", snapshot_id="death-after-tr-via-unknown")
+        for _ in range(1000):
+            now += _TICK_NS
+            sm.step(death, fx.make_no_op_decision(death), now_ns=now)
             if sm.context.terminal_locked:
                 break
         assert sm.context.state is ControllerState.COMPLETE
@@ -559,6 +751,65 @@ class TestFormalTerminalOrderingAndCas:
         new_ctx, effects = reduce(ctx, gp, fx.make_move_decision(gp), now_ns=100_000_000)
         assert new_ctx.state is ControllerState.FORMAL_RUN_TERMINAL_FAILURE
         assert [e.kind for e in effects] == ["release_all", "controller_stop", "process_terminate"]
+
+
+class TestArmResetsRunContext:
+    """M9: ``arm()`` は profile 以外の実行文脈を毎回まっさらに作り直す。"""
+
+    def test_rearm_after_debug_target_reached_timeout_resets_stale_success_latch(self) -> None:
+        # 前 run が TARGET_REACHED まで到達した(success_latched=True)まま
+        # debug モードで fail-closed(DISARMED)し、再arm した場合、新しい run の
+        # pre-30 death が誤って COMPLETE になってはならない。
+        sm = StateMachine()
+        now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.OPERATOR_DEBUG_RESTART)
+        tr = fx.make_perception_snapshot(screen_state="target_reached_transition", snapshot_id="tr-stale", buttons=())
+        for _ in range(3):
+            now += _TICK_NS
+            sm.step(tr, fx.make_no_op_decision(tr), now_ns=now)
+        assert sm.context.state is ControllerState.TARGET_REACHED_PENDING_TRANSITION
+        assert sm.context.success_latched is True
+
+        for _ in range(2000):
+            now += _TICK_NS
+            sm.step(tr, fx.make_no_op_decision(tr), now_ns=now)
+            if sm.context.state is ControllerState.DISARMED:
+                break
+        assert sm.context.state is ControllerState.DISARMED
+
+        # 新しい run を再arm する(profile 以外の文脈は完全に作り直されるはず)。
+        sm.arm(campaign_run_mode=CampaignRunMode.OPERATOR_DEBUG_RESTART, run_id="run-2", gameplay_attempt_id="attempt-2", now_ns=now)
+        assert sm.context.success_latched is False
+        assert sm.context.gameplay_entries == 0
+
+        gp2 = fx.make_perception_snapshot(screen_state="gameplay", snapshot_id="gp-run2")
+        for _ in range(6):
+            now += _TICK_NS
+            sm.step(gp2, fx.make_move_decision(gp2), now_ns=now)
+        assert sm.context.state is ControllerState.GAMEPLAY
+        assert sm.context.success_latched is False
+
+        death = fx.make_perception_snapshot(screen_state="death", snapshot_id="death-run2-pre30")
+        for _ in range(1000):
+            now += _TICK_NS
+            sm.step(death, fx.make_no_op_decision(death), now_ns=now)
+            if sm.context.state is ControllerState.RUN_SETUP:
+                break
+        assert sm.context.state is ControllerState.RUN_SETUP  # COMPLETE ではない。
+
+    def test_rearm_from_debug_to_formal_resets_gameplay_entries(self) -> None:
+        # 前 run(debug restart)で既に gameplay_entries=1 のまま manual abort で
+        # DISARMED へ戻り、次の process/run を formal_single_attempt で
+        # re-arm した場合、最初の GAMEPLAY entry を拒否してはならない。
+        sm = StateMachine()
+        now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.OPERATOR_DEBUG_RESTART)
+        assert sm.context.gameplay_entries == 1
+        now += _TICK_NS
+        sm.step(gp, fx.make_move_decision(gp), now_ns=now, manual_abort_requested=True)
+        assert sm.context.state is ControllerState.DISARMED
+
+        now, gp2 = _arm_to_gameplay(sm, now, mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT)
+        assert sm.context.state is ControllerState.GAMEPLAY
+        assert sm.context.gameplay_entries == 1
 
 
 class TestPausedUnknownRecover:
@@ -669,6 +920,270 @@ class TestGlobalSafetySignals:
         assert effects[0].kind == "release_all"
 
 
+class TestTransitionTable:
+    """M2: (from_state, confirmed_category, campaign_run_mode) -> (to_state, effect_kinds) を
+    table-driven に検証する。
+
+    やさしい説明: これまで parametrize されていたのは ``classify_screen_state``
+    だけでした。ここでは実際に state を1つ移す「遷移」そのものを表として
+    列挙し、plan本文の legal transition と、代表的な illegal transition
+    (LEVEL_UP/CHEST 相互、TARGET_REACHED→UNKNOWN、RECOVER→他)を網羅します。
+    ``StateContext`` を直接組み立て、debounce が既に確定する寸前
+    (``pending_streak = debounce_frames - 1``)にしておくことで、1回の
+    ``reduce()`` 呼び出しで「確定 tick」だけを取り出してテストします。
+    """
+
+    _CATEGORY_RAW: dict[ControllerState, str] = {
+        ControllerState.GAMEPLAY: "gameplay",
+        ControllerState.LEVEL_UP: "level_up_items",
+        ControllerState.CHEST: "chest",
+        ControllerState.PAUSED: "paused",
+        ControllerState.UNKNOWN: "totally_unrecognized_table_probe",
+        ControllerState.DEATH_RESULT: "death",
+        ControllerState.TARGET_REACHED_PENDING_TRANSITION: "target_reached_transition",
+    }
+
+    def _confirm(
+        self,
+        from_state: ControllerState,
+        category: ControllerState,
+        mode: CampaignRunMode,
+        *,
+        extra: dict | None = None,
+        move_action: int | None = None,
+        now_ns: int = 500_000_000,
+    ):
+        profile = NavigationProfile.default_v1()
+        raw = self._CATEGORY_RAW[category]
+        snapshot = fx.make_perception_snapshot(
+            screen_state=raw, snapshot_id=f"tt-{from_state.value}-{category.value}-{mode.value}"
+        )
+        ctx = StateContext(
+            state=from_state,
+            campaign_run_mode=mode,
+            pending_category=category,
+            pending_streak=profile.debounce_frames - 1,
+            state_entered_ns=0,
+            **(extra or {}),
+        )
+        decision = (
+            fx.make_move_decision(snapshot, action_index=move_action)
+            if move_action is not None
+            else fx.make_no_op_decision(snapshot)
+        )
+        return reduce(ctx, snapshot, decision, now_ns=now_ns, profile=profile)
+
+    @pytest.mark.parametrize(
+        "from_state,category,mode,expected_to_state,expected_kinds",
+        [
+            # ACQUIRE_TARGET -> RUN_SETUP(legal) / confirmed UNKNOWN は素通りしない。
+            pytest.param(
+                ControllerState.ACQUIRE_TARGET, ControllerState.GAMEPLAY, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.RUN_SETUP, (), id="acquire_target-gameplay-run_setup",
+            ),
+            pytest.param(
+                ControllerState.ACQUIRE_TARGET, ControllerState.UNKNOWN, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.ACQUIRE_TARGET, (), id="acquire_target-unknown-stays",
+            ),
+            # RUN_SETUP -> GAMEPLAY(legal) / confirmed UNKNOWN は素通りしない。
+            pytest.param(
+                ControllerState.RUN_SETUP, ControllerState.GAMEPLAY, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.GAMEPLAY, (), id="run_setup-gameplay-lands",
+            ),
+            pytest.param(
+                ControllerState.RUN_SETUP, ControllerState.UNKNOWN, CampaignRunMode.FORMAL_SINGLE_ATTEMPT,
+                ControllerState.RUN_SETUP, (), id="run_setup-unknown-stays",
+            ),
+            # GAMEPLAY からの legal 遷移: 抜けるtickで release_all を1回出す。
+            pytest.param(
+                ControllerState.GAMEPLAY, ControllerState.LEVEL_UP, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.LEVEL_UP, ("release_all",), id="gameplay-level_up",
+            ),
+            pytest.param(
+                ControllerState.GAMEPLAY, ControllerState.CHEST, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.CHEST, ("release_all",), id="gameplay-chest",
+            ),
+            pytest.param(
+                ControllerState.GAMEPLAY, ControllerState.PAUSED, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.PAUSED, ("release_all",), id="gameplay-paused",
+            ),
+            pytest.param(
+                ControllerState.GAMEPLAY, ControllerState.UNKNOWN, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.UNKNOWN, ("release_all",), id="gameplay-unknown",
+            ),
+            pytest.param(
+                ControllerState.GAMEPLAY, ControllerState.DEATH_RESULT, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.DEATH_RESULT, ("release_all",), id="gameplay-death_result",
+            ),
+            pytest.param(
+                ControllerState.GAMEPLAY, ControllerState.TARGET_REACHED_PENDING_TRANSITION,
+                CampaignRunMode.OPERATOR_DEBUG_RESTART, ControllerState.TARGET_REACHED_PENDING_TRANSITION,
+                ("release_all",), id="gameplay-target_reached",
+            ),
+            # LEVEL_UP: illegal cross-modal(CHEST) / legal ack(GAMEPLAY/DEATH_RESULT)。
+            pytest.param(
+                ControllerState.LEVEL_UP, ControllerState.CHEST, CampaignRunMode.FORMAL_SINGLE_ATTEMPT,
+                ControllerState.FORMAL_RUN_TERMINAL_FAILURE,
+                ("release_all", "controller_stop", "process_terminate"), id="level_up-chest-illegal-formal",
+            ),
+            pytest.param(
+                ControllerState.LEVEL_UP, ControllerState.CHEST, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.DISARMED, ("release_all",), id="level_up-chest-illegal-debug",
+            ),
+            pytest.param(
+                ControllerState.LEVEL_UP, ControllerState.GAMEPLAY, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.GAMEPLAY, (), id="level_up-gameplay-ack",
+            ),
+            pytest.param(
+                ControllerState.LEVEL_UP, ControllerState.DEATH_RESULT, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.DEATH_RESULT, (), id="level_up-death_result",
+            ),
+            # CHEST: illegal cross-modal(LEVEL_UP) / legal ack(GAMEPLAY/DEATH_RESULT)。
+            pytest.param(
+                ControllerState.CHEST, ControllerState.LEVEL_UP, CampaignRunMode.FORMAL_SINGLE_ATTEMPT,
+                ControllerState.FORMAL_RUN_TERMINAL_FAILURE,
+                ("release_all", "controller_stop", "process_terminate"), id="chest-level_up-illegal-formal",
+            ),
+            pytest.param(
+                ControllerState.CHEST, ControllerState.LEVEL_UP, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.DISARMED, ("release_all",), id="chest-level_up-illegal-debug",
+            ),
+            pytest.param(
+                ControllerState.CHEST, ControllerState.GAMEPLAY, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.GAMEPLAY, (), id="chest-gameplay-ack",
+            ),
+            pytest.param(
+                ControllerState.CHEST, ControllerState.DEATH_RESULT, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.DEATH_RESULT, (), id="chest-death_result",
+            ),
+            # PAUSED: indefinite / GAMEPLAY は RECOVER 経由 / LEVEL_UP直行はillegal(UNKNOWNへ)。
+            pytest.param(
+                ControllerState.PAUSED, ControllerState.PAUSED, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.PAUSED, (), id="paused-paused-stays",
+            ),
+            pytest.param(
+                ControllerState.PAUSED, ControllerState.GAMEPLAY, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.RECOVER, (), id="paused-gameplay-recover",
+            ),
+            pytest.param(
+                ControllerState.PAUSED, ControllerState.DEATH_RESULT, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.DEATH_RESULT, (), id="paused-death_result",
+            ),
+            pytest.param(
+                ControllerState.PAUSED, ControllerState.UNKNOWN, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.UNKNOWN, (), id="paused-unknown",
+            ),
+            pytest.param(
+                ControllerState.PAUSED, ControllerState.LEVEL_UP, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.UNKNOWN, (), id="paused-level_up-illegal-direct",
+            ),
+            # UNKNOWN: 1s timeout 管理下からの legal 遷移(TARGET_REACHED含む)。
+            pytest.param(
+                ControllerState.UNKNOWN, ControllerState.DEATH_RESULT, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.DEATH_RESULT, (), id="unknown-death_result",
+            ),
+            pytest.param(
+                ControllerState.UNKNOWN, ControllerState.GAMEPLAY, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.RECOVER, (), id="unknown-gameplay-recover",
+            ),
+            pytest.param(
+                ControllerState.UNKNOWN, ControllerState.PAUSED, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.PAUSED, (), id="unknown-paused",
+            ),
+            pytest.param(
+                ControllerState.UNKNOWN, ControllerState.LEVEL_UP, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.LEVEL_UP, (), id="unknown-level_up",
+            ),
+            pytest.param(
+                ControllerState.UNKNOWN, ControllerState.CHEST, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.CHEST, (), id="unknown-chest",
+            ),
+            pytest.param(
+                ControllerState.UNKNOWN, ControllerState.TARGET_REACHED_PENDING_TRANSITION,
+                CampaignRunMode.OPERATOR_DEBUG_RESTART, ControllerState.TARGET_REACHED_PENDING_TRANSITION,
+                (), id="unknown-target_reached",
+            ),
+            # RECOVER: GAMEPLAY/PAUSED/DEATH_RESULT は legal、その他は illegal(UNKNOWNへ戻す)。
+            pytest.param(
+                ControllerState.RECOVER, ControllerState.DEATH_RESULT, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.DEATH_RESULT, (), id="recover-death_result",
+            ),
+            pytest.param(
+                ControllerState.RECOVER, ControllerState.GAMEPLAY, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.GAMEPLAY, (), id="recover-gameplay",
+            ),
+            pytest.param(
+                ControllerState.RECOVER, ControllerState.PAUSED, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.PAUSED, (), id="recover-paused",
+            ),
+            pytest.param(
+                ControllerState.RECOVER, ControllerState.LEVEL_UP, CampaignRunMode.OPERATOR_DEBUG_RESTART,
+                ControllerState.UNKNOWN, (), id="recover-level_up-illegal-direct",
+            ),
+            # TARGET_REACHED_PENDING_TRANSITION: DEATH_RESULT は legal(success優先)、
+            # UNKNOWN への直接遷移は illegal(状態はそのまま)。
+            pytest.param(
+                ControllerState.TARGET_REACHED_PENDING_TRANSITION, ControllerState.DEATH_RESULT,
+                CampaignRunMode.OPERATOR_DEBUG_RESTART, ControllerState.DEATH_RESULT, (), id="target_reached-death_result",
+            ),
+            pytest.param(
+                ControllerState.TARGET_REACHED_PENDING_TRANSITION, ControllerState.UNKNOWN,
+                CampaignRunMode.OPERATOR_DEBUG_RESTART, ControllerState.TARGET_REACHED_PENDING_TRANSITION, (),
+                id="target_reached-unknown-illegal",
+            ),
+        ],
+    )
+    def test_confirmed_transition_table(
+        self,
+        from_state: ControllerState,
+        category: ControllerState,
+        mode: CampaignRunMode,
+        expected_to_state: ControllerState,
+        expected_kinds: tuple[str, ...],
+    ) -> None:
+        extra = {"success_latched": True} if from_state is ControllerState.TARGET_REACHED_PENDING_TRANSITION else {}
+        new_ctx, effects = self._confirm(from_state, category, mode, extra=extra)
+        assert new_ctx.state is expected_to_state
+        assert tuple(effect.kind for effect in effects) == expected_kinds
+
+    @pytest.mark.parametrize("mode", [CampaignRunMode.OPERATOR_DEBUG_RESTART, CampaignRunMode.FORMAL_SINGLE_ATTEMPT])
+    def test_target_reached_gameplay_confirm_completes_regardless_of_mode(self, mode: CampaignRunMode) -> None:
+        new_ctx, effects = self._confirm(
+            ControllerState.TARGET_REACHED_PENDING_TRANSITION,
+            ControllerState.GAMEPLAY,
+            mode,
+            extra={"success_latched": True},
+        )
+        assert new_ctx.state is ControllerState.COMPLETE
+        assert new_ctx.terminal_locked is True
+        assert [effect.kind for effect in effects] == ["release_all", "controller_stop", "process_terminate"]
+
+    def test_gameplay_stay_forwards_move_effect(self) -> None:
+        new_ctx, effects = self._confirm(
+            ControllerState.GAMEPLAY, ControllerState.GAMEPLAY, CampaignRunMode.OPERATOR_DEBUG_RESTART, move_action=4
+        )
+        assert new_ctx.state is ControllerState.GAMEPLAY
+        assert [effect.kind for effect in effects] == ["move"]
+        assert effects[0].action_index == 4
+
+    def test_target_reached_entry_from_gameplay_sets_success_latch(self) -> None:
+        new_ctx, _effects = self._confirm(
+            ControllerState.GAMEPLAY,
+            ControllerState.TARGET_REACHED_PENDING_TRANSITION,
+            CampaignRunMode.OPERATOR_DEBUG_RESTART,
+        )
+        assert new_ctx.success_latched is True
+
+    def test_target_reached_entry_from_unknown_sets_success_latch(self) -> None:
+        # M7(a) の table-driven 側の固定: UNKNOWN 経由でも success_latched が立つ。
+        new_ctx, _effects = self._confirm(
+            ControllerState.UNKNOWN,
+            ControllerState.TARGET_REACHED_PENDING_TRANSITION,
+            CampaignRunMode.OPERATOR_DEBUG_RESTART,
+        )
+        assert new_ctx.success_latched is True
+
+
 class TestGoldenEndToEnd:
     """04-09/05-01 契約に沿った parser -> assembler -> AgentDecision -> resolver 相当の end-to-end 再生。
 
@@ -723,9 +1238,20 @@ class TestGoldenEndToEnd:
 
 
 class TestNoiseInvariantProperty:
-    """M15: random/noisy state sequence でも安全不変条件が破れない。"""
+    """M15: random/noisy state sequence でも安全不変条件が破れない。
 
-    _SCREEN_STATES = (
+    やさしい説明: 以前は毎tick完全に一様乱数で画面を選んでいたため、
+    3-frame debounce がほとんど成立せず、LEVEL_UP/CHEST/PAUSED/UNKNOWN/
+    RECOVER/TARGET_REACHED に一度も入らず ui_click effect も0件のまま
+    「空振り」していました(実測済み)。ここでは同じ画面を1〜6フレーム
+    連続させる run-length 付きノイズに変え、全状態への訪問と
+    ui_click/ui_key の発生を最低件数で保証します。また fake な
+    movement lease(75ms)モデルで「held」を追跡し、UI/UNKNOWN/PAUSED/
+    RECOVER中や emergency stop 直後に held が残っていないことも検証します
+    (以前は effect 種別を見ておらず、この検証は素通りしていました)。
+    """
+
+    _SCREEN_STATE_POOL = (
         "gameplay",
         "level_up_items",
         "level_up_fallback",
@@ -738,16 +1264,56 @@ class TestNoiseInvariantProperty:
         "totally_unrecognized_noise",
     )
 
+    _REQUIRED_VISITED_STATES = frozenset(
+        {
+            ControllerState.LEVEL_UP,
+            ControllerState.CHEST,
+            ControllerState.PAUSED,
+            ControllerState.UNKNOWN,
+            ControllerState.RECOVER,
+            ControllerState.TARGET_REACHED_PENDING_TRANSITION,
+            ControllerState.DEATH_RESULT,
+        }
+    )
+
+    _LEASE_NS = 75_000_000  # InputLeaseController の movement lease(75ms)を模した閾値。
+
+    def _generate_schedule(self, rng: random.Random, total_ticks: int) -> list[str]:
+        """同じ画面分類を 1〜6 フレーム連続させる run-length 付きノイズ列を作る。
+
+        やさしい説明: プール全体を毎 lap シャッフルしてから run-length を
+        付けて並べるので、debounce(既定3フレーム)を上回る run が高確率で
+        毎 lap 発生し、全画面状態への訪問を(運任せではなく)実質的に保証します。
+        """
+        schedule: list[str] = []
+        pool = list(self._SCREEN_STATE_POOL)
+        while len(schedule) < total_ticks:
+            rng.shuffle(pool)
+            for state in pool:
+                schedule.extend([state] * rng.randint(1, 6))
+        return schedule[:total_ticks]
+
     def test_random_noisy_sequences_never_violate_safety_invariants(self) -> None:
         rng = random.Random(20260925)
-        for trial in range(20):
+        visited_states: set[ControllerState] = set()
+        ui_click_count = 0
+        ui_key_count = 0
+
+        for trial in range(40):
             sm = StateMachine()
             mode = CampaignRunMode.FORMAL_SINGLE_ATTEMPT if trial % 2 else CampaignRunMode.OPERATOR_DEBUG_RESTART
             sm.arm(campaign_run_mode=mode, run_id=f"noise-{trial}", gameplay_attempt_id="a", now_ns=0)
             now = 0
-            for tick in range(150):
+            last_move_ns: int | None = None  # fake movement lease(75ms)モデル。
+            # RECOVER は「UNKNOWN/PAUSED 中に3連続 gameplay を観測する」という
+            # 具体的な前提が要るため、trial/tick数を十分に確保して(運任せに
+            # せず)実質的に毎回訪問されるようにする(元は20trial*240tickで
+            # RECOVER だけ未訪問になることがあった)。
+            schedule = self._generate_schedule(random.Random(rng.random()), 360)
+
+            for tick, raw_state in enumerate(schedule):
                 now += _TICK_NS
-                raw_state = rng.choice(self._SCREEN_STATES)
+                pre_state = sm.context.state
                 snapshot = fx.make_perception_snapshot(
                     screen_state=raw_state,
                     snapshot_id=f"noise-{trial}-{tick}",
@@ -761,19 +1327,23 @@ class TestNoiseInvariantProperty:
                     buttons=(
                         (fx.make_button_target(semantic_action="ack_chest"),)
                         if raw_state == "chest"
+                        else (fx.make_button_target(semantic_action="confirm"),)
+                        if raw_state == "target_reached_transition"
                         else ()
                     ),
                 )
-                pre_state = sm.context.state
                 if pre_state is ControllerState.GAMEPLAY and raw_state == "gameplay":
                     decision = fx.make_move_decision(snapshot, action_index=rng.randrange(9))
-                elif raw_state in ("level_up_items",) and pre_state is ControllerState.LEVEL_UP:
+                elif raw_state == "level_up_items" and pre_state is ControllerState.LEVEL_UP:
                     intent = fx.make_choose_card_intent(snapshot, target_index=0)
                     decision = fx.make_ui_decision(snapshot, intent)
                 elif raw_state == "chest" and pre_state is ControllerState.CHEST:
                     intent = fx.make_button_intent(
                         snapshot, kind=UiIntentKind.ACK_CHEST, semantic_action="ack_chest"
                     )
+                    decision = fx.make_ui_decision(snapshot, intent)
+                elif raw_state == "target_reached_transition" and pre_state is ControllerState.TARGET_REACHED_PENDING_TRANSITION:
+                    intent = fx.make_button_intent(snapshot, kind=UiIntentKind.CONFIRM, semantic_action="confirm")
                     decision = fx.make_ui_decision(snapshot, intent)
                 else:
                     decision = fx.make_no_op_decision(snapshot)
@@ -785,6 +1355,15 @@ class TestNoiseInvariantProperty:
 
                 effects = sm.step(snapshot, decision, now_ns=now)
                 kinds = [effect.kind for effect in effects]
+                visited_states.add(sm.context.state)
+                ui_click_count += kinds.count("ui_click")
+                ui_key_count += kinds.count("ui_key")
+
+                for kind in kinds:
+                    if kind == "move":
+                        last_move_ns = now
+                    elif kind == "release_all":
+                        last_move_ns = None  # emergency_release は lease を即時に無効化する。
 
                 # I4: 同一 tick で move と ui_click/ui_key を同時に出さない。
                 assert not ("move" in kinds and ("ui_click" in kinds or "ui_key" in kinds))
@@ -805,3 +1384,33 @@ class TestNoiseInvariantProperty:
                 # emergency stop(DISARMED への fail-closed 遷移)直後は held input が無い。
                 if sm.context.state is ControllerState.DISARMED and pre_state is not ControllerState.DISARMED:
                     assert kinds in ([], ["release_all"])
+
+                # fake movement lease モデル: UI/UNKNOWN/PAUSED/RECOVER 中や
+                # emergency stop 直後は held(75ms 以内の move)が残っていない。
+                held = last_move_ns is not None and (now - last_move_ns) < self._LEASE_NS
+                if sm.context.state in (
+                    ControllerState.LEVEL_UP,
+                    ControllerState.CHEST,
+                    ControllerState.TARGET_REACHED_PENDING_TRANSITION,
+                    ControllerState.PAUSED,
+                    ControllerState.UNKNOWN,
+                    ControllerState.RECOVER,
+                ):
+                    assert not held, f"{sm.context.state} 中に movement lease が held のまま"
+                if sm.context.state is ControllerState.DISARMED and pre_state is not ControllerState.DISARMED:
+                    assert not held, "emergency stop 直後に movement lease が held のまま"
+
+                # debug モードで fail-closed(DISARMED)した場合、trial 全体を
+                # そこで無駄にせず即座に再arm する(1trialに1回の illegal
+                # transitionでUNKNOWN/PAUSED経由のRECOVERまで辿り着く前に
+                # 探索が終わってしまうのを防ぐ)。arm() は毎回まっさらな
+                # StateContext を作るので(M9 fix)、run を跨いでも安全。
+                if sm.context.state is ControllerState.DISARMED:
+                    sm.arm(campaign_run_mode=mode, run_id=f"noise-{trial}-{tick}", gameplay_attempt_id="a", now_ns=now)
+
+        # M15 fix: 空振り(全訪問状態が ACQUIRE_TARGET/RUN_SETUP/GAMEPLAY/
+        # DEATH_RESULT/FORMAL_RUN_TERMINAL_FAILURE だけ)ではないことを最低件数で保証する。
+        missing = self._REQUIRED_VISITED_STATES - visited_states
+        assert not missing, f"訪問できなかった状態がある: {missing}"
+        assert ui_click_count > 0, "ui_click effect が一度も出なかった"
+        assert ui_key_count > 0, "ui_key effect が一度も出なかった"

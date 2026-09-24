@@ -265,6 +265,28 @@ class TestResolveUiTargetRetry:
             resolve_ui_target(intent, original, mode="bogus")  # type: ignore[arg-type]
 
 
+class TestResolveUiTargetMinConfidence:
+    """overall_review(nav-min-target-confidence-ignored): profile の閾値が実際に効くこと。"""
+
+    def test_default_threshold_accepts_moderate_confidence(self) -> None:
+        snapshot = make_perception_snapshot(
+            screen_state="level_up_items",
+            candidates=(make_candidate_target(choice_id="c0", choice_index=0, confidence=0.8),),
+        )
+        intent = make_choose_card_intent(snapshot, target_index=0)
+        assert resolve_ui_target(intent, snapshot, mode="initial") is not None
+
+    def test_profile_min_confidence_rejects_below_threshold(self) -> None:
+        # min_target_confidence を運用者が 0.9 に上げると、0.8 の target は拒否される
+        # (以前は _lookup_target がモジュール定数 0.5 を hardcode していて無視されていた)。
+        snapshot = make_perception_snapshot(
+            screen_state="level_up_items",
+            candidates=(make_candidate_target(choice_id="c0", choice_index=0, confidence=0.8),),
+        )
+        intent = make_choose_card_intent(snapshot, target_index=0)
+        assert resolve_ui_target(intent, snapshot, mode="initial", min_confidence=0.9) is None
+
+
 class TestChooseHelpers:
     """``choose_card``/``choose_fallback``/``choose_button`` の kind ガード。"""
 
@@ -352,11 +374,16 @@ class TestNavigationProfile:
         profile = load_navigation_profile(_CONFIG_PATH)
         assert profile.debounce_frames == 3
         assert profile.retry_budget == 1
+        assert profile.retry_after_ns == 200_000_000
         assert profile.timeout_ns_for("level_up") == 2_000_000_000
         assert profile.timeout_ns_for("chest") == 5_000_000_000
         assert profile.timeout_ns_for("target_reached") == 5_000_000_000
         assert profile.timeout_ns_for("unknown") == 1_000_000_000
         assert profile.timeout_ns_for("run_setup") == 15_000_000_000
+
+    def test_retry_after_ns_rejects_negative(self) -> None:
+        with pytest.raises(ValueError):
+            NavigationProfile(retry_after_ns=-1)
 
     def test_shipped_yaml_has_no_pixel_or_normalized_coordinates(self) -> None:
         # I3 相当: 設定ファイル自体が固定座標を持たないことを保証する。

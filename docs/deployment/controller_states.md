@@ -51,6 +51,12 @@
   05-03 側でも明示的に保証するためです(`InputLeaseController` 側の
   `HelperRuntime.handle_lease` も UI 送信前に movement chord を強制解放しますが、
   05-03 の effect 順序としても独立に固定します)。
+- `GAMEPLAY` から他の状態(`LEVEL_UP`/`CHEST`/`PAUSED`/`UNKNOWN`/
+  `TARGET_REACHED_PENDING_TRANSITION`/`DEATH_RESULT`)へ確定的に抜けるtick
+  自体でも、`Effect(kind="release_all")` を1回発行します。UI click とペアの
+  release だけに頼らず(click が発生するまで時間がかかる/一度も click が
+  発生しない PAUSED・UNKNOWN・DEATH_RESULT のような遷移でも)movement lease を
+  即座に手放すためです。
 - 同一 tick で `move` と `ui_click`/`ui_key` の両方を送ることはありません
   (1 tick 1 input effect)。
 
@@ -71,10 +77,26 @@
   あること、同じ `ui_state_key` であること、そして
   `perception_snapshot.is_equivalent_ui_target()` が定める全 gate(semantic
   一致・validity・信頼度・IoU ≥ 0.90・中心移動量 ≤ 0.01)を満たすことを要求
-  します。1つでも欠けたら `None` を返し、二重送信を防ぎます。
-- retry は `NavigationProfile.retry_budget`(既定 1)回まで。1 回のクリック
-  試行の間に候補/inventory/state key が変わった(intent identity 変化)場合や、
-  retry の precondition を満たさない場合は再送せず emergency stop へ倒します。
+  します。1つでも欠けたら `None` を返し、二重送信を防ぎます。信頼度の閾値は
+  `NavigationProfile.min_target_confidence` を呼び出し側(state machine)から
+  渡します(以前はモジュール既定値 0.5 が hardcode されており、profile の
+  値を無視していました)。
+- retry は初回 click 送信直後の ack 待ち window
+  (`NavigationProfile.retry_after_ns`、既定 200ms)を経過するまで発生しません。
+  capture/perception の遅延が1フレーム(16ms)を超える実機では、初回 click を
+  ゲームがまだ処理し切っていない状態で newer snapshot が届くことがあるため、
+  この window を空けるまでは precondition を満たしていても retry しません。
+- retry は `NavigationProfile.retry_budget`(既定 1)回まで。
+- 送信済み click に対して、`ui_state_key`/`candidate_set_hash`/
+  `inventory_hash` のいずれかが元の snapshot から変わっていれば、それを
+  「game 側の apply ack」と認識します(OS への送信受理である
+  `ExecutionOutcome.ack` とは別物です)。apply ack を検出した場合は
+  intent identity の変化とはみなさず、`ui_attempt` をクリアして今 tick の
+  intent を新規 initial resolve として扱います(再送はしません)。これにより
+  reroll/banish 成功後の次の選択や連続 level-up を、誤って emergency stop
+  しません。apply ack が観測できないまま候補/inventory/state key が変わった
+  場合や、retry の precondition を満たさない場合は、再送せず emergency stop
+  へ倒します。
 - `CONFIRM` intent だけ ROI クリックの代わりに `ENTER` キーを使います。それ
   以外(`CHOOSE_CARD`/`CHOOSE_FALLBACK`/`REROLL`/`SKIP`/`BANISH`/`ACK_CHEST`)は
   resolve 済み ROI の中心をクリックします。
@@ -83,19 +105,41 @@
 
 `send_ui_click`/`send_ui_key` の戻り値(`ExecutionOutcome.ack`)は OS への
 送信受理を意味するだけで、ゲーム側で実際に適用されたかどうかは保証しません。
-適用確認は次に観測する `PerceptionSnapshot` の `ui_state_key`/`screen_state`
-の変化で行います。`build_ui_action_telemetry()` は「何を」「どの候補/ボタンへ」
+適用確認(game apply ack)は次に観測する `PerceptionSnapshot` の
+`ui_state_key`/`candidate_set_hash`/`inventory_hash` の変化で行います
+(前段落を参照)。`build_ui_action_telemetry()` は「何を」「どの候補/ボタンへ」
 「初回か retry か」を記録する監査用ペイロードを別途組み立てますが、これも
 ack とは独立な記録であり、適用成功の証明ではありません。
+
+`combat_reset`/`controller_stop`/`process_terminate` の3種類は OS への入力
+そのものではないため、`execute_effect` はこれらに対して何も実行せず
+`ack=True` を返すだけです。この `ack=True` は「OS が受理した」という意味では
+なく、「実行責任を呼び出し側へ委譲する通知を発行した」という意味だけです。
+実際の controller 停止処理・ゲームプロセス終了処理を行う責任者は、この
+PR の範囲外である 05-04 launcher です。
 
 ## 30:00 成功優先ルール
 
 `TARGET_REACHED_PENDING_TRANSITION` に入った時点(30:00 evidence 観測)で
-`success_latched=True` になります。以後は:
+`success_latched=True` になります。この共通の入口(`_enter_target_reached`)は
+`GAMEPLAY` から直接見えた場合だけでなく、一瞬 `UNKNOWN`(画面切り替え中の
+ノイズ等)を経由してから見えた場合でも必ず通るため、経路によって
+`success_latched` が立ったり立たなかったりすることはありません。
 
-- 画面が(post-30 の confirm を確認できて)他カテゴリへ確定 → `COMPLETE`。
-- `death`/`result` へ直接移っても(Reaper が confirm 前に倒す等) → `COMPLETE`。
-- timeout してしまっても → `COMPLETE`(既定で成功扱い)。
+ただし、evidence を観測しただけではまだ成功を確定させません。成功が確定する
+のは、その後 profile の timeout(既定 5s)以内に、次の post-30 の**確定的な**
+画面変化を確認できたときだけです(それ以外に `target_reached` 画面から遷移
+する現実的な行き先は無いという前提です)。
+
+- `GAMEPLAY` へ戻ったことが確定した(post-30 confirm を押せてゲームが再開
+  した) → 即座に `COMPLETE`。
+- `death`/`result` へ直接移った(confirm 前に Reaper に倒された等) →
+  `success_latched` を優先して `COMPLETE`。
+
+それ以外の確定的な画面変化(`UNKNOWN` 等、illegal transition)や、post-30
+event を確認できないままの timeout は、成功を確定させず **fail-closed**
+(`campaign_run_mode=formal_single_attempt` では `FORMAL_RUN_TERMINAL_FAILURE`、
+`operator_debug_restart` では `DISARMED`)に倒します。
 
 30:00 到達前の `death`/`result` は failure として扱われ、
 `campaign_run_mode=formal_single_attempt` では `FORMAL_RUN_TERMINAL_FAILURE`
@@ -126,6 +170,18 @@ attempt を許可するのは debug restart モードだけ)。
 `campaign_run_mode=formal_single_attempt` では `FORMAL_RUN_TERMINAL_FAILURE`
 へ terminal 化し、`operator_debug_restart` では入力を全解放して `DISARMED`
 へ戻ります。
+
+## arm() は毎回まっさらな実行文脈を作る
+
+`StateMachine.arm()` は `DISARMED` から `ACQUIRE_TARGET` へ遷移させる際、
+`profile` 以外の実行文脈(`StateContext`)を毎回 **完全に新しく作り直し**ます。
+`success_latched`/`gameplay_entries`/`death_result_reset_emitted`/
+`terminal_reason`/`ui_attempt` を含め、前 run から一切引き継ぎません。これは
+非formalモードで emergency stop(`DISARMED` へ戻る)した後に再 `arm()` した
+とき、前 run で 30:00 に到達していた事実(`success_latched=True`)や
+`GAMEPLAY` に entry 済みだった事実(`gameplay_entries>=1`)が新しい run に
+紛れ込み、新しい run の pre-30 death を誤って成功にしたり、formal モードの
+最初の `GAMEPLAY` entry を誤って拒否したりすることを防ぐためです。
 
 ## 非保証範囲
 

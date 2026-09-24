@@ -12,9 +12,16 @@
   暴走しない、ヒステリシス/デバウンス)。
 - 移動入力と UI 入力を同じ tick に同時に出さない(competing input を作らない)。
 - UI クリック前には必ず movement 解放 effect を先に出す(gameplay→level-up の
-  「key release が choice click より先」順序)。
-- レベルアップ/宝箱/確認画面のクリックは1回だけ再送(retry)を許し、それでも
-  変化がなければ input を止めて安全側(emergency stop)へ倒す(fail-closed)。
+  「key release が choice click より先」順序)。GAMEPLAY から他の状態へ
+  確定的に抜けるtick自体でも、同様に ``release_all`` を1回発行する。
+- レベルアップ/宝箱/確認画面のクリックは、送信直後の ack 待ち window
+  (``NavigationProfile.retry_after_ns``)を経過するまで retry せず、
+  その後1回だけ再送(retry)を許す。送信済み snapshot から見て
+  ``ui_state_key``/``candidate_set_hash``/``inventory_hash`` が変わって
+  いれば、それを「game 側の apply ack」と認識して retry せず、以後の intent
+  を新規 initial resolve として扱う(reroll/banish 成功後の次選択や連続
+  level-up を誤って emergency stop しない)。それでも変化がなければ input を
+  止めて安全側(emergency stop)へ倒す(fail-closed)。
 - unknown は 1s、paused は無期限(input 0 のまま画面変化を待つ)。どちらから
   復帰する場合も RECOVER で gameplay を再確認してから初めて移動を再開する。
   RECOVER/PAUSED/UNKNOWN は、対応する UiIntentV1 を持たない入力(例えば
@@ -22,7 +29,14 @@
 - run の成功/失敗/緊急停止は compare-and-set で一度だけ確定し、確定した
   直後に「入力解放 → controller 停止 → プロセス終了要求」の順で必ず1回だけ
   effect を出す。30:00 evidence(``TARGET_REACHED_PENDING_TRANSITION``)を
-  観測した後は、何が起きても最終的に成功(``COMPLETE``)へ収束する。
+  観測した経路(GAMEPLAY直行/UNKNOWN経由のどちらでも)は共通の入口を通り、
+  一貫して success を予約する。ただし成功が確定するのは、その後
+  ``GAMEPLAY`` への復帰または ``death``/``result`` という post-30 の
+  確定的な画面変化を確認できたときだけであり、未確認のままの timeout や
+  他カテゴリへの遷移は成功にせず fail-closed する。
+- ``StateMachine.arm()`` は ``profile`` 以外の実行文脈を毎回まっさらな
+  ``StateContext`` として作り直す(前 run の success_latched/gameplay_entries
+  等を新しい run に持ち越さない)。
 
 このモジュールは `UiIntentV1` を生成・再分類しません(受け取った決定を
 そのまま消費するだけ)。また、画面解析結果の内部表現や非モデル UI 決定ロジック側の
@@ -313,6 +327,29 @@ def _enter_death_result(context: StateContext, now_ns: int) -> tuple[StateContex
     return new_context, ()
 
 
+def _enter_target_reached(context: StateContext, now_ns: int) -> tuple[StateContext, tuple[Effect, ...]]:
+    """``TARGET_REACHED_PENDING_TRANSITION`` へ入る(30:00 evidence 観測)。
+
+    やさしい説明: GAMEPLAY から直接見えた場合も、一瞬 UNKNOWN(画面切り替え中の
+    ノイズ等)を経由してから見えた場合も、必ずこの共通入口を通します
+    (M7 fix: 経路によって ``success_latched`` を立てたり立てなかったりする
+    抜け道をなくす)。ここに入った時点で「30:00 evidence は確かに観測した」と
+    いう事実を ``success_latched=True`` として1つの真実にし、以後
+    ``_reduce_target_reached``/``_reduce_death_result`` がこれを見て
+    success を優先します。
+    """
+    new_context = _reset_pending(
+        replace(
+            context,
+            state=ControllerState.TARGET_REACHED_PENDING_TRANSITION,
+            state_entered_ns=now_ns,
+            success_latched=True,
+            ui_attempt=None,
+        )
+    )
+    return new_context, ()
+
+
 def _land_gameplay(context: StateContext, now_ns: int) -> tuple[StateContext, tuple[Effect, ...]]:
     """``RUN_SETUP`` から ``GAMEPLAY`` へ着地する(新規 attempt 扱い)。
 
@@ -335,6 +372,22 @@ def _land_gameplay(context: StateContext, now_ns: int) -> tuple[StateContext, tu
     return new_context, ()
 
 
+def _apply_ack_observed(original_snapshot: "PerceptionSnapshot", snapshot: "PerceptionSnapshot") -> bool:
+    """直前に送信した click 対象の snapshot と比べ、game 側が適用した合図(apply ack)を検出する。
+
+    やさしい説明: OS への送信受理(``ExecutionOutcome.ack``)とは全く別の話です。
+    ここで見ているのは「ゲーム側が実際にクリックを処理したらしい」痕跡で、
+    ``ui_state_key``/``candidate_set_hash``/``inventory_hash`` のどれか1つでも
+    前回送信時の snapshot から変わっていれば、それを apply ack とみなします
+    (reroll/banish 成功後の新しい候補集合、連続 level-up での次の選択画面など)。
+    """
+    return (
+        snapshot.ui_state_key != original_snapshot.ui_state_key
+        or snapshot.ui_presentation.candidate_set_hash != original_snapshot.ui_presentation.candidate_set_hash
+        or snapshot.ui_presentation.inventory_hash != original_snapshot.ui_presentation.inventory_hash
+    )
+
+
 def _dispatch_ui_click(
     context: StateContext,
     snapshot: "PerceptionSnapshot",
@@ -346,8 +399,18 @@ def _dispatch_ui_click(
     """現在の UI 画面のまま: decision を click/retry effect へ変換する共通ロジック。
 
     やさしい説明: LEVEL_UP/CHEST/TARGET_REACHED_PENDING_TRANSITION のどれでも
-    同じ規則で動きます。「まだクリックしていなければ初回送信」「送信済みなら
-    最大1回だけ retry」「意図が変わったら fail-closed」の3つがコアです。
+    同じ規則で動きます。優先順位は次のとおりです。
+
+    1. 送信済み click に対して apply ack(``ui_state_key``/
+       ``candidate_set_hash``/``inventory_hash`` の変化)が観測できたら、
+       それを最優先で認識し、``ui_attempt`` をクリアして今 tick の intent を
+       *新規* initial resolve として扱う(再送はしない)。
+    2. apply ack が無いのに intent identity が変わっていたら fail-closed。
+    3. 既に retry 済みなら何もしない。
+    4. ack 待ち window(``retry_after_ns``)を経過するまでは retry しない
+       (M4 fix: capture/perception 遅延中の二重click防止)。
+    5. 同一 snapshot の再利用は retry にならない。
+    6. precondition を満たす newer snapshot だけ、最大1回 retry する。
     """
     if decision.kind != "ui" or decision.ui_intent is None:
         return context, ()  # move/no_op は UI 状態中は無視する(movement と競合させない)。
@@ -357,10 +420,18 @@ def _dispatch_ui_click(
     if intent.kind is UiIntentKind.NO_OP:
         return context, ()
 
+    if context.ui_attempt is not None and _apply_ack_observed(context.ui_attempt.original_snapshot, snapshot):
+        # game 側が前回 click を適用した合図: 今 tick は再送せず、intent を
+        # 新規 initial resolve として扱う。旧 intent が遅れて届いても
+        # source snapshot binding(mode="initial")が一致しないため再送されない。
+        return _dispatch_ui_click(
+            replace(context, ui_attempt=None), snapshot, decision, now_ns=now_ns, profile=profile
+        )
+
     identity = _intent_identity(intent)
 
     if context.ui_attempt is None:
-        target = resolve_ui_target(intent, snapshot, mode="initial")
+        target = resolve_ui_target(intent, snapshot, mode="initial", min_confidence=profile.min_target_confidence)
         if target is None:
             return context, ()  # 0件/複数件/invalid/confidence未達: effect を出さない。
         attempt = UiAttempt(intent_identity=identity, original_snapshot=snapshot, sent_ns=now_ns, retried=False)
@@ -369,10 +440,15 @@ def _dispatch_ui_click(
 
     attempt = context.ui_attempt
     if identity != attempt.intent_identity:
-        # 最初の click 後に意図(候補/inventory/state key)が変わった -> ack 欠落でも再送しない。
+        # apply ack ではないのに意図(候補/inventory/state key)が変わった
+        # -> ack 欠落でも再送しない(fail-closed)。
         return _emergency_stop(context, now_ns=now_ns, reason="ui_intent_changed_mid_attempt")
     if attempt.retried:
         # retry は 1 回まで。timeout に任せてこれ以上は何もしない。
+        return context, ()
+    if now_ns - attempt.sent_ns < profile.retry_after_ns:
+        # ack 待ち window 内: ゲームがまだ初回 click を処理し切っていない
+        # 可能性があるので、newer snapshot が来ていても retry しない。
         return context, ()
     if snapshot.snapshot_id == attempt.original_snapshot.snapshot_id:
         # 同じ snapshot の再利用(ack frame 欠落等)は retry にならない。
@@ -380,7 +456,13 @@ def _dispatch_ui_click(
     if profile.retry_budget < 1:
         return context, ()
 
-    target = resolve_ui_target(intent, snapshot, mode="retry", original_snapshot=attempt.original_snapshot)
+    target = resolve_ui_target(
+        intent,
+        snapshot,
+        mode="retry",
+        original_snapshot=attempt.original_snapshot,
+        min_confidence=profile.min_target_confidence,
+    )
     if target is None:
         # newer snapshot だが precondition(同一 semantic/ui_state_key/IoU/中心許容量)を
         # 満たさない: 再送せず fail-closed する。
@@ -399,25 +481,26 @@ def _reduce_gameplay(
     now_ns: int,
     profile: NavigationProfile,
 ) -> tuple[StateContext, tuple[Effect, ...]]:
-    """GAMEPLAY 中の画面分類と decision から、次の状態と effect を決める。"""
+    """GAMEPLAY 中の画面分類と decision から、次の状態と effect を決める。
+
+    やさしい説明: GAMEPLAY から別の状態へ確定的に抜けるときは、必ず
+    ``release_all`` を1回発行してから抜けます(overall_review fix: unknown/
+    paused/focus loss/error は movement release、という plan18行目の要求を
+    75ms movement lease の自然失効任せにせず明示的に保証する)。
+    """
+    _GAMEPLAY_EXIT_EFFECTS = (Effect(kind="release_all", reason="gameplay_exit"),)
+
     if category is ControllerState.DEATH_RESULT:
         if not confirmed:
             return context, ()
-        return _enter_death_result(context, now_ns)
+        new_context, _ = _enter_death_result(context, now_ns)
+        return new_context, _GAMEPLAY_EXIT_EFFECTS
 
     if category is ControllerState.TARGET_REACHED_PENDING_TRANSITION:
         if not confirmed:
             return context, ()
-        new_context = _reset_pending(
-            replace(
-                context,
-                state=ControllerState.TARGET_REACHED_PENDING_TRANSITION,
-                state_entered_ns=now_ns,
-                success_latched=True,
-                ui_attempt=None,
-            )
-        )
-        return new_context, ()
+        new_context, _ = _enter_target_reached(context, now_ns)
+        return new_context, _GAMEPLAY_EXIT_EFFECTS
 
     if category in (ControllerState.LEVEL_UP, ControllerState.CHEST):
         if not confirmed:
@@ -425,7 +508,7 @@ def _reduce_gameplay(
         new_context = _reset_pending(
             replace(context, state=category, state_entered_ns=now_ns, ui_attempt=None)
         )
-        return new_context, ()
+        return new_context, _GAMEPLAY_EXIT_EFFECTS
 
     if category in (ControllerState.PAUSED, ControllerState.UNKNOWN):
         if not confirmed:
@@ -433,7 +516,7 @@ def _reduce_gameplay(
         new_context = _reset_pending(
             replace(context, state=category, state_entered_ns=now_ns, ui_attempt=None)
         )
-        return new_context, ()
+        return new_context, _GAMEPLAY_EXIT_EFFECTS
 
     # category は GAMEPLAY のまま: movement を 1 tick 1 effect で転送する。
     if decision.kind == "move":
@@ -480,25 +563,35 @@ def _reduce_target_reached(
     now_ns: int,
     profile: NavigationProfile,
 ) -> tuple[StateContext, tuple[Effect, ...]]:
-    """``TARGET_REACHED_PENDING_TRANSITION``: 30:00 evidence 後は何が起きても成功優先で ``COMPLETE`` に収束する。
+    """``TARGET_REACHED_PENDING_TRANSITION``: post-30 の確定的な画面変化を確認して初めて成功にする。
 
-    やさしい説明: この状態へ入った時点で既に「30分到達」の証拠は観測済みです。
-    以後、画面が(post-30 の確認イベントで)gameplay へ戻ろうと、直後に
-    death/result になろうと、timeout してしまおうと、結果は必ず成功
-    (``COMPLETE``)になります。plan 本文の「success を優先する」という
-    precedence ルールをここで実装します。
+    やさしい説明: この状態へ入った時点で既に「30分到達」の証拠は観測済み
+    (``success_latched=True``)ですが、それだけではまだ成功確定させません。
+    plan50行目が要求する「profileで定義した post-30 screen event をtimeout内に
+    確認したら成功」を、具体的には次の2つの確定的な画面変化に限定します
+    (それ以外に target_reached 画面から遷移する現実的な行き先は無いため)。
+
+    - ``GAMEPLAY`` へ戻ったことが確定した(post-30 confirm を押せてゲームが
+      再開した) -> 即座に成功(``COMPLETE``)。
+    - ``death``/``result`` へ直接移った(confirm 前に Reaper に倒された等) ->
+      success_latched を優先して成功(``COMPLETE``、``_reduce_death_result``
+      が最終確定する)。
+
+    それ以外の確定的な画面変化(``UNKNOWN`` 等)や、post-30 event を確認
+    できないままの timeout は、成功を確定させず fail-closed(campaign mode に
+    応じて formal terminal failure か disarmed)に倒します(M7 fix: 以前は
+    timeoutも未確認のconfirmed UNKNOWNも無条件でCOMPLETEにしていた)。
     """
-    if confirmed and category is not ControllerState.TARGET_REACHED_PENDING_TRANSITION:
-        if category is ControllerState.DEATH_RESULT:
-            return _enter_death_result(context, now_ns)
-        # target_reached 以外へ移った(= post-30 screen event を確認できた)ので成功確定。
+    if confirmed and category is ControllerState.DEATH_RESULT:
+        return _enter_death_result(context, now_ns)
+    if confirmed and category is ControllerState.GAMEPLAY:
+        # post-30 confirm を確認できた(gameplay 再開が確定) -> 成功確定。
         return _finalize_terminal(context, ControllerState.COMPLETE, now_ns=now_ns, reason="post_30_confirm_success")
 
     timeout_ns = profile.timeout_ns_for("target_reached")
     if now_ns - context.state_entered_ns >= timeout_ns:
-        return _finalize_terminal(
-            context, ControllerState.COMPLETE, now_ns=now_ns, reason="target_reached_timeout_default_success"
-        )
+        # post-30 event を確認できないまま timeout: 成功を確定させず fail-closed。
+        return _emergency_stop(context, now_ns=now_ns, reason="target_reached_timeout_unconfirmed")
 
     return _dispatch_ui_click(context, snapshot, decision, now_ns=now_ns, profile=profile)
 
@@ -541,7 +634,13 @@ def _reduce_unknown(
             return context, ()
         new_context = _reset_pending(replace(context, state=ControllerState.PAUSED, state_entered_ns=now_ns))
         return new_context, ()
-    if category in (ControllerState.LEVEL_UP, ControllerState.CHEST, ControllerState.TARGET_REACHED_PENDING_TRANSITION):
+    if category is ControllerState.TARGET_REACHED_PENDING_TRANSITION:
+        if not confirmed:
+            return context, ()
+        # M7 fix: GAMEPLAY 直行の経路と同じ共通入口を通し、success_latched を
+        # 一貫して立てる(UNKNOWN 経由でも 30:00 evidence の事実は変わらない)。
+        return _enter_target_reached(context, now_ns)
+    if category in (ControllerState.LEVEL_UP, ControllerState.CHEST):
         if not confirmed:
             return context, ()
         new_context = _reset_pending(replace(context, state=category, state_entered_ns=now_ns))
@@ -717,17 +816,23 @@ class StateMachine:
 
         やさしい説明: 「この run/attempt をこれから見張る」と宣言する操作です。
         画面認識では起動できず、必ず呼び出し側が明示的に呼びます。
+
+        M9 fix: 以前は ``state``/``campaign_run_mode``/``run_identity``/
+        ``pending_category``/``pending_streak`` しか初期化せず、
+        ``success_latched``/``gameplay_entries``/``death_result_reset_emitted``/
+        ``terminal_reason``/``ui_attempt`` が前 run から残ってしまっていました
+        (非formalモードで emergency stop → 再arm した際、前 run の
+        30:00到達成功や gameplay entry 済みという事実が新しい run に
+        紛れ込む危険がありました)。ここでは ``profile`` 以外の文脈を
+        完全に新しい ``StateContext``(既定値のみ)として作り直します。
         """
         if self.context.state is not ControllerState.DISARMED:
             raise ValueError("arm() requires the state machine to be DISARMED")
-        self.context = replace(
-            self.context,
+        self.context = StateContext(
             state=ControllerState.ACQUIRE_TARGET,
             campaign_run_mode=campaign_run_mode,
             run_identity=RunIdentity(run_id=run_id, gameplay_attempt_id=gameplay_attempt_id),
             state_entered_ns=now_ns,
-            pending_category=None,
-            pending_streak=0,
         )
 
     def step(
