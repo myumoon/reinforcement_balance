@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Capture versioned Survivors sessions into an explicit external store."""
+"""Survivors の実画面を版管理された外部データセットへ収録する。
+
+synthetic または live のフレームを受け取り、安全な一時領域を
+経由して完成セッションだけを外部ストアへ公開するコマンドである。
+"""
 
 from __future__ import annotations
 
@@ -20,7 +24,7 @@ from survivors.capture import (
     TargetWindowPolicy,
     WindowLocator,
 )
-from survivors.capture_dataset import DatasetWriter
+from survivors.capture_dataset import DatasetWriter, ThreadedFrameWriter
 from survivors.target_profile import load_runtime_profile
 
 
@@ -99,6 +103,11 @@ def _capture_live(session: CaptureSession, duration_sec: float):
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI引数に従ってフレームを収録し、公開結果をJSONで返す。
+
+    synthetic は従来の同期保存、live は重いPNG保存だけを
+    並列化し、dry-run と出力形式は変えずに終了コードを返す入口である。
+    """
     args = _parser().parse_args(argv)
     if args.store_root is None or not args.store_root.strip():
         print("error: --store-root is required; workspace fallback is forbidden", file=sys.stderr)
@@ -128,9 +137,15 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"status": "DRY_RUN_OK", "session_id": args.session_id}))
             return 0
         with DatasetWriter(Path(args.store_root), args.session_id, *identity) as writer:
-            for frame in frames:
-                writer.write_frame(frame)
-            manifest = writer.publish(operator_checkpoint="synthetic" if args.synthetic else "live-pilot")
+            if args.synthetic:
+                for frame in frames:
+                    writer.write_frame(frame)
+                manifest = writer.publish(operator_checkpoint="synthetic")
+            else:
+                with ThreadedFrameWriter(writer) as threaded:
+                    for frame in frames:
+                        threaded.submit_frame(frame)
+                    manifest = threaded.publish(operator_checkpoint="live-pilot")
         print(
             json.dumps(
                 {
