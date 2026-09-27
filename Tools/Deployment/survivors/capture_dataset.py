@@ -1,12 +1,13 @@
-"""Versioned real-vs-capture dataset storage confined to Deployment.
+"""実画面キャプチャを版管理されたデータセットとして安全に保存する。
 
-The writer keeps every frame in a private temporary session and exposes the
-session only with one directory rename.  Published sessions remain explicitly
-ineligible for formal training until the separate post-merge operator gate.
+初心者向けには、各フレームを非公開の一時領域へ保存し、全処理が成功した
+セッションだけを1回の rename で公開するモジュールである。
 """
 
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
 import importlib
@@ -16,6 +17,7 @@ from pathlib import Path
 import re
 import shutil
 import struct
+from threading import Lock
 from typing import Any, Iterable
 import uuid
 import zlib
@@ -242,7 +244,11 @@ def _decode_lossless_png(encoded: bytes) -> NDArray[np.uint8]:
 
 
 class DatasetWriter:
-    """Stream CapturedFrame objects into a private, atomically published session."""
+    """CapturedFrame を非公開領域へ記録し、セッション単位で原子的に公開する。
+
+    初心者向けには、入力確認、PNG保存、メタデータ確定を順に行い、途中状態を
+    正式なキャプチャセッションとして見せない writer である。
+    """
 
     def __init__(
         self,
@@ -273,6 +279,22 @@ class DatasetWriter:
         self._frame_records: list[FrameRecord] = []
 
     def write_frame(self, frame: CapturedFrame) -> FrameRecord:
+        """1フレームを検証・永続化・確定の順で同期保存する。
+
+        初心者向けには、従来どおりこの呼び出しが戻る時点で PNG と
+        frames.jsonl の両方へ記録済みになる同期 API である。
+        """
+        self._validate_frame_order(frame)
+        record = self._persist_frame(frame)
+        self._append_record(record)
+        return record
+
+    def _validate_frame_order(self, frame: CapturedFrame) -> None:
+        """フレームの型・順序・セッション同一性を副作用なしで検証する。
+
+        初心者向けには、保存前に不正な入力を従来と同じ順番とメッセージで
+        拒否し、この処理自体では writer の状態を変更しない。
+        """
         if self._sealed:
             raise ValueError("dataset writer is already sealed")
         if not isinstance(frame, CapturedFrame):
@@ -288,21 +310,42 @@ class DatasetWriter:
         ):
             raise ValueError("frame does not match session identity profile/build")
 
+    def _persist_frame(self, frame: CapturedFrame) -> FrameRecord:
+        """フレームを lossless PNG として保存し FrameRecord を生成する。
+
+        初心者向けには、フレームごとに独立したファイルだけを扱うため、複数の
+        ワーカースレッドから同時に呼び出しても共有状態を変更しない処理である。
+        """
+        frame_id = frame.session_frame_index
         object_path = f"frames/{frame_id:08d}.png"
         destination = _resolve_relative(self._temp_path, object_path, "object_path")
         if destination.exists():
             raise ValueError(f"duplicate frame object: {object_path}")
-        encoded = _encode_lossless_png(frame.frame_bgra)
-        destination.write_bytes(encoded)
-        record = FrameRecord(
-            frame_id=frame_id,
-            captured_monotonic_ns=frame.captured_monotonic_ns,
-            object_path=object_path,
-            object_sha256=_sha256_bytes(encoded),
-            client_rect_screen_px=frame.client_rect_screen_px,
-            foreground=frame.foreground,
-            target_profile_hash=frame.target_profile_hash,
-            game_build_id=frame.game_build_id,
+        try:
+            encoded = _encode_lossless_png(frame.frame_bgra)
+            destination.write_bytes(encoded)
+            return FrameRecord(
+                frame_id=frame_id,
+                captured_monotonic_ns=frame.captured_monotonic_ns,
+                object_path=object_path,
+                object_sha256=_sha256_bytes(encoded),
+                client_rect_screen_px=frame.client_rect_screen_px,
+                foreground=frame.foreground,
+                target_profile_hash=frame.target_profile_hash,
+                game_build_id=frame.game_build_id,
+            )
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+
+    def _append_record(self, record: FrameRecord) -> None:
+        """FrameRecord をメタデータと writer 状態へ確定する。
+
+        初心者向けには、並列保存済みの結果をキャプチャ順に1件ずつ追記し、
+        frames.jsonl への追記失敗時は対応する PNG も削除する処理である。
+        """
+        destination = _resolve_relative(
+            self._temp_path, record.object_path, "object_path"
         )
         try:
             self._metadata_stream.write(_canonical_json(_record_to_wire(record)))
@@ -310,11 +353,10 @@ class DatasetWriter:
         except Exception:
             destination.unlink(missing_ok=True)
             raise
-        self._frame_ids.add(frame_id)
-        self._last_timestamp = frame.captured_monotonic_ns
+        self._frame_ids.add(record.frame_id)
+        self._last_timestamp = record.captured_monotonic_ns
         self._frame_count += 1
         self._frame_records.append(record)
-        return record
 
     def __enter__(self) -> "DatasetWriter":
         return self
@@ -475,6 +517,157 @@ class DatasetWriter:
             frame_records=tuple(records),
             frames=tuple(frames),
         )
+
+
+class ThreadedFrameWriter:
+    """DatasetWriter の独立した PNG 永続化だけを並列実行する。
+
+    初心者向けには、重い圧縮とファイル書き込みをワーカーへ渡しつつ、
+    frames.jsonl と共有状態は投入順にメイン側で確定する薄いラッパーである。
+    """
+
+    def __init__(self, writer: DatasetWriter) -> None:
+        """CPU数由来のワーカーと有限 pending キューを初期化する。
+
+        初心者向けには、マシン性能に合わせて並列数を決め、その2倍を超えて
+        保存待ちフレームが増えないよう準備する。
+        """
+        self._writer = writer
+        self._max_workers = max(1, min(32, os.cpu_count() or 1))
+        self._max_pending = self._max_workers * 2
+        self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
+        self._pending: deque[tuple[int, Future[FrameRecord]]] = deque()
+        self._pending_frame_ids: set[int] = set()
+        self._last_submitted_timestamp = writer._last_timestamp
+        self._failure: BaseException | None = None
+        self._failure_lock = Lock()
+        self._closed = False
+
+    def submit_frame(self, frame: CapturedFrame) -> None:
+        """フレームを即時検証し、永続化を有限キューへ投入する。
+
+        初心者向けには、保存待ちが上限なら先頭完了まで呼び出し元を止め、
+        フレームを捨てずにワーカースレッドへ渡す。
+        """
+        self._raise_failure()
+        if self._closed:
+            raise ValueError("threaded frame writer is already closed")
+        self._drain_ready()
+        self._writer._validate_frame_order(frame)
+        frame_id = frame.session_frame_index
+        if frame_id in self._pending_frame_ids:
+            raise ValueError(f"duplicate frame_id: {frame_id}")
+        if (
+            self._last_submitted_timestamp is not None
+            and frame.captured_monotonic_ns <= self._last_submitted_timestamp
+        ):
+            raise ValueError("captured timestamp must increase monotonically")
+        while len(self._pending) >= self._max_pending:
+            self._drain_one()
+        future = self._executor.submit(self._writer._persist_frame, frame)
+        future.add_done_callback(self._remember_worker_failure)
+        self._pending.append((frame_id, future))
+        self._pending_frame_ids.add(frame_id)
+        self._last_submitted_timestamp = frame.captured_monotonic_ns
+
+    def close(self) -> None:
+        """残るフレームを投入順で確定し executor を停止する。
+
+        初心者向けには、成功時も失敗時も全ワーカースレッドを終了させ、最初の
+        保存失敗があれば同じ例外を呼び出し元へ返す終了処理である。
+        """
+        if self._closed:
+            self._raise_failure()
+            return
+        try:
+            while self._pending:
+                self._drain_one()
+        finally:
+            self._executor.shutdown(
+                wait=True,
+                cancel_futures=self._failure is not None,
+            )
+            self._closed = True
+        self._raise_failure()
+
+    def publish(self, operator_checkpoint: str = "") -> SessionManifest:
+        """全 pending を確定してから基底 writer のセッションを公開する。
+
+        初心者向けには、PNG保存が1件でも失敗した状態では公開せず、すべての
+        フレームが順番どおり記録された場合だけ完成セッションを返す。
+        """
+        self.close()
+        return self._writer.publish(operator_checkpoint=operator_checkpoint)
+
+    def __enter__(self) -> "ThreadedFrameWriter":
+        """context manager へこの writer を返す。
+
+        初心者向けには、with 構文で終了処理を必ず呼べるようにする入口である。
+        """
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        """with 終了時に pending 確定と executor 停止を行う。
+
+        初心者向けには、キャプチャ側で例外が起きた場合もワーカースレッドを
+        残さないための後片付けである。
+        """
+        self.close()
+
+    def _remember_worker_failure(self, future: Future[FrameRecord]) -> None:
+        """最初のワーカー例外を後続 API 用に保持する。
+
+        初心者向けには、バックグラウンドの失敗を黙殺せず、次の操作から同じ
+        例外を再送出できるよう保存するコールバックである。
+        """
+        if future.cancelled():
+            return
+        failure = future.exception()
+        if failure is None:
+            return
+        with self._failure_lock:
+            if self._failure is None:
+                self._failure = failure
+
+    def _raise_failure(self) -> None:
+        """保持済みの最初の例外を同一オブジェクトのまま再送出する。
+
+        初心者向けには、一度失敗した writer が後続フレームを確定しないよう、
+        各公開 API の入口で共通して使う fail-closed の検査である。
+        """
+        with self._failure_lock:
+            failure = self._failure
+        if failure is not None:
+            raise failure
+
+    def _drain_ready(self) -> None:
+        """先頭から連続して完了済みの結果だけを確定する。
+
+        初心者向けには、後のフレームが先に終わっても追い越させず、待たずに
+        確定できる先頭結果を frames.jsonl へ移す処理である。
+        """
+        while self._pending and self._pending[0][1].done():
+            self._drain_one()
+
+    def _drain_one(self) -> None:
+        """pending 先頭の結果を待ち、1件だけ確定する。
+
+        初心者向けには、投入順の先頭 Future を待つことで完了順の違いを吸収し、
+        成功したレコードだけを共有状態へ反映する処理である。
+        """
+        self._raise_failure()
+        frame_id, future = self._pending[0]
+        try:
+            record = future.result()
+            self._raise_failure()
+            self._writer._append_record(record)
+        except BaseException as failure:
+            with self._failure_lock:
+                if self._failure is None:
+                    self._failure = failure
+            self._raise_failure()
+        self._pending.popleft()
+        self._pending_frame_ids.remove(frame_id)
 
 
 def _record_to_wire(record: FrameRecord) -> dict[str, object]:
