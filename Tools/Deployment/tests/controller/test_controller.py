@@ -257,10 +257,11 @@ class FakeInput:
 
 
 def _build(tmp_path, mode, script, *, effects=(), terminal_state=None, detector=None, sm_fail=False,
-           emit_every=1, input_ack=True, release_ok=True, name="telemetry.jsonl"):
+           emit_every=1, input_ack=True, release_ok=True, name="telemetry.jsonl", capture_factory=None):
     """fake stage をつないだ controller と観察用の部品を返す。
 
     mode ごとに同じ部品構成で controller を作り、live だけ FakeInput を渡します。
+    ``capture_factory(clock)`` を渡すと FakeCapture の代わりにその capture(実 CaptureSession 等)を使います。
     """
     clock = Clock()
     events: list[str] = []
@@ -271,7 +272,8 @@ def _build(tmp_path, mode, script, *, effects=(), terminal_state=None, detector=
     )
     parts = SimpleNamespace(
         clock=clock, events=events, path=tmp_path / name,
-        capture=FakeCapture(clock, script, events), detector=detector or FakeDetector(),
+        capture=capture_factory(clock) if capture_factory else FakeCapture(clock, script, events),
+        detector=detector or FakeDetector(),
         hud=FakeHud(), runtime=FakeRuntime(),
         sm=FakeStateMachine(list(effects), terminal_state=terminal_state, fail=sm_fail),
         input=FakeInput(events, ack=input_ack, release_ok=release_ok) if mode == "live" else None,
@@ -519,7 +521,7 @@ def test_release_failure_forces_nonzero_exit(tmp_path) -> None:
     """M6: 入力解放が確認できなければ正常終了でも非0にする。"""
     parts = _build(tmp_path, "live", [0], release_ok=False)
     assert parts.controller.run(max_frames=1) == EXIT_ERROR
-    assert _stages(_rows(parts), "input_release")[0]["payload"] == {"released": False}
+    assert _stages(_rows(parts), "input_release")[0]["payload"]["released"] is False
 
 
 def test_arm_resets_temporal_state_and_marks_episode_start(tmp_path) -> None:

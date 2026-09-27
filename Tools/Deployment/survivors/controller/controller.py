@@ -18,6 +18,7 @@ import numpy as np
 
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema, DeployObservation
 
+from ..capture.window_locator import TargetWindowStateError
 from ..vision.entity_tracker import TrackedWorldStateV1
 from .health_monitor import HealthMonitor, HealthVerdict, observation_is_valid
 from .state_machine import CampaignRunMode, ControllerState
@@ -319,7 +320,14 @@ class SurvivorsController:
         前回処理した frame 以前の番号なら discard として記録して None を返し、
         番号が飛んでいればその枚数を drop として capture record に残します。
         """
-        if self._capture.capture_next() is None:
+        try:
+            captured = self._capture.capture_next()
+        except TargetWindowStateError as exc:
+            # 実 capture は focus 喪失を例外で伝える。STOP の記録だけ行い、
+            # _health_stop() は run() の poll 分岐に一本化する(二重に呼ばないため)。
+            self._health.record_focus_lost(now_ns=self._clock_ns(), detail=str(exc))
+            return None
+        if captured is None:
             return None
         try:
             frame = self._capture.frames.get_latest_nowait()
@@ -557,7 +565,13 @@ class SurvivorsController:
                 return {"released": None}
             released = bool(self._input.emergency_release())
             failed = failed or not released
-            return {"released": released}
+            # helper の release audit と同じ時計(time.monotonic_ns/time.time_ns)で記録し、
+            # telemetry 時計(既定 perf_counter_ns)とのドメイン差なしに audit と相関できるようにする。
+            return {
+                "released": released,
+                "release_timestamp_ns": time.time_ns(),
+                "release_monotonic_ns": time.monotonic_ns(),
+            }
 
         def artifact_finalize() -> Mapping[str, Any]:
             nonlocal code

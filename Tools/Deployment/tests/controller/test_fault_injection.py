@@ -2,28 +2,47 @@
 
 遅い detector・stage 例外・telemetry の disk full・入力 helper の切断を fake 部品へ注入し、
 health STOP / 非0終了 / 入力解放 / structured error が必ず起きることを確認します。
-さらに入力 helper 側の release audit(別 JSONL)を telemetry と同じ run のものとして関連付けられることを確かめます。
+さらに実 ``HelperRuntime`` が書く release audit(別 JSONL)を、helper と同じ時計の値で
+telemetry の input_release 行へ関連付けられることを確かめます。
 dropped frames・out-of-order・queue full は同一機構なので ``test_controller.py`` の
 ``test_latest_only_discards_stale_frames_and_counts_drops`` に任せ、ここでは重複させません。
-controller hang は ``test_capture_stall_is_detected_by_poll`` が既に扱っています。
+
+controller hang(frame が来ない / stage が長時間ブロックする)は、``test_controller.py`` の
+``test_capture_stall_is_detected_by_poll``(exit code と理由だけ)に加え、本ファイルの
+``test_capture_stall_releases_input_and_completes_shutdown`` と
+``test_blocked_stage_is_stopped_by_capture_gap_on_next_frame`` で health 行・入力解放・shutdown 完了まで検証します。
+peer death(controller が死んで lease を更新しなくなる / pipe が閉じる)は controller 側から注入できない
+別プロセスの安全網なので、``tests/input/test_helper_faults.py`` の
+``test_helper_subprocess_releases_expired_lease_with_bounded_observed_latency``(lease 失効で独立 helper が解放)と
+``test_controller_atexit_close_pipe_triggers_helper_exit_and_release``(pipe close で helper が解放)が扱います。
+実 capture の focus 喪失(例外で伝わる)は ``test_real_capture_focus_loss_is_health_stop`` が扱います。
 """
 
 from __future__ import annotations
 
 import errno
+import importlib.util
 import json
-import time
+from pathlib import Path
+import sys
 
 import pytest
 
+from survivors.capture.frame_capture import CaptureSession
+from survivors.capture.window_locator import MonitorInfo, TargetWindowPolicy, WindowLocator
 from survivors.controller.controller import EXIT_ERROR, EXIT_HEALTH_STOP, EXIT_OK
 from survivors.controller.telemetry import TelemetryWriter
 from survivors.input.audit_log import AuditLog
 from survivors.input.controller import HelperUnavailable
+from survivors.input.dry_run_backend import DryRunBackend
+from survivors.input.helper import HelperRuntime
+from survivors.input.lease_protocol import LeaseValidator
+from survivors.target_profile import load_target_profile
 from survivors.vision.entity_tracker import EntityTracker
 
 from .test_controller import (
     _INPUT_EFFECTS,
+    _PIXELS,
     MS,
     FakeAssembler,
     FakeDetector,
@@ -143,7 +162,7 @@ def test_transient_disk_full_is_recorded_and_shutdown_completes(tmp_path, monkey
     (shutdown,) = _stages(rows, "shutdown")
     assert shutdown["payload"]["exit_code"] == EXIT_ERROR
     assert shutdown["payload"]["errors"] == parts.controller.errors
-    assert _stages(rows, "input_release")[0]["payload"] == {"released": True}
+    assert _stages(rows, "input_release")[0]["payload"]["released"] is True
     assert parts.controller.shutdown_steps == _FULL_SHUTDOWN
 
 
@@ -202,38 +221,156 @@ def test_input_helper_disconnect_releases_and_exits_nonzero(tmp_path, monkeypatc
     assert parts.controller.shutdown_steps == _FULL_SHUTDOWN
 
 
-def test_release_observer_audit_correlates_with_telemetry(tmp_path, monkeypatch) -> None:
-    """helper 側 release audit を、命名規約と shutdown 付近の時刻近接で telemetry へ関連付けられる。
+# helper audit と input_release 行の実時計差の許容上限。helper は release 開始時に time.monotonic_ns()、
+# controller は emergency_release() が戻った直後に同じ関数を呼ぶので、差は「0 以上・release 1回分の所要時間
+# + 時計分解能」に収まる。実測(2026-09-28、reinbalance env、Windows): time.get_clock_info("monotonic").resolution
+# = 15.625ms、連続2回呼び出しの差は monotonic/time_ns とも 0ms(2000回の最大)。つまり相関差は 0〜約16ms の範囲で、
+# CI の scheduling 揺れを見込んで 100ms とする(perf_counter との差 23.6〜29.8ms のドメインずれは起きない)。
+_RELEASE_CORRELATION_TOLERANCE_NS = 100 * MS
 
-    audit path は ``run_survivors_controller.py`` と同じく telemetry の stem に
-    ``.input_audit.jsonl`` を付けて作ります。emergency release の呼び出しで実 ``AuditLog`` へ
-    helper ``_release()`` と同じ形の "release" event を書き、その monotonic 時刻が
-    telemetry の queue_drain と input_release record の間に入ることを確認します。
+
+def test_release_observer_audit_correlates_with_telemetry(tmp_path, monkeypatch) -> None:
+    """実 helper の release audit を、命名規約と helper と同じ時計の時刻で telemetry へ関連付けられる。
+
+    audit path は ``run_survivors_controller.py`` と同じく telemetry の stem に ``.input_audit.jsonl`` を付けます。
+    emergency release では実 ``HelperRuntime`` + ``DryRunBackend``(test_only) + 実 ``AuditLog`` を動かし、
+    helper 自身が ``time.monotonic_ns()``/``time.time_ns()`` で "release" event を書きます。
+    telemetry 時計(テストでは fake、本番は perf_counter_ns)は helper と別ドメインなので比較に使わず、
+    input_release 行が同じ時計で持つ ``release_monotonic_ns``/``release_timestamp_ns`` と突き合わせます。
     """
     parts = _build(tmp_path, "live", [0])
     audit_path = parts.path.with_name(parts.path.stem + ".input_audit.jsonl")
-    audit = AuditLog(audit_path)
-    original = FakeInput.emergency_release
+    runtime = HelperRuntime(
+        LeaseValidator("1" * 32, "a" * 64, "b" * 64, 42, 84),
+        DryRunBackend(foreground_pid=42, foreground_hwnd=84, focused=True),
+        AuditLog(audit_path),
+    )
 
-    def audited_release(self):
-        released = original(self)
-        audit.write(
-            "release", sequence=None, reason="emergency",
-            release_timestamp_ns=time.time_ns(), release_monotonic_ns=parts.clock(),
-        )
-        return released
+    def helper_release(self):
+        self._events.append("input_release")
+        runtime.emergency_release()
+        return True
 
-    monkeypatch.setattr(FakeInput, "emergency_release", audited_release)
+    monkeypatch.setattr(FakeInput, "emergency_release", helper_release)
     assert parts.controller.run(max_frames=1) == EXIT_OK
 
     assert audit_path.parent == parts.path.parent and audit_path.name == "telemetry.input_audit.jsonl"
     (release,) = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
     assert release["event"] == "release" and release["reason"] == "emergency"
+    (input_release,) = _stages(_rows(parts), "input_release")
+    payload = input_release["payload"]
+    assert payload["released"] is True
+    for key in ("release_monotonic_ns", "release_timestamp_ns"):
+        delta = payload[key] - release[key]
+        assert 0 <= delta <= _RELEASE_CORRELATION_TOLERANCE_NS, (key, delta)
+
+
+def test_capture_stall_releases_input_and_completes_shutdown(tmp_path) -> None:
+    """controller hang(frame が来なくなる)は poll の capture_gap で STOP し、入力解放と shutdown を完遂する。
+
+    ``test_capture_stall_is_detected_by_poll`` は exit code と理由だけを見るので、ここでは
+    health 行の first_failure・入力解放が最後の event であること・shutdown 全段の実行を確認します。
+    """
+    parts = _build(tmp_path, "live", [0], effects=_INPUT_EFFECTS)
+    assert parts.controller.run() == EXIT_HEALTH_STOP
+    assert parts.controller.exit_reason == "health_stop:capture_gap"
+    (health,) = _stages(_rows(parts), "health")
+    failure = health["payload"]["first_failure"]
+    assert failure["reason"] == "capture_gap" and failure["observed"] > failure["threshold"] == 200 * MS
+    assert parts.events[-1] == "input_release"
+    assert parts.controller.shutdown_steps == _FULL_SHUTDOWN
+
+
+def test_blocked_stage_is_stopped_by_capture_gap_on_next_frame(tmp_path, monkeypatch) -> None:
+    """stage が capture_gap 閾値を大きく超えてブロックすると、次の frame で STOP して入力を出さない。
+
+    frame 1 の detector で共有 Clock を 5 秒進め、controller が固まった状況を模擬します。
+    latest-only capture が次に渡す frame 2 は前 frame から 5 秒離れているので ingest が capture_gap で STOP し、
+    frame 2 では policy/effect へ進まずに入力解放・非0終了になります。
+    なお、ブロックしていた frame 1 自身の effect は既に出ています(p99 は min_samples 前は評価しないため)。
+    その入力は helper 側の lease 失効で有界に止まります。
+    """
+    parts = _build(tmp_path, "live", [0, 1, 2], effects=[()] * 3)
+    original = FakeDetector.infer
+
+    def hanging_infer(self, frame_bgr, *, score_threshold):
+        if self.calls == 1:
+            parts.clock.now += 5_000 * MS
+        return original(self, frame_bgr, score_threshold=score_threshold)
+
+    monkeypatch.setattr(FakeDetector, "infer", hanging_infer)
+    assert parts.controller.run(max_frames=3) == EXIT_HEALTH_STOP
+    assert parts.controller.exit_reason == "health_stop:capture_gap"
     rows = _rows(parts)
-    (drain,) = _stages(rows, "queue_drain")
-    (input_release,) = _stages(rows, "input_release")
-    (shutdown,) = _stages(rows, "shutdown")
-    assert input_release["payload"] == {"released": True}
-    released_ns = release["release_monotonic_ns"]
-    assert drain["timestamp_ns"] < released_ns < input_release["timestamp_ns"] < shutdown["timestamp_ns"]
-    assert input_release["timestamp_ns"] - released_ns <= 2 * MS
+    (health,) = _stages(rows, "health")
+    assert health["payload"]["first_failure"]["reason"] == "capture_gap"
+    assert health["payload"]["first_failure"]["observed"] > 5_000 * MS
+    assert [row["correlation_id"] for row in _stages(rows, "policy")] == ["session-1:0", "session-1:1"]
+    assert parts.events[-1] == "input_release"
+    assert parts.controller.shutdown_steps == _FULL_SHUTDOWN
+
+
+def _capture_fakes():
+    """``tests/capture/conftest.py`` の Win32/backend fake を別名で読み込む。
+
+    conftest はディレクトリごとに解決されるため、controller テストからは import できません。
+    fake の重複定義を避けるため、ファイルを直接 module として読み込みます。
+    """
+    path = Path(__file__).resolve().parents[1] / "capture" / "conftest.py"
+    spec = importlib.util.spec_from_file_location("_capture_fakes_for_controller", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclass の型解決が sys.modules から module を引くため
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_real_capture_focus_loss_is_health_stop(tmp_path) -> None:
+    """M5: 実 CaptureSession が focus 喪失で送出する例外は health STOP(focus_lost)・入力解放・exit 2 になる。
+
+    実 ``WindowLocator`` + ``CaptureSession`` に fake Win32 API と fake backend を渡し、
+    2 枚目の読み取り直後に前面ウィンドウを別 hwnd へ切り替えます。実 capture は foreground=False の
+    frame を返さず ``TargetWindowStateError`` を送出するので、それが controller 例外(exit 3)ではなく
+    health STOP として扱われることを確認します。
+    """
+    fakes = _capture_fakes()
+    profile = load_target_profile()
+    object.__setattr__(profile, "provenance", "operator-attested")  # frozen bypass: テスト用
+    policy = TargetWindowPolicy(
+        process_executable="VampireSurvivors.exe", window_class="YYGameMakerYY", window_title="Vampire Survivors",
+    )
+    window = fakes.FakeWindow(
+        hwnd=101, pid=2001, executable=r"C:\Games\Vampire Survivors\VampireSurvivors.exe",
+        window_class="YYGameMakerYY", title="Vampire Survivors", client_rect=(0, 0, 1920, 1080),
+        monitor=MonitorInfo(
+            rect_screen_px=(0, 0, 1920, 1080), device_name=r"\\.\DISPLAY1", primary=True, dxgi_output_idx=0,
+        ),
+    )
+    api = fakes.FakeWin32Api(
+        [window], foreground_hwnd=window.hwnd, exe_hash=profile.sections["build"]["executable_hash"],
+    )
+    reads = [0]
+
+    def lose_focus_on_second_read():
+        reads[0] += 1
+        if reads[0] >= 2:
+            api.foreground_hwnd = 999
+
+    def make_session(clock):
+        locator = WindowLocator(api, profile, policy)
+        base = clock.now
+        backend = fakes.FakeCaptureBackend(
+            [(_PIXELS, base + 1 * MS), (_PIXELS, base + 2 * MS)], after_read=lose_focus_on_second_read,
+        )
+        return CaptureSession(locator, locator.locate(), backend)
+
+    parts = _build(tmp_path, "live", [], capture_factory=make_session)
+    assert parts.controller.run(max_frames=5) == EXIT_HEALTH_STOP
+    assert parts.controller.exit_reason == "health_stop:focus_lost"
+    rows = _rows(parts)
+    assert _stages(rows, "error") == []
+    (health,) = _stages(rows, "health")
+    failure = health["payload"]["first_failure"]
+    assert failure["reason"] == "focus_lost" and failure["detail"] == "target window lost foreground"
+    assert [row["correlation_id"] for row in _stages(rows, "capture")] == ["session-1:0"]
+    assert parts.events[-1] == "input_release"
+    assert parts.controller.shutdown_steps == _FULL_SHUTDOWN

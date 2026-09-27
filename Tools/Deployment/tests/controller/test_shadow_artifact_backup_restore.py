@@ -214,7 +214,10 @@ def test_restored_live_keeps_helper_safety_refs(restored) -> None:
     result = recheck(_restored_rows(store, refs["m13-live"], base), "m13-live")
     assert result["stage_order_violations"] == []
     assert result["unsupported_ui"] == []
-    assert result["safety"]["input_release"] == [{"released": True}]
+    (release,) = result["safety"]["input_release"]
+    # release_*_ns は helper audit と相関するための実時計値なので、キーの存在だけを固定する。
+    assert release["released"] is True
+    assert set(release) == {"released", "release_timestamp_ns", "release_monotonic_ns"}
     assert result["safety"]["shutdown_steps"] == [["capture_stop", "queue_drain", "input_release"]]
     assert result["safety"]["shutdown_exit_code"] == [0]
 
