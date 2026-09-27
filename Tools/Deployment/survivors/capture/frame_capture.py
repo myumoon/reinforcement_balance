@@ -14,7 +14,12 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .captured_frame import CapturedFrame
-from .window_locator import LocatedTargetWindow, ScreenRect, WindowLocator
+from .window_locator import (
+    LocatedTargetWindow,
+    ScreenRect,
+    TargetWindowForegroundLost,
+    WindowLocator,
+)
 
 
 TARGET_FPS = 30
@@ -166,6 +171,16 @@ class CaptureSession:
         self._closed = False
         self._next_frame_index = 0
         self._last_monotonic_ns: int | None = None
+        self._paused_for_foreground = False
+
+    @property
+    def locator(self) -> WindowLocator:
+        """operator ツールが再開前ポーリングに使う読み取り専用の locator アクセサ。
+
+        capture_survivors.py の起動前ポーリングが同じ locator/target 組で
+        フォアグラウンド状態を確認できるようにするための公開点である。
+        """
+        return self._locator
 
     def start(self) -> None:
         if self._closed:
@@ -189,11 +204,24 @@ class CaptureSession:
         self._started = True
 
     def capture_next(self) -> CapturedFrame | None:
+        """次の frame を取得する。フォアグラウンド喪失時は破棄せず一時停止する。
+
+        alt-tab のような一時的なフォアグラウンド喪失は TargetWindowForegroundLost
+        として区別し、session を破棄せず None を返して次回呼び出しでの回復を待つ。
+        それ以外の識別子・解像度変化などは従来どおり致命的として session を無効化する。
+        """
         if not self._started or self._closed:
             raise CaptureFrameError("capture session is not active")
         try:
             # P2-1: DXGI 再列挙を避ける軽量検証を frame ごとに使う
             self._locator.validate_lightweight(self.target, require_foreground=True)
+            if self._paused_for_foreground:
+                # dxcam は get_latest_frame() 内部で最新フレームを取得後にバッファを
+                # clear() するため、停止中に溜まった stale frame を 1 tick 分だけ
+                # 明示的に読み捨ててから通常の取得を再開する
+                self._backend.get_latest_frame()
+                self._paused_for_foreground = False
+                return None
             backend_result = self._backend.get_latest_frame()
             self._locator.validate_lightweight(self.target, require_foreground=True)
             if backend_result is None:
@@ -207,19 +235,14 @@ class CaptureSession:
                     raise CaptureFrameError("backend timestamp regression")
                 if captured_ns == self._last_monotonic_ns:
                     return None  # ponytail: same frame (latest_only mode), not a fatal error
+        except TargetWindowForegroundLost:
+            # 一時的な喪失: backend は維持したまま pause し、次回フォアグラウンド
+            # 回復時に stale frame を読み捨てて再開できるようにする
+            self._paused_for_foreground = True
+            return None
         except Exception:
             # 状態異常/検証失敗時: stale frame を破棄し backend を停止・解放して session を完全無効化する
-            self.frames.clear()
-            self._started = False
-            self._closed = True  # close() による二重 stop/release を防ぐ
-            try:
-                self._backend.stop()
-            except Exception:
-                pass
-            try:
-                self._backend.release()
-            except Exception:
-                pass
+            self._invalidate()
             raise
         captured = CapturedFrame(
             frame_bgra=frame_bgra,
@@ -247,6 +270,24 @@ class CaptureSession:
                 self._backend.stop()
         finally:
             self._backend.release()
+
+    def _invalidate(self) -> None:
+        """回復不能な状態異常時に backend を停止・解放し session を完全無効化する。
+
+        識別子や解像度の変化のように pause では済まされない異常でだけ呼び出し、
+        close() による二重 stop/release を防ぎながら stale frame を破棄する。
+        """
+        self.frames.clear()
+        self._started = False
+        self._closed = True  # close() による二重 stop/release を防ぐ
+        try:
+            self._backend.stop()
+        except Exception:
+            pass
+        try:
+            self._backend.release()
+        except Exception:
+            pass
 
     @staticmethod
     def _validate_frame(frame_bgra: object) -> None:

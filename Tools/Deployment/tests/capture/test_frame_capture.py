@@ -332,17 +332,18 @@ def test_capture_clears_queue_on_state_loss_even_with_prior_frames(
         session.frames.get_latest_nowait()
 
 
-@pytest.mark.parametrize("state_change", ["focus", "resize"])
 def test_capture_revalidates_after_read_and_emits_nothing_on_state_loss(
-    profile, policy, fake_api, target_window, golden_bgra, state_change
+    profile, policy, fake_api, target_window, golden_bgra
 ):
+    """read 後の resize は致命的な状態異常として fail-closed することを確認する。
+
+    フォアグラウンド喪失だけを対象にした pause 挙動とは異なり、解像度変更は
+    従来どおり TargetWindowStateError で session を無効化しなければならない。
+    """
     from conftest import FakeCaptureBackend
 
     def mutate_state():
-        if state_change == "focus":
-            fake_api.foreground_hwnd = 999
-        else:
-            target_window.client_rect = (0, 0, 1280, 720)
+        target_window.client_rect = (0, 0, 1280, 720)
 
     backend = FakeCaptureBackend([(golden_bgra, 100)], after_read=mutate_state)
     session = _session(profile, policy, fake_api, backend)
@@ -352,6 +353,35 @@ def test_capture_revalidates_after_read_and_emits_nothing_on_state_loss(
         session.capture_next()
     with pytest.raises(Empty):
         session.frames.get_latest_nowait()
+
+
+def test_capture_pauses_and_recovers_after_foreground_loss(
+    profile, policy, fake_api, target_window, golden_bgra
+):
+    """フォアグラウンド喪失は session を破棄せず pause し、復帰後に再開することを確認する。
+
+    alt-tab のような一時的な喪失で backend が停止・解放されないこと、かつ
+    復帰直後は stale frame を 1 tick 分だけ読み捨てて次回から通常取得に戻ることを検証する。
+    """
+    from conftest import FakeCaptureBackend
+
+    backend = FakeCaptureBackend([(golden_bgra.copy(), 100), (golden_bgra.copy(), 200)])
+    session = _session(profile, policy, fake_api, backend)
+    session.start()
+
+    fake_api.foreground_hwnd = 999  # alt-tab 等でフォアグラウンドを失った状態を模擬
+    assert session.capture_next() is None  # pause: session は破棄されない
+    assert not backend.stopped
+    assert not backend.released
+
+    fake_api.foreground_hwnd = target_window.hwnd  # フォアグラウンド復帰
+    assert session.capture_next() is None  # 復帰直後の 1 tick は stale frame の読み捨て
+    assert backend.read_count == 1  # 読み捨て分だけ backend read が進んでいる
+
+    frame = session.capture_next()  # 3 回目でようやく実フレームを取得する
+    assert isinstance(frame, CapturedFrame)
+    assert backend.read_count == 2
+    assert frame.captured_monotonic_ns == 200
 
 
 def test_capture_rejects_regressing_monotonic_timestamp(

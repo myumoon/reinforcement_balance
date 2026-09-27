@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from survivors.capture.window_locator import (
+    TargetWindowForegroundLost,
     TargetWindowNotFound,
     TargetWindowStateError,
     WindowLocator,
@@ -148,6 +149,29 @@ def test_revalidation_fails_closed_after_window_state_changes(
             dxgi_output_idx=1,
         )
 
+    with pytest.raises(TargetWindowStateError):
+        locator.validate(target, require_foreground=True)
+
+
+def test_foreground_loss_raises_dedicated_subclass_for_validate_and_lightweight(
+    profile, policy, fake_api, target_window
+):
+    """フォアグラウンド喪失だけが TargetWindowForegroundLost で報告されることを確認する。
+
+    alt-tab のような一時的な喪失を、解像度変更などの致命的な状態変化と
+    呼び出し側が区別できるよう、専用サブクラスで送出されることを検証する。
+    """
+    locator = WindowLocator(fake_api, profile, policy)
+    target = locator.locate()
+    fake_api.foreground_hwnd = 999
+
+    with pytest.raises(TargetWindowForegroundLost):
+        locator.validate(target, require_foreground=True)
+    with pytest.raises(TargetWindowForegroundLost):
+        locator.validate_lightweight(target, require_foreground=True)
+
+    # TargetWindowForegroundLost は TargetWindowStateError のサブクラスなので、
+    # 既存の広い except 節でも従来どおり捕捉できることを確認する。
     with pytest.raises(TargetWindowStateError):
         locator.validate(target, require_foreground=True)
 

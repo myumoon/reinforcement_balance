@@ -32,6 +32,17 @@ class TargetWindowStateError(TargetWindowError):
     pass
 
 
+class TargetWindowForegroundLost(TargetWindowStateError):
+    """対象ウィンドウがフォアグラウンドを失った、という一時的な状態変化を表す例外。
+
+    alt-tab 等でフォアグラウンドを一時的に失っただけの場合と、解像度変更や
+    プロセス差し替えのような致命的な状態変化を呼び出し側が区別できるように、
+    TargetWindowStateError から独立した専用のサブクラスとして定義している。
+    """
+
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class TargetWindowPolicy:
     process_executable: str
@@ -135,7 +146,7 @@ class WindowLocator:
         if current != target:
             raise TargetWindowStateError("target window identity or geometry changed")
         if require_foreground and self._api.foreground_window() != target.hwnd:
-            raise TargetWindowStateError("target window lost foreground")
+            raise TargetWindowForegroundLost("target window lost foreground")
         return current
 
     def validate_lightweight(
@@ -166,7 +177,7 @@ class WindowLocator:
         if client_rect != target.client_rect_screen_px:
             raise TargetWindowStateError("target client rect changed")
         if require_foreground and self._api.foreground_window() != target.hwnd:
-            raise TargetWindowStateError("target window lost foreground")
+            raise TargetWindowForegroundLost("target window lost foreground")
 
     def _identity_matches(self, hwnd: int) -> bool:
         try:
