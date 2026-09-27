@@ -1,6 +1,6 @@
 """並列フレーム永続化の順序・流量制御・失敗伝播を検証する。
 
-初心者向けには、保存処理が並列でもメタデータの順番と失敗時の安全性が
+保存処理が並列でもメタデータの順番と失敗時の安全性が
 同期版と変わらないことを確認するテスト群である。
 """
 
@@ -27,7 +27,7 @@ BUILD_ID = "survivors-test-build"
 def _frame(frame_id: int, timestamp_ns: int) -> CapturedFrame:
     """決定的な CapturedFrame を生成する。
 
-    初心者向けには、実入力と同じ画面サイズを保ちながら、フレーム番号だけを
+    実入力と同じ画面サイズを保ちながら、フレーム番号だけを
     先頭画素へ埋め込んだ入力を作る関数である。
     """
     pixels = np.zeros((1080, 1920, 4), dtype=np.uint8)
@@ -47,7 +47,7 @@ def _frame(frame_id: int, timestamp_ns: int) -> CapturedFrame:
 def fake_encode(monkeypatch) -> None:
     """PNG エンコードを決定的な軽量バイト列へ置換する。
 
-    初心者向けには、圧縮速度に左右されず writer の順序と内容だけを比較する
+    圧縮速度に左右されず writer の順序と内容だけを比較する
     ためのテスト用差し替えである。
     """
     monkeypatch.setattr(
@@ -60,7 +60,7 @@ def fake_encode(monkeypatch) -> None:
 def test_records_are_appended_in_submission_order(tmp_path, monkeypatch, fake_encode):
     """後続ワーカーが先に完了しても投入順で確定することを検証する。
 
-    初心者向けには、2枚目の保存を先に終わらせても frames.jsonl が
+    2枚目の保存を先に終わらせても frames.jsonl が
     0番、1番の順から崩れないことを確認する。
     """
     monkeypatch.setattr(capture_dataset.os, "cpu_count", lambda: 2)
@@ -72,7 +72,7 @@ def test_records_are_appended_in_submission_order(tmp_path, monkeypatch, fake_en
         def delayed_persist(frame):
             """先頭フレームだけ待機させ、完了順を意図的に逆転する。
 
-            初心者向けには、並列処理で起こる追い越しを再現するテスト用関数である。
+            並列処理で起こる追い越しを再現するテスト用関数である。
             """
             if frame.session_frame_index == 0:
                 assert release_first.wait(2)
@@ -94,7 +94,7 @@ def test_records_are_appended_in_submission_order(tmp_path, monkeypatch, fake_en
 def test_backpressure_blocks_the_capture_caller(tmp_path, monkeypatch, fake_encode):
     """有限 pending 上限で submit_frame 呼び出し元が待機することを検証する。
 
-    初心者向けには、保存待ちが上限に達したとき、3枚目を捨てずに
+    保存待ちが上限に達したとき、3枚目を捨てずに
     先頭の保存完了までキャプチャ側を止めることを確認する。
     """
     monkeypatch.setattr(capture_dataset.os, "cpu_count", lambda: 1)
@@ -105,7 +105,7 @@ def test_backpressure_blocks_the_capture_caller(tmp_path, monkeypatch, fake_enco
         def blocked_persist(frame):
             """永続化を明示的に停止して pending 上限を再現する。
 
-            初心者向けには、遅いディスクをイベント待機で模擬する関数である。
+            遅いディスクをイベント待機で模擬する関数である。
             """
             assert release.wait(2)
             return persist(frame)
@@ -133,7 +133,7 @@ def test_backpressure_blocks_the_capture_caller(tmp_path, monkeypatch, fake_enco
 def test_worker_failure_is_rethrown_and_stops_appends(tmp_path, monkeypatch, fake_encode):
     """最初のワーカー例外を全APIで再送出し後続確定を止めることを検証する。
 
-    初心者向けには、保存失敗を見逃して不完全なデータセットを公開せず、
+    保存失敗を見逃して不完全なデータセットを公開せず、
     同じ失敗を submit・close・publish のどこからでも確認できることを試す。
     """
     monkeypatch.setattr(capture_dataset.os, "cpu_count", lambda: 1)
@@ -144,7 +144,7 @@ def test_worker_failure_is_rethrown_and_stops_appends(tmp_path, monkeypatch, fak
         def fail_persist(_frame):
             """ワーカースレッドで同一例外を発生させる。
 
-            初心者向けには、ディスク保存失敗を決定的に再現するテスト用関数である。
+            ディスク保存失敗を決定的に再現するテスト用関数である。
             """
             failed.set()
             raise failure
@@ -172,7 +172,7 @@ def test_failure_callback_cannot_cross_append_boundary(
 ):
     """failure 記録と record 確定が同じ排他境界にあることを検証する。
 
-    初心者向けには、先行フレームを確定している途中へ後続ワーカーの失敗通知が
+    先行フレームを確定している途中へ後続ワーカーの失敗通知が
     割り込まず、append の直前確認を無効化しないことを再現する。
     """
     monkeypatch.setattr(capture_dataset.os, "cpu_count", lambda: 2)
@@ -191,7 +191,7 @@ def test_failure_callback_cannot_cross_append_boundary(
         def ordered_persist(frame):
             """先行成功と後続失敗の発生順をイベントで固定する。
 
-            初心者向けには、append 境界の最中に別ワーカーが失敗する競合を
+            append 境界の最中に別ワーカーが失敗する競合を
             決定的に作るテスト用永続化関数である。
             """
             if frame.session_frame_index == 0:
@@ -205,7 +205,7 @@ def test_failure_callback_cannot_cross_append_boundary(
         def blocked_append(record):
             """record 確定境界を開いた状態で一時停止する。
 
-            初心者向けには、failure callback が排他されるべき区間を観測する
+            failure callback が排他されるべき区間を観測する
             テスト用ラッパーである。
             """
             append_entered.set()
@@ -220,7 +220,7 @@ def test_failure_callback_cannot_cross_append_boundary(
         def observed_callback(future):
             """failure callback の開始と終了を記録する。
 
-            初心者向けには、append の排他区間内で callback が完了できたかを
+            append の排他区間内で callback が完了できたかを
             判定するためのテスト用ラッパーである。
             """
             if future.exception() is failure:
@@ -238,7 +238,7 @@ def test_failure_callback_cannot_cross_append_boundary(
         def close_writer():
             """close の例外をテストスレッドへ戻す。
 
-            初心者向けには、バックグラウンドで close を進めながら、発生した
+            バックグラウンドで close を進めながら、発生した
             worker 例外を安全に検査できるよう保存する関数である。
             """
             try:
@@ -264,7 +264,7 @@ def test_failure_callback_cannot_cross_append_boundary(
 def test_threaded_publish_matches_synchronous_writer(tmp_path, fake_encode):
     """決定的エンコード時に同期版と並列版の成果物が一致することを検証する。
 
-    初心者向けには、処理方法だけを並列化しても PNG・frames.jsonl・
+    処理方法だけを並列化しても PNG・frames.jsonl・
     FrameRecord の内容が変わらないことを比較する。
     """
     frames = [_frame(0, 100), _frame(1, 200), _frame(2, 300)]
@@ -296,7 +296,7 @@ def test_live_capture_persists_on_worker_and_preserves_output(
 ):
     """live 収録だけがワーカー永続化を使い公開JSONを維持することを検証する。
 
-    初心者向けには、実機の代わりに1フレームを渡し、PNG保存がメインスレッドを
+    実機の代わりに1フレームを渡し、PNG保存がメインスレッドを
     外れても従来と同じ PUBLISHED 応答になることを確認する。
     """
     live_session = SimpleNamespace(
@@ -317,7 +317,7 @@ def test_live_capture_persists_on_worker_and_preserves_output(
     def record_thread(self, frame):
         """永続化を実行したスレッドIDを記録する。
 
-        初心者向けには、live 経路が本当にワーカースレッドへ移ったかを成果物と
+        live 経路が本当にワーカースレッドへ移ったかを成果物と
         合わせて確認するテスト用ラッパーである。
         """
         worker_threads.append(threading.get_ident())
