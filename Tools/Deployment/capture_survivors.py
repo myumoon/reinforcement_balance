@@ -71,7 +71,7 @@ def _start_live_session() -> CaptureSession:
     profile = load_runtime_profile()
     policy = TargetWindowPolicy(
         process_executable="VampireSurvivors.exe",
-        window_class="YYGameMakerYY",
+        window_class="UnityWndClass",
         window_title="Vampire Survivors",
     )
     locator = WindowLocator(CtypesWin32Api(), profile, policy)
