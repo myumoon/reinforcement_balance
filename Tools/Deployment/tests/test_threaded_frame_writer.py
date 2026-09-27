@@ -6,12 +6,15 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+import capture_survivors
 from survivors.capture.captured_frame import CapturedFrame
 from survivors import capture_dataset
 from survivors.capture_dataset import DatasetWriter, ThreadedFrameWriter
@@ -192,3 +195,59 @@ def test_threaded_publish_matches_synchronous_writer(tmp_path, fake_encode):
         assert (parallel_manifest.session_path / record.object_path).read_bytes() == (
             sync_manifest.session_path / record.object_path
         ).read_bytes()
+
+
+def test_live_capture_persists_on_worker_and_preserves_output(
+    tmp_path, monkeypatch, fake_encode, capsys
+):
+    """live 収録だけがワーカー永続化を使い公開JSONを維持することを検証する。
+
+    初心者向けには、実機の代わりに1フレームを渡し、PNG保存がメインスレッドを
+    外れても従来と同じ PUBLISHED 応答になることを確認する。
+    """
+    live_session = SimpleNamespace(
+        target=SimpleNamespace(
+            target_profile_hash=PROFILE_HASH,
+            game_build_id=BUILD_ID,
+        )
+    )
+    monkeypatch.setattr(capture_survivors, "_start_live_session", lambda: live_session)
+    monkeypatch.setattr(
+        capture_survivors,
+        "_capture_live",
+        lambda _session, _duration: iter([_frame(0, 100)]),
+    )
+    persist = DatasetWriter._persist_frame
+    worker_threads: list[int] = []
+
+    def record_thread(self, frame):
+        """永続化を実行したスレッドIDを記録する。
+
+        初心者向けには、live 経路が本当にワーカースレッドへ移ったかを成果物と
+        合わせて確認するテスト用ラッパーである。
+        """
+        worker_threads.append(threading.get_ident())
+        return persist(self, frame)
+
+    monkeypatch.setattr(DatasetWriter, "_persist_frame", record_thread)
+    main_thread = threading.get_ident()
+
+    result = capture_survivors.main(
+        [
+            "--store-root",
+            str(tmp_path),
+            "--session-id",
+            "live-session",
+            "--duration-sec",
+            "0.1",
+        ]
+    )
+
+    assert result == 0
+    assert worker_threads and worker_threads[0] != main_thread
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "PUBLISHED",
+        "session_id": "live-session",
+        "frame_count": 1,
+        "formal_dataset_eligible": False,
+    }
