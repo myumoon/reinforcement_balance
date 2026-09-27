@@ -167,6 +167,100 @@ def test_worker_failure_is_rethrown_and_stops_appends(tmp_path, monkeypatch, fak
         assert writer._frame_records == []
 
 
+def test_failure_callback_cannot_cross_append_boundary(
+    tmp_path, monkeypatch, fake_encode
+):
+    """failure 記録と record 確定が同じ排他境界にあることを検証する。
+
+    初心者向けには、先行フレームを確定している途中へ後続ワーカーの失敗通知が
+    割り込まず、append の直前確認を無効化しないことを再現する。
+    """
+    monkeypatch.setattr(capture_dataset.os, "cpu_count", lambda: 2)
+    failure = RuntimeError("later worker failure")
+    fail_second = threading.Event()
+    second_started = threading.Event()
+    append_entered = threading.Event()
+    allow_append = threading.Event()
+    callback_entered = threading.Event()
+    callback_done = threading.Event()
+    close_errors: list[BaseException] = []
+
+    with DatasetWriter(tmp_path, "failure-boundary", PROFILE_HASH, BUILD_ID) as writer:
+        persist = writer._persist_frame
+
+        def ordered_persist(frame):
+            """先行成功と後続失敗の発生順をイベントで固定する。
+
+            初心者向けには、append 境界の最中に別ワーカーが失敗する競合を
+            決定的に作るテスト用永続化関数である。
+            """
+            if frame.session_frame_index == 0:
+                return persist(frame)
+            second_started.set()
+            assert fail_second.wait(2)
+            raise failure
+
+        append_record = writer._append_record
+
+        def blocked_append(record):
+            """record 確定境界を開いた状態で一時停止する。
+
+            初心者向けには、failure callback が排他されるべき区間を観測する
+            テスト用ラッパーである。
+            """
+            append_entered.set()
+            assert allow_append.wait(2)
+            append_record(record)
+
+        monkeypatch.setattr(writer, "_persist_frame", ordered_persist)
+        monkeypatch.setattr(writer, "_append_record", blocked_append)
+        threaded = ThreadedFrameWriter(writer)
+        remember_failure = threaded._remember_worker_failure
+
+        def observed_callback(future):
+            """failure callback の開始と終了を記録する。
+
+            初心者向けには、append の排他区間内で callback が完了できたかを
+            判定するためのテスト用ラッパーである。
+            """
+            if future.exception() is failure:
+                callback_entered.set()
+                remember_failure(future)
+                callback_done.set()
+            else:
+                remember_failure(future)
+
+        monkeypatch.setattr(threaded, "_remember_worker_failure", observed_callback)
+        threaded.submit_frame(_frame(0, 100))
+        threaded.submit_frame(_frame(1, 200))
+        assert second_started.wait(2)
+
+        def close_writer():
+            """close の例外をテストスレッドへ戻す。
+
+            初心者向けには、バックグラウンドで close を進めながら、発生した
+            worker 例外を安全に検査できるよう保存する関数である。
+            """
+            try:
+                threaded.close()
+            except BaseException as error:
+                close_errors.append(error)
+
+        closer = threading.Thread(target=close_writer)
+        closer.start()
+        assert append_entered.wait(2)
+        fail_second.set()
+        assert callback_entered.wait(2)
+
+        callback_crossed_boundary = callback_done.wait(0.05)
+        allow_append.set()
+        closer.join(2)
+
+        assert not callback_crossed_boundary
+        assert not closer.is_alive()
+        assert close_errors == [failure]
+
+
 def test_threaded_publish_matches_synchronous_writer(tmp_path, fake_encode):
     """決定的エンコード時に同期版と並列版の成果物が一致することを検証する。
 

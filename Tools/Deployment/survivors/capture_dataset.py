@@ -659,8 +659,10 @@ class ThreadedFrameWriter:
         frame_id, future = self._pending[0]
         try:
             record = future.result()
-            self._raise_failure()
-            self._writer._append_record(record)
+            with self._failure_lock:
+                if self._failure is not None:
+                    raise self._failure
+                self._writer._append_record(record)
         except BaseException as failure:
             with self._failure_lock:
                 if self._failure is None:
