@@ -139,7 +139,12 @@ class FakeHud:
     def parse(self, frame_bgra, *, session_id, frame_index, captured_monotonic_ns):
         """HUD の最小属性だけを返す。"""
         self.parses += 1
-        return SimpleNamespace(screen_state="gameplay", screen_state_confidence=1.0, parser_artifact_hash="d" * 64)
+        return SimpleNamespace(
+            screen_state="gameplay", screen_state_confidence=1.0, parser_artifact_hash="d" * 64,
+            screen_state_reason="ok", timer_confidence=1.0, timer_reason="ok", hp_confidence=0.9, hp_reason="ok",
+            xp_confidence=0.8, xp_reason="ok", level_confidence=1.0, level_reason="ok", inventory_confidence=0.7,
+            capability_confidence=0.0, capability_reason="not_level_up",
+        )
 
 
 class FakeAssembler:
@@ -159,6 +164,7 @@ class FakeAssembler:
             snapshot_id=f"snap-{self._calls}", frame_id=f"frame-{world.frame_index}",
             screen_state="gameplay", ui_state_key="ui-key", source_content_hash="f" * 64,
             deploy_obs=_valid_obs(world.timestamp_ns),
+            ui_presentation=SimpleNamespace(schema_hash="1" * 64, candidate_set_hash="2" * 64, inventory_hash="3" * 64),
         )
 
 
@@ -317,6 +323,33 @@ def test_shadow_runs_full_pipeline_without_touching_input(tmp_path, monkeypatch)
         ("move", "proposed", None), ("ui_key", "proposed", None), ("release_all", "proposed", None),
     ]
     assert "input_release" not in parts.events
+
+
+def test_telemetry_records_parser_reasons_obs_summary_and_ui_hashes(tmp_path) -> None:
+    """M4: hud_parser 行に全 confidence/reason、obs 行に validity/age 要約と UI hash を毎 snapshot 記録する。"""
+    parts = _build(tmp_path, "shadow", [0, 1])
+
+    assert parts.controller.run(max_frames=2) == EXIT_OK
+    rows = _rows(parts)
+    hud = _stages(rows, "hud_parser")[0]["payload"]
+    assert hud == {
+        "screen_state": "gameplay", "parser_artifact_hash": "d" * 64,
+        "screen_state_confidence": 1.0, "screen_state_reason": "ok",
+        "timer_confidence": 1.0, "timer_reason": "ok", "hp_confidence": 0.9, "hp_reason": "ok",
+        "xp_confidence": 0.8, "xp_reason": "ok", "level_confidence": 1.0, "level_reason": "ok",
+        "inventory_confidence": 0.7, "capability_confidence": 0.0, "capability_reason": "not_level_up",
+    }
+    obs_rows = _stages(rows, "obs")
+    assert len(obs_rows) == 2
+    for row in obs_rows:
+        payload = row["payload"]
+        # _valid_obs は validity=0・age=1 の配列なので、全要素が「欠損」かつ age 最大として要約される。
+        assert payload["obs_invalid_count"] == _SCHEMA.dim
+        assert payload["obs_validity_mean"] == 0.0
+        assert payload["obs_age_mean"] == 1.0 and payload["obs_age_max"] == 1.0
+        assert (payload["ui_schema_hash"], payload["ui_candidate_set_hash"], payload["ui_inventory_hash"]) == (
+            "1" * 64, "2" * 64, "3" * 64,
+        )
 
 
 def test_mode_and_input_adapter_must_match(tmp_path) -> None:

@@ -32,6 +32,33 @@ EXIT_TERMINAL_FAILURE = 4
 # execute_effect が OS 入力として実行する effect 種別(live mode だけが渡す)。
 _INPUT_EFFECTS = frozenset({"move", "ui_click", "ui_key", "release_all"})
 
+# hud_parser 行へ書く HudStateV1 の信頼度と判定理由(parser validity/reasons)。
+_HUD_TELEMETRY_FIELDS = (
+    "screen_state_confidence", "screen_state_reason",
+    "timer_confidence", "timer_reason",
+    "hp_confidence", "hp_reason",
+    "xp_confidence", "xp_reason",
+    "level_confidence", "level_reason",
+    "inventory_confidence",
+    "capability_confidence", "capability_reason",
+)
+
+
+def _obs_quality_summary(obs: DeployObservation) -> dict[str, Any]:
+    """DeployObs の validity/age 配列を telemetry 用の少数の数値へ要約する。
+
+    生配列は大きいので書かず、欠損要素数(validity<1)・validity 平均・age 平均/最大だけを残します。
+    どの tick で観測が劣化したかを後から追えるようにするための要約です。
+    """
+    validity = np.asarray(obs.validity, dtype=np.float64)
+    age = np.asarray(obs.age, dtype=np.float64)
+    return {
+        "obs_invalid_count": int(np.count_nonzero(validity < 1.0)),
+        "obs_validity_mean": float(validity.mean()) if validity.size else 1.0,
+        "obs_age_mean": float(age.mean()) if age.size else 0.0,
+        "obs_age_max": float(age.max()) if age.size else 0.0,
+    }
+
 
 class _StageError(Exception):
     """perception/policy stage の例外を stage 名付きで包む内部例外。
@@ -358,8 +385,8 @@ class SurvivorsController:
                 "hud_parser", cid, latency_ns=latency,
                 payload={
                     "screen_state": hud.screen_state,
-                    "screen_state_confidence": hud.screen_state_confidence,
                     "parser_artifact_hash": hud.parser_artifact_hash,
+                    **{name: getattr(hud, name) for name in _HUD_TELEMETRY_FIELDS},
                 },
             )
             snapshot, latency = self._timed(
@@ -382,6 +409,10 @@ class SurvivorsController:
                     "obs_hash": obs_hash,
                     "obs_valid": self._last_obs_valid,
                     "obs_timestamp_ns": snapshot.deploy_obs.timestamp_ns,
+                    **_obs_quality_summary(snapshot.deploy_obs),
+                    "ui_schema_hash": snapshot.ui_presentation.schema_hash,
+                    "ui_candidate_set_hash": snapshot.ui_presentation.candidate_set_hash,
+                    "ui_inventory_hash": snapshot.ui_presentation.inventory_hash,
                 },
             )
             now_ns = self._clock_ns()
