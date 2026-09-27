@@ -97,12 +97,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _load_detector(args: argparse.Namespace) -> tuple[WorldDetector, EntityTracker, CheckpointManifest]:
     """detector config/class map/weight/manifest から detector と tracker を組み立てる。
 
-    weight の sha256 が manifest の model_hash と違えば読み込まずに止めます。
+    weight/config/class map の sha256 が manifest の model_hash/config_hash/class_map_hash と
+    1つでも違えば読み込まずに止めます(world_detector_package.restore_package と同じ照合)。
     tracker の設定は world_detector_package の復元経路と同じく config の ``tracker`` 節から作ります。
     """
     manifest = CheckpointManifest.load(args.detector_manifest)
-    if _sha256_file(args.detector_weights) != manifest.model_hash:
-        raise ValueError("detector weight hash does not match the checkpoint manifest model_hash")
+    for path, expected, message in (
+        (args.detector_weights, manifest.model_hash, "detector weight hash does not match the checkpoint manifest model_hash"),
+        (args.detector_config, manifest.config_hash, "detector config hash does not match the checkpoint manifest config_hash"),
+        (args.class_map, manifest.class_map_hash, "class map hash does not match the checkpoint manifest class_map_hash"),
+    ):
+        if _sha256_file(path) != expected:
+            raise ValueError(message)
     config = load_detector_config(args.detector_config)
     detector = WorldDetector.from_config(config, args.class_map)
     state_dict = torch.load(args.detector_weights, map_location="cpu", weights_only=True)
@@ -135,7 +141,8 @@ def _load_artifacts(args: argparse.Namespace) -> SimpleNamespace:
         artifact_hashes={
             "combat_model": combat_manifest["model_sha256"],
             "detector_model": detector_manifest.model_hash,
-            "detector_class_map": detector_manifest.class_map_hash,
+            # manifest の自己申告ではなく、実際に読んだファイルの hash を記録する。
+            "detector_class_map": _sha256_file(args.class_map),
             "hud_parser": parser_hash,
             "deploy_obs_schema": bundle.deploy_schema_hash,
         },

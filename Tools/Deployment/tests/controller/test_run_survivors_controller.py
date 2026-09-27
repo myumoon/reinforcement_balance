@@ -250,6 +250,37 @@ def test_shadow_runs_real_controller_without_input(env):
     assert env.capture.events == ["start", "close"]
 
 
+def test_header_records_hash_of_class_map_actually_read(env):
+    """telemetry header の detector_class_map は manifest の自己申告ではなく、読んだ class map の実 hash。"""
+    env.use_capture()
+    assert _main(env, "--max-frames", "1") == EXIT_OK
+    hashes = _rows(env.telemetry)[0]["artifact_hashes"]
+    assert hashes["detector_class_map"] == cli._sha256_file(_CLASS_MAP) != _detector_manifest().class_map_hash
+
+
+@pytest.mark.parametrize("mismatch", ["weights", "config", "class_map"])
+def test_load_detector_rejects_files_not_matching_manifest(tmp_path, monkeypatch, mismatch):
+    """weight/config/class map のどれか1つでも manifest の hash と違えば、読み込む前に ValueError で拒否する。"""
+    paths = {name: tmp_path / name for name in ("weights", "config", "class_map")}
+    for name, path in paths.items():
+        path.write_bytes(name.encode())
+    manifest = CheckpointManifest(
+        model_hash=cli._sha256_file(paths["weights"]), data_hash="2" * 64,
+        config_hash=cli._sha256_file(paths["config"]), build_hash="4" * 64,
+        class_map_hash=cli._sha256_file(paths["class_map"]), formal_detector_eligible=False,
+    )
+    paths[mismatch].write_bytes(b"tampered")
+    monkeypatch.setattr(cli.CheckpointManifest, "load", staticmethod(lambda _p: manifest))
+    monkeypatch.setattr(cli, "load_detector_config", _forbidden("load_detector_config"))
+    args = SimpleNamespace(
+        detector_manifest=tmp_path / "manifest.json", detector_weights=paths["weights"],
+        detector_config=paths["config"], class_map=paths["class_map"],
+    )
+    expected = {"weights": "model_hash", "config": "config_hash", "class_map": "class_map_hash"}[mismatch]
+    with pytest.raises(ValueError, match=expected):
+        cli._load_detector(args)
+
+
 def test_health_stop_exit_code_becomes_process_exit_code(env):
     """health STOP(推論エラー)時の run() 戻り値 2 がそのままプロセス終了コードになる。"""
     env.detector = EmptyDetector(fail=True)
