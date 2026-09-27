@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import compute_controller_gate as cli
+from survivors.controller.controller import EXIT_ERROR, EXIT_HEALTH_STOP, EXIT_TERMINAL_FAILURE
 from survivors.controller.gate import (
     issue_gate_verdict,
     memory_growth_bytes_per_hour,
@@ -100,6 +101,36 @@ def test_stage_error_is_not_a_process_crash():
     rows = _clean_rows()
     rows.insert(-1, _row("error", "s:3", 10**14, {"stage": "detector", "type": "RuntimeError", "message": "x"}))
     assert issue_gate_verdict(rows, _OK_MEMORY)["status"] == "PASS"
+
+
+def _with_exit(exit_code: int, reason: str) -> list[dict]:
+    """clean session の shutdown 行だけを指定 exit_code/reason に差し替える(error 行は足さない)。"""
+    rows = _clean_rows()
+    rows[-1] = _row("shutdown", "s:control", 10**15, {"exit_code": exit_code, "reason": reason})
+    return rows
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "reason"),
+    [
+        (EXIT_ERROR, "input_ack_failed:move"),  # error 行を書かない EXIT_ERROR 経路
+        (EXIT_ERROR, "interrupted"),
+        (EXIT_TERMINAL_FAILURE, "terminal:failed"),
+        (99, "unknown"),
+    ],
+)
+def test_abnormal_shutdown_exit_code_counts_as_process_crash(exit_code, reason):
+    verdict = issue_gate_verdict(_with_exit(exit_code, reason), _OK_MEMORY)
+    assert verdict["status"] == "FAIL" and verdict["fail_reasons"] == ["process_crash"]
+    assert verdict["metrics"]["process_crash_count"] == 1
+
+
+def test_health_stop_exit_code_is_not_a_process_crash():
+    rows = _with_exit(EXIT_HEALTH_STOP, "health_stop:capture_gap")
+    rows.insert(-1, _row("health", "s:control", 10**14, {"verdict": "stop"}))
+    verdict = issue_gate_verdict(rows, _OK_MEMORY)
+    assert verdict["fail_reasons"] == ["health_stop"]
+    assert verdict["metrics"]["process_crash_count"] == 0
 
 
 def test_missing_shutdown_row_counts_as_process_crash():

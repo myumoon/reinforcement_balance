@@ -17,6 +17,7 @@ import statistics
 from typing import Any
 import uuid
 
+from .controller import EXIT_HEALTH_STOP, EXIT_OK
 from .telemetry import TELEMETRY_SCHEMA_VERSION
 
 GATE_SCHEMA_VERSION = "survivors.controller_gate.v1"
@@ -85,8 +86,11 @@ def issue_gate_verdict(
     ``memory_samples`` が None なら memory gate は測定不能として FAIL 理由に残します。
     どの閾値も満たし、全て測定できたときだけ ``status="PASS"`` になります。
 
-    - process crash: ``run()`` が捕捉した例外(error 行の payload.stage=="controller")と、
-      shutdown 行が無い(プロセスが途中で死んだ)ことを数える。
+    - process crash: ``run()`` が捕捉した例外(error 行の payload.stage=="controller")、
+      shutdown 行が無い(プロセスが途中で死んだ)こと、shutdown 行の exit_code が 0(正常)でも
+      2(health STOP。health_stop 側で FAIL する)でもないことを数える。exit_code 3(EXIT_ERROR:
+      例外・``interrupted``・``input_ack_failed``・入力解放失敗)と 4(EXIT_TERMINAL_FAILURE:
+      terminal failure による停止)と未知の値はすべて crash として扱う。
     - wrong-state: 入力 effect の直前の同一 frame の state_machine 行の from_state が許可外、
       または同一 frame の state_machine 行が無いものを数える。
     - level-up candidate invalid: LEVEL_UP 訪問内で最初の UI 送信までの choose_card/choose_fallback
@@ -99,6 +103,7 @@ def issue_gate_verdict(
     header: Mapping[str, Any] = {}
     controller_errors = health_stops = wrong_state = eligible = invalid = 0
     shutdown_seen = level_up_sent = False
+    shutdown_exit_code: Any = None
     last_policy: tuple[str | None, str | None] = (None, None)
     last_state: tuple[str | None, str | None] = (None, None)
     captured: dict[str, int] = {}
@@ -115,6 +120,7 @@ def issue_gate_verdict(
             health_stops += 1
         elif stage == "shutdown":
             shutdown_seen = True
+            shutdown_exit_code = payload.get("exit_code")
         elif stage == "capture":
             captured[cid] = payload["captured_ns"]
         elif stage == "policy":
@@ -142,7 +148,8 @@ def issue_gate_verdict(
     p99 = latencies[math.ceil(0.99 * len(latencies)) - 1] if latencies else None
     invalid_rate = invalid / eligible if eligible else 0.0
     growth = memory_growth_bytes_per_hour(memory_samples) if memory_samples is not None else None
-    crashes = controller_errors + (not shutdown_seen)
+    abnormal_exit = shutdown_seen and shutdown_exit_code not in (EXIT_OK, EXIT_HEALTH_STOP)
+    crashes = controller_errors + (not shutdown_seen) + abnormal_exit
 
     fail_reasons = [
         reason for reason, failed in (
