@@ -114,7 +114,7 @@ python compute_controller_gate.py \
 
 | 項目 | PASS 条件 | FAIL 理由 |
 |---|---|---|
-| process crash | 0件(controller 例外の `error` 行が無く、`shutdown` 行がある) | `process_crash` |
+| process crash | 0件(controller 例外の `error` 行が無く、`shutdown` 行があり、その `exit_code` が `0` または `2`)。`exit_code` `3`(例外・`interrupted`・`input_ack_failed`・入力解放失敗。`error` 行が無い経路も含む)・`4`(terminal failure)・未知の値は crash として数える。`2` は `health_stop` 側で FAIL する | `process_crash` |
 | health stop | 0件 | `health_stop` |
 | wrong-state action proposal | 0件 | `wrong_state_action_proposal` |
 | level-up candidate invalid rate | `MAX_LEVEL_UP_CANDIDATE_INVALID_RATE=0.005`(0.5%)以下 | `level_up_candidate_invalid_rate_exceeded` |
@@ -148,6 +148,44 @@ STOP になると controller は入力を解放して exit 2 で終わります�
 |---|---|
 | focus loss(`window_focused=False`) | 即 STOP。 |
 | inference error | 1回で STOP。 |
+
+実 capture(`CaptureSession`)は `foreground` フラグではなく例外で focus 喪失を伝えます
+(`capture_next()` が `TargetWindowStateError` を送出し、`foreground=False` の frame は返しません)。
+controller はこの例外を `HealthMonitor.record_focus_lost()` で `focus_lost` の STOP として記録し、
+入力解放・exit 2 で終わります。同じ例外はウィンドウ消失・geometry 変化でも送出されるため、
+具体的な原因は health 行の `first_failure.detail`(例: `target window lost foreground`)で確認します。
+
+## telemetry 項目と未記録項目
+
+controller が stage ごとに書く主な payload です(`controller.py`)。
+
+| stage | 記録する項目 |
+|---|---|
+| `capture` | frame index・captured_ns・foreground・dropped_frames・target_profile_hash・game_build_id |
+| `hud_parser` | screen_state・parser_artifact_hash と、`HudStateV1` の全 confidence/reason(`screen_state_*`・`timer_*`・`hp_*`・`xp_*`・`level_*`・`inventory_confidence`・`capability_*`) |
+| `obs` | snapshot_id・frame_id・screen_state・ui_state_key・source_content_hash・obs_hash・obs_valid・obs_timestamp_ns、DeployObs の要約(`obs_invalid_count`=validity<1 の要素数・`obs_validity_mean`・`obs_age_mean`・`obs_age_max`。生配列は書かない)、UiPresentation の `ui_schema_hash`・`ui_candidate_set_hash`・`ui_inventory_hash`(snapshot を出した tick は毎回) |
+| `input_release` | released と、helper の release audit と同じ時計の `release_timestamp_ns`(`time.time_ns`)・`release_monotonic_ns`(`time.monotonic_ns`) |
+
+次の項目は、I6 で凍結された既存モジュール(`agent_runtime.py`・`input/controller.py`・
+`state_machine.py` 等)の public API に出ていないため、controller からは取得できず **未記録** です。
+凍結 API を変更しない限り追加できません。
+
+- item logits
+- resolver rejection reason
+- equivalence metrics
+- input helper PID / lease sequence / lease expiry / helper 側 ack(helper 側の ack・release は `.input_audit.jsonl` にだけ残る)
+
+### release audit と telemetry の相関手順
+
+telemetry の時刻(`timestamp_ns`)は既定で `time.perf_counter_ns` で、helper の
+`.input_audit.jsonl` が使う `time.monotonic_ns`/`time.time_ns` とは別の時計です
+(Windows では数十 ms ずれるため直接比較しない)。相関は次の手順で行います。
+
+1. audit ファイルは `<telemetry stem>.input_audit.jsonl`(同じディレクトリ)で対応付ける。
+2. telemetry の `input_release` 行の `release_monotonic_ns` と、audit の `event=="release"`・`reason=="emergency"`
+   行の `release_monotonic_ns` を比べる。helper が先に時刻を取るので差は 0 以上で、
+   `time.monotonic_ns` の分解能(Windows で約 15.6ms)+ release 所要時間に収まる。
+   `release_timestamp_ns`(wall clock)同士でも同様に確認できる。
 
 ## telemetry retention
 
