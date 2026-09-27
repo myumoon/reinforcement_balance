@@ -8,8 +8,10 @@ synthetic または live のフレームを受け取り、安全な一時領域�
 from __future__ import annotations
 
 import argparse
+import ctypes
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -71,7 +73,22 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _declare_process_dpi_awareness() -> None:
+    """起動直後にPer-Monitor DPI awarenessを宣言し、GetClientRect/GetWindowRectの
+    仮想化ずれ(M8と同種の問題)を防ぐ。古いWindowsでは未対応のため、その場合は
+    window_locatorのclient resolution検証がfail-closedする(survivors/input/helper.pyと同じ方針)。
+    """
+    if os.name != "nt":
+        return
+    try:
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4 (winuser.h)
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except (AttributeError, OSError):
+        pass
+
+
 def _start_live_session() -> CaptureSession:
+    _declare_process_dpi_awareness()
     profile = load_runtime_profile()
     policy = TargetWindowPolicy(
         process_executable="VampireSurvivors.exe",
