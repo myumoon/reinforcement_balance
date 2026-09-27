@@ -29,6 +29,20 @@ def _session(profile, policy, fake_api, backend):
     return CaptureSession(locator, locator.locate(), backend)
 
 
+def test_locator_property_returns_the_session_locator(profile, policy, fake_api):
+    """locator プロパティが構築時に渡した WindowLocator をそのまま返すことを確認する。
+
+    capture_survivors._wait_for_foreground が session.locator を使って
+    フォアグラウンド復帰を待つため、この参照が壊れていないことが前提になる。
+    """
+    from conftest import FakeCaptureBackend
+
+    locator = WindowLocator(fake_api, profile, policy)
+    session = CaptureSession(locator, locator.locate(), FakeCaptureBackend([]))
+
+    assert session.locator is locator
+
+
 def test_captured_frame_has_exact_frozen_seven_field_contract(golden_bgra):
     frame = CapturedFrame(
         frame_bgra=golden_bgra,
