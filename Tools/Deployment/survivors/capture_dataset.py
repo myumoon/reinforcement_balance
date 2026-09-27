@@ -278,6 +278,15 @@ class DatasetWriter:
         self._sealed = False
         self._frame_records: list[FrameRecord] = []
 
+    @property
+    def frame_count(self) -> int:
+        """ここまでに確定したフレーム枚数の読み取り専用アクセサ。
+
+        operator ツール側が中断時に0枚か否かを判定して、空セッションの
+        publish を避けるためだけに使う参照用の値である。
+        """
+        return self._frame_count
+
     def write_frame(self, frame: CapturedFrame) -> FrameRecord:
         """1フレームを検証・永続化・確定の順で同期保存する。
 
@@ -542,6 +551,15 @@ class ThreadedFrameWriter:
         self._failure: BaseException | None = None
         self._failure_lock = Lock()
         self._closed = False
+
+    @property
+    def frame_count(self) -> int:
+        """確定済みフレーム数を基底 DatasetWriter へ委譲する読み取り専用アクセサ。
+
+        operator ツールが pending 中のフレームを含まない確定数だけを見て
+        中断時の空セッション判定を行えるようにするための参照用の値である。
+        """
+        return self._writer.frame_count
 
     def submit_frame(self, frame: CapturedFrame) -> None:
         """フレームを即時検証し、永続化を有限キューへ投入する。

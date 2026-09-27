@@ -32,7 +32,28 @@ python Tools/Deployment/capture_survivors.py `
   --session-id live-pilot-001 --duration-sec 30
 ```
 
-`--store-root` の省略、focus loss、build/profile の変化は fail-closed で終了する。実ゲーム PNG / MP4 / annotation は `capture_sessions/` 配下に置き、Git へ追加しない。
+`--store-root` の省略、build/profile の変化、解像度・monitor の変化は fail-closed で終了する。実ゲーム PNG / MP4 / annotation は `capture_sessions/` 配下に置き、Git へ追加しない。
+
+`--session-id` は `auto` を指定すると `capture_sessions/` 配下の既存連番の次(`session-0001` から)を自動採番する。毎回一意な ID を手入力する必要はない:
+
+```powershell
+python Tools/Deployment/capture_survivors.py `
+  --store-root D:\reinbalance-capture `
+  --session-id auto --duration-sec 30
+```
+
+起動直後に対象ウィンドウが前面へ来るまで自動でポーリング待機するため、従来 operator が別途行っていた `Start-Sleep` での起動待ちは不要になった。
+
+## 中断・一時停止
+
+収録中に alt-tab 等で対象ウィンドウが一時的にフォアグラウンドを失っても、収録は中断されない。自動で一時停止し、ウィンドウが前面へ戻ると自動で再開する(解像度変更やプロセス差し替えなど、alt-tab 以外の状態変化は従来通り即座に fail-closed で終了する)。
+
+Ctrl+C は 1 回目と 2 回目で挙動が異なる:
+
+- **1 回目**: 収録ループを安全に打ち切り、それまでに撮れたフレームがあればそのまま `PUBLISHED` として公開する。1 枚も撮れていなければ何も公開せず `ABORTED_EMPTY` として終了する（従来の「未公開 temp を丸ごと破棄する」動作による全データ消失を避けるための変更）。
+- **2 回目**: 通常の `KeyboardInterrupt` として即座に中断する。この場合は未公開の一時領域が破棄される。意図的に全て破棄したい場合のエスケープハッチとして残している。
+
+終了時の JSON (`PUBLISHED` / `ABORTED_EMPTY`) には `ended_reason`(`duration_elapsed` / `source_exhausted` / `interrupted`)・`requested_duration_sec`・`elapsed_sec` が含まれる。
 
 ## Annotation workflow
 

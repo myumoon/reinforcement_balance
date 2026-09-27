@@ -306,11 +306,16 @@ def test_live_capture_persists_on_worker_and_preserves_output(
         )
     )
     monkeypatch.setattr(capture_survivors, "_start_live_session", lambda: live_session)
-    monkeypatch.setattr(
-        capture_survivors,
-        "_capture_live",
-        lambda _session, _duration: iter([_frame(0, 100)]),
-    )
+
+    def fake_capture_live(_session, _duration, _interrupted, _stats):
+        """フォアグラウンド待機やdeadline管理を省いた最小限のfake収録ループ。
+
+        main()側のframes.close()呼び出しに応答できるよう、通常のgenerator
+        (close()を持つ)として1フレームだけyieldする。
+        """
+        yield _frame(0, 100)
+
+    monkeypatch.setattr(capture_survivors, "_capture_live", fake_capture_live)
     persist = DatasetWriter._persist_frame
     worker_threads: list[int] = []
 
@@ -339,9 +344,14 @@ def test_live_capture_persists_on_worker_and_preserves_output(
 
     assert result == 0
     assert worker_threads and worker_threads[0] != main_thread
-    assert json.loads(capsys.readouterr().out) == {
+    payload = json.loads(capsys.readouterr().out)
+    elapsed_sec = payload.pop("elapsed_sec")
+    assert isinstance(elapsed_sec, float) and elapsed_sec >= 0
+    assert payload == {
         "status": "PUBLISHED",
         "session_id": "live-session",
         "frame_count": 1,
         "formal_dataset_eligible": False,
+        "ended_reason": "duration_elapsed",
+        "requested_duration_sec": 0.1,
     }

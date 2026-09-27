@@ -8,12 +8,16 @@ synthetic または live のフレームを受け取り、安全な一時領域�
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
+import signal
 import sys
+import threading
 import time
 
 import numpy as np
@@ -23,11 +27,16 @@ from survivors.capture import (
     CapturedFrame,
     CtypesWin32Api,
     DxcamCaptureBackend,
+    LocatedTargetWindow,
+    TargetWindowForegroundLost,
     TargetWindowPolicy,
     WindowLocator,
 )
 from survivors.capture_dataset import DatasetWriter, ThreadedFrameWriter
 from survivors.target_profile import load_runtime_profile
+
+
+_AUTO_SESSION_ID_PATTERN = re.compile(r"^session-(\d{4,})$")
 
 
 SYNTHETIC_PROFILE_HASH = "0" * 64
@@ -58,7 +67,7 @@ class FakeCaptureBackend:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         usage=(
-            "capture_survivors.py [--store-root STORE_ROOT] [--session-id SESSION_ID] "
+            "capture_survivors.py [--store-root STORE_ROOT] [--session-id SESSION_ID|auto] "
             "[--duration-sec N] [--synthetic] [--dry-run]"
         )
     )
@@ -105,16 +114,94 @@ def _start_live_session() -> CaptureSession:
     return CaptureSession(locator, target, backend)
 
 
-def _capture_live(session: CaptureSession, duration_sec: float):
-    deadline = time.monotonic() + duration_sec
-    session.start()
+@contextlib.contextmanager
+def _graceful_interrupt(flag: threading.Event):
+    """Ctrl+Cを例外ではなくフラグ通知に変換し、収録ループを協調的に止める。
+
+    ThreadedFrameWriterのワーカー例外保持はBaseExceptionごと記録して以後
+    再送出し続ける仕組みのため、KeyboardInterruptをそのまま伝播させると
+    無関係な保存失敗と誤認識される。1回目のCtrl+Cはフラグを立てるだけに
+    留め、2回目は標準ハンドラへ委譲して本物の中断を発生させる。
+    """
+    previous_handler = signal.getsignal(signal.SIGINT)
+
+    def _handle_sigint(signum, frame_):
+        if flag.is_set():
+            signal.default_int_handler(signum, frame_)
+        else:
+            flag.set()
+
+    signal.signal(signal.SIGINT, _handle_sigint)
     try:
+        yield flag
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
+
+
+def _wait_for_foreground(
+    locator: WindowLocator,
+    target: LocatedTargetWindow,
+    interrupted: threading.Event,
+    *,
+    poll_interval_sec: float = 0.5,
+) -> bool:
+    """対象ウィンドウがフォアグラウンドに来るまで軽量検証をポーリングする。
+
+    起動直後にオペレーターが手動でウィンドウを前面へ出すために行っていた
+    Start-Sleep運用を不要にする。フォアグラウンド消失以外の異常はそのまま
+    伝播させ、中断された場合は例外を投げずFalseを返す。
+    """
+    while not interrupted.is_set():
+        try:
+            locator.validate_lightweight(target, require_foreground=True)
+            return True
+        except TargetWindowForegroundLost:
+            interrupted.wait(poll_interval_sec)
+    return False
+
+
+def _next_auto_session_id(store_root: Path) -> str:
+    """capture_sessions配下の既存連番から次のsession-NNNNを採番する。
+
+    毎回一意な --session-id を手入力する手間をなくすため、既存の
+    最大連番+1(存在しなければ1)を4桁ゼロ埋めで返す採番専用の関数である。
+    """
+    sessions_dir = store_root / "capture_sessions"
+    max_n = 0
+    if sessions_dir.is_dir():
+        for entry in sessions_dir.iterdir():
+            match = _AUTO_SESSION_ID_PATTERN.match(entry.name)
+            if match:
+                max_n = max(max_n, int(match.group(1)))
+    return f"session-{max_n + 1:04d}"
+
+
+def _capture_live(
+    session: CaptureSession,
+    duration_sec: float,
+    interrupted: threading.Event,
+    stats: dict,
+):
+    """live収録ループ本体。起動前のフォアグラウンド待機と経過時間の起点を管理する。
+
+    フォアグラウンド待機の時間はduration_secに含めないため、
+    session.start()直後を起点としてstatsへ書き込み、呼び出し側が
+    正確なelapsed_sec/ended_reasonを算出できるようにする。
+    """
+    try:
+        if not _wait_for_foreground(session.locator, session.target, interrupted):
+            stats["ended_reason"] = "interrupted"
+            return
+        session.start()
+        stats["started_at"] = time.monotonic()
+        deadline = stats["started_at"] + duration_sec
         while time.monotonic() < deadline:
             frame = session.capture_next()
             if frame is None:
                 time.sleep(1 / 60)  # ponytail: 60fps上限ポーリング — busy loopを防ぐ
                 continue
             yield frame
+        stats["ended_reason"] = "duration_elapsed"
     finally:
         session.close()
 
@@ -122,8 +209,10 @@ def _capture_live(session: CaptureSession, duration_sec: float):
 def main(argv: list[str] | None = None) -> int:
     """CLI引数に従ってフレームを収録し、公開結果をJSONで返す。
 
-    synthetic は従来の同期保存、live は重いPNG保存だけを
-    並列化し、dry-run と出力形式は変えずに終了コードを返す入口である。
+    synthetic は従来の同期保存、live は重いPNG保存だけを並列化する。
+    Ctrl+C(1回目)は収録済み分だけを安全に公開するか、0枚ならABORTED_EMPTY
+    として空セッションを残さず終了し、2回目のCtrl+Cだけ本来のKeyboardInterrupt
+    (未公開tempのrmtree)へエスケープする。
     """
     args = _parser().parse_args(argv)
     if args.store_root is None or not args.store_root.strip():
@@ -135,34 +224,80 @@ def main(argv: list[str] | None = None) -> int:
     if not args.session_id.strip():
         print("error: --session-id must be non-empty", file=sys.stderr)
         return 1
+    store_root = Path(args.store_root)
+    interrupted = threading.Event()  # I6: main()呼び出しごとに毎回新規に作る
+    stats: dict = {}
+    loop_started_at = time.monotonic()
     try:
-        if args.synthetic:
-            frames = FakeCaptureBackend().frames(args.duration_sec)
-            identity = SYNTHETIC_PROFILE_HASH, SYNTHETIC_BUILD_ID
-            live_session = None
-        else:
-            live_session = _start_live_session()
-            frames = _capture_live(live_session, args.duration_sec)
-            identity = (
-                live_session.target.target_profile_hash,
-                live_session.target.game_build_id,
-            )
-        if args.dry_run:
-            first = next(iter(frames), None)
-            if first is None:
-                raise ValueError("capture produced no frame")
-            print(json.dumps({"status": "DRY_RUN_OK", "session_id": args.session_id}))
-            return 0
-        with DatasetWriter(Path(args.store_root), args.session_id, *identity) as writer:
+        with _graceful_interrupt(interrupted):
+            session_id = args.session_id
+            if session_id == "auto":
+                session_id = _next_auto_session_id(store_root)
             if args.synthetic:
-                for frame in frames:
-                    writer.write_frame(frame)
-                manifest = writer.publish(operator_checkpoint="synthetic")
+                frames = FakeCaptureBackend().frames(args.duration_sec)
+                identity = SYNTHETIC_PROFILE_HASH, SYNTHETIC_BUILD_ID
             else:
-                with ThreadedFrameWriter(writer) as threaded:
+                live_session = _start_live_session()
+                frames = _capture_live(live_session, args.duration_sec, interrupted, stats)
+                identity = (
+                    live_session.target.target_profile_hash,
+                    live_session.target.game_build_id,
+                )
+            if args.dry_run:
+                first = next(iter(frames), None)
+                close = getattr(frames, "close", None)
+                if close is not None:
+                    close()
+                if first is None:
+                    raise ValueError("capture produced no frame")
+                print(json.dumps({"status": "DRY_RUN_OK", "session_id": session_id}))
+                return 0
+            with DatasetWriter(store_root, session_id, *identity) as writer:
+                if args.synthetic:
+                    for frame in frames:
+                        writer.write_frame(frame)
+                        if interrupted.is_set():  # 1フレーム分の書き込み完了直後にだけ確認する
+                            break
+                    active_writer = writer
+                    checkpoint = "synthetic"
+                else:
+                    threaded = ThreadedFrameWriter(writer)
                     for frame in frames:
                         threaded.submit_frame(frame)
-                    manifest = threaded.publish(operator_checkpoint="live-pilot")
+                        if interrupted.is_set():  # I4: submit_frame内部では割り込まない
+                            break
+                    active_writer = threaded
+                    checkpoint = "live-pilot"
+
+                close = getattr(frames, "close", None)
+                if close is not None:
+                    close()  # _capture_liveのfinally(session.close())を即時実行させる
+                if not args.synthetic:
+                    threaded.close()
+
+                ended_reason = (
+                    "interrupted"
+                    if interrupted.is_set()
+                    else "source_exhausted"
+                    if args.synthetic
+                    else stats.get("ended_reason", "duration_elapsed")
+                )
+                elapsed_sec = time.monotonic() - stats.get("started_at", loop_started_at)
+
+                if active_writer.frame_count == 0 and interrupted.is_set():
+                    print(
+                        json.dumps(
+                            {
+                                "status": "ABORTED_EMPTY",
+                                "session_id": session_id,
+                                "ended_reason": ended_reason,
+                                "requested_duration_sec": args.duration_sec,
+                                "elapsed_sec": elapsed_sec,
+                            }
+                        )
+                    )
+                    return 0
+                manifest = active_writer.publish(operator_checkpoint=checkpoint)
         print(
             json.dumps(
                 {
@@ -170,6 +305,9 @@ def main(argv: list[str] | None = None) -> int:
                     "session_id": manifest.session_id,
                     "frame_count": manifest.frame_count,
                     "formal_dataset_eligible": manifest.formal_dataset_eligible,
+                    "ended_reason": ended_reason,
+                    "requested_duration_sec": args.duration_sec,
+                    "elapsed_sec": elapsed_sec,
                 }
             )
         )
