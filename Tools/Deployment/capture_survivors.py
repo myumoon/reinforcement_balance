@@ -126,6 +126,13 @@ def _graceful_interrupt(flag: threading.Event):
     previous_handler = signal.getsignal(signal.SIGINT)
 
     def _handle_sigint(signum, frame_):
+        """SIGINTを1回目はフラグ設定、2回目は既定ハンドラへ委譲する。
+
+        signal.signalに渡すハンドラそのものであり、OSから
+        (シグナル番号, 割り込まれたフレーム)を受け取る決まった形を
+        している。flagが既に立っていれば「もう一度押した」とみなし
+        本来のKeyboardInterruptへ進ませる。
+        """
         if flag.is_set():
             signal.default_int_handler(signum, frame_)
         else:
@@ -196,6 +203,12 @@ def _capture_live(
         stats["started_at"] = time.monotonic()
         deadline = stats["started_at"] + duration_sec
         while time.monotonic() < deadline:
+            # frameが来ないtick(foreground一時停止中を含む)でも必ずここで
+            # interruptedを見る。yieldは実フレームがあるときにしか起きないため、
+            # ここで確認しないと一時停止中はCtrl+Cがdeadlineまで無視され続ける。
+            if interrupted.is_set():
+                stats["ended_reason"] = "interrupted"
+                return
             frame = session.capture_next()
             if frame is None:
                 time.sleep(1 / 60)  # ponytail: 60fps上限ポーリング — busy loopを防ぐ
@@ -261,19 +274,22 @@ def main(argv: list[str] | None = None) -> int:
                     active_writer = writer
                     checkpoint = "synthetic"
                 else:
-                    threaded = ThreadedFrameWriter(writer)
-                    for frame in frames:
-                        threaded.submit_frame(frame)
-                        if interrupted.is_set():  # I4: submit_frame内部では割り込まない
-                            break
+                    # withで囲むことで、submit_frame中の例外(fail-closedな
+                    # TargetWindowStateErrorや2回目Ctrl+CのKeyboardInterrupt含む)
+                    # でも必ずclose()が呼ばれexecutorが止まる。裸のthreaded.close()
+                    # 呼び出しだと例外時にスキップされ、ワーカーがPNG書き込み中の
+                    # ままDatasetWriter.__exit__のrmtreeと競合する(過去の回帰)。
+                    with ThreadedFrameWriter(writer) as threaded:
+                        for frame in frames:
+                            threaded.submit_frame(frame)
+                            if interrupted.is_set():  # I4: submit_frame内部では割り込まない
+                                break
                     active_writer = threaded
                     checkpoint = "live-pilot"
 
                 close = getattr(frames, "close", None)
                 if close is not None:
                     close()  # _capture_liveのfinally(session.close())を即時実行させる
-                if not args.synthetic:
-                    threaded.close()
 
                 ended_reason = (
                     "interrupted"
