@@ -320,8 +320,16 @@ class SurvivorsController:
         前回処理した frame 以前の番号なら discard として記録して None を返し、
         番号が飛んでいればその枚数を drop として capture record に残します。
         """
+        # 実 CaptureSession は一時的な focus 喪失を例外にせず内部 pause して None を返す。
+        # pause に入った tick だけを focus_lost として記録する(fake capture は paused を持たない)。
+        was_paused = getattr(self._capture, "paused", False)
         try:
             captured = self._capture.capture_next()
+            if not was_paused and getattr(self._capture, "paused", False):
+                self._health.record_focus_lost(
+                    now_ns=self._clock_ns(), detail="target window lost foreground"
+                )
+                return None
         except TargetWindowStateError as exc:
             # 実 capture は focus 喪失を例外で伝える。STOP の記録だけ行い、
             # _health_stop() は run() の poll 分岐に一本化する(二重に呼ばないため)。
