@@ -123,6 +123,10 @@ def test_wait_for_foreground_propagates_non_foreground_state_errors():
         )
 
 
+_PAUSE = "PAUSE"
+_RESUME = "RESUME"
+
+
 class _FakeCaptureSession:
     """_capture_liveをCaptureSessionの実装なしで検証するための最小dummy。
 
@@ -135,6 +139,9 @@ class _FakeCaptureSession:
 
         locator/targetは自分自身とダミーオブジェクトで済ませ、
         started/closedでstart()・close()が呼ばれたかを外から確認できるようにする。
+        frames_to_yieldに_PAUSE/_RESUMEマーカーを混ぜると、そのtickで
+        pausedプロパティだけ切り替えてNoneを返す(実CaptureSessionの
+        一時停止/復帰tickを模擬する)。
         """
         self.locator = self
         self.target = object()
@@ -142,6 +149,7 @@ class _FakeCaptureSession:
         self._foreground_ok = foreground_ok
         self.started = False
         self.closed = False
+        self.paused = False
 
     def validate_lightweight(self, target, *, require_foreground):
         """foreground_okがFalseの間だけフォアグラウンド喪失を模擬する。
@@ -160,10 +168,18 @@ class _FakeCaptureSession:
         """用意したframeを1つずつ払い出し、尽きたらNoneを返す。
 
         _capture_liveのwhileループが「frameが来ないtick」を経験できるよう、
-        frames_to_yieldを使い切った後はNoneを返し続ける。
+        frames_to_yieldを使い切った後はNoneを返し続ける。_PAUSE/_RESUME
+        マーカーはpausedを切り替えるだけでframeは返さない。
         """
         if self._frames:
-            return self._frames.pop(0)
+            item = self._frames.pop(0)
+            if item == _PAUSE:
+                self.paused = True
+                return None
+            if item == _RESUME:
+                self.paused = False
+                return None
+            return item
         return None
 
     def close(self):
@@ -207,6 +223,26 @@ def test_capture_live_yields_until_deadline_then_closes():
     assert session.closed is True
     assert stats["ended_reason"] == "duration_elapsed"
     assert "started_at" in stats
+
+
+def test_capture_live_logs_pause_and_resume_transitions_to_stderr(capsys):
+    """foreground一時停止・復帰のtick遷移でstderrへログが出ることを確認する。
+
+    以前はsession.pausedの遷移がコンソールへ一切出ず、operatorが
+    alt-tabによる一時停止・復帰を実行結果から確認できなかった。
+    frameを伴わないtickでも遷移を検知してログすることを見る。
+    """
+    session = _FakeCaptureSession([_PAUSE, _RESUME, _frame(0, 100)])
+    interrupted = threading.Event()
+    stats: dict = {}
+
+    frames = list(capture_survivors._capture_live(session, 0.5, interrupted, stats))
+
+    assert [frame.session_frame_index for frame in frames] == [0]
+    err = capsys.readouterr().err
+    assert "capture paused" in err
+    assert "capture resumed" in err
+    assert err.index("capture paused") < err.index("capture resumed")
 
 
 def test_capture_live_stops_promptly_when_interrupted_while_foreground_paused():

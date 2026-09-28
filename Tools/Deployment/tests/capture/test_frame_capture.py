@@ -398,6 +398,30 @@ def test_capture_pauses_and_recovers_after_foreground_loss(
     assert frame.captured_monotonic_ns == 200
 
 
+def test_paused_property_reflects_foreground_loss_and_recovery(
+    profile, policy, fake_api, target_window, golden_bgra
+):
+    """paused プロパティが一時停止/再開の tick とちょうど同期して切り替わることを確認する。
+
+    capture_survivors._capture_live がこのプロパティを見て operator へ
+    一時停止・再開をログ出力するため、内部フラグとずれてはならない。
+    """
+    from conftest import FakeCaptureBackend
+
+    backend = FakeCaptureBackend([(golden_bgra.copy(), 100), (golden_bgra.copy(), 200)])
+    session = _session(profile, policy, fake_api, backend)
+    session.start()
+    assert session.paused is False
+
+    fake_api.foreground_hwnd = 999
+    session.capture_next()
+    assert session.paused is True
+
+    fake_api.foreground_hwnd = target_window.hwnd
+    session.capture_next()  # stale frame の読み捨て tick
+    assert session.paused is False
+
+
 def test_capture_rejects_regressing_monotonic_timestamp(
     profile, policy, fake_api, golden_bgra
 ):

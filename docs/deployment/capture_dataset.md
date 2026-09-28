@@ -46,7 +46,7 @@ python Tools/Deployment/capture_survivors.py `
 
 ## 中断・一時停止
 
-収録中に alt-tab 等で対象ウィンドウが一時的にフォアグラウンドを失っても、収録は中断されない。自動で一時停止し、ウィンドウが前面へ戻ると自動で再開する(解像度変更やプロセス差し替えなど、alt-tab 以外の状態変化は従来通り即座に fail-closed で終了する)。
+収録中に alt-tab 等で対象ウィンドウが一時的にフォアグラウンドを失っても、収録は中断されない。自動で一時停止し、ウィンドウが前面へ戻ると自動で再開する(解像度変更やプロセス差し替えなど、alt-tab 以外の状態変化は従来通り即座に fail-closed で終了する)。一時停止・再開のたびに `capture paused: target window lost foreground` / `capture resumed: target window regained foreground` を stderr へ出力するため、operator はコンソールで一時停止が起きたことを確認できる。
 
 Ctrl+C は 1 回目と 2 回目で挙動が異なる:
 
