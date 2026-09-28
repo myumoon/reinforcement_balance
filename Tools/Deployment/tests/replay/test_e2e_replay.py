@@ -6,6 +6,8 @@ effect recorder の semantic JSON、discrete/numeric の分離、同一入力で
 実時計と live input backend に触れないことを確かめます。
 後半(タスク3)は golden/diff: quantize と segment tolerance、first divergence の tree report、
 golden update の必須項目、安全 fixture の hard assertion、正式 parent 欠落時の formal verdict 拒否です。
+最後(タスク4)は configs/e2e_replay_suite_v1.yaml の synthetic suite を標準 pytest で3回ずつ再生する決定性 gate、
+CLI サブコマンド(replay/compare/update-golden/publish-formal-verdict)、30分相当の仮想 schedule の benchmark です。
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import time
 
 import numpy as np
 import pytest
+import yaml
 
 import replay_controller_fixture as fixture
 import replay_survivors_session as cli
@@ -28,6 +31,7 @@ from survivors.controller.state_machine import CampaignRunMode
 from survivors.input.controller import InputLeaseController
 from survivors.replay.e2e_replay import (
     DEFAULT_TOLERANCES,
+    FORMAL_REPLAY_RUNS,
     CaptureManifest,
     FormalReplayRejectedError,
     GoldenUpdateError,
@@ -55,6 +59,8 @@ from survivors.replay.recorded_frame_source import DeterminismManifest, Determin
 from survivors.runtime.artifact_bundle import RuntimeBundle
 from survivors.target_profile import load_target_profile
 from survivors.vision.entity_tracker import EntityTracker
+from survivors.vision.hud_parser import HudStateV1, ParsedButton, ParsedCard
+from survivors.vision.world_detector import DetectionResult
 
 SESSION = "e2e-sess"
 PROFILE_HASH = "d" * 64
@@ -381,7 +387,7 @@ def test_cli_replays_capture_with_loaded_artifacts(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(cli, "load_runtime_profile", lambda *_a: profile)
     monkeypatch.setattr(cli, "_load_artifacts", lambda args: loaded.append(args) or parts)
     argv = [
-        "--capture-manifest", str(capture_path), "--output-dir", str(tmp_path / "out"),
+        "replay", "--capture-manifest", str(capture_path), "--output-dir", str(tmp_path / "out"),
         "--combat-package", "c", "--detector-config", "d",
         "--class-map", str(Path(fixture.__file__).parent / "configs" / "world_class_map_v1.yaml"),
         "--detector-weights", "w", "--detector-manifest", "x", "--campaign-run-mode", "operator_debug_restart",
@@ -393,7 +399,7 @@ def test_cli_replays_capture_with_loaded_artifacts(tmp_path: Path, monkeypatch: 
     _write_capture(tmp_path, data)
     loaded.clear()
     with pytest.raises(ReplayIntegrityError):
-        cli.main([*argv[:3], str(tmp_path / "out2"), *argv[4:]])
+        cli.main([*argv[:4], str(tmp_path / "out2"), *argv[5:]])
     assert not loaded  # artifact を読む前に止まる
 
 
@@ -727,3 +733,268 @@ def test_formal_verdict_is_refused_when_a_parent_is_development_only(base_run, t
     with pytest.raises(FormalReplayRejectedError):
         publish_formal_replay_verdict(tmp_path / "verdict.json", **kwargs)
     assert not (tmp_path / "verdict.json").exists()
+
+
+# ---- synthetic suite・CLI・30分 benchmark(06-01 タスク4) ---------------------------------------
+
+SUITE = yaml.safe_load(
+    (Path(fixture.__file__).parent / "configs" / "e2e_replay_suite_v1.yaml").read_text(encoding="utf-8")
+)
+SUITE_FIXTURES = {spec["name"]: spec for spec in SUITE["fixtures"]}
+SUITE_TOLERANCES = {segment: Tolerance(*values) for segment, values in SUITE["gate"]["tolerances"].items()}
+
+
+class SceneDetector:
+    """suite の detector_scene に応じた場面を返す detector(呼ばれた回数で場面を進める)。
+
+    basic は player anchor と敵1体、gems は gem が player へ近づいて回収され(届いたら消える)、
+    dense は 60px の敵を 50px 間隔で並べて重ね、elite・boss・hazard も置いた終盤場面です。
+    呼ばれる順番は replay で固定されるので、回数で場面を進めても決定的です。
+    """
+
+    def __init__(self, scene: str) -> None:
+        """場面名を保持する。"""
+        assert scene in {"basic", "gems", "dense"}, scene
+        self._scene = scene
+        self._calls = 0
+
+    def infer(self, frame_bgr: np.ndarray, *, score_threshold: float) -> DetectionResult:
+        """呼び出し回数に応じた DetectionResult を返す(画素は見ない)。"""
+        step = self._calls
+        self._calls += 1
+        boxes = [[940, 520, 980, 560], [1300, 300, 1340, 340]]
+        classes = [1, 2]  # player_anchor, enemy_normal
+        if self._scene == "gems":
+            for k in range(3):  # gem_blue / gem_green / gem_red
+                x = 1400 + 120 * k - 12 * step
+                if x > 980:
+                    boxes.append([x, 530, x + 16, 546])
+                    classes.append(5 + k)
+        elif self._scene == "dense":
+            for k in range(16):
+                x, y = 740 + (k % 8) * 50, 380 + (k // 8) * 220 + (step % 5) * 4
+                boxes.append([x, y, x + 60, y + 60])
+                classes.append(3 if k % 5 == 0 else 2)  # enemy_elite / enemy_normal
+            boxes += [[900, 480, 1020, 600], [1000, 540, 1060, 600], [600, 700, 900, 900]]
+            classes += [4, 10, 11]  # enemy_boss, hazard_projectile, hazard_area
+        return DetectionResult(
+            boxes_xyxy=np.array(boxes, np.float32), scores=np.full(len(boxes), .9, np.float32),
+            class_ids=np.array(classes, np.int32), image_width=1920, image_height=1080,
+        )
+
+
+class SuiteHudParser:
+    """suite の script(画面・confidence・card・ボタン)どおりの HudStateV1 を frame 番号で返す HUD parser。"""
+
+    def __init__(self, spec: dict) -> None:
+        """script を frame ごとの区間へ展開し、inventory と timer の初期値を決める。"""
+        defaults = SUITE["session"]
+        self._frames = [segment for segment in spec["script"] for _ in range(segment["frames"])]
+        inventory = list(spec.get("inventory", defaults["default_inventory"]))
+        self._inventory = tuple(inventory + [None] * (12 - len(inventory)))
+        self._timer = float(spec.get("timer_seconds", defaults["default_timer_seconds"]))
+
+    def reset_temporal_state(self) -> None:
+        """arm 時のリセット(台本は時系列状態を持たない)。"""
+
+    def parse(self, frame_bgra, *, session_id: str, frame_index: int, captured_monotonic_ns: int) -> HudStateV1:
+        """frame 番号の区間から HudStateV1 を組み立てる。"""
+        segment = self._frames[frame_index]
+        cards = tuple(
+            ParsedCard(slot, item, kind, level, .99, "ok", (100 + 450 * slot, 100, 400 + 450 * slot, 500))
+            for slot, (item, kind, level) in enumerate(segment.get("cards", ()))
+        )
+        names = tuple(segment.get("buttons", ()))
+        buttons = tuple(ParsedButton(name, .95, "ok", (860, 900 + 60 * i, 1060, 950 + 60 * i)) for i, name in enumerate(names))
+        return HudStateV1(
+            "hud_state.v1", session_id, frame_index, captured_monotonic_ns, "a" * 64,
+            segment["screen"], segment.get("confidence", .9), "ok",
+            self._timer, .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+            self._inventory, .9, "b" * 64, cards, "c" * 64, buttons,
+            "reroll" in names, "skip" in names, False, .9, "ok",
+        )
+
+
+def _suite_events(spec: dict) -> list[dict]:
+    """suite fixture の script と faults から recorded event 列を作る。
+
+    frame は frame_interval_ns 間隔。drop はその frame を落とし、duplicate/focus_lost はその frame の直後、
+    timeout は interval_ns ずつ時計を進めながら count 回積む(後続 frame も後ろへずれる)。
+    """
+    faults: dict[int, list[dict]] = {}
+    for fault in spec.get("faults", ()):
+        faults.setdefault(fault["frame"], []).append(fault)
+    events: list[dict] = []
+    ts = START_NS
+
+    def add(kind: str, at: int, index: int | None = None) -> None:
+        events.append({
+            "completion_seq": len(events), "kind": kind, "timestamp_ns": at, "session_frame_index": index,
+            "correlation_id": None if index is None else f"{SESSION}:{index}",
+        })
+
+    for index in range(sum(segment["frames"] for segment in spec["script"])):
+        here = faults.get(index, [])
+        if all(fault["kind"] != "drop" for fault in here):
+            add("frame", ts, index)
+        for fault in here:
+            if fault["kind"] == "duplicate":
+                add("duplicate", ts + 1_000_000, index)
+            elif fault["kind"] == "focus_lost":
+                add("focus_lost", ts + 2_000_000)
+            elif fault["kind"] == "timeout":
+                for _ in range(fault.get("count", 1)):
+                    ts += fault["interval_ns"]
+                    add("timeout", ts)
+            else:
+                assert fault["kind"] == "drop", fault
+        ts += SUITE["session"]["frame_interval_ns"]
+    return events
+
+
+def _suite_replay(tmp_path: Path, spec: dict, name: str):
+    """suite fixture を1回 replay し、(capture, result) を返す。"""
+    capture = CaptureManifest.load(_write_capture(tmp_path, _capture_dict(_suite_events(spec))))
+    scene = spec.get("detector_scene", SUITE["session"]["default_detector_scene"])
+    return capture, _replay(tmp_path, name, capture, detector=SceneDetector(scene), hud_parser=SuiteHudParser(spec))
+
+
+def test_suite_config_lists_every_plan_fixture() -> None:
+    """suite は plan の検証一式(画面・card 種別/枚数・fault・場面)を全て含み、run 数は formal と同じ3回。"""
+    fixtures = SUITE["fixtures"]
+    segments = [segment for spec in fixtures for segment in spec["script"]]
+    assert {"gameplay", "level_up_items", "level_up_fallback", "chest", "paused", "death", "result", "unknown"} <= {
+        segment["screen"] for segment in segments
+    }
+    assert {"weapon", "evolved", "fallback"} <= {card[1] for segment in segments for card in segment.get("cards", ())}
+    assert {1, 2, 3} <= {len(segment["cards"]) for segment in segments if segment.get("cards")}
+    assert {"reroll", "skip"} <= {name for segment in segments for name in segment.get("buttons", ())}
+    assert any(segment.get("confidence", 1.0) < 0.5 for segment in segments)
+    assert {"timeout", "focus_lost", "drop", "duplicate"} <= {f["kind"] for spec in fixtures for f in spec.get("faults", ())}
+    assert {"gems", "dense"} <= {spec.get("detector_scene") for spec in fixtures}
+    assert SUITE["gate"]["runs"] == FORMAL_REPLAY_RUNS
+    assert len(SUITE_FIXTURES) == len(fixtures)
+
+
+@pytest.mark.parametrize("name", sorted(SUITE_FIXTURES))
+def test_synthetic_suite_fixture_is_deterministic_over_three_runs(tmp_path: Path, name: str) -> None:
+    """M11: 同じ bundle で3回 replay し、discrete hash 一致・numeric segment の quantized/tolerance gate を通る。
+
+    safety fixture は unknown/focus loss/timeout 区間の effect が release/no-op だけであることも hard assertion する。
+    """
+    spec, gate = SUITE_FIXTURES[name], SUITE["gate"]
+    runs = [_suite_replay(tmp_path, spec, f"run-{k}") for k in range(gate["runs"])]
+    capture, results = runs[0][0], [result for _, result in runs]
+    for result in results:
+        assert result.manifest["development_only"] is True and result.manifest["formal_replay_eligible"] is False
+    diffs = [
+        compare_replays(results[0], result, tolerances=SUITE_TOLERANCES, quantum=gate["quantum"], obs_layout=OBS_LAYOUT)
+        for result in results[1:]
+    ]
+    for diff in diffs:
+        assert diff.passed, diff.first_divergence
+        assert diff.discrete_sha256[0] == diff.discrete_sha256[1]
+        assert diff.metrics["numeric_tolerance_pass_rate"] == 1.0
+        assert all(s["quantized_equal"] or s["within_tolerance"] for s in diff.segments.values())
+    expect, metrics = spec["expect"], replay_metrics(results[0])
+    rows = _jsonl(results[0].paths["discrete.jsonl"])
+    effects = json.loads(results[0].paths["effects.json"].read_text(encoding="utf-8"))
+    assert metrics["exit_reason"] == expect.get("exit_reason", "stop_requested"), metrics
+    assert set(expect["states"]) <= {row["payload"]["to_state"] for row in rows if row["stage"] == "state_machine"}
+    assert set(expect.get("effects", ())) <= set(metrics["effect_counts"]), metrics
+    # parser の confidence が閾値未満の frame からは移動を出さない(低 confidence を行動へ使わない)。
+    low, start = set(), 0
+    for segment in spec["script"]:
+        if segment.get("confidence", 1.0) < 0.5:
+            low.update(f"{SESSION}:{i}" for i in range(start, start + segment["frames"]))
+        start += segment["frames"]
+    assert not [e for e in effects if e["category"] == "movement" and e["correlation_id"] in low]
+    if spec.get("safety"):
+        assert_safe_effects(effects, fault_windows(capture.session, rows))
+
+
+def test_cli_suite_replay_compare_golden_and_formal_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLI: replay --runs 3 → compare → update-golden → golden 比較、分岐の検出、synthetic からの formal publish 拒否。"""
+    spec = SUITE_FIXTURES["card_choice_variants"]
+    profile = load_target_profile()
+    data = _capture_dict(_suite_events(spec))
+    data["session"].update(target_profile_hash=profile.target_hash, game_build_id=str(profile.sections["build"]["build_id"]))
+    capture_path = _write_capture(tmp_path, data)
+    policy = fixture.build_combat_policy(0)
+    loads: list = []
+
+    def load(args):
+        """呼ばれるたびに新しい部品一式を返す(run 間で状態を共有しない)。"""
+        loads.append(args)
+        return type("Parts", (), dict(
+            bundle=RuntimeBundle.from_golden_fixture(policy, item_selector=fixture.FirstCardItemSelector()),
+            detector=SceneDetector("basic"), tracker=EntityTracker({i: 5 for i in range(12)}, 0.7, 0.6, 0.9),
+            detector_manifest=None, hud_parser=SuiteHudParser(spec),
+            artifact_hashes={"combat_policy": fixture._model_hash(policy)},
+        ))
+
+    monkeypatch.setattr(cli, "load_runtime_profile", lambda *_a: profile)
+    monkeypatch.setattr(cli, "_load_artifacts", load)
+    artifacts = [
+        "--capture-manifest", str(capture_path), "--combat-package", "c", "--detector-config", "d",
+        "--class-map", str(Path(fixture.__file__).parent / "configs" / "world_class_map_v1.yaml"),
+        "--detector-weights", "w", "--detector-manifest", "x",
+    ]
+    out = tmp_path / "suite"
+    assert cli.main(["replay", *artifacts, "--output-dir", str(out), "--runs", "3",
+                     "--campaign-run-mode", "operator_debug_restart"]) == 0
+    assert len(loads) == 3
+    comparisons = json.loads((out / "comparisons.json").read_text(encoding="utf-8"))
+    assert [c["passed"] for c in comparisons] == [True, True]
+    runs = [out / f"run-{k}" for k in (1, 2, 3)]
+    assert cli.main(["compare", "--old", str(runs[0]), "--new", str(runs[1])]) == 0
+
+    golden, hashes = tmp_path / "golden.json", tmp_path / "hashes.json"
+    manifest = json.loads((runs[1] / "manifest.json").read_text(encoding="utf-8"))
+    hashes.write_text(json.dumps({}), encoding="utf-8")
+    with pytest.raises(GoldenUpdateError):
+        cli.main(["update-golden", "--golden", str(golden), "--old-run", str(runs[0]), "--new-run", str(runs[1]),
+                  "--artifact-hashes", str(hashes)])
+    hashes.write_text(json.dumps({**manifest["artifact_hashes"],
+                                  "capture_manifest_sha256": manifest["capture_manifest_sha256"]}), encoding="utf-8")
+    assert cli.main(["update-golden", "--golden", str(golden), "--old-run", str(runs[0]), "--new-run", str(runs[1]),
+                     "--artifact-hashes", str(hashes)]) == 0
+    assert cli.main(["compare", "--golden", str(golden), "--new", str(runs[2])]) == 0
+
+    def tamper(rows: list[dict]) -> None:
+        next(row for row in rows if row["stage"] == "state_machine")["payload"]["to_state"] = "unknown"
+
+    _mutate_jsonl(runs[2] / "discrete.jsonl", tamper)
+    report = tmp_path / "report.json"
+    assert cli.main(["compare", "--old", str(runs[0]), "--golden", str(golden), "--new", str(runs[2]),
+                     "--report", str(report)]) == 1
+    result = json.loads(report.read_text(encoding="utf-8"))
+    assert result["passed"] is False and "discrete" in result["golden_mismatches"]
+    assert result["first_divergence"]["frame"]["stage"]["name"] == "state_machine"
+
+    verdict = tmp_path / "verdict.json"
+    with pytest.raises(FormalReplayRejectedError):
+        cli.main(["publish-formal-verdict", *artifacts, *[a for run in runs for a in ("--run", str(run))],
+                  "--verdict", str(verdict)])
+    assert not verdict.exists()
+
+
+def test_thirty_minute_virtual_schedule_replays_within_wall_clock_budget(tmp_path: Path) -> None:
+    """M11: 仮想時計で30分進む synthetic schedule を実 controller で再生し、wall-clock 予算(10分)内に終わる。"""
+    bench = SUITE["benchmark"]
+    interval = bench["frame_interval_ns"]
+    frames = bench["virtual_duration_s"] * 1_000_000_000 // interval + 1
+    events = [
+        {"completion_seq": i, "kind": "frame", "timestamp_ns": START_NS + i * interval,
+         "session_frame_index": i, "correlation_id": f"{SESSION}:{i}"}
+        for i in range(frames)
+    ]
+    capture = CaptureManifest.load(_write_capture(tmp_path, _capture_dict(events)))
+    started = time.perf_counter()
+    result = _replay(tmp_path, "bench", capture, hud_parser=fixture.ScriptedHudParser([tuple(c) for c in bench["cycle"]]))
+    elapsed = time.perf_counter() - started
+    clock = result.manifest["virtual_clock"]
+    assert clock["end_ns"] - clock["start_ns"] >= bench["virtual_duration_s"] * 1_000_000_000
+    assert result.exit_reason == "stop_requested"
+    assert replay_metrics(result)["stage_counts"]["capture"] == frames
+    assert elapsed < bench["wall_clock_budget_s"], f"30-minute virtual replay took {elapsed:.1f}s"

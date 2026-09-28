@@ -107,9 +107,10 @@ def _replay(args: argparse.Namespace) -> int:
     identity = {"target_profile_hash": profile.target_hash, "game_build_id": str(profile.sections["build"]["build_id"])}
     capture = CaptureManifest.load(args.capture_manifest)
     capture.require_identity(**identity)
-    parts = _load_artifacts(args)
     results = []
     for run in range(1, args.runs + 1):
+        # run ごとに読み直す(controller は tracker を reset しないので、内部状態を持つ部品を run 間で共有しない)。
+        parts = _load_artifacts(args)
         output_dir = args.output_dir if args.runs == 1 else args.output_dir / f"run-{run}"
         result = run_recorded_replay(
             capture, output_dir,
