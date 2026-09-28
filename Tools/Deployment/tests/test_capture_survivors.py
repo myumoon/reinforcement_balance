@@ -89,6 +89,71 @@ def test_wait_for_foreground_propagates_non_foreground_state_errors():
         )
 
 
+class _FakeCaptureSession:
+    """_capture_liveをCaptureSessionの実装なしで検証するための最小dummy。
+
+    locator/target/start/capture_next/closeだけをduck-typingで
+    提供し、start呼び出し有無・close呼び出し有無を観測する。
+    """
+
+    def __init__(self, frames_to_yield=(), *, foreground_ok=True):
+        self.locator = self
+        self.target = object()
+        self._frames = list(frames_to_yield)
+        self._foreground_ok = foreground_ok
+        self.started = False
+        self.closed = False
+
+    def validate_lightweight(self, target, *, require_foreground):
+        if not self._foreground_ok:
+            raise TargetWindowForegroundLost("still lost")
+
+    def start(self):
+        self.started = True
+
+    def capture_next(self):
+        if self._frames:
+            return self._frames.pop(0)
+        return None
+
+    def close(self):
+        self.closed = True
+
+
+def test_capture_live_closes_without_starting_when_interrupted_before_foreground():
+    """起動前に中断された場合、start()を呼ばずcloseだけ行いended_reasonをinterruptedにすることを確認する。
+
+    session.start()はDXcamの実キャプチャを起動する重い呼び出しのため、
+    フォアグラウンドを一度も確認できないまま呼んでしまわないことが重要。
+    """
+    session = _FakeCaptureSession(foreground_ok=False)
+    interrupted = threading.Event()
+    interrupted.set()  # 起動前から中断済みだった状況を再現する
+    stats: dict = {}
+
+    frames = list(capture_survivors._capture_live(session, 1.0, interrupted, stats))
+
+    assert frames == []
+    assert session.started is False
+    assert session.closed is True
+    assert stats["ended_reason"] == "interrupted"
+
+
+def test_capture_live_yields_until_deadline_then_closes():
+    """フォアグラウンド確認後にframeをyieldし、deadline到達後は必ずcloseすることを確認する。"""
+    session = _FakeCaptureSession([_frame(0, 100)])
+    interrupted = threading.Event()
+    stats: dict = {}
+
+    frames = list(capture_survivors._capture_live(session, 0.05, interrupted, stats))
+
+    assert [frame.session_frame_index for frame in frames] == [0]
+    assert session.started is True
+    assert session.closed is True
+    assert stats["ended_reason"] == "duration_elapsed"
+    assert "started_at" in stats
+
+
 def test_graceful_interrupt_sets_flag_without_raising_on_first_sigint():
     """1回目のCtrl+Cは例外を投げずフラグを立てるだけであることを確認する。"""
     flag = threading.Event()
