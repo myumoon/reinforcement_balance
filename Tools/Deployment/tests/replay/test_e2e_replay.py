@@ -27,12 +27,15 @@ import yaml
 import replay_controller_fixture as fixture
 import replay_survivors_session as cli
 from survivors.controller import controller as controller_module
-from survivors.controller.state_machine import CampaignRunMode
+from survivors.controller.health_monitor import HealthMonitor, HealthVerdict
+from survivors.controller.state_machine import CampaignRunMode, StateMachine
+from survivors.controller.ui_navigation import Effect
 from survivors.input.controller import InputLeaseController
 from survivors.replay.e2e_replay import (
     DEFAULT_TOLERANCES,
     FORMAL_REPLAY_RUNS,
     CaptureManifest,
+    FaultWindow,
     FormalReplayRejectedError,
     GoldenUpdateError,
     ReplayIntegrityError,
@@ -57,6 +60,7 @@ from survivors.replay.e2e_replay import (
     verify_virtual_telemetry,
 )
 from survivors.replay.recorded_frame_source import DeterminismManifest, DeterminismMismatchError, RecordedSession
+from survivors.runtime.agent_runtime import AgentRuntime
 from survivors.runtime.artifact_bundle import RuntimeBundle
 from survivors.target_profile import load_target_profile
 from survivors.vision.entity_tracker import EntityTracker
@@ -744,52 +748,110 @@ def test_golden_artifact_change_requires_independent_approval(base_run, tmp_path
     assert golden["approved_by"] == "verifier" and golden["previous_golden_sha256"]
 
 
-def test_fault_windows_cover_timeout_focus_loss_and_unknown_state() -> None:
-    """timeout/focus_lost は次の frame まで、unknown は unknown を抜けるまでが安全区間になる。"""
+def _cid(index: int) -> str:
+    """frame 番号の correlation id。"""
+    return f"{SESSION}:{index}"
+
+
+def test_fault_windows_hold_the_ticks_that_observed_each_fault() -> None:
+    """区間は fault を観測した tick を持つ: focus_lost は次に処理された frame、stall はその frame、unknown は滞在 tick。"""
+    marker = {"session_frame_index": None, "correlation_id": None}
     events = _events(6)
-    events.insert(3, {"completion_seq": 0, "kind": "focus_lost", "timestamp_ns": START_NS + 2 * TICK + 5,
-                      "session_frame_index": None, "correlation_id": None})
+    events.insert(3, {"completion_seq": 0, "kind": "focus_lost", "timestamp_ns": START_NS + 2 * TICK + 5, **marker})
+    events.insert(6, {"completion_seq": 0, "kind": "inference_stall", "timestamp_ns": START_NS + 4 * TICK + 5, **marker})
     for seq, event in enumerate(events):
         event["completion_seq"] = seq
     session = RecordedSession.from_dict(_capture_dict(events)["session"])
-    rows = [
-        {"stage": "state_machine", "timestamp_ns": ts, "payload": {"to_state": state}}
-        for ts, state in ((10, "gameplay"), (20, "unknown"), (30, "unknown"), (40, "gameplay"), (50, "unknown"))
+    rows = [  # frame 3 は state machine まで届かなかった(focus_lost の観測 tick は frame 4)
+        {"stage": "state_machine", "correlation_id": _cid(index), "timestamp_ns": ts, "payload": {"to_state": state}}
+        for index, ts, state in ((0, 10, "gameplay"), (1, 20, "unknown"), (2, 30, "unknown"), (4, 40, "gameplay"),
+                                 (5, 60, "unknown"))
     ]
-    assert fault_windows(session, rows) == [(START_NS + 2 * TICK + 5, START_NS + 3 * TICK), (20, 40), (50, 2**63)]
+    assert fault_windows(session, rows) == [
+        FaultWindow("focus_lost", START_NS + 2 * TICK + 5, frozenset({_cid(4)})),
+        FaultWindow("inference_stall", START_NS + 4 * TICK + 5, frozenset({_cid(4)})),
+        FaultWindow("unknown", 20, frozenset({_cid(1), _cid(2)})),
+        FaultWindow("unknown", 60, frozenset({_cid(5)})),
+    ]
+    assert [w.ticks for w in fault_windows(session, rows[:3])][:2] == [frozenset(), frozenset()]
+    # focus_lost の直後(frame の直後でない)に置いた stall は記録の破損として拒否する。
+    bad = [dict(event) for event in events[:4]] + [{**events[3], "kind": "inference_stall"}]
+    bad += [dict(event) for event in events[4:]]
+    for seq, event in enumerate(bad):
+        event["completion_seq"] = seq
+    with pytest.raises(ValueError, match="inference_stall"):
+        RecordedSession.from_dict(_capture_dict(bad)["session"])
 
 
-def test_safety_assertion_hard_fails_on_input_effects_in_fault_window() -> None:
-    """区間内の movement/ui は1件でも hard fail、release/control と区間外(終端含まず)は通る。"""
+def test_safety_assertion_hard_fails_on_input_effects_or_unverified_windows() -> None:
+    """観測 tick の movement/ui は1件でも hard fail。観測 tick の無い区間は health_stop の run だけ許す。"""
 
-    def effect(ts: int, category: str) -> dict:
-        return {"correlation_id": f"{SESSION}:1", "timestamp_ns": ts, "category": category, "effect": {"kind": "x"}}
+    def effect(index: int, ts: int, category: str) -> dict:
+        return {"correlation_id": _cid(index), "timestamp_ns": ts, "category": category, "effect": {"kind": "x"}}
 
-    windows = [(100, 200)]
-    assert_safe_effects([effect(100, "release"), effect(150, "control"), effect(200, "movement"), effect(99, "ui")], windows)
+    windows = [FaultWindow("timeout", 100, frozenset({_cid(1)})), FaultWindow("unknown", 200, frozenset({_cid(2)}))]
+    fine = [effect(1, 100, "release"), effect(2, 200, "control"), effect(3, 300, "movement"), effect(0, 99, "ui")]
+    assert_safe_effects(fine, windows, exit_reason="stop_requested")
     for category in ("movement", "ui", "unknown"):
         with pytest.raises(SafetyAssertionError):
-            assert_safe_effects([effect(150, "release")] * 1000 + [effect(150, category)], windows)
+            assert_safe_effects([effect(1, 100, "release")] * 1000 + [effect(1, 100, category)], windows,
+                                exit_reason="stop_requested")
     with pytest.raises(SafetyAssertionError, match="no unknown"):
-        assert_safe_effects([], [])
+        assert_safe_effects([], [], exit_reason="stop_requested")
+    empty = [*windows, FaultWindow("focus_lost", 150, frozenset())]
+    with pytest.raises(SafetyAssertionError, match="not verified"):
+        assert_safe_effects(fine, empty, exit_reason="stop_requested")
+    assert_safe_effects([effect(0, 99, "movement")], empty, exit_reason="health_stop:focus_lost")
+    with pytest.raises(SafetyAssertionError):  # health_stop でも区間開始以降の入力 effect は許さない
+        assert_safe_effects([effect(9, 150, "movement")], empty, exit_reason="health_stop:focus_lost")
 
 
-def test_safety_fixture_timeout_and_focus_loss_emit_only_release_or_noop(tmp_path: Path) -> None:
-    """実 controller の replay で timeout・focus loss 後(次の frame まで)の effect は release/no-op だけ。"""
-    events = _events()
-    events.insert(10, {"completion_seq": 0, "kind": "focus_lost", "timestamp_ns": START_NS + 10 * TICK + 3_000_000,
-                       "session_frame_index": None, "correlation_id": None})
-    for seq, event in enumerate(events):
-        event["completion_seq"] = seq
-    capture = CaptureManifest.load(_write_capture(tmp_path, _capture_dict(events)))
-    result = _replay(tmp_path, "safety", capture)
+def _suite_safety_check(tmp_path: Path, name: str) -> list[dict]:
+    """suite の safety fixture を実 controller で1回再生し、hard assertion を当てて discrete 行を返す。"""
+    capture, result = _suite_replay(tmp_path, SUITE_FIXTURES[name], "run")
+    rows = _jsonl(result.paths["discrete.jsonl"])
     effects = json.loads(result.paths["effects.json"].read_text(encoding="utf-8"))
-    windows = fault_windows(capture.session, _jsonl(result.paths["discrete.jsonl"]))
-    assert len(windows) >= 2  # timeout と focus_lost
-    assert_safe_effects(effects, windows)
-    injected = [*effects, {**effects[0], "timestamp_ns": windows[0][0], "category": "movement"}]
-    with pytest.raises(SafetyAssertionError):
-        assert_safe_effects(injected, windows)
+    assert_safe_effects(effects, fault_windows(capture.session, rows), exit_reason=result.exit_reason)
+    return rows
+
+
+def test_inference_timeout_fixture_goes_through_runtime_gate(tmp_path: Path) -> None:
+    """M9: inference_stall は仮想時計を推論中に進め、runtime の inference timeout gate がその frame を no_op にする。"""
+    rows = _suite_safety_check(tmp_path, "fault_inference_timeout")
+    gated = [row for row in rows if row["stage"] == "policy" and row["payload"]["reason"] == "inference timeout gate failed"]
+    assert [row["correlation_id"] for row in gated] == [_cid(8), _cid(20)]
+
+
+@pytest.mark.parametrize("name, mutation", [
+    ("fault_inference_timeout", "no_inference_timeout_gate"),
+    ("fault_inference_timeout", "move_on_every_tick"),
+    ("fault_capture_gap", "no_health_stop"),
+    ("fault_focus_loss", "no_health_stop"),
+    ("fault_unknown_ui", "move_on_every_tick"),
+])
+def test_safety_fixture_fails_when_controller_safety_is_mutated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, mutation: str
+) -> None:
+    """M9 mutation: 安全機構を壊した実 controller では、全 fault 種別の safety fixture が SafetyAssertionError になる。"""
+    if mutation == "no_inference_timeout_gate":
+        monkeypatch.setattr(
+            AgentRuntime, "_enforce_inference_timeout",
+            lambda self, snapshot, decision, **_kwargs: self._accept_snapshot(snapshot, decision),
+        )
+    elif mutation == "no_health_stop":
+        for method in ("poll", "ingest", "record_focus_lost"):
+            monkeypatch.setattr(HealthMonitor, method, lambda self, *_args, **_kwargs: HealthVerdict.OK)
+    else:
+        step = StateMachine.step
+
+        def moving(self, snapshot, decision, **kwargs):
+            """本来の effect に move を1つ足す(区間内の tick で移動を出す改変)。"""
+            return (*step(self, snapshot, decision, **kwargs), Effect(kind="move", action_index=0, reason="mutation"))
+
+        monkeypatch.setattr(StateMachine, "step", moving)
+    # 空区間の扱いではなく、fault を観測した tick の移動 effect そのもので落ちること。
+    with pytest.raises(SafetyAssertionError, match="non release/no-op effects"):
+        _suite_safety_check(tmp_path, name)
 
 
 class _FormalDetector:
@@ -946,6 +1008,7 @@ def _suite_events(spec: dict) -> list[dict]:
 
     frame は frame_interval_ns 間隔。drop はその frame を落とし、duplicate/focus_lost はその frame の直後、
     timeout は interval_ns ずつ時計を進めながら count 回積む(後続 frame も後ろへずれる)。
+    inference_stall はその frame の推論が interval_ns かかったことを frame の直後に積む(後続 frame もずれる)。
     """
     faults: dict[int, list[dict]] = {}
     for fault in spec.get("faults", ()):
@@ -972,6 +1035,9 @@ def _suite_events(spec: dict) -> list[dict]:
                 for _ in range(fault.get("count", 1)):
                     ts += fault["interval_ns"]
                     add("timeout", ts)
+            elif fault["kind"] == "inference_stall":
+                ts += fault["interval_ns"]
+                add("inference_stall", ts)
             else:
                 assert fault["kind"] == "drop", fault
         ts += SUITE["session"]["frame_interval_ns"]
@@ -996,7 +1062,9 @@ def test_suite_config_lists_every_plan_fixture() -> None:
     assert {1, 2, 3} <= {len(segment["cards"]) for segment in segments if segment.get("cards")}
     assert {"reroll", "skip"} <= {name for segment in segments for name in segment.get("buttons", ())}
     assert any(segment.get("confidence", 1.0) < 0.5 for segment in segments)
-    assert {"timeout", "focus_lost", "drop", "duplicate"} <= {f["kind"] for spec in fixtures for f in spec.get("faults", ())}
+    assert {"timeout", "focus_lost", "drop", "duplicate", "inference_stall"} <= {
+        f["kind"] for spec in fixtures for f in spec.get("faults", ())
+    }
     assert {"gems", "dense"} <= {spec.get("detector_scene") for spec in fixtures}
     assert SUITE["gate"]["runs"] == FORMAL_REPLAY_RUNS
     assert len(SUITE_FIXTURES) == len(fixtures)
@@ -1035,8 +1103,10 @@ def test_synthetic_suite_fixture_is_deterministic_over_three_runs(tmp_path: Path
             low.update(f"{SESSION}:{i}" for i in range(start, start + segment["frames"]))
         start += segment["frames"]
     assert not [e for e in effects if e["category"] == "movement" and e["correlation_id"] in low]
+    reasons = {row["payload"]["reason"] for row in rows if row["stage"] == "policy"}
+    assert set(expect.get("policy_reasons", ())) <= reasons, reasons
     if spec.get("safety"):
-        assert_safe_effects(effects, fault_windows(capture.session, rows))
+        assert_safe_effects(effects, fault_windows(capture.session, rows), exit_reason=metrics["exit_reason"])
 
 
 def test_cli_suite_replay_compare_golden_and_formal_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

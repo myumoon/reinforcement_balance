@@ -14,7 +14,9 @@
 - **仮想時計**: `VirtualClock` を controller の `clock_ns`/`sleep` へ注入します。replay path は
   `time.sleep`/`time.perf_counter_ns` などの実時計を一切呼ばず、記録 event の timestamp で時計を進めます。
 - **frame source**: `RecordedFrameSource` が capture manifest の event 列(frame / duplicate / timeout /
-  focus_lost)を記録された completion 順に再生し、`CapturedFrame` を返します。
+  focus_lost / inference_stall)を記録された completion 順に再生し、`CapturedFrame` を返します。
+  inference_stall は直前の frame の推論が記録時刻まで返らなかったことを表し、runtime へ注入した時計
+  (`inference_clock_ns`)が推論中に仮想時計を進めるので、runtime の inference timeout gate を実際に通ります。
 - **shadow 固定**: controller は常に shadow mode で、`execute_effect` も live input backend も使いません。
   effect は telemetry の `effect` 行から semantic JSON(`effects.json`)として保存します。
 - **決定性 manifest**: `torch.use_deterministic_algorithms`・device・NMS 実装・threads を記録時と照合し、
@@ -122,8 +124,13 @@ capture 側の異常(faults)と、1回目の再生で必ず起きること(expec
 - fault: capture gap(drop・duplicate を含む)、focus loss、unknown UI、parser low confidence、inference timeout
 
 テストは各 fixture を同じ bundle で3回再生し、discrete hash 一致と numeric gate を確認します。
-`safety: true` の fixture は unknown / focus loss / timeout 区間の effect が release / no-op だけであることを
-hard assertion し(aggregate tolerance では許容しない)、low confidence の frame からは移動を出さないことも確かめます。
+`safety: true` の fixture は、fault を観測した tick(unknown 中の tick、focus loss / capture timeout の後に最初に
+処理された frame、推論が遅れた frame)の effect が release / no-op だけであることを hard assertion します
+(aggregate tolerance では許容しない)。観測 tick が0件の区間は検証済みとみなさず、run が health_stop で終わった
+場合だけ区間開始以降の全 effect を対象にして許します。inference timeout の fixture は policy 行の reason に
+`inference timeout gate failed` が出ることも確かめ、timeout gate の無効化・health stop の無効化・区間内での移動を
+入れた改変で各 safety fixture が `SafetyAssertionError` になる mutation test を持ちます。
+low confidence の frame からは移動を出さないことも確かめます。
 さらに仮想時計で30分進む schedule(200ms 間隔・約9000 frame)が wall-clock 10分以内に終わることを測ります
 (手元で約90秒)。
 

@@ -410,7 +410,7 @@ def run_recorded_replay(
         ))
         controller = SurvivorsController(
             mode="shadow", session_id=session.session_id, capture=source, detector=detector, tracker=tracker,
-            hud_parser=hud_parser, assembler=assembler, runtime=AgentRuntime(bundle, clock_ns=clock),
+            hud_parser=hud_parser, assembler=assembler, runtime=AgentRuntime(bundle, clock_ns=source.inference_clock_ns),
             state_machine=StateMachine(), health=HealthMonitor(), telemetry=telemetry,
             schema=bundle.deploy_schema, model_hashes=artifact_hashes, ui_config=bundle.ui_policy_config,
             class_map_path=class_map_path, score_threshold=score_threshold, clock_ns=clock, sleep=clock.sleep,
@@ -943,48 +943,80 @@ def golden_mismatches(
     return out, diff
 
 
-def fault_windows(session: RecordedSession, discrete_rows: Iterable[Mapping[str, Any]]) -> list[tuple[int, int]]:
-    """unknown state・focus loss・timeout が続いている仮想時刻の区間 [開始, 終了) を列挙する。
+@dataclass(frozen=True)
+class FaultWindow:
+    """安全 fixture の1区間(fault の種類・開始時刻・その fault を観測した tick の correlation id)。
 
-    timeout/focus_lost は記録 event の時刻から次の新しい frame が届く時刻まで、
-    unknown は state machine が unknown に入った時刻から unknown 以外へ移る時刻までです。
-    終端は含まないので、回復後の新しい frame で出た effect は対象外になります。
+    tick は state machine まで処理された frame(effect を出しうる frame)のことです。
+    timeout / focus_lost はその event の後に最初に処理された frame、inference_stall は推論が遅れた frame 自身、
+    unknown は state machine が unknown にいた tick を持ちます。
+    ticks が空なのは、fault の後に1 tick も処理されずに run が終わったときだけです。
     """
+
+    kind: str
+    start_ns: int
+    ticks: frozenset[str]
+
+
+def fault_windows(session: RecordedSession, discrete_rows: Iterable[Mapping[str, Any]]) -> list[FaultWindow]:
+    """記録 session の fault(timeout・focus_lost・inference_stall)と unknown state の安全区間を列挙する。
+
+    区間は時刻ではなく「その fault を観測した tick」で持ちます。controller は frame を処理する tick で
+    しか effect を出さないため、fault から次の frame までの時刻区間では effect が構造的に0件になり、
+    どんな挙動でも検証を通ってしまう(空区間を検証済みと扱う)からです。
+    """
+    rows = list(discrete_rows)
+    ticks = {row["correlation_id"] for row in rows if row["stage"] == "state_machine"}
+    events = session.events
     windows = []
-    events = list(session.events)
     for pos, event in enumerate(events):
-        if event.kind in ("timeout", "focus_lost"):
-            end = next((later.timestamp_ns for later in events[pos + 1:] if later.kind == "frame"), _OPEN_END_NS)
-            windows.append((event.timestamp_ns, end))
-    start = None
-    for row in discrete_rows:
+        if event.kind == "inference_stall":
+            observers = [events[pos - 1].correlation_id]
+        elif event.kind in ("timeout", "focus_lost"):
+            observers = [later.correlation_id for later in events[pos + 1:] if later.kind == "frame"]
+        else:
+            continue
+        first = next((cid for cid in observers if cid in ticks), None)
+        windows.append(FaultWindow(event.kind, event.timestamp_ns, frozenset() if first is None else frozenset({first})))
+    unknown: tuple[int, set[str]] | None = None
+    for row in rows:
         if row["stage"] != "state_machine":
             continue
-        unknown = row["payload"]["to_state"] == ControllerState.UNKNOWN.value
-        if unknown and start is None:
-            start = row["timestamp_ns"]
-        elif not unknown and start is not None:
-            windows.append((start, row["timestamp_ns"]))
-            start = None
-    if start is not None:
-        windows.append((start, _OPEN_END_NS))
+        if row["payload"]["to_state"] == ControllerState.UNKNOWN.value:
+            unknown = unknown or (row["timestamp_ns"], set())
+            unknown[1].add(row["correlation_id"])
+        elif unknown is not None:
+            windows.append(FaultWindow("unknown", unknown[0], frozenset(unknown[1])))
+            unknown = None
+    if unknown is not None:
+        windows.append(FaultWindow("unknown", unknown[0], frozenset(unknown[1])))
     return windows
 
 
-def assert_safe_effects(effects: Iterable[Mapping[str, Any]], windows: Sequence[tuple[int, int]]) -> None:
-    """安全 fixture の hard assertion: 区間内の effect が release/no-op 以外なら SafetyAssertionError。
+def assert_safe_effects(
+    effects: Iterable[Mapping[str, Any]], windows: Sequence[FaultWindow], *, exit_reason: str | None
+) -> None:
+    """安全 fixture の hard assertion: fault を観測した tick の effect が release/no-op 以外なら SafetyAssertionError。
 
     effects は record_effects(effects.json)の出力です。movement/ui/unknown は1件でも失敗で、
-    aggregate の tolerance では許容しません。区間が1つも無い(fault が起きていない)fixture も
-    検証になっていないので失敗にします。
+    aggregate の tolerance では許容しません。次の場合も検証になっていないので失敗にします。
+    - 区間が1つも無い(fault が起きていない)
+    - 観測 tick が0件の区間がある(run が health_stop で終わった場合だけは、区間開始以降の effect を全て対象にして許す)
     """
     if not windows:
         raise SafetyAssertionError("safety fixture produced no unknown/focus-loss/timeout window")
+    empty = [window for window in windows if not window.ticks]
+    if empty and not (isinstance(exit_reason, str) and exit_reason.startswith("health_stop")):
+        raise SafetyAssertionError(
+            f"fault windows without any processed tick are not verified: {[(w.kind, w.start_ns) for w in empty]}"
+        )
+    watched = frozenset().union(*(window.ticks for window in windows))
+    open_from = min((window.start_ns for window in empty), default=_OPEN_END_NS)
     violations = [
         (effect["correlation_id"], effect["timestamp_ns"], effect["category"], effect["effect"].get("kind"))
         for effect in effects
         if effect["category"] not in SAFE_EFFECT_CATEGORIES
-        and any(lo <= effect["timestamp_ns"] < hi for lo, hi in windows)
+        and (effect["correlation_id"] in watched or effect["timestamp_ns"] >= open_from)
     ]
     if violations:
         raise SafetyAssertionError(f"non release/no-op effects during fault windows: {violations[:5]}")

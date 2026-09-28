@@ -20,7 +20,7 @@ from ..capture.captured_frame import CapturedFrame
 from ..capture.frame_capture import LatestFrameQueue
 from .virtual_clock import VirtualClock
 
-EVENT_KINDS = ("frame", "duplicate", "timeout", "focus_lost")
+EVENT_KINDS = ("frame", "duplicate", "timeout", "focus_lost", "inference_stall")
 _FRAME_KINDS = ("frame", "duplicate")
 
 
@@ -111,6 +111,7 @@ class RecordedEvent:
     - duplicate: 既に届けた frame がもう一度届いた(controller は stale として捨てる)
     - timeout: 何も届かなかった
     - focus_lost: target window がフォアグラウンドを失い capture が一時停止した
+    - inference_stall: 直前の frame の推論が timestamp_ns まで返らなかった(frame の直後にだけ置ける)
     取りこぼし(drop)は frame 番号の飛びとして表現します。
     """
 
@@ -174,10 +175,12 @@ class RecordedSession:
         last_ns = 0
         delivered: set[int] = set()
         last_index = -1
-        for event in ordered:
+        for pos, event in enumerate(ordered):
             if event.timestamp_ns < last_ns:
                 raise ValueError("timestamp_ns must be non-decreasing in completion order")
             last_ns = event.timestamp_ns
+            if event.kind == "inference_stall" and (pos == 0 or ordered[pos - 1].kind != "frame"):
+                raise ValueError("inference_stall must directly follow a frame event")
             if event.kind not in _FRAME_KINDS:
                 continue
             index = event.session_frame_index
@@ -245,6 +248,8 @@ class RecordedFrameSource:
         self._paused = False
         # duplicate 再送用に frame 番号→記録時刻だけを覚える(画素は毎回ローダーから読む)
         self._delivered_ns: dict[int, int] = {}
+        # 今の frame の推論が返る記録時刻(inference_stall が続く frame だけ)
+        self._stall_until_ns: int | None = None
 
     @property
     def paused(self) -> bool:
@@ -262,11 +267,16 @@ class RecordedFrameSource:
 
     def capture_next(self) -> CapturedFrame | None:
         """次の event を再生し、frame を積んだらそれを、そうでなければ None を返す。"""
+        self._stall_until_ns = None
         if self.exhausted:
             return None
         event = self.session.events[self._position]
         self._position += 1
         self._clock.advance_to(event.timestamp_ns)
+        if not self.exhausted and self.session.events[self._position].kind == "inference_stall":
+            # 推論の遅れはこの frame の処理中に起きるので、次の poll を待たずにここで受け取る。
+            self._stall_until_ns = self.session.events[self._position].timestamp_ns
+            self._position += 1
         if event.kind == "focus_lost":
             self._paused = True
             return None
@@ -286,6 +296,19 @@ class RecordedFrameSource:
         )
         self.frames.put_latest(frame)
         return frame
+
+    def inference_clock_ns(self) -> int:
+        """推論 runtime へ注入する時計。inference_stall の frame では推論中に仮想時計を記録時刻まで進める。
+
+        最初の読み取り(推論開始)は今の時刻を返し、その直後に時計を stall の終了時刻へ進めます。
+        そのため推論完了の読み取りは stall 分だけ後になり、runtime の inference timeout gate を実際に通ります。
+        stall の無い frame では仮想時計と同じ値を返すだけです。
+        """
+        now_ns = self._clock.now_ns()
+        if self._stall_until_ns is not None:
+            self._clock.advance_to(self._stall_until_ns)
+            self._stall_until_ns = None
+        return now_ns
 
     def close(self) -> None:
         """controller から呼ばれる停止通知(queue の中身は controller が drain する)。"""

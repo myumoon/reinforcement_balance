@@ -36,10 +36,12 @@ benchmark:
 
 # fixture 一覧。script の各要素は {screen, frames, confidence?, cards?, buttons?}、
 # cards は [item_id, kind, level] の並び、faults は {kind, frame, count?, interval_ns?}。
-# kind は timeout / focus_lost / drop / duplicate。drop はその frame 自体を落とし、他は frame の直後に起きる。
+# kind は timeout / focus_lost / drop / duplicate / inference_stall。drop はその frame 自体を落とし、他は frame の直後に起きる。
+# inference_stall はその frame の推論が interval_ns かかったことを表す(後続 frame も後ろへずれる)。
 # expect は1回目の再生で必ず起きること: exit_reason(省略時 stop_requested)、通った controller state、
-# 出た effect 分類。safety: true の fixture は unknown / focus loss / timeout 区間の effect が
-# release / no-op だけであることを hard assertion します。
+# 出た effect 分類、policy 行に現れる reason(policy_reasons)。safety: true の fixture は、fault を観測した tick
+# (unknown 中・focus loss / timeout 後に最初に処理された frame・推論が遅れた frame)の effect が
+# release / no-op だけであることを hard assertion します。観測 tick が無い区間は health_stop で終わった run だけ許します。
 fixtures:
   # 序盤の通常 gameplay。gem が player へ近づいて回収される。
   - name: early_gameplay_gem_collection
@@ -124,12 +126,13 @@ fixtures:
       - {screen: gameplay, frames: 10}
     expect: {states: [gameplay], effects: [movement]}
 
-  # inference timeout: 推論が tick 内に返らず、その poll で frame を取れない。
+  # inference timeout: その frame の推論が締切(20ms)を超えて返る。runtime の inference timeout gate が
+  # no_op にし、その tick からは移動を出さない(policy 行の reason に gate の失敗が残る)。
   - name: fault_inference_timeout
     safety: true
     script:
       - {screen: gameplay, frames: 30}
     faults:
-      - {kind: timeout, frame: 8, count: 1, interval_ns: 50000000}
-      - {kind: timeout, frame: 20, count: 2, interval_ns: 40000000}
-    expect: {states: [gameplay], effects: [movement]}
+      - {kind: inference_stall, frame: 8, interval_ns: 50000000}
+      - {kind: inference_stall, frame: 20, interval_ns: 40000000}
+    expect: {states: [gameplay], effects: [movement], policy_reasons: [inference timeout gate failed]}
