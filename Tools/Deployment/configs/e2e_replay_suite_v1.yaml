@@ -1,0 +1,124 @@
+# e2e_replay_suite_v1 — recorded replay の synthetic 検証 fixture 一式と判定値(06-01)。
+#
+# 実 SurvivorsController を仮想時計で再生して回帰を見つけるための「台本」の一覧です。
+# 各 fixture は画面の流れ(script)と capture 側の異常(faults)を並べたもので、
+# tests/replay/test_e2e_replay.py がここから画素なしの小さな session を組み立て、標準 pytest で再生します。
+# synthetic の結果は常に development_only=true で、formal replay verdict には使えません。
+schema_version: e2e_replay_suite.v1
+
+# 判定値。numeric は quantum で量子化した hash が一致すればそのまま合格、
+# 食い違ったら segment 名の最長前方一致で選んだ [abs_tol, rel_tol] 内かを見ます("" は既定値)。
+# discrete(state/action/effect)は tolerance を持たず常に exact hash 一致です。
+gate:
+  runs: 3
+  quantum: 1.0e-6
+  tolerances:
+    "": [1.0e-6, 1.0e-6]
+    obs: [1.0e-5, 1.0e-5]
+    latency: [1000000.0, 0.0]
+
+# session の組み立て規約。frame は frame_interval_ns 間隔で並び、faults の timeout は
+# その場で interval_ns ずつ時計を進めます(後続 frame も後ろへずれる)。
+session:
+  frame_interval_ns: 66666667
+  default_detector_scene: basic
+  default_inventory: [whip]
+  default_timer_seconds: 20.0
+
+# 30分相当の仮想 schedule の benchmark。health の capture gap 上限(200ms)ちょうどの間隔で
+# frame を並べ、仮想時計で 1800 秒進む再生が wall-clock の予算内に終わることを確かめます。
+benchmark:
+  virtual_duration_s: 1800
+  frame_interval_ns: 200000000
+  wall_clock_budget_s: 600
+  # 約1分周期で繰り返す画面の台本 [screen, frames](level-up・chest・死亡からの再開始を含む)。
+  cycle: [[gameplay, 240], [level_up_items, 5], [gameplay, 30], [chest, 5], [gameplay, 20], [death, 3]]
+
+# fixture 一覧。script の各要素は {screen, frames, confidence?, cards?, buttons?}、
+# cards は [item_id, kind, level] の並び、faults は {kind, frame, count?, interval_ns?}。
+# kind は timeout / focus_lost / drop / duplicate。drop はその frame 自体を落とし、他は frame の直後に起きる。
+# safety: true の fixture は
+# unknown / focus loss / timeout 区間の effect が release / no-op だけであることを hard assertion します。
+fixtures:
+  # 序盤の通常 gameplay。gem が player へ近づいて回収される。
+  - name: early_gameplay_gem_collection
+    detector_scene: gems
+    script:
+      - {screen: gameplay, frames: 45}
+
+  # 終盤の密集場面。多数の敵・elite・boss・hazard が重なり合う(遮蔽・effect 過多)。
+  - name: dense_late_game_occlusion
+    detector_scene: dense
+    timer_seconds: 1500.0
+    inventory: [whip, garlic, magic_wand, king_bible, axe, cross]
+    script:
+      - {screen: gameplay, frames: 45}
+
+  # target 由来の card 選択。1..3 枚、new / upgrade / evolution / union / fallback と reroll・skip ボタン。
+  # union は parser が区別しないため evolved の union item として出す。
+  - name: card_choice_variants
+    inventory: [whip, garlic]
+    script:
+      - {screen: gameplay, frames: 8}
+      - {screen: level_up_items, frames: 6, cards: [[magic_wand, weapon, 1]]}
+      - {screen: gameplay, frames: 8}
+      - {screen: level_up_items, frames: 6, cards: [[whip, weapon, 3], [garlic, weapon, 2]], buttons: [reroll, skip]}
+      - {screen: gameplay, frames: 8}
+      - {screen: level_up_items, frames: 6, cards: [[bloody_tear, evolved, 1], [phieraggi, evolved, 1], [axe, weapon, 1]]}
+      - {screen: gameplay, frames: 8}
+      - {screen: level_up_fallback, frames: 6, cards: [[gold, fallback, null], [chicken, fallback, null]]}
+      - {screen: gameplay, frames: 8}
+
+  # chest・一時停止/再開・死亡・結果・run の再開始。
+  - name: chest_pause_death_restart
+    script:
+      - {screen: gameplay, frames: 8}
+      - {screen: chest, frames: 8, buttons: [ack_chest]}
+      - {screen: gameplay, frames: 8}
+      - {screen: paused, frames: 8}
+      - {screen: gameplay, frames: 8}
+      - {screen: death, frames: 6}
+      - {screen: result, frames: 6, buttons: [confirm]}
+      - {screen: gameplay, frames: 10}
+
+  # capture gap: frame 取り落とし・重複再送のあと、200ms を超えて何も届かない。
+  - name: fault_capture_gap
+    safety: true
+    script:
+      - {screen: gameplay, frames: 30}
+    faults:
+      - {kind: drop, frame:5}
+      - {kind: duplicate, frame:9}
+      - {kind: timeout, frame:15, count: 4, interval_ns: 66666667}
+
+  # focus loss: target window がフォアグラウンドを失う(health は即 STOP)。
+  - name: fault_focus_loss
+    safety: true
+    script:
+      - {screen: gameplay, frames: 30}
+    faults:
+      - {kind: focus_lost, frame:12}
+
+  # unknown UI: 見たことのない画面が1秒未満続いてから gameplay に戻る。
+  - name: fault_unknown_ui
+    safety: true
+    script:
+      - {screen: gameplay, frames: 10}
+      - {screen: unknown, frames: 10}
+      - {screen: gameplay, frames: 10}
+
+  # parser low confidence: 画面判定の confidence が閾値を下回る区間。
+  - name: fault_parser_low_confidence
+    script:
+      - {screen: gameplay, frames: 10}
+      - {screen: gameplay, frames: 10, confidence: 0.2}
+      - {screen: gameplay, frames: 10}
+
+  # inference timeout: 推論が tick 内に返らず、その poll で frame を取れない。
+  - name: fault_inference_timeout
+    safety: true
+    script:
+      - {screen: gameplay, frames: 30}
+    faults:
+      - {kind: timeout, frame:8, count: 1, interval_ns: 50000000}
+      - {kind: timeout, frame:20, count: 2, interval_ns: 40000000}
