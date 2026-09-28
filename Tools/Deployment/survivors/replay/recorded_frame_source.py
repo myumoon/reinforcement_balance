@@ -226,8 +226,15 @@ class RecordedFrameSource:
         session: RecordedSession,
         clock: VirtualClock,
         pixels: Callable[[int], NDArray[np.uint8]],
+        *,
+        replay_determinism: DeterminismManifest,
     ) -> None:
-        """session・仮想時計・画素ローダーを受け取り、再生位置を先頭にする。"""
+        """session・仮想時計・画素ローダーを受け取り、再生位置を先頭にする。
+
+        replay_determinism(再生環境の決定性設定)が記録時と食い違えば、
+        1 frame も返さずに DeterminismMismatchError で拒否します。
+        """
+        session.determinism.require_match(replay_determinism)
         self.session = session
         self.frames = LatestFrameQueue()
         self.started = False
