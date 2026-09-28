@@ -45,6 +45,7 @@ from survivors.replay.e2e_replay import (
     fault_windows,
     formal_parents_eligible,
     golden_mismatches,
+    inference_device,
     publish_formal_replay_verdict,
     quantize,
     quantized_sha256,
@@ -270,6 +271,29 @@ def test_determinism_mismatch_is_rejected(tmp_path: Path) -> None:
     assert not (tmp_path / "run" / "telemetry.jsonl").exists()
 
 
+@pytest.mark.parametrize("field, value", [("device", "cuda:0"), ("nms_backend", "custom_nms")])
+def test_declared_determinism_must_match_loaded_inference_parts(tmp_path: Path, field: str, value: str) -> None:
+    """M5: 記録と申告が一致していても、実際に読み込んだ部品の device や NMS 実装と違えば拒否する。"""
+    declared = dataclasses.replace(DETERMINISM, **{field: value})
+    data = _capture_dict()
+    data["session"]["determinism"] = declared.to_dict()
+    capture = CaptureManifest.load(_write_capture(tmp_path, data))
+    with pytest.raises(DeterminismMismatchError, match="loaded inference parts"):
+        _replay(tmp_path, "run", capture, replay_determinism=declared)
+    assert not (tmp_path / "run").exists()
+
+
+def test_inference_device_is_read_from_detector_and_policy_parameters() -> None:
+    """M5: device は detector model と combat policy の parameter から読み、混在していれば拒否する。"""
+    import torch
+
+    bundle = RuntimeBundle.from_golden_fixture(fixture.build_combat_policy(0))
+    assert inference_device(fixture.FixedSceneDetector(), bundle) == "cpu"
+    detector = type("MetaDetector", (), {"_model": torch.nn.Linear(1, 1, device="meta")})()
+    with pytest.raises(DeterminismMismatchError, match="exactly one device"):
+        inference_device(detector, bundle)
+
+
 def _frames_npz(tmp_path: Path, indices) -> tuple[str, str]:
     """指定 frame 番号の画素を持つ NPZ を書き、(相対パス, sha256) を返す。"""
     path = tmp_path / "frames.npz"
@@ -362,6 +386,25 @@ def test_formal_eligibility_fails_closed() -> None:
     assert formal_parents_eligible(formal_bundle, Formal(), dev_capture) is False
 
 
+def test_pixel_override_is_never_formal(tmp_path: Path) -> None:
+    """I4: 正式 parent と記録画素が揃っていても、画素ローダーを差し替えた run は formal の材料にしない。"""
+    rel, digest = _frames_npz(tmp_path, range(4))
+    data = _capture_dict(_events(4), frames_path=rel, frames_sha256=digest, development_only=False)
+    capture = CaptureManifest.load(_write_capture(tmp_path, data))
+    policy = fixture.build_combat_policy(0)
+    formal = dict(
+        bundle=dataclasses.replace(
+            RuntimeBundle.from_golden_fixture(policy, item_selector=fixture.FirstCardItemSelector()),
+            development_only=False, live_eligible=True,
+        ),
+        detector_manifest=_FormalDetector(),
+    )
+    assert _replay(tmp_path, "recorded", capture, **formal).manifest["formal_replay_eligible"] is True
+    blank = np.zeros((1080, 1920, 4), np.uint8)
+    manifest = _replay(tmp_path, "override", capture, pixels=lambda _i: blank, **formal).manifest
+    assert manifest["development_only"] is True and manifest["formal_replay_eligible"] is False
+
+
 def test_synthetic_replay_manifest_is_never_formal(tmp_path: Path) -> None:
     """synthetic session + development bundle の出力 manifest は development_only で formal 不可。"""
     manifest = _replay(tmp_path, "run").manifest
@@ -394,6 +437,16 @@ def test_cli_replays_capture_with_loaded_artifacts(tmp_path: Path, monkeypatch: 
     ]
     assert cli.main(argv) == 0
     assert loaded and (tmp_path / "out" / "manifest.json").exists()
+    assert json.loads((tmp_path / "out" / "manifest.json").read_text(encoding="utf-8"))["determinism"]["device"] == "cpu"
+
+    # M5: 記録も申告も cuda:0 でも、読み込んだ部品は CPU なので拒否する。NMS は実装が使うものしか選べない。
+    cuda = {**data, "session": {**data["session"], "determinism": {**data["session"]["determinism"], "device": "cuda:0"}}}
+    _write_capture(tmp_path, cuda)
+    with pytest.raises(DeterminismMismatchError, match="loaded inference parts"):
+        cli.main([*argv[:4], str(tmp_path / "out-cuda"), *argv[5:], "--device", "cuda:0"])
+    with pytest.raises(SystemExit):
+        cli.main([*argv, "--nms-backend", "custom_nms"])
+    _write_capture(tmp_path, data)
 
     data["session"]["game_build_id"] = "other"
     _write_capture(tmp_path, data)

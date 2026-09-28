@@ -23,10 +23,12 @@ from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from run_survivors_controller import _load_artifacts
 from survivors.controller.state_machine import CampaignRunMode
 from survivors.replay.e2e_replay import (
+    NMS_BACKEND,
     CaptureManifest,
     FormalReplayRejectedError,
     compare_replays,
     golden_mismatches,
+    inference_device,
     publish_formal_replay_verdict,
     replay_metrics,
     run_recorded_replay,
@@ -67,8 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--campaign-run-mode", choices=[mode.value for mode in CampaignRunMode],
         default=CampaignRunMode.FORMAL_SINGLE_ATTEMPT.value,
     )
-    replay.add_argument("--device", default="cpu", help="推論 device(記録時の determinism manifest と照合)")
-    replay.add_argument("--nms-backend", default="torchvision.ops.nms", help="NMS 実装名(記録時と照合)")
+    replay.add_argument(
+        "--device", default=None,
+        help="推論 device の申告値。省略時は読み込んだ detector/policy の device を使い、指定時は実測と食い違えば拒否する",
+    )
+    replay.add_argument(
+        "--nms-backend", choices=[NMS_BACKEND], default=NMS_BACKEND, help="NMS 実装名(detector が実際に使うものだけ)",
+    )
 
     compare = commands.add_parser("compare", help="replay 出力を旧 run / golden と比べる")
     compare.add_argument("--new", required=True, type=Path, help="比べる replay 出力ディレクトリ")
@@ -112,11 +119,13 @@ def _replay(args: argparse.Namespace) -> int:
         # run ごとに読み直す(controller は tracker を reset しないので、内部状態を持つ部品を run 間で共有しない)。
         parts = _load_artifacts(args)
         output_dir = args.output_dir if args.runs == 1 else args.output_dir / f"run-{run}"
+        # device は読み込んだ部品から実測する。--device の申告が実測と違えば run_recorded_replay が拒否する。
+        device = args.device if args.device is not None else inference_device(parts.detector, parts.bundle)
         result = run_recorded_replay(
             capture, output_dir,
             detector=parts.detector, tracker=parts.tracker, hud_parser=parts.hud_parser, bundle=parts.bundle,
             artifact_hashes=parts.artifact_hashes, **identity,
-            replay_determinism=DeterminismManifest.from_torch(device=args.device, nms_backend=args.nms_backend),
+            replay_determinism=DeterminismManifest.from_torch(device=device, nms_backend=args.nms_backend),
             detector_manifest=parts.detector_manifest, class_map_path=args.class_map,
             score_threshold=args.score_threshold, campaign_run_mode=CampaignRunMode(args.campaign_run_mode),
         )

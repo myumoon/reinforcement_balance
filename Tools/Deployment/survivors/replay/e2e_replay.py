@@ -35,7 +35,7 @@ from ..controller.telemetry import TelemetrySessionHeader, TelemetryWriter
 from ..real_obs_assembler import RealObsAssembler
 from ..runtime.agent_runtime import AgentRuntime
 from ..runtime.artifact_bundle import RuntimeBundle
-from .recorded_frame_source import DeterminismManifest, RecordedFrameSource, RecordedSession
+from .recorded_frame_source import DeterminismManifest, DeterminismMismatchError, RecordedFrameSource, RecordedSession
 from .virtual_clock import VirtualClock
 
 CAPTURE_MANIFEST_SCHEMA_VERSION = "survivors.recorded_capture.v1"
@@ -56,6 +56,9 @@ EFFECT_CATEGORIES = {
     "controller_stop": "control",
     "process_terminate": "control",
 }
+# 再生で実際に使う NMS 実装。WorldDetector(SSDLite320)の後処理は torchvision の NMS だけを使うので、
+# これ以外を申告した replay は実装と結び付かない値として拒否する。
+NMS_BACKEND = "torchvision.ops.nms"
 
 
 class ReplayIntegrityError(ValueError):
@@ -299,6 +302,35 @@ def formal_parents_eligible(bundle: RuntimeBundle, detector_manifest: Any, captu
     return True
 
 
+def inference_device(detector: Any, bundle: RuntimeBundle) -> str:
+    """detector と combat policy の torch parameter が実際に載っている device を読む。
+
+    CLI の申告値ではなく、推論に使う model そのものから device を決めます。torch model を持たない
+    detector(synthetic fixture の代役)は policy 側だけを見ます。
+    部品ごとに device が混在していたり、1つも読めなかったりすれば DeterminismMismatchError です。
+    """
+    devices: set[str] = set()
+    for model in (getattr(detector, "_model", None), bundle.combat_policy.model):
+        if callable(getattr(model, "parameters", None)):
+            devices |= {str(parameter.device) for parameter in model.parameters()}
+    if len(devices) != 1:
+        raise DeterminismMismatchError(f"inference parts must run on exactly one device, got {sorted(devices)}")
+    return devices.pop()
+
+
+def require_replay_determinism(declared: DeterminismManifest, *, detector: Any, bundle: RuntimeBundle) -> None:
+    """申告された再生側 determinism が、実際に読み込んだ部品と今の torch 設定に一致するか確かめる。
+
+    device は inference_device、NMS は NMS_BACKEND、決定的アルゴリズムと thread 数は torch から読みます。
+    申告値だけで記録時の設定と照合すると、別 device で推論していても一致扱いになるためです。
+    """
+    actual = DeterminismManifest.from_torch(device=inference_device(detector, bundle), nms_backend=NMS_BACKEND)
+    if declared != actual:
+        raise DeterminismMismatchError(
+            f"declared replay determinism {declared.to_dict()} does not match the loaded inference parts {actual.to_dict()}"
+        )
+
+
 @dataclass
 class E2EReplayResult:
     """1回の recorded replay の結果(終了コードと各出力ファイルのパス・出力 manifest)。
@@ -340,6 +372,7 @@ def run_recorded_replay(
     ``pixels`` を省くと capture manifest の NPZ(synthetic なら黒画面)から画素を読みます。
     """
     capture.require_identity(target_profile_hash=target_profile_hash, game_build_id=game_build_id)
+    require_replay_determinism(replay_determinism, detector=detector, bundle=bundle)
     session = capture.session
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -348,6 +381,8 @@ def run_recorded_replay(
     )}
     start_ns = session.events[0].timestamp_ns if session.events else 0
     clock = VirtualClock(start_ns)
+    # 記録 frame 以外の画素で再生した run は frames_sha256 と結び付かないので formal の材料にしない(I4)。
+    pixels_overridden = pixels is not None
     archive = np.load(capture.frames_path) if pixels is None and capture.frames_path is not None else None
     if pixels is None:
         blank = np.zeros(_FRAME_SHAPE, dtype=np.uint8)
@@ -397,7 +432,7 @@ def run_recorded_replay(
     effects = record_effects(rows)
     paths["effects.json"].write_text(json.dumps(effects, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    development_only = not formal_parents_eligible(bundle, detector_manifest, capture)
+    development_only = pixels_overridden or not formal_parents_eligible(bundle, detector_manifest, capture)
     manifest = {
         "schema_version": OUTPUT_MANIFEST_SCHEMA_VERSION,
         # I4: 開発用 parent が1つでも混ざれば formal replay verdict の材料にしない(fail closed)。
