@@ -238,13 +238,17 @@ def main(argv: list[str] | None = None) -> int:
                     nms_iou=config["nms_iou"],
                 )
             )
-            write_label_file(
+            wrote_label = write_label_file(
                 json_path or png_path.with_suffix(".json"),
                 boxes,
                 image_width=width,
                 image_height=height,
                 checked=False,
+                overwrite=False,
             )
+            if not wrote_label:
+                skipped += 1
+                continue
             created += 1
     except (OSError, ValueError, cv2.error) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 import yaml
 
+import prelabel_survivors_frames
 from prelabel_survivors_frames import DEFAULT_CONFIG_PATH, load_config, main
 from survivors.annotation_labels import LabelBox, read_label_file, write_label_file
 
@@ -135,6 +136,42 @@ def test_prelabel_uses_checked_ordered_templates_and_preserves_existing_json(tmp
     assert (target / "00000012.json").read_bytes() == unpaired_bytes
     assert "下書き作成数: 1" in capsys.readouterr().out
     assert all(0 <= box.left < box.right <= 64 and 0 <= box.top < box.bottom <= 36 for box in boxes)
+
+
+def test_prelabel_skips_json_created_after_frame_listing(tmp_path, monkeypatch, capsys):
+    """一覧取得後に現れた人手 JSON を置換せず、スキップ数に含める。
+
+    画像読み込み時に同じセッションの別 JSON を作り、一覧と書き込みの競合を再現する。
+    """
+    work_root = tmp_path / "work"
+    session_dir = work_root / "s1"
+    session_dir.mkdir(parents=True)
+    config_path = tmp_path / "prelabel.yaml"
+    _write_config(config_path)
+    image = np.zeros((36, 64, 3), dtype=np.uint8)
+    first_png = session_dir / "00000000.png"
+    raced_json = session_dir / "00000001.json"
+    _write_image(first_png, image)
+    _write_image(session_dir / "00000001.png", image)
+    human_bytes = (
+        b'{"shapes":[],"imagePath":"00000001.png","imageData":null,'
+        b'"checked":true,"HUMAN":1}\n'
+    )
+    read_image = prelabel_survivors_frames._read_image
+
+    def create_human_label_after_listing(path):
+        if path == first_png:
+            raced_json.write_bytes(human_bytes)
+        return read_image(path)
+
+    monkeypatch.setattr(prelabel_survivors_frames, "_read_image", create_human_label_after_listing)
+    result = main(["--work-root", str(work_root), "--session-id", "s1", "--config", str(config_path)])
+
+    assert result == 0
+    assert raced_json.read_bytes() == human_bytes
+    output = capsys.readouterr().out
+    assert "下書き作成数: 1" in output
+    assert "既存 JSON スキップ数: 1" in output
 
 
 @pytest.mark.parametrize(

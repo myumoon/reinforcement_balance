@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,15 +83,18 @@ def write_label_file(
     image_width: int = 1920,
     image_height: int = 1080,
     checked: bool = False,
-) -> None:
-    """write_label_file(path, boxes, *, image_width=1920, image_height=1080, checked=False) を書く。
+    overwrite: bool = True,
+) -> bool:
+    """write_label_file(path, boxes, *, overwrite=True) でラベルを保存する。
 
-    四点 rectangle と v4.0.6 の必須キーを一時ファイル経由で原子的に保存する。
+    上書き時は一時ファイルから置換し、no-clobber 時は既存ファイルをそのまま残す。
     """
     if image_width <= 0 or image_height <= 0:
         raise ValueError("image dimensions must be positive")
     if not isinstance(checked, bool):
         raise ValueError("checked must be a boolean")
+    if not isinstance(overwrite, bool):
+        raise ValueError("overwrite must be a boolean")
 
     path = Path(path)
     shapes: list[dict] = []
@@ -139,13 +143,40 @@ def write_label_file(
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
             json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.write("\n")
-        os.replace(temporary_name, path)
+        if overwrite:
+            os.replace(temporary_name, path)
+        else:
+            try:
+                os.link(temporary_name, path)
+            except FileExistsError:
+                return False
+            except OSError:
+                try:
+                    descriptor = os.open(
+                        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666
+                    )
+                except FileExistsError:
+                    return False
+                try:
+                    with os.fdopen(descriptor, "wb") as destination, open(
+                        temporary_name, "rb"
+                    ) as source:
+                        shutil.copyfileobj(source, destination)
+                except BaseException:
+                    path.unlink(missing_ok=True)
+                    raise
+        return True
     except BaseException:
         try:
             os.unlink(temporary_name)
         except FileNotFoundError:
-            pass
+                pass
         raise
+    finally:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
 
 
 def read_label_file(path: Path | str) -> tuple[list[LabelBox], bool]:
