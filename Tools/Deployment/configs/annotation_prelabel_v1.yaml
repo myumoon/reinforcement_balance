@@ -1,0 +1,18 @@
+# Survivors の自動下書きに使う初期値。
+#
+# 固定矩形とテンプレート検出の調整値をまとめる。
+
+schema_version: annotation_prelabel.v1
+
+# 毎フレームに置く固定矩形。
+fixed_boxes:
+  - {label: player_anchor, bbox: [912, 466, 996, 540]}
+  - {label: hud_hp, bbox: [924, 544, 996, 554]}
+  - {label: hud_xp, bbox: [96, 0, 1824, 36]}
+
+# 確認済みラベルから見本を集めて照合する設定。
+template_matching:
+  labels: [gem_blue, gem_green, gem_red, pickup_heal, pickup_special, enemy_normal]
+  threshold: 0.85
+  nms_iou: 0.3
+  max_templates_per_label: 5

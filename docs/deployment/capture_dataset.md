@@ -57,6 +57,8 @@ Ctrl+C は 1 回目と 2 回目で挙動が異なる:
 
 ## Annotation workflow
 
+GUI を使う手順は [Survivors キャプチャの GUI アノテーション](annotation_gui.md) を参照してください。
+
 ```bash
 python Tools/Deployment/annotate_survivors_frames.py \
   --store-root /mnt/d/reinbalance-capture --session-id live-pilot-001 \
