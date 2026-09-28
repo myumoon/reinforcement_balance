@@ -653,7 +653,7 @@ def compare_replays(
     old/new は E2EReplayResult か、その paths と同じ形の dict です。discrete.jsonl を行ごとに exact 比較し、
     numeric.jsonl の stage 値・latency と numeric_obs.npz の obs 3平面を segment ごとに quantized hash
     → tolerance の順で判定します(全比較対象に同じ2経路を当てる)。effects.json の中身は discrete/numeric の
-    effect 行と同じなので別には比べません。obs の segment 名は ``obs_layout``(DeployObsSchema.layout())で付けます。
+    effect 行と同じなので別には比べません。obs の segment 名は ``obs_layout``(``bundle.deploy_schema.layout``)で付けます。
     """
     old_paths, new_paths = _paths(old), _paths(new)
     old_rows, new_rows = _read_jsonl(old_paths["discrete.jsonl"]), _read_jsonl(new_paths["discrete.jsonl"])
