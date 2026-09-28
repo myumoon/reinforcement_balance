@@ -15,7 +15,7 @@ peer death(controller が死んで lease を更新しなくなる / pipe が閉�
 別プロセスの安全網なので、``tests/input/test_helper_faults.py`` の
 ``test_helper_subprocess_releases_expired_lease_with_bounded_observed_latency``(lease 失効で独立 helper が解放)と
 ``test_controller_atexit_close_pipe_triggers_helper_exit_and_release``(pipe close で helper が解放)が扱います。
-実 capture の focus 喪失(例外で伝わる)は ``test_real_capture_focus_loss_is_health_stop`` が扱います。
+実 capture の focus 喪失(pause 状態と、回復不能時の例外の両方)は ``test_real_capture_focus_loss_is_health_stop`` が扱います。
 """
 
 from __future__ import annotations
@@ -325,12 +325,12 @@ def _capture_fakes():
 
 
 def test_real_capture_focus_loss_is_health_stop(tmp_path) -> None:
-    """M5: 実 CaptureSession が focus 喪失で送出する例外は health STOP(focus_lost)・入力解放・exit 2 になる。
+    """M5: 実 CaptureSession の focus 喪失は例外にせず health STOP(focus_lost)・入力解放・exit 2 になる。
 
     実 ``WindowLocator`` + ``CaptureSession`` に fake Win32 API と fake backend を渡し、
-    2 枚目の読み取り直後に前面ウィンドウを別 hwnd へ切り替えます。実 capture は foreground=False の
-    frame を返さず ``TargetWindowStateError`` を送出するので、それが controller 例外(exit 3)ではなく
-    health STOP として扱われることを確認します。
+    2 枚目の読み取り直後に前面ウィンドウを別 hwnd へ切り替えます。実 capture は一時的な focus 喪失を
+    例外にせず内部 pause して frame None を返すため、controller が pause への立ち上がりを検知して
+    health STOP を記録することを確認します(controller 例外による exit 3 にはならない)。
     """
     fakes = _capture_fakes()
     profile = load_target_profile()

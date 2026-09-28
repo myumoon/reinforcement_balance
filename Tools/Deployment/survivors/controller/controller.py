@@ -331,8 +331,9 @@ class SurvivorsController:
                 )
                 return None
         except TargetWindowStateError as exc:
-            # 実 capture は focus 喪失を例外で伝える。STOP の記録だけ行い、
-            # _health_stop() は run() の poll 分岐に一本化する(二重に呼ばないため)。
+            # ここに来るのは identity/geometry 変化など回復不能な状態異常だけ
+            # (一時的な focus 喪失は上の paused 立ち上がり検知で処理済み)。
+            # STOP の記録だけ行い、_health_stop() は run() の poll 分岐に一本化する(二重に呼ばないため)。
             self._health.record_focus_lost(now_ns=self._clock_ns(), detail=str(exc))
             return None
         if captured is None:

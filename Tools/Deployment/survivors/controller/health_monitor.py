@@ -360,9 +360,11 @@ class HealthMonitor:
     def record_focus_lost(self, *, now_ns: int, detail: str = "target window lost focus") -> HealthVerdict:
         """capture 側で検出した focus/ウィンドウ状態の喪失を記録し、即 STOP にする。
 
-        実 CaptureSession は focus を失うと frame を返さず ``TargetWindowStateError`` を送出するため、
-        ``ingest(window_focused=False)`` には到達しません。その例外を受けた controller が呼びます。
-        前面喪失以外(ウィンドウ消失・geometry 変化)も同じ例外なので、具体的な原因は ``detail`` に残します。
+        実 CaptureSession は一時的な focus 喪失を例外にせず内部 pause して frame None を返すため、
+        ``ingest(window_focused=False)`` には到達しません。controller が pause への立ち上がりを検知して
+        呼びます。ウィンドウ消失・geometry 変化など回復不能な状態異常は ``TargetWindowStateError`` として
+        別途例外送出され、それを受けた controller も同じくこのメソッドを呼びます。具体的な原因は
+        ``detail`` に残します。
         """
         self._advance_clock(now_ns)
         self._stop(HealthReason.FOCUS_LOST, now_ns, None, None, detail or "target window lost focus")

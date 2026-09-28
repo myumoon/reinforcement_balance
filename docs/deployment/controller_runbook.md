@@ -149,11 +149,12 @@ STOP になると controller は入力を解放して exit 2 で終わります�
 | focus loss(`window_focused=False`) | 即 STOP。 |
 | inference error | 1回で STOP。 |
 
-実 capture(`CaptureSession`)は `foreground` フラグではなく例外で focus 喪失を伝えます
-(`capture_next()` が `TargetWindowStateError` を送出し、`foreground=False` の frame は返しません)。
-controller はこの例外を `HealthMonitor.record_focus_lost()` で `focus_lost` の STOP として記録し、
-入力解放・exit 2 で終わります。同じ例外はウィンドウ消失・geometry 変化でも送出されるため、
-具体的な原因は health 行の `first_failure.detail`(例: `target window lost foreground`)で確認します。
+実 capture(`CaptureSession`)は一時的な focus 喪失を例外にせず内部 pause して frame None を返します。
+controller は `paused` プロパティが立ち上がった tick を検知して `HealthMonitor.record_focus_lost()` を
+呼び、`focus_lost` の STOP として記録して入力解放・exit 2 で終わります。ウィンドウ消失・geometry 変化
+など回復不能な状態異常は `capture_next()` が `TargetWindowStateError` を送出し、その例外を受けた
+controller も同じく `record_focus_lost()` を呼びます。具体的な原因は health 行の `first_failure.detail`
+(例: `target window lost foreground`)で確認します。
 
 ## telemetry 項目と未記録項目
 
