@@ -622,11 +622,84 @@ def test_golden_update_records_metrics_and_hashes(base_run, tmp_path: Path) -> N
     assert golden["metrics"] == {"old": metrics, "new": metrics, "comparison": comparison}
     assert golden["artifact_hashes"] == _run_hashes(base_run)
     assert golden["development_only"] is True and golden["formal_replay_eligible"] is False
-    assert golden_mismatches(golden, base_run, obs_layout=OBS_LAYOUT) == []
+    assert golden_mismatches(golden_path, base_run, obs_layout=OBS_LAYOUT)[0] == []
 
     mutated = _copy(base_run, tmp_path)
     _mutate_jsonl(mutated["discrete.jsonl"], lambda rows: rows.pop())
-    assert "discrete" in golden_mismatches(golden, mutated, obs_layout=OBS_LAYOUT)
+    assert "discrete" in golden_mismatches(golden_path, mutated, obs_layout=OBS_LAYOUT)[0]
+
+    # 参照 run 出力が golden に固定した sha256 と合わなければ比較せずに拒否する。
+    reference = tmp_path / "golden.reference" / "numeric.jsonl"
+    reference.write_text(reference.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    with pytest.raises(ReplayIntegrityError, match="reference"):
+        golden_mismatches(golden_path, base_run, obs_layout=OBS_LAYOUT)
+
+
+def _golden(base_run, tmp_path: Path) -> Path:
+    """base_run を golden として書き、そのパスを返す。"""
+    metrics = replay_metrics(base_run)
+    golden_path = tmp_path / "golden.json"
+    update_golden(
+        golden_path, base_run, old_metrics=metrics, new_metrics=metrics,
+        comparison=compare_replays(base_run, base_run).metrics, artifact_hashes=_run_hashes(base_run), obs_layout=OBS_LAYOUT,
+    )
+    return golden_path
+
+
+def _perturb_numeric(paths: dict[str, Path], plane: str, delta: float) -> str:
+    """stage 値・latency・obs の各平面の最初の値を delta だけずらし、ずらした segment 名を返す。"""
+    if plane == "obs":
+        name, (offset, _size) = next(iter(OBS_LAYOUT.items()))
+        with np.load(paths["numeric_obs.npz"]) as archive:
+            arrays = {key: archive[key].copy() for key in archive.files}
+        arrays["values"][0, offset] += delta
+        _write_npz(paths["numeric_obs.npz"], arrays)
+        return f"obs.values.{name}"
+    segment = {"stage": "hud_parser.capability_confidence", "latency": "latency.policy"}[plane]
+
+    def mutate(rows) -> None:
+        if plane == "stage":
+            row = next(row for row in rows if "capability_confidence" in row["values"])
+            row["values"]["capability_confidence"] += delta
+        else:
+            next(row for row in rows if row["stage"] == "policy")["latency_ns"] += delta
+
+    _mutate_jsonl(paths["numeric.jsonl"], mutate)
+    return segment
+
+
+@pytest.mark.parametrize("plane, within, beyond", [
+    ("stage", 5.01e-7, 0.5), ("latency", 10, 5_000_000), ("obs", 3e-6, 1.0),
+])
+def test_golden_numeric_uses_segment_tolerance_like_compare_replays(
+    base_run, tmp_path: Path, plane: str, within: float, beyond: float
+) -> None:
+    """I5: golden 比較も quantized hash → segment tolerance の同じ規則で、許容内の差を mismatch にしない。
+
+    quantum の丸め境界をまたぐ許容内の摂動は compare_replays と同じく合格し、
+    tolerance を超える摂動は numeric:<segment> と first divergence で報告される。
+    """
+    golden_path = _golden(base_run, tmp_path)
+    small = _copy(base_run, tmp_path, "small")
+    segment = _perturb_numeric(small, plane, within)
+    direct = compare_replays(base_run, small, obs_layout=OBS_LAYOUT)
+    assert direct.passed and direct.segments[segment]["quantized_equal"] is False
+    mismatches, diff = golden_mismatches(golden_path, small, obs_layout=OBS_LAYOUT)
+    assert mismatches == [] and diff.passed, diff.first_divergence
+    assert diff.segments[segment]["quantized_equal"] is False and diff.segments[segment]["passed"] is True
+    assert cli.main(["compare", "--golden", str(golden_path), "--new", str(small["manifest.json"].parent)]) == 0
+
+    large = _copy(base_run, tmp_path, "large")
+    _perturb_numeric(large, plane, beyond)
+    mismatches, diff = golden_mismatches(golden_path, large, obs_layout=OBS_LAYOUT)
+    assert mismatches == [f"numeric:{segment}"]
+    assert diff.first_divergence["frame"]["stage"]["divergence"]["segment"] == segment
+    report = tmp_path / "report.json"
+    assert cli.main(["compare", "--golden", str(golden_path), "--new", str(large["manifest.json"].parent),
+                     "--report", str(report)]) == 1
+    result = json.loads(report.read_text(encoding="utf-8"))
+    assert result["golden_mismatches"] == [f"numeric:{segment}"]
+    assert result["golden_first_divergence"]["frame"]["stage"]["divergence"]["segment"] == segment
 
 
 @pytest.mark.parametrize("case", [

@@ -145,8 +145,9 @@ def _replay(args: argparse.Namespace) -> int:
 
 
 def _compare(args: argparse.Namespace) -> int:
-    """新 run を旧 run(tolerance 判定と first divergence)と golden(hash 一致)の指定された方と比べる。
+    """新 run を旧 run と golden の指定された方と比べる(どちらも quantized hash → tolerance と first divergence)。
 
+    golden は golden に固定した参照 run 出力と compare_replays と同じ規則で比べ、artifact hashes は exact に比べます。
     どちらも合格なら 0、1つでも食い違えば 1 を返します。
     """
     if args.old is None and args.golden is None:
@@ -157,9 +158,11 @@ def _compare(args: argparse.Namespace) -> int:
         diff = compare_replays(_run_paths(args.old), new, obs_layout=_OBS_LAYOUT)
         report.update(passed=diff.passed, metrics=diff.metrics, first_divergence=diff.first_divergence)
     if args.golden is not None:
-        golden = json.loads(args.golden.read_text(encoding="utf-8"))
-        mismatches = golden_mismatches(golden, new, obs_layout=_OBS_LAYOUT)
-        report.update(golden_mismatches=mismatches, passed=report.get("passed", True) and not mismatches)
+        mismatches, golden_diff = golden_mismatches(args.golden, new, obs_layout=_OBS_LAYOUT)
+        report.update(
+            golden_mismatches=mismatches, golden_first_divergence=golden_diff.first_divergence,
+            golden_metrics=golden_diff.metrics, passed=report.get("passed", True) and not mismatches,
+        )
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.report is not None:
         args.report.write_text(text + "\n", encoding="utf-8")

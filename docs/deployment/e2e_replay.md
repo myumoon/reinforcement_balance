@@ -18,7 +18,9 @@
 - **shadow 固定**: controller は常に shadow mode で、`execute_effect` も live input backend も使いません。
   effect は telemetry の `effect` 行から semantic JSON(`effects.json`)として保存します。
 - **決定性 manifest**: `torch.use_deterministic_algorithms`・device・NMS 実装・threads を記録時と照合し、
-  食い違えば1 frame も流さずに拒否します。
+  食い違えば1 frame も流さずに拒否します。再生側の値は申告ではなく実測です。device は読み込んだ detector と
+  combat policy の parameter から読み(`--device` を渡して実測と違えば `DeterminismMismatchError`)、
+  NMS は detector が実際に使う `torchvision.ops.nms` だけを受け付けます。
 - **2経路の比較**: state/action/effect などの discrete 出力は canonical hash の exact 一致、obs/logits/latency
   などの numeric 出力は量子化 hash → segment 別 tolerance の順で判定します。全比較対象に同じ2経路を当てます。
 
@@ -50,8 +52,11 @@ python replay_survivors_session.py compare --old <run-a> --new <run-b> [--golden
 - `--old`: 旧 run と比べ、合否・metrics と最初の分岐点(first divergence)を tree で出します。tree は
   frame(correlation id)→ stage → 分岐の種類(parser field / obs の平面・index・segment / model action /
   state / effect)の順に並び、どの segment・stage が最初に崩れたかが分かります。
-- `--golden`: golden に保存した discrete hash・numeric segment hash・artifact hashes と比べ、食い違った項目名を
-  `golden_mismatches` に出します。
+- `--golden`: golden に固定した参照 run 出力(`<golden 名>.reference/`)と `--old` と同じ規則で比べます。
+  discrete は exact hash、numeric は stage 値・latency・obs 3平面の全 segment を量子化 hash → segment tolerance の
+  順で判定するので、quantum 境界をまたぐだけの許容内の差は食い違いになりません。artifact hashes は exact に比べます。
+  食い違った項目名を `golden_mismatches` に、分岐点を `golden_first_divergence` に出します。
+  参照 run 出力が golden の `reference_sha256` と合わなければ `ReplayIntegrityError` で止まります。
 - 合格なら 0、1つでも食い違えば 1 を返します。
 
 ## golden update
@@ -62,6 +67,8 @@ python replay_survivors_session.py update-golden --golden golden.json \
 ```
 
 - 旧/新 run の集計 metrics と新旧の比較 metrics は run から計算し、golden に保存します。
+- 新 run の `discrete.jsonl` / `numeric.jsonl` / `numeric_obs.npz` を `<golden 名>.reference/` へ複製し、
+  その sha256 を golden の `reference_sha256` に固定します(golden 比較の tolerance 再判定に使う)。
 - `--artifact-hashes` は新 run の artifact hashes(bundle/detector 等と `capture_manifest_sha256`、NPZ があれば
   `frames_sha256`)を明示した JSON で、新 run の manifest と1つでも食い違えば `GoldenUpdateError` です。
 - 前の golden から artifact hashes が変わる更新(model/parser の版が変わる)は、独立検証担当者の

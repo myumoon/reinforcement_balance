@@ -21,6 +21,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import shutil
 from typing import Any
 import zipfile
 
@@ -480,6 +481,8 @@ SAFE_EFFECT_CATEGORIES = frozenset({"release", "control"})
 REQUIRED_RUN_METRICS = ("stage_rows", "stage_counts", "effect_counts", "obs_emitted", "exit_code")
 REQUIRED_COMPARISON_METRICS = ("discrete_match_rate", "numeric_tolerance_pass_rate")
 _OBS_PLANES = ("values", "validity", "age")
+# golden に複製して tolerance 再判定に使う参照 run の出力(compare_replays が読むもの全て)。
+_GOLDEN_REFERENCE_FILES = ("discrete.jsonl", "numeric.jsonl", "numeric_obs.npz")
 _MISSING = "<missing>"
 _OPEN_END_NS = 2**63
 
@@ -851,6 +854,8 @@ def update_golden(
     新 run の manifest と食い違ったりすれば GoldenUpdateError です。前の golden から artifact hashes が
     変わる(model/parser の版が変わる)更新は、独立検証担当者の ``approved_by`` も必須です。
     golden には discrete の exact hash、numeric の segment 別 quantized hash、metrics、hashes を保存します。
+    numeric を tolerance で再判定できるよう、新 run の discrete/numeric 出力を golden の隣の
+    ``<golden 名>.reference/`` へ複製し、その sha256 を golden に固定します(golden_mismatches が使う)。
     """
     for label, metrics, required in (
         ("old_metrics", old_metrics, REQUIRED_RUN_METRICS),
@@ -874,6 +879,11 @@ def update_golden(
     if previous is not None and json.loads(previous)["artifact_hashes"] != dict(artifact_hashes):
         if not isinstance(approved_by, str) or not approved_by.strip():
             raise GoldenUpdateError("artifact version change requires approved_by (independent verifier)")
+    # 複製が途中で落ちても、golden に固定した sha256 と合わなくなるので golden_mismatches が拒否する。
+    reference = _golden_reference_paths(golden_path)
+    reference["discrete.jsonl"].parent.mkdir(parents=True, exist_ok=True)
+    for name, path in reference.items():
+        shutil.copyfile(paths[name], path)
     golden = {
         "schema_version": GOLDEN_SCHEMA_VERSION,
         "session_id": manifest["session_id"],
@@ -882,6 +892,7 @@ def update_golden(
         "discrete_sha256": _canonical_sha256(_read_jsonl(paths["discrete.jsonl"])),
         "numeric_quantum": quantum,
         "numeric_quantized_sha256": numeric_segment_hashes(paths, quantum=quantum, obs_layout=obs_layout),
+        "reference_sha256": {name: _sha256_bytes(path.read_bytes()) for name, path in sorted(reference.items())},
         "artifact_hashes": dict(sorted(artifact_hashes.items())),
         "metrics": {"old": dict(old_metrics), "new": dict(new_metrics), "comparison": dict(comparison)},
         "approved_by": approved_by,
@@ -891,26 +902,45 @@ def update_golden(
     return golden
 
 
-def golden_mismatches(
-    golden: Mapping[str, Any], run: Any, *, obs_layout: Mapping[str, tuple[int, int]] | None = None
-) -> list[str]:
-    """replay 出力が golden と食い違う項目名を返す(空なら一致)。
+def _golden_reference_paths(golden_path: Path) -> dict[str, Path]:
+    """golden の隣に置く参照 run 出力(discrete/numeric)の paths dict を返す。"""
+    directory = golden_path.with_name(golden_path.stem + ".reference")
+    return {name: directory / name for name in _GOLDEN_REFERENCE_FILES}
 
-    discrete hash・numeric segment の quantized hash・artifact hashes を比べます。numeric が quantized hash で
-    食い違ったときは、保存済みの旧 run と compare_replays で tolerance 判定と first divergence を確かめます。
+
+def golden_mismatches(
+    golden_path: Path | str,
+    run: Any,
+    *,
+    tolerances: Mapping[str, Tolerance] = DEFAULT_TOLERANCES,
+    obs_layout: Mapping[str, tuple[int, int]] | None = None,
+) -> tuple[list[str], ReplayDiff]:
+    """replay 出力が golden と食い違う項目名(空なら一致)と、golden 参照 run との比較結果を返す。
+
+    golden に固定した参照 run 出力(sha256 が合わなければ ReplayIntegrityError)と run を compare_replays で比べるので、
+    discrete は exact hash、numeric は stage 値・latency・obs 3平面の全 segment を quantized hash → tolerance の
+    順で判定します(compare_replays と同じ規則)。quantum 境界をまたぐだけの許容内の差は mismatch にしません。
+    artifact hashes は exact に比べます。分岐点は返す ReplayDiff の first_divergence に入ります。
     """
+    golden_path = Path(golden_path)
+    golden = json.loads(golden_path.read_text(encoding="utf-8"))
+    reference = _golden_reference_paths(golden_path)
+    stored = golden["reference_sha256"]
+    if set(stored) != set(reference) or any(
+        not path.is_file() or _sha256_bytes(path.read_bytes()) != stored[name] for name, path in reference.items()
+    ):
+        raise ReplayIntegrityError("golden reference outputs are missing or do not match reference_sha256")
+    diff = compare_replays(reference, run, tolerances=tolerances, quantum=golden["numeric_quantum"], obs_layout=obs_layout)
     paths = _paths(run)
     manifest = json.loads(paths["manifest.json"].read_text(encoding="utf-8"))
-    out = [] if golden["discrete_sha256"] == _canonical_sha256(_read_jsonl(paths["discrete.jsonl"])) else ["discrete"]
-    current = numeric_segment_hashes(paths, quantum=golden["numeric_quantum"], obs_layout=obs_layout)
-    stored = golden["numeric_quantized_sha256"]
-    out += [f"numeric:{name}" for name in sorted(set(current) | set(stored)) if current.get(name) != stored.get(name)]
+    out = [] if golden["discrete_sha256"] == diff.discrete_sha256[1] else ["discrete"]
+    out += [f"numeric:{name}" for name in diff.metrics["numeric_segments_failed"]]
     hashes = _run_artifact_hashes(manifest)
     out += [
         f"artifact:{name}" for name in sorted(set(hashes) | set(golden["artifact_hashes"]))
         if hashes.get(name) != golden["artifact_hashes"].get(name)
     ]
-    return out
+    return out, diff
 
 
 def fault_windows(session: RecordedSession, discrete_rows: Iterable[Mapping[str, Any]]) -> list[tuple[int, int]]:
