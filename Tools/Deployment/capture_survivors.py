@@ -193,7 +193,9 @@ def _capture_live(
 
     フォアグラウンド待機の時間はduration_secに含めないため、
     session.start()直後を起点としてstatsへ書き込み、呼び出し側が
-    正確なelapsed_sec/ended_reasonを算出できるようにする。
+    正確なelapsed_sec/ended_reasonを算出できるようにする。alt-tab等で
+    一時停止・再開したことがoperatorにもコンソール上で分かるよう、
+    session.pausedの遷移をstderrへログ出力する。
     """
     try:
         if not _wait_for_foreground(session.locator, session.target, interrupted):
@@ -202,6 +204,7 @@ def _capture_live(
         session.start()
         stats["started_at"] = time.monotonic()
         deadline = stats["started_at"] + duration_sec
+        was_paused = False
         while time.monotonic() < deadline:
             # frameが来ないtick(foreground一時停止中を含む)でも必ずここで
             # interruptedを見る。yieldは実フレームがあるときにしか起きないため、
@@ -210,6 +213,14 @@ def _capture_live(
                 stats["ended_reason"] = "interrupted"
                 return
             frame = session.capture_next()
+            if session.paused != was_paused:
+                was_paused = session.paused
+                message = (
+                    "capture paused: target window lost foreground"
+                    if was_paused
+                    else "capture resumed: target window regained foreground"
+                )
+                print(message, file=sys.stderr)
             if frame is None:
                 time.sleep(1 / 60)  # ponytail: 60fps上限ポーリング — busy loopを防ぐ
                 continue

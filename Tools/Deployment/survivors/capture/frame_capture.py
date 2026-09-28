@@ -182,6 +182,15 @@ class CaptureSession:
         """
         return self._locator
 
+    @property
+    def paused(self) -> bool:
+        """フォアグラウンド喪失により一時停止中かどうかを返す読み取り専用アクセサ。
+
+        capture_survivors.py が tick 間の遷移を検知して一時停止・再開を
+        operator へログ出力できるようにするための公開点である。
+        """
+        return self._paused_for_foreground
+
     def start(self) -> None:
         if self._closed:
             raise CaptureFrameError("capture session is closed")
