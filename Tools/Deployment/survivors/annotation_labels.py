@@ -1,0 +1,231 @@
+"""Survivors アノテーションの共通ラベル一覧とファイル処理を提供する。
+
+各 CLI はこのモジュールのクラス検証、矩形、X-AnyLabeling 入出力を共有する。
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Iterator
+
+from survivors.vision.world_dataset import load_class_map
+
+
+DEFAULT_CLASS_MAP_PATH = Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v1.yaml"
+_CLASS_MAP = load_class_map(DEFAULT_CLASS_MAP_PATH)
+WORLD_CLASSES = tuple(
+    item["name"] for item in sorted(_CLASS_MAP.foreground_classes, key=lambda item: item["id"])
+)
+UI_CLASSES = ("hud_hp", "hud_xp", "card", "button", "death_result")
+ALL_CLASSES = WORLD_CLASSES + UI_CLASSES
+_FRAME_STEM = re.compile(r"^\d{8}$")
+
+
+@dataclass(frozen=True)
+class LabelBox:
+    """画像内の名前付き矩形と任意の検出スコアを表す。
+
+    left, top, right, bottom はピクセル座標で、right と bottom は排他的な端点。
+    """
+
+    label: str
+    left: float
+    top: float
+    right: float
+    bottom: float
+    score: float | None = None
+
+
+def validate_label(name: str) -> str:
+    """validate_label(name) -> str として共有クラス一覧を検証する。
+
+    有効な名前をそのまま返し、未知の名前は ValueError にする。
+    """
+    if name not in ALL_CLASSES:
+        raise ValueError(f"unknown annotation label: {name!r}")
+    return name
+
+
+def clip_box(
+    box: LabelBox, *, image_width: int, image_height: int
+) -> LabelBox | None:
+    """clip_box(box, *, image_width, image_height) で矩形を画像内へ収める。
+
+    面積が 0 になる矩形は None、画像範囲に残る矩形は新しい LabelBox で返す。
+    """
+    if image_width <= 0 or image_height <= 0:
+        raise ValueError("image dimensions must be positive")
+    validate_label(box.label)
+    coordinates = (box.left, box.top, box.right, box.bottom)
+    if not all(math.isfinite(float(value)) for value in coordinates):
+        raise ValueError("box coordinates must be finite")
+
+    left = min(max(float(box.left), 0.0), float(image_width))
+    top = min(max(float(box.top), 0.0), float(image_height))
+    right = min(max(float(box.right), 0.0), float(image_width))
+    bottom = min(max(float(box.bottom), 0.0), float(image_height))
+    if right <= left or bottom <= top:
+        return None
+    return LabelBox(box.label, left, top, right, bottom, box.score)
+
+
+def write_label_file(
+    path: Path | str,
+    boxes: Iterable[LabelBox],
+    *,
+    image_width: int = 1920,
+    image_height: int = 1080,
+    checked: bool = False,
+) -> None:
+    """write_label_file(path, boxes, *, image_width=1920, image_height=1080, checked=False) を書く。
+
+    四点 rectangle と v4.0.6 の必須キーを一時ファイル経由で原子的に保存する。
+    """
+    if image_width <= 0 or image_height <= 0:
+        raise ValueError("image dimensions must be positive")
+    if not isinstance(checked, bool):
+        raise ValueError("checked must be a boolean")
+
+    path = Path(path)
+    shapes: list[dict] = []
+    for box in boxes:
+        validate_label(box.label)
+        clipped = clip_box(box, image_width=image_width, image_height=image_height)
+        if clipped is None:
+            continue
+        score = None if clipped.score is None else float(clipped.score)
+        if score is not None and not math.isfinite(score):
+            raise ValueError("box score must be finite")
+        shapes.append(
+            {
+                "label": clipped.label,
+                "score": score,
+                "points": [
+                    [float(clipped.left), float(clipped.top)],
+                    [float(clipped.right), float(clipped.top)],
+                    [float(clipped.right), float(clipped.bottom)],
+                    [float(clipped.left), float(clipped.bottom)],
+                ],
+                "group_id": None,
+                "description": "",
+                "difficult": False,
+                "shape_type": "rectangle",
+                "flags": {},
+                "attributes": {},
+            }
+        )
+
+    payload = {
+        "version": "4.0.6",
+        "flags": {},
+        "shapes": shapes,
+        "imagePath": path.with_suffix(".png").name,
+        "imageData": None,
+        "imageHeight": image_height,
+        "imageWidth": image_width,
+        "checked": checked,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.write("\n")
+        os.replace(temporary_name, path)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def read_label_file(path: Path | str) -> tuple[list[LabelBox], bool]:
+    """read_label_file(path) -> (boxes, checked) としてラベルファイルを読む。
+
+    二点または四点の rectangle を受け入れ、未知ラベルや不正 shape はパス付き ValueError にする。
+    """
+    path = Path(path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{path}: cannot read label file: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: label file must contain a JSON object")
+
+    missing = [key for key in ("shapes", "imagePath", "imageData") if key not in payload]
+    if missing:
+        raise ValueError(f"{path}: missing required keys: {', '.join(missing)}")
+    if not isinstance(payload["shapes"], list):
+        raise ValueError(f"{path}: shapes must be a list")
+
+    boxes: list[LabelBox] = []
+    for index, shape in enumerate(payload["shapes"]):
+        prefix = f"{path}: shape {index}"
+        if not isinstance(shape, dict):
+            raise ValueError(f"{prefix} must be an object")
+        if "shape_type" not in shape or "points" not in shape or "label" not in shape:
+            raise ValueError(f"{prefix} is missing label, shape_type, or points")
+        if shape["shape_type"] != "rectangle":
+            raise ValueError(f"{prefix} has unsupported shape_type: {shape['shape_type']!r}")
+        try:
+            label = validate_label(shape["label"])
+        except ValueError as exc:
+            raise ValueError(f"{prefix}: {exc}") from exc
+
+        points = shape["points"]
+        if not isinstance(points, list) or len(points) not in (2, 4):
+            raise ValueError(f"{prefix} rectangle points must contain 2 or 4 points")
+        xs: list[float] = []
+        ys: list[float] = []
+        for point in points:
+            if not isinstance(point, list) or len(point) != 2:
+                raise ValueError(f"{prefix} has an invalid point: {point!r}")
+            if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in point):
+                raise ValueError(f"{prefix} point coordinates must be numbers")
+            x, y = float(point[0]), float(point[1])
+            if not math.isfinite(x) or not math.isfinite(y):
+                raise ValueError(f"{prefix} point coordinates must be finite")
+            xs.append(x)
+            ys.append(y)
+
+        score = shape.get("score")
+        if score is not None:
+            if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(float(score)):
+                raise ValueError(f"{prefix} score must be a finite number or null")
+            score = float(score)
+        boxes.append(LabelBox(label, min(xs), min(ys), max(xs), max(ys), score))
+
+    return boxes, payload.get("checked", False) is True
+
+
+def iter_frame_files(
+    session_dir: Path | str,
+) -> Iterator[tuple[int, Path | None, Path | None]]:
+    """iter_frame_files(session_dir) は (frame_id, png_path, json_path) を昇順に返す。
+
+    八桁数字 stem の PNG/JSON だけを列挙し、片方の欠落は None で示す。
+    """
+    files: dict[str, dict[str, Path]] = {}
+    for path in Path(session_dir).iterdir():
+        if not path.is_file() or path.suffix not in {".png", ".json"}:
+            continue
+        if not _FRAME_STEM.fullmatch(path.stem):
+            continue
+        files.setdefault(path.stem, {})[path.suffix] = path
+
+    for stem in sorted(files, key=int):
+        frame_files = files[stem]
+        yield (
+            int(stem),
+            frame_files.get(".png"),
+            frame_files.get(".json"),
+        )
