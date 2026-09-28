@@ -5,15 +5,20 @@ RecordedFrameSource と VirtualClock を controller の既存注入点(capture/c
 controller は常に shadow mode で動かすので ``execute_effect`` は呼ばれず、OS 入力は一切出ません。
 実行後は telemetry を読み、全 stage の時刻と correlation id が仮想時計・記録 frame に揃っていることを確かめ、
 結果を「exact 比較する離散値(discrete)」と「tolerance 比較する数値(numeric)」に分けて保存します。
+後半は golden/diff(06-01 タスク3): numeric の quantize と segment 別 tolerance、2回の replay の比較と
+最初の分岐点の tree report、golden 更新、安全 fixture の hard assertion、formal verdict の publish ガードです。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 import hashlib
 import io
 import json
+import math
+import os
 from pathlib import Path
 import platform
 from typing import Any
@@ -25,7 +30,7 @@ from numpy.typing import NDArray
 from ..controller import controller as controller_module
 from ..controller.controller import SurvivorsController
 from ..controller.health_monitor import HealthMonitor
-from ..controller.state_machine import CampaignRunMode, StateMachine
+from ..controller.state_machine import CampaignRunMode, ControllerState, StateMachine
 from ..controller.telemetry import TelemetrySessionHeader, TelemetryWriter
 from ..real_obs_assembler import RealObsAssembler
 from ..runtime.agent_runtime import AgentRuntime
@@ -414,3 +419,550 @@ def run_recorded_replay(
     }
     paths["manifest.json"].write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return E2EReplayResult(exit_code, controller.exit_reason, manifest, paths, list(controller.errors))
+
+
+# --------------------------------------------------------------------------------------------
+# golden/diff(06-01 タスク3)
+# --------------------------------------------------------------------------------------------
+
+GOLDEN_SCHEMA_VERSION = "survivors.e2e_replay_golden.v1"
+VERDICT_SCHEMA_VERSION = "survivors.e2e_replay_verdict.v1"
+# canonical quantization rule: 値を round(value / quantum)(偶数丸め)の整数値へ丸めてから hash する。
+DEFAULT_QUANTUM = 1e-6
+# formal verdict に必要な同一 bundle の再生回数。
+FORMAL_REPLAY_RUNS = 3
+# discrete の stage → first divergence tree の分類(parser field / obs / model action / state / effect)。
+STAGE_CATEGORIES = {
+    "hud_parser": "parser_field",
+    "obs": "obs",
+    "policy": "model_action",
+    "state_machine": "state",
+    "effect": "effect",
+}
+# unknown/focus loss/timeout の区間で許す effect 分類(OS 入力を出さない release と停止系 control だけ)。
+SAFE_EFFECT_CATEGORIES = frozenset({"release", "control"})
+# golden 更新で新旧の各 run に必須の集計 metrics と、新旧比較に必須の metrics。
+REQUIRED_RUN_METRICS = ("stage_rows", "stage_counts", "effect_counts", "obs_emitted", "exit_code")
+REQUIRED_COMPARISON_METRICS = ("discrete_match_rate", "numeric_tolerance_pass_rate")
+_OBS_PLANES = ("values", "validity", "age")
+_MISSING = "<missing>"
+_OPEN_END_NS = 2**63
+
+
+class SafetyAssertionError(AssertionError):
+    """安全 fixture の区間で release/no-op 以外の effect が出たときに送出する(aggregate tolerance で許容しない)。"""
+
+
+class GoldenUpdateError(ValueError):
+    """golden 更新に必須の情報(新旧 metrics・artifact hashes・承認者)が欠けている・食い違うときに送出する。"""
+
+
+class FormalReplayRejectedError(ValueError):
+    """開発用 parent や formal 不可の replay から formal verdict を publish しようとしたときに送出する。"""
+
+
+@dataclass(frozen=True)
+class Tolerance:
+    """numeric 1 segment の許容差(``math.isclose`` と同じ対称な abs/rel の意味)。
+
+    |old - new| <= max(abs_tol, rel_tol * max(|old|, |new|)) なら許容します。
+    NaN は両方 NaN のとき、inf は同符号どうしのときだけ一致とみなします。
+    """
+
+    abs_tol: float
+    rel_tol: float
+
+
+# segment 名(ドット区切り)の最長前方一致で使う tolerance。"" は既定値。
+DEFAULT_TOLERANCES: Mapping[str, Tolerance] = {
+    "": Tolerance(abs_tol=1e-6, rel_tol=1e-6),
+    "obs": Tolerance(abs_tol=1e-5, rel_tol=1e-5),
+    "latency": Tolerance(abs_tol=1_000_000.0, rel_tol=0.0),
+}
+
+
+def tolerance_for(segment: str, tolerances: Mapping[str, Tolerance]) -> Tolerance:
+    """segment に対しドット区切りの最長前方一致で tolerance を選ぶ(どれにも一致しなければ exact)。
+
+    例えば ``obs.values.player`` は ``obs.values.player`` → ``obs.values`` → ``obs`` → ``""`` の順に探します。
+    """
+    parts = segment.split(".")
+    for n in range(len(parts), -1, -1):
+        key = ".".join(parts[:n])
+        if key in tolerances:
+            return tolerances[key]
+    return Tolerance(0.0, 0.0)
+
+
+def quantize(values: Any, quantum: float = DEFAULT_QUANTUM) -> NDArray[np.float64]:
+    """numeric 値を canonical quantization rule で丸めた float64 配列を返す。
+
+    round(value / quantum) を偶数丸めで求め、-0 を 0 に、NaN を単一の bit 表現にそろえます。
+    raw float の最下位 bit の揺れで hash が変わらないようにするための規則です。
+    """
+    quantized = np.rint(np.asarray(values, dtype=np.float64) / quantum) + 0.0
+    quantized[np.isnan(quantized)] = np.nan
+    return quantized
+
+
+def quantized_sha256(values: Any, quantum: float = DEFAULT_QUANTUM, keys: Sequence[str] | None = None) -> str:
+    """quantize 後の値(と形・key 列)から canonical hash を作る。"""
+    quantized = quantize(values, quantum)
+    digest = hashlib.sha256(json.dumps([list(quantized.shape), keys], separators=(",", ":")).encode("utf-8"))
+    digest.update(quantized.astype("<f8").tobytes())
+    return digest.hexdigest()
+
+
+def _within(old: Any, new: Any, tolerance: Tolerance) -> NDArray[np.bool_]:
+    """old と new の各要素が tolerance 内かどうかの bool 配列を返す。"""
+    old = np.asarray(old, dtype=np.float64)
+    new = np.asarray(new, dtype=np.float64)
+    with np.errstate(invalid="ignore"):
+        bound = np.maximum(tolerance.abs_tol, tolerance.rel_tol * np.maximum(np.abs(old), np.abs(new)))
+        close = np.abs(new - old) <= bound
+    return close | (old == new) | (np.isnan(old) & np.isnan(new))
+
+
+def _canonical_sha256(rows: Iterable[Any]) -> str:
+    """rows を _write_jsonl と同じ canonical JSONL にした bytes の sha256(discrete の exact hash)。"""
+    text = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n" for row in rows)
+    return _sha256_bytes(text.encode("utf-8"))
+
+
+def _paths(run: Any) -> dict[str, Path]:
+    """E2EReplayResult か paths dict を受け取り、出力名 → Path の dict にする。"""
+    return {name: Path(path) for name, path in getattr(run, "paths", run).items()}
+
+
+def _column_segments(layout: Mapping[str, tuple[int, int]] | None, width: int) -> list[tuple[str, int, int]]:
+    """obs の列範囲を DeployObs schema の segment 名で区切る(layout が無ければ全体で1つ)。"""
+    if not layout:
+        return [("all", 0, width)] if width else []
+    spans = [(name, offset, min(offset + size, width)) for name, (offset, size) in layout.items() if offset < width]
+    end = max((hi for _, _, hi in spans), default=0)
+    return spans + ([("unassigned", end, width)] if end < width else [])
+
+
+def _load_numeric(
+    paths: Mapping[str, Path], discrete_rows: list[dict[str, Any]]
+) -> tuple[dict[str, dict[str, tuple[int, dict[str, Any], float]]], dict[str, NDArray[np.float64]], list[tuple[int, str]]]:
+    """numeric.jsonl を segment → key → (sequence, 位置情報, 値) に、numeric_obs.npz を平面ごとの配列に読む。
+
+    stage 値の segment は ``<stage>.<payload の先頭 key>``、処理時間は ``latency.<stage>`` です。
+    obs 配列の各行は、discrete の emitted な obs 行(sequence, correlation_id)に順に対応します。
+    """
+    stage: dict[str, dict[str, tuple[int, dict[str, Any], float]]] = {}
+    for row in _read_jsonl(paths["numeric.jsonl"]):
+        base = {"sequence": row["sequence"], "stage": row["stage"], "correlation_id": row["correlation_id"]}
+        items = [(f"latency.{row['stage']}", "latency_ns", row["latency_ns"])]
+        items += [(f"{row['stage']}.{path.split('.')[0].split('[')[0]}", path, value) for path, value in row["values"].items()]
+        for segment, path, value in items:
+            stage.setdefault(segment, {})[f"{row['sequence']}/{row['stage']}/{path}"] = (
+                row["sequence"], {**base, "path": path}, float(value),
+            )
+    emitted = [
+        (row["sequence"], row["correlation_id"])
+        for row in discrete_rows if row["stage"] == "obs" and row["payload"].get("emitted")
+    ]
+    with np.load(paths["numeric_obs.npz"]) as archive:
+        planes = {name: np.asarray(archive[name], dtype=np.float64) for name in _OBS_PLANES}
+    return stage, planes, emitted
+
+
+def _stage_segment_hash(entries: Mapping[str, tuple[int, dict[str, Any], float]], quantum: float) -> str:
+    """stage 値 segment の quantized hash(key を整列して値と一緒に hash)。"""
+    keys = sorted(entries)
+    return quantized_sha256([entries[key][2] for key in keys], quantum, keys=keys)
+
+
+def numeric_segment_hashes(
+    run: Any, *, quantum: float = DEFAULT_QUANTUM, obs_layout: Mapping[str, tuple[int, int]] | None = None
+) -> dict[str, str]:
+    """1回分の replay 出力について numeric segment ごとの quantized hash を返す(golden に保存する値)。"""
+    paths = _paths(run)
+    stage, planes, _ = _load_numeric(paths, _read_jsonl(paths["discrete.jsonl"]))
+    hashes = {segment: _stage_segment_hash(entries, quantum) for segment, entries in stage.items()}
+    for plane, array in planes.items():
+        for name, lo, hi in _column_segments(obs_layout, array.shape[1]):
+            hashes[f"obs.{plane}.{name}"] = quantized_sha256(array[:, lo:hi], quantum)
+    return dict(sorted(hashes.items()))
+
+
+def _first_diff(old: Any, new: Any, path: str = "") -> tuple[str, Any, Any] | None:
+    """old と new を型も含めて比べ、最初に食い違う葉の (path, old, new) を返す(一致なら None)。"""
+    if type(old) is not type(new):
+        return path, old, new
+    if isinstance(old, dict):
+        for key in sorted(set(old) | set(new)):
+            sub = f"{path}.{key}" if path else str(key)
+            if key not in old or key not in new:
+                return sub, old.get(key, _MISSING), new.get(key, _MISSING)
+            found = _first_diff(old[key], new[key], sub)
+            if found:
+                return found
+        return None
+    if isinstance(old, list):
+        for i in range(max(len(old), len(new))):
+            if i >= len(old) or i >= len(new):
+                return f"{path}[{i}]", old[i] if i < len(old) else _MISSING, new[i] if i < len(new) else _MISSING
+            found = _first_diff(old[i], new[i], f"{path}[{i}]")
+            if found:
+                return found
+        return None
+    return None if old == new else (path, old, new)
+
+
+def _tree(sequence: int, correlation_id: str, stage: str, divergence: dict[str, Any]) -> dict[str, Any]:
+    """first divergence を frame → stage → divergence の入れ子(tree)にする。"""
+    return {"frame": {"correlation_id": correlation_id, "stage": {
+        "name": stage, "sequence": sequence, "category": STAGE_CATEGORIES.get(stage, "stage"),
+        "divergence": divergence,
+    }}}
+
+
+@dataclass(frozen=True)
+class ReplayDiff:
+    """2回の replay 出力の比較結果。
+
+    discrete は canonical hash の exact 一致、numeric は segment ごとに quantized hash 一致か
+    tolerance 内かで判定します。どちらかが外れると ``first_divergence`` に、最も早い sequence で
+    分岐した frame/stage/field(obs なら平面・index・segment)を tree で入れます。空なら合格です。
+    """
+
+    discrete_sha256: tuple[str, str]
+    segments: dict[str, dict[str, Any]]
+    metrics: dict[str, Any]
+    first_divergence: dict[str, Any] | None
+
+    @property
+    def passed(self) -> bool:
+        """分岐が1つも無ければ True。"""
+        return self.first_divergence is None
+
+
+def compare_replays(
+    old: Any,
+    new: Any,
+    *,
+    tolerances: Mapping[str, Tolerance] = DEFAULT_TOLERANCES,
+    quantum: float = DEFAULT_QUANTUM,
+    obs_layout: Mapping[str, tuple[int, int]] | None = None,
+) -> ReplayDiff:
+    """旧(golden 側)と新の replay 出力を比べ、metrics と最初の分岐点 tree を返す。
+
+    old/new は E2EReplayResult か、その paths と同じ形の dict です。discrete.jsonl を行ごとに exact 比較し、
+    numeric.jsonl の stage 値・latency と numeric_obs.npz の obs 3平面を segment ごとに quantized hash
+    → tolerance の順で判定します(全比較対象に同じ2経路を当てる)。effects.json の中身は discrete/numeric の
+    effect 行と同じなので別には比べません。obs の segment 名は ``obs_layout``(DeployObsSchema.layout())で付けます。
+    """
+    old_paths, new_paths = _paths(old), _paths(new)
+    old_rows, new_rows = _read_jsonl(old_paths["discrete.jsonl"]), _read_jsonl(new_paths["discrete.jsonl"])
+    hashes = (_canonical_sha256(old_rows), _canonical_sha256(new_rows))
+    total_rows = max(len(old_rows), len(new_rows))
+    candidates: list[tuple[int, int, int, dict[str, Any]]] = []
+    matches = total_rows
+    if hashes[0] != hashes[1]:
+        matches = 0
+        for i in range(total_rows):
+            o = old_rows[i] if i < len(old_rows) else _MISSING
+            n = new_rows[i] if i < len(new_rows) else _MISSING
+            found = _first_diff(o, n)
+            if found is None:
+                matches += 1
+            elif not any(c[1] == 0 for c in candidates):
+                row = o if isinstance(o, dict) else n
+                candidates.append((row["sequence"], 0, len(candidates), _tree(
+                    row["sequence"], row["correlation_id"], row["stage"],
+                    {"kind": "discrete", "path": found[0], "old": found[1], "new": found[2]},
+                )))
+
+    old_stage, old_planes, emitted = _load_numeric(old_paths, old_rows)
+    new_stage, new_planes, _ = _load_numeric(new_paths, new_rows)
+    segments: dict[str, dict[str, Any]] = {}
+
+    def record(segment: str, tolerance: Tolerance, values: int, within: int, equal: bool, max_abs: float | None) -> None:
+        """segment 1つ分の tolerance metrics を記録する(形が違うときは max_abs_diff=None)。"""
+        segments[segment] = {
+            "values": values, "within_tolerance": within, "quantized_equal": equal,
+            "passed": equal or within == values, "max_abs_diff": max_abs,
+            "abs_tol": tolerance.abs_tol, "rel_tol": tolerance.rel_tol,
+        }
+
+    for segment in sorted(set(old_stage) | set(new_stage)):
+        o, n = old_stage.get(segment, {}), new_stage.get(segment, {})
+        tolerance = tolerance_for(segment, tolerances)
+        keys = sorted(set(o) | set(n))
+        equal = _stage_segment_hash(o, quantum) == _stage_segment_hash(n, quantum)
+        within, max_abs, failures = len(keys), 0.0, []
+        if not equal:
+            within = 0
+            for key in keys:
+                old_value = o[key][2] if key in o else None
+                new_value = n[key][2] if key in n else None
+                if old_value is not None and new_value is not None:
+                    if math.isfinite(old_value) and math.isfinite(new_value):
+                        max_abs = max(max_abs, abs(new_value - old_value))
+                    if _within(old_value, new_value, tolerance):
+                        within += 1
+                        continue
+                sequence, locator, _ = o[key] if key in o else n[key]
+                failures.append((sequence, key, locator, old_value, new_value))
+        record(segment, tolerance, len(keys), within, equal, max_abs)
+        if failures:
+            sequence, _, locator, old_value, new_value = min(failures, key=lambda f: (f[0], f[1]))
+            candidates.append((sequence, 1, len(candidates), _tree(
+                sequence, locator["correlation_id"], locator["stage"],
+                {"kind": "numeric", "segment": segment, "path": locator["path"],
+                 "old": _MISSING if old_value is None else old_value,
+                 "new": _MISSING if new_value is None else new_value},
+            )))
+
+    def obs_at(row: int) -> tuple[int, str]:
+        """obs 配列の行番号から、対応する obs stage 行の (sequence, correlation_id) を返す。"""
+        return emitted[row] if row < len(emitted) else (_OPEN_END_NS, _MISSING)
+
+    for plane in _OBS_PLANES:
+        o, n = old_planes[plane], new_planes[plane]
+        if o.shape != n.shape:
+            segment = f"obs.{plane}"
+            record(segment, tolerance_for(segment, tolerances), max(o.size, n.size), 0, False, None)
+            row = min(o.shape[0], n.shape[0]) if o.shape[1:] == n.shape[1:] else 0
+            sequence, correlation_id = obs_at(row)
+            candidates.append((sequence, 1, len(candidates), _tree(sequence, correlation_id, "obs", {
+                "kind": "numeric_shape", "segment": segment, "plane": plane, "obs_row": row,
+                "old": list(o.shape), "new": list(n.shape),
+            })))
+            continue
+        for name, lo, hi in _column_segments(obs_layout, o.shape[1]):
+            segment = f"obs.{plane}.{name}"
+            tolerance = tolerance_for(segment, tolerances)
+            so, sn = o[:, lo:hi], n[:, lo:hi]
+            equal = quantized_sha256(so, quantum) == quantized_sha256(sn, quantum)
+            ok = np.ones(so.shape, dtype=bool) if equal else _within(so, sn, tolerance)
+            finite = np.isfinite(so) & np.isfinite(sn)
+            max_abs = float(np.abs(sn - so)[finite].max()) if finite.any() else 0.0
+            record(segment, tolerance, int(ok.size), int(ok.sum()), equal, max_abs)
+            if not ok.all():
+                row, col = (int(x) for x in np.argwhere(~ok)[0])
+                sequence, correlation_id = obs_at(row)
+                candidates.append((sequence, 1, len(candidates), _tree(sequence, correlation_id, "obs", {
+                    "kind": "numeric", "segment": segment, "plane": plane, "obs_row": row,
+                    "obs_index": lo + col, "obs_segment": name,
+                    "old": float(so[row, col]), "new": float(sn[row, col]),
+                })))
+
+    values = sum(s["values"] for s in segments.values())
+    within = sum(s["values"] if s["passed"] else s["within_tolerance"] for s in segments.values())
+    metrics = {
+        "discrete_equal": hashes[0] == hashes[1],
+        "discrete_rows": [len(old_rows), len(new_rows)],
+        "discrete_match_rate": matches / total_rows if total_rows else 1.0,
+        "numeric_values": values,
+        "numeric_tolerance_pass_rate": within / values if values else 1.0,
+        "numeric_segments_failed": sorted(name for name, s in segments.items() if not s["passed"]),
+    }
+    first = min(candidates, key=lambda c: c[:3])[3] if candidates else None
+    return ReplayDiff(hashes, segments, metrics, first)
+
+
+def replay_metrics(run: Any) -> dict[str, Any]:
+    """1回分の replay 出力の集計 metrics(stage 行数・stage 別件数・effect 分類別件数・obs 件数・終了)を返す。"""
+    paths = _paths(run)
+    rows = _read_jsonl(paths["discrete.jsonl"])
+    effects = json.loads(paths["effects.json"].read_text(encoding="utf-8"))
+    manifest = json.loads(paths["manifest.json"].read_text(encoding="utf-8"))
+    return {
+        "stage_rows": len(rows),
+        "stage_counts": dict(sorted(Counter(row["stage"] for row in rows).items())),
+        "effect_counts": dict(sorted(Counter(effect["category"] for effect in effects).items())),
+        "obs_emitted": sum(1 for row in rows if row["stage"] == "obs" and row["payload"].get("emitted")),
+        "exit_code": manifest["exit_code"],
+        "exit_reason": manifest["exit_reason"],
+    }
+
+
+def _run_artifact_hashes(manifest: Mapping[str, Any]) -> dict[str, str]:
+    """replay 出力 manifest から、その run を縛る artifact hashes(bundle/detector 等 + capture)を集める。"""
+    hashes = {**manifest["artifact_hashes"], "capture_manifest_sha256": manifest["capture_manifest_sha256"]}
+    if manifest["frames_sha256"] is not None:
+        hashes["frames_sha256"] = manifest["frames_sha256"]
+    return hashes
+
+
+def _atomic_write_json(path: Path, data: Mapping[str, Any]) -> None:
+    """一時ファイルへ書いてから置き換える(途中で落ちても半端な JSON を残さない)。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def update_golden(
+    golden_path: Path | str,
+    new_run: Any,
+    *,
+    old_metrics: Mapping[str, Any],
+    new_metrics: Mapping[str, Any],
+    comparison: Mapping[str, Any],
+    artifact_hashes: Mapping[str, str],
+    approved_by: str | None = None,
+    quantum: float = DEFAULT_QUANTUM,
+    obs_layout: Mapping[str, tuple[int, int]] | None = None,
+) -> dict[str, Any]:
+    """expected improvement を golden として書き直す(golden update command)。
+
+    旧 run・新 run の集計 metrics(replay_metrics)、新旧比較の metrics(ReplayDiff.metrics)、
+    artifact hashes(新 run の bundle/detector 等と capture の hash を全て)を必須にし、欠けていたり
+    新 run の manifest と食い違ったりすれば GoldenUpdateError です。前の golden から artifact hashes が
+    変わる(model/parser の版が変わる)更新は、独立検証担当者の ``approved_by`` も必須です。
+    golden には discrete の exact hash、numeric の segment 別 quantized hash、metrics、hashes を保存します。
+    """
+    for label, metrics, required in (
+        ("old_metrics", old_metrics, REQUIRED_RUN_METRICS),
+        ("new_metrics", new_metrics, REQUIRED_RUN_METRICS),
+        ("comparison", comparison, REQUIRED_COMPARISON_METRICS),
+    ):
+        if not isinstance(metrics, Mapping) or any(key not in metrics for key in required):
+            raise GoldenUpdateError(f"{label} must contain {list(required)}")
+    paths = _paths(new_run)
+    manifest = json.loads(paths["manifest.json"].read_text(encoding="utf-8"))
+    expected = _run_artifact_hashes(manifest)
+    if not isinstance(artifact_hashes, Mapping) or not manifest["artifact_hashes"]:
+        raise GoldenUpdateError("artifact_hashes are required")
+    if any(not isinstance(value, str) or not value for value in artifact_hashes.values()):
+        raise GoldenUpdateError("artifact_hashes values must be non-empty strings")
+    wrong = sorted(key for key, value in expected.items() if artifact_hashes.get(key) != value)
+    if wrong:
+        raise GoldenUpdateError(f"artifact_hashes missing or not matching the new run: {wrong}")
+    golden_path = Path(golden_path)
+    previous = golden_path.read_bytes() if golden_path.exists() else None
+    if previous is not None and json.loads(previous)["artifact_hashes"] != dict(artifact_hashes):
+        if not isinstance(approved_by, str) or not approved_by.strip():
+            raise GoldenUpdateError("artifact version change requires approved_by (independent verifier)")
+    golden = {
+        "schema_version": GOLDEN_SCHEMA_VERSION,
+        "session_id": manifest["session_id"],
+        "development_only": manifest["development_only"],
+        "formal_replay_eligible": manifest["formal_replay_eligible"],
+        "discrete_sha256": _canonical_sha256(_read_jsonl(paths["discrete.jsonl"])),
+        "numeric_quantum": quantum,
+        "numeric_quantized_sha256": numeric_segment_hashes(paths, quantum=quantum, obs_layout=obs_layout),
+        "artifact_hashes": dict(sorted(artifact_hashes.items())),
+        "metrics": {"old": dict(old_metrics), "new": dict(new_metrics), "comparison": dict(comparison)},
+        "approved_by": approved_by,
+        "previous_golden_sha256": None if previous is None else _sha256_bytes(previous),
+    }
+    _atomic_write_json(golden_path, golden)
+    return golden
+
+
+def golden_mismatches(
+    golden: Mapping[str, Any], run: Any, *, obs_layout: Mapping[str, tuple[int, int]] | None = None
+) -> list[str]:
+    """replay 出力が golden と食い違う項目名を返す(空なら一致)。
+
+    discrete hash・numeric segment の quantized hash・artifact hashes を比べます。numeric が quantized hash で
+    食い違ったときは、保存済みの旧 run と compare_replays で tolerance 判定と first divergence を確かめます。
+    """
+    paths = _paths(run)
+    manifest = json.loads(paths["manifest.json"].read_text(encoding="utf-8"))
+    out = [] if golden["discrete_sha256"] == _canonical_sha256(_read_jsonl(paths["discrete.jsonl"])) else ["discrete"]
+    current = numeric_segment_hashes(paths, quantum=golden["numeric_quantum"], obs_layout=obs_layout)
+    stored = golden["numeric_quantized_sha256"]
+    out += [f"numeric:{name}" for name in sorted(set(current) | set(stored)) if current.get(name) != stored.get(name)]
+    hashes = _run_artifact_hashes(manifest)
+    out += [
+        f"artifact:{name}" for name in sorted(set(hashes) | set(golden["artifact_hashes"]))
+        if hashes.get(name) != golden["artifact_hashes"].get(name)
+    ]
+    return out
+
+
+def fault_windows(session: RecordedSession, discrete_rows: Iterable[Mapping[str, Any]]) -> list[tuple[int, int]]:
+    """unknown state・focus loss・timeout が続いている仮想時刻の区間 [開始, 終了) を列挙する。
+
+    timeout/focus_lost は記録 event の時刻から次の新しい frame が届く時刻まで、
+    unknown は state machine が unknown に入った時刻から unknown 以外へ移る時刻までです。
+    終端は含まないので、回復後の新しい frame で出た effect は対象外になります。
+    """
+    windows = []
+    events = list(session.events)
+    for pos, event in enumerate(events):
+        if event.kind in ("timeout", "focus_lost"):
+            end = next((later.timestamp_ns for later in events[pos + 1:] if later.kind == "frame"), _OPEN_END_NS)
+            windows.append((event.timestamp_ns, end))
+    start = None
+    for row in discrete_rows:
+        if row["stage"] != "state_machine":
+            continue
+        unknown = row["payload"]["to_state"] == ControllerState.UNKNOWN.value
+        if unknown and start is None:
+            start = row["timestamp_ns"]
+        elif not unknown and start is not None:
+            windows.append((start, row["timestamp_ns"]))
+            start = None
+    if start is not None:
+        windows.append((start, _OPEN_END_NS))
+    return windows
+
+
+def assert_safe_effects(effects: Iterable[Mapping[str, Any]], windows: Sequence[tuple[int, int]]) -> None:
+    """安全 fixture の hard assertion: 区間内の effect が release/no-op 以外なら SafetyAssertionError。
+
+    effects は record_effects(effects.json)の出力です。movement/ui/unknown は1件でも失敗で、
+    aggregate の tolerance では許容しません。区間が1つも無い(fault が起きていない)fixture も
+    検証になっていないので失敗にします。
+    """
+    if not windows:
+        raise SafetyAssertionError("safety fixture produced no unknown/focus-loss/timeout window")
+    violations = [
+        (effect["correlation_id"], effect["timestamp_ns"], effect["category"], effect["effect"].get("kind"))
+        for effect in effects
+        if effect["category"] not in SAFE_EFFECT_CATEGORIES
+        and any(lo <= effect["timestamp_ns"] < hi for lo, hi in windows)
+    ]
+    if violations:
+        raise SafetyAssertionError(f"non release/no-op effects during fault windows: {violations[:5]}")
+
+
+def publish_formal_replay_verdict(
+    path: Path | str,
+    *,
+    diffs: Sequence[ReplayDiff],
+    manifests: Sequence[Mapping[str, Any]],
+    bundle: RuntimeBundle,
+    detector_manifest: Any,
+    capture: CaptureManifest,
+) -> dict[str, Any]:
+    """同一 bundle を FORMAL_REPLAY_RUNS 回再生した結果から formal replay verdict を書く。
+
+    ``verify_formal_runtime_release`` と同じ fail-closed の考え方で、次のどれかなら
+    FormalReplayRejectedError で publish を拒否します: runtime bundle/detector/capture の正式 parent が
+    揃わない(development_only を含む)、run 数不足、run の manifest が development_only・formal 不可・
+    別 capture・別 artifact、比較結果の不足。合否(passed)は拒否と別で、不合格の verdict も書けます。
+    """
+    if not formal_parents_eligible(bundle, detector_manifest, capture):
+        raise FormalReplayRejectedError("formal parents (runtime bundle/detector/capture) are development_only or unverified")
+    if len(manifests) < FORMAL_REPLAY_RUNS or len(diffs) < len(manifests) - 1:
+        raise FormalReplayRejectedError(f"formal verdict needs {FORMAL_REPLAY_RUNS} runs and their comparisons")
+    identity_keys = ("capture_manifest_sha256", "artifact_hashes", "determinism", "target_profile_hash", "game_build_id")
+    for manifest in manifests:
+        if manifest.get("development_only") is not False or manifest.get("formal_replay_eligible") is not True:
+            raise FormalReplayRejectedError("a replay run is development_only / not formal_replay_eligible")
+        if manifest.get("capture_manifest_sha256") != capture.manifest_sha256:
+            raise FormalReplayRejectedError("a replay run used a different capture manifest")
+    if len({json.dumps({key: m.get(key) for key in identity_keys}, sort_keys=True) for m in manifests}) != 1:
+        raise FormalReplayRejectedError("replay runs do not share the same bundle/capture/determinism")
+    verdict = {
+        "schema_version": VERDICT_SCHEMA_VERSION,
+        "development_only": False,
+        "formal_replay_eligible": True,
+        "passed": all(diff.passed for diff in diffs),
+        "runs": len(manifests),
+        "capture_manifest_sha256": capture.manifest_sha256,
+        "artifact_hashes": dict(manifests[0]["artifact_hashes"]),
+        "comparisons": [diff.metrics for diff in diffs],
+        "first_divergences": [diff.first_divergence for diff in diffs if not diff.passed],
+    }
+    _atomic_write_json(Path(path), verdict)
+    return verdict
