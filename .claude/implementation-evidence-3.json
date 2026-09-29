@@ -1,0 +1,482 @@
+{
+  "schema_version": 1,
+  "contract_coverage": [
+    {
+      "contract_id": "M1",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_schema.py",
+        "Tools/Deployment/tests/campaign/test_campaign_schema.py"
+      ],
+      "tests": [
+        "test_valid_campaign_event_cardinalities",
+        "test_cardinality_violations_are_rejected"
+      ],
+      "counterexample": "reserved-only, preflight-failed and activated chains accepted; terminal overwrite, duplicate activation and activation without identity rejected",
+      "siblings": [
+        "CampaignEvent",
+        "validate_campaign_events",
+        "generate_campaign_report"
+      ]
+    },
+    {
+      "contract_id": "M2",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_schema.py",
+        "Tools/Deployment/tests/campaign/test_campaign_schema.py"
+      ],
+      "tests": [
+        "test_duplicate_attempt_gameplay_and_process_ids_are_rejected",
+        "test_second_gameplay_attempt_cannot_replace_an_activated_run",
+        "test_preflight_failure_cannot_be_retried_or_replaced",
+        "test_all_identity_kinds_reject_duplicates",
+        "test_event_wire_rejects_unknown_required_and_claim_fields"
+      ],
+      "counterexample": "duplicate attempt/gameplay/process IDs, slot reuse, terminal overwrite, retry after preflight failure, and legacy issuance field",
+      "siblings": [
+        "all EventType branches in validate_campaign_events",
+        "CampaignEvent.from_wire"
+      ]
+    },
+    {
+      "contract_id": "M3",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_schema.py",
+        "Tools/Deployment/tests/campaign/test_campaign_schema.py"
+      ],
+      "tests": [
+        "test_all_wire_contracts_reject_claim_key_spellings",
+        "test_event_details_reject_normalized_and_nested_claim_fields"
+      ],
+      "counterexample": "rngseed, RNGSeed, sameseed, seeds and independently are rejected in manifest, prerequisite and event details; five joined spellings failed before the shared scanner fix and passed after",
+      "siblings": [
+        "validate_prerequisites",
+        "CampaignManifest.from_wire",
+        "CampaignEvent.from_wire",
+        "CampaignEvent.details recursive scan"
+      ]
+    },
+    {
+      "contract_id": "M4",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_schema.py",
+        "Tools/Deployment/tests/campaign/test_campaign_schema.py"
+      ],
+      "tests": [
+        "test_prerequisite_validator_fails_closed",
+        "test_prerequisite_validator_rejects_stale_parent_and_unknown_field",
+        "test_formal_manifest_requires_verified_non_development_prerequisites"
+      ],
+      "counterexample": "missing/stale/mixed parents, unknown prerequisite fields, cloud-sync/backup/save-contract failures",
+      "siblings": [
+        "validate_prerequisites",
+        "CampaignManifest.__post_init__",
+        "CampaignManifest.from_wire"
+      ]
+    },
+    {
+      "contract_id": "M5",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_schema.py",
+        "Tools/Deployment/survivors/campaign/campaign_report.py",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py"
+      ],
+      "tests": [
+        "test_synthetic_golden_events_cannot_be_relabelled_as_formal_parent",
+        "test_synthetic_events_cannot_be_rebound_to_formal_manifest"
+      ],
+      "counterexample": "normal_16_of_20 synthetic events paired with validated formal C4 prerequisites and formal event_manifest_hash",
+      "siblings": [
+        "CampaignManifest.__post_init__",
+        "generate_campaign_report",
+        "all event hashes validated by validate_campaign_events"
+      ]
+    },
+    {
+      "contract_id": "M6",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_report.py",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py"
+      ],
+      "tests": [
+        "test_stage_policies_freeze_duration_slots_and_promotion_floors"
+      ],
+      "counterexample": "asserted frozen C0-C4 duration, slot count and promotion floor table",
+      "siblings": [
+        "STAGE_POLICIES entries C0, C1, C2, C3, C4"
+      ]
+    },
+    {
+      "contract_id": "M7",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_report.py",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py"
+      ],
+      "tests": [
+        "test_pre_activation_failures_are_excluded_and_block_the_stage",
+        "test_activated_failure_stays_in_denominator_and_cannot_be_replaced",
+        "test_uncertain_launch_is_a_blocked_pre_activation_slot",
+        "test_incomplete_slots_block_stage_and_prevent_promotion"
+      ],
+      "counterexample": "preflight/launch-gate/uncertain failures remain outside denominator and block stage; activated failure remains in denominator",
+      "siblings": [
+        "preflight failure",
+        "launch-gate failure",
+        "uncertain launch",
+        "activated terminal outcomes"
+      ]
+    },
+    {
+      "contract_id": "M8",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_report.py",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py"
+      ],
+      "tests": [
+        "test_sixteen_of_twenty_report_uses_observed_rate_and_wilson_interval",
+        "test_fifteen_of_twenty_does_not_meet_the_frozen_c4_floor",
+        "test_two_sided_wilson_interval_handles_empty_and_extreme_samples"
+      ],
+      "counterexample": "16/20 yields observed 0.8 and Wilson interval; 15/20 misses C4 floor; no population_success_probability field",
+      "siblings": [
+        "generate_campaign_report",
+        "wilson_score_interval"
+      ]
+    },
+    {
+      "contract_id": "M9",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_report.py",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py"
+      ],
+      "tests": [
+        "test_report_includes_unsupported_ui_failure_taxonomy_and_campaign_chain"
+      ],
+      "counterexample": "unsupported UI, failure taxonomy, blocked and superseded campaign IDs asserted in wire report",
+      "siblings": [
+        "CampaignReport.to_wire",
+        "generate_campaign_report"
+      ]
+    },
+    {
+      "contract_id": "M10",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_schema.py",
+        "Tools/Deployment/tests/campaign/test_campaign_schema.py"
+      ],
+      "tests": [
+        "test_manifest_requires_separate_rng_and_trial_fields",
+        "test_manifest_rejects_seed_and_independence_claims",
+        "test_all_wire_contracts_reject_claim_key_spellings"
+      ],
+      "counterexample": "missing trial_separation, controlled rng value, and joined seed/independence claims rejected",
+      "siblings": [
+        "CampaignManifest constructor",
+        "CampaignManifest.from_wire",
+        "validate_prerequisites",
+        "CampaignEvent.from_wire"
+      ]
+    },
+    {
+      "contract_id": "M11",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/tests/campaign/fixtures/golden_campaigns.jsonl",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py",
+        "Tools/Deployment/tests/campaign/test_campaign_schema.py"
+      ],
+      "tests": [
+        "test_six_golden_jsonl_contract_fixtures_are_canonical_and_reproducible",
+        "test_campaign_manifest_round_trip_and_canonical_hash",
+        "test_event_wire_rejects_unknown_required_and_claim_fields"
+      ],
+      "counterexample": "six golden scenarios pin canonical event/JSONL/manifest/report hashes; missing campaign_manifest_hash and unknown required fields rejected",
+      "siblings": [
+        "CampaignManifest.from_wire",
+        "CampaignEvent.from_wire",
+        "canonical_event_jsonl",
+        "campaign_event_hash",
+        "campaign_jsonl_hash",
+        "campaign_manifest_hash"
+      ]
+    },
+    {
+      "contract_id": "M12",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/tests/campaign/test_campaign_schema.py",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py"
+      ],
+      "tests": [
+        "campaign schema suite: 47 passed",
+        "campaign report suite: 18 passed",
+        "campaign runner suite: 65 passed"
+      ],
+      "counterexample": "campaign suite includes valid, rejection, golden, denominator and rebinding cases",
+      "siblings": [
+        "test_campaign_schema.py",
+        "test_campaign_report.py"
+      ]
+    },
+    {
+      "contract_id": "M13",
+      "status": "PASS",
+      "evidence_paths": [
+        "docs/deployment/campaign_contract.md",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py"
+      ],
+      "tests": [
+        "test_campaign_contract_doc_records_stage_and_denominator_rules"
+      ],
+      "counterexample": "doc test asserts event names, promotion floor and Wilson interval; contract now documents per-event manifest binding",
+      "siblings": [
+        "schema contract",
+        "report denominator and promotion rules"
+      ]
+    },
+    {
+      "contract_id": "M14",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_report.py",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py"
+      ],
+      "tests": [
+        "test_sixteen_of_twenty_report_uses_observed_rate_and_wilson_interval",
+        "test_synthetic_golden_events_cannot_be_relabelled_as_formal_parent"
+      ],
+      "counterexample": "synthetic report has development_only=true/formal_parent_eligible=false; synthetic golden events cannot be rebound to formal C4",
+      "siblings": [
+        "CampaignReport.development_only",
+        "CampaignReport.formal_parent_eligible",
+        "generate_campaign_report"
+      ]
+    },
+    {
+      "contract_id": "M15",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_schema.py",
+        "Tools/Deployment/survivors/campaign/campaign_report.py",
+        "Tools/Common/src/reinbalance_survivors_contracts/canonical_json.py"
+      ],
+      "tests": [
+        "campaign schema and report suites: 65 passed"
+      ],
+      "counterexample": "contract/report exercise uses in-memory dataclasses, enums, JSON and shared canonical hash; no process launch or Win32 API is called",
+      "siblings": [
+        "campaign_schema.py",
+        "campaign_report.py",
+        "canonical_json.py"
+      ]
+    },
+    {
+      "contract_id": "M16",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/run-pytest.sh",
+        "Tools/Deployment/tests/campaign/test_campaign_schema.py",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py"
+      ],
+      "tests": [
+        "Tools/run-pytest.sh Tools/Deployment/tests/campaign -q -rs"
+      ],
+      "counterexample": "65 passed, failed 0; final Deployment suite 1731 passed and 8 skipped vs baseline 1666 passed and 8 skipped",
+      "siblings": [
+        "campaign test package",
+        "Deployment test package"
+      ]
+    },
+    {
+      "contract_id": "M17",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_schema.py",
+        "Tools/Deployment/survivors/campaign/campaign_report.py",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py",
+        "Tools/Deployment/tests/campaign/fixtures/golden_campaigns.jsonl",
+        "docs/deployment/campaign_contract.md"
+      ],
+      "tests": [
+        "test_synthetic_events_cannot_be_rebound_to_formal_manifest",
+        "test_event_validator_rejects_another_manifest_hash",
+        "test_six_golden_jsonl_contract_fixtures_are_canonical_and_reproducible"
+      ],
+      "counterexample": "pre-fix formal C4 + normal_16_of_20 events + event_manifest_hash(formal) did not raise; now each persisted synthetic event hash conflicts and raises ValueError",
+      "siblings": [
+        "CampaignEvent.to_wire",
+        "CampaignEvent.from_wire",
+        "validate_campaign_events",
+        "generate_campaign_report",
+        "canonical_event_jsonl",
+        "campaign_event_hash",
+        "campaign_jsonl_hash"
+      ]
+    },
+    {
+      "contract_id": "I1",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_report.py",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py"
+      ],
+      "tests": [
+        "test_pre_activation_failures_are_excluded_and_block_the_stage",
+        "test_activated_failure_stays_in_denominator_and_cannot_be_replaced",
+        "test_uncertain_launch_is_a_blocked_pre_activation_slot"
+      ],
+      "counterexample": "pre-activation failure excludes and blocks; post-activation failure counts and forbids replacement",
+      "siblings": [
+        "denominator calculation",
+        "stage_blocked calculation",
+        "promotion_eligible calculation"
+      ]
+    },
+    {
+      "contract_id": "I2",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_schema.py",
+        "Tools/Deployment/tests/campaign/test_campaign_schema.py"
+      ],
+      "tests": [
+        "test_cardinality_violations_are_rejected",
+        "test_duplicate_attempt_gameplay_and_process_ids_are_rejected",
+        "test_second_gameplay_attempt_cannot_replace_an_activated_run",
+        "test_preflight_failure_cannot_be_retried_or_replaced",
+        "test_all_wire_contracts_reject_claim_key_spellings"
+      ],
+      "counterexample": "duplicate/reuse/overwrite/replacement/legacy/claim rejection paths all remain rejected; schema suite 47 passed",
+      "siblings": [
+        "validate_prerequisites",
+        "CampaignManifest.from_wire",
+        "CampaignEvent.from_wire",
+        "CampaignEvent.details",
+        "validate_campaign_events"
+      ]
+    },
+    {
+      "contract_id": "I3",
+      "status": "PASS",
+      "evidence_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_schema.py",
+        "Tools/Deployment/survivors/campaign/campaign_report.py",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py",
+        "Tools/Deployment/tests/campaign/fixtures/golden_campaigns.jsonl"
+      ],
+      "tests": [
+        "test_synthetic_events_cannot_be_rebound_to_formal_manifest",
+        "test_event_validator_rejects_another_manifest_hash",
+        "test_six_golden_jsonl_contract_fixtures_are_canonical_and_reproducible"
+      ],
+      "counterexample": "all 20 golden events carry the synthetic manifest hash; passing only the formal manifest hash kwarg produces ValueError",
+      "siblings": [
+        "all CampaignEvent values",
+        "validate_campaign_events",
+        "generate_campaign_report",
+        "canonical JSONL and event hash functions"
+      ]
+    }
+  ],
+  "verification_runs": [
+    {
+      "name": "I3 regression red",
+      "exit_code": 1,
+      "command": "Windows reinbalance Python: pytest Tools/Deployment/tests/campaign/test_campaign_report.py -q -k synthetic_events_cannot_be_rebound -rs",
+      "output_tail": "E       Failed: DID NOT RAISE <class 'ValueError'>\n\nTools\\\\Deployment\\\\tests\\\\campaign\\\\test_campaign_report.py:416: Failed\n1 failed, 17 deselected in 0.36s"
+    },
+    {
+      "name": "schema after I3",
+      "exit_code": 0,
+      "command": "Windows reinbalance Python: pytest Tools/Deployment/tests/campaign/test_campaign_schema.py -q -rs",
+      "output_tail": "..........................................                               [100%]\n42 passed in 0.21s"
+    },
+    {
+      "name": "report helper smoke",
+      "exit_code": 0,
+      "command": "Windows reinbalance Python: pytest Tools/Deployment/tests/campaign/test_campaign_report.py -q -k sixteen_of_twenty_report -rs",
+      "output_tail": ".                                                                        [100%]\n1 passed, 17 deselected in 0.24s"
+    },
+    {
+      "name": "report suite",
+      "exit_code": 0,
+      "command": "Windows reinbalance Python: pytest Tools/Deployment/tests/campaign/test_campaign_report.py -q -rs",
+      "output_tail": "..................                                                       [100%]\n18 passed in 0.24s"
+    },
+    {
+      "name": "M3 regression red",
+      "exit_code": 1,
+      "command": "Windows reinbalance Python: pytest Tools/Deployment/tests/campaign/test_campaign_schema.py -q -k all_wire_contracts_reject_claim_key_spellings -rs",
+      "output_tail": "E       AssertionError: Regex pattern did not match.\nE         Expected regex: 'statistical claim'\nE         Actual message: 'campaign manifest has unknown fields: independently'\n5 failed, 4 passed, 38 deselected in 0.36s"
+    },
+    {
+      "name": "schema final",
+      "exit_code": 0,
+      "command": "Windows reinbalance Python: pytest Tools/Deployment/tests/campaign/test_campaign_schema.py -q -rs",
+      "output_tail": "...............................................                          [100%]\n47 passed in 0.21s"
+    },
+    {
+      "name": "prescribed runner cwd",
+      "exit_code": 1,
+      "command": "cd Tools/Deployment; USER=\"$(whoami)\" bash ../run-pytest.sh Tools/Deployment/tests/campaign -q -rs",
+      "output_tail": "Using: /home/neko/miniconda-wsl/envs/reinbalance/bin/python\nERROR: Tools/Common is not a valid editable requirement."
+    },
+    {
+      "name": "campaign runner from repository root",
+      "exit_code": 0,
+      "command": "USER=\"$(whoami)\" bash Tools/run-pytest.sh Tools/Deployment/tests/campaign -q -rs (WSL, repository root)",
+      "output_tail": "Using: /home/neko/miniconda-wsl/envs/reinbalance/bin/python\n.................................................................        [100%]\n65 passed, 2 warnings in 1.01s"
+    },
+    {
+      "name": "WSL full suite environment",
+      "exit_code": 1,
+      "command": "USER=\"$(whoami)\" bash Tools/run-pytest.sh Tools/Deployment/tests -q -rs (WSL, repository root)",
+      "output_tail": "ModuleNotFoundError: No module named 'cryptography'\n!!!!!!!!!!!!!!!!!!! Interrupted: 7 errors during collection !!!!!!!!!!!!!!!!!!!"
+    },
+    {
+      "name": "Windows full suite first run",
+      "exit_code": 1,
+      "command": "Windows reinbalance Python: pytest Tools/Deployment/tests -q -rs",
+      "output_tail": "Tools\\\\Deployment\\\\tests\\\\runtime\\\\test_ui_policy_runtime_parity.py:139: AssertionError\n1 failed, 1730 passed, 8 skipped, 18 warnings in 519.83s (0:08:39)"
+    },
+    {
+      "name": "isolated environment failure",
+      "exit_code": 0,
+      "command": "Windows reinbalance Python with elevated read access: pytest Tools/Deployment/tests/runtime/test_ui_policy_runtime_parity.py -q -rs",
+      "output_tail": ".                                                                        [100%]\n1 passed, 1 warning in 2.92s"
+    },
+    {
+      "name": "Windows full suite reused basetemp",
+      "exit_code": 1,
+      "command": "Windows reinbalance Python: pytest Tools/Deployment/tests -q -rs --basetemp=.pytest-temp-iteration3",
+      "output_tail": "PermissionError: pytest could not remove the previous worktree basetemp\n1189 passed, 8 skipped, 464 warnings, 542 errors in 184.37s (0:03:04)"
+    },
+    {
+      "name": "Windows full suite final",
+      "exit_code": 0,
+      "command": "Windows reinbalance Python with elevated read access: pytest Tools/Deployment/tests -q -rs --basetemp=.pytest-temp-final-iteration3",
+      "output_tail": "SKIPPED [1] Tools\\\\Deployment\\\\tests\\\\test_perception_formal_runner.py:1122: formal release descriptors/sessions are intentionally unavailable\n1731 passed, 8 skipped, 19 warnings in 517.74s (0:08:37)"
+    }
+  ],
+  "baseline": {
+    "passed": 1666,
+    "skipped": 8,
+    "source": "main branch 2026-09-29"
+  },
+  "final": {
+    "passed": 1731,
+    "skipped": 8,
+    "failed": 0,
+    "exit_code": 0
+  },
+  "notes": "The prescribed Tools/Deployment cwd invocation fails because its relative Tools/Common path resolves incorrectly here; the same campaign runner succeeds from repository root. WSL full suite lacks cryptography, so the full suite was verified with Windows reinbalance Python and local worktree PYTHONPATH. Pytest emitted cache/deprecation warnings; final exit code was 0."
+}
