@@ -18,6 +18,7 @@ from .campaign_schema import (
     CampaignManifest,
     EventType,
     campaign_event_hash,
+    campaign_manifest_hash,
     validate_campaign_events,
 )
 
@@ -71,6 +72,7 @@ class CampaignReport:
     promotion_floor: int
     denominator: int
     successes: int
+    incomplete_slot_ids: tuple[int, ...]
     observed_rate: float | None
     wilson_ci: tuple[float, float] | None
     preflight_failures: int
@@ -86,6 +88,8 @@ class CampaignReport:
     campaign_chain: Mapping[str, tuple[str, ...]]
     development_only: bool
     formal_parent_eligible: bool
+    manifest_hash: str
+    prerequisite_parent_hash: str | None
     event_hash: str
 
     def __post_init__(self) -> None:
@@ -106,6 +110,7 @@ class CampaignReport:
             "promotion_floor": self.promotion_floor,
             "denominator": self.denominator,
             "successes": self.successes,
+            "incomplete_slot_ids": list(self.incomplete_slot_ids),
             "observed_rate": self.observed_rate,
             "wilson_ci": None if self.wilson_ci is None else list(self.wilson_ci),
             "preflight_failures": self.preflight_failures,
@@ -121,6 +126,8 @@ class CampaignReport:
             "campaign_chain": {name: list(ids) for name, ids in self.campaign_chain.items()},
             "development_only": self.development_only,
             "formal_parent_eligible": self.formal_parent_eligible,
+            "manifest_hash": self.manifest_hash,
+            "prerequisite_parent_hash": self.prerequisite_parent_hash,
             "event_hash": self.event_hash,
         }
 
@@ -133,22 +140,31 @@ def generate_campaign_report(
     manifest: CampaignManifest,
     events: Sequence[CampaignEvent | Mapping[str, Any]],
     *,
-    stage: str,
+    event_manifest_hash: str,
+    stage: str | None = None,
     support_outside_ui: Sequence[str] = (),
     blocked_campaign_ids: Sequence[str] = (),
     superseded_campaign_ids: Sequence[str] = (),
 ) -> CampaignReport:
     if not isinstance(manifest, CampaignManifest):
         raise ValueError("manifest must be a validated CampaignManifest")
+    if stage is not None and stage != manifest.stage:
+        raise ValueError("report stage does not match manifest stage")
+    stage = manifest.stage
     try:
         policy = STAGE_POLICIES[stage]
     except KeyError as exc:
         raise ValueError(f"unknown campaign stage: {stage}") from exc
+    manifest_hash = campaign_manifest_hash(manifest)
+    if event_manifest_hash != manifest_hash:
+        raise ValueError("event manifest hash does not match manifest")
     normalized = tuple(
         event if isinstance(event, CampaignEvent) else CampaignEvent.from_wire(event)
         for event in events
     )
-    validate_campaign_events(normalized, expected_slots=policy.slot_count)
+    grouped = validate_campaign_events(normalized, expected_slots=manifest.expected_slots)
+    if manifest.expected_slots != policy.slot_count:
+        raise ValueError("manifest expected_slots does not match stage policy")
     support = _unique_texts(support_outside_ui, "support_outside_ui")
     blocked = _unique_texts(blocked_campaign_ids, "blocked_campaign_ids")
     superseded = _unique_texts(superseded_campaign_ids, "superseded_campaign_ids")
@@ -158,6 +174,18 @@ def generate_campaign_report(
     preflight = sum(event.event_type is EventType.PREFLIGHT_FAILED for event in normalized)
     launch_gate = sum(event.event_type is EventType.LAUNCH_GATE_FAILED for event in normalized)
     uncertain = sum(event.event_type is EventType.LAUNCH_UNCERTAIN for event in normalized)
+    incomplete = tuple(
+        slot
+        for slot in range(policy.slot_count)
+        if not grouped.get(slot)
+        or grouped[slot][-1].event_type
+        not in TERMINAL_OUTCOMES
+        | {
+            EventType.PREFLIGHT_FAILED,
+            EventType.LAUNCH_GATE_FAILED,
+            EventType.LAUNCH_UNCERTAIN,
+        }
+    )
     activated_failures = Counter(
         event.event_type.value
         for event in normalized
@@ -191,7 +219,7 @@ def generate_campaign_report(
             blocked_slots.add(event.slot_id)
 
     rate = successes / activated if activated else None
-    blocked_stage = bool(preflight or launch_gate or uncertain)
+    blocked_stage = bool(preflight or launch_gate or uncertain or incomplete)
     eligible = (
         not blocked_stage
         and activated == policy.slot_count
@@ -205,6 +233,7 @@ def generate_campaign_report(
         promotion_floor=policy.promotion_floor,
         denominator=activated,
         successes=successes,
+        incomplete_slot_ids=incomplete,
         observed_rate=rate,
         wilson_ci=wilson_score_interval(successes, activated),
         preflight_failures=preflight,
@@ -220,6 +249,8 @@ def generate_campaign_report(
         campaign_chain={"blocked": blocked, "superseded": superseded},
         development_only=manifest.development_only,
         formal_parent_eligible=(manifest.mode == "formal" and not manifest.development_only),
+        manifest_hash=manifest_hash,
+        prerequisite_parent_hash=manifest.prerequisite_parent_hash,
         event_hash=campaign_event_hash(normalized),
     )
 

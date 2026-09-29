@@ -18,6 +18,9 @@ from reinbalance_survivors_contracts.canonical_json import (
 
 CAMPAIGN_SCHEMA_VERSION = "survivors.campaign.v1"
 CAMPAIGN_SLOT_COUNT = 20
+CAMPAIGN_STAGE_SLOT_COUNTS = MappingProxyType(
+    {"C0": 2, "C1": 4, "C2": 8, "C3": 16, "C4": CAMPAIGN_SLOT_COUNT}
+)
 REQUIRED_PREREQUISITES = (
     "exact_runtime",
     "target",
@@ -107,8 +110,12 @@ _WIRE_FIELDS = frozenset(
 def _reject_claim_fields(value: Any) -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
-            if isinstance(key, str) and key.lower() in _FORBIDDEN_CLAIMS:
-                raise ValueError(f"statistical claim field is forbidden: {key}")
+            if isinstance(key, str):
+                normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+                normalized = re.sub(r"[^a-zA-Z0-9]+", "_", normalized).casefold().strip("_")
+                words = set(normalized.split("_"))
+                if normalized in _FORBIDDEN_CLAIMS or words & {"seed", "independent", "independence"}:
+                    raise ValueError(f"statistical claim field is forbidden: {key}")
             _reject_claim_fields(child)
     elif isinstance(value, (list, tuple)):
         for child in value:
@@ -241,6 +248,7 @@ class CampaignManifest:
     campaign_id: str
     schema_version: str = CAMPAIGN_SCHEMA_VERSION
     mode: str = "synthetic"
+    stage: str = "C4"
     expected_slots: int = CAMPAIGN_SLOT_COUNT
     rng_control: str = "uncontrolled"
     trial_separation: str = "unique_run_id_separate_process"
@@ -252,8 +260,11 @@ class CampaignManifest:
         _text(self.campaign_id, "campaign_id")
         if self.schema_version != CAMPAIGN_SCHEMA_VERSION:
             raise ValueError("unsupported campaign schema version")
-        if type(self.expected_slots) is not int or self.expected_slots != CAMPAIGN_SLOT_COUNT:
-            raise ValueError(f"expected_slots must be {CAMPAIGN_SLOT_COUNT}")
+        slot_count = CAMPAIGN_STAGE_SLOT_COUNTS.get(self.stage)
+        if slot_count is None:
+            raise ValueError(f"unknown campaign stage: {self.stage}")
+        if type(self.expected_slots) is not int or self.expected_slots != slot_count:
+            raise ValueError(f"expected_slots must match {self.stage} ({slot_count})")
         if self.mode not in {"synthetic", "formal"}:
             raise ValueError("mode must be synthetic or formal")
         if self.rng_control != "uncontrolled":
@@ -278,6 +289,7 @@ class CampaignManifest:
             "campaign_id": self.campaign_id,
             "schema_version": self.schema_version,
             "mode": self.mode,
+            "stage": self.stage,
             "expected_slots": self.expected_slots,
             "rng_control": self.rng_control,
             "trial_separation": self.trial_separation,
@@ -295,6 +307,7 @@ class CampaignManifest:
             "campaign_id",
             "schema_version",
             "mode",
+            "stage",
             "expected_slots",
             "rng_control",
             "trial_separation",
@@ -483,9 +496,7 @@ def validate_campaign_events(
             if state != "confirmed":
                 raise ValueError(f"slot {slot} activation requires attempt, process, and gameplay identity")
             states[slot] = "activated"
-        elif kind in {EventType.PREFLIGHT_FAILED, EventType.LAUNCH_GATE_FAILED, EventType.LAUNCH_UNCERTAIN}:
-            if kind is EventType.PREFLIGHT_FAILED:
-                continue
+        elif kind in {EventType.LAUNCH_GATE_FAILED, EventType.LAUNCH_UNCERTAIN}:
             if state not in {"preflight", "launch_intent", "attested", "confirmed"}:
                 raise ValueError(f"slot {slot} launch gate failure is out of order")
             states[slot] = "terminal"
