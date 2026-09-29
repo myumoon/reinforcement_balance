@@ -248,7 +248,7 @@ def test_event_details_reject_normalized_and_nested_claim_fields(claim) -> None:
 )
 def test_all_identity_kinds_reject_duplicates(field, identity) -> None:
     first = _events(slot=0)
-    second = _events(slot=1)
+    second = _events(slot=1, attempt="a1")
     index = {"reserved_run_id": 2, "launch_nonce": 2, "job_ref": 3}[field]
     first[index] = replace(first[index], **{field: identity})
     second[index] = replace(second[index], **{field: identity})
