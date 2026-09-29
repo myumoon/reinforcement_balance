@@ -110,14 +110,12 @@ def test_six_golden_jsonl_contract_fixtures_are_canonical_and_reproducible() -> 
     }
     for line, fixture in zip(lines, fixtures):
         assert canonical_json_bytes(fixture) + b"\n" == line.encode("utf-8")
-        manifest_wire = dict(fixture["manifest"])
-        manifest_wire.setdefault("stage", fixture["stage"])
-        manifest_wire["expected_slots"] = STAGE_POLICIES[fixture["stage"]].slot_count
-        manifest = CampaignManifest.from_wire(manifest_wire)
+        manifest = CampaignManifest.from_wire(fixture["manifest"])
         events = [CampaignEvent.from_wire(item) for item in fixture["events"]]
         assert CampaignManifest.from_wire(manifest.to_wire()) == manifest
         assert [item.to_wire() for item in events] == fixture["events"]
         expected_hashes = fixture["expected_hashes"]
+        assert fixture["event_manifest_hash"] == expected_hashes["manifest_hash"]
         assert campaign_manifest_hash(manifest) == expected_hashes["manifest_hash"]
         assert campaign_event_hash(events) == expected_hashes["event_hash"]
         assert campaign_jsonl_hash(events) == expected_hashes["jsonl_hash"]
@@ -126,14 +124,14 @@ def test_six_golden_jsonl_contract_fixtures_are_canonical_and_reproducible() -> 
                 generate_campaign_report(
                     manifest,
                     events,
-                    event_manifest_hash=expected_hashes["manifest_hash"],
+                    event_manifest_hash=fixture["event_manifest_hash"],
                 )
             assert expected_hashes["report_hash"] is None
             continue
         report = generate_campaign_report(
             manifest,
             events,
-            event_manifest_hash=expected_hashes["manifest_hash"],
+            event_manifest_hash=fixture["event_manifest_hash"],
         )
         assert report.denominator == fixture["expected"]["denominator"]
         assert report.successes == fixture["expected"]["successes"]
@@ -297,10 +295,16 @@ def test_synthetic_golden_events_cannot_be_relabelled_as_formal_parent() -> None
         prerequisites=validate_prerequisites(prerequisites_wire, expected_parent_hash="b" * 64),
         prerequisite_parent_hash="b" * 64,
     )
-    synthetic = _manifest("C0", "synthetic-source")
+    golden_path = Path(__file__).parent / "fixtures" / "golden_campaigns.jsonl"
+    synthetic = next(
+        fixture
+        for fixture in (json.loads(line) for line in golden_path.read_text(encoding="utf-8").splitlines())
+        if fixture["fixture_name"] == "reconciliation_activation"
+    )
+    events = [CampaignEvent.from_wire(item) for item in synthetic["events"]]
     with pytest.raises(ValueError, match="manifest hash"):
         generate_campaign_report(
             formal,
-            _run(0) + _run(1),
-            event_manifest_hash=campaign_manifest_hash(synthetic),
+            events,
+            event_manifest_hash=synthetic["event_manifest_hash"],
         )

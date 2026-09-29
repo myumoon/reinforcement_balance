@@ -158,6 +158,15 @@ def test_manifest_requires_separate_rng_and_trial_fields() -> None:
         replace(CampaignManifest(campaign_id="synthetic-01"), rng_control="seeded")
 
 
+def test_manifest_stage_fixes_its_expected_slot_count() -> None:
+    with pytest.raises(ValueError, match="expected_slots must match C0"):
+        CampaignManifest(campaign_id="synthetic-c0", stage="C0")
+    wire = CampaignManifest(campaign_id="synthetic-c0", stage="C0", expected_slots=2).to_wire()
+    del wire["stage"]
+    with pytest.raises(ValueError, match="missing fields: stage"):
+        CampaignManifest.from_wire(wire)
+
+
 def test_manifest_rejects_unknown_wire_fields() -> None:
     wire = CampaignManifest(campaign_id="synthetic-01").to_wire()
     wire["legacy_issuance_id"] = "old"
@@ -236,6 +245,19 @@ def test_event_details_reject_normalized_and_nested_claim_fields(claim) -> None:
             0,
             details=claim,
         )
+
+
+@pytest.mark.parametrize("claim_key", ["same-seed", "rng_seed", "realSeed", "is_independent"])
+def test_all_wire_contracts_reject_claim_key_spellings(claim_key) -> None:
+    manifest = CampaignManifest(campaign_id="synthetic-claim").to_wire()
+    manifest[claim_key] = True
+    with pytest.raises(ValueError, match="statistical claim"):
+        CampaignManifest.from_wire(manifest)
+
+    prerequisites = _prerequisite_wire()
+    prerequisites["hashes"][claim_key] = _hash("a")
+    with pytest.raises(ValueError, match="statistical claim"):
+        validate_prerequisites(prerequisites, expected_parent_hash=_hash("b"))
 
 
 @pytest.mark.parametrize(
