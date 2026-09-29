@@ -49,7 +49,7 @@ Every planned slot must end in a pre-activation failure or an activated terminal
 
 The report includes the observed rate and a two-sided 95% Wilson score interval. For 16 successes from 20 activations, it reports 0.8 with an interval of approximately 0.583–0.919. It makes no population success probability claim. Fifteen of twenty successes report 0.75 and do not meet C4's frozen floor of 16.
 
-Reports include `support_outside_ui`, a failure taxonomy, blocked/superseded campaign IDs, and the manifest's canonical hash. Report generation requires an `event_manifest_hash` matching that manifest; the report wire also records `prerequisite_parent_hash` when present. Synthetic reports carry `development_only: true` and `formal_parent_eligible: false`; they cannot serve as a formal C0 parent.
+Reports include `support_outside_ui`, a failure taxonomy, blocked/superseded campaign IDs, and the manifest's canonical hash. Every event wire carries `campaign_manifest_hash`; event validation and report generation require each event hash and the `event_manifest_hash` argument to match the manifest's canonical hash. The report wire also records `prerequisite_parent_hash` when present. Synthetic reports carry `development_only: true` and `formal_parent_eligible: false`; they cannot serve as a formal C0 parent.
 
 ## Canonical fixtures
 
