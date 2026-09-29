@@ -131,6 +131,7 @@ _WIRE_FIELDS = frozenset(
         "activation_source",
         "failure_reason",
         "details",
+        "campaign_manifest_hash",
     }
 )
 
@@ -429,6 +430,7 @@ class CampaignEvent:
     activation_source: str | None = None
     failure_reason: str | None = None
     details: Mapping[str, Any] = field(default_factory=dict)
+    campaign_manifest_hash: str | None = None
 
     def __post_init__(self) -> None:
         """event payload の必須 field と値を検証します。
@@ -442,6 +444,8 @@ class CampaignEvent:
         object.__setattr__(self, "event_type", event_type)
         if type(self.slot_id) is not int or self.slot_id < 0:
             raise ValueError("slot_id must be a non-negative integer")
+        if self.campaign_manifest_hash is not None:
+            _digest(self.campaign_manifest_hash, "campaign_manifest_hash")
         present = {
             name for name in _EVENT_FIELDS[event_type] if getattr(self, name) is not None
         }
@@ -485,8 +489,11 @@ class CampaignEvent:
         value: dict[str, Any] = {
             "event_type": self.event_type.value,
             "slot_id": self.slot_id,
+            "campaign_manifest_hash": _digest(
+                self.campaign_manifest_hash, "campaign_manifest_hash"
+            ),
         }
-        for name in _WIRE_FIELDS - {"event_type", "slot_id", "details"}:
+        for name in _WIRE_FIELDS - {"event_type", "slot_id", "details", "campaign_manifest_hash"}:
             item = getattr(self, name)
             if item is not None:
                 value[name] = item
@@ -506,8 +513,8 @@ class CampaignEvent:
         unknown = value.keys() - _WIRE_FIELDS
         if unknown:
             raise ValueError(f"campaign event has unknown fields: {', '.join(sorted(unknown))}")
-        if not {"event_type", "slot_id"} <= value.keys():
-            raise ValueError("campaign event requires event_type and slot_id")
+        if not {"event_type", "slot_id", "campaign_manifest_hash"} <= value.keys():
+            raise ValueError("campaign event requires event_type, slot_id, and campaign_manifest_hash")
         return cls(**value)
 
 
@@ -552,7 +559,10 @@ def campaign_manifest_hash(manifest: CampaignManifest) -> str:
 
 
 def validate_campaign_events(
-    events: Sequence[CampaignEvent | Mapping[str, Any]], *, expected_slots: int = CAMPAIGN_SLOT_COUNT
+    events: Sequence[CampaignEvent | Mapping[str, Any]],
+    *,
+    expected_manifest_hash: str,
+    expected_slots: int = CAMPAIGN_SLOT_COUNT,
 ) -> dict[int, tuple[CampaignEvent, ...]]:
     """slot lifecycle と campaign 内 identity の重複を検証します。
 
@@ -560,6 +570,7 @@ def validate_campaign_events(
     """
     if type(expected_slots) is not int or expected_slots <= 0:
         raise ValueError("expected_slots must be a positive integer")
+    expected_manifest_hash = _digest(expected_manifest_hash, "expected_manifest_hash")
     if isinstance(events, (str, bytes)) or not isinstance(events, Sequence):
         raise ValueError("events must be a sequence")
     grouped: dict[int, list[CampaignEvent]] = {}
@@ -575,6 +586,8 @@ def validate_campaign_events(
     bound: dict[int, dict[str, str]] = {}
     for raw in events:
         event = raw if isinstance(raw, CampaignEvent) else CampaignEvent.from_wire(raw)
+        if _digest(event.campaign_manifest_hash, "campaign_manifest_hash") != expected_manifest_hash:
+            raise ValueError("event manifest hash does not match manifest")
         if event.slot_id >= expected_slots:
             raise ValueError(f"slot_id {event.slot_id} is outside campaign capacity")
         slot = event.slot_id

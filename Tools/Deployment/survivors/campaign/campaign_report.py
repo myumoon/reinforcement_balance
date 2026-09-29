@@ -172,7 +172,11 @@ def generate_campaign_report(
         event if isinstance(event, CampaignEvent) else CampaignEvent.from_wire(event)
         for event in events
     )
-    grouped = validate_campaign_events(normalized, expected_slots=manifest.expected_slots)
+    grouped = validate_campaign_events(
+        normalized,
+        expected_manifest_hash=manifest_hash,
+        expected_slots=manifest.expected_slots,
+    )
     if manifest.expected_slots != policy.slot_count:
         raise ValueError("manifest expected_slots does not match stage policy")
     support = _unique_texts(support_outside_ui, "support_outside_ui")
