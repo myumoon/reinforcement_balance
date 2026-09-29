@@ -1,4 +1,7 @@
-"""Deterministic campaign aggregation using only Python's standard library."""
+"""campaign event を集計して deterministic report を生成します。
+
+Wilson interval と failure accounting は標準 library のみで計算します。
+"""
 
 from __future__ import annotations
 
@@ -17,7 +20,6 @@ from .campaign_schema import (
     CampaignManifest,
     EventType,
     STAGE_POLICIES,
-    StagePolicy,
     campaign_event_hash,
     campaign_manifest_hash,
     validate_campaign_events,
@@ -27,7 +29,10 @@ _WILSON_Z_95 = 1.959963984540054
 
 
 def wilson_score_interval(successes: int, denominator: int) -> tuple[float, float] | None:
-    """Return a two-sided 95% Wilson score interval for the observed rate."""
+    """観測 rate の両側95% Wilson score interval を返します。
+
+    母集団成功確率ではなく、標本の観測区間だけを示します。
+    """
     if type(successes) is not int or type(denominator) is not int:
         raise ValueError("successes and denominator must be integers")
     if denominator < 0 or successes < 0 or successes > denominator:
@@ -48,6 +53,11 @@ def wilson_score_interval(successes: int, denominator: int) -> tuple[float, floa
 
 @dataclass(frozen=True, slots=True)
 class CampaignReport:
+    """campaign の denominator、failure、promotion 判定を保持します。
+
+    wire/hash に manifest と event stream の identity を含めます。
+    """
+
     campaign_id: str
     stage: str
     duration_seconds: int
@@ -76,6 +86,10 @@ class CampaignReport:
     event_hash: str
 
     def __post_init__(self) -> None:
+        """mapping field を外部変更できない形へ固定します。
+
+        report 内容と canonical hash の対応を保ちます。
+        """
         object.__setattr__(self, "activated_failure_counts", MappingProxyType(dict(self.activated_failure_counts)))
         object.__setattr__(self, "failure_taxonomy", MappingProxyType(dict(self.failure_taxonomy)))
         object.__setattr__(
@@ -85,6 +99,10 @@ class CampaignReport:
         )
 
     def to_wire(self) -> dict[str, Any]:
+        """report を JSON wire object に変換します。
+
+        tuple と mapping を JSON array と object に展開します。
+        """
         return {
             "campaign_id": self.campaign_id,
             "stage": self.stage,
@@ -116,6 +134,10 @@ class CampaignReport:
 
     @property
     def report_hash(self) -> str:
+        """report wire object の canonical hash を返します。
+
+        hash field 自体は wire object に含めません。
+        """
         return canonical_hash(self.to_wire())
 
 
@@ -129,6 +151,10 @@ def generate_campaign_report(
     blocked_campaign_ids: Sequence[str] = (),
     superseded_campaign_ids: Sequence[str] = (),
 ) -> CampaignReport:
+    """manifest に束縛した event 列から stage report を作ります。
+
+    未完 slot は stage を block し、promotion 対象から外します。
+    """
     if not isinstance(manifest, CampaignManifest):
         raise ValueError("manifest must be a validated CampaignManifest")
     if stage is not None and stage != manifest.stage:
@@ -239,6 +265,10 @@ def generate_campaign_report(
 
 
 def _unique_texts(values: Sequence[str], name: str) -> tuple[str, ...]:
+    """unique な非空 text 値を sorted tuple にします。
+
+    report の UI と campaign chain field に共通適用します。
+    """
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         raise ValueError(f"{name} must be a sequence of strings")
     items = tuple(values)
