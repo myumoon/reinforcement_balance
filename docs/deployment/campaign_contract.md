@@ -1,12 +1,12 @@
-# Survivors live canary campaign contract
+# Survivors live canary campaign契約
 
-## Scope and identity
+## 対象範囲とidentity
 
-This package defines the pure Python contract for a 20-slot Survivors campaign. It does not launch processes, perform controller I/O, or persist a durable ledger. Those remain the responsibility of later phases.
+このパッケージは20 slot構成のSurvivors campaignに対する、pure Pythonの契約を定義する。processの起動やcontroller I/O、durable ledgerへの永続化は行わない。それらは後続phaseの責務である。
 
-Every manifest uses schema `survivors.campaign.v1`, a fixed `stage` (`C0`–`C4`), and an `expected_slots` value matching that stage's frozen policy. It also requires `rng_control: "uncontrolled"` and `trial_separation: "unique_run_id_separate_process"` as separate fields. A distinct run ID and process do not establish statistical independence; seed values and independence claims are rejected across manifest, prerequisite, and event details.
+すべてのmanifestはschema `survivors.campaign.v1` を使い、固定された `stage`（`C0`–`C4`）と、そのstageのfrozen policyに一致する `expected_slots` を持つ。また `rng_control: "uncontrolled"` と `trial_separation: "unique_run_id_separate_process"` を別fieldとして必須とする。run IDとprocessが別であることは統計的独立性を保証しない。そのためseed値や独立性の主張は、manifest・prerequisite・event detailsのいずれにおいても拒否する。
 
-The event path is:
+eventの経路は次の通り。
 
 ```text
 FORMAL_SLOT_RESERVED
@@ -19,38 +19,38 @@ FORMAL_SLOT_RESERVED
   -> SUCCESS | GAMEPLAY_FAILURE | SAFETY_FAILURE | ARTIFACT_FAILURE
 ```
 
-`PREFLIGHT_FAILED`, `LAUNCH_GATE_FAILED`, and `LAUNCH_UNCERTAIN` end that slot before activation. A slot can have one preflight attempt and at most one launch intent. IDs are unique within their identity type. A slot cannot be reserved again, and a terminal event cannot be overwritten. Each activation is bound to one attempt, one attested process/job, and one gameplay attempt.
+`PREFLIGHT_FAILED`、`LAUNCH_GATE_FAILED`、`LAUNCH_UNCERTAIN` は、activation前にそのslotを終了させる。1つのslotが持てるpreflight attemptは1回まで、launch intentは最大1回までである。IDはそのidentity種別の中で一意でなければならない。slotの再予約はできず、terminal eventの上書きもできない。各activationは、1つのattempt・1つのattested process/job・1つのgameplay attemptにそれぞれ紐づく。
 
 ## Formal prerequisites
 
-Formal prerequisites contain exactly these evidence keys: `exact_runtime`, `target`, `save`, `build`, `hardware`, `perception_final`, `shadow`, `replay`, `input_safety`, and `restore`. Each has a lowercase SHA-256 hash, a parent hash, and `PASS` status. All parents must match the manifest's expected parent hash.
+Formal prerequisitesは、`exact_runtime`、`target`、`save`、`build`、`hardware`、`perception_final`、`shadow`、`replay`、`input_safety`、`restore` の10個のevidence keyだけを持つ。各keyは小文字のSHA-256 hash、parent hash、`PASS` statusを持つ。すべてのparentは、manifestが期待するparent hashと一致しなければならない。
 
-The bundle also requires verified cloud sync, a backup hash, and pre-save and post-save contract hashes. Missing, stale, mixed-parent, non-PASS, development-only, or unknown fields are rejected. A synthetic manifest is always `development_only: true` and cannot contain formal prerequisite evidence. A formal manifest requires a validated non-development prerequisite bundle.
+このbundleはさらに、検証済みのcloud sync、backup hash、pre-save/post-save contract hashを必須とする。欠落・古い値・parentの不一致・非PASS・development-only・未知fieldはいずれも拒否する。synthetic manifestは常に `development_only: true` であり、formal prerequisite evidenceを含むことはできない。formal manifestは、検証済みでdevelopment-onlyでないprerequisite bundleを必須とする。
 
-This phase validates evidence hash shape and shared parent binding. Comparing those evidence hashes with independently observed expected values belongs to the formal issuance flow in 06-04; this pure contract does not issue a formal campaign from synthetic fixtures.
+このphaseでは、evidence hashの形式と共通parentへの束縛のみを検証する。これらevidence hashを独立に観測した期待値と突き合わせる処理は06-04のformal issuance flowの担当範囲であり、この契約単体ではsynthetic fixtureからformal campaignを発行することはない。
 
 ## Frozen stage policies
 
-This implementation freezes these values because the supplied phase contract named the fields but did not provide numeric values. Changing them requires an explicit contract revision.
+支給されたphase契約はfieldの名前だけを示し数値を与えていなかったため、この実装では以下の値を凍結する。変更するには明示的な契約改定が必要である。
 
 | Stage | Duration | Slots | Promotion floor (successes) |
 |---|---:|---:|---:|
-| C0 | 30 minutes | 2 | 2 |
-| C1 | 60 minutes | 4 | 3 |
-| C2 | 120 minutes | 8 | 6 |
-| C3 | 240 minutes | 16 | 12 |
-| C4 | 480 minutes | 20 | 16 |
+| C0 | 30分 | 2 | 2 |
+| C1 | 60分 | 4 | 3 |
+| C2 | 120分 | 8 | 6 |
+| C3 | 240分 | 16 | 12 |
+| C4 | 480分 | 20 | 16 |
 
-## Denominator and report rules
+## 分母とreport規則
 
-The denominator is the number of `FORMAL_RUN_ACTIVATED` events. Success rate is `SUCCESS / activated runs`; preflight, launch-gate, and uncertain-launch failures are excluded and block stage promotion. They do not create replacements. Gameplay, safety, and artifact failures after activation remain in the denominator and cannot be replaced.
+分母は `FORMAL_RUN_ACTIVATED` eventの件数である。成功率は `SUCCESS / activated runs` で計算する。preflight failure、launch-gate failure、uncertain launchは分母から除外し、stage promotionをblockする。これらは代替枠を作らない。activation後のgameplay failure、safety failure、artifact failureは分母に残り、代替できない。
 
-Every planned slot must end in a pre-activation failure or an activated terminal outcome. Missing slots, reserved-only slots, in-progress preflight, and activated slots without a terminal outcome appear in `incomplete_slot_ids`; any such slot blocks the stage and makes promotion ineligible. An activated slot without a terminal outcome still counts in the denominator.
+計画された各slotは、activation前のfailureかactivated terminal outcomeのいずれかで終わらなければならない。欠落slot、reservedのままのslot、進行中のpreflight、terminal outcomeを持たないactivated slotは `incomplete_slot_ids` に現れる。該当slotが1つでもあればstageをblockし、promotion対象外とする。terminal outcomeを持たないactivated slotも分母には数える。
 
-The report includes the observed rate and a two-sided 95% Wilson score interval. For 16 successes from 20 activations, it reports 0.8 with an interval of approximately 0.583–0.919. It makes no population success probability claim. Fifteen of twenty successes report 0.75 and do not meet C4's frozen floor of 16.
+reportにはobserved rateと、両側95%のWilson score intervalを含める。20 activation中16 successの場合、rateは0.8、intervalはおよそ0.583–0.919として報告する。母集団の成功確率に関する主張は一切行わない。20分の15の場合はrate 0.75となり、C4のfrozen floorである16には届かない。
 
-Reports include `support_outside_ui`, a failure taxonomy, blocked/superseded campaign IDs, and the manifest's canonical hash. Every event wire carries `campaign_manifest_hash`; event validation and report generation require each event hash and the `event_manifest_hash` argument to match the manifest's canonical hash. The report wire also records `prerequisite_parent_hash` when present. Synthetic reports carry `development_only: true` and `formal_parent_eligible: false`; they cannot serve as a formal C0 parent.
+reportには `support_outside_ui`、failure taxonomy、blocked/superseded campaign ID、manifestのcanonical hashを含める。すべてのevent wireは `campaign_manifest_hash` を持ち、event validationとreport生成の両方で、各eventのhashと `event_manifest_hash` 引数がmanifestのcanonical hashに一致することを要求する。report wireには、存在する場合 `prerequisite_parent_hash` も記録する。synthetic reportは `development_only: true` と `formal_parent_eligible: false` を持ち、formal C0 parentにはなれない。
 
 ## Canonical fixtures
 
-`Tools/Deployment/tests/campaign/fixtures/golden_campaigns.jsonl` contains six canonical scenario envelopes: normal 16/20, normal 15/20, reconciliation activation, preflight failure, uncertain launch, and duplicate process. Each row pins its stage, event-to-manifest binding, and expected event, JSONL, manifest, and report hashes (the duplicate-process report hash is null because validation rejects it). The fixtures use only synthetic values and are parsed through the same strict event and manifest schemas as generated reports.
+`Tools/Deployment/tests/campaign/fixtures/golden_campaigns.jsonl` には、normal 16/20、normal 15/20、reconciliation activation、preflight failure、uncertain launch、duplicate processの6種類のcanonical scenario envelopeを収録する。各行はstage、event-to-manifestの束縛、event・JSONL・manifest・reportそれぞれの期待hashを固定する（duplicate-processのreport hashはvalidationがrejectするためnullとなる）。fixtureはsynthetic値のみを使い、生成されたreportと同じ厳密なevent／manifest schemaを通して解析する。
