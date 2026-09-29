@@ -1,3 +1,8 @@
+"""campaign report の分母と stage 集計を検証します。
+
+golden fixture と synthetic run で再現可能な結果を固定します。
+"""
+
 from __future__ import annotations
 
 import json
@@ -25,6 +30,10 @@ from survivors.campaign.campaign_schema import (
 
 def _run(slot: int, outcome: EventType = EventType.SUCCESS,
          activation_source: str = "normal") -> list[CampaignEvent]:
+    """一 slot 分の activated run event を作ります。
+
+    terminal outcome と activation source を切り替えられます。
+    """
     prefix = f"{slot}"
     return [
         CampaignEvent(EventType.FORMAL_SLOT_RESERVED, slot),
@@ -48,6 +57,10 @@ def _run(slot: int, outcome: EventType = EventType.SUCCESS,
 
 
 def _campaign(successes: int) -> list[CampaignEvent]:
+    """20-slot synthetic campaign event 列を作ります。
+
+    先頭の指定数を success、残りを gameplay failure にします。
+    """
     return [
         event
         for slot in range(20)
@@ -59,6 +72,10 @@ def _campaign(successes: int) -> list[CampaignEvent]:
 
 
 def _manifest(stage: str, campaign_id: str = "synthetic-test") -> CampaignManifest:
+    """指定 stage に合う synthetic manifest を作ります。
+
+    expected slot 数は固定 stage policy から取得します。
+    """
     policy = STAGE_POLICIES[stage]
     return CampaignManifest(
         campaign_id=campaign_id,
@@ -68,6 +85,10 @@ def _manifest(stage: str, campaign_id: str = "synthetic-test") -> CampaignManife
 
 
 def _report(manifest: CampaignManifest, events, **kwargs):
+    """event 列を manifest hash に束縛して report します。
+
+    test ごとに同じ report binding を適用します。
+    """
     return generate_campaign_report(
         manifest,
         events,
@@ -77,6 +98,10 @@ def _report(manifest: CampaignManifest, events, **kwargs):
 
 
 def test_stage_policies_freeze_duration_slots_and_promotion_floors() -> None:
+    """C0 から C4 の duration、slot、floor を固定します。
+
+    policy 値の変更が test で検出されることを確認します。
+    """
     assert {
         key: (policy.duration_seconds, policy.slot_count, policy.promotion_floor)
         for key, policy in STAGE_POLICIES.items()
@@ -90,6 +115,10 @@ def test_stage_policies_freeze_duration_slots_and_promotion_floors() -> None:
 
 
 def test_campaign_contract_doc_records_stage_and_denominator_rules() -> None:
+    """contract 文書に stage と denominator 用語があることを確認します。
+
+    実装と運用文書の主要語彙を同期させます。
+    """
     path = Path(__file__).resolve().parents[4] / "docs" / "deployment" / "campaign_contract.md"
     document = path.read_text(encoding="utf-8")
     for term in ("FORMAL_SLOT_RESERVED", "FORMAL_RUN_ACTIVATED", "promotion floor", "Wilson score interval"):
@@ -97,6 +126,10 @@ def test_campaign_contract_doc_records_stage_and_denominator_rules() -> None:
 
 
 def test_six_golden_jsonl_contract_fixtures_are_canonical_and_reproducible() -> None:
+    """六つの golden fixture の wire と pinned hash を検証します。
+
+    event、JSONL、manifest、report の各 digest を照合します。
+    """
     path = Path(__file__).parent / "fixtures" / "golden_campaigns.jsonl"
     lines = path.read_text(encoding="utf-8").splitlines()
     fixtures = [json.loads(line) for line in lines]
@@ -141,6 +174,10 @@ def test_six_golden_jsonl_contract_fixtures_are_canonical_and_reproducible() -> 
 
 
 def test_sixteen_of_twenty_report_uses_observed_rate_and_wilson_interval() -> None:
+    """16/20 report が観測 rate と Wilson interval を出すことを確認します。
+
+    synthetic report に population probability claim が無いことも確認します。
+    """
     report = _report(_manifest("C4", "synthetic-16"), _campaign(16))
     assert report.denominator == 20
     assert report.successes == 16
@@ -154,6 +191,10 @@ def test_sixteen_of_twenty_report_uses_observed_rate_and_wilson_interval() -> No
 
 
 def test_fifteen_of_twenty_does_not_meet_the_frozen_c4_floor() -> None:
+    """15/20 が C4 promotion floor に届かないことを確認します。
+
+    observed rate と promotion 判定を別々に検証します。
+    """
     report = _report(_manifest("C4", "synthetic-15"), _campaign(15))
     assert report.denominator == 20
     assert report.observed_rate == pytest.approx(0.75)
@@ -165,6 +206,10 @@ def test_fifteen_of_twenty_does_not_meet_the_frozen_c4_floor() -> None:
     [EventType.PREFLIGHT_FAILED, EventType.LAUNCH_GATE_FAILED],
 )
 def test_pre_activation_failures_are_excluded_and_block_the_stage(failure_type: EventType) -> None:
+    """pre-activation failure を分母外にして stage を block します。
+
+    preflight と launch gate の両経路に同じ規則を適用します。
+    """
     events = [CampaignEvent(EventType.FORMAL_SLOT_RESERVED, 0)]
     events.append(CampaignEvent(EventType.ATTEMPT_PREFLIGHT, 0, attempt_id="a0"))
     if failure_type is EventType.PREFLIGHT_FAILED:
@@ -182,6 +227,10 @@ def test_pre_activation_failures_are_excluded_and_block_the_stage(failure_type: 
 
 
 def test_activated_failure_stays_in_denominator_and_cannot_be_replaced() -> None:
+    """activated failure を denominator に残して replacement を拒否します。
+
+    safety failure の分類と slot identity を保持します。
+    """
     events = _run(0, EventType.SAFETY_FAILURE)
     report = _report(_manifest("C0", "synthetic-safety"), events)
     assert report.denominator == 1
@@ -191,6 +240,10 @@ def test_activated_failure_stays_in_denominator_and_cannot_be_replaced() -> None
 
 
 def test_uncertain_launch_is_a_blocked_pre_activation_slot() -> None:
+    """uncertain launch を分母外の blocked slot として扱います。
+
+    activation 前で止まった slot に replacement を許しません。
+    """
     events = [
         CampaignEvent(EventType.FORMAL_SLOT_RESERVED, 0),
         CampaignEvent(EventType.ATTEMPT_PREFLIGHT, 0, attempt_id="a0"),
@@ -206,6 +259,10 @@ def test_uncertain_launch_is_a_blocked_pre_activation_slot() -> None:
 
 
 def test_report_includes_unsupported_ui_failure_taxonomy_and_campaign_chain() -> None:
+    """UI support、failure taxonomy、campaign chain を report します。
+
+    artifact failure と blocked/superseded id を wire に残します。
+    """
     events = _run(0, EventType.ARTIFACT_FAILURE)
     report = _report(
         _manifest("C0", "synthetic-chain"),
@@ -223,6 +280,10 @@ def test_report_includes_unsupported_ui_failure_taxonomy_and_campaign_chain() ->
 
 
 def test_two_sided_wilson_interval_handles_empty_and_extreme_samples() -> None:
+    """Wilson interval の空標本と極端な標本を検証します。
+
+    invalid successes 数は入力境界で拒否されます。
+    """
     assert wilson_score_interval(0, 0) is None
     assert wilson_score_interval(0, 20)[0] == 0.0
     assert wilson_score_interval(20, 20)[1] == 1.0
@@ -245,6 +306,10 @@ def test_two_sided_wilson_interval_handles_empty_and_extreme_samples() -> None:
     ids=["activated-no-terminal", "reserved-only", "preflight-in-progress", "missing-slot"],
 )
 def test_incomplete_slots_block_stage_and_prevent_promotion(events, incomplete) -> None:
+    """未完了 slot を列挙して stage promotion を止めます。
+
+    activation 後、reserved、preflight、中抜けの各状態を確認します。
+    """
     report = _report(_manifest("C0"), events)
     assert report.incomplete_slot_ids == incomplete
     assert report.stage_blocked is True
@@ -252,6 +317,10 @@ def test_incomplete_slots_block_stage_and_prevent_promotion(events, incomplete) 
 
 
 def test_manifest_stage_and_event_binding_are_enforced_and_reported() -> None:
+    """manifest stage と event hash binding を検証します。
+
+    report wire に parent identity を含めることも確認します。
+    """
     manifest = _manifest("C0", "bound-campaign")
     events = _run(0) + _run(1)
     report = _report(manifest, events)
@@ -274,6 +343,10 @@ def test_manifest_stage_and_event_binding_are_enforced_and_reported() -> None:
 
 
 def test_synthetic_golden_events_cannot_be_relabelled_as_formal_parent() -> None:
+    """synthetic golden event を formal manifest に付け替えられません。
+
+    保存された event manifest hash と formal manifest hash を照合します。
+    """
     prerequisites_wire = {
         "hashes": {name: "a" * 64 for name in REQUIRED_PREREQUISITES},
         "parents": {name: "b" * 64 for name in REQUIRED_PREREQUISITES},
