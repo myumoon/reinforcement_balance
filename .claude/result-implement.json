@@ -1,0 +1,7 @@
+{
+  "status": "DONE",
+  "branch": "feature/campaign-contracts-report",
+  "summary": "CampaignEvent の各 wire に campaign_manifest_hash を必須化し、schema validator と report で manifest hash への束縛を検証。golden fixture の event/hash を更新し、結合 spelling の statistical claim 拒否も修正。",
+  "intent": "manifest hash 引数だけで event 列の出自を差し替えられないよう、束縛元を event 列自体へ移した。",
+  "notes": "Campaign suite は 65 passed、Deployment 全体は 1731 passed / 8 skipped（main 基準 1666 passed / 8 skipped）。campaign runner は repository root から成功。全体 suite は Windows reinbalance interpreter と worktree PYTHONPATH で検証した。WSL suite には cryptography が無く、指定された Tools/Deployment cwd では相対 Tools/Common path が解決しない環境差を evidence に記録。"
+}
