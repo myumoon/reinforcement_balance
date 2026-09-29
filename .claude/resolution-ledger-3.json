@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "resolutions": [
+    {
+      "fingerprint": "boundary/I3/events-unbound-to-manifest-formal-parent",
+      "changed_paths": [
+        "Tools/Deployment/survivors/campaign/campaign_schema.py",
+        "Tools/Deployment/survivors/campaign/campaign_report.py",
+        "Tools/Deployment/tests/campaign/test_campaign_schema.py",
+        "Tools/Deployment/tests/campaign/test_campaign_report.py",
+        "Tools/Deployment/tests/campaign/fixtures/golden_campaigns.jsonl",
+        "docs/deployment/campaign_contract.md"
+      ],
+      "regression_tests": [
+        "test_synthetic_events_cannot_be_rebound_to_formal_manifest",
+        "test_event_validator_rejects_another_manifest_hash",
+        "test_six_golden_jsonl_contract_fixtures_are_canonical_and_reproducible"
+      ],
+      "siblings_swept": [
+        "CampaignEvent.to_wire",
+        "CampaignEvent.from_wire",
+        "validate_campaign_events",
+        "generate_campaign_report",
+        "canonical_event_jsonl",
+        "campaign_event_hash",
+        "campaign_jsonl_hash",
+        "all EventType values share CampaignEvent.campaign_manifest_hash"
+      ],
+      "reproduction_result": "Before the fix, the formal C4 manifest plus normal_16_of_20 synthetic events and event_manifest_hash(formal) did not raise. After the fix, each event carries the fixture's synthetic campaign hash and validation raises ValueError against the formal manifest hash.",
+      "test_commands": [
+        "USER=\"$(whoami)\" bash Tools/run-pytest.sh Tools/Deployment/tests/campaign -q -rs (WSL, repository root): 65 passed",
+        "Windows reinbalance Python: pytest Tools/Deployment/tests -q -rs --basetemp=.pytest-temp-final-iteration3: 1731 passed, 8 skipped, exit 0"
+      ]
+    }
+  ]
+}
