@@ -216,6 +216,44 @@ def test_event_wire_rejects_unknown_required_and_claim_fields() -> None:
     wire["legacy_issuance_field"] = "old"
     with pytest.raises(ValueError):
         CampaignEvent.from_wire(wire)
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        {"same-seed": True},
+        {"rng_seed": 123},
+        {"realSeed": 123},
+        {"is_independent": True},
+        {"metadata": {"same seed": True}},
+    ],
+    ids=["hyphen", "snake", "camel", "independence", "nested-spaces"],
+)
+def test_event_details_reject_normalized_and_nested_claim_fields(claim) -> None:
+    with pytest.raises(ValueError, match="statistical claim"):
+        CampaignEvent(
+            EventType.FORMAL_SLOT_RESERVED,
+            0,
+            details=claim,
+        )
+
+
+@pytest.mark.parametrize(
+    "field,identity",
+    [
+        ("reserved_run_id", "r0"),
+        ("launch_nonce", "n0"),
+        ("job_ref", "j0"),
+    ],
+)
+def test_all_identity_kinds_reject_duplicates(field, identity) -> None:
+    first = _events(slot=0)
+    second = _events(slot=1)
+    index = {"reserved_run_id": 2, "launch_nonce": 2, "job_ref": 3}[field]
+    first[index] = replace(first[index], **{field: identity})
+    second[index] = replace(second[index], **{field: identity})
+    with pytest.raises(ValueError, match=f"duplicate {field}"):
+        validate_campaign_events(first + second, expected_slots=20)
     wire = {
         "event_type": EventType.FORMAL_SLOT_RESERVED.value,
         "slot_id": 0,

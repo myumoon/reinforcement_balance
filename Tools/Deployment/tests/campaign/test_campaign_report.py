@@ -17,6 +17,7 @@ from survivors.campaign.campaign_schema import (
     EventType,
     campaign_event_hash,
     canonical_event_jsonl,
+    campaign_manifest_hash,
 )
 
 
@@ -53,6 +54,24 @@ def _campaign(successes: int) -> list[CampaignEvent]:
             EventType.SUCCESS if slot < successes else EventType.GAMEPLAY_FAILURE,
         )
     ]
+
+
+def _manifest(stage: str, campaign_id: str = "synthetic-test") -> CampaignManifest:
+    policy = STAGE_POLICIES[stage]
+    return CampaignManifest(
+        campaign_id=campaign_id,
+        stage=stage,
+        expected_slots=policy.slot_count,
+    )
+
+
+def _report(manifest: CampaignManifest, events, **kwargs):
+    return generate_campaign_report(
+        manifest,
+        events,
+        event_manifest_hash=campaign_manifest_hash(manifest),
+        **kwargs,
+    )
 
 
 def test_stage_policies_freeze_duration_slots_and_promotion_floors() -> None:
@@ -205,3 +224,46 @@ def test_two_sided_wilson_interval_handles_empty_and_extreme_samples() -> None:
     assert wilson_score_interval(20, 20)[1] == 1.0
     with pytest.raises(ValueError):
         wilson_score_interval(21, 20)
+
+
+@pytest.mark.parametrize(
+    "events,incomplete",
+    [
+        (_run(0)[:-1] + _run(1), (0,)),
+        ([CampaignEvent(EventType.FORMAL_SLOT_RESERVED, 0)] + _run(1), (0,)),
+        (
+            [CampaignEvent(EventType.FORMAL_SLOT_RESERVED, 0),
+             CampaignEvent(EventType.ATTEMPT_PREFLIGHT, 0, attempt_id="pending")] + _run(1),
+            (0,),
+        ),
+        (_run(0), (1,)),
+    ],
+    ids=["activated-no-terminal", "reserved-only", "preflight-in-progress", "missing-slot"],
+)
+def test_incomplete_slots_block_stage_and_prevent_promotion(events, incomplete) -> None:
+    report = _report(_manifest("C0"), events)
+    assert report.incomplete_slot_ids == incomplete
+    assert report.stage_blocked is True
+    assert report.promotion_eligible is False
+
+
+def test_manifest_stage_and_event_binding_are_enforced_and_reported() -> None:
+    manifest = _manifest("C0", "bound-campaign")
+    events = _run(0) + _run(1)
+    report = _report(manifest, events)
+    assert report.stage == "C0"
+    assert report.manifest_hash == campaign_manifest_hash(manifest)
+    assert report.prerequisite_parent_hash is None
+    with pytest.raises(ValueError, match="manifest hash"):
+        generate_campaign_report(
+            manifest,
+            events,
+            event_manifest_hash="0" * 64,
+        )
+    with pytest.raises(ValueError, match="does not match manifest stage"):
+        generate_campaign_report(
+            manifest,
+            events,
+            event_manifest_hash=campaign_manifest_hash(manifest),
+            stage="C4",
+        )
