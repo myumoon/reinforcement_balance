@@ -146,8 +146,8 @@ def _reject_claim_fields(value: Any) -> None:
             if isinstance(key, str):
                 normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
                 normalized = re.sub(r"[^a-zA-Z0-9]+", "_", normalized).casefold().strip("_")
-                words = set(normalized.split("_"))
-                if normalized in _FORBIDDEN_CLAIMS or words & {"seed", "independent", "independence"}:
+                compact = re.sub(r"[^a-z0-9]", "", key.casefold())
+                if normalized in _FORBIDDEN_CLAIMS or "seed" in compact or "independen" in compact:
                     raise ValueError(f"statistical claim field is forbidden: {key}")
             _reject_claim_fields(child)
     elif isinstance(value, (list, tuple)):
