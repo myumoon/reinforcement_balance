@@ -6,6 +6,7 @@ golden fixture と synthetic run で再現可能な結果を固定します。
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -89,10 +90,11 @@ def _report(manifest: CampaignManifest, events, **kwargs):
 
     test ごとに同じ report binding を適用します。
     """
+    manifest_hash = campaign_manifest_hash(manifest)
     return generate_campaign_report(
         manifest,
-        events,
-        event_manifest_hash=campaign_manifest_hash(manifest),
+        [replace(event, campaign_manifest_hash=manifest_hash) for event in events],
+        event_manifest_hash=manifest_hash,
         **kwargs,
     )
 
