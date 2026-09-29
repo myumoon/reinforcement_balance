@@ -143,9 +143,7 @@ def test_six_golden_jsonl_contract_fixtures_are_canonical_and_reproducible() -> 
 
 
 def test_sixteen_of_twenty_report_uses_observed_rate_and_wilson_interval() -> None:
-    report = generate_campaign_report(
-        _manifest("C4", "synthetic-16"), _campaign(16)
-    )
+    report = _report(_manifest("C4", "synthetic-16"), _campaign(16))
     assert report.denominator == 20
     assert report.successes == 16
     assert report.observed_rate == pytest.approx(0.8)
@@ -158,9 +156,7 @@ def test_sixteen_of_twenty_report_uses_observed_rate_and_wilson_interval() -> No
 
 
 def test_fifteen_of_twenty_does_not_meet_the_frozen_c4_floor() -> None:
-    report = generate_campaign_report(
-        _manifest("C4", "synthetic-15"), _campaign(15)
-    )
+    report = _report(_manifest("C4", "synthetic-15"), _campaign(15))
     assert report.denominator == 20
     assert report.observed_rate == pytest.approx(0.75)
     assert report.promotion_eligible is False
