@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
@@ -17,30 +16,14 @@ from .campaign_schema import (
     CampaignEvent,
     CampaignManifest,
     EventType,
+    STAGE_POLICIES,
+    StagePolicy,
     campaign_event_hash,
     campaign_manifest_hash,
     validate_campaign_events,
 )
 
 _WILSON_Z_95 = 1.959963984540054
-
-
-@dataclass(frozen=True, slots=True)
-class StagePolicy:
-    duration_seconds: int
-    slot_count: int
-    promotion_floor: int
-
-
-STAGE_POLICIES: Mapping[str, StagePolicy] = MappingProxyType(
-    {
-        "C0": StagePolicy(1800, 2, 2),
-        "C1": StagePolicy(3600, 4, 3),
-        "C2": StagePolicy(7200, 8, 6),
-        "C3": StagePolicy(14400, 16, 12),
-        "C4": StagePolicy(28800, CAMPAIGN_SLOT_COUNT, 16),
-    }
-)
 
 
 def wilson_score_interval(successes: int, denominator: int) -> tuple[float, float] | None:

@@ -18,9 +18,6 @@ from reinbalance_survivors_contracts.canonical_json import (
 
 CAMPAIGN_SCHEMA_VERSION = "survivors.campaign.v1"
 CAMPAIGN_SLOT_COUNT = 20
-CAMPAIGN_STAGE_SLOT_COUNTS = MappingProxyType(
-    {"C0": 2, "C1": 4, "C2": 8, "C3": 16, "C4": CAMPAIGN_SLOT_COUNT}
-)
 REQUIRED_PREREQUISITES = (
     "exact_runtime",
     "target",
@@ -34,6 +31,24 @@ REQUIRED_PREREQUISITES = (
     "restore",
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True, slots=True)
+class StagePolicy:
+    duration_seconds: int
+    slot_count: int
+    promotion_floor: int
+
+
+STAGE_POLICIES: Mapping[str, StagePolicy] = MappingProxyType(
+    {
+        "C0": StagePolicy(1800, 2, 2),
+        "C1": StagePolicy(3600, 4, 3),
+        "C2": StagePolicy(7200, 8, 6),
+        "C3": StagePolicy(14400, 16, 12),
+        "C4": StagePolicy(28800, CAMPAIGN_SLOT_COUNT, 16),
+    }
+)
 _FORBIDDEN_CLAIMS = frozenset(
     {
         "seed",
@@ -260,11 +275,11 @@ class CampaignManifest:
         _text(self.campaign_id, "campaign_id")
         if self.schema_version != CAMPAIGN_SCHEMA_VERSION:
             raise ValueError("unsupported campaign schema version")
-        slot_count = CAMPAIGN_STAGE_SLOT_COUNTS.get(self.stage)
-        if slot_count is None:
+        policy = STAGE_POLICIES.get(self.stage)
+        if policy is None:
             raise ValueError(f"unknown campaign stage: {self.stage}")
-        if type(self.expected_slots) is not int or self.expected_slots != slot_count:
-            raise ValueError(f"expected_slots must match {self.stage} ({slot_count})")
+        if type(self.expected_slots) is not int or self.expected_slots != policy.slot_count:
+            raise ValueError(f"expected_slots must match {self.stage} ({policy.slot_count})")
         if self.mode not in {"synthetic", "formal"}:
             raise ValueError("mode must be synthetic or formal")
         if self.rng_control != "uncontrolled":
