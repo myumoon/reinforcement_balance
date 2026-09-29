@@ -109,7 +109,7 @@ def test_six_golden_jsonl_contract_fixtures_are_canonical_and_reproducible() -> 
         "duplicate_process",
     }
     for line, fixture in zip(lines, fixtures):
-        assert canonical_json_bytes(fixture) + b"\n" == line.encode("utf-8")
+        assert canonical_json_bytes(fixture) == line.encode("utf-8")
         manifest = CampaignManifest.from_wire(fixture["manifest"])
         events = [CampaignEvent.from_wire(item) for item in fixture["events"]]
         assert CampaignManifest.from_wire(manifest.to_wire()) == manifest
