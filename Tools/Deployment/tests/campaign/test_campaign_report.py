@@ -270,6 +270,13 @@ def test_manifest_stage_and_event_binding_are_enforced_and_reported() -> None:
             events,
             event_manifest_hash="0" * 64,
         )
+    with pytest.raises(ValueError, match="does not match manifest stage"):
+        generate_campaign_report(
+            manifest,
+            events,
+            event_manifest_hash=campaign_manifest_hash(manifest),
+            stage="C4",
+        )
 
 
 def test_synthetic_golden_events_cannot_be_relabelled_as_formal_parent() -> None:
@@ -300,11 +307,4 @@ def test_synthetic_golden_events_cannot_be_relabelled_as_formal_parent() -> None
             formal,
             _run(0) + _run(1),
             event_manifest_hash=campaign_manifest_hash(synthetic),
-        )
-    with pytest.raises(ValueError, match="does not match manifest stage"):
-        generate_campaign_report(
-            manifest,
-            events,
-            event_manifest_hash=campaign_manifest_hash(manifest),
-            stage="C4",
         )
