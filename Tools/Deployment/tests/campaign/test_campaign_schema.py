@@ -1,3 +1,8 @@
+"""campaign schema の境界条件を検証します。
+
+pure Python contract の受理と拒否を固定します。
+"""
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -19,10 +24,18 @@ from survivors.campaign.campaign_schema import (
 
 
 def _hash(char: str) -> str:
+    """test 用の決定的な SHA-256 形式値を作ります。
+
+    指定文字を64回並べた digest fixture を返します。
+    """
     return char * 64
 
 
 def _prerequisite_wire(*, parent: str = "b", development_only: bool = False) -> dict[str, object]:
+    """valid prerequisite wire fixture を作ります。
+
+    全 prerequisite と save contract hash を含めます。
+    """
     names = REQUIRED_PREREQUISITES
     return {
         "hashes": {name: _hash("a") for name in names},
@@ -39,6 +52,10 @@ def _prerequisite_wire(*, parent: str = "b", development_only: bool = False) -> 
 def _events(*, slot: int = 0, terminal: EventType = EventType.SUCCESS,
             activation_source: str = "normal", attempt: str = "a0",
             run: str = "r0", gameplay: str = "g0", process: str = "p0") -> list[CampaignEvent]:
+    """一 slot の正常な event chain を作ります。
+
+    identity と terminal outcome は引数で差し替えられます。
+    """
     return [
         CampaignEvent(EventType.FORMAL_SLOT_RESERVED, slot),
         CampaignEvent(EventType.ATTEMPT_PREFLIGHT, slot, attempt_id=attempt),
@@ -72,6 +89,10 @@ def _events(*, slot: int = 0, terminal: EventType = EventType.SUCCESS,
     ids=["reserved-without-attempt", "attempt-without-reserved-run", "full-activation"],
 )
 def test_valid_campaign_event_cardinalities(events: list[CampaignEvent]) -> None:
+    """許可する event chain cardinality を受け入れます。
+
+    reserved-only、preflight failure、activated run を確認します。
+    """
     validate_campaign_events(events, expected_slots=20)
 
 
@@ -90,11 +111,19 @@ def test_valid_campaign_event_cardinalities(events: list[CampaignEvent]) -> None
     ids=["terminal-overwrite", "second-activation", "activation-without-identity", "slot-reuse"],
 )
 def test_cardinality_violations_are_rejected(events: list[CampaignEvent]) -> None:
+    """identity の欠落と再利用を拒否します。
+
+    slot overwrite と terminal overwrite を同じ validator で検出します。
+    """
     with pytest.raises(ValueError):
         validate_campaign_events(events, expected_slots=20)
 
 
 def test_duplicate_attempt_gameplay_and_process_ids_are_rejected() -> None:
+    """attempt、gameplay、process の重複 id を拒否します。
+
+    identity type ごとの一意性を campaign 全体で検証します。
+    """
     duplicate_attempt = _events(slot=0) + _events(slot=1, attempt="a0")
     duplicate_gameplay = _events(slot=0) + _events(slot=1, gameplay="g0")
     duplicate_process = _events(slot=0) + _events(slot=1, process="p0")
@@ -104,6 +133,10 @@ def test_duplicate_attempt_gameplay_and_process_ids_are_rejected() -> None:
 
 
 def test_second_gameplay_attempt_cannot_replace_an_activated_run() -> None:
+    """activated gameplay attempt の置換を拒否します。
+
+    terminal event より前でも二度目の launch intent を許しません。
+    """
     events = _events()[:-1] + [
         CampaignEvent(
             EventType.LAUNCH_INTENT_COMMITTED,
@@ -119,6 +152,10 @@ def test_second_gameplay_attempt_cannot_replace_an_activated_run() -> None:
 
 
 def test_preflight_failure_cannot_be_retried_or_replaced() -> None:
+    """preflight failure 後の再試行を拒否します。
+
+    同じ reserved slot を別 attempt に置き換えられないことを確認します。
+    """
     events = [
         CampaignEvent(EventType.FORMAL_SLOT_RESERVED, 0),
         CampaignEvent(EventType.ATTEMPT_PREFLIGHT, 0, attempt_id="a0"),
@@ -130,6 +167,10 @@ def test_preflight_failure_cannot_be_retried_or_replaced() -> None:
 
 
 def test_campaign_manifest_round_trip_and_canonical_hash() -> None:
+    """manifest と event の round-trip hash を固定します。
+
+    shared canonical serializer による同一 identity を確認します。
+    """
     manifest = CampaignManifest(campaign_id="synthetic-01")
     decoded = CampaignManifest.from_wire(manifest.to_wire())
     assert decoded == manifest
@@ -143,6 +184,10 @@ def test_campaign_manifest_round_trip_and_canonical_hash() -> None:
 
 @pytest.mark.parametrize("field", ["seed", "same_seed", "independent", "statistical_independence"])
 def test_manifest_rejects_seed_and_independence_claims(field: str) -> None:
+    """manifest 上の seed と独立性 claim を拒否します。
+
+    禁止 field が unknown-key validation より先に検出されます。
+    """
     wire = CampaignManifest(campaign_id="synthetic-01").to_wire()
     wire[field] = True
     with pytest.raises(ValueError):
@@ -150,6 +195,10 @@ def test_manifest_rejects_seed_and_independence_claims(field: str) -> None:
 
 
 def test_manifest_requires_separate_rng_and_trial_fields() -> None:
+    """rng control と trial separation を別々に必須化します。
+
+    欠落 field と uncontrolled 以外の値を拒否します。
+    """
     wire = CampaignManifest(campaign_id="synthetic-01").to_wire()
     del wire["trial_separation"]
     with pytest.raises(ValueError):
@@ -159,6 +208,10 @@ def test_manifest_requires_separate_rng_and_trial_fields() -> None:
 
 
 def test_manifest_stage_fixes_its_expected_slot_count() -> None:
+    """manifest stage と expected slot count の対応を固定します。
+
+    C0 slot 数の不一致と stage field の欠落を拒否します。
+    """
     with pytest.raises(ValueError, match="expected_slots must match C0"):
         CampaignManifest(campaign_id="synthetic-c0", stage="C0")
     wire = CampaignManifest(campaign_id="synthetic-c0", stage="C0", expected_slots=2).to_wire()
@@ -168,6 +221,10 @@ def test_manifest_stage_fixes_its_expected_slot_count() -> None:
 
 
 def test_manifest_rejects_unknown_wire_fields() -> None:
+    """legacy issuance field を含む manifest を拒否します。
+
+    schema wire の unknown key を fail-closed に扱います。
+    """
     wire = CampaignManifest(campaign_id="synthetic-01").to_wire()
     wire["legacy_issuance_id"] = "old"
     with pytest.raises(ValueError):
@@ -190,6 +247,10 @@ def test_manifest_rejects_unknown_wire_fields() -> None:
          "missing-backup", "missing-pre-save", "missing-post-save", "development-fixture"],
 )
 def test_prerequisite_validator_fails_closed(change) -> None:
+    """不完全または stale な prerequisite bundle を拒否します。
+
+    required evidence、sync、backup、save contract を網羅します。
+    """
     wire = _prerequisite_wire()
     change(wire)
     with pytest.raises(ValueError):
@@ -197,6 +258,10 @@ def test_prerequisite_validator_fails_closed(change) -> None:
 
 
 def test_prerequisite_validator_rejects_stale_parent_and_unknown_field() -> None:
+    """mixed parent と unknown prerequisite field を拒否します。
+
+    expected parent の binding と strict key set を確認します。
+    """
     with pytest.raises(ValueError, match="stale"):
         validate_prerequisites(_prerequisite_wire(), expected_parent_hash=_hash("f"))
     wire = _prerequisite_wire()
@@ -206,6 +271,10 @@ def test_prerequisite_validator_rejects_stale_parent_and_unknown_field() -> None
 
 
 def test_formal_manifest_requires_verified_non_development_prerequisites() -> None:
+    """formal manifest の prerequisite gate を検証します。
+
+    development-only evidence と prerequisite 無しの発行を拒否します。
+    """
     good = validate_prerequisites(_prerequisite_wire(), expected_parent_hash=_hash("b"))
     formal = CampaignManifest(
         campaign_id="formal-01", mode="formal", development_only=False,
@@ -221,6 +290,10 @@ def test_formal_manifest_requires_verified_non_development_prerequisites() -> No
 
 
 def test_event_wire_rejects_unknown_required_and_claim_fields() -> None:
+    """event wire の unknown field と independence claim を拒否します。
+
+    必須 field 不足と legacy field も validation error にします。
+    """
     wire = CampaignEvent(EventType.FORMAL_SLOT_RESERVED, 0).to_wire()
     wire["legacy_issuance_field"] = "old"
     with pytest.raises(ValueError):
@@ -239,6 +312,10 @@ def test_event_wire_rejects_unknown_required_and_claim_fields() -> None:
     ids=["hyphen", "snake", "camel", "independence", "nested-spaces"],
 )
 def test_event_details_reject_normalized_and_nested_claim_fields(claim) -> None:
+    """details 内の大小文字・区切り違い claim を拒否します。
+
+    nested mapping も再帰的に同じ denylist を通します。
+    """
     with pytest.raises(ValueError, match="statistical claim"):
         CampaignEvent(
             EventType.FORMAL_SLOT_RESERVED,
@@ -249,6 +326,10 @@ def test_event_details_reject_normalized_and_nested_claim_fields(claim) -> None:
 
 @pytest.mark.parametrize("claim_key", ["same-seed", "rng_seed", "realSeed", "is_independent"])
 def test_all_wire_contracts_reject_claim_key_spellings(claim_key) -> None:
+    """manifest と prerequisite の全 wire path で claim を拒否します。
+
+    camelCase、snake_case、hyphen key を共通 scanner で検証します。
+    """
     manifest = CampaignManifest(campaign_id="synthetic-claim").to_wire()
     manifest[claim_key] = True
     with pytest.raises(ValueError, match="statistical claim"):
@@ -269,6 +350,10 @@ def test_all_wire_contracts_reject_claim_key_spellings(claim_key) -> None:
     ],
 )
 def test_all_identity_kinds_reject_duplicates(field, identity) -> None:
+    """reserved run、nonce、job identity の重複を拒否します。
+
+    兄弟 identity type に同じ一意制約があることを固定します。
+    """
     first = _events(slot=0)
     second = _events(slot=1, attempt="a1", run="r1", gameplay="g1", process="p1")
     index = {"reserved_run_id": 2, "launch_nonce": 2, "job_ref": 3}[field]
