@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from reinbalance_survivors_contracts.canonical_json import canonical_hash
+from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 
 from survivors.campaign.campaign_report import (
     STAGE_POLICIES,
@@ -15,9 +15,11 @@ from survivors.campaign.campaign_schema import (
     CampaignEvent,
     CampaignManifest,
     EventType,
+    REQUIRED_PREREQUISITES,
     campaign_event_hash,
-    canonical_event_jsonl,
+    campaign_jsonl_hash,
     campaign_manifest_hash,
+    canonical_event_jsonl,
 )
 
 
@@ -107,27 +109,42 @@ def test_six_golden_jsonl_contract_fixtures_are_canonical_and_reproducible() -> 
         "duplicate_process",
     }
     for line, fixture in zip(lines, fixtures):
-        assert json.dumps(fixture, sort_keys=True, separators=(",", ":"), ensure_ascii=False) == line
-        manifest = CampaignManifest.from_wire(fixture["manifest"])
+        assert canonical_json_bytes(fixture) + b"\n" == line.encode("utf-8")
+        manifest_wire = dict(fixture["manifest"])
+        manifest_wire.setdefault("stage", fixture["stage"])
+        manifest_wire["expected_slots"] = STAGE_POLICIES[fixture["stage"]].slot_count
+        manifest = CampaignManifest.from_wire(manifest_wire)
         events = [CampaignEvent.from_wire(item) for item in fixture["events"]]
         assert CampaignManifest.from_wire(manifest.to_wire()) == manifest
+        assert [item.to_wire() for item in events] == fixture["events"]
+        expected_hashes = fixture["expected_hashes"]
+        assert campaign_manifest_hash(manifest) == expected_hashes["manifest_hash"]
+        assert campaign_event_hash(events) == expected_hashes["event_hash"]
+        assert campaign_jsonl_hash(events) == expected_hashes["jsonl_hash"]
         if fixture["fixture_name"] == "duplicate_process":
             with pytest.raises(ValueError, match="duplicate process_ref"):
-                generate_campaign_report(manifest, events, stage=fixture["stage"])
+                generate_campaign_report(
+                    manifest,
+                    events,
+                    event_manifest_hash=expected_hashes["manifest_hash"],
+                )
+            assert expected_hashes["report_hash"] is None
             continue
-        report = generate_campaign_report(manifest, events, stage=fixture["stage"])
+        report = generate_campaign_report(
+            manifest,
+            events,
+            event_manifest_hash=expected_hashes["manifest_hash"],
+        )
         assert report.denominator == fixture["expected"]["denominator"]
         assert report.successes == fixture["expected"]["successes"]
         assert report.stage_blocked is fixture["expected"]["stage_blocked"]
-        assert campaign_event_hash(events) == campaign_event_hash(
-            [CampaignEvent.from_wire(event.to_wire()) for event in events]
-        )
+        assert report.report_hash == expected_hashes["report_hash"]
         assert canonical_event_jsonl(events).endswith(b"\n")
 
 
 def test_sixteen_of_twenty_report_uses_observed_rate_and_wilson_interval() -> None:
     report = generate_campaign_report(
-        CampaignManifest(campaign_id="synthetic-16"), _campaign(16), stage="C4"
+        _manifest("C4", "synthetic-16"), _campaign(16)
     )
     assert report.denominator == 20
     assert report.successes == 16
@@ -142,7 +159,7 @@ def test_sixteen_of_twenty_report_uses_observed_rate_and_wilson_interval() -> No
 
 def test_fifteen_of_twenty_does_not_meet_the_frozen_c4_floor() -> None:
     report = generate_campaign_report(
-        CampaignManifest(campaign_id="synthetic-15"), _campaign(15), stage="C4"
+        _manifest("C4", "synthetic-15"), _campaign(15)
     )
     assert report.denominator == 20
     assert report.observed_rate == pytest.approx(0.75)
@@ -161,9 +178,7 @@ def test_pre_activation_failures_are_excluded_and_block_the_stage(failure_type: 
     else:
         events.append(CampaignEvent(failure_type, 0, failure_reason="gate_closed"))
     events.extend(event for slot in range(1, 20) for event in _run(slot))
-    report = generate_campaign_report(
-        CampaignManifest(campaign_id="synthetic-gate"), events, stage="C4"
-    )
+    report = _report(_manifest("C4", "synthetic-gate"), events)
     assert report.denominator == 19
     assert report.preflight_failures == (1 if failure_type is EventType.PREFLIGHT_FAILED else 0)
     assert report.launch_gate_failures == (1 if failure_type is EventType.LAUNCH_GATE_FAILED else 0)
@@ -174,9 +189,7 @@ def test_pre_activation_failures_are_excluded_and_block_the_stage(failure_type: 
 
 def test_activated_failure_stays_in_denominator_and_cannot_be_replaced() -> None:
     events = _run(0, EventType.SAFETY_FAILURE)
-    report = generate_campaign_report(
-        CampaignManifest(campaign_id="synthetic-safety"), events, stage="C0"
-    )
+    report = _report(_manifest("C0", "synthetic-safety"), events)
     assert report.denominator == 1
     assert report.successes == 0
     assert report.activated_failure_counts["SAFETY_FAILURE"] == 1
@@ -191,9 +204,7 @@ def test_uncertain_launch_is_a_blocked_pre_activation_slot() -> None:
                       reserved_run_id="r0", gameplay_attempt_id="g0", launch_nonce="n0"),
         CampaignEvent(EventType.LAUNCH_UNCERTAIN, 0, failure_reason="observer_timeout"),
     ]
-    report = generate_campaign_report(
-        CampaignManifest(campaign_id="synthetic-uncertain"), events, stage="C0"
-    )
+    report = _report(_manifest("C0", "synthetic-uncertain"), events)
     assert report.denominator == 0
     assert report.uncertain_launches == 1
     assert report.stage_blocked is True
@@ -202,10 +213,9 @@ def test_uncertain_launch_is_a_blocked_pre_activation_slot() -> None:
 
 def test_report_includes_unsupported_ui_failure_taxonomy_and_campaign_chain() -> None:
     events = _run(0, EventType.ARTIFACT_FAILURE)
-    report = generate_campaign_report(
-        CampaignManifest(campaign_id="synthetic-chain"),
+    report = _report(
+        _manifest("C0", "synthetic-chain"),
         events,
-        stage="C0",
         support_outside_ui=("pause_overlay",),
         blocked_campaign_ids=("campaign-old",),
         superseded_campaign_ids=("campaign-prev",),
@@ -259,6 +269,37 @@ def test_manifest_stage_and_event_binding_are_enforced_and_reported() -> None:
             manifest,
             events,
             event_manifest_hash="0" * 64,
+        )
+
+
+def test_synthetic_golden_events_cannot_be_relabelled_as_formal_parent() -> None:
+    prerequisites_wire = {
+        "hashes": {name: "a" * 64 for name in REQUIRED_PREREQUISITES},
+        "parents": {name: "b" * 64 for name in REQUIRED_PREREQUISITES},
+        "statuses": {name: "PASS" for name in REQUIRED_PREREQUISITES},
+        "cloud_sync_status": "verified",
+        "backup_hash": "c" * 64,
+        "pre_save_contract_hash": "d" * 64,
+        "post_save_contract_hash": "e" * 64,
+        "development_only": False,
+    }
+    from survivors.campaign.campaign_schema import validate_prerequisites
+
+    formal = CampaignManifest(
+        campaign_id="formal-fake",
+        mode="formal",
+        stage="C0",
+        expected_slots=2,
+        development_only=False,
+        prerequisites=validate_prerequisites(prerequisites_wire, expected_parent_hash="b" * 64),
+        prerequisite_parent_hash="b" * 64,
+    )
+    synthetic = _manifest("C0", "synthetic-source")
+    with pytest.raises(ValueError, match="manifest hash"):
+        generate_campaign_report(
+            formal,
+            _run(0) + _run(1),
+            event_manifest_hash=campaign_manifest_hash(synthetic),
         )
     with pytest.raises(ValueError, match="does not match manifest stage"):
         generate_campaign_report(
