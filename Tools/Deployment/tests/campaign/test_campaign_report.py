@@ -381,3 +381,41 @@ def test_synthetic_golden_events_cannot_be_relabelled_as_formal_parent() -> None
             events,
             event_manifest_hash=synthetic["event_manifest_hash"],
         )
+
+
+def test_synthetic_events_cannot_be_rebound_to_formal_manifest() -> None:
+    prerequisites = {
+        "hashes": {name: "a" * 64 for name in REQUIRED_PREREQUISITES},
+        "parents": {name: "b" * 64 for name in REQUIRED_PREREQUISITES},
+        "statuses": {name: "PASS" for name in REQUIRED_PREREQUISITES},
+        "cloud_sync_status": "verified",
+        "backup_hash": "c" * 64,
+        "pre_save_contract_hash": "d" * 64,
+        "post_save_contract_hash": "e" * 64,
+        "development_only": False,
+    }
+    from survivors.campaign.campaign_schema import validate_prerequisites
+
+    formal = CampaignManifest(
+        campaign_id="formal-c4",
+        mode="formal",
+        stage="C4",
+        expected_slots=20,
+        development_only=False,
+        prerequisites=validate_prerequisites(prerequisites, expected_parent_hash="b" * 64),
+        prerequisite_parent_hash="b" * 64,
+    )
+    golden_path = Path(__file__).parent / "fixtures" / "golden_campaigns.jsonl"
+    fixture = next(
+        row
+        for row in (json.loads(line) for line in golden_path.read_text(encoding="utf-8").splitlines())
+        if row["fixture_name"] == "normal_16_of_20"
+    )
+    events = [CampaignEvent.from_wire(item) for item in fixture["events"]]
+
+    with pytest.raises(ValueError, match="event.*manifest"):
+        generate_campaign_report(
+            formal,
+            events,
+            event_manifest_hash=campaign_manifest_hash(formal),
+        )
