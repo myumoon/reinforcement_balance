@@ -31,6 +31,16 @@ def _hash(char: str) -> str:
     return char * 64
 
 
+def _bind(events: list[CampaignEvent]) -> list[CampaignEvent]:
+    return [replace(event, campaign_manifest_hash=_hash("f")) for event in events]
+
+
+def _validate(events: list[CampaignEvent]):
+    return validate_campaign_events(
+        _bind(events), expected_manifest_hash=_hash("f"), expected_slots=20
+    )
+
+
 def _prerequisite_wire(*, parent: str = "b", development_only: bool = False) -> dict[str, object]:
     """valid prerequisite wire fixture を作ります。
 
@@ -93,7 +103,7 @@ def test_valid_campaign_event_cardinalities(events: list[CampaignEvent]) -> None
 
     reserved-only、preflight failure、activated run を確認します。
     """
-    validate_campaign_events(events, expected_slots=20)
+    _validate(events)
 
 
 @pytest.mark.parametrize(
@@ -116,7 +126,7 @@ def test_cardinality_violations_are_rejected(events: list[CampaignEvent]) -> Non
     slot overwrite と terminal overwrite を同じ validator で検出します。
     """
     with pytest.raises(ValueError):
-        validate_campaign_events(events, expected_slots=20)
+        _validate(events)
 
 
 def test_duplicate_attempt_gameplay_and_process_ids_are_rejected() -> None:
@@ -129,7 +139,7 @@ def test_duplicate_attempt_gameplay_and_process_ids_are_rejected() -> None:
     duplicate_process = _events(slot=0) + _events(slot=1, process="p0")
     for events in (duplicate_attempt, duplicate_gameplay, duplicate_process):
         with pytest.raises(ValueError):
-            validate_campaign_events(events, expected_slots=20)
+            _validate(events)
 
 
 def test_second_gameplay_attempt_cannot_replace_an_activated_run() -> None:
@@ -148,7 +158,7 @@ def test_second_gameplay_attempt_cannot_replace_an_activated_run() -> None:
         )
     ]
     with pytest.raises(ValueError):
-        validate_campaign_events(events, expected_slots=20)
+        _validate(events)
 
 
 def test_preflight_failure_cannot_be_retried_or_replaced() -> None:
@@ -163,7 +173,7 @@ def test_preflight_failure_cannot_be_retried_or_replaced() -> None:
         CampaignEvent(EventType.ATTEMPT_PREFLIGHT, 0, attempt_id="a1"),
     ]
     with pytest.raises(ValueError):
-        validate_campaign_events(events, expected_slots=20)
+        _validate(events)
 
 
 def test_campaign_manifest_round_trip_and_canonical_hash() -> None:
@@ -175,7 +185,7 @@ def test_campaign_manifest_round_trip_and_canonical_hash() -> None:
     decoded = CampaignManifest.from_wire(manifest.to_wire())
     assert decoded == manifest
     assert campaign_manifest_hash(decoded) == campaign_manifest_hash(manifest)
-    events = _events()
+    events = _bind(_events())
     round_tripped = [CampaignEvent.from_wire(event.to_wire()) for event in events]
     assert campaign_event_hash(round_tripped) == campaign_event_hash(events)
     assert campaign_jsonl_hash(round_tripped) == campaign_jsonl_hash(events)
@@ -294,7 +304,11 @@ def test_event_wire_rejects_unknown_required_and_claim_fields() -> None:
 
     必須 field 不足と legacy field も validation error にします。
     """
-    wire = CampaignEvent(EventType.FORMAL_SLOT_RESERVED, 0).to_wire()
+    wire = _bind([CampaignEvent(EventType.FORMAL_SLOT_RESERVED, 0)])[0].to_wire()
+    del wire["campaign_manifest_hash"]
+    with pytest.raises(ValueError, match="campaign_manifest_hash"):
+        CampaignEvent.from_wire(wire)
+    wire["campaign_manifest_hash"] = _hash("f")
     wire["legacy_issuance_field"] = "old"
     with pytest.raises(ValueError):
         CampaignEvent.from_wire(wire)
@@ -360,7 +374,7 @@ def test_all_identity_kinds_reject_duplicates(field, identity) -> None:
     first[index] = replace(first[index], **{field: identity})
     second[index] = replace(second[index], **{field: identity})
     with pytest.raises(ValueError, match=f"duplicate {field}"):
-        validate_campaign_events(first + second, expected_slots=20)
+        _validate(first + second)
     wire = {
         "event_type": EventType.FORMAL_SLOT_RESERVED.value,
         "slot_id": 0,
@@ -368,3 +382,10 @@ def test_all_identity_kinds_reject_duplicates(field, identity) -> None:
     }
     with pytest.raises(ValueError):
         CampaignEvent.from_wire(wire)
+
+
+def test_event_validator_rejects_another_manifest_hash() -> None:
+    with pytest.raises(ValueError, match="event manifest hash"):
+        validate_campaign_events(
+            _bind(_events()), expected_manifest_hash=_hash("a"), expected_slots=20
+        )
