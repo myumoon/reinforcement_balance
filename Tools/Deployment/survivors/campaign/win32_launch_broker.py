@@ -83,6 +83,7 @@ _FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000
 _PIPE_REJECT_REMOTE_CLIENTS = 0x8
 _ERROR_INVALID_PARAMETER = 87
 _ERROR_PIPE_CONNECTED = 535
+_ERROR_NO_DATA = 232
 _WAIT_OBJECT_0 = 0
 
 
@@ -690,8 +691,14 @@ def serve(pipe_name: str, broker: LaunchBroker, *, max_requests: int | None = No
     handled = 0
     try:
         while max_requests is None or handled < max_requests:
-            if not connect(pipe, None) and ctypes.get_last_error() != _ERROR_PIPE_CONNECTED:
-                continue
+            if not connect(pipe, None):
+                error = ctypes.get_last_error()
+                if error == _ERROR_NO_DATA:
+                    # client が接続前に open→close した。切断して次の接続を待つ(しないと毎回 232 で busy-loop)。
+                    _k("DisconnectNamedPipe", _BOOL, _H)(pipe)
+                    continue
+                if error != _ERROR_PIPE_CONNECTED:
+                    raise OSError(error, f"ConnectNamedPipe failed (winerror {error})")
             stop = False
             try:
                 client = _DW()

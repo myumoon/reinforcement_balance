@@ -6,6 +6,7 @@ kernel identity・resume marker・activation 可否を確認します。本家 g
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
 import sys
@@ -333,6 +334,78 @@ def test_named_pipe_checks_server_identity_and_serves_launch(store, broker, tmp_
     assert request_broker(pipe, {"kind": "shutdown"}, broker_pid=os.getpid()) == {"kind": "shutdown_ack"}
     thread.join(10)
     assert not thread.is_alive()
+
+
+def _patch_connect(monkeypatch, wrap) -> list[int]:
+    """serve が取得する ConnectNamedPipe だけを wrap で包み、呼び出し回数を記録します。
+
+    3回を超えて呼ばれたら busy-loop とみなして AssertionError で止めます。
+    """
+    real_k = broker_module._k
+    calls: list[int] = []
+
+    def patched(name, *signature):
+        real = real_k(name, *signature)
+        if name != "ConnectNamedPipe":
+            return real
+
+        def connect(handle, overlapped):
+            calls.append(1)
+            if len(calls) > 3:
+                raise AssertionError("ConnectNamedPipe busy-loop")
+            return wrap(real, handle, overlapped, len(calls))
+        return connect
+
+    monkeypatch.setattr(broker_module, "_k", patched)
+    return calls
+
+
+def test_serve_recovers_when_client_closes_before_connect(broker, monkeypatch) -> None:
+    """接続前に client が open→close しても serve は busy-loop せず次の client に応答します。
+
+    最初の ConnectNamedPipe を client の open→close 後まで遅らせ、ERROR_NO_DATA を必ず発生させます。
+    """
+    opened = threading.Event()
+
+    def gated(real, handle, overlapped, count):
+        if count == 1:
+            opened.wait(10)
+        return real(handle, overlapped)
+
+    calls = _patch_connect(monkeypatch, gated)
+    pipe = f"{PIPE_PREFIX}reinbalance-test-nodata-{os.getpid()}-{time.monotonic_ns()}"
+    thread = threading.Thread(target=serve, args=(pipe, broker), daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            open(pipe, "r+b", buffering=0).close()
+            break
+        except OSError:
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+    opened.set()
+    assert request_broker(pipe, {"kind": "shutdown"}, broker_pid=os.getpid(), timeout_s=10) == {
+        "kind": "shutdown_ack"}
+    thread.join(10)
+    assert not thread.is_alive()
+    assert len(calls) == 2
+
+
+def test_serve_exits_on_unexpected_connect_error(broker, monkeypatch) -> None:
+    """ConnectNamedPipe の想定外エラーは再試行せず OSError で serve を抜けます。
+
+    broker process は非0終了し、同じエラーでの無限再試行は起きません。
+    """
+    def failing(real, handle, overlapped, count):
+        ctypes.set_last_error(5)
+        return 0
+
+    calls = _patch_connect(monkeypatch, failing)
+    pipe = f"{PIPE_PREFIX}reinbalance-test-connerr-{os.getpid()}-{time.monotonic_ns()}"
+    with pytest.raises(OSError, match="ConnectNamedPipe failed"):
+        serve(pipe, broker)
+    assert calls == [1]
 
 
 def test_server_rejects_client_with_foreign_sid(store, tmp_path, monkeypatch) -> None:
