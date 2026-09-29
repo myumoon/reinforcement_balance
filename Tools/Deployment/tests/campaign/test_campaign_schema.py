@@ -338,7 +338,20 @@ def test_event_details_reject_normalized_and_nested_claim_fields(claim) -> None:
         )
 
 
-@pytest.mark.parametrize("claim_key", ["same-seed", "rng_seed", "realSeed", "is_independent"])
+@pytest.mark.parametrize(
+    "claim_key",
+    [
+        "same-seed",
+        "rng_seed",
+        "realSeed",
+        "is_independent",
+        "rngseed",
+        "RNGSeed",
+        "sameseed",
+        "seeds",
+        "independently",
+    ],
+)
 def test_all_wire_contracts_reject_claim_key_spellings(claim_key) -> None:
     """manifest と prerequisite の全 wire path で claim を拒否します。
 
@@ -353,6 +366,14 @@ def test_all_wire_contracts_reject_claim_key_spellings(claim_key) -> None:
     prerequisites["hashes"][claim_key] = _hash("a")
     with pytest.raises(ValueError, match="statistical claim"):
         validate_prerequisites(prerequisites, expected_parent_hash=_hash("b"))
+
+    event = {
+        "event_type": EventType.FORMAL_SLOT_RESERVED.value,
+        "slot_id": 0,
+        "details": {claim_key: True},
+    }
+    with pytest.raises(ValueError, match="statistical claim"):
+        CampaignEvent.from_wire(event)
 
 
 @pytest.mark.parametrize(
