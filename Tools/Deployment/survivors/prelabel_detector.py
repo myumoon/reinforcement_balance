@@ -332,6 +332,14 @@ def build_model(num_labels: int, settings: DetectorSettings, *, pretrained: bool
     return model
 
 
+def default_device() -> str:
+    """学習・推論に使う torch デバイス名を返す（GPU があれば cuda、無ければ cpu）。
+
+    学習 CLI と下書き CLI が同じ決め方をするよう、ここ1か所で判定する。
+    """
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def _to_tensor(image_bgr: np.ndarray, device: str) -> torch.Tensor:
     """BGR uint8 画像を検出器入力の RGB float テンソル（0〜1）へ変換する。
 
