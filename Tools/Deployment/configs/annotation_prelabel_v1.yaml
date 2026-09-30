@@ -12,7 +12,7 @@ fixed_boxes:
 
 # 確認済みラベルから見本を集めて照合する設定。
 template_matching:
-  labels: [gem_blue, gem_green, gem_red, pickup_heal, pickup_special, enemy_normal]
-  threshold: 0.85
+  labels: [gem_blue, gem_green, gem_red, pickup_heal, pickup_special, enemy_normal, enemy_elite, enemy_boss]
+  threshold: 0.78
   nms_iou: 0.3
-  max_templates_per_label: 5
+  max_templates_per_label: 15

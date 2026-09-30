@@ -261,7 +261,10 @@ def test_bundled_config_is_valid_and_uses_expected_defaults():
     config = load_config(DEFAULT_CONFIG_PATH)
 
     assert [box.label for box in config["fixed_boxes"]] == ["player_anchor", "hud_hp", "hud_xp"]
-    assert config["labels"] == ["gem_blue", "gem_green", "gem_red", "pickup_heal", "pickup_special", "enemy_normal"]
-    assert config["threshold"] == 0.85
+    assert config["labels"] == [
+        "gem_blue", "gem_green", "gem_red", "pickup_heal", "pickup_special",
+        "enemy_normal", "enemy_elite", "enemy_boss",
+    ]
+    assert config["threshold"] == 0.78
     assert config["nms_iou"] == 0.3
-    assert config["max_templates_per_label"] == 5
+    assert config["max_templates_per_label"] == 15
