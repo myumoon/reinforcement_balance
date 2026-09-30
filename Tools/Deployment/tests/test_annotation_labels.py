@@ -126,16 +126,14 @@ def test_checked_is_true_only_for_boolean_true(tmp_path: Path, checked: object) 
 @pytest.mark.parametrize(
     "shape",
     [
-        {"label": "gem_blue", "shape_type": "polygon", "points": [[1, 2], [3, 4]]},
-        {"label": "not_a_class", "shape_type": "rectangle", "points": [[1, 2], [3, 4]]},
         {"label": "gem_blue", "points": [[1, 2], [3, 4]]},
         {"label": "gem_blue", "shape_type": "rectangle"},
     ],
 )
 def test_reader_rejects_invalid_shapes_with_path(tmp_path: Path, shape: dict) -> None:
-    """不正な shape を入力ファイル名付きで拒否する。
+    """壊れた shape を入力ファイル名付きで拒否する。
 
-    shape type、未知ラベル、rectangle 必須キー欠落を曖昧に読み飛ばさない。
+    shape_type や points の必須キー欠落は、タイプミスと違い読み飛ばさずエラーにする。
     """
     path = tmp_path / "00000001.json"
     path.write_text(json.dumps(_label_payload([shape])), encoding="utf-8")
@@ -144,6 +142,44 @@ def test_reader_rejects_invalid_shapes_with_path(tmp_path: Path, shape: dict) ->
         read_label_file(path)
 
     assert str(path) in str(exc_info.value)
+
+
+def test_reader_skips_unknown_label_and_unsupported_shape_type_with_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """未知ラベルや未対応 shape_type の shape だけを警告付きで読み飛ばす。
+
+    GUI 入力ミス（誤字ラベルや未対応図形）が1件あっても、他の shape は失わない。
+    """
+    good = _shape(label="gem_blue")
+    typo_label = _shape(label="r")
+    unsupported_shape = {"label": "gem_blue", "shape_type": "polygon", "points": [[1, 2], [3, 4]]}
+    path = tmp_path / "00000001.json"
+    path.write_text(
+        json.dumps(_label_payload([good, typo_label, unsupported_shape])), encoding="utf-8"
+    )
+
+    boxes, checked = read_label_file(path)
+
+    assert boxes == [LabelBox("gem_blue", 1.0, 2.0, 5.0, 8.0, None)]
+    assert checked is True
+    stderr = capsys.readouterr().err
+    assert "unknown annotation label 'r'" in stderr
+    assert "unsupported shape_type 'polygon'" in stderr
+
+
+def test_read_converts_circle_center_and_edge_points_to_bounding_box(tmp_path: Path) -> None:
+    """circle shape を中心点＋円周上の一点から外接矩形へ変換する。
+
+    X-AnyLabeling で円として描いた hazard_area / hazard_projectile を bbox として扱う。
+    """
+    shape = {"label": "hazard_area", "shape_type": "circle", "points": [[10.0, 10.0], [13.0, 10.0]]}
+    path = tmp_path / "00000001.json"
+    path.write_text(json.dumps(_label_payload([shape])), encoding="utf-8")
+
+    boxes, _ = read_label_file(path)
+
+    assert boxes == [LabelBox("hazard_area", 7.0, 7.0, 13.0, 13.0, None)]
 
 
 @pytest.mark.parametrize("missing", ["shapes", "imagePath", "imageData"])

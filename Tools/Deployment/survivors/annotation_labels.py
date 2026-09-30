@@ -10,6 +10,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -179,10 +180,15 @@ def write_label_file(
             pass
 
 
+_SHAPE_POINT_COUNTS = {"rectangle": (2, 4), "circle": (2,)}
+
+
 def read_label_file(path: Path | str) -> tuple[list[LabelBox], bool]:
     """read_label_file(path) -> (boxes, checked) としてラベルファイルを読む。
 
-    二点または四点の rectangle を受け入れ、未知ラベルや不正 shape はパス付き ValueError にする。
+    rectangle（対角二点または四隅四点）と circle（中心点＋円周上の一点）を受け入れる。
+    未知ラベルや未対応 shape_type の shape は警告を表示して読み飛ばし、
+    欠損キーや不正な点座標など壊れた形式だけをパス付き ValueError にする。
     """
     path = Path(path)
     try:
@@ -205,18 +211,19 @@ def read_label_file(path: Path | str) -> tuple[list[LabelBox], bool]:
             raise ValueError(f"{prefix} must be an object")
         if "shape_type" not in shape or "points" not in shape or "label" not in shape:
             raise ValueError(f"{prefix} is missing label, shape_type, or points")
-        if shape["shape_type"] != "rectangle":
-            raise ValueError(f"{prefix} has unsupported shape_type: {shape['shape_type']!r}")
-        try:
-            label = validate_label(shape["label"])
-        except ValueError as exc:
-            raise ValueError(f"{prefix}: {exc}") from exc
+        shape_type = shape["shape_type"]
+        if shape_type not in _SHAPE_POINT_COUNTS:
+            print(f"warning: {prefix} has unsupported shape_type {shape_type!r}, skipped", file=sys.stderr)
+            continue
+        label = shape["label"]
+        if label not in ALL_CLASSES:
+            print(f"warning: {prefix} has unknown annotation label {label!r}, skipped", file=sys.stderr)
+            continue
 
         points = shape["points"]
-        if not isinstance(points, list) or len(points) not in (2, 4):
-            raise ValueError(f"{prefix} rectangle points must contain 2 or 4 points")
-        xs: list[float] = []
-        ys: list[float] = []
+        if not isinstance(points, list) or len(points) not in _SHAPE_POINT_COUNTS[shape_type]:
+            raise ValueError(f"{prefix} {shape_type} points must contain {_SHAPE_POINT_COUNTS[shape_type]} points")
+        parsed_points: list[tuple[float, float]] = []
         for point in points:
             if not isinstance(point, list) or len(point) != 2:
                 raise ValueError(f"{prefix} has an invalid point: {point!r}")
@@ -225,15 +232,22 @@ def read_label_file(path: Path | str) -> tuple[list[LabelBox], bool]:
             x, y = float(point[0]), float(point[1])
             if not math.isfinite(x) or not math.isfinite(y):
                 raise ValueError(f"{prefix} point coordinates must be finite")
-            xs.append(x)
-            ys.append(y)
+            parsed_points.append((x, y))
 
         score = shape.get("score")
         if score is not None:
             if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(float(score)):
                 raise ValueError(f"{prefix} score must be a finite number or null")
             score = float(score)
-        boxes.append(LabelBox(label, min(xs), min(ys), max(xs), max(ys), score))
+
+        if shape_type == "circle":
+            (cx, cy), (ex, ey) = parsed_points
+            radius = math.hypot(ex - cx, ey - cy)
+            boxes.append(LabelBox(label, cx - radius, cy - radius, cx + radius, cy + radius, score))
+        else:
+            xs = [x for x, _ in parsed_points]
+            ys = [y for _, y in parsed_points]
+            boxes.append(LabelBox(label, min(xs), min(ys), max(xs), max(ys), score))
 
     return boxes, payload.get("checked", False) is True
 
