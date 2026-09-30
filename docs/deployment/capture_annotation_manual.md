@@ -59,7 +59,27 @@ python Tools/Deployment/select_survivors_annotation_candidates.py `
 
 ### 2-3. 自動下書きを作る
 
-固定矩形（player/HUD）と、確認済みラベルから切り出した見本を使って下書き JSON を生成します。
+固定矩形（player/HUD）と、確認済みラベルで学習した下書き用検出器（Faster R-CNN）の推論結果を使って下書き JSON を生成します。
+
+**(1) 最初の周回: 学習用の確認済みフレームを用意する**
+
+時期の違うフレームを数枚選び、X-AnyLabeling（2-4.）で次のようにラベルして確認済みにします。全部をラベルする必要はありません。
+
+- `labeled_region` の矩形を1つ描きます（画面の 1/4 程度、敵が 5〜10 体入る場所）。
+- **その矩形の内側にある** 敵・ジェム・ピックアップを漏れなくラベルします。矩形の外側はラベル不要です。
+- 画面全体をラベル済みのフレームは、`labeled_region` なしでそのまま学習に使えます。
+
+**(2) 検出器を学習する**
+
+```powershell
+python Tools/Deployment/train_survivors_prelabel_detector.py `
+  --work-root "<WorkRoot>"
+```
+
+- work-root 内の `checked: true` の JSON だけを使い、重みを `<WorkRoot>/prelabel_detector.pt` に保存します（`--output` で変更可）。確認済みフレームが無い場合はエラーで終了します。
+- 初回は pytorch.org から事前学習重み（約 74MB）を自動でダウンロードします。GPU があれば自動で使い、数分で終わります。
+
+**(3) 下書きを作る**
 
 ```powershell
 python Tools/Deployment/prelabel_survivors_frames.py `
@@ -67,10 +87,14 @@ python Tools/Deployment/prelabel_survivors_frames.py `
   --session-id "<SessionId>"
 ```
 
-- 下書きは `checked: false` で保存され、JSON がまだ無い画像にのみ作成されます（既存 JSON は上書きされません）。
-- `card` / `button` / `death_result` は自動下書きされないため、GUI で手動追加が必要です。
+- 既定で `<WorkRoot>/prelabel_detector.pt` を読みます（`--detector` で変更可）。重みファイルが無い場合は警告を表示し、固定矩形だけの下書きを作ります。
+- 下書きは `checked: false` で保存され、JSON がまだ無い画像にのみ作成されます（既存 JSON は上書きされません）。下書きに `labeled_region` は書かれません。
+- 設定は [annotation_prelabel_v2.yaml](../../Tools/Deployment/configs/annotation_prelabel_v2.yaml) です。学習後に `input_scale` や `labels` を変えた場合は重みと一致しないためエラーになるので、再学習してください。
+- 既存 work-root の `classes.txt` に `labeled_region` が無い場合は、末尾に1行 `labeled_region` を追記してから X-AnyLabeling で読み込み直してください。
 
-同一セッション内で先に一部だけ確認済みにし、残りの未確認フレームにも増えた見本を反映したい場合は `--refresh-unchecked` を付けます。`checked: false` の既存下書きだけが最新の見本で再生成され、`checked: true` にした矩形は変更されません。
+**(4) 反復する**
+
+下書きを修正して確認済みにする → (2) で再学習する → `--refresh-unchecked` を付けて下書きを作り直す、を繰り返すと検出器の精度が上がります。`--refresh-unchecked` では `checked: false` の既存下書きだけが最新の検出器で再生成され、`checked: true` にしたファイルは変更されません。
 
 ```powershell
 python Tools/Deployment/prelabel_survivors_frames.py `
@@ -103,8 +127,13 @@ python Tools/Deployment/prelabel_survivors_frames.py `
 | `hud_hp` / `hud_xp` | HP / XP の HUD 領域 |
 | `card` / `button` | レベルアップカード / 選択ボタン |
 | `death_result` | 死亡・結果画面の領域 |
+| `labeled_region` | ラベルを付け終えた範囲（学習用。物体ではない） |
 
 宝箱は `chest` ではなく `pickup_special` として付けます。
+
+- `card` / `button` / `death_result` / `hazard_projectile` / `hazard_area` は自動下書きされないため、GUI で手動追加が必要です。
+- `enemy_elite` / `enemy_boss` は検出器の学習時に `enemy_normal` として扱われ、下書きでは `enemy_normal` として出るので、GUI で正しいクラスへ直してください。
+- `labeled_region` を含む確認済みフレームは範囲外が未ラベルのため、COCO 出力から除外されます。COCO に含めたいフレームは画面全体をラベルし、`labeled_region` を消してください。
 
 ### 2-6. COCO JSON を出力する
 
