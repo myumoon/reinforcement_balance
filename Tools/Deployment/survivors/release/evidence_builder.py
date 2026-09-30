@@ -1,7 +1,6 @@
-"""Survivors C4 campaign artifacts and durable launch history into goal evidence.
+"""Survivors campaign証跡からMad Forest C4のgoal evidenceを作ります。
 
-Inputs are re-read through the campaign artifact and ledger APIs. The generated
-manifest contains only logical artifact names and digests, never source payloads.
+artifactとdurable ledgerを読み戻して照合し、公開用の出力にはlogical idとhashだけを残します。
 """
 
 from __future__ import annotations
@@ -67,19 +66,17 @@ _LEDGER_CLOSED = frozenset({
 
 
 class EvidenceError(ValueError):
-    """Evidence is absent or inconsistent.
+    """証跡が欠落または不整合であることを表します。
 
-    Callers should stop the build instead of converting this validation failure
-    into a partial report.
+    呼び出し側は不完全なreportを作らず、検証を停止します。
     """
 
 
 @dataclass(frozen=True, slots=True)
 class GoalEvidence:
-    """Sanitized manifest and independently recomputed campaign report.
+    """sanitized manifestと再計算済みcampaign reportを保持します。
 
-    Source object bodies are omitted; the manifest keeps their logical ids and
-    SHA-256 references for audit and restore checks.
+    source payloadは含めず、監査とrestore照合に使うlogical idとSHA-256を保持します。
     """
 
     manifest: dict[str, Any]
@@ -87,14 +84,31 @@ class GoalEvidence:
 
 
 class _Artifacts:
+    """artifact読み出しと参照hashの記録をまとめます。
+
+    campaign runner既存のArtifactStoreを使い、読んだobjectのhashをinventoryへ残します。
+    """
+
     def __init__(self, store: ArtifactStore) -> None:
+        """既存artifact storeを読み出し元として登録します。
+
+        inventoryは出力へ含めるsource referenceの元になります。
+        """
         self.store = store
         self.inventory: dict[str, str] = {}
 
     def exists(self, name: str) -> bool:
+        """logical artifact idの存在を確認します。
+
+        store固有のpath処理はArtifactStoreへ委ねます。
+        """
         return self.store.exists(name)
 
     def read(self, name: str) -> bytes:
+        """artifact bytesを読み、内容hashをinventoryへ記録します。
+
+        読み出しに失敗したobjectは検証対象の欠落として報告します。
+        """
         try:
             data = self.store.read(name)
         except OSError as exc:
@@ -103,6 +117,10 @@ class _Artifacts:
         return data
 
     def json(self, name: str) -> Any:
+        """JSON artifactを読み、decode結果を返します。
+
+        UTF-8またはJSON形式が壊れている場合はEvidenceErrorにします。
+        """
         try:
             value = json.loads(self.read(name))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -110,6 +128,10 @@ class _Artifacts:
         return value
 
     def stream(self, name: str) -> list[dict[str, Any]]:
+        """JSONL streamを読み、raw bytesのhashを記録します。
+
+        存在しないoptional streamは空配列として扱います。
+        """
         logical_id = f"streams/{name}.jsonl"
         if not self.exists(logical_id):
             return []
@@ -123,18 +145,30 @@ class _Artifacts:
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
+    """値がmappingであることを検証します。
+
+    wire objectの型違いを早い段階で拒否します。
+    """
     if not isinstance(value, Mapping):
         raise EvidenceError(f"{name} must be an object")
     return value
 
 
 def _text(value: Any, name: str) -> str:
+    """値が空でない文字列であることを検証します。
+
+    文字列以外や空値を後段のidentityとして使いません。
+    """
     if not isinstance(value, str) or not value:
         raise EvidenceError(f"{name} must be non-empty text")
     return value
 
 
 def _id(value: Any, name: str) -> str:
+    """値をsanitized logical idとして検証します。
+
+    path断片に使えない文字や空値を拒否します。
+    """
     text = _text(value, name)
     if _ID.fullmatch(text) is None:
         raise EvidenceError(f"{name} must be a sanitized logical id")
@@ -142,12 +176,20 @@ def _id(value: Any, name: str) -> str:
 
 
 def _sha(value: Any, name: str) -> str:
+    """値が小文字hexのSHA-256であることを検証します。
+
+    digestの欠落や形式違いをfail-closedで拒否します。
+    """
     if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
         raise EvidenceError(f"{name} must be a lowercase SHA-256 digest")
     return value
 
 
 def _reject_claims(value: Any) -> None:
+    """未対応の母集団・独立性claimを再帰的に拒否します。
+
+    nested mappingとsequenceを走査して、claimが出力へ混ざるのを防ぎます。
+    """
     if isinstance(value, Mapping):
         for key, child in value.items():
             if isinstance(key, str) and key.casefold() in _FORBIDDEN_CLAIM_KEYS:
@@ -162,6 +204,10 @@ def _reject_claims(value: Any) -> None:
 
 
 def _events(records: Sequence[Mapping[str, Any]], execution_id: str) -> list[CampaignEvent]:
+    """指定executionに属するeventをschemaで復元します。
+
+    不正wireや禁止claimがあれば該当executionの検証を停止します。
+    """
     result = []
     for record in records:
         if record.get("stage_execution_id") == execution_id:
@@ -175,6 +221,10 @@ def _events(records: Sequence[Mapping[str, Any]], execution_id: str) -> list[Cam
 
 
 def _storage_attestation(store: DurableLaunchStore) -> dict[str, Any]:
+    """durable ledgerのstorage、SQLite、schema attestationを検証します。
+
+    local fixed NTFS、ACL、WAL/FULL、integrity、broker schemaが揃う場合だけ返します。
+    """
     try:
         verdict = check_storage(store.directory)
         opened_verdict = store.verdict
@@ -211,6 +261,10 @@ def _storage_attestation(store: DurableLaunchStore) -> dict[str, Any]:
 
 
 def _validate_chain(chain: Any, plan: Mapping[str, Any]) -> tuple[str, list[dict[str, str]]]:
+    """release artifact chainのschema、親hash、内容hashを検証します。
+
+    target profileとbuildからevaluationまでの参照が一貫する場合にdigest一覧を返します。
+    """
     chain = _mapping(chain, "goal release chain")
     required = {"schema_version", "target_profile_sha256", "game_build_sha256", "nodes", "chain_sha256"}
     if set(chain) != required or chain.get("schema_version") != RELEASE_CHAIN_SCHEMA:
@@ -291,6 +345,10 @@ def _validate_chain(chain: Any, plan: Mapping[str, Any]) -> tuple[str, list[dict
 
 
 def _validate_save(reader: _Artifacts, plan: Mapping[str, Any], summary: Mapping[str, Any]) -> dict[str, Any]:
+    """original backup、canonical save、cloud sync、restore verdictを再検証します。
+
+    summaryの自己申告値を保存済みobjectと一致させて返します。
+    """
     backup = reader.read("save/original_backup.bin")
     backup_hash = sha256_hex(backup)
     backup_record = _mapping(reader.json("save/original_backup.json"), "original backup record")
@@ -325,6 +383,10 @@ def _validate_save(reader: _Artifacts, plan: Mapping[str, Any], summary: Mapping
 
 
 def _read_run(reader: _Artifacts, path: str, plan: Mapping[str, Any], backup_hash: str) -> dict[str, Any]:
+    """per-run manifestのschema、save identity、eligibilityを検証します。
+
+    summaryにあるeligibility claimは信用せず、runのsave記録から再計算します。
+    """
     run = _mapping(reader.json(path), f"run manifest {path}")
     required = {
         "campaign_id", "plan_hash", "stage", "stage_execution_id", "campaign_manifest_hash",
@@ -362,6 +424,10 @@ def _load_closures(
     reader: _Artifacts,
     required_issues: set[str],
 ) -> list[dict[str, str]]:
+    """必要なremediation issueをhash付きclose evidenceへ結びます。
+
+    authorとindependent verifierが異なり、保存objectが一致するclosureだけ返します。
+    """
     path = "campaign/remediation_closures.json"
     if not reader.exists(path):
         if required_issues:
@@ -402,6 +468,10 @@ def _load_closures(
 
 
 def _safe_output(value: Any, key: str = "") -> None:
+    """出力からabsolute path、secret、raw payload、independence claimを除きます。
+
+    nestedな値まで走査し、危険な文字列やfieldがあれば生成を停止します。
+    """
     if isinstance(value, Mapping):
         for name, child in value.items():
             if not isinstance(name, str) or re.search(r"secret|password|token|frame|payload|authorization", name, re.I):
@@ -426,10 +496,15 @@ def _check_c4_events(
     plan_hash: str,
     backup_hash: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """全stage historyを照合し、唯一のpromoted C4だけを集計します。
+
+    C0からC4までexecutionとfailure remediationを検証し、C4 metricsはledgerから再構成します。
+    """
     executions = summary.get("executions")
     if not isinstance(executions, list):
         raise EvidenceError("summary executions must be an array")
-    c4_executions = []
+    stage_executions = []
+    c4_execution_ids: set[str] = set()
     all_execution_ids: set[str] = set()
     for raw in executions:
         execution = _mapping(raw, "summary execution")
@@ -437,20 +512,26 @@ def _check_c4_events(
         if execution_id in all_execution_ids:
             raise EvidenceError("summary has duplicate stage execution ids")
         all_execution_ids.add(execution_id)
-        if execution.get("stage") == "C4":
-            c4_executions.append(dict(execution))
-    if not c4_executions:
+        stage = execution.get("stage")
+        if not isinstance(stage, str) or stage not in STAGE_POLICIES:
+            raise EvidenceError(f"unknown campaign stage in summary: {stage}")
+        stage_executions.append(dict(execution))
+        if stage == "C4":
+            c4_execution_ids.add(execution_id)
+    if not c4_execution_ids:
         raise EvidenceError("C4 stage is missing")
 
     stage_data: dict[str, dict[str, Any]] = {}
-    for execution in c4_executions:
+    for execution in stage_executions:
         execution_id = execution["stage_execution_id"]
+        stage = execution["stage"]
+        policy = STAGE_POLICIES[stage]
         path = f"stages/{execution_id}"
         actual_execution = _mapping(reader.json(f"{path}/execution.json"), "stage execution artifact")
         if dict(actual_execution) != execution:
             raise EvidenceError(f"summary execution differs from its artifact: {execution_id}")
-        if actual_execution.get("plan_hash") != plan_hash or actual_execution.get("stage") != "C4":
-            raise EvidenceError(f"C4 execution plan/stage mismatch: {execution_id}")
+        if actual_execution.get("plan_hash") != plan_hash or actual_execution.get("stage") != stage:
+            raise EvidenceError(f"stage execution plan/stage mismatch: {execution_id}")
         envelope = _mapping(reader.json(f"{path}/manifest.json"), "stage manifest artifact")
         manifest_wire = _mapping(envelope.get("manifest"), "campaign manifest")
         try:
@@ -458,18 +539,21 @@ def _check_c4_events(
         except (TypeError, ValueError) as exc:
             raise EvidenceError(f"invalid campaign manifest: {execution_id}") from exc
         digest = campaign_manifest_hash(manifest)
-        if (manifest.stage != "C4" or manifest.expected_slots != STAGE_POLICIES["C4"].slot_count
+        if (manifest.stage != stage or manifest.expected_slots != policy.slot_count
                 or manifest.campaign_id != execution_id or envelope.get("plan_hash") != plan_hash
                 or actual_execution.get("manifest_hash") != digest):
-            raise EvidenceError(f"C4 manifest chain mismatch: {execution_id}")
+            raise EvidenceError(f"stage manifest chain mismatch: {execution_id}")
         if (manifest.mode != plan.get("mode") or manifest.development_only != plan.get("development_only")
                 or envelope.get("development_only") is not manifest.development_only
                 or envelope.get("formal_campaign_eligible") is not (not manifest.development_only)):
-            raise EvidenceError(f"C4 eligibility differs from campaign plan: {execution_id}")
-        stage_data[execution_id] = {"manifest": manifest, "hash": digest, "events": []}
+            raise EvidenceError(f"stage eligibility differs from campaign plan: {execution_id}")
+        stage_data[execution_id] = {
+            "manifest": manifest, "hash": digest, "stage": stage, "execution": execution,
+        }
 
-    executions_by_hash = {value["hash"]: key for key, value in stage_data.items()}
-    if len(executions_by_hash) != len(stage_data):
+    c4_stage_data = {key: value for key, value in stage_data.items() if value["stage"] == "C4"}
+    executions_by_hash = {value["hash"]: key for key, value in c4_stage_data.items()}
+    if len(executions_by_hash) != len(c4_stage_data):
         raise EvidenceError("C4 stage executions share a campaign manifest identity")
 
     preflight_records = reader.stream("preflight_attempts")
@@ -482,8 +566,8 @@ def _check_c4_events(
             execution_id = record.get("stage_execution_id")
             if execution_id in known_stream_ids or not isinstance(execution_id, str):
                 continue
-            if execution_id.startswith(f"{plan['campaign_id']}.C4."):
-                raise EvidenceError(f"unlisted C4 artifact history: {execution_id}")
+            if any(execution_id.startswith(f"{plan['campaign_id']}.{stage}.") for stage in STAGE_POLICIES):
+                raise EvidenceError(f"unlisted stage artifact history: {execution_id}")
 
     superseded = None
     if reader.exists("campaign/superseded.json"):
@@ -493,15 +577,19 @@ def _check_c4_events(
                 or superseded.get("campaign_id") != plan.get("campaign_id")
                 or _id(superseded.get("successor_campaign_id"), "successor campaign id") == plan.get("campaign_id")):
             raise EvidenceError("superseded campaign record is invalid")
+        raise EvidenceError("superseded campaign cannot produce goal evidence")
     required_remediations: set[str] = set()
     raw_preflight_by_exec: dict[str, list[CampaignEvent]] = defaultdict(list)
     for execution_id in stage_data:
         events = _events(preflight_records, execution_id)
+        policy = STAGE_POLICIES[stage_data[execution_id]["stage"]]
+        if any(event.campaign_manifest_hash != stage_data[execution_id]["hash"]
+               or event.slot_id >= policy.slot_count for event in events):
+            raise EvidenceError(f"preflight event is not bound to its stage: {execution_id}")
         raw_preflight_by_exec[execution_id] = events
         for event in events:
             if event.event_type is EventType.PREFLIGHT_FAILED:
                 required_remediations.add(f"{execution_id}.preflight.slot-{event.slot_id:02d}")
-    closures = _load_closures(reader, required_remediations)
     ledger_attempts: dict[str, dict[int, tuple[Any, tuple[CampaignEvent, ...]]]] = defaultdict(dict)
     global_ids: dict[str, set[str]] = {name: set() for name in (
         "attempt_id", "reserved_run_id", "gameplay_attempt_id", "launch_nonce", "process_ref", "job_ref"
@@ -591,7 +679,7 @@ def _check_c4_events(
     gates_by_attempt: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for record in gate_records:
         execution_id = record.get("stage_execution_id")
-        if execution_id not in stage_data:
+        if execution_id not in c4_stage_data:
             continue
         attempt_id = _text(record.get("attempt_id"), "launch gate attempt id")
         gates_by_attempt[attempt_id].append(record)
@@ -604,16 +692,26 @@ def _check_c4_events(
             event = CampaignEvent.from_wire(record["event"])
         except (KeyError, TypeError, ValueError) as exc:
             raise EvidenceError("invalid launched outcome record") from exc
+        if (event.campaign_manifest_hash != stage_data[execution_id]["hash"]
+                or event.slot_id >= STAGE_POLICIES[stage_data[execution_id]["stage"]].slot_count
+                or event.event_type not in TERMINAL_OUTCOMES):
+            raise EvidenceError(f"launched outcome is not bound to its stage: {execution_id}")
         if event.event_type is EventType.SAFETY_FAILURE:
             required_remediations.add(f"{execution_id}.safety.slot-{event.slot_id:02d}")
-        outcomes_by_exec_slot[(execution_id, event.slot_id)].append((event, record))
+        if execution_id in c4_stage_data:
+            outcomes_by_exec_slot[(execution_id, event.slot_id)].append((event, record))
     closures = _load_closures(reader, required_remediations)
 
-    activated_runs: list[dict[str, Any]] = []
+    activated_by_execution: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    activated_ids_by_execution: dict[str, dict[str, set[str]]] = defaultdict(
+        lambda: {name: set() for name in (
+            "attempt_id", "reserved_run_id", "gameplay_attempt_id", "process_ref", "job_ref"
+        )}
+    )
     stage_history: list[dict[str, Any]] = []
-    terminal_counts: Counter[str] = Counter()
+    terminal_counts_by_execution: dict[str, Counter[str]] = defaultdict(Counter)
     preflight_failures = 0
-    for execution_id, data in stage_data.items():
+    for execution_id, data in c4_stage_data.items():
         manifest: CampaignManifest = data["manifest"]
         manifest_hash = data["hash"]
         preflight = raw_preflight_by_exec[execution_id]
@@ -677,10 +775,10 @@ def _check_c4_events(
                             or broker.get("broker_ref") != attestation.broker_ref
                             or broker.get("ledger_row_hashes") != list(history.row_hashes)):
                         raise EvidenceError(f"run manifest identity differs from durable lifecycle: {prefix}")
-                    terminal_counts[event.event_type.value] += 1
+                    terminal_counts_by_execution[execution_id][event.event_type.value] += 1
                     stage_outcomes += 1
                     stage_successes += event.event_type is EventType.SUCCESS
-                    activated_runs.append({
+                    activated_by_execution[execution_id].append({
                         "artifact_id": prefix,
                         "sha256": reader.inventory[prefix],
                         "attempt_id_sha256": sha256_hex(intent.attempt_id.encode()),
@@ -691,6 +789,15 @@ def _check_c4_events(
                         "broker_ref_sha256": sha256_hex(attestation.broker_ref.encode()),
                         "ledger_row_hashes": list(history.row_hashes),
                     })
+                    activated_ids = activated_ids_by_execution[execution_id]
+                    for kind, value in {
+                        "attempt_id": intent.attempt_id,
+                        "reserved_run_id": intent.reserved_run_id,
+                        "gameplay_attempt_id": intent.gameplay_attempt_id,
+                        "process_ref": process_ref,
+                        "job_ref": attestation.job_ref,
+                    }.items():
+                        activated_ids[kind].add(value)
                 elif terminal_list or reader.exists(prefix):
                     raise EvidenceError(f"inactive launch has terminal run evidence: {execution_id}:slot-{slot:02d}")
             elif terminal_list or reader.exists(prefix):
@@ -716,11 +823,11 @@ def _check_c4_events(
             raise EvidenceError(f"C4 contains a pre-activation launch gate failure: {execution_id}")
         expected_state = (
             "preflight_blocked" if any(e.event_type is EventType.PREFLIGHT_FAILED for e in ordered_events)
-            else "stage_passed" if len([e for e in ordered_events if e.event_type in TERMINAL_OUTCOMES]) == 20
+            else "stage_passed" if len([e for e in ordered_events if e.event_type in TERMINAL_OUTCOMES]) == STAGE_POLICIES["C4"].slot_count
             and stage_successes >= STAGE_POLICIES["C4"].promotion_floor
             else "stage_not_promoted"
         )
-        if next(e for e in c4_executions if e["stage_execution_id"] == execution_id)["state"] != expected_state:
+        if data["execution"].get("state") != expected_state:
             raise EvidenceError(f"C4 runner state differs from ledger/artifact events: {execution_id}")
         stage_history.append({
             "stage_execution_id": execution_id,
@@ -734,14 +841,21 @@ def _check_c4_events(
     for attempt_id, records in gates_by_attempt.items():
         if attempt_id not in all_attempt_ids or len(records) != 1:
             raise EvidenceError(f"duplicate launch gate record: {attempt_id}")
+    promoted = [entry for entry in stage_history if entry["state"] == "stage_passed"]
+    if len(promoted) != 1:
+        raise EvidenceError(
+            f"C4 requires exactly one promoted C4 execution for 16/20; found {len(promoted)}"
+        )
+    promoted_execution_id = promoted[0]["stage_execution_id"]
+    activated_runs = activated_by_execution[promoted_execution_id]
+    terminal_counts = terminal_counts_by_execution[promoted_execution_id]
+    promoted_ids = activated_ids_by_execution[promoted_execution_id]
     activation_count = len(activated_runs)
-    if activation_count != 20 or len(global_ids["reserved_run_id"]) != 20:
+    if activation_count != STAGE_POLICIES["C4"].slot_count:
         raise EvidenceError(f"C4 requires 20 unique activated reserved-run ids; found {activation_count}/20")
-    if len(global_ids["attempt_id"]) != 20 or len(global_ids["gameplay_attempt_id"]) != 20:
-        raise EvidenceError("C4 attempt/gameplay identity cardinality must be 20")
-    if len(global_ids["process_ref"]) != 20 or len(global_ids["job_ref"]) != 20:
-        raise EvidenceError("C4 process/job lifecycle cardinality must be 20")
-    if sum(terminal_counts.values()) != 20:
+    if any(len(promoted_ids[kind]) != STAGE_POLICIES["C4"].slot_count for kind in promoted_ids):
+        raise EvidenceError("promoted C4 identity/process lifecycle cardinality must be 20")
+    if sum(terminal_counts.values()) != STAGE_POLICIES["C4"].slot_count:
         raise EvidenceError("C4 activated outcome denominator must be 20")
     stage_history.sort(key=lambda entry: entry["stage_execution_id"])
     return {
@@ -763,6 +877,10 @@ def _summary_formal_eligibility(
     summary: Mapping[str, Any],
     backup_hash: str,
 ) -> bool:
+    """summaryのformal eligibilityをartifactから独立に再計算します。
+
+    全runのsave hash、進行中execution、backup、cloud sync、restoreを照合します。
+    """
     executions = summary["executions"]
     run_paths: list[str] = []
     runs_ready = True
@@ -802,11 +920,9 @@ def build_goal_evidence(
     *,
     formal_c4_root: str | os.PathLike[str] | None = None,
 ) -> GoalEvidence:
-    """Recompute C4 outcomes from campaign artifacts and durable ledger history.
+    """campaign artifactとdurable ledgerからC4 evidenceを再計算します。
 
-    Without an explicit formal C4 root, only a synthetic development result is
-    returned. The output always labels the observed 16/20 criterion separately
-    from RNG control and trial separation.
+    formal rootが無い場合はdevelopment結果として返し、16/20とcontrol fieldを分けて出力します。
     """
     reader = _Artifacts(artifacts)
     storage = _storage_attestation(store)
@@ -922,6 +1038,10 @@ def build_goal_evidence(
 
 
 def _bundle_entries(evidence: GoalEvidence) -> tuple[dict[str, Any], dict[str, Any]]:
+    """manifest、report、source referenceからbundle indexを作ります。
+
+    各objectのhashとsource inventoryのhashをrestore時の照合用にまとめます。
+    """
     manifest_data = canonical_json_bytes(evidence.manifest)
     report_data = canonical_json_bytes(evidence.report)
     sources = evidence.manifest["source_artifacts"]
@@ -948,10 +1068,9 @@ def _bundle_entries(evidence: GoalEvidence) -> tuple[dict[str, Any], dict[str, A
 
 
 def verify_evidence_bundle(backup_directory: str | os.PathLike[str], empty_root: str | os.PathLike[str]) -> GoalEvidence:
-    """Restore a sanitized bundle into an empty root and verify every object.
+    """sanitized bundleをempty rootへ復元し、全objectのhashを検証します。
 
-    The manifest is reconstructed from its bundled source references and hashes;
-    missing or changed objects stop the restore.
+    source referenceからmanifest inventoryを再構成し、欠落・改ざんを拒否します。
     """
     backup_path, restore_path = Path(backup_directory), Path(empty_root)
     if not backup_path.is_dir():
@@ -1011,10 +1130,9 @@ def write_evidence_bundle(
     *,
     formal_c4_root: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
-    """Write safe manifest/report copies to sibling temp stores and verify backup restore.
+    """manifestとreportをtemp storeへ保存し、backup restoreを検証します。
 
-    Evidence is rebuilt from the input APIs immediately before writing, so a
-    changed source cannot reuse a previously cached PASS result.
+    書き込み直前に入力APIから再構築し、古いPASSや変更済みsourceを再利用しません。
     """
     rebuilt = build_goal_evidence(source_artifacts, store, formal_c4_root=formal_c4_root)
     if (canonical_hash(rebuilt.manifest) != canonical_hash(evidence.manifest)
