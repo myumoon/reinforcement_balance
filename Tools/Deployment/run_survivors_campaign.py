@@ -172,6 +172,7 @@ class _DevelopmentRun:
             gameplay_attempt_id=self.spec.gameplay_attempt_id, gameplay_entries=1, target_success="confirmed",
             died=False, level=21, gems=340, kills=812, choices=20, unknown_frames=0, fallback_decisions=0,
             latency_ms={"p50": 9.5, "p95": 14.0}, menu_inputs_sent=0,
+            telemetry_refs=(f"development:{self.spec.reserved_run_id}.telemetry",),
         )
 
     def terminate(self) -> None:
