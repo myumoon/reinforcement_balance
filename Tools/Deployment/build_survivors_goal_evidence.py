@@ -1,7 +1,6 @@
-"""Build a sanitized Survivors goal-evidence bundle from one campaign artifact root.
+"""campaign artifact rootからsanitizedなSurvivors goal evidenceを生成します。
 
-The CLI writes only to the requested temporary primary and backup stores. It
-never edits docs/goal.md or a Git-managed release manifest.
+指定されたtemporary primary/backup storeへだけ保存し、正式goal文書は変更しません。
 """
 
 from __future__ import annotations
@@ -13,6 +12,10 @@ from pathlib import Path
 
 
 def _add_common_source() -> None:
+    """共有Python contract packageのsource rootをimport pathへ加えます。
+
+Deployment script単体の実行でも同じcontract moduleを読み込めるようにします。
+"""
     common = Path(__file__).resolve().parents[1] / "Common" / "src"
     sys.path.insert(0, str(common))
 
@@ -29,10 +32,9 @@ from survivors.release.evidence_builder import (  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Parse the campaign, ledger, backup, and output locations and build evidence.
+    """artifact、ledger、backup、outputの引数からevidenceを作ります。
 
-    A formal run needs an explicit --formal-c4-root; absent that option, only a
-    synthetic development fixture is accepted.
+    formal campaignには明示的なformal C4 rootを要求し、通常はdevelopment fixtureだけを扱います。
     """
     parser = argparse.ArgumentParser(description="Build a sanitized Survivors C4 goal-evidence bundle.")
     parser.add_argument("--artifacts-root", required=True, type=Path)
