@@ -50,7 +50,7 @@ python run_survivors_campaign.py restore --backup-root <backup store> --artifact
 
 - 06-03 の実 `LaunchBroker` を process 内で動かし、harmless な target helper(`python.exe -c "import time; time.sleep(600)"`)を実際に起動する。helper は broker を閉じるときに Job ごと終了する。
 - controller・helper・target・operator は fake(`DevelopmentHarness`)であり、checkpoint は自動で承認され、run は stage の秒数を待たずに合成値の成功を返す。
-- plan は `mode=synthetic` になる。plan・stage manifest・per-run manifest・summary はすべて `development_only=true` かつ `formal_campaign_eligible=false` であり、`formal_evidence_eligible` は常に false になる。dry-run に `--formal-parents` を渡すと拒否される。
+- plan は `mode=synthetic` になる。plan・stage manifest・per-run manifest・summary はすべて `development_only=true` かつ `formal_campaign_eligible=false` であり、summary の `formal_evidence_eligible` は常に false になる。dry-run に `--formal-parents` を渡すと拒否される。
 - durable ledger は Windows・NTFS・固定ディスクでしか開けない(06-03 の support envelope)。
 
 ### 停止・再開・finalize
@@ -103,6 +103,9 @@ runner 自体も、formal plan に `development_only=true` の port が渡され
 ### 4. 終了時の save 復元
 
 - finalize(`finish()`)で元 save を書き戻し、hash を検証して `save/restore_verdict.json` に記録する。verdict が `PASS` でない campaign は正式な証跡にならない。
+- `finish()` を再度呼ぶと、記録済み verdict を返す前に現在の save を読み直す。backup の hash と違えば backup から書き戻し、`save_restore_attempts` stream に `DRIFT` を残す。
+- formal 適格かどうかは `campaign/summary.json` の `formal_evidence_eligible` と `formal_evidence_run_manifests`(適格な run manifest の列挙)だけで判定する。per-run manifest は restore verdict 確定前に書かれるので、save hash がそろったかどうか(`save_hashes_complete`)だけを持ち、formal 適格は主張しない。
+- summary を記録した campaign では、同じ runner でも、同じ artifact root を指す新しい runner でも、`begin()` と `run_stage()` は拒否される。再実行は新しい campaign id で C0 から行う。
 - 最後に Steam Cloud を元の設定へ戻すのは、復元の verdict を確認した後にする。
 
 ## Recovery

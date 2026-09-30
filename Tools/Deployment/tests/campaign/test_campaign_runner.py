@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import json
 import os
 import sys
 from dataclasses import replace
@@ -57,7 +58,7 @@ from survivors.campaign.durable_launch_store import (
     UnsupportedStorageError,
     new_launch_nonce,
 )
-from survivors.campaign.save_lifecycle import SaveLifecycle
+from survivors.campaign.save_lifecycle import SaveLifecycle, SaveLifecycleError
 from survivors.campaign.win32_launch_broker import parse_launch_request
 
 ORIGINAL = b"original-save"
@@ -569,8 +570,9 @@ def test_run_manifest_collects_pids_release_refs_and_save_hashes(tmp_path, ledge
     assert run["save"]["pre_sha256"] == CANONICAL_HASH and run["save"]["post_sha256"] == CANONICAL_HASH
     assert run["campaign_run_mode"] == "formal_single_attempt"
     assert run["operator_checkpoints"] == ["arm", "focus", "manual_start"]
-    assert (run["development_only"], run["formal_campaign_eligible"], run["formal_evidence_eligible"]) == (
+    assert (run["development_only"], run["formal_campaign_eligible"], run["save_hashes_complete"]) == (
         True, False, False)
+    assert "formal_evidence_eligible" not in run
     plan = env.artifacts.read_json("campaign/plan.json")
     assert (plan["development_only"], plan["formal_campaign_eligible"], plan["ui_restart_enabled"]) == (
         True, False, False)
@@ -947,15 +949,20 @@ def test_formal_evidence_requires_every_save_record(tmp_path, ledger, save_path)
     """formal 証跡は backup・cloud sync・各 run の pre/post hash・restore verdict がそろったときだけです。
 
     post-run hash を取れない run が1件でもあれば campaign summary は formal_evidence_eligible=false です。
+    run manifest は save hash の完全性だけを持ち、formal 適格は summary の列挙だけで表します。
     """
     env = _build(tmp_path, ledger, save_path, plan=_formal_plan(), development=False)
     env.runner.begin()
     assert "validator.prerequisites" in env.effects
     env.runner.run_stage("C0")
     run = env.artifacts.read_json("stages/canary-formal.C0.x1/runs/slot-00.json")
-    assert (run["development_only"], run["formal_evidence_eligible"]) == (False, True)
+    assert (run["development_only"], run["save_hashes_complete"]) == (False, True)
+    assert _formal_claims(env.artifacts) == []
     summary = env.runner.finish()
     assert summary["formal_evidence_eligible"] is True and summary["formal_campaign_eligible"] is True
+    assert summary["formal_evidence_run_manifests"] == [
+        "stages/canary-formal.C0.x1/runs/slot-00.json", "stages/canary-formal.C0.x1/runs/slot-01.json"]
+    assert _formal_claims(env.artifacts) == ["campaign/summary.json"]
 
     save_path.write_bytes(ORIGINAL)
     broken = _build(tmp_path, ledger, save_path, root="artifacts-broken",
@@ -964,6 +971,65 @@ def test_formal_evidence_requires_every_save_record(tmp_path, ledger, save_path)
     broken.runner.begin()
     broken.runner.run_stage("C0", max_slots=1)
     run = broken.artifacts.read_json("stages/canary-formal-2.C0.x1/runs/slot-00.json")
-    assert run["save"]["post_sha256"] is None and run["formal_evidence_eligible"] is False
+    assert run["save"]["post_sha256"] is None and run["save_hashes_complete"] is False
     assert run["outcome"]["failure_reason"] == "target_process_not_stopped"
-    assert broken.runner.finish()["formal_evidence_eligible"] is False
+    summary = broken.runner.finish()
+    assert summary["formal_evidence_eligible"] is False and summary["formal_evidence_run_manifests"] == []
+    assert _formal_claims(broken.artifacts) == []
+
+
+def _formal_claims(artifacts) -> list[str]:
+    """formal_evidence_eligible=true を主張する JSON artifact の相対 path を列挙します。
+
+    artifact root 配下の全 JSON を再帰的に調べ、入れ子の値も含めて探します。
+    """
+    def claims(value) -> bool:
+        if isinstance(value, dict):
+            return value.get("formal_evidence_eligible") is True or any(map(claims, value.values()))
+        return isinstance(value, list) and any(map(claims, value))
+
+    root = artifacts.root
+    return sorted(path.relative_to(root).as_posix() for path in root.rglob("*.json")
+                  if claims(json.loads(path.read_text(encoding="utf-8"))))
+
+
+def test_failed_restore_leaves_no_formal_evidence_claim(tmp_path, ledger, save_path):
+    """restore が失敗すると summary は作られず、formal 適格を主張する artifact が1件もありません。
+
+    run 実行後(restore 未実行)と restore 失敗後の両方で確認し、元 save が戻っていないことも固定します。
+    """
+    env = _build(tmp_path, ledger, save_path, plan=_formal_plan(), development=False)
+    env.runner.begin()
+    env.runner.run_stage("C0")
+    assert _formal_claims(env.artifacts) == []
+    env.artifacts._path("save/original_backup.bin").write_bytes(b"corrupted-backup")
+    with pytest.raises(SaveLifecycleError, match="restore failed"):
+        env.runner.finish()
+    assert not env.artifacts.exists("campaign/summary.json")
+    assert _formal_claims(env.artifacts) == []
+    for slot in (0, 1):
+        run = env.artifacts.read_json(f"stages/canary-formal.C0.x1/runs/slot-{slot:02d}.json")
+        assert run["save_hashes_complete"] is True and "formal_evidence_eligible" not in run
+    assert save_path.read_bytes() == CANONICAL
+
+
+@pytest.mark.parametrize("fresh_instance", [False, True])
+def test_finalized_campaign_rejects_begin_and_run_stage(tmp_path, ledger, save_path, fresh_instance):
+    """finish 済み campaign は同じ instance でも同じ root の新 instance でも begin / run_stage を拒否します。
+
+    canonical save が再び入らず、元 save のままであることを確認します。
+    """
+    env = _build(tmp_path, ledger, save_path, plan=_formal_plan(), development=False)
+    env.runner.begin()
+    env.runner.run_stage("C0")
+    assert env.runner.finish()["formal_evidence_eligible"] is True
+    assert save_path.read_bytes() == ORIGINAL
+    probe = _build(tmp_path, ledger, save_path, plan=_formal_plan(), development=False) if fresh_instance else env
+    probe.effects.clear()
+    with pytest.raises(RunnerError, match="already finalized"):
+        probe.runner.run_stage("C1")
+    with pytest.raises(RunnerError, match="already finalized"):
+        probe.runner.begin()
+    assert "save.install_canonical" not in probe.effects and "save.backup_original" not in probe.effects
+    assert save_path.read_bytes() == ORIGINAL
+    assert not env.artifacts.exists("stages/canary-formal.C1.x1/manifest.json")

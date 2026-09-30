@@ -671,7 +671,9 @@ class CampaignRunner:
 
         prerequisite・threshold parent・canonical save を検証し(不一致なら何も書かない)、
         plan を write-once で保存し、元 save の backup と cloud sync 無効化 checkpoint を記録します。
+        finalize 済み(summary 記録済み)の campaign は、別 instance からでも開始できません。
         """
+        self._require_not_finalized()
         try:
             self._prerequisites = self._validated_prerequisites()
         except (PrerequisiteMismatch, ValueError) as exc:
@@ -743,11 +745,13 @@ class CampaignRunner:
 
         backup・cloud sync attestation・全 run の pre/post hash・restore verdict が
         そろった formal campaign だけを formal_evidence_eligible にします。
+        formal 適格な run はここで formal_evidence_run_manifests に列挙し、run manifest 自体は適格を主張しません。
         """
         verdict = self._save.restore_original()
         executions = []
         runs_ready = True
         in_progress = []
+        runs = []
         for stage, execution_id in self._executions():
             name = f"stages/{execution_id}/execution.json"
             if not self._artifacts.exists(name):
@@ -757,8 +761,14 @@ class CampaignRunner:
             for slot in range(STAGE_POLICIES[stage].slot_count):
                 run = f"stages/{execution_id}/runs/slot-{slot:02d}.json"
                 if self._artifacts.exists(run):
-                    runs_ready &= self._artifacts.read_json(run)["formal_evidence_eligible"] is True
+                    runs.append(run)
+                    runs_ready &= self._artifacts.read_json(run)["save_hashes_complete"] is True
         evidence = self._save.evidence()
+        eligible = (
+            not self.plan.development_only and bool(executions) and runs_ready and not in_progress
+            and evidence["backup_sha256"] is not None and evidence["cloud_sync_attested"]
+            and verdict.get("status") == "PASS"
+        )
         summary = {
             "campaign_id": self.plan.campaign_id,
             "plan_hash": self.plan.plan_hash,
@@ -768,11 +778,8 @@ class CampaignRunner:
             "restore_verdict": dict(verdict),
             "development_only": self.plan.development_only,
             "formal_campaign_eligible": not self.plan.development_only,
-            "formal_evidence_eligible": (
-                not self.plan.development_only and bool(executions) and runs_ready and not in_progress
-                and evidence["backup_sha256"] is not None and evidence["cloud_sync_attested"]
-                and verdict.get("status") == "PASS"
-            ),
+            "formal_evidence_eligible": eligible,
+            "formal_evidence_run_manifests": runs if eligible else [],
         }
         self._artifacts.put_json(SUMMARY, summary)
         self.state = RunnerState.FINISHED
@@ -785,7 +792,9 @@ class CampaignRunner:
 
         preflight failure・launch gate failure・uncertain launch が出た時点で stage を止めます。
         max_slots を指定すると、その数の slot を処理した時点で STOPPED として返します(resume 可能)。
+        finalize 済みの campaign では canonical save を再び入れないよう、何もせず拒否します。
         """
+        self._require_not_finalized()
         if self.state in {RunnerState.IDLE, RunnerState.PREREQUISITE_MISMATCH}:
             raise RunnerError("begin() must succeed before running a stage")
         if stage not in STAGES:
@@ -831,6 +840,15 @@ class CampaignRunner:
         preflight_blocked 後の再実行は番号を進めた新しい id になります。
         """
         return f"{self.plan.campaign_id}.{stage}.x{number}"
+
+    def _require_not_finalized(self) -> None:
+        """campaign が finish 済みでないことを確認します。
+
+        この instance の state と artifact root の summary の両方を見るので、同じ root を指す
+        新しい runner instance からの再開も拒否します(元 save 復元後に canonical save を戻さないため)。
+        """
+        if self.state is RunnerState.FINISHED or self._artifacts.exists(SUMMARY):
+            raise RunnerError("campaign is already finalized; start a new campaign id from C0")
 
     def _require_not_blocked(self) -> None:
         """campaign が block / supersede 済みでないことを確認します。
@@ -1268,7 +1286,9 @@ class CampaignRunner:
             "outcome": event.to_wire(),
             "development_only": self.plan.development_only,
             "formal_campaign_eligible": not self.plan.development_only,
-            "formal_evidence_eligible": (
+            # restore verdict は campaign 終了時まで確定しないので、run 単体では formal 適格を主張しない。
+            # formal 適格の判定は campaign/summary.json の formal_evidence_run_manifests だけで行う。
+            "save_hashes_complete": (
                 not self.plan.development_only and pre_hash is not None and post_hash is not None
                 and evidence["backup_sha256"] is not None and evidence["cloud_sync_attested"]
             ),

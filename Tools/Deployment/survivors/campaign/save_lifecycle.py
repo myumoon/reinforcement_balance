@@ -180,22 +180,29 @@ class SaveLifecycle:
     def restore_original(self) -> Mapping[str, Any]:
         """campaign 終了時に元 save を復元して verify します。
 
-        PASS verdict は write-once で記録し、再呼び出しでは記録済み verdict を返します。
+        呼び出すたびに現在の save を読み戻し、backup hash と一致しなければ backup から書き戻して
+        再検証します(記録済み PASS verdict を検証なしで返さない)。PASS verdict は write-once です。
+        記録済み verdict 後に save がずれていた場合は DRIFT を attempt stream に残します。
         失敗は attempt stream へ残して例外にするので、是正後に再実行できます。
         """
-        verdict = self._json(RESTORE)
-        if verdict is not None:
-            return verdict
         self._require_stopped("restore the original save")
         record = self._json(BACKUP_RECORD)
         if record is None:
             raise SaveLifecycleError("original save backup is missing")
+        expected = str(record["sha256"])
         try:
-            atomic_replace(self._path, self._artifacts.read(BACKUP), str(record["sha256"]))
-        except (SaveLifecycleError, OSError) as exc:
-            self._artifacts.append(RESTORE_ATTEMPTS, [{"status": "FAIL", "reason": str(exc)}])
-            raise SaveLifecycleError(f"original save restore failed: {exc}") from exc
-        verdict = {"status": "PASS", "backup_sha256": record["sha256"], "restored_sha256": _sha(self._path.read_bytes())}
+            current = _sha(self._path.read_bytes())
+        except OSError:
+            current = None
+        if current != expected:
+            if self._artifacts.exists(RESTORE):
+                self._artifacts.append(RESTORE_ATTEMPTS, [{"status": "DRIFT", "observed_sha256": current}])
+            try:
+                atomic_replace(self._path, self._artifacts.read(BACKUP), expected)
+            except (SaveLifecycleError, OSError) as exc:
+                self._artifacts.append(RESTORE_ATTEMPTS, [{"status": "FAIL", "reason": str(exc)}])
+                raise SaveLifecycleError(f"original save restore failed: {exc}") from exc
+        verdict = {"status": "PASS", "backup_sha256": expected, "restored_sha256": _sha(self._path.read_bytes())}
         self._artifacts.put_json(RESTORE, verdict)
         return verdict
 

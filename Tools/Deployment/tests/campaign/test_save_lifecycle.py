@@ -173,7 +173,7 @@ def test_post_run_hash_requires_stop_and_is_write_once(env):
 def test_restore_original_passes_and_is_idempotent(env):
     """campaign 終了時に元 save を復元し PASS verdict を記録します。
 
-    再呼び出しは記録済み verdict を返し、evidence に restore 状態が載ります。
+    save が元のままなら再呼び出しは同じ verdict を返し、evidence に restore 状態が載ります。
     """
     save, _store, _stopped, lifecycle = env
     _ready(lifecycle)
@@ -190,6 +190,27 @@ def test_restore_original_passes_and_is_idempotent(env):
         "canonical_sha256": _sha(CANONICAL),
         "restore_status": "PASS",
     }
+
+
+def test_restore_rechecks_save_after_recorded_pass(env):
+    """記録済み PASS 後も再呼び出しのたびに現在の save を検証します。
+
+    save が canonical にずれていれば backup から書き戻して DRIFT を残し、
+    書き戻せなければ PASS を返さず例外にします。
+    """
+    save, store, _stopped, lifecycle = env
+    _ready(lifecycle)
+    lifecycle.install_canonical("a1", _sha(CANONICAL))
+    verdict = lifecycle.restore_original()
+    lifecycle.install_canonical("a2", _sha(CANONICAL))
+    assert lifecycle.restore_original() == verdict
+    assert save.read_bytes() == ORIGINAL
+    assert store.stream(sl.RESTORE_ATTEMPTS)[0] == {"status": "DRIFT", "observed_sha256": _sha(CANONICAL)}
+    lifecycle.install_canonical("a3", _sha(CANONICAL))
+    store._path(sl.BACKUP).write_bytes(b"corrupted-backup")
+    with pytest.raises(SaveLifecycleError, match="restore failed"):
+        lifecycle.restore_original()
+    assert save.read_bytes() == CANONICAL
 
 
 def test_restore_failure_is_recorded_without_verdict(env):
