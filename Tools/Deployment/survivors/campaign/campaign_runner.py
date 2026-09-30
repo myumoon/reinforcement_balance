@@ -935,11 +935,24 @@ class CampaignRunner:
         events: list[CampaignEvent] = []
         for slot in sorted(set(ctx.preflight) | set(ctx.outcomes)):
             events.extend(ctx.preflight.get(slot, ()))
-            attempt = slot_identity(ctx.execution_id, slot).attempt_id
-            if attempt in attempts:
-                events.extend(self._ledger.campaign_events(attempt))
+            if self._owned_history(ctx, slot, attempts) is not None:
+                events.extend(self._ledger.campaign_events(slot_identity(ctx.execution_id, slot).attempt_id))
             events.extend(ctx.outcomes.get(slot, ()))
         return events
+
+    def _owned_history(self, ctx: _Execution, slot: int, attempts: set[str] | None = None) -> Any:
+        """slot の ledger 履歴を、この runner が記録した launch nonce と一致するときだけ返します。
+
+        同じ attempt id の intent が別 runner のものなら None で、その ledger 行を自分の
+        slot として採用・再開しません。nonce は ATTEMPT_PREFLIGHT の details に記録します。
+        """
+        attempt = slot_identity(ctx.execution_id, slot).attempt_id
+        if attempt not in (attempts if attempts is not None else set(self._ledger.attempt_ids())):
+            return None
+        nonce = next((event.details.get("launch_nonce") for event in ctx.preflight.get(slot, ())
+                      if event.event_type is EventType.ATTEMPT_PREFLIGHT), None)
+        history = self._ledger.history(attempt)
+        return history if nonce is not None and history.intent.launch_nonce == nonce else None
 
     def _slot_events(self, ctx: _Execution) -> dict[int, tuple[str, ...]]:
         """slot ごとの event 種別列を返します。
@@ -998,28 +1011,29 @@ class CampaignRunner:
         再開時は ledger を reconcile して続きから進め、broker へは再送しません。
         """
         ids = slot_identity(ctx.execution_id, slot)
-        in_ledger = ids.attempt_id in self._ledger.attempt_ids()
+        owned = self._owned_history(ctx, slot) is not None
         response: Mapping[str, Any] | None = None
         if slot not in ctx.preflight:
             self._require_no_pending_launch()
+            nonce = new_launch_nonce()
             self._append(ctx, PREFLIGHT_STREAM, [
                 CampaignEvent(EventType.FORMAL_SLOT_RESERVED, slot_id=slot, campaign_manifest_hash=ctx.manifest_hash),
                 CampaignEvent(EventType.ATTEMPT_PREFLIGHT, slot_id=slot, attempt_id=ids.attempt_id,
-                              campaign_manifest_hash=ctx.manifest_hash),
+                              campaign_manifest_hash=ctx.manifest_hash, details={"launch_nonce": nonce}),
             ])
             reason = self._preflight(ids)
             if reason is None:
                 intent = LaunchIntent(
                     campaign_manifest_hash=ctx.manifest_hash, slot_id=slot, attempt_id=ids.attempt_id,
                     reserved_run_id=ids.reserved_run_id, gameplay_attempt_id=ids.gameplay_attempt_id,
-                    launch_nonce=new_launch_nonce(), executable_path=self.plan.executable_path,
+                    launch_nonce=nonce, executable_path=self.plan.executable_path,
                     executable_hash=self.plan.executable_hash, build_hash=self.plan.build_hash,
                     config_hash=self.plan.config_hash, argv=self.plan.argv,
                 )
                 try:
                     self._ledger.commit_intent(intent)
                 except (LedgerError, ValueError) as exc:
-                    if ids.attempt_id not in self._ledger.attempt_ids():
+                    if self._owned_history(ctx, slot) is None:
                         reason = f"launch_intent_commit_failed: {exc}"
             if reason is not None:
                 self._append(ctx, PREFLIGHT_STREAM, [
@@ -1029,10 +1043,10 @@ class CampaignRunner:
                 return EventType.PREFLIGHT_FAILED
             response = self._send_launch(intent)
             last, resumed = self._conclude_launch(ids.attempt_id, response)
-        elif not in_ledger:
+        elif not owned:
             self._append(ctx, PREFLIGHT_STREAM, [
                 CampaignEvent(EventType.PREFLIGHT_FAILED, slot_id=slot, attempt_id=ids.attempt_id,
-                              failure_reason="runner_interrupted_before_launch_intent",
+                              failure_reason="runner_interrupted_before_owned_launch_intent",
                               campaign_manifest_hash=ctx.manifest_hash),
             ])
             return EventType.PREFLIGHT_FAILED
