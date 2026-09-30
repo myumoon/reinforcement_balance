@@ -1,0 +1,19 @@
+# Mad Forest live canary campaign(06-04)の campaign 設定。
+#
+# run_survivors_campaign.py が読み込み、campaign plan の threshold・threshold parent・grace 秒数を決めます。
+# stage ごとの実行秒数と slot 数(C0=1800s×2 … C4=28800s×20)は 06-02 の STAGE_POLICIES が唯一の正で、
+# この file では定義しません。この file の内容は config_hash として plan に束縛されるため、
+# 1文字でも変えたら新しい campaign id で C0 からやり直します。
+
+# file 形式の版です。CLI はこの値以外を拒否します。
+schema_version: survivors_canary_campaign.v1
+
+# controller の run 待ち時間に stage 秒数へ上乗せする猶予(秒)です。
+# 超えた run は controller terminate → helper lease release 確認の順で止められます。
+grace_seconds: 120
+
+# metric floor(判定の下限値)と、その値を導いた parent evidence の hash です。
+# 03-04 exact-target verdict と 04-10 final perception verdict が確定するまで未解決のため空/null にしています。
+# 未解決の間 --live は fail closed で拒否され、development dry-run だけが動きます。
+thresholds: {}
+threshold_parent_hash: null
