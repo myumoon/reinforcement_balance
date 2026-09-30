@@ -77,3 +77,14 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 ## 2周目以降の運用
 
 確認済みの矩形は次の実行からテンプレート見本に使われます。先に一部の画像を確認済みにし、同じ work-root の未処理セッションで下書きを作ると、見本が増えた状態で照合できます。既存 JSON は上書きされないため、下書きが無い PNG にだけ新しい JSON が作られます。
+
+同一セッション内で先に一部だけ確認済みにし、残りの未確認フレームにも増えた見本を反映したい場合は `--refresh-unchecked` を付けます。`checked: false` の既存下書きだけが新しい見本で再生成され、`checked: true` にした矩形は変更されません。
+
+```powershell
+python Tools/Deployment/prelabel_survivors_frames.py `
+  --work-root "D:\captures\annotation_work" `
+  --session-id "session-0001" `
+  --refresh-unchecked
+```
+
+未確認のまま GUI で手動編集を始めているフレームがある場合、`--refresh-unchecked` を実行すると下書きが編集前の状態に戻ってしまいます。手を付けたフレームは先に確認済みにしてから実行してください。

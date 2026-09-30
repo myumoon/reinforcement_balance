@@ -174,6 +174,60 @@ def test_prelabel_skips_json_created_after_frame_listing(tmp_path, monkeypatch, 
     assert "既存 JSON スキップ数: 1" in output
 
 
+def test_refresh_unchecked_overwrites_stale_drafts_but_protects_checked(tmp_path, capsys):
+    """--refresh-unchecked で未チェックの下書きだけ再生成し、チェック済みは保護する。
+
+    見本が増えた後に同じセッションを再実行して古い下書きを更新する運用を想定する。
+    """
+    work_root = tmp_path / "work"
+    session_dir = work_root / "s1"
+    session_dir.mkdir(parents=True)
+    config_path = tmp_path / "prelabel.yaml"
+    _write_config(config_path)
+
+    blue = _pattern(3)
+    image = np.zeros((36, 64, 3), dtype=np.uint8)
+
+    checked_image = image.copy()
+    checked_image[4:8, 3:7] = blue
+    _write_image(session_dir / "00000001.png", checked_image)
+    checked_json = session_dir / "00000001.json"
+    write_label_file(
+        checked_json,
+        [LabelBox("gem_blue", 3, 4, 7, 8, 0.9)],
+        image_width=64,
+        image_height=36,
+        checked=True,
+    )
+    checked_bytes = checked_json.read_bytes()
+
+    stale_image = image.copy()
+    stale_image[12:16, 20:24] = blue
+    _write_image(session_dir / "00000002.png", stale_image)
+    write_label_file(
+        session_dir / "00000002.json", [], image_width=64, image_height=36, checked=False
+    )
+
+    result = main(
+        [
+            "--work-root", str(work_root), "--session-id", "s1",
+            "--config", str(config_path), "--refresh-unchecked",
+        ]
+    )
+
+    assert result == 0
+    assert checked_json.read_bytes() == checked_bytes
+
+    boxes, checked = read_label_file(session_dir / "00000002.json")
+    assert checked is False
+    assert ("gem_blue", 20.0, 12.0, 24.0, 16.0) in [
+        (box.label, box.left, box.top, box.right, box.bottom) for box in boxes
+    ]
+    output = capsys.readouterr().out
+    assert "下書き作成数: 1" in output
+    assert "既存 JSON スキップ数: 1" in output
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
