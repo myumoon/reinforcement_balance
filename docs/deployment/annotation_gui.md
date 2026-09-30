@@ -74,6 +74,10 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 
 宝箱は `chest` ではなく `pickup_special` として付けます。`card`、`button`、`death_result` は自動下書きされないため、GUI で必要な矩形を追加してください。
 
+`hazard_projectile` / `hazard_area` は円（circle）ツールで描いても構いません。中心点と円周上の一点から外接する矩形へ自動変換されます。
+
+タイプミスで未知のラベル名が付いた shape や、rectangle/circle 以外の未対応図形は、そのファイルを読む際に警告を表示して読み飛ばされます（ファイル全体は失敗しません）。警告は `prelabel_survivors_frames.py` や `export_survivors_annotations_coco.py` の実行時に標準エラー出力へ表示されるので、意図しない読み飛ばしがないか確認してください。
+
 ## 2周目以降の運用
 
 確認済みの矩形は次の実行からテンプレート見本に使われます。先に一部の画像を確認済みにし、同じ work-root の未処理セッションで下書きを作ると、見本が増えた状態で照合できます。既存 JSON は上書きされないため、下書きが無い PNG にだけ新しい JSON が作られます。
