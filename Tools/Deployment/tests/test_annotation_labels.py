@@ -12,6 +12,7 @@ import pytest
 
 from survivors.annotation_labels import (
     ALL_CLASSES,
+    REGION_LABEL,
     UI_CLASSES,
     WORLD_CLASSES,
     LabelBox,
@@ -62,7 +63,8 @@ def test_classes_follow_world_class_map_and_append_ui_classes() -> None:
 
     assert WORLD_CLASSES == expected_world
     assert UI_CLASSES == ("hud_hp", "hud_xp", "card", "button", "death_result")
-    assert ALL_CLASSES == WORLD_CLASSES + UI_CLASSES
+    assert REGION_LABEL == "labeled_region"
+    assert ALL_CLASSES == WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,)
 
 
 def test_write_and_read_label_file_preserve_contract(tmp_path: Path) -> None:

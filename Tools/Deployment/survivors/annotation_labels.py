@@ -25,7 +25,9 @@ WORLD_CLASSES = tuple(
     item["name"] for item in sorted(_CLASS_MAP.foreground_classes, key=lambda item: item["id"])
 )
 UI_CLASSES = ("hud_hp", "hud_xp", "card", "button", "death_result")
-ALL_CLASSES = WORLD_CLASSES + UI_CLASSES
+# この矩形を持つ確認済みフレームは「矩形の内側だけ漏れなくラベル済み」を意味する（物体ではない）。
+REGION_LABEL = "labeled_region"
+ALL_CLASSES = WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,)
 _FRAME_STEM = re.compile(r"^\d{8}$")
 
 
