@@ -109,6 +109,22 @@ test_restore_failure_is_recorded_without_verdict, test_canonical_registration_is
 - broker response は分類に使わない（confirmed でも ledger attestation と process_ref / job_ref が一致したときだけ normal activation）。timeout は ledger reconcile で CONFIRMED なら `activation_source="reconciliation"`、生存を証明できない confirmed は LAUNCH_UNCERTAIN（campaign block）。
 - Windows 以外では `DurableLaunchStore` が開けないので runner test は skip（06-03 と同じ方針）。
 
+- `finish()` の summary は write-once。STOPPED 中に finish すると `formal_evidence_eligible=false` の summary で確定するので、CLI の stop は finish を呼ばずに終わること（resume は `begin()` → `run_stage()` を再度呼ぶ）。
+
 ## 実行した検証コマンド
 
-（下に追記）
+新規 test のみ:
+```
+$ USER=$USERNAME PYTHONUTF8=1 bash Tools/run-pytest.sh Tools/Deployment/tests/campaign/test_campaign_runner.py Tools/Deployment/tests/campaign/test_save_lifecycle.py -q -rf -p no:cacheprovider --basetemp=.pytest-tmp-cr --tb=short
+Using: /c/Users/neko/Anaconda3/envs/reinbalance/python.exe
+........................................                                 [100%]
+40 passed in 4.34s
+```
+
+全体（ベースライン 1819 collected + 新規 40 = 1859 = 1851 passed + 8 skipped）:
+```
+$ USER=$USERNAME PYTHONUTF8=1 bash Tools/run-pytest.sh Tools/Deployment/tests -q -rs -p no:cacheprovider --basetemp=.pytest-tmp-full
+SKIPPED [1] Tools\Deployment\tests\test_perception_formal_runner.py:323: formal release descriptors/sessions are intentionally unavailable
+...（同じ理由の既存 skip 計 8 件）
+1851 passed, 8 skipped, 18 warnings in 556.66s (0:09:16)
+```
