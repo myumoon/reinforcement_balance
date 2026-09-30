@@ -1,3 +1,8 @@
+"""Survivors goal evidence builder の受け入れ条件を検証します。
+
+synthetic campaign fixture を使い、再計算・失敗条件・復元経路を固定します。
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -17,6 +22,7 @@ from survivors.campaign.campaign_schema import (
     CampaignEvent,
     CampaignManifest,
     EventType,
+    STAGE_POLICIES,
     campaign_manifest_hash,
 )
 from survivors.campaign.durable_launch_store import (
@@ -47,6 +53,11 @@ CHAIN_NAMES = (
 
 @dataclass
 class FakeLedger:
+    """耐久ledger APIを模すテスト用の記録集合です。
+
+    campaignごとのattempt履歴とstorage verdictをメモリ上で返します。
+    """
+
     histories: dict[str, LaunchHistory]
     events: dict[str, tuple[CampaignEvent, ...]]
     directory: Path
@@ -54,20 +65,40 @@ class FakeLedger:
     pragmas: dict[str, str]
 
     def attempt_ids(self) -> tuple[str, ...]:
+        """登録されたattempt idを返します。
+
+        evidence builder がledger全体を走査できるようにします。
+        """
         return tuple(self.histories)
 
     def history(self, attempt_id: str) -> LaunchHistory:
+        """指定attemptのlifecycle履歴を返します。
+
+        fixtureが登録した完全な履歴をそのまま公開します。
+        """
         return self.histories[attempt_id]
 
     def campaign_events(self, attempt_id: str) -> tuple[CampaignEvent, ...]:
+        """指定attemptに記録されたcampaign eventを返します。
+
+        event列は実ledger consumerと同じ読み出し形にそろえます。
+        """
         return self.events[attempt_id]
 
 
 def _digest(text: str) -> str:
+    """fixture値から安定したSHA-256を作ります。
+
+    各テストで同じ入力が同じ参照値になるようにします。
+    """
     return hashlib.sha256(text.encode()).hexdigest()
 
 
 def _chain(build_hash: str) -> dict:
+    """テスト用release chainを生成します。
+
+    全nodeと親hashを正規hashで結び、buildの混在を検証可能にします。
+    """
     nodes = {}
     contents = {
         "target_profile": {"profile_sha256": _digest("target-profile")},
@@ -117,11 +148,16 @@ def _put_stage(
     stage: str = "C4",
     omit_rng_control: bool = False,
 ) -> dict:
+    """指定stageのmanifest、run、ledger fixtureを保存します。
+
+    受け取ったoutcomeごとにactivationとartifactを組み立てます。
+    """
     manifest = CampaignManifest(
         campaign_id=execution_id,
         schema_version=CAMPAIGN_SCHEMA_VERSION,
         mode="synthetic",
         stage=stage,
+        expected_slots=STAGE_POLICIES[stage].slot_count,
         development_only=True,
     )
     manifest_wire = manifest.to_wire()
@@ -285,6 +321,10 @@ def make_fixture(
     duplicate_reserved: bool = False,
     duplicate_gameplay: bool = False,
 ) -> tuple[ArtifactStore, FakeLedger]:
+    """保存・restore・ledgerを含むsynthetic campaignを作ります。
+
+    既定fixtureはC4の16/20成功例で、引数に応じて拒否条件を差し替えます。
+    """
     root.mkdir(parents=True, exist_ok=True)
     artifacts = ArtifactStore(root)
     histories: dict[str, LaunchHistory] = {}
@@ -422,13 +462,198 @@ def make_fixture(
     return artifacts, ledger
 
 
+def _close_issue(artifacts: ArtifactStore, issue_id: str) -> None:
+    """remediation issueに独立検証済みのclose recordを追加します。
+
+    evidence objectのhash、作成者、別のclose担当者をclosureへ結びます。
+    """
+    evidence_path = f"campaign/remediation/{_digest(issue_id)}.json"
+    evidence = issue_id.encode("utf-8")
+    artifacts.put_immutable(evidence_path, evidence)
+    path = "campaign/remediation_closures.json"
+    payload = (artifacts.read_json(path) if artifacts.exists(path) else {
+        "schema_version": "survivors.campaign_remediation_closures.v1", "closures": [],
+    })
+    payload["closures"].append({
+        "issue_id": issue_id, "evidence_path": evidence_path,
+        "evidence_sha256": sha256_hex(evidence), "author_id": "operator-a",
+        "closed_by": "reviewer-b", "status": "closed",
+    })
+    artifacts._path(path).write_bytes(canonical_json_bytes(payload))
+
+
+def _add_c4_execution(
+    artifacts: ArtifactStore,
+    ledger: FakeLedger,
+    execution_id: str,
+    *,
+    successes: int,
+    outcome_count: int,
+    blocked_after: int | None = None,
+) -> None:
+    """C4 executionを追加し、必要ならpreflight failureで止めます。
+
+    各executionのstreamとrun outcomeを固有manifest hashへ結び直します。
+    """
+    plan = artifacts.read_json("campaign/plan.json")
+    backup_hash = artifacts.read_json("save/original_backup.json")["sha256"]
+    outcomes = tuple(CampaignEvent(
+        EventType.SUCCESS if slot < successes else EventType.GAMEPLAY_FAILURE,
+        slot,
+        failure_reason=None if slot < successes else "fixture_gameplay_failure",
+        campaign_manifest_hash="f" * 64,
+    ) for slot in range(outcome_count))
+    stage = _put_stage(
+        artifacts, execution_id=execution_id, plan_hash=canonical_hash(plan), outcomes=outcomes,
+        histories=ledger.histories, ledger_events=ledger.events, backup_sha256=backup_hash,
+        build_hash=plan["build_hash"],
+    )
+    records = artifacts.stream("launched_outcomes")
+    for record in records:
+        if record["stage_execution_id"] != execution_id:
+            continue
+        event_wire = dict(record["event"])
+        event_wire["campaign_manifest_hash"] = stage["manifest_hash"]
+        record["event"] = event_wire
+        run = artifacts.read_json(record["run_manifest"])
+        run["outcome"] = event_wire
+        artifacts._path(record["run_manifest"]).write_bytes(canonical_json_bytes(run))
+    artifacts._path("streams/launched_outcomes.jsonl").write_bytes(b"".join(
+        canonical_json_bytes(record) + b"\n" for record in records
+    ))
+    execution = dict(stage["execution"])
+    if blocked_after is not None:
+        slot = blocked_after
+        attempt_id = f"blocked-{execution_id}-{slot:02d}"
+        nonce = _digest(f"blocked-nonce-{execution_id}-{slot:02d}")
+        failed = (
+            CampaignEvent(EventType.FORMAL_SLOT_RESERVED, slot,
+                          campaign_manifest_hash=stage["manifest_hash"]),
+            CampaignEvent(EventType.ATTEMPT_PREFLIGHT, slot, attempt_id=attempt_id,
+                          details={"launch_nonce": nonce}, campaign_manifest_hash=stage["manifest_hash"]),
+            CampaignEvent(EventType.PREFLIGHT_FAILED, slot, attempt_id=attempt_id,
+                          failure_reason="preflight_failed", campaign_manifest_hash=stage["manifest_hash"]),
+        )
+        preflight = artifacts.stream("preflight_attempts")
+        preflight.extend({"stage_execution_id": execution_id, "event": event.to_wire()} for event in failed)
+        artifacts._path("streams/preflight_attempts.jsonl").write_bytes(b"".join(
+            canonical_json_bytes(record) + b"\n" for record in preflight
+        ))
+        execution["state"] = "preflight_blocked"
+        _close_issue(artifacts, f"{execution_id}.preflight.slot-{slot:02d}")
+    artifacts._path(f"stages/{execution_id}/execution.json").write_bytes(canonical_json_bytes(execution))
+    summary = artifacts.read_json("campaign/summary.json")
+    summary["executions"].append(execution)
+    artifacts._path("campaign/summary.json").write_bytes(canonical_json_bytes(summary))
+
+
 def _permit_test_storage(monkeypatch, module) -> None:
+    """storage検査をfixture専用のNTFS/WAL verdictへ置き換えます。
+
+    本番のcheck_storageを避け、ledger artifactの検証経路に集中します。
+    """
     monkeypatch.setattr(module, "check_storage", lambda _path: StorageVerdict(
         True, (), {"drive_type": "fixed", "filesystem": "NTFS", "volume_serial": 1}
     ))
 
 
+def test_blocked_c4_executions_do_not_combine_into_promoted_metrics(tmp_path, monkeypatch):
+    """別々のblocked executionの成功slotを合算しても昇格させません。
+
+    remediationがclose済みでもpromoted C4 executionが無ければ拒否します。
+    """
+    from survivors.release import evidence_builder
+
+    artifacts, ledger = make_fixture(tmp_path / "artifacts", include_c4=False)
+    _add_c4_execution(artifacts, ledger, "fixture-c4.C4.x1", successes=10,
+                      outcome_count=10, blocked_after=10)
+    _add_c4_execution(artifacts, ledger, "fixture-c4.C4.x2", successes=10,
+                      outcome_count=10, blocked_after=10)
+    _permit_test_storage(monkeypatch, evidence_builder)
+    with pytest.raises(EvidenceError, match="promoted C4"):
+        build_goal_evidence(artifacts, ledger)
+
+
+def test_blocked_c4_history_is_excluded_from_the_single_promoted_execution(tmp_path, monkeypatch):
+    """blocked C4履歴を残し、唯一のpromoted executionだけを集計します。
+
+    先行executionのattempt数に影響されず、成功16件と分母20件を返します。
+    """
+    from survivors.release import evidence_builder
+
+    artifacts, ledger = make_fixture(tmp_path / "artifacts", include_c4=False)
+    _add_c4_execution(artifacts, ledger, "fixture-c4.C4.x1", successes=3,
+                      outcome_count=3, blocked_after=3)
+    _add_c4_execution(artifacts, ledger, "fixture-c4.C4.x2", successes=16,
+                      outcome_count=20)
+    _permit_test_storage(monkeypatch, evidence_builder)
+    evidence = build_goal_evidence(artifacts, ledger)
+    assert evidence.report["successes"] == 16
+    assert evidence.report["denominator"] == 20
+    assert len(evidence.report["stage_history"]) == 2
+    assert evidence.report["preflight_failures"] == 1
+
+
+def test_c3_safety_failure_requires_and_records_remediation_close(tmp_path, monkeypatch):
+    """C3のsafety failureにもcloseを要求し、履歴を出力へ残します。
+
+    C4以外のstageでcloseを追加する前後を同じfixtureで確認します。
+    """
+    from survivors.release import evidence_builder
+
+    artifacts, ledger = make_fixture(tmp_path / "artifacts")
+    plan = artifacts.read_json("campaign/plan.json")
+    execution_id = "fixture-c4.C3.x1"
+    stage = _put_stage(
+        artifacts, execution_id=execution_id, plan_hash=canonical_hash(plan), outcomes=(),
+        histories=ledger.histories, ledger_events=ledger.events,
+        backup_sha256=artifacts.read_json("save/original_backup.json")["sha256"],
+        build_hash=plan["build_hash"], stage="C3",
+    )
+    execution = dict(stage["execution"])
+    execution["state"] = "stage_passed"
+    artifacts._path(f"stages/{execution_id}/execution.json").write_bytes(canonical_json_bytes(execution))
+    summary = artifacts.read_json("campaign/summary.json")
+    summary["executions"].append(execution)
+    artifacts._path("campaign/summary.json").write_bytes(canonical_json_bytes(summary))
+    safety = CampaignEvent(EventType.SAFETY_FAILURE, 0, failure_reason="fixture_safety_failure",
+                           campaign_manifest_hash=stage["manifest_hash"])
+    artifacts.append("launched_outcomes", [{
+        "stage_execution_id": execution_id, "event": safety.to_wire(),
+        "run_manifest": f"stages/{execution_id}/runs/slot-00.json",
+    }])
+    _permit_test_storage(monkeypatch, evidence_builder)
+    with pytest.raises(EvidenceError, match="remediation"):
+        build_goal_evidence(artifacts, ledger)
+
+    issue_id = f"{execution_id}.safety.slot-00"
+    _close_issue(artifacts, issue_id)
+    evidence = build_goal_evidence(artifacts, ledger)
+    assert issue_id in {entry["issue_id"] for entry in evidence.manifest["remediated_history"]}
+
+
+def test_superseded_campaign_is_rejected_before_evidence_output(tmp_path, monkeypatch):
+    """superseded campaign自体をdevelopment evidenceの対象から外します。
+
+    close済みfailureの有無に依存せず、後継campaignを持つrootを拒否します。
+    """
+    from survivors.release import evidence_builder
+
+    artifacts, ledger = make_fixture(tmp_path / "artifacts")
+    artifacts.put_json("campaign/superseded.json", {
+        "kind": "superseded", "campaign_id": "fixture-c4",
+        "successor_campaign_id": "fixture-c4-next", "reason": "superseded fixture",
+    })
+    _permit_test_storage(monkeypatch, evidence_builder)
+    with pytest.raises(EvidenceError, match="superseded"):
+        build_goal_evidence(artifacts, ledger)
+
+
 def test_valid_synthetic_sixteen_of_twenty_recomputes_metrics_and_round_trips(tmp_path, monkeypatch):
+    """有効なsynthetic fixtureからmetricsを再計算して復元します。
+
+    16/20、別々のcontrol field、安全なmanifest、backup restoreを確認します。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts")
@@ -461,6 +686,10 @@ def test_valid_synthetic_sixteen_of_twenty_recomputes_metrics_and_round_trips(tm
 
 
 def test_fifteen_of_twenty_is_rejected_before_output(tmp_path, monkeypatch):
+    """15/20のcampaignは出力前に拒否します。
+
+    observed promotion floorを下回る境界を固定します。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts", successes=15)
@@ -470,6 +699,10 @@ def test_fifteen_of_twenty_is_rejected_before_output(tmp_path, monkeypatch):
 
 
 def test_missing_c4_is_rejected(tmp_path, monkeypatch):
+    """C4 executionが無いcampaignを拒否します。
+
+    下位stageだけではgoal evidenceを生成できないことを確認します。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts", include_c4=False)
@@ -479,6 +712,10 @@ def test_missing_c4_is_rejected(tmp_path, monkeypatch):
 
 
 def test_cli_exposes_the_campaign_and_output_directories():
+    """CLI helpが入力rootと一時出力先を公開することを確認します。
+
+    指定したcampaign、ledger、backup、primaryの引数を検証します。
+    """
     repo_root = Path(__file__).resolve().parents[4]
     script = repo_root / "Tools" / "Deployment" / "build_survivors_goal_evidence.py"
     result = subprocess.run([sys.executable, str(script), "--help"], capture_output=True,
@@ -491,6 +728,10 @@ def test_cli_exposes_the_campaign_and_output_directories():
 
 
 def test_missing_rng_control_is_rejected(tmp_path, monkeypatch):
+    """manifestからRNG-control fieldが欠けた場合に拒否します。
+
+    field欠落をdefault値で補わずfail-closedにします。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts", omit_rng_control=True)
@@ -500,6 +741,10 @@ def test_missing_rng_control_is_rejected(tmp_path, monkeypatch):
 
 
 def test_mixed_build_chain_is_rejected(tmp_path, monkeypatch):
+    """campaign buildとrelease chainの不一致を拒否します。
+
+    同じfixture内の別build hashが混ざるケースを固定します。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts", build_hash_override=_digest("other-build"))
@@ -509,6 +754,10 @@ def test_mixed_build_chain_is_rejected(tmp_path, monkeypatch):
 
 
 def test_tampered_release_chain_digest_is_rejected(tmp_path, monkeypatch):
+    """release chain nodeの改ざんをhash照合で拒否します。
+
+    内容を変えて元のdigestを残したcounterexampleを使います。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts")
@@ -521,6 +770,10 @@ def test_tampered_release_chain_digest_is_rejected(tmp_path, monkeypatch):
 
 
 def test_population_independence_claim_is_rejected(tmp_path, monkeypatch):
+    """独立性を主張するrelease chainを拒否します。
+
+    forbidden claimがgoal outputへ流れないことを確認します。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts")
@@ -533,6 +786,10 @@ def test_population_independence_claim_is_rejected(tmp_path, monkeypatch):
 
 
 def test_synthetic_fixture_cannot_be_promoted_by_formal_root(tmp_path, monkeypatch):
+    """synthetic fixtureをformal C4 rootとして受け入れません。
+
+    development-only labelを正式適格性へ昇格できないことを確認します。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts")
@@ -544,6 +801,10 @@ def test_synthetic_fixture_cannot_be_promoted_by_formal_root(tmp_path, monkeypat
 @pytest.mark.parametrize("damage", ["missing", "tampered"])
 @pytest.mark.parametrize("object_name", ["manifest.json", "source-0000.json"])
 def test_empty_root_restore_rejects_missing_or_tampered_objects(tmp_path, monkeypatch, damage, object_name):
+    """bundle objectの欠落と改ざんをempty-root restoreで検出します。
+
+    manifestとsource referenceの両方へ破損を適用します。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts")
@@ -564,6 +825,10 @@ def test_empty_root_restore_rejects_missing_or_tampered_objects(tmp_path, monkey
 
 @pytest.mark.parametrize("missing", ["backup", "restore"])
 def test_missing_save_backup_or_restore_is_rejected(tmp_path, monkeypatch, missing):
+    """backupまたはrestore verdictが無いcampaignを拒否します。
+
+    どちらか片方だけ揃ったsave identityも正式証跡にしません。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(
@@ -575,6 +840,10 @@ def test_missing_save_backup_or_restore_is_rejected(tmp_path, monkeypatch, missi
 
 
 def test_preflight_or_launch_gate_contamination_is_rejected(tmp_path, monkeypatch):
+    """launch gate failureの混入を拒否します。
+
+    CREATE_PROCESS_FAILED相当のeventがterminal outcomeを置き換えません。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts")
@@ -594,6 +863,10 @@ def test_preflight_or_launch_gate_contamination_is_rejected(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("duplicate", ["reserved", "gameplay"])
 def test_duplicate_c4_identity_is_rejected(tmp_path, monkeypatch, duplicate):
+    """重複reservedまたはgameplay identityを拒否します。
+
+    C4全attemptを横断するidentity cardinalityを検証します。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(
@@ -608,6 +881,10 @@ def test_duplicate_c4_identity_is_rejected(tmp_path, monkeypatch, duplicate):
 
 @pytest.mark.parametrize("failure", ["ntfs", "wal"])
 def test_missing_ntfs_or_wal_attestation_is_rejected(tmp_path, monkeypatch, failure):
+    """NTFSまたはWAL/FULL attestationが欠けたledgerを拒否します。
+
+    storage verdictと実SQLite設定の両方の失敗経路を固定します。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts")
@@ -622,14 +899,14 @@ def test_missing_ntfs_or_wal_attestation_is_rejected(tmp_path, monkeypatch, fail
         build_goal_evidence(artifacts, ledger)
 
 
-def test_unclosed_superseded_preflight_remediation_is_rejected(tmp_path, monkeypatch):
+def test_unclosed_preflight_remediation_is_rejected(tmp_path, monkeypatch):
+    """PREFLIGHT_FAILED eventにcloseが無いcampaignを拒否します。
+
+    通常campaignでもblocked historyをremediationなしで通しません。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts")
-    artifacts.put_json("campaign/superseded.json", {
-        "kind": "superseded", "campaign_id": "fixture-c4",
-        "successor_campaign_id": "fixture-c4-next", "reason": "preflight remediation required",
-    })
     artifacts.put_json("campaign/remediation_closures.json", {
         "schema_version": "survivors.campaign_remediation_closures.v1",
         "closures": [],
@@ -657,6 +934,10 @@ def test_unclosed_superseded_preflight_remediation_is_rejected(tmp_path, monkeyp
 
 
 def test_safety_failure_without_remediation_close_is_rejected(tmp_path, monkeypatch):
+    """C4 SAFETY_FAILURE eventにcloseが無い場合を拒否します。
+
+    run outcomeとlaunched outcome streamに同じfailureを置きます。
+    """
     from survivors.release import evidence_builder
 
     artifacts, ledger = make_fixture(tmp_path / "artifacts")
