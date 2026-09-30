@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """候補フレームへ固定矩形と見本照合の下書きを付ける。
 
-確認済みラベルから見本を集め、未作成のラベルファイルだけを生成する。
+確認済みラベルから見本を集め、未作成のラベルファイルを生成する。
+`--refresh-unchecked` を付けると、未チェックの既存下書きも最新の見本で
+再生成する（チェック済みのファイルは変更しない）。
 """
 
 from __future__ import annotations
@@ -199,13 +201,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument(
+        "--refresh-unchecked",
+        action="store_true",
+        help="Regenerate draft boxes for existing unchecked labels using the latest templates.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     """対象セッションの未ラベル PNG に下書きを書き、件数を表示する。
 
-    JSON がすでにあるフレームは読み書きせず、そのまま残す。
+    JSON が無いフレームには新規下書きを作る。`--refresh-unchecked` を付けると、
+    既存 JSON のうち `checked: false` のものだけ最新の見本で再生成し、
+    `checked: true` のものは変更せず残す。
     """
     args = _parser().parse_args(argv)
     if not args.session_id or Path(args.session_id).name != args.session_id or args.session_id in {".", ".."}:
@@ -219,9 +228,16 @@ def main(argv: list[str] | None = None) -> int:
         for _, png_path, json_path in iter_frame_files(session_dir):
             if png_path is None:
                 continue
+            refresh = False
             if json_path is not None:
-                skipped += 1
-                continue
+                if not args.refresh_unchecked:
+                    skipped += 1
+                    continue
+                _, checked = read_label_file(json_path)
+                if checked:
+                    skipped += 1
+                    continue
+                refresh = True
             image = _read_image(png_path)
             height, width = image.shape[:2]
             boxes = [
@@ -244,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
                 image_width=width,
                 image_height=height,
                 checked=False,
-                overwrite=False,
+                overwrite=refresh,
             )
             if not wrote_label:
                 skipped += 1
