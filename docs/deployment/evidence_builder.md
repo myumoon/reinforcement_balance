@@ -26,7 +26,9 @@ summary内のplan hash、formal eligibility、run manifest一覧は実ファイ�
 
 ### Remediation close
 
-過去のpreflight failureとsafety failureはhistoryから除外しません。該当issueは `campaign/remediation_closures.json` の `survivors.campaign_remediation_closures.v1` recordでcloseし、証跡artifactのSHA-256と担当者・独立検証者の異なるIDを確認します。closeが無い、証跡hashが異なる、または担当者と検証者が同一なら拒否します。
+過去のpreflight failureとsafety failureはhistoryから除外しません。C0〜C4すべてのstage executionで該当issueを `campaign/remediation_closures.json` の `survivors.campaign_remediation_closures.v1` recordによりcloseし、証跡artifactのSHA-256と担当者・独立検証者の異なるIDを確認します。closeが無い、証跡hashが異なる、または担当者と検証者が同一なら拒否します。
+
+`campaign/superseded.json` があるcampaignは、failure remediationのclose状況にかかわらずgoal evidenceを生成しません。後継campaignの記録はhistoryとして保持しますが、superseded root自体はpromotion対象にしません。
 
 ## 出力と実行
 
