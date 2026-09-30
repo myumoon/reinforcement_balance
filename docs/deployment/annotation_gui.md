@@ -25,7 +25,28 @@ python Tools/Deployment/select_survivors_annotation_candidates.py `
 
 ## 3. 自動下書きを作る
 
-確認済みラベルから切り出した見本と固定矩形を使い、指定セッション内の JSON がまだ無い PNG に下書きを作ります。
+固定矩形（`player_anchor` / `hud_hp` / `hud_xp`）と、確認済みラベルで学習した下書き用検出器（Faster R-CNN）の推論結果を使い、指定セッション内の JSON がまだ無い PNG に下書きを作ります。
+
+### 3-1. 学習用の確認済みフレームを用意する（最初の周回）
+
+時期の違うフレームを数枚選び、X-AnyLabeling で確認済みにします（手順は「4.」）。画面全体をラベルする必要はありません。
+
+1. `labeled_region` の矩形を1つ描きます。画面の 1/4 程度で、敵が 5〜10 体入る場所を選びます。
+2. **その矩形の内側にある** 敵・ジェム・ピックアップを漏れなくラベルします。矩形の外側はラベル不要です。
+3. `Ctrl+Alt+K` で確認済みにします。
+
+学習では `labeled_region` の内側だけを切り出して使うため、範囲外の未ラベルの物体が「背景」として誤って学習されることはありません。画面全体をラベル済みのフレームは、`labeled_region` なしでそのまま学習に使えます。
+
+### 3-2. 下書き用検出器を学習する
+
+```powershell
+python Tools/Deployment/train_survivors_prelabel_detector.py `
+  --work-root "D:\captures\annotation_work"
+```
+
+work-root 内の `checked: true` の JSON だけを使って学習し、重みを `<work-root>/prelabel_detector.pt` に保存します（`--output` で変更可）。確認済みフレームが1枚も無い場合はエラーで終了します。初回は pytorch.org から事前学習重み（約 74MB）を自動でダウンロードします。GPU があれば自動で使い、数分で終わります。
+
+### 3-3. 下書きを作る
 
 ```powershell
 python Tools/Deployment/prelabel_survivors_frames.py `
@@ -33,9 +54,15 @@ python Tools/Deployment/prelabel_survivors_frames.py `
   --session-id "session-0001"
 ```
 
-初期設定は [annotation_prelabel_v1.yaml](../../Tools/Deployment/configs/annotation_prelabel_v1.yaml) です。固定矩形・照合ラベル・一致 threshold は調整できます。設定のラベル名は共通クラス一覧で検証され、矩形は 1920x1080 の範囲内に置いてください。
+既定では `<work-root>/prelabel_detector.pt` を読みます（`--detector` で変更可）。重みファイルが無い場合は警告を表示し、固定矩形だけの下書きを作ります。
 
-下書きは `checked: false` で保存されます。既存 JSON はスキップされます。テンプレート見本には work-root 内の `checked: true` の JSON だけを使います。
+設定は [annotation_prelabel_v2.yaml](../../Tools/Deployment/configs/annotation_prelabel_v2.yaml) です。固定矩形・検出するラベル・スコアのしきい値・学習回数などを調整できます。設定は学習 CLI と下書き CLI で同じ検証を通り、ラベル名は共通クラス一覧で確認され、矩形は 1920x1080 の範囲内に置く必要があります。学習後に `input_scale` や `labels` を変えた場合は、重みと設定が一致しないためエラーになります。再学習してください。
+
+下書きは `checked: false` で保存されます。既存 JSON はスキップされます。下書きに `labeled_region` は書かれません。
+
+### 既存 work-root の classes.txt
+
+`labeled_region` を追加する前に作った work-root では、`classes.txt` に `labeled_region` がありません。末尾に1行 `labeled_region` を追記してから X-AnyLabeling で読み込み直してください。
 
 ## 4. X-AnyLabeling で確認・修正する
 
@@ -71,8 +98,13 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 | `hud_hp` / `hud_xp` | HP / XP の HUD 領域 |
 | `card` / `button` | レベルアップカード / 選択ボタン |
 | `death_result` | 死亡・結果画面の領域 |
+| `labeled_region` | ラベルを付け終えた範囲（学習用。物体ではない） |
 
-宝箱は `chest` ではなく `pickup_special` として付けます。`card`、`button`、`death_result` は自動下書きされないため、GUI で必要な矩形を追加してください。
+宝箱は `chest` ではなく `pickup_special` として付けます。`card`、`button`、`death_result`、`hazard_projectile`、`hazard_area` は自動下書きされないため、GUI で必要な矩形を追加してください。
+
+`enemy_elite` / `enemy_boss` は検出器の学習時に `enemy_normal` として扱われるため、下書きでは `enemy_normal` として出ます。GUI で正しいクラスへ直してください。
+
+`labeled_region` を含む確認済みフレームは範囲外が未ラベルのため、COCO 出力から除外されます（出力時に「範囲限定でスキップした数」として表示されます）。COCO に含めたいフレームは画面全体をラベルし、`labeled_region` を消してください。
 
 `hazard_projectile` / `hazard_area` は円（circle）ツールで描いても構いません。中心点と円周上の一点から外接する矩形へ自動変換されます。
 
@@ -80,9 +112,13 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 
 ## 2周目以降の運用
 
-確認済みの矩形は次の実行からテンプレート見本に使われます。先に一部の画像を確認済みにし、同じ work-root の未処理セッションで下書きを作ると、見本が増えた状態で照合できます。既存 JSON は上書きされないため、下書きが無い PNG にだけ新しい JSON が作られます。
+下書きを直して確認済みにするほど、学習データが増えて検出器の精度が上がります。次の流れを繰り返します。
 
-同一セッション内で先に一部だけ確認済みにし、残りの未確認フレームにも増えた見本を反映したい場合は `--refresh-unchecked` を付けます。`checked: false` の既存下書きだけが新しい見本で再生成され、`checked: true` にした矩形は変更されません。
+1. 下書きを GUI で修正し、確認済みにする
+2. `train_survivors_prelabel_detector.py` で再学習する
+3. `prelabel_survivors_frames.py --refresh-unchecked` で未確認の下書きを作り直す
+
+既存 JSON は既定では上書きされないため、`--refresh-unchecked` を付けない場合は下書きが無い PNG にだけ新しい JSON が作られます。`--refresh-unchecked` を付けると `checked: false` の既存下書きだけが最新の検出器で再生成され、`checked: true` にしたファイルは変更されません。
 
 ```powershell
 python Tools/Deployment/prelabel_survivors_frames.py `
