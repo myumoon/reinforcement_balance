@@ -133,6 +133,7 @@ python Tools/Deployment/prelabel_survivors_frames.py `
 
 - `card` / `button` / `death_result` / `hazard_projectile` / `hazard_area` は自動下書きされないため、GUI で手動追加が必要です。
 - `enemy_elite` / `enemy_boss` は検出器の学習時に `enemy_normal` として扱われ、下書きでは `enemy_normal` として出るので、GUI で正しいクラスへ直してください。
+- `enemy_boss` はボスとして出現した個体（倒すと宝箱を落とす個体）にだけ付けます。ステージ後半に、序盤〜中盤のボスと同じ見た目の敵が雑魚敵として群れで出てきた場合は `enemy_normal` です。迷ったら `enemy_normal` にしてください（理由は [`annotation_gui.md`](annotation_gui.md) の「ボスと元ボスの雑魚敵」を参照）。
 - `labeled_region` を含む確認済みフレームは範囲外が未ラベルのため、COCO 出力から除外されます。COCO に含めたいフレームは画面全体をラベルし、`labeled_region` を消してください。
 
 ### 2-6. COCO JSON を出力する

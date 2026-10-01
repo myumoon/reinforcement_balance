@@ -110,6 +110,17 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 
 タイプミスで未知のラベル名が付いた shape や、rectangle/circle 以外の未対応図形は、そのファイルを読む際に警告を表示して読み飛ばされます（ファイル全体は失敗しません）。警告は `prelabel_survivors_frames.py` や `export_survivors_annotations_coco.py` の実行時に標準エラー出力へ表示されるので、意図しない読み飛ばしがないか確認してください。
 
+### ボスと元ボスの雑魚敵
+
+`enemy_boss` は、ボスとして出現した個体（倒すと宝箱を落とす個体）にだけ付けます。ステージ序盤〜中盤にボスとして出た敵は、後半になると同じ見た目のまま雑魚敵として群れで出てきます。この元ボスの雑魚敵は `enemy_normal` として付けてください。
+
+- ボスは通常の敵より大きく描かれることが多く、1 画面に普通 1 体です。同じ見た目の敵が何体もいる場合は雑魚敵と判断できます。
+- 迷った場合は `enemy_normal` にします。
+
+`enemy_boss` が 1 体でも見えると、実機の観測では `boss_flag` が真になり、アイテム選択の判断材料として方策へ渡されます（`Tools/Deployment/survivors/real_obs_assembler.py`）。元ボスの雑魚敵を `enemy_boss` で付けると、ステージ後半がずっとボス戦として扱われてしまいます。
+
+下書き用検出器は `enemy_boss` を `enemy_normal` にまとめて学習するため、この区別は下書きの精度には影響しません。効くのは COCO 出力で学習する本番の検出器（[world_detector.md](world_detector.md)）です。
+
 ## 2周目以降の運用
 
 下書きを直して確認済みにするほど、学習データが増えて検出器の精度が上がります。次の流れを繰り返します。
