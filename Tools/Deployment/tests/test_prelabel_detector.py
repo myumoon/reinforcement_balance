@@ -284,6 +284,7 @@ def test_build_model_without_pretrained_weights_sets_head_size():
     assert model.roi_heads.box_predictor.cls_score.out_features == 4
     assert model.transform.min_size == (128,)
     assert model.transform.max_size == 128
+    assert model.roi_heads.detections_per_img == 1000
 
 
 @pytest.fixture(scope="module")

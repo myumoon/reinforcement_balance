@@ -44,6 +44,9 @@ _DETECTOR_KEYS = {
     "iterations", "batch_size", "learning_rate", "momentum", "weight_decay", "seed",
 }
 _LOG_EVERY = 100
+# 1画像あたりの検出数上限。torchvision 既定の 100 では敵が多い画面で下書きが打ち切られる。
+# RPN の推論時提案数 1000 と同じ値。これより大きくしても検出数は増えない。
+_MAX_DETECTIONS = 1000
 
 
 @dataclass(frozen=True)
@@ -324,9 +327,13 @@ def build_model(num_labels: int, settings: DetectorSettings, *, pretrained: bool
     """
     size = settings.crop_size * settings.input_scale
     if pretrained:
-        model = fasterrcnn_mobilenet_v3_large_fpn(weights="DEFAULT", min_size=size, max_size=size)
+        model = fasterrcnn_mobilenet_v3_large_fpn(
+            weights="DEFAULT", min_size=size, max_size=size, box_detections_per_img=_MAX_DETECTIONS
+        )
     else:
-        model = fasterrcnn_mobilenet_v3_large_fpn(weights=None, weights_backbone=None, min_size=size, max_size=size)
+        model = fasterrcnn_mobilenet_v3_large_fpn(
+            weights=None, weights_backbone=None, min_size=size, max_size=size, box_detections_per_img=_MAX_DETECTIONS
+        )
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_labels + 1)
     return model
