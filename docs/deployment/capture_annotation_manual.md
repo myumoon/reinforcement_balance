@@ -123,7 +123,7 @@ python Tools/Deployment/prelabel_survivors_frames.py `
 | `enemy_normal` / `enemy_elite` / `enemy_boss` | 通常 / エリート / ボス敵 |
 | `gem_blue` / `gem_green` / `gem_red` | 青 / 緑 / 赤の経験値ジェム |
 | `pickup_heal` / `pickup_special` | 回復 / 特殊ピックアップ |
-| `hazard_projectile` / `hazard_area` | 飛来する弾 / 範囲攻撃 |
+| `hazard_projectile` / `hazard_area` | 敵が放つ弾 / 敵の範囲攻撃（プレイヤーの武器は含めない） |
 | `hud_hp` / `hud_xp` | HP / XP の HUD 領域 |
 | `card` / `button` | レベルアップカード / 選択ボタン |
 | `death_result` | 死亡・結果画面の領域 |
@@ -132,7 +132,8 @@ python Tools/Deployment/prelabel_survivors_frames.py `
 宝箱は `chest` ではなく `pickup_special` として付けます。
 
 - `card` / `button` / `death_result` / `hazard_projectile` / `hazard_area` は自動下書きされないため、GUI で手動追加が必要です。
-- `enemy_elite` / `enemy_boss` は検出器の学習時に `enemy_normal` として扱われ、下書きでは `enemy_normal` として出るので、GUI で正しいクラスへ直してください。
+- `enemy_elite` は下書きでも `enemy_elite` として出ますが、サンプルが少ないうちは `enemy_normal` と取り違えることがあるので確認してください。`enemy_boss` は下書きでは `enemy_normal` として出るので、GUI で正しいクラスへ直してください。
+- `hazard_projectile` / `hazard_area` は**敵側**の弾や範囲攻撃にだけ付けます。Garlic・斧・Santa Water・Peachone の照準など、プレイヤー自身の武器エフェクトには付けません（理由は [`annotation_gui.md`](annotation_gui.md) を参照）。
 - `enemy_boss` はボスとして出現した個体（倒すと宝箱を落とす個体）にだけ付けます。ステージ後半に、序盤〜中盤のボスと同じ見た目の敵が雑魚敵として群れで出てきた場合は `enemy_normal` です。迷ったら `enemy_normal` にしてください（理由は [`annotation_gui.md`](annotation_gui.md) の「ボスと元ボスの雑魚敵」を参照）。
 - `labeled_region` を含む確認済みフレームは範囲外が未ラベルのため、COCO 出力から除外されます。COCO に含めたいフレームは画面全体をラベルし、`labeled_region` を消してください。
 

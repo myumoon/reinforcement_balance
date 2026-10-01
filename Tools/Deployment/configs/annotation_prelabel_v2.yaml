@@ -14,8 +14,8 @@ fixed_boxes:
 # 下書き用検出器（torchvision Faster R-CNN MobileNetV3）の学習・推論設定。
 # labels の並びが検出器のクラス番号になるため、変えたら再学習が必要。
 detector:
-  labels: [enemy_normal, gem_blue, gem_green, gem_red, pickup_heal, pickup_special]
-  label_aliases: {enemy_elite: enemy_normal, enemy_boss: enemy_normal}
+  labels: [enemy_normal, enemy_elite, gem_blue, gem_green, gem_red, pickup_heal, pickup_special]
+  label_aliases: {enemy_boss: enemy_normal}
   score_threshold: 0.5
   input_scale: 2
   crop_size: 480
