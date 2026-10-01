@@ -149,6 +149,40 @@ def test_export_checked_labels_clips_sorts_and_keeps_negative_images(tmp_path: P
     assert len(dataset[1].annotations) == 0
 
 
+def test_export_skips_checked_frames_with_labeled_region(tmp_path: Path, capsys) -> None:
+    """labeled_region 付きの確認済みフレームを world/ui 両方の COCO から外す。
+
+    範囲限定フレームは範囲外に未ラベルの物体があるため、全面 dataset に混ぜない。
+    スキップ数は標準出力に表示され、labeled_region 自体も矩形として出ない。
+    """
+    work_root = tmp_path / "work"
+    session = work_root / "session-a"
+    _write_png(session / "00000001.png")
+    _write_label(session / "00000001.json", [_shape("gem_blue", [[1, 1], [3, 3]])], checked=True)
+    _write_png(session / "00000002.png")
+    _write_label(
+        session / "00000002.json",
+        [
+            _shape("labeled_region", [[0, 0], [5, 5]]),
+            _shape("gem_blue", [[1, 1], [3, 3]]),
+            _shape("hud_hp", [[1, 1], [4, 4]]),
+        ],
+        checked=True,
+    )
+    output_dir = tmp_path / "export"
+
+    assert main(["--work-root", str(work_root), "--output-dir", str(output_dir)]) == 0
+
+    for filename in ("world_coco.json", "ui_coco.json"):
+        document = json.loads((output_dir / filename).read_text(encoding="utf-8"))
+        assert [image["frame_id"] for image in document["images"]] == [1]
+        assert all(annotation["image_id"] == 1 for annotation in document["annotations"])
+        assert "labeled_region" not in [category["name"] for category in document["categories"]]
+    world = json.loads((output_dir / "world_coco.json").read_text(encoding="utf-8"))
+    assert len(world["annotations"]) == 1
+    assert "範囲限定でスキップした数: 1" in capsys.readouterr().out
+
+
 def test_export_rejects_checked_label_without_matching_png(tmp_path: Path, capsys) -> None:
     """確認済み JSON に対応する PNG がなければ CLI を失敗させる。
 

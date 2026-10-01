@@ -1,0 +1,28 @@
+# Survivors の自動下書きに使う固定矩形と下書き用検出器の設定。
+#
+# 毎フレーム同じ位置に置く矩形と、確認済みラベルで学習する小さな物体検出器の
+# 学習・推論パラメータをまとめる。学習 CLI と下書き CLI の両方がこのファイルを読む。
+
+schema_version: annotation_prelabel.v2
+
+# 毎フレームに置く固定矩形（1920x1080 画面座標）。
+fixed_boxes:
+  - {label: player_anchor, bbox: [912, 466, 996, 540]}
+  - {label: hud_hp, bbox: [924, 544, 996, 554]}
+  - {label: hud_xp, bbox: [96, 0, 1824, 36]}
+
+# 下書き用検出器（torchvision Faster R-CNN MobileNetV3）の学習・推論設定。
+# labels の並びが検出器のクラス番号になるため、変えたら再学習が必要。
+detector:
+  labels: [enemy_normal, gem_blue, gem_green, gem_red, pickup_heal, pickup_special]
+  label_aliases: {enemy_elite: enemy_normal, enemy_boss: enemy_normal}
+  score_threshold: 0.5
+  input_scale: 2
+  crop_size: 480
+  min_box_size: 6
+  iterations: 1500
+  batch_size: 4
+  learning_rate: 0.01
+  momentum: 0.9
+  weight_decay: 0.0001
+  seed: 0

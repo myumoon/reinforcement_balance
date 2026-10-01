@@ -15,6 +15,7 @@ import cv2
 
 from survivors.annotation_labels import (
     DEFAULT_CLASS_MAP_PATH,
+    REGION_LABEL,
     UI_CLASSES,
     WORLD_CLASSES,
     clip_box,
@@ -80,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
         world_annotations: list[dict] = []
         ui_annotations: list[dict] = []
         skipped_unconfirmed = 0
+        skipped_region = 0
 
         for session_id in session_ids:
             session_dir = args.work_root / session_id
@@ -89,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
                 boxes, checked = read_label_file(label_path)
                 if not checked:
                     skipped_unconfirmed += 1
+                    continue
+                # 範囲限定ラベルのフレームは範囲外に未ラベルの物体が残るので全面 dataset に入れない。
+                if any(box.label == REGION_LABEL for box in boxes):
+                    skipped_region += 1
                     continue
                 if image_path is None:
                     expected_image = session_dir / f"{frame_id:08d}.png"
@@ -154,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"採用画像数: {len(world_images)}")
         print(f"未確認でスキップした数: {skipped_unconfirmed}")
+        print(f"範囲限定でスキップした数: {skipped_region}")
         print(f"world 矩形数: {len(world_annotations)}")
         print(f"ui 矩形数: {len(ui_annotations)}")
         return 0
