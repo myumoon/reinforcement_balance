@@ -377,7 +377,10 @@ def build_deploy_obs_v2(
     px, py = float(player_px[0]), float(player_px[1])
 
     def rel(track: TrackPx) -> tuple[float, float]:
-        """track 中心のプレイヤー基準・半幅正規化座標（[-1,1] に clip）。"""
+        """track 中心のプレイヤー基準・半幅正規化座標を返す。
+
+        縦横とも viewport 半幅で割るので縮尺が等しく、結果は [-1,1] に clip します。
+        """
         return _clip((track.cx_px - px) / half, -1.0, 1.0), _clip((track.cy_px - py) / half, -1.0, 1.0)
 
     visible = [
@@ -436,7 +439,11 @@ def build_deploy_obs_v2(
     emitters = {kind: _emitter(kind, weapons, params) for kind in ("aura", "orbit", "zone")}
 
     def slot_plane(emitter: _Emitter) -> tuple[float, bool]:
-        """スロット番号の正規化値と有効性。一意なら番号、出しうる武器が無いと確定なら neutral・有効。"""
+        """エフェクトを出す武器のスロット番号を正規化値と有効性で返す。
+
+        出しうる武器が一意なら slot/(MaxWeaponSlots-1)、無いと確定なら neutral・有効、
+        それ以外（複数・HUD 不完全）は不明として無効にします。
+        """
         if emitter.slot is not None:
             return emitter.slot / slot_norm, True
         return 0.0, emitter.none_certain
