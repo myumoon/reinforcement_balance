@@ -5,6 +5,7 @@
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -238,3 +239,39 @@ def test_recursive_header_set_is_bound_to_each_cpp_gating_hash(tmp_path, key) ->
     header.unlink()
     fourth = resolve_gating_producer_hashes(tmp_path, manifest, {}, _attestation(tmp_path))
     assert third[key] != fourth[key]
+
+
+def test_deploy_obs_v2_sources_are_bound_to_deploy_gating_hashes(tmp_path) -> None:
+    """DeployObs v2 の schema・ビルダー・yaml を1 byte 変えると deploy 系 gating hash が変わる。
+
+    packaged manifest の deploy_obs_schema / deploy_release_adapter entry をそのまま使い、
+    実ファイルの内容を一時 repo へ写して stale verdict を検出できることを固定します。
+    """
+    repo = Path(__file__).resolve().parents[3]
+    packaged = load_producer_path_manifest()
+    common = "Tools/Common/src/reinbalance_survivors_contracts/"
+    schema_paths = [f"{common}deploy_obs.py", f"{common}schemas/deploy_obs_v2.yaml", f"{common}deploy_obs_v2_features.py", f"{common}schemas/deploy_obs_v2_features.yaml"]
+    assert list(packaged.producers["deploy_obs_schema"]["ordered_exact_paths"]) == schema_paths
+    assert list(packaged.producers["deploy_release_adapter"]["ordered_exact_paths"]) == schema_paths[2:]
+    (tmp_path / "Module/Private").mkdir(parents=True)
+    (tmp_path / "Module/Public").mkdir()
+    (tmp_path / "Module/Module.Build.cs").write_text("module", encoding="utf-8")
+    (tmp_path / "Module/Private/Weapon.cpp").write_text("one", encoding="utf-8")
+    for relative in schema_paths:
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((repo / relative).read_bytes())
+    producers = _empty_producers()
+    for key in ("deploy_obs_schema", "deploy_release_adapter"):
+        producers[key] = _mutable(packaged.producers[key])
+    manifest = type(packaged)("v", producers, "f" * 64)
+    generated = {"deploy_obs_schema": {"v": 1}, "deploy_release_adapter": {"v": 1}}
+    previous = resolve_gating_producer_hashes(tmp_path, manifest, generated, _attestation(tmp_path))
+    for relative in schema_paths:
+        target = tmp_path / relative
+        target.write_bytes(target.read_bytes() + b" ")
+        current = resolve_gating_producer_hashes(tmp_path, manifest, generated, _attestation(tmp_path))
+        assert current["deploy_obs_schema"] != previous["deploy_obs_schema"], relative
+        adapter_changed = current["deploy_release_adapter"] != previous["deploy_release_adapter"]
+        assert adapter_changed == (relative in schema_paths[2:]), relative
+        previous = current
