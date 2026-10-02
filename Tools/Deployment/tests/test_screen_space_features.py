@@ -90,3 +90,18 @@ def test_nearest_enemy_offset_validity_zero_when_anchor_is_fallback() -> None:
     estimates = build_screen_space_estimates(world)
     assert estimates["nearest_enemy_offset"].validity == pytest.approx(0.)
     assert estimates["nearest_enemy_screen_radius"].validity == pytest.approx(0.)
+
+
+@pytest.mark.parametrize("dx,dy", [
+    (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (-1.0, -0.0), (0.0, -1.0),
+    (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0), (0.3, -0.05),
+])
+def test_directional_bin_matches_common_deploy_obs_v2_bin(dx, dy):
+    """Deployment の方位ビンが Common の DeployObs v2 ビルダーと同じ16ビンを返す。
+
+    04-13 で Common の関数へ置き換えるまで同じ式が2か所にあるので、
+    片方だけ変わったら軸上・負ゼロ・対角の固定入力で検出できるようにします。
+    """
+    from reinbalance_survivors_contracts.deploy_obs_v2_features import directional_bin as common_bin
+
+    assert directional_bin(dx, dy, 16) == common_bin(dx, dy, 16)

@@ -370,18 +370,29 @@ def build_deploy_obs_v2(
     ensure(is_strict_number(now_s) and math.isfinite(float(now_s)) and now_s >= 0, "now_s must be finite non-negative")
     ensure(duration_mult is None or (is_strict_number(duration_mult) and math.isfinite(float(duration_mult)) and duration_mult > 0), "duration_mult must be positive or None")
     ensure(type(world_valid) is bool, "world_valid must be bool")
+    # generator など1回しか回せない iterable は検証で消費されて全 track が消えるため、list/tuple だけを受け付ける
+    ensure(isinstance(tracks, (list, tuple)), "tracks must be a list or tuple")
+    ensure(hud_slots is None or isinstance(hud_slots, (list, tuple)), "hud_slots must be a list, tuple or None")
     ensure(all(isinstance(t, TrackPx) for t in tracks), "tracks must be TrackPx")
     ensure(all(t.first_seen_s <= now_s for t in tracks), "track first_seen_s is in the future")
     width, height = viewport_wh
     half = width / 2.0
     px, py = float(player_px[0]), float(player_px[1])
 
-    def rel(track: TrackPx) -> tuple[float, float]:
-        """track 中心のプレイヤー基準・半幅正規化座標を返す。
+    def raw(track: TrackPx) -> tuple[float, float]:
+        """track 中心のプレイヤー基準・半幅正規化座標を clip せずに返す。
 
-        縦横とも viewport 半幅で割るので縮尺が等しく、結果は [-1,1] に clip します。
+        縦横とも viewport 半幅で割るので縮尺が等しくなります。
+        方向ビンと距離はこの値から求め、clip で方向が歪まないようにします。
         """
-        return _clip((track.cx_px - px) / half, -1.0, 1.0), _clip((track.cy_px - py) / half, -1.0, 1.0)
+        return (track.cx_px - px) / half, (track.cy_px - py) / half
+
+    def clip_xy(point: tuple[float, float]) -> tuple[float, float]:
+        """相対座標を出力用に [-1,1] へ clip する。
+
+        nearest_enemy_offset や zone の位置など、値として出す座標だけに使います。
+        """
+        return _clip(point[0], -1.0, 1.0), _clip(point[1], -1.0, 1.0)
 
     visible = [
         t for t in tracks
@@ -390,9 +401,9 @@ def build_deploy_obs_v2(
     classes = params["entity_classes"]
     effect_of = classes["effect"]
     by_kind = {kind: [t for t in visible if effect_of.get(t.class_name) == kind] for kind in EFFECT_KINDS}
-    enemies = [rel(t) for t in visible if t.class_name in classes["enemy"]]
-    gems = [rel(t) for t in visible if t.class_name in classes["gem"]]
-    rare_gems = [rel(t) for t in visible if t.class_name in classes["rare_gem"]]
+    enemies = [raw(t) for t in visible if t.class_name in classes["enemy"]]
+    gems = [raw(t) for t in visible if t.class_name in classes["gem"]]
+    rare_gems = [raw(t) for t in visible if t.class_name in classes["rare_gem"]]
     weapons, passives = _hud_slots(hud_slots, params)
     out = _Planes(schema)
     bins = params["direction_bins"]
@@ -405,7 +416,7 @@ def build_deploy_obs_v2(
         ensure(type(player_level) is int and player_level >= 0, "player_level must be non-negative int")
         out.put("level", min(player_level / params["level_norm"], 1.0), True)
     out.put("player_screen_pos", [_clip((px - width / 2.0) / half, -1.0, 1.0), _clip((py - height / 2.0) / half, -1.0, 1.0)], world_valid)
-    nearest_enemy = min(enemies, key=lambda p: p[0] ** 2 + p[1] ** 2) if enemies else (0.0, 0.0)
+    nearest_enemy = clip_xy(min(enemies, key=lambda p: p[0] ** 2 + p[1] ** 2)) if enemies else (0.0, 0.0)
     out.put("nearest_enemy_offset", nearest_enemy, world_valid)
     out.put("visible_enemy_count", min(len(enemies) / params["visible_enemy_count_norm"], 1.0), world_valid)
     if movement_direction is not None:
@@ -459,7 +470,7 @@ def build_deploy_obs_v2(
     # orbit: 周回半径は可視 orbit の距離の中央値、残り時間は最も古い初観測時刻から推定
     orbits = by_kind["orbit"]
     if orbits:
-        out.put("weapon_orbit_radius", _clip(statistics.median(math.hypot(*rel(t)) for t in orbits), 0.0, 1.0), True)
+        out.put("weapon_orbit_radius", _clip(statistics.median(math.hypot(*raw(t)) for t in orbits), 0.0, 1.0), True)
         out.put("weapon_orbit_ttl", *_ttl(emitters["orbit"], min(t.first_seen_s for t in orbits), now_s, duration_mult, params))
     else:
         out.put("weapon_orbit_radius", 0.0, emitters["orbit"].none_certain)
@@ -468,11 +479,11 @@ def build_deploy_obs_v2(
 
     # zone: 最寄り zone_slots 個を距離の近い順（同距離は track id 順）に並べる
     zone_count = params["zone_slots"]
-    zones = sorted(by_kind["zone"], key=lambda t: (math.hypot(*rel(t)), t.track_id))[:zone_count]
+    zones = sorted(by_kind["zone"], key=lambda t: (math.hypot(*raw(t)), t.track_id))[:zone_count]
     geometry, geometry_valid, slot_values, slot_valid, ttl_values, ttl_valid = [], [], [], [], [], []
     for j in range(zone_count):
         if j < len(zones):
-            dx, dy = rel(zones[j])
+            dx, dy = clip_xy(raw(zones[j]))
             geometry += [dx, dy, _clip(zones[j].radius_px / half, 0.0, 1.0)]
             geometry_valid += [True] * 3
             slot_value, slot_ok = slot_plane(emitters["zone"]) if emitters["zone"].slot is not None else (0.0, False)
@@ -493,7 +504,7 @@ def build_deploy_obs_v2(
     # projectile: 方向ビンごとの個数を正規化係数で割った密度
     density = [0.0] * bins
     for t in by_kind["projectile"]:
-        dx, dy = rel(t)
+        dx, dy = raw(t)
         if math.hypot(dx, dy) > _KINDA_SMALL_NUMBER:
             density[directional_bin(dx, dy, bins)] += 1.0 / params["projectile_density_norm"]
     out.put("weapon_projectile_density_16dir", [_clip(v, 0.0, 1.0) for v in density], world_valid)

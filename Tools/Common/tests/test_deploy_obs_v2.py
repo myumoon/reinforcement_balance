@@ -63,12 +63,20 @@ def _hud(weapons=None, passives=None, *, omit=()):
 
 
 def _track(cls, dx_px, dy_px, *, radius=10.0, tid=1, first_seen=0.0, occluded=False, player=(960.0, 540.0)):
-    """プレイヤーからの px オフセットで TrackPx を作る。"""
+    """プレイヤーからの px オフセットで TrackPx を作る。
+
+    テストでは「プレイヤーから右へ 96px」のように相対位置で書く方が読みやすいので、
+    画面上の絶対 px への変換をここにまとめます。
+    """
     return TrackPx(cls, player[0] + dx_px, player[1] + dy_px, radius, tid, first_seen, occluded)
 
 
 def _build(tracks=(), hud="empty", **kw):
-    """既定値（1920x1080・中央プレイヤー・有効な world）でビルダーを呼ぶ。"""
+    """既定値（1920x1080・中央プレイヤー・有効な world）でビルダーを呼ぶ。
+
+    各テストは確かめたい引数だけを kw で上書きします。
+    hud を省略すると「全スロットが空と読めた HUD」になります。
+    """
     args = dict(viewport_wh=(1920, 1080), player_px=(960.0, 540.0), tracks=list(tracks),
                 hud_slots=_hud() if hud == "empty" else hud, now_s=10.0, duration_mult=1.0, world_valid=True)
     args.update(kw)
@@ -76,14 +84,21 @@ def _build(tracks=(), hud="empty", **kw):
 
 
 def _seg(obs, name):
-    """segment の (values, validity, age) を返す。"""
+    """segment の (values, validity, age) を返す。
+
+    schema の layout から segment の位置を引き、3平面それぞれの該当範囲を切り出します。
+    """
     offset, size = V2.layout[name]
     span = slice(offset, offset + size)
     return obs.values[span], obs.validity[span], obs.age[span]
 
 
 def _assert_missing_rule(obs):
-    """I7: validity 0 なら neutral・age 1、validity 1 なら age 0、NaN 無し。"""
+    """I7: validity 0 なら neutral・age 1、validity 1 なら age 0、NaN 無し。
+
+    全 segment を走査し、欠損の表し方が1通りに揃っていることを確かめます。
+    どのテストの出力にも同じ規則が成り立つはずなので、共通の確認として呼びます。
+    """
     for field in V2.fields:
         values, validity, age = _seg(obs, field.name)
         assert np.all(np.isfinite(values))
@@ -95,7 +110,11 @@ def _assert_missing_rule(obs):
 # ---- schema（M1・M2）----
 
 def test_v2_segment_table_matches_plan_and_extends_v1_unchanged():
-    """v2 は v1 の10 segment を同設定で先頭に置き、plan 表の順で追加する。"""
+    """v2 は v1 の10 segment を同設定で先頭に置き、plan 表の順で追加する。
+
+    v1 の hash・次元が変わっていないこと、v2 の追加分が plan の表と名前・幅・
+    source_class まで一致すること、v1 と v2 の hash が異なることを確かめます。
+    """
     v1 = DeployObsSchema.default_v1()
     assert V2.schema_version == DEPLOY_OBS_V2_SCHEMA_VERSION == "deploy_obs.v2"
     assert V2.fields[:10] == v1.fields
@@ -108,7 +127,11 @@ def test_v2_segment_table_matches_plan_and_extends_v1_unchanged():
 
 
 def test_segment_order_is_validated_per_schema_version():
-    """各 version は自分の segment 列との完全一致だけを受け付ける。"""
+    """各 version は自分の segment 列との完全一致だけを受け付ける。
+
+    v2 の fields に v1 の version を付ける、順序を入れ替える、未知の version を
+    名乗るといった食い違いはすべて ContractValidationError になります。
+    """
     v1 = DeployObsSchema.default_v1()
     assert DeployObsSchema.from_wire(V2.to_wire()) == V2
     assert DeployObsSchema.from_wire(v1.to_wire()) == v1
@@ -128,7 +151,10 @@ def test_segment_order_is_validated_per_schema_version():
 
 
 def test_packaged_v2_yaml_matches_default_v2():
-    """package-data の deploy_obs_v2.yaml が default_v2() と同内容。"""
+    """package-data の deploy_obs_v2.yaml が default_v2() と同内容。
+
+    yaml とコード内の表は二重管理なので、片方だけ直したときにここで気付けるようにします。
+    """
     text = files("reinbalance_survivors_contracts").joinpath("schemas/deploy_obs_v2.yaml").read_text(encoding="utf-8")
     assert DeployObsSchema.from_wire(yaml.safe_load(text)) == V2
 
@@ -137,7 +163,11 @@ def test_packaged_v2_yaml_matches_default_v2():
 
 @pytest.mark.parametrize("viewport", [(1920, 1080), (1280, 1024), (1000, 2000)])
 def test_isotropic_half_width_normalisation_on_any_aspect_ratio(viewport):
-    """縦横同じ縮尺（W/2）で正規化し、縦横比が違っても斜め45度は同じ大きさになる。"""
+    """縦横同じ縮尺（W/2）で正規化し、縦横比が違っても斜め45度は同じ大きさになる。
+
+    横長・ほぼ正方形・縦長の viewport で、斜め45度の敵の相対位置が x/y 同じ値になり、
+    プレイヤー位置も同じ縮尺で中心からのずれとして出ることを確かめます。
+    """
     w, h = viewport
     player = (w / 2 + w / 4, h / 2)
     step = w / 20  # = 0.1 × 半幅
@@ -149,14 +179,21 @@ def test_isotropic_half_width_normalisation_on_any_aspect_ratio(viewport):
 
 
 def test_positions_are_clipped_to_unit_range():
-    """プレイヤーが画面端にいて画面反対側の敵が半幅より遠いとき [-1,1] に clip する。"""
+    """プレイヤーが画面端にいて画面反対側の敵が半幅より遠いとき [-1,1] に clip する。
+
+    出力する位置の値だけが schema の範囲 [-1,1] に収まることを確かめます。
+    """
     obs = _build([TrackPx("enemy_normal", 1900.0, 1070.0, 5.0, 1, 0.0, False)], player_px=(10.0, 10.0))
     assert _seg(obs, "nearest_enemy_offset")[0] == pytest.approx([1.0, 1.0])  # 1890/960・1060/960 を clip
     assert _seg(obs, "player_screen_pos")[0] == pytest.approx([-950 / 960, -530 / 960], abs=1e-6)
 
 
 def test_visibility_uses_center_only_not_rectangle_or_clipped():
-    """中心が画面内なら矩形がはみ出しても可視、中心が外 or 遮蔽なら不可視。"""
+    """中心が画面内なら矩形がはみ出しても可視、中心が外 or 遮蔽なら不可視。
+
+    画面端の大きい Santa Water は残し、中心が1px外のものと遮蔽されたものは
+    zone の枠に入らないことを確かめます。
+    """
     edge = TrackPx("weapon_zone", 1919.0, 540.0, 400.0, 1, 9.0, False)
     outside = TrackPx("weapon_zone", 1921.0, 540.0, 400.0, 2, 9.0, False)
     occluded = TrackPx("weapon_zone", 1000.0, 540.0, 50.0, 3, 9.0, True)
@@ -170,7 +207,11 @@ def test_visibility_uses_center_only_not_rectangle_or_clipped():
 # ---- 方向ビン・距離帯（M6・I6）----
 
 def _deployment_directional_bin(dx, dy, bin_count=8):
-    """Tools/Deployment/survivors/screen_space_features.directional_bin の式の転記（import しない）。"""
+    """Tools/Deployment/survivors/screen_space_features.directional_bin の式の転記（import しない）。
+
+    Common のテストは Deployment を import しないので、式を書き写して比べます。
+    実関数との一致は Tools/Deployment/tests/test_screen_space_features.py 側で確かめます。
+    """
     angle01 = (math.atan2(float(dy), float(dx)) + math.pi) / (2.0 * math.pi)
     return max(0, min(bin_count - 1, math.floor(angle01 * bin_count)))
 
@@ -180,12 +221,20 @@ def _deployment_directional_bin(dx, dy, bin_count=8):
     (1.0, 1.0, 10), (-1.0, 1.0, 14), (-1.0, -1.0, 2), (1.0, -1.0, 6), (0.3, -0.05, 7),
 ])
 def test_directional_bin_matches_deployment_and_cpp_formula(dx, dy, expected):
-    """軸上・負ゼロ・対角で Deployment と同じ式・同じ16ビンになる。"""
+    """軸上・負ゼロ・対角で Deployment と同じ式・同じ16ビンになる。
+
+    atan2 の境界（-0.0 と +0.0 で π と -π に分かれる所）を含む固定値で、
+    期待ビンと転記した Deployment の式の両方に一致することを確かめます。
+    """
     assert directional_bin(dx, dy) == expected == _deployment_directional_bin(dx, dy, 16)
 
 
 def test_direction_features_follow_build_dir_density_with_yaml_bands():
-    """最寄り距離・近距離・中距離密度を yaml の帯と係数で C++ と同じ式で作る。"""
+    """最寄り距離・近距離・中距離密度を yaml の帯と係数で C++ と同じ式で作る。
+
+    近距離帯と中距離帯に1体ずつ置き、各ビンの値が BuildDirDensity の式どおりになること、
+    距離0の敵は方向が決まらないので除外されることを確かめます。
+    """
     band = load_deploy_obs_v2_feature_params()["density"]["enemy"]
     assert (band["near"], band["mid"]) != (600.0, 1400.0)
     near_px, mid_px = 0.1 * 960, 0.4 * 960
@@ -199,7 +248,10 @@ def test_direction_features_follow_build_dir_density_with_yaml_bands():
 
 
 def test_gem_and_rare_gem_use_same_rule_and_class_split():
-    """緑・赤は全ジェムとレアジェム両方、青は全ジェムだけに入り、同じ式で作られる。"""
+    """緑・赤は全ジェムとレアジェム両方、青は全ジェムだけに入り、同じ式で作られる。
+
+    v2 で使わない class（pickup）は敵にもジェムにも数えないことも確かめます。
+    """
     obs = _build([_track("gem_green", 0.0, 96.0), _track("gem_blue", 0.0, -96.0, tid=2), _track("pickup", 50.0, 0.0, tid=3)])
     for kind in ("nearest_dist", "density_near", "density_mid"):
         gem, rare = _seg(obs, f"gem_{kind}_16dir")[0], _seg(obs, f"rare_gem_{kind}_16dir")[0]
@@ -212,7 +264,11 @@ def test_gem_and_rare_gem_use_same_rule_and_class_split():
 # ---- 武器エフェクト（M7）----
 
 def test_zone_geometry_nearest_four_sorted_with_empty_slots():
-    """zone は近い順に最大4個、同距離は track id 順、足りない枠は neutral・有効。"""
+    """zone は近い順に最大4個、同距離は track id 順、足りない枠は neutral・有効。
+
+    5個・2個・0個の zone で並び順と空き枠の扱いを確かめます。
+    空き枠は「画面内に無い」という観測なので validity 1 のままです。
+    """
     zones = [_track("weapon_zone", d, 0.0, radius=20.0, tid=tid, first_seen=9.0) for tid, d in ((5, 300.0), (4, 96.0), (3, -96.0), (2, 500.0), (1, 700.0))]
     obs = _build(zones, hud=_hud({1: ("SantaWater", 1)}))
     geometry, validity, _ = _seg(obs, "weapon_zone_geometry")
@@ -228,7 +284,11 @@ def test_zone_geometry_nearest_four_sorted_with_empty_slots():
 
 
 def test_aura_orbit_projectile_effect_values():
-    """aura は半径、orbit は距離の中央値と最古の初観測からの残り時間、projectile は方向別密度。"""
+    """aura は半径、orbit は距離の中央値と最古の初観測からの残り時間、projectile は方向別密度。
+
+    Garlic・King Bible・Axe を持つ HUD で、各エフェクトの値とスロットが
+    plan の集約規則どおりに計算されることを確かめます。
+    """
     tracks = [
         _track("weapon_aura", 0.0, 0.0, radius=192.0),
         _track("weapon_orbit", 96.0, 0.0, tid=2, first_seen=9.5),
@@ -251,7 +311,11 @@ def test_aura_orbit_projectile_effect_values():
 # ---- 確定した不在と不明（M8）----
 
 def test_scan_features_absent_is_valid_neutral_but_world_invalid_is_unknown():
-    """画面走査の特徴は見えなければ neutral・有効、world 認識が無効なら validity 0・age 1。"""
+    """画面走査の特徴は見えなければ neutral・有効、world 認識が無効なら validity 0・age 1。
+
+    「見えなかった」は画面内に無いという観測ですが、認識そのものが無効なフレームでは
+    何も言えないので不明扱いになることを確かめます。
+    """
     scan = [f.name for f in V2.fields if f.name.endswith("_16dir")] + ["weapon_zone_geometry", "nearest_enemy_offset", "visible_enemy_count", "player_screen_pos"]
     seen = _build([])
     blind = _build([_track("enemy_normal", 96.0, 0.0)], world_valid=False)
@@ -264,7 +328,11 @@ def test_scan_features_absent_is_valid_neutral_but_world_invalid_is_unknown():
 
 @pytest.mark.parametrize("kind,weapon", [("aura", "Garlic"), ("orbit", "UnholyVespers")])
 def test_aura_orbit_radius_confirmed_absent_vs_missed(kind, weapon):
-    """武器を持っていなければ neutral・有効、持っているのに見えなければ不明、HUD 不完全でも不明。"""
+    """武器を持っていなければ neutral・有効、持っているのに見えなければ不明、HUD 不完全でも不明。
+
+    aura・orbit はプレイヤーの周りに必ず出るので、持っているのに見えないのは見落としです。
+    HUD の一部が読めないときは持っていないと言い切れないので、こちらも不明になります。
+    """
     name = f"weapon_{kind}_radius"
     absent = _build([], hud=_hud({0: ("Whip", 1)}))
     missed = _build([], hud=_hud({0: (weapon, 1)}))
@@ -277,7 +345,11 @@ def test_aura_orbit_radius_confirmed_absent_vs_missed(kind, weapon):
 
 
 def test_slot_ttl_level_unknown_vs_confirmed_absent():
-    """スロット・残り時間・レベルは不明なら validity 0、出しうる武器が無いと確定なら neutral・有効。"""
+    """スロット・残り時間・レベルは不明なら validity 0、出しうる武器が無いと確定なら neutral・有効。
+
+    語彙外の武器・HUD 無し・レベル不明の各ケースで不明になり、
+    エフェクトを出さない武器だけなら「無い」と確定することを確かめます。
+    """
     absent = _build([], hud=_hud({0: ("Knife", 2)}))
     for name in ("weapon_aura_slot", "weapon_orbit_slot", "weapon_orbit_ttl", "weapon_zone_slot", "weapon_zone_ttl"):
         assert np.all(_seg(absent, name)[1] == 1) and np.all(_seg(absent, name)[0] == 0), name
@@ -296,7 +368,11 @@ def test_slot_ttl_level_unknown_vs_confirmed_absent():
 
 
 def test_hud_slot_ids_and_levels_are_normalised_by_vocabulary():
-    """種類 id は語彙 index/(len-1)（末尾 unknown）、レベルは最大レベルで割る。"""
+    """種類 id は語彙 index/(len-1)（末尾 unknown）、レベルは最大レベルで割る。
+
+    武器・パッシブの id とレベル、v1 から引き継ぐ weapon_category の大分類が
+    既存の normalized_category と同じ規則で [0,1] になることを確かめます。
+    """
     params = load_deploy_obs_v2_feature_params()
     obs = _build([], hud=_hud({0: ("Garlic", 8), 1: ("Vandalier", 1)}, {0: ("TorronasBox", 9)}))
     ids, levels = _seg(obs, "weapon_slot_ids")[0], _seg(obs, "weapon_slot_levels")[0]
@@ -310,7 +386,11 @@ def test_hud_slot_ids_and_levels_are_normalised_by_vocabulary():
 # ---- スロット割り当て・残り時間（M9）----
 
 def test_zone_slot_requires_unique_emitter_fire_wand_plus_santa_water_is_unknown():
-    """zone を出しうる武器が1つならスロット有効、Fire Wand + Santa Water なら validity 0。"""
+    """zone を出しうる武器が1つならスロット有効、Fire Wand + Santa Water なら validity 0。
+
+    同じ種類を出す武器が2つあると、見えている zone がどちらの物か決められないので
+    スロットと残り時間は不明になります。残り時間が負なら 0 に clip されます。
+    """
     zone = [_track("weapon_zone", 96.0, 0.0, first_seen=9.0)]
     unique = _build(zone, hud=_hud({2: ("SantaWater", 3)}), duration_mult=1.5)
     assert _seg(unique, "weapon_zone_slot")[0][0] == pytest.approx(2 / 5)
@@ -327,7 +407,11 @@ def test_zone_slot_requires_unique_emitter_fire_wand_plus_santa_water_is_unknown
 
 
 def test_ttl_unknown_when_level_or_duration_mult_missing():
-    """レベルか持続時間倍率が分からないと残り時間は不明、スロットは有効のまま。"""
+    """レベルか持続時間倍率が分からないと残り時間は不明、スロットは有効のまま。
+
+    持続時間はレベルと倍率から決まるので、どちらかが欠けると推定できません。
+    一方でどの武器が出しているかは分かるので、スロットは有効なままです。
+    """
     orbit = [_track("weapon_orbit", 96.0, 0.0, first_seen=9.0)]
     no_level = _build(orbit, hud=_hud({0: ("KingBible", None)}))
     no_mult = _build(orbit, hud=_hud({0: ("KingBible", 1)}), duration_mult=None)
@@ -337,7 +421,11 @@ def test_ttl_unknown_when_level_or_duration_mult_missing():
 
 
 def test_effect_duration_table_formula():
-    """持続時間 = 固定分 + レベル別基準 × 倍率（LightningRing は倍率の影響なし）。"""
+    """持続時間 = 固定分 + レベル別基準 × 倍率（LightningRing は倍率の影響なし）。
+
+    代表的な武器とレベルで式を確かめ、持続時間を持たない武器や
+    最大レベルを超えたレベルは拒否されることも確かめます。
+    """
     assert effect_duration_s("SantaWater", 5, 1.0) == pytest.approx(2.85)
     assert effect_duration_s("LaBorra", 1, 1.3) == pytest.approx(0.1 + 4.0 * 1.3)
     assert effect_duration_s("FireWand", 8, 1.5) == pytest.approx(0.3)
@@ -352,7 +440,11 @@ def test_effect_duration_table_formula():
 # ---- パラメータ・入力検証（M11）----
 
 def test_weapon_track_max_age_frames_are_in_common_params():
-    """weapon 4クラスの max_age フレーム数を Common の特徴量パラメータに持つ。"""
+    """weapon 4クラスの max_age フレーム数を Common の特徴量パラメータに持つ。
+
+    sim と実機で track の消え方を揃えるための値なので、4クラス分が正の整数で揃っていること、
+    読み込んだパラメータが書き換えられないことを確かめます。
+    """
     params = load_deploy_obs_v2_feature_params()
     assert set(params["track_max_age_frames"]) == {"weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura"}
     assert all(type(v) is int and v > 0 for v in params["track_max_age_frames"].values())
@@ -361,7 +453,11 @@ def test_weapon_track_max_age_frames_are_in_common_params():
 
 
 def test_invalid_inputs_are_rejected_and_v1_segments_are_built():
-    """NaN 座標・未来の初観測・重複スロットを拒否し、HP・レベル・移動方向・bias を組み立てる。"""
+    """NaN 座標・未来の初観測・重複スロットを拒否し、HP・レベル・移動方向・bias を組み立てる。
+
+    おかしな入力は黙って neutral にせず例外にすること、v1 から引き継いだ segment が
+    渡された値どおりに入り、隠れた情報（enemy_hp・cooldown）は常に欠損になることを確かめます。
+    """
     with pytest.raises(ContractValidationError):
         TrackPx("enemy_normal", float("nan"), 0.0, 1.0, 1, 0.0, False)
     with pytest.raises(ContractValidationError):
@@ -380,10 +476,45 @@ def test_invalid_inputs_are_rejected_and_v1_segments_are_built():
     assert obs.as_policy_tensor(V2).shape == (3 * V2.dim,)
 
 
+def test_single_pass_iterables_are_rejected_for_tracks_and_hud_slots():
+    """tracks・hud_slots に generator など1回限りの iterable を渡すと例外になる。
+
+    入力検証で中身を消費すると全 track が消えて「確定した不在」と誤って出力されるため、
+    list/tuple 以外は fail-closed で拒否し、tuple は list と同じ出力になることを確かめます。
+    """
+    tracks = [_track("enemy_normal", 100.0, 0.0)]
+    with pytest.raises(ContractValidationError):  # _build は list() で包むので直接呼ぶ
+        build_deploy_obs_v2(
+            viewport_wh=(1920, 1080), player_px=(960.0, 540.0), tracks=(t for t in tracks),
+            hud_slots=_hud(), now_s=10.0, duration_mult=1.0, world_valid=True)
+    with pytest.raises(ContractValidationError):
+        _build(tracks, hud=(s for s in _hud()))
+    as_list = _build(tracks)
+    as_tuple = _build(tracks, hud=tuple(_hud()))
+    np.testing.assert_array_equal(as_list.values, as_tuple.values)
+    assert _seg(as_list, "visible_enemy_count")[0][0] == pytest.approx(1 / 20)
+
+
+def test_direction_bins_use_unclipped_offsets():
+    """方向ビンと距離は clip 前の相対座標から求め、clip は出力する位置値だけに掛ける。
+
+    プレイヤーが画面端にいると相対座標が半幅を超えます。先に clip すると方向が歪んで
+    別のビンに入るので、clip 前の座標で bin 8 に入ることを確かめます。
+    """
+    obs = _build([TrackPx("weapon_projectile", 1900.0, 1000.0, 5.0, 1, 0.0, False)], player_px=(100.0, 540.0))
+    density = _seg(obs, "weapon_projectile_density_16dir")[0]
+    assert directional_bin(1800 / 960, 460 / 960) == 8 != directional_bin(1.0, 460 / 960)
+    assert density[8] > 0 and np.sum(density > 0) == 1
+
+
 # ---- golden fixture（M12）----
 
 def _case_inputs(case):
-    """fixture の JSON 入力をビルダー引数へ戻す。"""
+    """fixture の JSON 入力をビルダー引数へ戻す。
+
+    JSON では tuple や dataclass を表せないので、list と dict から
+    TrackPx・HudSlot・tuple へ組み直します。
+    """
     data = dict(case["input"])
     data["viewport_wh"] = tuple(data["viewport_wh"])
     data["player_px"] = tuple(data["player_px"])
@@ -395,7 +526,11 @@ def _case_inputs(case):
 
 
 def test_golden_fixture_matches_builder_output():
-    """px 入力と期待 v2 tensor の golden fixture にビルダー出力が一致する。"""
+    """px 入力と期待 v2 tensor の golden fixture にビルダー出力が一致する。
+
+    03-07（sim）と 04-13（実機）はこの同じ fixture と一致させるので、
+    ビルダーの出力が意図せず変わったらここで検出します。
+    """
     golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
     assert golden["schema_hash"] == V2.schema_hash and len(golden["cases"]) >= 3
     for case in golden["cases"]:
