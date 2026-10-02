@@ -18,13 +18,19 @@ PRIVATE = LOGIC / "Private/Survivors"
 
 
 def _read(path: Path) -> str:
-    """C++ ソースを読む。無い環境は契約を検証できないので失敗させる。"""
+    """C++ ソースを読む。
+
+    無い環境では C++ との一致を検証できないので、skip ではなく失敗させます。
+    """
     assert path.is_file(), f"C++ source missing: {path}"
     return path.read_text(encoding="utf-8-sig")
 
 
 def _enum_names(source: str, enum_name: str) -> list[str]:
-    """enum class 本体の ``Name = N,`` を値の順に並べ、値が 0 から連番であることも確かめる。"""
+    """enum class 本体の ``Name = N,`` を値の順に並べる。
+
+    値が 0 から連番でないと語彙の index と enum 値がずれるので、そのことも確かめます。
+    """
     match = re.search(rf"enum\s+class\s+{enum_name}\b[^{{]*{{(?P<body>.*?)}};", source, re.DOTALL)
     assert match is not None, f"{enum_name} missing"
     pairs = re.findall(r"^\s*([A-Za-z_]\w*)\s*=\s*(\d+)\s*,?", match.group("body"), re.MULTILINE)
@@ -33,14 +39,20 @@ def _enum_names(source: str, enum_name: str) -> list[str]:
 
 
 def _constant(source: str, name: str) -> float:
-    """``static constexpr <型> Name = 値;`` の数値を読む。"""
+    """``static constexpr <型> Name = 値;`` の数値を読む。
+
+    最初に見つかった定義の値を返し、定数が見つからなければ比較できないので失敗させます。
+    """
     match = re.search(rf"\b{name}\s*=\s*([0-9.]+)f?\s*;", source)
     assert match is not None, f"{name} missing"
     return float(match.group(1))
 
 
 def _table_column(source: str, table: str, column: int) -> list[float]:
-    """``inline constexpr F...Params Table[MaxWeaponLevel] = {{...}, ...};`` の指定列を行順に読む。"""
+    """``inline constexpr F...Params Table[MaxWeaponLevel] = {{...}, ...};`` の指定列を行順に読む。
+
+    レベル別の表（1行が1レベル）から、持続時間など1つの列だけを取り出して list にします。
+    """
     match = re.search(rf"\b{table}\s*\[\s*MaxWeaponLevel\s*\]\s*=\s*{{(?P<body>.*?)\n\s*}};", source, re.DOTALL)
     assert match is not None, f"{table} missing"
     rows = re.findall(r"{([^{}]*)}", match.group("body"))
@@ -48,7 +60,10 @@ def _table_column(source: str, table: str, column: int) -> list[float]:
 
 
 def test_weapon_and_passive_vocabularies_match_cpp_enums():
-    """武器・パッシブ語彙が EWeaponType / EPassiveItemType の値順と一致し、末尾が unknown。"""
+    """武器・パッシブ語彙が EWeaponType / EPassiveItemType の値順と一致し、末尾が unknown。
+
+    sim の enum に武器が足されたのに yaml の語彙を直し忘れると、種類 id がずれるのでここで検出します。
+    """
     params = load_deploy_obs_v2_feature_params()
     types = _read(PUBLIC / "SurvivorsTypes.h")
     assert list(params["weapon_vocabulary"]) == _enum_names(types, "EWeaponType") + ["unknown"]
@@ -56,7 +71,10 @@ def test_weapon_and_passive_vocabularies_match_cpp_enums():
 
 
 def test_limits_and_direction_bins_match_cpp_constants():
-    """スロット数・最大レベル・ttl 上限・方向ビン数が C++ 定数と一致する。"""
+    """スロット数・最大レベル・ttl 上限・方向ビン数が C++ 定数と一致する。
+
+    スロット番号や残り時間の正規化に使う分母が sim と同じであることを確かめます。
+    """
     params = load_deploy_obs_v2_feature_params()
     constants = _read(PUBLIC / "SurvivorsGameConstants.h")
     wiki = _read(PUBLIC / "SurvivorsWikiSpec.h")
@@ -72,7 +90,11 @@ def test_limits_and_direction_bins_match_cpp_constants():
 
 
 def test_direction_bin_formula_is_the_cpp_build_dir_density_formula():
-    """C++ BuildDirDensity が Common と同じ方向ビン式・距離除外を使っている。"""
+    """C++ BuildDirDensity が Common と同じ方向ビン式・距離除外を使っている。
+
+    C++ 側の式の文字列を確かめ、角度から16分割する規則と距離0の除外が
+    Common の実装と食い違っていないことを保証します。
+    """
     source = _read(PRIVATE / "SurvivorsGameLogic.cpp")
     assert "if (D <= KINDA_SMALL_NUMBER) continue;" in source
     assert "const float A01 = (FMath::Atan2(Rel.Y, Rel.X) + PI) / (2.f * PI);" in source
@@ -80,7 +102,11 @@ def test_direction_bin_formula_is_the_cpp_build_dir_density_formula():
 
 
 def test_effect_duration_tables_match_cpp_constants_and_formulas():
-    """zone / orbit の持続時間表と式（固定分・倍率の掛かり方）が C++ と一致する。"""
+    """zone / orbit の持続時間表と式（固定分・倍率の掛かり方）が C++ と一致する。
+
+    残り時間の推定に使う持続時間が sim と同じになるよう、レベル別の値と
+    持続時間倍率の掛かる/掛からない部分を C++ の定数と実装から確かめます。
+    """
     durations = load_deploy_obs_v2_feature_params()["effect_durations"]
     constants = _read(PUBLIC / "SurvivorsGameConstants.h")
     for weapon, table, column in (("SantaWater", "SantaWaterTable", 3), ("LaBorra", "LaBorraTable", 3), ("KingBible", "KingBibleTable", 2), ("UnholyVespers", "UnholyVespersTable", 2)):
@@ -121,7 +147,10 @@ def _cpp_weapon_effect_kinds() -> dict[str, set[str]]:
             pending = []
 
     def class_kinds(name: str) -> set[str]:
-        """実装クラス（と基底クラス）が呼ぶ spawn から種類を求める。"""
+        """実装クラス（と基底クラス）が呼ぶ spawn から種類を求める。
+
+        進化形の武器は基底クラスの spawn を使うことがあるので、基底クラスもたどります。
+        """
         source = _read(next((PRIVATE / "Weapons").rglob(f"SurvivorsWeapon{name}Logic.cpp")))
         kinds = {"projectile"} if "SpawnProjectile" in source else set()
         kinds |= {"zone"} if "SpawnGroundZone" in source else set()
@@ -144,7 +173,11 @@ def _cpp_weapon_effect_kinds() -> dict[str, set[str]]:
 
 
 def test_weapon_effect_kinds_match_cpp_projectile_obs_view():
-    """武器→エフェクト種類の集合が C++ の spawn 呼び出しと GetProjectileObsView から求めたものと一致する。"""
+    """武器→エフェクト種類の集合が C++ の spawn 呼び出しと GetProjectileObsView から求めたものと一致する。
+
+    スロット割り当ては「同じ種類を出す武器が1つだけか」で決まるので、
+    この対応表が sim とずれるとスロットの有効・無効が変わってしまいます。
+    """
     table = {weapon: set(kinds) for weapon, kinds in load_deploy_obs_v2_feature_params()["weapon_effect_kinds"].items()}
     expected = _cpp_weapon_effect_kinds()
     assert table == expected
