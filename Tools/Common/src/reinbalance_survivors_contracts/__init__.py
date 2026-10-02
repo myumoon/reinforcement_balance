@@ -62,9 +62,15 @@ from .artifact_store import (
 )
 from .deploy_obs import (
     DEPLOY_OBS_SCHEMA_VERSION,
+    DEPLOY_OBS_V2_SCHEMA_VERSION,
     DeployObsField,
     DeployObsSchema,
     DeployObservation,
+)
+from .deploy_obs_v2_features import (
+    HudSlot,
+    TrackPx,
+    build_deploy_obs_v2,
 )
 from .item_decision import (
     CANDIDATE_FEATURES_SCHEMA_VERSION,
@@ -167,9 +173,13 @@ __all__ = [
     "StoreAuditReport",
     # deploy obs（DeployObs）
     "DEPLOY_OBS_SCHEMA_VERSION",
+    "DEPLOY_OBS_V2_SCHEMA_VERSION",
     "DeployObsField",
     "DeployObsSchema",
     "DeployObservation",
+    "HudSlot",
+    "TrackPx",
+    "build_deploy_obs_v2",
     # item decision（アイテム決定）
     "ITEM_DECISION_SCHEMA_VERSION",
     "CANDIDATE_FEATURES_SCHEMA_VERSION",
@@ -229,5 +239,6 @@ def contract_fingerprint() -> dict[str, str]:
         "ui_intent_v1_qualname": f"{UiIntentV1.__module__}.{UiIntentV1.__qualname__}",
         "non_model_ui_policy_config_hash": NonModelUiPolicyConfigV1.default_config().config_hash,
         "deploy_obs_v1_schema_hash": DeployObsSchema.default_v1().schema_hash,
+        "deploy_obs_v2_schema_hash": DeployObsSchema.default_v2().schema_hash,
         "action_semantics_v1_hash": ActionSemantics.default_v1().semantics_hash,
     }
