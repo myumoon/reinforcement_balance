@@ -42,7 +42,7 @@ _REQUIRED = [
 
 def _combat_policy() -> CombatPolicy:
     """runtime 契約どおりの次元を持つ小さな combat policy を作る。"""
-    obs_dim = 3 * DeployObsSchema.default_v1().dim
+    obs_dim = 3 * DeployObsSchema.default_v2().dim
     model = CombatGruPolicy(observation_dim=obs_dim, action_dim=REQUIRED_ACTION_DIM, hidden_dim=8).eval()
     return CombatPolicy(model=model, observation_dim=obs_dim, action_dim=REQUIRED_ACTION_DIM, hidden_dim=8)
 

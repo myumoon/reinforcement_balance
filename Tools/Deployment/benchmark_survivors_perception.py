@@ -43,6 +43,7 @@ from survivors.perception_benchmark import (
     SnapshotReplayTick,
     _formalize_benchmark_report,
     formal_threshold_content_hash,
+    obs_v2_residuals,
     run_benchmark,
 )
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
@@ -908,7 +909,7 @@ def _derive_calibration_residuals(
 
     # consumer wrapper と同じ segment を使って coord / category residual を導出する。
     # schema は一度だけ読み込み、ループ内で再利用する。
-    _deploy_schema = DeployObsSchema.default_v1()
+    _deploy_schema = DeployObsSchema.default_v2()
     from reinbalance_survivors_contracts.perception_error import ITEM_CATEGORY_SIZE as _ITEM_CAT_SIZE
     _field_by_name = {field.name: field for field in _deploy_schema.fields}
     # (offset, size, max_age_ms) — age plane は [0,1] 正規化なので変換に max_age_ms が必要。
@@ -1001,6 +1002,10 @@ def _derive_calibration_residuals(
                 append(session_id, frame_id, "coord_quantization_px",
                        abs(dx) * pixel_dims[i % 2] / 2.0, coord_confidence, latency_frames,
                        age_frames=seg_age_frames)
+        # DeployObs v2 の新 segment（16方向特徴・zone・スロット・残り時間）の残差。
+        # benchmark の obs_v2_errors と同じ関数で導出し、calibration profile の segment_error_stats へ渡す。
+        for v2_field, v2_residual in obs_v2_residuals(ground.deploy_obs, predicted.deploy_obs):
+            append(session_id, frame_id, v2_field, v2_residual, 1.0, latency_frames)
         # item_category は assembler が DeployObs へ格納した weapon_category から導出する。
         # level-up candidate choice_id ではなく、consumer wrapper と同一の分類を使う。
         if _wc_off is not None:

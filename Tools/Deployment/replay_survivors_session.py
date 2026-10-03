@@ -38,7 +38,7 @@ from survivors.replay.recorded_frame_source import DeterminismManifest
 from survivors.target_profile import load_runtime_profile
 
 # compare / update-golden は artifact を読まないので、runtime bundle と同じ既定 DeployObs schema で segment 名を付ける。
-_OBS_LAYOUT = DeployObsSchema.default_v1().layout
+_OBS_LAYOUT = DeployObsSchema.default_v2().layout
 
 
 def _add_artifact_args(parser: argparse.ArgumentParser) -> None:

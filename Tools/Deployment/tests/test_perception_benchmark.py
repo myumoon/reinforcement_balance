@@ -460,15 +460,23 @@ class TestRareSliceGate:
                 metrics[name] = 0.0
         passed, reasons = recompute_gate_from_metrics(metrics, formal=True)
         assert passed is False
+        # 出現数に依存しない class は従来どおり下限未満で失敗する。
         for class_name in (
             "player_anchor", "enemy_normal", "enemy_elite", "enemy_boss",
             "gem_blue", "gem_green", "gem_red", "pickup_heal",
-            "pickup_special", "hazard_projectile", "hazard_area",
+            "pickup_special",
         ):
             assert any(
                 f"foreground_class:{class_name}" in reason and "200" in reason
                 for reason in reasons
             )
+        # hazard・weapon は「該当なし」として実測 0 件が absent_slices に残り、必須条件から外れる。
+        for class_name in (
+            "hazard_projectile", "hazard_area",
+            "weapon_projectile", "weapon_zone", "weapon_aura", "weapon_orbit",
+        ):
+            assert metrics["absent_slices"][f"foreground_class:{class_name}"] == 0
+            assert not any(f"foreground_class:{class_name}" in reason for reason in reasons)
 
 
 

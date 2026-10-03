@@ -869,7 +869,7 @@ class RuntimeBundle:
         if not isinstance(combat_policy, CombatPolicy):
             raise BundleLoadError("combat_policy must be a CombatPolicy")
         config = ui_policy_config or NonModelUiPolicyConfigV1.load_default()
-        schema = deploy_schema or DeployObsSchema.default_v1()
+        schema = deploy_schema or DeployObsSchema.default_v2()
         semantics = action_semantics or ActionSemantics.default_v1()
         return cls(
             development_only=True,
@@ -1029,7 +1029,7 @@ class RuntimeBundle:
         if item_selector.ui_policy_config.to_wire() != installed_config.to_wire():
             raise BundleLoadError("ItemSelector UI policy does not match the installed policy")
 
-        deploy_schema = DeployObsSchema.default_v1()
+        deploy_schema = DeployObsSchema.default_v2()
         _require_exact(
             combat_manifest["deploy_schema_hash"],
             deploy_schema.schema_hash,

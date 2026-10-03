@@ -5,6 +5,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, replace
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
+from .hud_identity_vocabulary import load_hud_identity_vocabulary
 from .vision.entity_tracker import TrackedWorldStateV2
 from .vision.hud_parser import HudStateV1
 _ITEM_STATES = frozenset({"level_up_items", "level_up_fallback", "chest"})
@@ -68,7 +69,13 @@ class TemporalAssembler:
             return
         timer = max(value for value in (previous.timer_seconds, hud.timer_seconds) if value is not None) if previous.timer_seconds is not None or hud.timer_seconds is not None else None
         level = max(value for value in (previous.level, hud.level) if value is not None) if previous.level is not None or hud.level is not None else None
-        inventory = tuple(current if current is not None else old for old, current in zip(previous.inventory, hud.inventory, strict=True))
+        # 読めなかった枠（None）は前の identity を保持する（所持品は消えない）。空スロット確定は
+        # 新アイテムで埋まりうるので保持せず None（不明）へ戻す。
+        empty = load_hud_identity_vocabulary().empty_slot
+        inventory = tuple(
+            current if current is not None else (None if old == empty else old)
+            for old, current in zip(previous.inventory, hud.inventory, strict=True)
+        )
         hp = self._bounded_filter(previous.hp_ratio, hud.hp_ratio)
         xp = self._bounded_filter(previous.xp_ratio, hud.xp_ratio)
         self._hud = replace(

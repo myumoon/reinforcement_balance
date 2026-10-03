@@ -41,7 +41,7 @@ from survivors.runtime.artifact_bundle import (
 
 # combat model の既定次元。observation_dim は deploy schema の value/validity/age 三面。
 DEFAULT_HIDDEN_DIM = 8
-DEFAULT_OBSERVATION_DIM = 3 * DeployObsSchema.default_v1().dim
+DEFAULT_OBSERVATION_DIM = 3 * DeployObsSchema.default_v2().dim
 
 # 04-10 final verdict が subject として固定する exact hash field 群
 # （artifact_dag._FORMAL_PERCEPTION_SUBJECT_HASH_FIELDS と同一契約）。
@@ -141,7 +141,7 @@ def write_combat_package(
         {"model_config": dict(model_config), "model_state_dict": model.state_dict()},
         root / "model.pt",
     )
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     manifest = {
         "schema_version": COMBAT_PACKAGE_SCHEMA_VERSION,
         "checkpoint_sha256": hash_of("deployable-checkpoint"),
@@ -367,7 +367,7 @@ def release_entry(
         ].identity_hash,
         "combat_package_manifest_hash": canonical_hash(combat_manifest),
         "item_selector_manifest_hash": canonical_hash(item_selector_manifest),
-        "deploy_schema_hash": DeployObsSchema.default_v1().schema_hash,
+        "deploy_schema_hash": DeployObsSchema.default_v2().schema_hash,
         "action_semantics_hash": semantics.semantics_hash,
         "target_profile_ref_hash": target_profile.ref_hash,
         "target_capability_hash": target_capability_hash,

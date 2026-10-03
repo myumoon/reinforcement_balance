@@ -97,11 +97,12 @@ def test_nearest_enemy_offset_validity_zero_when_anchor_is_fallback() -> None:
     (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0), (0.3, -0.05),
 ])
 def test_directional_bin_matches_common_deploy_obs_v2_bin(dx, dy):
-    """Deployment の方位ビンが Common の DeployObs v2 ビルダーと同じ16ビンを返す。
+    """Deployment の方位ビンが Common の DeployObs v2 ビルダーの関数そのものである。
 
-    04-13 で Common の関数へ置き換えるまで同じ式が2か所にあるので、
-    片方だけ変わったら軸上・負ゼロ・対角の固定入力で検出できるようにします。
+    04-13 で Common の関数の再 export に置き換えたので、式が2か所に戻っていないことを
+    同一オブジェクトであることと、軸上・負ゼロ・対角の固定入力で確かめます。
     """
     from reinbalance_survivors_contracts.deploy_obs_v2_features import directional_bin as common_bin
 
+    assert directional_bin is common_bin
     assert directional_bin(dx, dy, 16) == common_bin(dx, dy, 16)

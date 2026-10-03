@@ -23,6 +23,7 @@ from reinbalance_survivors_contracts.perception_profile import (
     FormalVerdictPromotionError,
     HashMismatchError,
     InvalidResidualError,
+    OBS_V2_RESIDUAL_FIELDS,
     _FORMAL_FACTORY_TOKEN,
 )
 # _RESIDUAL_FIELDS は CalibrationResidual (Common) が使うためここでは不要
@@ -236,7 +237,12 @@ def fit_error_profile(
     for residual in residuals:
         if residual.confidence > 0.0:
             by_field.setdefault(residual.field, []).append(residual)
-    sample_counts = {name: len(rows) for name, rows in by_field.items()}
+    # v2 segment の残差は出現次第（zone が出ないステージ等）なので、2件未満なら fit を止めず
+    # 統計を出さない（segment_error_stats に載らない＝誤差が分からない）扱いにする。
+    for name in OBS_V2_RESIDUAL_FIELDS:
+        if len(by_field.get(name, ())) < 2:
+            by_field.pop(name, None)
+    sample_counts ={name: len(rows) for name, rows in by_field.items()}
     underpowered = {name: count for name, count in sample_counts.items() if count < 2}
     if underpowered:
         raise EmptyResidualError(
@@ -327,6 +333,11 @@ def fit_error_profile(
         final_e2e_session_ids=final_ids,
         calibration_session_hashes=hashes,
         field_sample_counts=sample_counts,
+        # v2 segment の誤差は profile 本体ではなく artifact の統計として残す（ttl の mean が初観測ずれ）
+        segment_error_stats={
+            name: {"mean": mean(name), "std": std(name), "count": sample_counts[name]}
+            for name in OBS_V2_RESIDUAL_FIELDS if name in by_field
+        },
         fit_code_hash=fit_code_hash,
         development_only=_factory_token is not _FORMAL_FACTORY_TOKEN,
         _factory_token=_factory_token,

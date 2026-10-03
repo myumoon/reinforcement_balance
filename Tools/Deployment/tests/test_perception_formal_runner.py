@@ -229,7 +229,7 @@ class _MockAssembler:
 
     def __init__(self, parser_artifact_hash: str = "9" * 64) -> None:
         self._assemblers: dict[str, RealObsAssembler] = {}
-        self._schema = DeployObsSchema.default_v1()
+        self._schema = DeployObsSchema.default_v2()
         self._parser_artifact_hash = parser_artifact_hash
 
     def assemble_frame(self, frame, session_id: str, frame_index: int):
@@ -623,7 +623,7 @@ def test_replay_excludes_zero_area_ground_rois_from_geometry_records() -> None:
     対応 predicted が usable でも geometry 成功値は生成せず、余剰予測として
     ui_false_positive に記録されることを確認します。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     ticks: list[SnapshotReplayTick] = []
     for index, ground_roi in enumerate(((200, 100, 200, 500), (100, 200, 400, 200))):
         session_id = f"zero-roi-{index}"
@@ -1148,7 +1148,7 @@ def test_final_sessions_are_reserved_before_provider_and_remain_consumed(tmp_pat
 
 def _make_tick(session_id: str, frame_idx: int, screen_state: str) -> SnapshotReplayTick:
     """指定 screen_state の最小 SnapshotReplayTick を生成するヘルパー（回帰テスト用）。"""
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     hud, world = _hud_world(session_id, frame_idx, frame_idx * 1_000_000_000, screen_state)
     snapshot = assembler.assemble(hud, world, schema, (1920, 1080))
@@ -1176,7 +1176,7 @@ def test_coord_quantization_uses_half_dimension_for_normalized_domain() -> None:
 
     正規化差 0.02、幅 1920 の場合、19.2px（38.4px ではない）になることを確認する（P1-4 regression）。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     width, height = 1920, 1080
     session_id = "coord-test"
@@ -1204,7 +1204,7 @@ def test_invalid_predicted_validity_excludes_coord_residual() -> None:
 
     invalid な predicted が noise sample として混入しないことを確認する。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     width, height = 1920, 1080
     session_id = "validity-test"
@@ -1234,7 +1234,7 @@ def test_predicted_none_skips_all_continuous_residuals() -> None:
     欠測フレームが ground truth を prediction として代入したゼロ残差で calibration を
     汚染しないことを確認する（P1 #2 regression）。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     width, height = 1920, 1080
     session_id = "none-predicted-test"
@@ -1266,7 +1266,7 @@ def test_age_frames_propagated_from_ui_state_age() -> None:
     完全に無効になる（P1 #3 regression）。item_context を合成して直接注入する。
     """
     from reinbalance_survivors_contracts.item_decision import CandidateFeatures, ItemDecisionFeatures
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     width, height = 1920, 1080
     session_id = "age-test"
@@ -1324,7 +1324,7 @@ def test_coord_age_comes_from_deploy_obs_age_not_item_context() -> None:
     item_context が None（ゲームプレイ中の標準状態）でも age_frames は 0 にならず、
     deploy_obs.age 平面から正しく変換されることを確認する。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     width, height = 1920, 1080
     session_id = "coord-age-test"
