@@ -86,7 +86,7 @@ def test_export_checked_labels_clips_sorts_and_keeps_negative_images(tmp_path: P
     source_label = session_a / "00000003.json"
     original_label = source_label.read_bytes()
     output_dir = tmp_path / "export"
-    class_map_path = Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v1.yaml"
+    class_map_path = Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v2.yaml"
 
     result = main(
         [
@@ -232,10 +232,10 @@ def test_export_accepts_repeated_session_id_filters(tmp_path: Path) -> None:
     ]
 
 
-def test_export_drops_weapon_effect_boxes_but_keeps_frames(tmp_path: Path, capsys) -> None:
-    """weapon_* の矩形だけを除外し、フレームと他の矩形は出力する。
+def test_export_writes_weapon_effect_boxes_as_world_categories_12_to_15(tmp_path: Path) -> None:
+    """weapon_* の矩形は world COCO の category 12〜15（class map v2 の ID）として出力する。
 
-    weapon_* だけのフレームも矩形0の画像として残り、除外数が表示される。
+    UI 側には入らず、world の categories にも weapon 4 クラスが並ぶ。
     """
     work_root = tmp_path / "work"
     session = work_root / "session-a"
@@ -264,8 +264,15 @@ def test_export_drops_weapon_effect_boxes_but_keeps_frames(tmp_path: Path, capsy
     ui = json.loads((output_dir / "ui_coco.json").read_text(encoding="utf-8"))
     assert [item["frame_id"] for item in world["images"]] == [1, 2]
     assert [item["frame_id"] for item in ui["images"]] == [1, 2]
-    assert [(item["image_id"], item["bbox"]) for item in world["annotations"]] == [(1, [1.0, 1.0, 2.0, 2.0])]
+    assert [(item["image_id"], item["category_id"], item["bbox"]) for item in world["annotations"]] == [
+        (1, 5, [1.0, 1.0, 2.0, 2.0]),
+        (1, 15, [0.0, 0.0, 9.0, 7.0]),
+        (2, 12, [1.0, 1.0, 1.0, 1.0]),
+        (2, 13, [3.0, 3.0, 3.0, 3.0]),
+    ]
     assert [(item["image_id"], item["category_id"]) for item in ui["annotations"]] == [(1, 1)]
-    category_names = {item["name"] for item in world["categories"] + ui["categories"]}
-    assert not any(name.startswith("weapon_") for name in category_names)
-    assert "武器エフェクトで除外した矩形数: 3" in capsys.readouterr().out
+    world_categories = {item["id"]: item["name"] for item in world["categories"]}
+    assert {k: world_categories[k] for k in range(12, 16)} == {
+        12: "weapon_projectile", 13: "weapon_zone", 14: "weapon_orbit", 15: "weapon_aura",
+    }
+    assert not any(item["name"].startswith("weapon_") for item in ui["categories"])

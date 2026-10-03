@@ -13,7 +13,7 @@ from .deploy_obs_adapter import NamedEstimate, build_deploy_observation, normali
 from .perception_snapshot import PerceptionSnapshot, UiPresentationSnapshotV1, build_ui_presentation_from_hud
 from .screen_space_features import build_screen_space_estimates
 from .temporal_state import TemporalAssembler, TemporalJoin
-from .vision.entity_tracker import TrackedEntityV1, TrackedWorldStateV1
+from .vision.entity_tracker import TrackedEntityV2, TrackedWorldStateV2
 from .vision.hud_parser import HudStateV1, ParsedCard
 def _weapon_category(item_id: str | None) -> str:
     """先頭 weapon identity を DeployObs の粗いカテゴリへ写す。
@@ -118,7 +118,7 @@ def _build_ui_policy_input(
 
 def _item_context(
     joined: TemporalJoin, snapshot_id: str, screen: dict[str, NamedEstimate],
-    gameplay_world: TrackedWorldStateV1 | None, last_gameplay_ns: int | None, now_ns: int | None,
+    gameplay_world: TrackedWorldStateV2 | None, last_gameplay_ns: int | None, now_ns: int | None,
     valid_ui_ids: frozenset[str],
 ) -> tuple[ItemDecisionFeatures | None, tuple[CandidateFeatures, ...]]:
     """item UI 用 context と候補を visible feature だけから構築する。
@@ -201,13 +201,13 @@ class RealObsAssembler:
         test と runtime が同じ assembly 経路のまま cadence 設定だけを差し替えられます。
         """
         self.temporal = temporal or TemporalAssembler()
-        self._last_gameplay_world: TrackedWorldStateV1 | None = None
+        self._last_gameplay_world: TrackedWorldStateV2 | None = None
         self._last_gameplay_screen: dict[str, NamedEstimate] | None = None
         self._last_gameplay_ns: int | None = None
         self._last_session_id: str | None = None
 
     def assemble(
-        self, hud: HudStateV1, world: TrackedWorldStateV1,
+        self, hud: HudStateV1, world: TrackedWorldStateV2,
         schema: DeployObsSchema, viewport: tuple[int, int],
         config: NonModelUiPolicyConfigV1 | None = None,
     ) -> PerceptionSnapshot | None:

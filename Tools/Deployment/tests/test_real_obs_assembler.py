@@ -12,10 +12,10 @@ from reinbalance_survivors_contracts.item_decision import ItemDecisionFeatures
 from survivors.deploy_obs_adapter import build_deploy_observation
 from survivors.perception_snapshot import UiPresentationSnapshotV1
 from survivors.real_obs_assembler import RealObsAssembler
-from survivors.vision.entity_tracker import PlayerAnchorState, TrackedEntityV1, TrackedWorldStateV1
+from survivors.vision.entity_tracker import PlayerAnchorState, TrackedEntityV2, TrackedWorldStateV2
 from survivors.vision.hud_parser import HudStateV1, ParsedCard
 
-def _inputs(state="gameplay", *, ts=1_000_000_000) -> tuple[HudStateV1, TrackedWorldStateV1]:
+def _inputs(state="gameplay", *, ts=1_000_000_000) -> tuple[HudStateV1, TrackedWorldStateV2]:
     """assembler test 用の同時刻 HUD/world を返す。
 
     visible と off-screen の敵を混ぜ、release 境界を一度に検証します。
@@ -28,9 +28,9 @@ def _inputs(state="gameplay", *, ts=1_000_000_000) -> tuple[HudStateV1, TrackedW
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    visible = TrackedEntityV1(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
-    leaked = TrackedEntityV1(2, 2, "enemy_normal", "enemy", .99, 1, 4, .51, .5, .01, 0., 0., 0., False, False)
-    world = TrackedWorldStateV1(4, ts, [visible, leaked], PlayerAnchorState(.5, .5, .9, False))
+    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False, .05, .05, 0)
+    leaked = TrackedEntityV2(2, 2, "enemy_normal", "enemy", .99, 1, 4, .51, .5, .01, 0., 0., 0., False, False, .05, .05, 0)
+    world = TrackedWorldStateV2(4, ts, [visible, leaked], PlayerAnchorState(.5, .5, .9, False))
     return hud, world
 
 def test_assemble_builds_release_observation_without_offscreen_leak() -> None:
@@ -98,7 +98,7 @@ def test_item_context_uses_cached_gameplay_danger() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world_lu = TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
     assert snapshot is not None
     assert snapshot.item_context is not None
@@ -120,9 +120,9 @@ def test_assemble_returns_none_for_old_frame() -> None:
             ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
             False, False, False, .9, "ok",
         )
-    snap1 = assembler.assemble(_make_hud(5, 2_000_000_000), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap1 = assembler.assemble(_make_hud(5, 2_000_000_000), TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap1 is not None
-    snap2 = assembler.assemble(_make_hud(3, 1_500_000_000), TrackedWorldStateV1(3, 1_500_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap2 = assembler.assemble(_make_hud(3, 1_500_000_000), TrackedWorldStateV2(3, 1_500_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap2 is None
 
 def test_gameplay_cache_cleared_on_session_change() -> None:
@@ -141,7 +141,7 @@ def test_gameplay_cache_cleared_on_session_change() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world_lu = TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
     assert snapshot is not None
     assert snapshot.item_context is None
@@ -157,7 +157,7 @@ def test_low_combat_validity_does_not_update_danger_cache() -> None:
     hud_gp, world_gp = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
     hud_low = dataclasses.replace(hud_gp, frame_index=5, captured_monotonic_ns=2_000_000_000, screen_state_confidence=.3)
-    world_empty = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world_empty = TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     assembler.assemble(hud_low, world_empty, schema, (1000, 1000))
     card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
     hud_lu = HudStateV1(
@@ -166,7 +166,7 @@ def test_low_combat_validity_does_not_update_danger_cache() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world_lu = TrackedWorldStateV1(6, 3_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world_lu = TrackedWorldStateV2(6, 3_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
     assert snapshot is not None
     assert snapshot.item_context is not None
@@ -186,7 +186,7 @@ def test_item_context_fail_closed_without_gameplay_cache() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world_lu = TrackedWorldStateV1(4, 1_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world_lu = TrackedWorldStateV2(4, 1_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
     assert snapshot is not None
     assert snapshot.item_context is None
@@ -206,7 +206,7 @@ def test_duplicate_card_ids_fail_closed() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (card_a, card_b), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world = TrackedWorldStateV1(4, 1_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world = TrackedWorldStateV2(4, 1_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     with pytest.raises(ValueError):
         RealObsAssembler().assemble(hud, world, schema, (1000, 1000))
 
@@ -221,7 +221,7 @@ def test_assemble_respects_policy_hz() -> None:
     snap1 = assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
     assert snap1 is not None
     hud2 = dataclasses.replace(hud_gp, frame_index=5, captured_monotonic_ns=hud_gp.captured_monotonic_ns + 1_000_000)
-    world2 = TrackedWorldStateV1(5, world_gp.timestamp_ns + 1_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world2 = TrackedWorldStateV2(5, world_gp.timestamp_ns + 1_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snap2 = assembler.assemble(hud2, world2, schema, (1000, 1000))
     assert snap2 is None  # 1ms は 15 Hz interval (66.7ms) 未満
 
@@ -233,8 +233,8 @@ def test_item_context_world_age_and_snapshot_age_computed_independently() -> Non
     schema = DeployObsSchema.default_v1()
     assembler = RealObsAssembler()
     hud_gp, _ = _inputs("gameplay")  # ts=1B
-    visible = TrackedEntityV1(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
-    world_skewed = TrackedWorldStateV1(4, 960_000_000, [visible], PlayerAnchorState(.5, .5, .9, False))
+    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False, .05, .05, 0)
+    world_skewed = TrackedWorldStateV2(4, 960_000_000, [visible], PlayerAnchorState(.5, .5, .9, False))
     assembler.assemble(hud_gp, world_skewed, schema, (1000, 1000))
     card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
     hud_lu = HudStateV1(
@@ -243,7 +243,7 @@ def test_item_context_world_age_and_snapshot_age_computed_independently() -> Non
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world_lu = TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
     assert snapshot is not None and snapshot.item_context is not None
     assert snapshot.item_context.world_age == pytest.approx(1.04)  # (2B - 960M) / 1e9
@@ -267,7 +267,7 @@ def test_fallback_card_excluded_from_model_choices() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (card_item, card_fallback), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world_lu = TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
     assert snapshot is not None and snapshot.item_context is not None
     assert all(c.item_id != "gold_bag" for c in snapshot.choices)
@@ -291,7 +291,7 @@ def test_item_context_excludes_low_confidence_ui_targets() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world_lu = TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
     assert snapshot is not None
     assert snapshot.item_context is None
@@ -307,7 +307,7 @@ def test_skew_ms_uses_joined_timestamps() -> None:
     assembler = RealObsAssembler()
     # HUD ts=2B, world ts=1B → joined 後は両者が採用されるので skew = |2B - 1B| = 1B ns = 1000 ms
     hud, _ = _inputs(ts=2_000_000_000)
-    world = TrackedWorldStateV1(4, 1_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world = TrackedWorldStateV2(4, 1_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud, world, schema, (1000, 1000))
     assert snapshot is not None
     assert snapshot.diagnostics["hud_world_skew_ms"] == pytest.approx(1000.)
@@ -331,7 +331,7 @@ def test_item_context_slot_encoding_is_binary_occupancy() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world_lu = TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
     assert snapshot is not None and snapshot.item_context is not None
     ctx = snapshot.item_context
@@ -366,7 +366,7 @@ def test_ui_policy_input_hp_025_selects_chicken() -> None:
     assembler = RealObsAssembler()
     card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
     card_chk = ParsedCard(1, "chicken_leg", "fallback", 0, .99, "ok", (500, 100, 800, 300))
-    snap = assembler.assemble(_fallback_hud(0.25, (card_gold, card_chk)), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(_fallback_hud(0.25, (card_gold, card_chk)), TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is not None
     assert snap.ui_policy_input.hp_fraction == pytest.approx(0.25)
     assert snap.ui_policy_input.screen_state.value == "fallback"
@@ -382,7 +382,7 @@ def test_ui_policy_input_hp_090_selects_gold() -> None:
     assembler = RealObsAssembler()
     card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
     card_chk = ParsedCard(1, "chicken_leg", "fallback", 0, .99, "ok", (500, 100, 800, 300))
-    snap = assembler.assemble(_fallback_hud(0.90, (card_gold, card_chk)), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(_fallback_hud(0.90, (card_gold, card_chk)), TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is not None
     config = NonModelUiPolicyConfigV1.default_config()
     intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
@@ -395,7 +395,7 @@ def test_ui_policy_input_chicken_only_selects_chicken() -> None:
     schema = DeployObsSchema.default_v1()
     assembler = RealObsAssembler()
     card_chk = ParsedCard(0, "chicken_leg", "fallback", 0, .99, "ok", (100, 100, 400, 300))
-    snap = assembler.assemble(_fallback_hud(0.90, (card_chk,)), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(_fallback_hud(0.90, (card_chk,)), TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is not None
     config = NonModelUiPolicyConfigV1.default_config()
     intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
@@ -413,7 +413,7 @@ def test_ui_policy_input_invalid_target_stops() -> None:
     # confidence=0.1 < 0.35 → validity=False
     card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .1, "ok", (100, 100, 400, 300))
     card_chk = ParsedCard(1, "chicken_leg", "fallback", 0, .1, "ok", (500, 100, 800, 300))
-    snap = assembler.assemble(_fallback_hud(0.25, (card_gold, card_chk)), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(_fallback_hud(0.25, (card_gold, card_chk)), TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is not None
     config = NonModelUiPolicyConfigV1.default_config()
     intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
@@ -429,7 +429,7 @@ def test_ui_policy_input_unknown_semantic_stops() -> None:
     schema = DeployObsSchema.default_v1()
     assembler = RealObsAssembler()
     card_unk = ParsedCard(0, "mystery_box", "fallback", 0, .99, "ok", (100, 100, 400, 300))
-    snap = assembler.assemble(_fallback_hud(0.25, (card_unk,)), TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(_fallback_hud(0.25, (card_unk,)), TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is not None
     config = NonModelUiPolicyConfigV1.default_config()
     intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
@@ -446,8 +446,8 @@ def test_item_context_fallback_anchor_resets_direction_to_neutral() -> None:
     schema = DeployObsSchema.default_v1()
     assembler = RealObsAssembler()
     # is_fallback=True の gameplay frame でキャッシュを構築
-    visible = TrackedEntityV1(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
-    world_gp_fb = TrackedWorldStateV1(4, 1_000_000_000, [visible], PlayerAnchorState(.5, .5, .9, True))
+    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False, .05, .05, 0)
+    world_gp_fb = TrackedWorldStateV2(4, 1_000_000_000, [visible], PlayerAnchorState(.5, .5, .9, True))
     hud_gp, _ = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp_fb, schema, (1000, 1000))
     card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
@@ -457,7 +457,7 @@ def test_item_context_fallback_anchor_resets_direction_to_neutral() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, True))
+    world_lu = TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, True))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
     assert snapshot is not None and snapshot.item_context is not None
     # fallback anchor → offset_validity=0 → direction は中立値へリセット
@@ -474,8 +474,8 @@ def test_item_context_real_anchor_preserves_direction() -> None:
     """
     schema = DeployObsSchema.default_v1()
     assembler = RealObsAssembler()
-    visible = TrackedEntityV1(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
-    world_gp = TrackedWorldStateV1(4, 1_000_000_000, [visible], PlayerAnchorState(.5, .5, .9, False))
+    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False, .05, .05, 0)
+    world_gp = TrackedWorldStateV2(4, 1_000_000_000, [visible], PlayerAnchorState(.5, .5, .9, False))
     hud_gp, _ = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
     card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
@@ -485,7 +485,7 @@ def test_item_context_real_anchor_preserves_direction() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world_lu = TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snapshot = assembler.assemble(hud_lu, world_lu, schema, (1000, 1000))
     assert snapshot is not None and snapshot.item_context is not None
     # 実 anchor → 0.2 オフセットが保持される
@@ -515,7 +515,7 @@ def test_item_context_occupancy_schema_is_deterministic() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world_lu = TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world_lu = TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     for a in (assembler1, assembler2):
         a.assemble(hud_gp, world_gp, schema, (1000, 1000))
     snap1 = assembler1.assemble(hud_lu, world_lu, schema, (1000, 1000))
@@ -542,7 +542,7 @@ def test_ui_policy_input_missing_hp_returns_none() -> None:
         hp_ratio=None,
         hp_confidence=0.0,
     )
-    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(hud, TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is None
 
 
@@ -558,7 +558,7 @@ def test_ui_policy_input_hp_confidence_zero_returns_none() -> None:
         _fallback_hud(0.5, (card_gold,)),
         hp_confidence=0.0,
     )
-    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(hud, TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is None
 
 
@@ -576,7 +576,7 @@ def test_ui_policy_input_low_confidence_screen_maps_to_unknown() -> None:
         screen_state="chest",
         screen_state_confidence=0.3,
     )
-    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(hud, TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is not None
     assert snap.ui_policy_input.screen_state is ScreenState.UNKNOWN
     config = NonModelUiPolicyConfigV1.default_config()
@@ -601,7 +601,7 @@ def test_ui_policy_input_target_reached_transition_confirm() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (), "c" * 64, (confirm_btn,),
         False, False, False, .9, "ok",
     )
-    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(hud, TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is not None
     config = NonModelUiPolicyConfigV1.default_config()
     intent = decide_non_model_ui_intent(snap.ui_policy_input, config)
@@ -626,7 +626,7 @@ def test_policy_input_chest_with_no_hp() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (), "c" * 64, (ack_btn,),
         False, False, False, .9, "ok",
     )
-    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(hud, TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is not None
     assert snap.ui_policy_input.screen_state is ScreenState.CHEST
     config = NonModelUiPolicyConfigV1.default_config()
@@ -650,7 +650,7 @@ def test_policy_input_confirm_with_no_hp() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (), "c" * 64, (confirm_btn,),
         False, False, False, .9, "ok",
     )
-    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(hud, TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is not None
     assert snap.ui_policy_input.screen_state is ScreenState.CONFIRM
     config = NonModelUiPolicyConfigV1.default_config()
@@ -677,7 +677,7 @@ def test_stale_hud_clears_policy_input_and_candidate_validity() -> None:
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    world_fresh = TrackedWorldStateV1(5, 1_400_000_000, [], PlayerAnchorState(.5, .5, .9, False))
+    world_fresh = TrackedWorldStateV2(5, 1_400_000_000, [], PlayerAnchorState(.5, .5, .9, False))
     snap = assembler.assemble(hud_stale, world_fresh, schema, (1000, 1000))
     assert snap is not None
     assert snap.ui_policy_input is None
@@ -693,7 +693,7 @@ def test_fallback_hp_confidence_below_threshold_returns_none() -> None:
     assembler = RealObsAssembler()
     card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
     hud = dataclasses.replace(_fallback_hud(0.5, (card_gold,)), hp_confidence=0.1)
-    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(hud, TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is None
 
 
@@ -706,7 +706,7 @@ def test_fallback_hp_confidence_at_threshold_generates_input() -> None:
     assembler = RealObsAssembler()
     card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
     hud = dataclasses.replace(_fallback_hud(0.5, (card_gold,)), hp_confidence=0.36)
-    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(hud, TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is not None
 
 
@@ -735,7 +735,7 @@ def test_meta_priority_selects_valid_reroll_button() -> None:
     config = NonModelUiPolicyConfigV1(
         meta_policy_enabled=True, meta_priority=("reroll", "skip", "banish"),
     )
-    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000), config=config)
+    snap = assembler.assemble(hud, TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000), config=config)
     assert snap is not None and snap.ui_policy_input is not None
     assert snap.ui_policy_input.button is not None
     assert snap.ui_policy_input.button.semantic == "reroll"
@@ -760,6 +760,42 @@ def test_no_config_button_is_none() -> None:
     )
     hud_gp, world_gp = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
-    snap = assembler.assemble(hud, TrackedWorldStateV1(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
+    snap = assembler.assemble(hud, TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is not None
     assert snap.ui_policy_input.button is None
+
+
+def test_weapon_tracks_do_not_raise_hazard_or_boss_flag() -> None:
+    """tracker が作った weapon track は item context の hazard_flag / boss_flag を立てない。
+
+    weapon は大分類 weapon なので、hazard / enemy だけを見る2つの flag に影響しないことを確認します。
+    """
+    from survivors.vision.entity_tracker import EntityTracker, default_class_map
+    from survivors.vision.world_detector import DetectionResult
+
+    cm = default_class_map()
+    tracker = EntityTracker({i: 5 for i in range(cm.num_classes)}, 0.7, 0.6, 0.9, coarse_by_class_id=cm.coarse_by_class_id())
+    weapon_ids = [cm.name_to_id(n) for n in ("weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura")]
+    boxes = [[600 + 40 * i, 400, 630 + 40 * i, 430] for i in range(4)] + [[700, 500, 730, 530]]
+    det = DetectionResult(
+        boxes_xyxy=np.array(boxes, dtype=np.float32), scores=np.full(5, .9, dtype=np.float32),
+        class_ids=np.array(weapon_ids + [cm.name_to_id("enemy_normal")], dtype=np.int32),
+        image_width=1000, image_height=1000,
+    )
+    world_gp = TrackedWorldStateV2.from_state(tracker.update(det, 4, 1_000_000_000), 4, 1_000_000_000)
+    assert sorted(t.coarse_class for t in world_gp.tracks) == ["enemy"] + ["weapon"] * 4
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud_gp, _ = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    snapshot = assembler.assemble(hud_lu, TrackedWorldStateV2(5, 2_000_000_000, [], world_gp.player_anchor), schema, (1000, 1000))
+    assert snapshot is not None and snapshot.item_context is not None
+    assert snapshot.item_context.hazard_flag is False
+    assert snapshot.item_context.boss_flag is False

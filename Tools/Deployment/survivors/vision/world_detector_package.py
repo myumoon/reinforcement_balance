@@ -5,10 +5,10 @@ development weight、resolved config、class map、tracker config、
 metrics、dataset/target/build/contract hash を
 content-addressed temp store へ atomic publish する。
 
-package ディレクトリ内に manifest.json / world_detector_v1.yaml /
-world_class_map_v1.yaml を格納するため、別環境でも restore できる。
+package ディレクトリ内に manifest.json / world_detector_v2.yaml /
+world_class_map_v2.yaml を格納するため、別環境でも restore できる。
 
-restore 後に 04-06 golden fixture と同じ TrackedWorldStateV1 schema を返し、
+restore 後に 04-06 golden fixture と同じ TrackedWorldStateV2 schema を返し、
 schema 差を PackageSchemaError で拒否する。
 
 PR#315 では development package のみ提供する。formal publish は 04-08 に委譲する。
@@ -47,8 +47,8 @@ PACKAGE_SCHEMA_VERSION = "world_detector_package.v1"
 
 # package 内のファイル名（固定）
 _MANIFEST_NAME = "manifest.json"
-_CONFIG_NAME = "world_detector_v1.yaml"
-_CLASS_MAP_NAME = "world_class_map_v1.yaml"
+_CONFIG_NAME = "world_detector_v2.yaml"
+_CLASS_MAP_NAME = "world_class_map_v2.yaml"
 _WEIGHT_NAME = "model.pt"
 
 
@@ -68,7 +68,7 @@ class PackageManifest:
     config_hash: str
     build_hash: str
     class_map_hash: str
-    contract_hash: str          # 04-06 TrackedWorldStateV1 フィールド定義の hash
+    contract_hash: str          # 04-06 TrackedWorldStateV2 フィールド定義の hash
     metrics: dict               # EvalMetrics.to_json() の dict
     checkpoint_selection: dict  # CheckpointSelector.to_dict()
     weight_included: bool       # package 内に model.pt があるか
@@ -197,30 +197,30 @@ class FormalPackageRejectedError(ValueError):
 
 
 class PackageSchemaError(ValueError):
-    """restore 後の schema が TrackedWorldStateV1 と一致しないときに送出される。"""
+    """restore 後の schema が TrackedWorldStateV2 と一致しないときに送出される。"""
 
 
 # ---- contract hash ----
 
 def _compute_contract_hash() -> str:
-    """TrackedWorldStateV1 契約全体の SHA-256 を計算する。
+    """TrackedWorldStateV2 契約全体の SHA-256 を計算する。
 
-    TrackedWorldStateV1・TrackedEntityV1・PlayerAnchorState の
+    TrackedWorldStateV2・TrackedEntityV2・PlayerAnchorState の
     フィールド名と型注釈を含む canonical descriptor を JSON 化してハッシュする。
     トップレベルフィールドの追加・削除・型変更でもハッシュが変わり、
     schema ドリフトを確実に検知する。
     """
     import dataclasses as _dc
     from survivors.vision.entity_tracker import (
-        TrackedWorldStateV1, TrackedEntityV1, PlayerAnchorState,
+        TrackedWorldStateV2, TrackedEntityV2, PlayerAnchorState,
     )
 
     def _descriptor(cls: type) -> dict:
         return {f.name: str(f.type) for f in _dc.fields(cls)}
 
     descriptor = {
-        "TrackedWorldStateV1": _descriptor(TrackedWorldStateV1),
-        "TrackedEntityV1": _descriptor(TrackedEntityV1),
+        "TrackedWorldStateV2": _descriptor(TrackedWorldStateV2),
+        "TrackedEntityV2": _descriptor(TrackedEntityV2),
         "PlayerAnchorState": _descriptor(PlayerAnchorState),
     }
     payload = json.dumps(descriptor, sort_keys=True)
@@ -357,7 +357,7 @@ def publish_development_package(
 
     store_dir/<content_hash>/ に manifest.json / config / class_map を配置する。
     formal_detector_eligible は常に False（04-08 が差し替える）。
-    contract_hash は TrackedWorldStateV1 フィールド定義から計算する。
+    contract_hash は TrackedWorldStateV2 フィールド定義から計算する。
 
     weight_path が指定されている場合は model.pt としてコピーし、copy 前後で
     model_hash を検証する。指定した path の欠落や不一致は publish を失敗させる。
@@ -453,16 +453,16 @@ def restore_package(
     frame_bgr: np.ndarray,
     *,
     require_formal: bool = False,
-) -> "TrackedWorldStateV1":
-    """package manifest から detector を復元し、1 フレームを推論して TrackedWorldStateV1 を返す。
+) -> "TrackedWorldStateV2":
+    """package manifest から detector を復元し、1 フレームを推論して TrackedWorldStateV2 を返す。
 
     package ディレクトリ内の config / class_map から detector を構築する。
     weight_included=True のとき model.pt を load する（torch 不在時は stub）。
-    schema が TrackedWorldStateV1 フィールド定義と一致しない場合は PackageSchemaError。
+    schema が TrackedWorldStateV2 フィールド定義と一致しない場合は PackageSchemaError。
     require_formal=True のとき、development package は FormalPackageRejectedError で拒否する。
     推論スコア閾値は manifest の score_threshold を使用する（呼び出し側引数不可）。
     """
-    from survivors.vision.entity_tracker import EntityTracker, TrackedWorldStateV1
+    from survivors.vision.entity_tracker import EntityTracker, TrackedWorldStateV2
     from survivors.vision.world_detector import WorldDetector
     from survivors.vision.world_dataset import load_class_map
 
@@ -494,7 +494,7 @@ def restore_package(
         raise PackageSchemaError(
             f"contract_hash 不一致: package={pkg_manifest.contract_hash!r}"
             f" current={current_contract_hash!r}。"
-            " TrackedWorldStateV1 のフィールド定義が変更されています。"
+            " TrackedWorldStateV2 のフィールド定義が変更されています。"
         )
 
     # -- package 内 config / class_map を使う
@@ -557,10 +557,11 @@ def restore_package(
         max_match_cost=tracker_cfg.get("max_match_cost", 0.7),
         velocity_ema_alpha=tracker_cfg.get("velocity_ema_alpha", 0.6),
         confidence_decay_per_frame=tracker_cfg.get("confidence_decay_per_frame", 0.9),
+        coarse_by_class_id=cm.coarse_by_class_id(),
     )
 
     state = tracker.update(result, frame_index=0, timestamp_ns=0)
-    v1 = TrackedWorldStateV1.from_state(state, frame_index=0, timestamp_ns=0, class_map_path=cm_path)
+    v2 = TrackedWorldStateV2.from_state(state, frame_index=0, timestamp_ns=0, class_map_path=cm_path)
 
     # -- schema 検証は上の contract_hash 比較で実施済み（_compute_contract_hash が3クラス全体をカバー）
-    return v1
+    return v2

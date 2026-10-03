@@ -1,6 +1,6 @@
 """WorldDetector のテスト。
 
-feasibility config の architecture dispatch、ssdlite320 head の num_classes=12 置換、
+feasibility config の architecture dispatch、ssdlite320 head の num_classes=16（class map v2 由来）置換、
 未実装 architecture の silent fallback 禁止、checkpoint manifest hash 保存、
 development checkpoint の formal loader 拒否を検証する。
 実 GPU・実画像・実 weight は不要。
@@ -25,8 +25,8 @@ from survivors.vision.world_detector import (
 
 
 CONFIGS_DIR = pathlib.Path(__file__).parents[2] / "configs"
-DETECTOR_CONFIG_PATH = CONFIGS_DIR / "world_detector_v1.yaml"
-CLASS_MAP_PATH = CONFIGS_DIR / "world_class_map_v1.yaml"
+DETECTOR_CONFIG_PATH = CONFIGS_DIR / "world_detector_v2.yaml"
+CLASS_MAP_PATH = CONFIGS_DIR / "world_class_map_v2.yaml"
 
 
 # ---- config loading ----
@@ -34,15 +34,57 @@ CLASS_MAP_PATH = CONFIGS_DIR / "world_class_map_v1.yaml"
 class TestDetectorConfig:
     def test_load_config_schema_version(self):
         cfg = load_detector_config(DETECTOR_CONFIG_PATH)
-        assert cfg["schema_version"] == "world_detector.v1"
+        assert cfg["schema_version"] == "world_detector.v2"
 
     def test_formal_detector_eligible_false(self):
         cfg = load_detector_config(DETECTOR_CONFIG_PATH)
         assert cfg["formal_detector_eligible"] is False
 
-    def test_num_classes_is_12(self):
+    def test_num_classes_is_16(self):
+        """既定 config（v2）の num_classes は class map v2 と同じ 16。
+
+        background 1 + foreground 15（武器エフェクト4クラスを含む）の合計。
+        """
         cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        assert cfg["model"]["num_classes"] == 16
+
+    def test_v2_tracker_max_age_matches_common_weapon_track_age(self):
+        """weapon 4 クラスの max_age は Common の track_max_age_frames と同じ値。
+
+        04-13 が同じ値で sim の初観測時刻を破棄するため、ずれると sim と実機の特徴量が食い違う。
+        """
+        from reinbalance_survivors_contracts.deploy_obs_v2_features import load_deploy_obs_v2_feature_params
+
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        common = load_deploy_obs_v2_feature_params()["track_max_age_frames"]
+        ages = cfg["tracker"]["max_age_by_class"]
+        assert {k: ages[k] for k in common} == dict(common)
+
+    def test_v1_config_still_loads_with_12_classes(self):
+        """v1 config は残しており、12 クラスのまま読める。"""
+        cfg = load_detector_config(CONFIGS_DIR / "world_detector_v1.yaml")
+        assert cfg["schema_version"] == "world_detector.v1"
         assert cfg["model"]["num_classes"] == 12
+
+    def test_v1_config_rejects_16_classes(self):
+        """v1 config の num_classes を 16 にすると v1 class map と合わないので拒否する。"""
+        import yaml
+        from survivors.vision.world_detector import validate_detector_config
+
+        cfg = yaml.safe_load((CONFIGS_DIR / "world_detector_v1.yaml").read_text(encoding="utf-8"))
+        cfg["model"]["num_classes"] = 16
+        with pytest.raises(ValueError, match="num_classes"):
+            validate_detector_config(cfg)
+
+    def test_v1_config_rejects_weapon_class_keys(self):
+        """v1 config では v1 class map に無い weapon クラス名を max_age_by_class に書けない。"""
+        import yaml
+        from survivors.vision.world_detector import validate_detector_config
+
+        cfg = yaml.safe_load((CONFIGS_DIR / "world_detector_v1.yaml").read_text(encoding="utf-8"))
+        cfg["tracker"]["max_age_by_class"]["weapon_aura"] = 10
+        with pytest.raises(ValueError, match="weapon_aura"):
+            validate_detector_config(cfg)
 
     def test_architecture_is_ssdlite320(self):
         cfg = load_detector_config(DETECTOR_CONFIG_PATH)
@@ -64,14 +106,14 @@ class TestArchitectureDispatch:
         """ssdlite320 は正常に detector を組み立てられる（weight ロードなし）。"""
         cfg = load_detector_config(DETECTOR_CONFIG_PATH)
         det = WorldDetector.from_config(cfg, CLASS_MAP_PATH)
-        assert det.num_classes == 12
+        assert det.num_classes == 16
 
     def test_head_output_count_matches_num_classes(self):
         """モデルヘッドの分類次元が num_classes と一致する。"""
         cfg = load_detector_config(DETECTOR_CONFIG_PATH)
         det = WorldDetector.from_config(cfg, CLASS_MAP_PATH)
         # head_num_classes は model 内部の出力クラス数を返す
-        assert det.head_num_classes == 12
+        assert det.head_num_classes == 16
 
 
 # ---- detection result contract ----
@@ -334,9 +376,21 @@ class TestArchitectureDispatchP1:
     def test_num_classes_mismatch_raises(self, tmp_path):
         """class map の num_classes と config が不一致なら拒否する。"""
         cfg = load_detector_config(DETECTOR_CONFIG_PATH)
-        cfg["model"]["num_classes"] = 5  # class map は 12
+        cfg["model"]["num_classes"] = 5  # class map は 16
         with pytest.raises(ValueError, match="num_classes"):
             WorldDetector.from_config(cfg, CLASS_MAP_PATH)
+
+    def test_v1_config_with_v2_class_map_fails_closed(self):
+        """v1 config（12）と v2 class map（16）の組み合わせは拒否する。"""
+        cfg = load_detector_config(CONFIGS_DIR / "world_detector_v1.yaml")
+        with pytest.raises(ValueError, match="num_classes"):
+            WorldDetector.from_config(cfg, CLASS_MAP_PATH)
+
+    def test_v2_config_with_v1_class_map_fails_closed(self):
+        """v2 config（16）と v1 class map（12）の組み合わせは拒否する。"""
+        cfg = load_detector_config(DETECTOR_CONFIG_PATH)
+        with pytest.raises(ValueError, match="num_classes"):
+            WorldDetector.from_config(cfg, CONFIGS_DIR / "world_class_map_v1.yaml")
 
 
 # ---- validate_detector_config: invalid family 網羅テスト ----
@@ -439,7 +493,7 @@ class TestValidateDetectorConfig:
             validate_detector_config(valid_cfg)
 
     def test_default_config_passes(self, valid_cfg):
-        """既定 world_detector_v1.yaml は validate_detector_config を通過する。"""
+        """既定 world_detector_v2.yaml は validate_detector_config を通過する。"""
         from survivors.vision.world_detector import validate_detector_config
         validate_detector_config(valid_cfg)  # no exception
 

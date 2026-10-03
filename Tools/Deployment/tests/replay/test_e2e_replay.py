@@ -63,7 +63,7 @@ from survivors.replay.recorded_frame_source import DeterminismManifest, Determin
 from survivors.runtime.agent_runtime import AgentRuntime
 from survivors.runtime.artifact_bundle import RuntimeBundle
 from survivors.target_profile import load_target_profile
-from survivors.vision.entity_tracker import EntityTracker
+from survivors.vision.entity_tracker import EntityTracker, default_class_map
 from survivors.vision.hud_parser import HudStateV1, ParsedButton, ParsedCard
 from survivors.vision.world_detector import DetectionResult
 
@@ -128,7 +128,7 @@ def _replay(tmp_path: Path, name: str, capture: CaptureManifest | None = None, *
     policy = fixture.build_combat_policy(0)
     kwargs = dict(
         detector=fixture.FixedSceneDetector(),
-        tracker=EntityTracker({i: 5 for i in range(12)}, 0.7, 0.6, 0.9),
+        tracker=EntityTracker({i: 5 for i in range(default_class_map().num_classes)}, 0.7, 0.6, 0.9, coarse_by_class_id=default_class_map().coarse_by_class_id()),
         hud_parser=fixture.ScriptedHudParser(),
         bundle=RuntimeBundle.from_golden_fixture(policy, item_selector=fixture.FirstCardItemSelector()),
         artifact_hashes={"combat_policy": fixture._model_hash(policy)},
@@ -426,7 +426,7 @@ def test_cli_replays_capture_with_loaded_artifacts(tmp_path: Path, monkeypatch: 
     policy = fixture.build_combat_policy(0)
     parts = type("Parts", (), dict(
         bundle=RuntimeBundle.from_golden_fixture(policy, item_selector=fixture.FirstCardItemSelector()),
-        detector=fixture.FixedSceneDetector(), tracker=EntityTracker({i: 5 for i in range(12)}, 0.7, 0.6, 0.9),
+        detector=fixture.FixedSceneDetector(), tracker=EntityTracker({i: 5 for i in range(default_class_map().num_classes)}, 0.7, 0.6, 0.9, coarse_by_class_id=default_class_map().coarse_by_class_id()),
         detector_manifest=None, hud_parser=fixture.ScriptedHudParser(),
         artifact_hashes={"combat_policy": fixture._model_hash(policy)},
     ))
@@ -436,7 +436,7 @@ def test_cli_replays_capture_with_loaded_artifacts(tmp_path: Path, monkeypatch: 
     argv = [
         "replay", "--capture-manifest", str(capture_path), "--output-dir", str(tmp_path / "out"),
         "--combat-package", "c", "--detector-config", "d",
-        "--class-map", str(Path(fixture.__file__).parent / "configs" / "world_class_map_v1.yaml"),
+        "--class-map", str(Path(fixture.__file__).parent / "configs" / "world_class_map_v2.yaml"),
         "--detector-weights", "w", "--detector-manifest", "x", "--campaign-run-mode", "operator_debug_restart",
     ]
     assert cli.main(argv) == 0
@@ -1124,7 +1124,7 @@ def test_cli_suite_replay_compare_golden_and_formal_refusal(tmp_path: Path, monk
         loads.append(args)
         return type("Parts", (), dict(
             bundle=RuntimeBundle.from_golden_fixture(policy, item_selector=fixture.FirstCardItemSelector()),
-            detector=SceneDetector("basic"), tracker=EntityTracker({i: 5 for i in range(12)}, 0.7, 0.6, 0.9),
+            detector=SceneDetector("basic"), tracker=EntityTracker({i: 5 for i in range(default_class_map().num_classes)}, 0.7, 0.6, 0.9, coarse_by_class_id=default_class_map().coarse_by_class_id()),
             detector_manifest=None, hud_parser=SuiteHudParser(spec),
             artifact_hashes={"combat_policy": fixture._model_hash(policy)},
         ))
@@ -1133,7 +1133,7 @@ def test_cli_suite_replay_compare_golden_and_formal_refusal(tmp_path: Path, monk
     monkeypatch.setattr(cli, "_load_artifacts", load)
     artifacts = [
         "--capture-manifest", str(capture_path), "--combat-package", "c", "--detector-config", "d",
-        "--class-map", str(Path(fixture.__file__).parent / "configs" / "world_class_map_v1.yaml"),
+        "--class-map", str(Path(fixture.__file__).parent / "configs" / "world_class_map_v2.yaml"),
         "--detector-weights", "w", "--detector-manifest", "x",
     ]
     out = tmp_path / "suite"

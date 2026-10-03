@@ -16,8 +16,8 @@ best checkpoint は選択専用、model / optimizer / epoch を含む last check
     python train_survivors_world_detector.py \\
         --annotations data/world_annotations.json \\
         --split data/split.json \\
-        --config configs/world_detector_v1.yaml \\
-        --class-map configs/world_class_map_v1.yaml \\
+        --config configs/world_detector_v2.yaml \\
+        --class-map configs/world_class_map_v2.yaml \\
         --output runs/world_detector_dev
 """
 from __future__ import annotations
@@ -60,8 +60,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             " train / validation は独立した Dataset view に分割される。"
         ),
     )
-    p.add_argument("--config", default="configs/world_detector_v1.yaml", help="detector config YAML")
-    p.add_argument("--class-map", default="configs/world_class_map_v1.yaml", help="class map YAML")
+    p.add_argument("--config", default="configs/world_detector_v2.yaml", help="detector config YAML")
+    p.add_argument("--class-map", default="configs/world_class_map_v2.yaml", help="class map YAML")
     p.add_argument("--output", required=True, help="checkpoint 出力ディレクトリ")
     p.add_argument("--epochs", type=int, default=None, help="学習エポック数（config 優先）")
     p.add_argument("--dry-run", action="store_true", help="preflight チェックのみ実行して終了")

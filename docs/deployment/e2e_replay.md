@@ -31,7 +31,7 @@
 ```bash
 python replay_survivors_session.py replay \
   --capture-manifest <session>/capture.json --output-dir <out> \
-  --combat-package <pkg> --detector-config <cfg> --class-map configs/world_class_map_v1.yaml \
+  --combat-package <pkg> --detector-config <cfg> --class-map configs/world_class_map_v2.yaml \
   --detector-weights <weights> --detector-manifest <manifest> [--runs 3]
 ```
 

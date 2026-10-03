@@ -68,6 +68,8 @@ python Tools/Deployment/prelabel_survivors_frames.py `
 
 武器エフェクトクラスを追加する前に作った work-root では、`classes.txt` の `labeled_region` の後ろに次の4行を**この順で**追記し、X-AnyLabeling で読み込み直してください（新しく候補を抽出した work-root には最初から入っています）。
 
+world class map v2 で武器エフェクトが world クラス（ID 12〜15）になったため、新しく作る `classes.txt` では4行が `hazard_area` の後ろ（UI クラスより前）に並びます。**既に末尾へ4行を追記した `classes.txt` はそのまま使えます。** JSON にはラベル名で保存されるので、並びの違いは X-AnyLabeling のラベル一覧の表示順が変わるだけで、移行作業は不要です。
+
 ```text
 weapon_projectile
 weapon_zone
@@ -97,7 +99,7 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 
 `world_coco.json` と `ui_coco.json` が作られます。
 
-武器エフェクト（`weapon_*`）は現在の world class map（v1）に無いため、**当面は COCO 出力から矩形だけ除外**されます。フレーム自体と他の矩形は出力され、`weapon_*` しか無いフレームも矩形 0 個の画像として出力されます。除外した数は「武器エフェクトで除外した矩形数」として表示されます。この除外は world class map v2 で解除される予定です。
+武器エフェクト（`weapon_*`）は world class map v2 の world クラスなので、`world_coco.json` に category 12〜15（`weapon_projectile` = 12、`weapon_zone` = 13、`weapon_orbit` = 14、`weapon_aura` = 15）として出力されます。以前の「武器エフェクトで除外した矩形数」の表示と除外は無くなりました。
 
 ## クラス早見表
 
@@ -121,7 +123,7 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 
 ### 武器エフェクトのクラス対応表
 
-プレイヤー自身の武器エフェクトには `weapon_*` を付けます。クラスはシミュレーターが観測する4種類（Projectile / GroundZone / Orbit / Aura）に合わせています（`Tools/Deployment/survivors/annotation_labels.py` の `WEAPON_EFFECT_KINDS`）。
+プレイヤー自身の武器エフェクトには `weapon_*` を付けます。クラスはシミュレーターが観測する4種類（Projectile / GroundZone / Orbit / Aura）に合わせています。`Tools/Deployment/survivors/annotation_labels.py` の `WEAPON_EFFECT_KINDS` は、Common の `deploy_obs_v2_features.yaml` の `weapon_effect_kinds` から作られます（表を二重に持ちません）。
 
 | 武器（進化後） | ラベル |
 |---|---|

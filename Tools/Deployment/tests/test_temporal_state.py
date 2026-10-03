@@ -6,7 +6,7 @@
 from dataclasses import replace
 
 from survivors.temporal_state import TemporalAssembler
-from survivors.vision.entity_tracker import PlayerAnchorState, TrackedWorldStateV1
+from survivors.vision.entity_tracker import PlayerAnchorState, TrackedWorldStateV2
 from survivors.vision.hud_parser import HudStateV1
 
 def _hud(timestamp: int, state: str = "gameplay", **changes) -> HudStateV1:
@@ -22,12 +22,12 @@ def _hud(timestamp: int, state: str = "gameplay", **changes) -> HudStateV1:
     )
     return replace(base, **changes)
 
-def _world(timestamp: int) -> TrackedWorldStateV1:
+def _world(timestamp: int) -> TrackedWorldStateV2:
     """track なしの world state を作る。
 
     join の鮮度と skew だけを検証するため最小の状態を返します。
     """
-    return TrackedWorldStateV1(1, timestamp, [], PlayerAnchorState(.5, .5, .9, False))
+    return TrackedWorldStateV2(1, timestamp, [], PlayerAnchorState(.5, .5, .9, False))
 
 def test_join_applies_monotonic_and_bounded_filters() -> None:
     """timer・level・inventory の後退を防ぎ HP/XP を範囲内に保つ。

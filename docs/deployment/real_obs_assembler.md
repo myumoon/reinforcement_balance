@@ -1,5 +1,5 @@
 # Real observation assembler
-`RealObsAssembler` は `HudStateV1` と `TrackedWorldStateV1` を同じ policy tick に結合し、`PerceptionSnapshot` を生成する 04-09 の本番観測境界です。
+`RealObsAssembler` は `HudStateV1` と `TrackedWorldStateV2` を同じ policy tick に結合し、`PerceptionSnapshot` を生成する 04-09 の本番観測境界です。
 
 ## 境界
 - `DeployObservation` は visible (`on_screen=true`, `clipped=false`) な track と HUD 値だけから生成する。

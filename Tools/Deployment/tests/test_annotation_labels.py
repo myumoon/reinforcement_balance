@@ -59,7 +59,7 @@ def test_classes_follow_world_class_map_and_append_ui_classes() -> None:
 
     UI クラスは WorldDetector の foreground に混ぜず、末尾へ追加する。
     """
-    class_map_path = Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v1.yaml"
+    class_map_path = Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v2.yaml"
     expected_world = tuple(
         item["name"]
         for item in sorted(load_class_map(class_map_path).foreground_classes, key=lambda item: item["id"])
@@ -69,9 +69,27 @@ def test_classes_follow_world_class_map_and_append_ui_classes() -> None:
     assert UI_CLASSES == ("hud_hp", "hud_xp", "card", "button", "death_result")
     assert REGION_LABEL == "labeled_region"
     assert WEAPON_EFFECT_CLASSES == ("weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura")
-    assert ALL_CLASSES == WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,) + WEAPON_EFFECT_CLASSES
-    # 実データの classes.txt（2026-10-02 に末尾へ4行追記済み）と同じ並び。
-    assert ALL_CLASSES[-5:] == ("labeled_region", *WEAPON_EFFECT_CLASSES)
+    # weapon は class map v2 の world クラス（ID 12〜15）なので WORLD_CLASSES の末尾に入る。
+    assert WORLD_CLASSES[-4:] == WEAPON_EFFECT_CLASSES
+    assert ALL_CLASSES == WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,)
+
+
+def test_class_map_v2_names_match_common_entity_vocabulary() -> None:
+    """class map v2 の enemy / gem / weapon の名前が Common の entity_classes と一致する。
+
+    Common（03-06）の特徴量ビルダーは track の class 名で役割を引くため、名前がずれると特徴量が空になる。
+    """
+    cm = load_class_map(Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v2.yaml")
+    entity = load_deploy_obs_v2_feature_params()["entity_classes"]
+
+    def names(coarse: str) -> set[str]:
+        return {fc["name"] for fc in cm.foreground_classes if fc["coarse_category"] == coarse}
+
+    assert set(entity["enemy"]) == names("enemy")
+    assert set(entity["gem"]) == names("gem")
+    assert set(entity["rare_gem"]) <= names("gem")
+    assert set(entity["effect"]) == names("weapon")
+    assert {f"weapon_{kind}" for kind in entity["effect"].values()} == names("weapon")
 
 
 def test_weapon_effect_kinds_match_common_deploy_obs_v2_features() -> None:

@@ -42,7 +42,7 @@ from survivors.real_obs_assembler import RealObsAssembler
 from survivors.runtime.agent_runtime import AgentRuntime
 from survivors.runtime.artifact_bundle import REQUIRED_ACTION_DIM, CombatGruPolicy, CombatPolicy, RuntimeBundle
 from survivors.runtime.decision_scheduler import DecisionScheduler
-from survivors.vision.entity_tracker import EntityTracker
+from survivors.vision.entity_tracker import EntityTracker, default_class_map
 from survivors.vision.hud_parser import HudStateV1, ParsedCard
 from survivors.vision.world_detector import DetectionResult
 
@@ -287,7 +287,7 @@ def run_replay(
     ))
     controller = SurvivorsController(
         mode="shadow", session_id=session_id, capture=capture, detector=FixedSceneDetector(),
-        tracker=EntityTracker({i: 5 for i in range(12)}, 0.7, 0.6, 0.9), hud_parser=ScriptedHudParser(cycle), assembler=RealObsAssembler(),
+        tracker=EntityTracker({i: 5 for i in range(default_class_map().num_classes)}, 0.7, 0.6, 0.9, coarse_by_class_id=default_class_map().coarse_by_class_id()), hud_parser=ScriptedHudParser(cycle), assembler=RealObsAssembler(),
         runtime=AgentRuntime(bundle, clock_ns=clock), state_machine=StateMachine(), health=HealthMonitor(),
         telemetry=telemetry, schema=bundle.deploy_schema, model_hashes=model_hashes,
         ui_config=bundle.ui_policy_config, clock_ns=clock, sleep=lambda _: None,

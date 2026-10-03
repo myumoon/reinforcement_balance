@@ -5,7 +5,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, replace
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
-from .vision.entity_tracker import TrackedWorldStateV1
+from .vision.entity_tracker import TrackedWorldStateV2
 from .vision.hud_parser import HudStateV1
 _ITEM_STATES = frozenset({"level_up_items", "level_up_fallback", "chest"})
 _SCREEN_CONFIDENCE_THRESHOLD = 0.5
@@ -15,7 +15,7 @@ class TemporalJoin:
 
     値を保持することと policy が利用可能かを分け、stale 時は fail-closed にします。
     """
-    hud: HudStateV1; world: TrackedWorldStateV1; captured_ns: int
+    hud: HudStateV1; world: TrackedWorldStateV2; captured_ns: int
     hud_validity: float; world_validity: float
     combat_validity: float; item_validity: float
 class TemporalAssembler:
@@ -40,7 +40,7 @@ class TemporalAssembler:
         self.max_stale_ns = {key: round(value * 1_000_000) for key, value in stale.items()}
         self.filter_alpha = filter_alpha
         self._hud: HudStateV1 | None = None
-        self._world: TrackedWorldStateV1 | None = None
+        self._world: TrackedWorldStateV2 | None = None
         self._last_tick_ns: int | None = None
         self._session_id: str | None = None
         self._session_start_ns: int | None = None  # 現在sessionの最初のHUD timestamp
@@ -87,19 +87,19 @@ class TemporalAssembler:
             return max(0., min(1., new))
         return max(0., min(1., old + self.filter_alpha * (new - old)))
 
-    def observe_world(self, world: TrackedWorldStateV1) -> None:
+    def observe_world(self, world: TrackedWorldStateV2) -> None:
         """最新 world state を時刻順に取り込む。
 
         遅れて届いた tracker 結果で新しい画面状態を上書きしません。
         """
-        if not isinstance(world, TrackedWorldStateV1):
-            raise TypeError("world must be TrackedWorldStateV1")
+        if not isinstance(world, TrackedWorldStateV2):
+            raise TypeError("world must be TrackedWorldStateV2")
         if self._session_start_ns is not None and world.timestamp_ns < self._session_start_ns:
             return  # 現在session開始より前のworldは旧sessionの残存として拒否
         if self._world is None or world.timestamp_ns >= self._world.timestamp_ns:
             self._world = world
 
-    def join(self, hud: HudStateV1, world: TrackedWorldStateV1, *, now_ns: int | None = None) -> TemporalJoin:
+    def join(self, hud: HudStateV1, world: TrackedWorldStateV2, *, now_ns: int | None = None) -> TemporalJoin:
         """同期 HUD/world を取り込み一回分の用途別 validity を返す。
 
         skew または stale が閾値を超える場合、保持値を tensor へ入れても validity はゼロになります。

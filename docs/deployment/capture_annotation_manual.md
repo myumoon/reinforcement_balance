@@ -91,7 +91,7 @@ python Tools/Deployment/prelabel_survivors_frames.py `
 - 下書きは `checked: false` で保存され、JSON がまだ無い画像にのみ作成されます（既存 JSON は上書きされません）。下書きに `labeled_region` は書かれません。
 - 設定は [annotation_prelabel_v2.yaml](../../Tools/Deployment/configs/annotation_prelabel_v2.yaml) です。学習後に `input_scale` や `labels` を変えた場合は重みと一致しないためエラーになるので、再学習してください。
 - 既存 work-root の `classes.txt` に `labeled_region` が無い場合は、末尾に1行 `labeled_region` を追記してから X-AnyLabeling で読み込み直してください。
-- 既存 work-root の `classes.txt` に武器エフェクト4クラスが無い場合は、`labeled_region` の後ろに `weapon_projectile`、`weapon_zone`、`weapon_orbit`、`weapon_aura` の4行をこの順で追記してから読み込み直してください。
+- 既存 work-root の `classes.txt` に武器エフェクト4クラスが無い場合は、`labeled_region` の後ろに `weapon_projectile`、`weapon_zone`、`weapon_orbit`、`weapon_aura` の4行をこの順で追記してから読み込み直してください。既に末尾へ4行を追記した `classes.txt` はそのまま使えます（新しく作る `classes.txt` では world class map v2 に合わせて `hazard_area` の後ろに並びますが、JSON はラベル名で保存されるため、違いは X-AnyLabeling の表示順だけです）。
 - 検出するラベルに `weapon_*` の4クラスを追加したため、追加前に学習した `prelabel_detector.pt` はラベル不一致のエラーになります。(2) で再学習してください。
 - 武器エフェクト用クラスを追加する前に `hazard_*` で付けた武器エフェクトは、`relabel_survivors_annotations.py`（propose → 対応表の確認 → apply）で `weapon_*` へ付け替え、既存の確認済みフレームを開き直して未ラベルの武器エフェクトを追加します。手順は [`annotation_gui.md`](annotation_gui.md) の「付け替え CLI」「確認済みフレームの見直し手順」を参照してください。
 
@@ -164,6 +164,8 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 ```
 
 `checked: true` の画像だけが出力対象になり、`<DatasetDir>/world_coco.json` と `<DatasetDir>/ui_coco.json` が生成されます。`--session-id` を省略すると work-root 直下の全セッションが対象です。
+
+武器エフェクト（`weapon_*`）は world class map v2 の world クラスとして、`world_coco.json` の category 12〜15（`weapon_projectile` / `weapon_zone` / `weapon_orbit` / `weapon_aura`）に出力されます（以前のような除外はありません）。
 
 ## 参考
 

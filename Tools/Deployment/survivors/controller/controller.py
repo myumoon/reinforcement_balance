@@ -19,7 +19,7 @@ import numpy as np
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema, DeployObservation
 
 from ..capture.window_locator import TargetWindowStateError
-from ..vision.entity_tracker import TrackedWorldStateV1
+from ..vision.entity_tracker import TrackedWorldStateV2
 from .health_monitor import HealthMonitor, HealthVerdict, observation_is_valid
 from .state_machine import CampaignRunMode, ControllerState
 from .telemetry import TelemetryWriter
@@ -387,7 +387,7 @@ class SurvivorsController:
             self._write("detector", cid, latency_ns=latency, payload={"detections": len(detection.scores)})
             world, latency = self._timed(
                 "tracker",
-                lambda: TrackedWorldStateV1.from_state(
+                lambda: TrackedWorldStateV2.from_state(
                     self._tracker.update(detection, index, captured_ns), index, captured_ns, self._class_map_path
                 ),
             )

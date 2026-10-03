@@ -30,7 +30,7 @@ from survivors.controller.telemetry import TelemetrySessionHeader, TelemetryWrit
 from survivors.real_obs_assembler import RealObsAssembler
 from survivors.runtime.agent_runtime import AgentRuntime
 from survivors.runtime.artifact_bundle import RuntimeBundle
-from survivors.vision.entity_tracker import EntityTracker
+from survivors.vision.entity_tracker import EntityTracker, default_class_map
 
 import replay_controller_fixture as replay
 
@@ -129,7 +129,7 @@ def _run_live(output_dir: Path, session_id: str) -> Path:
     ))
     controller = SurvivorsController(
         mode="live", session_id=session_id, capture=replay.ScriptedCapture(clock, sample_every=10**9),
-        detector=replay.FixedSceneDetector(), tracker=EntityTracker({i: 5 for i in range(12)}, 0.7, 0.6, 0.9),
+        detector=replay.FixedSceneDetector(), tracker=EntityTracker({i: 5 for i in range(default_class_map().num_classes)}, 0.7, 0.6, 0.9, coarse_by_class_id=default_class_map().coarse_by_class_id()),
         hud_parser=replay.ScriptedHudParser(_CYCLE), assembler=RealObsAssembler(),
         runtime=AgentRuntime(bundle, clock_ns=clock), state_machine=StateMachine(), health=HealthMonitor(),
         telemetry=telemetry, schema=bundle.deploy_schema, model_hashes=model_hashes,
