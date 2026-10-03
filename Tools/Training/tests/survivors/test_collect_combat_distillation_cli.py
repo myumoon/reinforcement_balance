@@ -18,7 +18,10 @@ from test_documented_formal_cli import _documented_argv
 
 
 def test_synthetic_path_saves_v2_dataset(tmp_path):
-    """--source-descriptor 無しは v2 schema hash の synthetic dataset を保存して 0 を返す。"""
+    """--source-descriptor 無しは v2 schema hash の synthetic dataset を保存して 0 を返す。
+
+    5 episode のうち train の 4 本だけが保存されます（既存の synthetic 規則）。
+    """
     output = tmp_path / "dev"
     assert cli.main(["--output", str(output), "--episodes", "5", "--sequence-length", "8", "--burn-in", "2"]) == 0
     dataset = CombatDistillationDataset.load(output)
@@ -27,7 +30,10 @@ def test_synthetic_path_saves_v2_dataset(tmp_path):
 
 
 def _formal_argv(tmp_path, descriptor, verdict_path, *, drop=()):
-    """正式経路の argv を作る。drop に入れた flag は省く。"""
+    """正式経路の argv を作る。
+
+    drop に入れた flag は省き、前提 artifact の指定漏れを再現します。
+    """
     values = {
         "--source-descriptor": descriptor, "--fidelity-verdict": verdict_path,
         "--artifact-store": tmp_path / "store", "--generated-input-descriptor": tmp_path / "generated-inputs.json",
@@ -42,7 +48,10 @@ def _formal_argv(tmp_path, descriptor, verdict_path, *, drop=()):
 
 @pytest.fixture
 def fake_formal(monkeypatch):
-    """current hash 解決・UE5 env・教師ロードを fake に差し替え、作られた env を記録する。"""
+    """current hash 解決・UE5 env・教師ロードを fake に差し替え、作られた env を記録する。
+
+    戻り値は (current hash に合う verdict, 作られた env の一覧) です。
+    """
     verdict, hashes = _verdict()
     envs = []
     monkeypatch.setattr(
@@ -55,7 +64,10 @@ def fake_formal(monkeypatch):
 
 
 def test_formal_path_collects_and_saves_with_all_prerequisites(tmp_path, fake_formal):
-    """前提 artifact が揃えば正式収集して 0 を返し、train/validation と descriptor を保存する。"""
+    """前提 artifact が揃えば正式収集して 0 を返し、train/validation と descriptor を保存する。
+
+    収集後に env が閉じられることも確かめます。
+    """
     verdict, envs = fake_formal
     descriptor, verdict_path = _formal_inputs(tmp_path, verdict)
     assert cli.main(_formal_argv(tmp_path, descriptor, verdict_path)) == 0
@@ -65,7 +77,10 @@ def test_formal_path_collects_and_saves_with_all_prerequisites(tmp_path, fake_fo
 
 @pytest.mark.parametrize("flag", ["--fidelity-verdict", "--artifact-store", "--generated-input-descriptor", "--ubt-action-graph"])
 def test_formal_path_without_prerequisite_exits_3_without_connecting(tmp_path, fake_formal, flag, capsys):
-    """前提 artifact の指定が 1 つでも欠ければ終了コード 3 で、UE5 に接続せず何も保存しない。"""
+    """前提 artifact の指定が 1 つでも欠ければ終了コード 3 で、UE5 に接続せず何も保存しない。
+
+    stderr には欠けた flag 名が出ます。
+    """
     verdict, envs = fake_formal
     descriptor, verdict_path = _formal_inputs(tmp_path, verdict)
     assert cli.main(_formal_argv(tmp_path, descriptor, verdict_path, drop=(flag,))) == 3
@@ -75,7 +90,10 @@ def test_formal_path_without_prerequisite_exits_3_without_connecting(tmp_path, f
 
 @pytest.mark.parametrize("case", ["missing_descriptor", "invalid_descriptor", "blocked_verdict"])
 def test_formal_path_with_invalid_prerequisite_exits_3(tmp_path, fake_formal, monkeypatch, case):
-    """descriptor 不在・descriptor 検証失敗・blocking 付き verdict はどれも終了コード 3 で収集しない。"""
+    """descriptor 不在・descriptor 検証失敗・blocking 付き verdict はどれも終了コード 3 で収集しない。
+
+    例外は CLI が捕まえて終了コードに変え、UE5 への接続も dataset の保存も起きません。
+    """
     verdict, envs = fake_formal
     if case == "blocked_verdict":
         verdict, _ = _verdict(blocked=True)
@@ -89,7 +107,10 @@ def test_formal_path_with_invalid_prerequisite_exits_3(tmp_path, fake_formal, mo
 
 
 def test_documented_formal_collection_command_parses():
-    """docs/train/overview.md の正式収集コマンドが現在の CLI 引数で解釈できる。"""
+    """docs/train/overview.md の正式収集コマンドが現在の CLI 引数で解釈できる。
+
+    引数名を変えたら運用手順の docs も直す必要があることを、このテストで気づけるようにします。
+    """
     args = cli._parser().parse_args(_documented_argv("collect_survivors_combat_distillation.py"))
     assert args.source_descriptor is not None and args.fidelity_verdict is not None
     assert args.generated_input_descriptor.name == "generated-inputs.json"

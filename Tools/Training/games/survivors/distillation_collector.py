@@ -50,10 +50,16 @@ class Teacher(Protocol):
     identity_sha256: str
 
     def initial_state(self) -> Any:
-        """episode 開始時の再帰状態（LSTM なら零）を返す。"""
+        """episode 開始時の再帰状態（LSTM なら零）を返す。
+
+        収集ループは episode の最初の step でこの状態を act に渡します。
+        """
 
     def act(self, obs: np.ndarray, state: Any, episode_start: bool) -> tuple[int, np.ndarray, float, Any]:
-        """1 step 推論して (行動, logits[A], value, 次の状態) を返す。"""
+        """1 step 推論して (行動, logits[A], value, 次の状態) を返す。
+
+        obs は正規化前の flat obs、episode_start は episode の最初の step だけ True です。
+        """
 
 
 class ValueSourceTeacher:

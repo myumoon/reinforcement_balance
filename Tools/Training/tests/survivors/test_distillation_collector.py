@@ -57,18 +57,27 @@ class FakeSurvivorsEnv:
         self.last_reset_response = None
 
     def _flat(self):
-        """現在の応答番号を 1 要素の flat obs にする（差し替え指定があればそれを返す）。"""
+        """現在の応答番号を 1 要素の flat obs にする。
+
+        差し替え指定（壊れた flat obs の再現用）があればそれをそのまま返します。
+        """
         if self.flat_override is not None:
             return self.flat_override
         return np.array([float(self.cursor)], np.float32)
 
     def set_params(self, **kwargs):
-        """/params 呼び出しを記録し、設定した成否を返す。"""
+        """/params 呼び出しを記録し、設定した成否を返す。
+
+        SurvivorsEnv.set_params と同じく失敗は例外ではなく False で表します。
+        """
         self.params_calls.append(kwargs)
         return self.params_ok
 
     def reset(self, *, seed=None, options=None):
-        """応答 0 を last_reset_response に置き、flat obs と空 info を返す。"""
+        """応答 0 を last_reset_response に置き、flat obs と空 info を返す。
+
+        渡された seed は記録し、episode ごとの seed 割り当てを検証できるようにします。
+        """
         self.cursor = 0
         self.reset_seeds.append(seed)
         self.last_reset_response = {"obs": [0.0]}
@@ -77,7 +86,10 @@ class FakeSurvivorsEnv:
         return self._flat(), {}
 
     def step(self, action):
-        """次の応答の deploy_raw を info に入れ、最後の応答で terminated を返す。"""
+        """次の応答の deploy_raw を info に入れ、最後の応答で terminated を返す。
+
+        flat obs と deploy_raw は同じ応答番号から作るので、同 step の対応が保たれます。
+        """
         self.cursor += 1
         info = {"base_reward": 1.0}
         if self.drop_at != self.cursor:
@@ -85,7 +97,10 @@ class FakeSurvivorsEnv:
         return self._flat(), 1.0, self.cursor == len(self.payloads) - 1, False, info
 
     def close(self):
-        """close されたことを記録する。"""
+        """close されたことを記録する。
+
+        正式経路が収集後に env を必ず閉じることの確認に使います。
+        """
         self.closed = True
 
 
@@ -99,15 +114,24 @@ class FakeTeacher:
     identity_sha256 = "d" * 64
 
     def __init__(self, logits_shape=(ACTION_DIM,)):
-        """logits の形（壊れた教師の再現用）と呼び出し履歴を用意する。"""
+        """logits の形と呼び出し履歴を用意する。
+
+        logits_shape を action_dim と違う値にすると、壊れた教師を再現できます。
+        """
         self.logits_shape, self.calls = logits_shape, []
 
     def initial_state(self):
-        """episode 開始時の状態 0 を返す。"""
+        """episode 開始時の状態 0 を返す。
+
+        act のたびに 1 増えるので、境界で 0 に戻ったかを数値で確認できます。
+        """
         return 0
 
     def act(self, obs, state, episode_start):
-        """呼び出しを記録し、flat obs から決定的な (行動, logits, value, 次状態) を返す。"""
+        """呼び出しを記録し、flat obs から決定的な (行動, logits, value, 次状態) を返す。
+
+        記録は (flat obs の先頭値, 渡された状態, episode_start) の組です。
+        """
         self.calls.append((float(obs[0]), state, episode_start))
         logits = (np.arange(ACTION_DIM, dtype=np.float32) * 0.1 + obs[0])[: self.logits_shape[0]]
         return int(obs[0]) % ACTION_DIM, logits, float(obs[0]), state + 1
@@ -128,7 +152,10 @@ def _expected_tensors():
 
 
 def _collect(**kwargs):
-    """fake env / fake teacher で収集し、(結果, env, teacher) を返す。"""
+    """fake env / fake teacher で収集し、(結果, env, teacher) を返す。
+
+    既定は 2 episode・長さ 8・burn-in 2・validation なし・seed 100 で、kwargs で上書きできます。
+    """
     env, teacher = kwargs.pop("env", FakeSurvivorsEnv()), kwargs.pop("teacher", FakeTeacher())
     options = {"episodes": 2, "sequence_length": 8, "burn_in": 2, "validation_every": 0, "seed": 100, **kwargs}
     return collector.collect_sequences(env, teacher, V2, **options), env, teacher
@@ -189,26 +216,38 @@ def test_chunks_padding_burn_in_and_episode_level_split():
 
 @pytest.mark.parametrize("drop_at", [0, 3])
 def test_missing_deploy_raw_fails_instead_of_skipping(drop_at):
-    """reset / step の応答に deploy_raw が無ければ、その step を飛ばさず収集を失敗させる。"""
+    """reset / step の応答に deploy_raw が無ければ、その step を飛ばさず収集を失敗させる。
+
+    drop_at=0 は reset 応答、3 は途中の step 応答から deploy_raw を抜きます。
+    """
     with pytest.raises(ValueError, match="deploy_raw"):
         _collect(env=FakeSurvivorsEnv(drop_at=drop_at))
 
 
 def test_deploy_raw_opt_in_failure_stops_collection():
-    """/params で deploy_raw を有効化できなければ収集を始めない。"""
+    """/params で deploy_raw を有効化できなければ収集を始めない。
+
+    flat obs だけの応答へ黙って戻らないことを確かめます。
+    """
     with pytest.raises(ValueError, match="deploy_raw"):
         _collect(env=FakeSurvivorsEnv(params_ok=False))
 
 
 @pytest.mark.parametrize("flat", [np.array([np.nan], np.float32), np.zeros((1, 1), np.float32)])
 def test_non_finite_or_malformed_flat_obs_is_rejected(flat):
-    """flat obs が非数・多次元なら教師へ渡さず拒否する。"""
+    """flat obs が非数・多次元なら教師へ渡さず拒否する。
+
+    UE5 応答の壊れた観測で教師出力を作らないための検査です。
+    """
     with pytest.raises(collector.CollectionError, match="flat observation"):
         _collect(env=FakeSurvivorsEnv(flat_override=flat))
 
 
 def test_malformed_teacher_logits_are_rejected():
-    """教師の logits が action_dim と合わなければ記録しない。"""
+    """教師の logits が action_dim と合わなければ記録しない。
+
+    形の違う logits を dataset に入れず、収集を止めます。
+    """
     with pytest.raises(collector.CollectionError, match="logits"):
         _collect(teacher=FakeTeacher(logits_shape=(ACTION_DIM - 1,)))
 
@@ -222,6 +261,10 @@ def test_oracle_values_mixed_into_deploy_obs_are_rejected(monkeypatch):
     offset, _ = V2.layout["enemy_hp"]
 
     def leaky(self, raw):
+        """release の出力に enemy_hp の oracle 値（valid・age 0）を書き足して返す。
+
+        privileged 値が DeployObs に漏れた状況の再現です。
+        """
         tensor = np.array(original(self, raw), copy=True)
         tensor[offset], tensor[V2.dim + offset], tensor[2 * V2.dim + offset] = 0.5, 1.0, 0.0
         return tensor
@@ -261,7 +304,10 @@ def _verdict(*, blocked=False, stage="integration"):
 
 
 def _formal_inputs(tmp_path, verdict):
-    """教師 descriptor（中身は任意の JSON）と verdict JSON を tmp に書いてパスを返す。"""
+    """教師 descriptor と verdict JSON を tmp に書いてパスを返す。
+
+    教師ロードは fake に差し替えるので、descriptor の中身は任意の JSON で構いません。
+    """
     descriptor = tmp_path / "teacher_descriptor.json"
     descriptor.write_bytes(canonical_json_bytes({"identity_sha256": "d" * 64}))
     verdict_path = tmp_path / "verdict.json"
@@ -270,10 +316,17 @@ def _formal_inputs(tmp_path, verdict):
 
 
 def _run(tmp_path, *, verdict_path, hashes, descriptor, teacher_factory=None, env=None):
-    """run_formal_collection を fake で呼び、env_factory の呼び出し回数を返す。"""
+    """run_formal_collection を fake で呼び、(descriptor, 作られた env の一覧) を返す。
+
+    5 episode・長さ 4・burn-in 2・validation_every 5・seed 7 の固定設定で収集します。
+    """
     created = []
 
     def env_factory():
+        """fake env を作って記録する。
+
+        呼ばれた回数で「開始条件を通る前に接続していない」ことを確かめます。
+        """
         created.append(env or FakeSurvivorsEnv())
         return created[-1]
 
@@ -319,10 +372,17 @@ def test_formal_collection_saves_dataset_and_parent_identities_to_artifact_store
 
 
 def test_formal_gate_checks_descriptor_before_verdict_and_never_connects(tmp_path):
-    """教師 descriptor の検証が最初。失敗すると verdict を読まず、env にも接続しない。"""
+    """教師 descriptor の検証が最初。失敗すると verdict を読まず、env にも接続しない。
+
+    verdict パスは存在しないものを渡し、descriptor の失敗が先に出ることで順序を確かめます。
+    """
     _, hashes = _verdict()
 
     def broken_teacher(path):
+        """descriptor 検証に失敗する教師ロードを再現する。
+
+        load_value_source が ValueSourceLoadError（ValueError）を出す場合と同じ形です。
+        """
         raise ValueError("descriptor invalid")
 
     with pytest.raises(ValueError, match="descriptor invalid"):
@@ -333,7 +393,10 @@ def test_formal_gate_checks_descriptor_before_verdict_and_never_connects(tmp_pat
 
 @pytest.mark.parametrize("case", ["missing", "stale_hash", "blocked", "baseline"])
 def test_formal_gate_rejects_invalid_fidelity_verdict_before_collection(tmp_path, case):
-    """verdict 欠損・producer hash 不一致・blocking あり・baseline のどれでも env に接続せず止まる。"""
+    """verdict 欠損・producer hash 不一致・blocking あり・baseline のどれでも env に接続せず止まる。
+
+    どの場合も dataset の出力 directory は作られません。
+    """
     verdict, hashes = _verdict(blocked=case == "blocked", stage="baseline" if case == "baseline" else "integration")
     descriptor, verdict_path = _formal_inputs(tmp_path, verdict)
     if case == "missing":
@@ -351,7 +414,10 @@ def test_formal_gate_rejects_invalid_fidelity_verdict_before_collection(tmp_path
 
 
 def test_save_rechecks_fidelity_verdict(tmp_path):
-    """保存関数を直接呼んでも verdict を再検証し、stale な verdict では何も保存しない。"""
+    """保存関数を直接呼んでも verdict を再検証し、stale な verdict では何も保存しない。
+
+    正式経路のモジュール入口が複数あっても同じ開始条件で止まることを確かめます。
+    """
     verdict, hashes = _verdict()
     descriptor, _ = _formal_inputs(tmp_path, verdict)
     result, _, _ = _collect(episodes=1)
