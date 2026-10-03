@@ -77,7 +77,9 @@ class SurvivorsEnv(BaseUE5Env):
         """reset response の observation schema binding を検証する。
 
         接続時 schema と reset 時 hash の不一致を observation 解釈前に拒否する。
+        応答全体は last_reset_response に残し、deploy_raw など reset の戻り値に載らない欄を読めるようにする。
         """
+        self.last_reset_response = data
         received_hash = data.get("obs_schema_hash", "")
         if self._expected_schema_hash and received_hash != self._expected_schema_hash:
             raise RuntimeError(
