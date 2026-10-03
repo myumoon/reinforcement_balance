@@ -149,6 +149,10 @@ def _set(path, value):
     value が _DELETE ならキーを消し、path の最後が新しいキーなら未知キーの追加になります。
     """
     def apply(payload):
+        """payload をその場で書き換える。
+
+        deepcopy した payload に対して呼び出します。
+        """
         target = payload
         for key in path[:-1]:
             target = target[key]
