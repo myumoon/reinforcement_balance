@@ -195,7 +195,7 @@ void FSurvivorsGameLogic::Reset(TOptional<int32> Seed)
 	CurrentConfig.GemPickupRadius = BaseGemPickupRadiusConst;
 	PlayerShieldTimer = 0.f; bShieldActive = false;
 	MaxRevivalCount   = 0;   UsedRevivalCount = 0;
-	NextEnemyId = 0; NextGemId = 0;
+	NextEnemyId = 0; NextGemId = 0; NextEffectId = 0;
 	FloorPickups.Empty(); SpecialPickups.Empty(); Destructibles.Empty();
 	PhysicsAccumTime = 0.f;
 
@@ -807,6 +807,7 @@ TArray<FProjectileObsState> FSurvivorsGameLogic::GetProjectileObsView() const
 		OS.Kind          = EProjectileObsKind::Projectile;
 		OS.WeaponSlotIdx = P.WeaponSlotIdx;
 		OS.bIsWarning    = P.bIsWarning;
+		OS.EntityId      = SurvivorsDeployRaw::MakeEntityId(ESurvivorsDeployRawIdSpace::Projectile, P.EffectId);
 		V.Add(OS);
 	}
 
@@ -821,6 +822,7 @@ TArray<FProjectileObsState> FSurvivorsGameLogic::GetProjectileObsView() const
 		OS.Kind          = EProjectileObsKind::GroundZone;
 		OS.WeaponSlotIdx = Z.WeaponSlotIdx;
 		OS.bIsWarning    = Z.bIsWarning;
+		OS.EntityId      = SurvivorsDeployRaw::MakeEntityId(ESurvivorsDeployRawIdSpace::GroundZone, Z.EffectId);
 		V.Add(OS);
 	}
 
@@ -847,6 +849,10 @@ TArray<FProjectileObsState> FSurvivorsGameLogic::GetProjectileObsView() const
 			OS.Kind          = EProjectileObsKind::Orbit;
 			OS.WeaponSlotIdx = Weapons[si]->GetOrbitOrbSlotIdx(oi);
 			OS.bIsWarning    = false;
+			// 周期 id × 256 + 本番号: 周期が変われば全ての本が新しい id になる
+			OS.EntityId      = SurvivorsDeployRaw::MakeEntityId(
+				ESurvivorsDeployRawIdSpace::Orbit,
+				static_cast<int64>(Weapons[si]->GetOrbitOrbCycleId()) * 256 + oi);
 			V.Add(OS);
 		}
 		OrbOff += OrbCount;
@@ -871,10 +877,90 @@ TArray<FProjectileObsState> FSurvivorsGameLogic::GetProjectileObsView() const
 		OS.Kind          = EProjectileObsKind::Aura;
 		OS.WeaponSlotIdx = s;
 		OS.bIsWarning    = false;
+		// aura は常時存在するので slot と武器種で固定（進化で武器種が変われば新しい id）
+		OS.EntityId      = SurvivorsDeployRaw::MakeEntityId(
+			ESurvivorsDeployRawIdSpace::Aura, static_cast<int64>(s) * 256 + static_cast<uint8>(Slot.Type));
 		V.Add(OS);
 	}
 
 	return V;
+}
+
+/**
+ * DeployObs v2 用の deploy raw state を現在の state から読み取って作る。
+ *
+ * 敵（通常/ボス）・ジェム（色別）・武器エフェクト（GetProjectileObsView と同じ範囲）を、
+ * カメラ範囲＋余白の内側にあるものだけ entity として並べる。乱数・進行・flat obs は変えない。
+ */
+FSurvivorsDeployRawState FSurvivorsGameLogic::BuildDeployRawState(float CullMarginU) const
+{
+	using namespace SurvivorsGameConstants;
+
+	FSurvivorsDeployRawState S;
+	S.CameraCenter     = PlayerPos;
+	S.CameraHalfWidth  = ScreenHalfWidthU;
+	S.CameraHalfHeight = ScreenHalfHeightU;
+	S.CullMarginU      = CullMarginU;
+	S.PlayerPos        = PlayerPos;
+	S.HpRatio          = FMath::Clamp(PlayerHP / FMath::Max(CurrentConfig.MaxPlayerHP, KINDA_SMALL_NUMBER), 0.f, 1.f);
+	S.PlayerLevel      = PlayerLevel;
+	S.ElapsedS         = ElapsedTime;
+	S.DurationMult     = CachedPassiveEffects.DurationMult;
+
+	for (int32 i = 0; i < MaxWeaponSlots; ++i)
+	{
+		S.WeaponSlots.Add({i, static_cast<int32>(WeaponSlots[i].Type), WeaponSlots[i].Level.Value});
+	}
+	for (int32 i = 0; i < MaxPassiveSlots; ++i)
+	{
+		S.PassiveSlots.Add({i, static_cast<int32>(PassiveSlots[i].Type), PassiveSlots[i].Level});
+	}
+
+	const auto InRange = [&](FVector2D Pos)
+	{
+		return SurvivorsDeployRaw::IsWithinCullRange(
+			PlayerPos, ScreenHalfWidthU, ScreenHalfHeightU, CullMarginU, Pos);
+	};
+
+	for (const FEnemyState& E : Enemies)
+	{
+		if (E.bPendingRemove || !InRange(E.Pos)) continue;
+		const bool bBoss = CurrentConfig.EnemyTypeTable.IsValidIndex(E.TypeId)
+			&& CurrentConfig.EnemyTypeTable[E.TypeId].bIsBoss;
+		FSurvivorsDeployRawEntity& Out = S.Entities.AddDefaulted_GetRef();
+		Out.EntityId    = SurvivorsDeployRaw::MakeEntityId(ESurvivorsDeployRawIdSpace::Enemy, E.UniqueId);
+		Out.ClassName   = bBoss ? TEXT("enemy_boss") : TEXT("enemy_normal");
+		Out.WorldPos    = E.Pos;
+		Out.RadiusWorld = E.CollisionRadius;
+	}
+
+	for (const FGemState& G : Gems)
+	{
+		if (G.bPendingRemove || !InRange(G.Pos)) continue;
+		FSurvivorsDeployRawEntity& Out = S.Entities.AddDefaulted_GetRef();
+		Out.EntityId  = SurvivorsDeployRaw::MakeEntityId(ESurvivorsDeployRawIdSpace::Gem, G.UniqueId);
+		Out.ClassName = G.Type == EGemType::Red ? TEXT("gem_red")
+			: (G.Type == EGemType::Green ? TEXT("gem_green") : TEXT("gem_blue"));
+		Out.WorldPos  = G.Pos;
+		// ponytail: sim にジェムの見た目半径の定数が無いので 0。v2 特徴量はジェム半径を使わない
+	}
+
+	for (const FProjectileObsState& P : GetProjectileObsView())
+	{
+		if (!InRange(P.Pos)) continue;
+		FSurvivorsDeployRawEntity& Out = S.Entities.AddDefaulted_GetRef();
+		Out.EntityId    = P.EntityId;
+		Out.ClassName   = P.Kind == EProjectileObsKind::GroundZone ? TEXT("weapon_zone")
+			: P.Kind == EProjectileObsKind::Orbit ? TEXT("weapon_orbit")
+			: P.Kind == EProjectileObsKind::Aura ? TEXT("weapon_aura")
+			: TEXT("weapon_projectile");
+		Out.WorldPos    = P.Pos;
+		Out.RadiusWorld = P.Radius;
+		Out.Slot        = P.WeaponSlotIdx;
+		Out.TtlTrueS    = P.Ttl;
+		Out.bWarning    = P.bIsWarning;
+	}
+	return S;
 }
 
 int32 FSurvivorsGameLogic::GetOrbitOrbSlotIdx(int32 GI) const
@@ -1084,6 +1170,7 @@ TUniquePtr<FSurvivorsGameLogic> FSurvivorsGameLogic::CloneForPreview() const
 	Clone->UsedRevivalCount = UsedRevivalCount;
 	Clone->NextEnemyId = NextEnemyId;
 	Clone->NextGemId = NextGemId;
+	Clone->NextEffectId = NextEffectId;
 	Clone->FloorPickups = FloorPickups;
 	Clone->SpecialPickups = SpecialPickups;
 	Clone->Destructibles = Destructibles;

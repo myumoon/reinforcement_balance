@@ -186,6 +186,15 @@ class TrackPx:
         ensure(type(self.occluded) is bool, "occluded must be bool")
 
 
+def is_track_visible(track: TrackPx, viewport_wh: tuple[int, int]) -> bool:
+    """track が v2 の可視規則（中心が画面内・遮蔽なし）を満たすか返す。
+
+    ビルダーの可視判定と、sim wrapper の初観測時刻の追跡が同じ規則を使うための共有関数です。
+    矩形が画面からはみ出していても、中心が画面内なら可視とします。
+    """
+    return not track.occluded and 0.0 <= track.cx_px <= viewport_wh[0] and 0.0 <= track.cy_px <= viewport_wh[1]
+
+
 @dataclass(frozen=True)
 class HudSlot:
     """HUD から読んだ武器またはパッシブの1スロット。
@@ -394,10 +403,7 @@ def build_deploy_obs_v2(
         """
         return _clip(point[0], -1.0, 1.0), _clip(point[1], -1.0, 1.0)
 
-    visible = [
-        t for t in tracks
-        if world_valid and not t.occluded and 0.0 <= t.cx_px <= width and 0.0 <= t.cy_px <= height
-    ]
+    visible = [t for t in tracks if world_valid and is_track_visible(t, viewport_wh)]
     classes = params["entity_classes"]
     effect_of = classes["effect"]
     by_kind = {kind: [t for t in visible if effect_of.get(t.class_name) == kind] for kind in EFFECT_KINDS}

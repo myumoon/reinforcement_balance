@@ -72,10 +72,11 @@ class PerceptionErrorWrapper(gym.Wrapper):
 
         viewport は pixel 量子化を正規化座標へ変換するためだけに使い、
         world 座標や privileged state を受け取る入口は設けません。
+        schema を省略したときは Training の既定である DeployObs v2 を使います。
         """
         ensure(isinstance(profile, PerceptionErrorProfile), "invalid profile")
         if schema is None:
-            schema = DeployObsSchema.default_v1()
+            schema = DeployObsSchema.default_v2()
         ensure(isinstance(schema, DeployObsSchema), "invalid DeployObs schema")
         ensure(
             seed is None or (isinstance(seed, int) and not isinstance(seed, bool)),

@@ -27,22 +27,23 @@ from reinbalance_survivors_contracts.perception_profile import (
     FittedPerceptionErrorProfile,
     _FORMAL_FACTORY_TOKEN,
 )
-SCHEMA = DeployObsSchema.default_v1()
-def _dataset() -> CombatDistillationDataset:
+SCHEMA = DeployObsSchema.default_v2()
+def _dataset(schema: DeployObsSchema = SCHEMA) -> CombatDistillationDataset:
     """burn-in 一枠と padding 一枠を持つ一 episode dataset を返す。
     release observation は全 field の canonical missing 表現で leakage を含めない。
+    schema は既定の v2 で、v1 artifact の拒否を確かめるときだけ v1 を渡す。
     """
-    observations = np.zeros((1, 4, SCHEMA.dim * 3), dtype=np.float32)
+    observations = np.zeros((1, 4, schema.dim * 3), dtype=np.float32)
     neutral = np.concatenate([
-        np.full(field.size, field.neutral, dtype=np.float32) for field in SCHEMA.fields
+        np.full(field.size, field.neutral, dtype=np.float32) for field in schema.fields
     ])
-    observations[:, :, :SCHEMA.dim] = neutral
-    observations[:, :, SCHEMA.dim * 2 :] = 1.0
+    observations[:, :, :schema.dim] = neutral
+    observations[:, :, schema.dim * 2 :] = 1.0
     return CombatDistillationDataset(
         observations, np.array([[[9., -9.], [1., 0.], [0., 1.], [0., 0.]]], np.float32),
         np.array([[99., 1., 2., 0.]], np.float32),
         np.array([[1, 1, 1, 0]], np.bool_), np.array([[1, 0, 0, 0]], np.bool_),
-        np.array([[1, 0, 0, 0]], np.bool_), ("ep",), ("train",), SCHEMA.schema_hash, 1,
+        np.array([[1, 0, 0, 0]], np.bool_), ("ep",), ("train",), schema.schema_hash, 1,
         ("hud_inventory", "screen_world_observed", "temporal_inferred", "constant"),
     )
 def test_sequence_loss_is_actor_kl_plus_value_huber_with_masks() -> None:
@@ -152,6 +153,23 @@ def test_step_zero_rejects_missing_formal_dependencies_and_dataset_leakage() -> 
     with pytest.raises(ValueError, match="split leakage"):
         development.train_step(leaked)
     assert development.training_steps == 0
+def test_default_schema_is_v2_and_v1_development_artifacts_are_rejected(tmp_path: Path) -> None:
+    """Training の既定 schema は v2 で、v1 で作った dataset と checkpoint は hash 不一致で拒否される。
+    v1 dataset は step-0 gate で、v1 trainer が保存した development checkpoint は binding 検証で止まり、
+    どちらも optimizer を進めません。
+    """
+    v1 = DeployObsSchema.default_v1()
+    trainer = DeployablePolicyTrainer(DeployableCombatPolicy(SCHEMA.dim * 3, 2, hidden_dim=4))
+    assert trainer.schema == DeployObsSchema.default_v2() == SCHEMA
+    with pytest.raises(ValueError, match="deploy schema hash mismatch"):
+        trainer.train_step(_dataset(v1))
+    assert trainer.training_steps == 0
+    old = DeployablePolicyTrainer(DeployableCombatPolicy(SCHEMA.dim * 3, 2, hidden_dim=4))
+    old.schema = v1
+    old.save_checkpoint(tmp_path / "v1.pt")
+    with pytest.raises(ValueError, match="binding mismatch"):
+        trainer.load_checkpoint(tmp_path / "v1.pt")
+    assert trainer.training_steps == 0
 def _formal_profile(session_id: str = "cal-1") -> FittedPerceptionErrorProfile:
     """テスト専用 development_only=False フィクスチャ。
 

@@ -538,7 +538,8 @@ def test_v2_schema_applies_source_class_errors_to_new_segments_and_default_stays
         offset, size = v2.layout[name]
         assert np.all(delayed[2 * v2.dim + offset:2 * v2.dim + offset + size] > 0), name
 
-    default = PerceptionErrorWrapper(StaticDeployEnv(), _profile(), seed=1)
-    assert default.schema == DeployObsSchema.default_v1() == SCHEMA
+    # Training の既定 schema は v2（03-07）。v1 の観測空間を持つ環境は既定 schema では拒否される。
+    default = PerceptionErrorWrapper(StaticDeployEnv(first), _profile(), seed=1)
+    assert default.schema == v2 != SCHEMA
     with pytest.raises(Exception, match="observation_space"):
-        PerceptionErrorWrapper(StaticDeployEnv(first), _profile(), seed=1)
+        PerceptionErrorWrapper(StaticDeployEnv(), _profile(), seed=1)

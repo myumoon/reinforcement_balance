@@ -7,6 +7,7 @@
 
 #include "CoreMinimal.h"
 #include "Survivors/SurvivorsTypes.h"
+#include "Survivors/SurvivorsDeployRaw.h"
 #include "Survivors/SurvivorsGameConstants.h"
 #include "Survivors/SurvivorsLevelUpDecision.h"
 #include "Survivors/SurvivorsCollisionTypes.h"  // FSurvivorsTargetGrid (ReinBalanceLogic module)
@@ -356,11 +357,26 @@ public:
 	// ---- 武器クラスが使用する API (FSurvivorsWeaponLogic サブクラスからアクセス) ----
 	void  EquipWeapon(int32 SlotIdx, EWeaponType Type, int32 Level);
 	void  UnequipWeapon(int32 SlotIdx);
-	void  SpawnProjectile(const FProjectileState& P) { Projectiles.Add(P); }
-	void  SpawnGroundZone(const FGroundZoneState& Z) { GroundZones.Add(Z); }
+	/** projectile を追加し、deploy raw 用の新しい EffectId を振る（RNG 不使用） */
+	void  SpawnProjectile(const FProjectileState& P) { Projectiles.Add_GetRef(P).EffectId = AllocateEffectId(); }
+	/** ground zone を追加し、deploy raw 用の新しい EffectId を振る（RNG 不使用） */
+	void  SpawnGroundZone(const FGroundZoneState& Z) { GroundZones.Add_GetRef(Z).EffectId = AllocateEffectId(); }
+	/**
+	 * 武器エフェクト（projectile / zone / orbit 周期）用の新しい id を返す。
+	 *
+	 * 単調増加のカウンタで、乱数もゲーム進行も変えない。Reset で 0 に戻る。
+	 */
+	int32 AllocateEffectId() { return NextEffectId++; }
 	TArray<FProjectileState>& GetProjectiles() { return Projectiles; }
 	void  UpdateProjectilesBySlot(int32 InSlotIdx, float Dt, TFunctionRef<bool(FProjectileState&, float)> Callback);
 	TArray<FProjectileObsState> GetProjectileObsView() const;
+	/**
+	 * DeployObs v2 用の deploy raw state（カメラ・自機・スロット・画面付近の entity）を作る。
+	 *
+	 * カメラ中心は自機、半幅・半高は ScreenHalfWidthU / ScreenHalfHeightU。範囲＋CullMarginU の外の entity は除く。
+	 * 状態を読むだけで、乱数・ゲーム進行・flat obs は一切変えない。武器エフェクトは GetProjectileObsView と同じ範囲。
+	 */
+	FSurvivorsDeployRawState BuildDeployRawState(float CullMarginU = SurvivorsDeployRaw::CullMarginU) const;
 	int32 GetOrbitOrbSlotIdx(int32 GI) const;
 	void  QueryEnemyContacts(FVector2D Pos, float Radius, TArray<const struct FSurvivorsTargetProxy*>& Out) const;
 	bool  ReflectOffWall(FVector2D& InOutPos, FVector2D& InOutVel, float Radius) const;
@@ -382,6 +398,7 @@ public:
 	int32                 UsedRevivalCount  = 0;
 	int32                 NextEnemyId       = 0;
 	int32                 NextGemId         = 0;
+	int32                 NextEffectId      = 0;  // deploy raw の武器エフェクト id カウンタ（RNG 不使用）
 	TArray<FFloorPickupState>   FloorPickups;
 	TArray<FSpecialPickupState> SpecialPickups;
 	TArray<FDestructibleState>  Destructibles;

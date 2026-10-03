@@ -4,6 +4,7 @@
  */
 #include "Training/SurvivorsHttpEnvService.h"
 #include "HttpEnvServerBase.h"
+#include "Survivors/SurvivorsDeployRaw.h"
 #include "HttpServerResponse.h"
 #include "Kismet/GameplayStatics.h"
 #include "Dom/JsonObject.h"
@@ -19,6 +20,24 @@ FString SerializeJsonObject(const TSharedRef<FJsonObject>& Object)
 	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Json);
 	FJsonSerializer::Serialize(Object, Writer);
 	return Json;
+}
+
+/**
+ * deploy_raw が有効なときだけ、JSON オブジェクト文字列の末尾に "deploy_raw" キーを足す。
+ *
+ * 中身は FSurvivorsGameLogic::BuildDeployRawState と SurvivorsDeployRaw::ToJson が作る（service では組み立てない）。
+ * 無効なら文字列を一切変えないので、既定の /reset・/step 応答は従来と同じになる。
+ */
+void AppendDeployRawIfEnabled(FString& JsonObject, const ASurvivorsGame* Game)
+{
+	if (!Game || !Game->bDeployRawEnabled || !JsonObject.EndsWith(TEXT("}")))
+	{
+		return;
+	}
+	const FString Raw = SurvivorsDeployRaw::ToJson(Game->GetLogic()->BuildDeployRawState());
+	JsonObject.LeftChopInline(1);
+	const TCHAR* Separator = JsonObject.EndsWith(TEXT("{")) ? TEXT("") : TEXT(",");
+	JsonObject += FString::Printf(TEXT("%s\"deploy_raw\":%s}"), Separator, *Raw);
 }
 
 bool IsLowerSha256(const FString& Value)
@@ -505,6 +524,9 @@ public:
 				EHttpServerResponseCodes::ServerError));
 			return;
 		}
+		// 単体経路（ProcessStep）と並列経路（ParallelSetupActor → BuildInfoJson）の
+		// 両方がここを通るので、deploy_raw の付与はこの1か所だけで行う。
+		AppendDeployRawIfEnabled(Result.InfoJson, Game);
 		Callback(MakeJsonResponse(BuildStepJson(Result)));
 	}
 
@@ -528,7 +550,9 @@ public:
 				EHttpServerResponseCodes::ServerError));
 			return;
 		}
-		Callback(MakeJsonResponse(BuildResetJson(Result)));
+		FString ResetJson = BuildResetJson(Result);
+		AppendDeployRawIfEnabled(ResetJson, Game);
+		Callback(MakeJsonResponse(ResetJson));
 	}
 
 protected:
@@ -942,6 +966,16 @@ static FString ApplyParamsToGame(ASurvivorsGame* Game, const FString& BodyStr)
 			return TEXT("{\"error\":\"unknown item_selection_mode\"}");
 		}
 	}
+	// deploy_raw は JSON の bool だけを受理する（数値や文字列の暗黙変換で有効化させない）
+	TOptional<bool> DeployRawEnabled;
+	if (const TSharedPtr<FJsonValue>* DeployRawValue = JsonObj->Values.Find(TEXT("deploy_raw")))
+	{
+		if (!DeployRawValue->IsValid() || (*DeployRawValue)->Type != EJson::Boolean)
+		{
+			return TEXT("{\"error\":\"deploy_raw must be bool\"}");
+		}
+		DeployRawEnabled = (*DeployRawValue)->AsBool();
+	}
 	FString WeaponPoolMode;
 	if (JsonObj->Values.Contains(TEXT("weapon_pool_mode")))
 	{
@@ -1086,6 +1120,9 @@ static FString ApplyParamsToGame(ASurvivorsGame* Game, const FString& BodyStr)
 	bool bEnableEvolutions;
 	if (JsonObj->TryGetBoolField(TEXT("enable_evolutions"), bEnableEvolutions))
 		Game->bEnableEvolutions = bEnableEvolutions;
+
+	if (DeployRawEnabled.IsSet())
+		Game->bDeployRawEnabled = DeployRawEnabled.GetValue();
 
 	double ReplayOldPhaseFraction;
 	if (JsonObj->TryGetNumberField(TEXT("replay_old_phase_fraction"), ReplayOldPhaseFraction))

@@ -46,6 +46,12 @@ public:
 	virtual float     GetOrbitOrbVisualRadius()           const { return 0.f; }
 	virtual int32     GetOrbitOrbSlotIdx(int32 OrbIdx)    const { return SlotIdx; }
 	virtual float     GetOrbitOrbTtl(int32 OrbIdx)        const { return 1.f; }
+	/**
+	 * 現在の軌道オーブ周期の id（deploy raw の安定 id 用）を返す。
+	 *
+	 * 周期ごとに出し直すオーブ（King Bible の本）は周期開始時に新しい値になる。既定は 0。
+	 */
+	virtual int32     GetOrbitOrbCycleId()                const { return 0; }
 
 	// ---- obs 正規化用 cooldown 分母 ----
 	// 武器ごとに適切な正規化分母を返す。
