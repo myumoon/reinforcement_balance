@@ -8,3 +8,4 @@ Claude の Bash ツールで quoted heredoc(<<'EOF')に書いた Python raw 文�
 Windows の Python で `Path.write_text()` / `open(..., "w")` を newline 指定なしで使うと LF ファイルが CRLF に変わり diff 全行変更になる。既存ファイルの書き換えは `newline="\n"` を付けるか Edit ツールを使う。
 ReinBalanceLogicTests (LLT) 内では FFileHelper::SaveStringToFile が false を返す（UE file manager が書けない）。fixture の読み書きは std::ofstream/std::ifstream を使い、パスは __FILE__ + NormalizeFilename + CollapseRelativeDirectories で作る。
 UE5.4 の Build.bat 出力には "Result: Succeeded" 行が出ない。成功判定は exit code 0 と "Target is up to date"/WriteMetadata 行で行う。
+Claude の Bash ツールで長い quoted heredoc (cat >> file <<'EOF') が 'unexpected EOF while looking for matching' で丸ごと失敗することがある。長い追記は Write ツールで scratchpad に書いてから cat scratch | tr -d '\r' >> target で足す。
