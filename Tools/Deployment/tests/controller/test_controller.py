@@ -33,7 +33,7 @@ from survivors.vision.world_detector import DetectionResult
 
 MS = 1_000_000
 _PIXELS = np.zeros((1080, 1920, 4), dtype=np.uint8)
-_SCHEMA = DeployObsSchema.default_v1()
+_SCHEMA = DeployObsSchema.default_v2()
 _MODEL_HASHES = {"combat_model": "b" * 64}
 
 

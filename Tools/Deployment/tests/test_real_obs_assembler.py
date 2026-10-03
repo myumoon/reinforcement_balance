@@ -34,9 +34,11 @@ def _inputs(state="gameplay", *, ts=1_000_000_000) -> tuple[HudStateV1, TrackedW
     return hud, world
 
 def test_assemble_builds_release_observation_without_offscreen_leak() -> None:
-    """visible track だけを DeployObservation へ組み立てる。
+    """v1 経路では on_screen・clipped で可視な track だけを DeployObservation へ組み立てる。
 
     全 tracker 件数や画面外の最近傍が policy tensor に現れないことを確認します。
+    v1 schema を明示したときの旧経路のテストです（v2 は中心が画面内かで判定し、
+    tests/test_deploy_obs_v2_input.py と test_real_obs_assembler_v2.py で確認します）。
     """
     schema = DeployObsSchema.default_v1()
     snapshot = RealObsAssembler().assemble(*_inputs(), schema, (1000, 1000))
@@ -53,7 +55,7 @@ def test_ui_snapshot_is_atomic_and_diagnostics_have_no_roi() -> None:
     HudState side channel や ROI diagnostics を作らず、identity を同じ snapshot に束縛します。
     """
     assembler = RealObsAssembler()
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler.assemble(*_inputs("gameplay"), schema, (1000, 1000))
     snapshot = assembler.assemble(*_inputs("level_up_items", ts=2_000_000_000), schema, (1000, 1000))
     assert snapshot is not None
@@ -74,7 +76,7 @@ def test_ui_presentation_cannot_enter_tensor_builder() -> None:
 
     型の境界を誤って跨いでも Mapping estimate として解釈されないことを確認します。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     snapshot = RealObsAssembler().assemble(*_inputs(), schema, (1000, 1000))
     assert isinstance(snapshot.ui_presentation, UiPresentationSnapshotV1)
     with pytest.raises(ValueError):
@@ -87,7 +89,7 @@ def test_item_context_uses_cached_gameplay_danger() -> None:
 
     level_up overlay は enemy tracks が空なので、gameplay snapshot を参照しないと density=0 になります。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     hud_gp, world_gp = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
@@ -110,7 +112,7 @@ def test_assemble_returns_none_for_old_frame() -> None:
 
     monotonic tick に基づき、now_ns が _last_tick_ns 未満のフレームを抑制します。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     card = ParsedCard(0, "whip", "weapon", 2, .99, "ok", (100, 100, 400, 500))
     def _make_hud(frame_idx: int, ts: int) -> HudStateV1:
@@ -130,7 +132,7 @@ def test_gameplay_cache_cleared_on_session_change() -> None:
 
     s1 で danger を蓄積後、s2 の item overlay では item_context が None になります。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     hud_gp, world_gp = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
@@ -152,7 +154,7 @@ def test_low_combat_validity_does_not_update_danger_cache() -> None:
 
     信頼度不足の低品質フレームで敵密度ゼロに更新されると次の item 選択精度が落ちます。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     hud_gp, world_gp = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
@@ -177,7 +179,7 @@ def test_item_context_fail_closed_without_gameplay_cache() -> None:
 
     初回が item 画面の場合、空の world が新鮮な danger 特徴として学習に入ることを防ぎます。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
     hud_lu = HudStateV1(
@@ -197,7 +199,7 @@ def test_duplicate_card_ids_fail_closed() -> None:
 
     model と UI で identity が対応しない状態を UiPresentationSnapshotV1 の検証で排除します。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     card_a = ParsedCard(0, "whip", "weapon", 2, .99, "ok", (100, 100, 400, 500))
     card_b = ParsedCard(1, "whip", "weapon", 3, .99, "ok", (500, 100, 800, 500))
     hud = HudStateV1(
@@ -215,7 +217,7 @@ def test_assemble_respects_policy_hz() -> None:
 
     60 Hz 等の高頻度入力でも snapshot 発行は 15 Hz に抑制されます。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     hud_gp, world_gp = _inputs("gameplay")
     snap1 = assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
@@ -230,7 +232,7 @@ def test_item_context_world_age_and_snapshot_age_computed_independently() -> Non
 
     world が tick より 40ms 古い場合に両者が異なる値になることを確認します。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     hud_gp, _ = _inputs("gameplay")  # ts=1B
     visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False, .05, .05, 0)
@@ -255,7 +257,7 @@ def test_fallback_card_excluded_from_model_choices() -> None:
 
     ItemSelector が非選択 UI policy の所有物を選択しないよう、choices から除きます。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     hud_gp, world_gp = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
@@ -280,7 +282,7 @@ def test_item_context_excludes_low_confidence_ui_targets() -> None:
 
     クリック不能な候補を ItemSelector が選択するとレベルアップ画面で進行不能になります。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     hud_gp, world_gp = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
@@ -303,7 +305,7 @@ def test_skew_ms_uses_joined_timestamps() -> None:
 
     out-of-order 入力を片側だけ破棄した場合、raw args ではなく joined state のズレを示します。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     # HUD ts=2B, world ts=1B → joined 後は両者が採用されるので skew = |2B - 1B| = 1B ns = 1000 ms
     hud, _ = _inputs(ts=2_000_000_000)
@@ -320,7 +322,7 @@ def test_item_context_slot_encoding_is_binary_occupancy() -> None:
     simulator 用の context_danger_v1 とは別スキーマで表現します。
     evolution_readiness・is_union・has_prerequisite も同様に画面観測不能として固定値です。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     hud_gp, world_gp = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
@@ -362,7 +364,7 @@ def test_ui_policy_input_hp_025_selects_chicken() -> None:
     DeployObservation の HP=0 とは独立して chicken / gold を判定できます。
     """
     from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, decide_non_model_ui_intent
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
     card_chk = ParsedCard(1, "chicken_leg", "fallback", 0, .99, "ok", (500, 100, 800, 300))
@@ -378,7 +380,7 @@ def test_ui_policy_input_hp_025_selects_chicken() -> None:
 def test_ui_policy_input_hp_090_selects_gold() -> None:
     """HP=0.90 (>0.70 閾値) では fallback_heuristic_v1 が gold を選ぶ。"""
     from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, decide_non_model_ui_intent
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
     card_chk = ParsedCard(1, "chicken_leg", "fallback", 0, .99, "ok", (500, 100, 800, 300))
@@ -392,7 +394,7 @@ def test_ui_policy_input_hp_090_selects_gold() -> None:
 def test_ui_policy_input_chicken_only_selects_chicken() -> None:
     """chicken のみ有効なら gold がなくても chicken を選ぶ。"""
     from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, decide_non_model_ui_intent
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     card_chk = ParsedCard(0, "chicken_leg", "fallback", 0, .99, "ok", (100, 100, 400, 300))
     snap = assembler.assemble(_fallback_hud(0.90, (card_chk,)), TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
@@ -408,7 +410,7 @@ def test_ui_policy_input_invalid_target_stops() -> None:
     無効な候補から誤ったクリック座標を生成しないことを確認します。
     """
     from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, decide_non_model_ui_intent
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     # confidence=0.1 < 0.35 → validity=False
     card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .1, "ok", (100, 100, 400, 300))
@@ -426,7 +428,7 @@ def test_ui_policy_input_unknown_semantic_stops() -> None:
     未知の fallback target が意図せず選ばれることを防ぎます。
     """
     from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, decide_non_model_ui_intent
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     card_unk = ParsedCard(0, "mystery_box", "fallback", 0, .99, "ok", (100, 100, 400, 300))
     snap = assembler.assemble(_fallback_hud(0.25, (card_unk,)), TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
@@ -443,7 +445,7 @@ def test_item_context_fallback_anchor_resets_direction_to_neutral() -> None:
 
     world_validity にも anchor の無効性が伝播し、推測座標が有効扱いにならないことを確認します。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     # is_fallback=True の gameplay frame でキャッシュを構築
     visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False, .05, .05, 0)
@@ -472,7 +474,7 @@ def test_item_context_real_anchor_preserves_direction() -> None:
 
     fallback anchor との非対称性を確認することで P2 fix の回帰テストとします。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False, .05, .05, 0)
     world_gp = TrackedWorldStateV2(4, 1_000_000_000, [visible], PlayerAnchorState(.5, .5, .9, False))
@@ -504,7 +506,7 @@ def test_item_context_occupancy_schema_is_deterministic() -> None:
     (occupancy parity)。simulator の context_danger_v1 とは schema が異なるため、
     対応する専用モデルが必要です。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler1 = RealObsAssembler()
     assembler2 = RealObsAssembler()
     hud_gp, world_gp = _inputs("gameplay")
@@ -534,7 +536,7 @@ def test_ui_policy_input_missing_hp_returns_none() -> None:
     欠損 HP を 0.0 に置換すると fallback_heuristic_v1 が chicken を誤選択するため、
     None を返してアクションを起こさない設計にしています。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
     hud = dataclasses.replace(
@@ -551,7 +553,7 @@ def test_ui_policy_input_hp_confidence_zero_returns_none() -> None:
 
     HP 測定が完全に信頼できない場合は行動を起こさない設計にしています。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
     hud = dataclasses.replace(
@@ -569,7 +571,7 @@ def test_ui_policy_input_low_confidence_screen_maps_to_unknown() -> None:
     信頼度不足の場合は UNKNOWN を返して no-op にします。
     """
     from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, ScreenState, decide_non_model_ui_intent
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     hud = dataclasses.replace(
         _fallback_hud(0.75, ()),
@@ -591,7 +593,7 @@ def test_ui_policy_input_target_reached_transition_confirm() -> None:
     """
     from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, decide_non_model_ui_intent
     from survivors.vision.hud_parser import ParsedButton
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     confirm_btn = ParsedButton("confirm", .9, "ok", (300, 300, 700, 600))
     hud = HudStateV1(
@@ -617,7 +619,7 @@ def test_policy_input_chest_with_no_hp() -> None:
     """
     from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, ScreenState, decide_non_model_ui_intent
     from survivors.vision.hud_parser import ParsedButton
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     ack_btn = ParsedButton("ack_chest", .9, "ok", (300, 300, 700, 600))
     hud = HudStateV1(
@@ -641,7 +643,7 @@ def test_policy_input_confirm_with_no_hp() -> None:
     """
     from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, ScreenState, decide_non_model_ui_intent
     from survivors.vision.hud_parser import ParsedButton
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     confirm_btn = ParsedButton("confirm", .9, "ok", (300, 300, 700, 600))
     hud = HudStateV1(
@@ -665,7 +667,7 @@ def test_stale_hud_clears_policy_input_and_candidate_validity() -> None:
 
     古い HUD の ROI や HP から誤操作が生成されないよう fail-closed にします。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     hud_gp, world_gp = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
@@ -689,7 +691,7 @@ def test_fallback_hp_confidence_below_threshold_returns_none() -> None:
 
     parserと同じ 0.35 閾値を共有し、信頼できないHPから誤った fallback 選択を防ぎます。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
     hud = dataclasses.replace(_fallback_hud(0.5, (card_gold,)), hp_confidence=0.1)
@@ -702,7 +704,7 @@ def test_fallback_hp_confidence_at_threshold_generates_input() -> None:
 
     閾値直上は有効な HP として受け入れ、fallback_heuristic_v1 が動作します。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     card_gold = ParsedCard(0, "gold_bag", "fallback", 0, .99, "ok", (100, 100, 400, 300))
     hud = dataclasses.replace(_fallback_hud(0.5, (card_gold,)), hp_confidence=0.36)
@@ -719,7 +721,7 @@ def test_meta_priority_selects_valid_reroll_button() -> None:
     """
     from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1
     from survivors.vision.hud_parser import ParsedButton
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     reroll_btn = ParsedButton("reroll", .9, "ok", (100, 100, 200, 150))
     card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
@@ -748,7 +750,7 @@ def test_no_config_button_is_none() -> None:
     05-01 adapter が config を渡すまで meta_priority は空のままで button は設定されません。
     """
     from survivors.vision.hud_parser import ParsedButton
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     reroll_btn = ParsedButton("reroll", .9, "ok", (100, 100, 200, 150))
     card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
@@ -784,7 +786,7 @@ def test_weapon_tracks_do_not_raise_hazard_or_boss_flag() -> None:
     )
     world_gp = TrackedWorldStateV2.from_state(tracker.update(det, 4, 1_000_000_000), 4, 1_000_000_000)
     assert sorted(t.coarse_class for t in world_gp.tracks) == ["enemy"] + ["weapon"] * 4
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     hud_gp, _ = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))

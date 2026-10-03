@@ -67,7 +67,7 @@ def test_load_accepts_training_shaped_package(
     assert bundle.development_only is False
     bundle.assert_live_eligible()
 
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assert bundle.combat_policy.observation_dim == 3 * schema.dim
     assert bundle.action_dim == REQUIRED_ACTION_DIM
     assert bundle.combat_policy.hidden_dim == fx.DEFAULT_HIDDEN_DIM

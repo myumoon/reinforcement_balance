@@ -189,7 +189,7 @@ def test_observation_is_valid_uses_existing_contract() -> None:
 
     やさしい説明: 判定は ``DeployObservation.validate_for`` に委ねています。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     values = np.zeros(schema.dim, dtype=np.float32)
     for field in schema.fields:
         offset, size = schema.layout[field.name]

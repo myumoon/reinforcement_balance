@@ -215,7 +215,7 @@ def build_combat_policy(seed: int = 0) -> CombatPolicy:
     重みは乱数の種で固定するので、同じ seed なら毎回同じ policy になります。
     """
     torch.manual_seed(seed)
-    obs_dim = 3 * DeployObsSchema.default_v1().dim
+    obs_dim = 3 * DeployObsSchema.default_v2().dim
     model = CombatGruPolicy(observation_dim=obs_dim, action_dim=REQUIRED_ACTION_DIM, hidden_dim=8).eval()
     return CombatPolicy(model=model, observation_dim=obs_dim, action_dim=REQUIRED_ACTION_DIM, hidden_dim=8)
 

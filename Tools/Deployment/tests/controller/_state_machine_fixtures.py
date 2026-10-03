@@ -24,7 +24,7 @@ from survivors.perception_snapshot import (
 )
 from survivors.runtime.agent_runtime import AGENT_DECISION_SCHEMA_VERSION, AgentDecision
 
-_SCHEMA = DeployObsSchema.default_v1()
+_SCHEMA = DeployObsSchema.default_v2()
 
 
 def _hash_of(label: str) -> str:

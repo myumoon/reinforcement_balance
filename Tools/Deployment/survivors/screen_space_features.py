@@ -4,19 +4,14 @@
 """
 from __future__ import annotations
 import math
+# 方位ビンの式は Common の DeployObs v2 ビルダーと1か所で共有する（既定 bin 数は Common の16）
+from reinbalance_survivors_contracts.deploy_obs_v2_features import directional_bin
 from .deploy_obs_adapter import NamedEstimate
 from .vision.entity_tracker import TrackedEntityV2, TrackedWorldStateV2
-def directional_bin(dx: float, dy: float, bin_count: int = 8) -> int:
-    """相対ベクトルを C++ BuildDirectionalDensityFeatures と同じ bin へ写す。
 
-    ``atan2 + PI`` により +X は八分割時の bin 4 になり、境界は末端へ clamp します。
-    """
-    if isinstance(dx, bool) or isinstance(dy, bool) or not all(math.isfinite(float(value)) for value in (dx, dy)):
-        raise ValueError("direction must be finite")
-    if type(bin_count) is not int or bin_count <= 0:
-        raise ValueError("bin_count must be positive int")
-    angle01 = (math.atan2(float(dy), float(dx)) + math.pi) / (2.0 * math.pi)
-    return max(0, min(bin_count - 1, math.floor(angle01 * bin_count)))
+__all__ = ["build_screen_space_estimates", "directional_bin"]
+
+
 def _visible(tracks: list[TrackedEntityV2], coarse_class: str, threshold: float) -> list[TrackedEntityV2]:
     """指定 class の安全に可視な track だけを返す。
 

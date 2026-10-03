@@ -3,15 +3,19 @@
 モデル特徴と操作 ROI を別経路で生成し、最後に同一 identity へ atomic に束縛します。
 """
 from __future__ import annotations
+import dataclasses
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
-from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
+from reinbalance_survivors_contracts.deploy_obs import DEPLOY_OBS_V2_SCHEMA_VERSION, DeployObservation, DeployObsSchema
+from reinbalance_survivors_contracts.deploy_obs_v2_features import duration_mult_from_hud_slots
 from reinbalance_survivors_contracts.item_decision import CandidateFeatures, ItemDecisionFeatures
 from reinbalance_survivors_contracts.ui_policy import (
     ButtonOption, FallbackSemantic, FallbackTarget, NonModelUiPolicyConfigV1, ScreenState, UiPolicyInputV1,
 )
 from .deploy_obs_adapter import NamedEstimate, build_deploy_observation, normalized_category
+from .deploy_obs_v2_input import build_v2_observation, hud_slots_from_inventory
 from .perception_snapshot import PerceptionSnapshot, UiPresentationSnapshotV1, build_ui_presentation_from_hud
 from .screen_space_features import build_screen_space_estimates
+from .slot_level_tracker import SlotLevelTracker
 from .temporal_state import TemporalAssembler, TemporalJoin
 from .vision.entity_tracker import TrackedEntityV2, TrackedWorldStateV2
 from .vision.hud_parser import HudStateV1, ParsedCard
@@ -189,6 +193,32 @@ def _item_context(
     )
     return context, choices
 
+_V2_SCHEMA_HASH = DeployObsSchema.default_v2().schema_hash
+
+
+def _v1_observation(joined: TemporalJoin, screen: dict[str, NamedEstimate], schema: DeployObsSchema) -> DeployObservation:
+    """v1 schema 用の DeployObservation を named estimates から作る。
+
+    v1 schema を明示的に渡された場合だけ使う旧経路で、既定（v2）の経路とは分けています。
+    HUD・画面の値の validity には combat の有効性を掛け、停止画面では欠損にします。
+    """
+    estimates: dict[str, NamedEstimate] = {}
+    combat = joined.combat_validity
+    if joined.hud.hp_ratio is not None:
+        estimates["player_hp"] = NamedEstimate((joined.hud.hp_ratio,), joined.hud.captured_monotonic_ns, joined.hud.hp_confidence * combat)
+    if joined.hud.level is not None:
+        estimates["level"] = NamedEstimate((min(joined.hud.level / 99., 1.),), joined.hud.captured_monotonic_ns, joined.hud.level_confidence * combat)
+    estimates["weapon_category"] = NamedEstimate(
+        (normalized_category(_weapon_category(joined.hud.inventory[0])),), joined.hud.captured_monotonic_ns,
+        joined.hud.inventory_confidence * combat,
+    )
+    for name in ("player_screen_pos", "nearest_enemy_offset", "visible_enemy_count"):
+        if name in screen:
+            value = screen[name]
+            estimates[name] = NamedEstimate(value.value, value.timestamp_ns, value.validity * combat)
+    return build_deploy_observation(schema, estimates, joined.captured_ns)
+
+
 class RealObsAssembler:
     """実 parser/tracker 出力から一貫した policy snapshot を生成する。
 
@@ -205,6 +235,32 @@ class RealObsAssembler:
         self._last_gameplay_screen: dict[str, NamedEstimate] | None = None
         self._last_gameplay_ns: int | None = None
         self._last_session_id: str | None = None
+        self._slot_levels = SlotLevelTracker()
+
+    def _v2_observation(self, joined: TemporalJoin, schema: DeployObsSchema, viewport: tuple[int, int]) -> DeployObservation:
+        """TemporalJoin を Common の v2 ビルダーへ渡して DeployObs v2 を作る。
+
+        combat が無効なフレームは v1 と同じく world・HUD 由来の値を全て不明にします。
+        HUD の値は信頼度が閾値以上のときだけ渡し、スロットのレベルは追跡器から引きます。
+        movement_direction は Deployment に情報源が無いので常に不明（None）です。
+        """
+        if schema.schema_hash != _V2_SCHEMA_HASH:
+            raise ValueError("v2 schema must be DeployObsSchema.default_v2()")
+        hud = joined.hud
+        combat = joined.combat_validity > 0
+        hud_slots = (
+            hud_slots_from_inventory(hud.inventory, self._slot_levels.level)
+            if combat and hud.inventory_confidence >= _HP_CONFIDENCE_THRESHOLD else None
+        )
+        observation = build_v2_observation(
+            world=joined.world, viewport=viewport, hud_slots=hud_slots,
+            now_s=joined.captured_ns / 1e9, duration_mult=duration_mult_from_hud_slots(hud_slots),
+            world_valid=combat,
+            hp_ratio=hud.hp_ratio if combat and hud.hp_confidence >= _HP_CONFIDENCE_THRESHOLD else None,
+            player_level=hud.level if combat and hud.level_confidence >= _HP_CONFIDENCE_THRESHOLD else None,
+        )
+        # ビルダーは秒から ns を作り直すので、snapshot と同じ整数 ns へ揃える
+        return dataclasses.replace(observation, timestamp_ns=joined.captured_ns)
 
     def assemble(
         self, hud: HudStateV1, world: TrackedWorldStateV2,
@@ -243,21 +299,11 @@ class RealObsAssembler:
             self._last_gameplay_world = joined.world
             self._last_gameplay_screen = screen
             self._last_gameplay_ns = joined.captured_ns
-        estimates: dict[str, NamedEstimate] = {}
-        combat = joined.combat_validity
-        if joined.hud.hp_ratio is not None:
-            estimates["player_hp"] = NamedEstimate((joined.hud.hp_ratio,), joined.hud.captured_monotonic_ns, joined.hud.hp_confidence * combat)
-        if joined.hud.level is not None:
-            estimates["level"] = NamedEstimate((min(joined.hud.level / 99., 1.),), joined.hud.captured_monotonic_ns, joined.hud.level_confidence * combat)
-        estimates["weapon_category"] = NamedEstimate(
-            (normalized_category(_weapon_category(joined.hud.inventory[0])),), joined.hud.captured_monotonic_ns,
-            joined.hud.inventory_confidence * combat,
-        )
-        for name in ("player_screen_pos", "nearest_enemy_offset", "visible_enemy_count"):
-            if name in screen:
-                value = screen[name]
-                estimates[name] = NamedEstimate(value.value, value.timestamp_ns, value.validity * combat)
-        deploy_obs = build_deploy_observation(schema, estimates, joined.captured_ns)
+        self._slot_levels.observe(joined.hud)
+        if schema.schema_version == DEPLOY_OBS_V2_SCHEMA_VERSION:
+            deploy_obs = self._v2_observation(joined, schema, viewport)
+        else:
+            deploy_obs = _v1_observation(joined, screen, schema)
         hud_valid = joined.hud_validity > 0
         ui = build_ui_presentation_from_hud(joined.hud, viewport, snapshot_id=snapshot_id, frame_id=frame_id, hud_valid=hud_valid)
         valid_ui_ids = frozenset(c.choice_id for c in ui.candidates if c.validity and c.semantic_kind == "item_card")

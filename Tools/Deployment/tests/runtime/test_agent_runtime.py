@@ -116,7 +116,7 @@ def _snap(screen_state: str = "gameplay", *, ts: int = 1_000_000_000):
 
     やさしい説明: 呼び出し側が期待する入出力と安全条件を明示します。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     hud, world = _hud_world(screen_state, ts=ts)
     snap = RealObsAssembler().assemble(hud, world, schema, (1000, 1000))
     assert snap is not None, f"assembler returned None for screen_state={screen_state!r}"
@@ -128,7 +128,7 @@ def _snap_with_invalid_leading_item_card():
 
     やさしい説明: 画面のカード番号とモデルの候補番号がずれる実際の経路を、テスト用に再現します。
     """
-    schema = DeployObsSchema.default_v1()
+    schema = DeployObsSchema.default_v2()
     assembler = RealObsAssembler()
     gameplay_hud, gameplay_world = _hud_world("gameplay")
     assert assembler.assemble(gameplay_hud, gameplay_world, schema, (1000, 1000)) is not None
@@ -487,7 +487,7 @@ class TestTypedScreenStateRouting:
         """
         hud, world = _hud_world(raw_screen_state, ts=9_000_000_000)
         low_confidence_hud = dataclasses.replace(hud, screen_state_confidence=0.1)
-        schema = DeployObsSchema.default_v1()
+        schema = DeployObsSchema.default_v2()
         snap = RealObsAssembler().assemble(low_confidence_hud, world, schema, (1000, 1000))
         assert snap is not None
         assert snap.ui_policy_input is not None

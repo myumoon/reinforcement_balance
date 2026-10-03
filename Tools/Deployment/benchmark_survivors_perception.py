@@ -908,7 +908,7 @@ def _derive_calibration_residuals(
 
     # consumer wrapper と同じ segment を使って coord / category residual を導出する。
     # schema は一度だけ読み込み、ループ内で再利用する。
-    _deploy_schema = DeployObsSchema.default_v1()
+    _deploy_schema = DeployObsSchema.default_v2()
     from reinbalance_survivors_contracts.perception_error import ITEM_CATEGORY_SIZE as _ITEM_CAT_SIZE
     _field_by_name = {field.name: field for field in _deploy_schema.fields}
     # (offset, size, max_age_ms) — age plane は [0,1] 正規化なので変換に max_age_ms が必要。
