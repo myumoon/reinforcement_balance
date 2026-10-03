@@ -24,8 +24,8 @@ from reinbalance_survivors_contracts.ui_policy import NonModelUiPolicyConfigV1, 
 from survivors.real_obs_assembler import RealObsAssembler
 from survivors.vision.entity_tracker import (
     PlayerAnchorState,
-    TrackedEntityV1,
-    TrackedWorldStateV1,
+    TrackedEntityV2,
+    TrackedWorldStateV2,
 )
 from survivors.vision.hud_parser import HudStateV1, ParsedCard
 
@@ -106,8 +106,8 @@ def _hud_world(screen_state: str = "gameplay", *, ts: int = 1_000_000_000):
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    visible = TrackedEntityV1(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
-    world = TrackedWorldStateV1(4, ts, [visible], PlayerAnchorState(.5, .5, .9, False))
+    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
+    world = TrackedWorldStateV2(4, ts, [visible], PlayerAnchorState(.5, .5, .9, False))
     return hud, world
 
 

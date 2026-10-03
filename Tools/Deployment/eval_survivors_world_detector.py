@@ -8,8 +8,8 @@ weight がなくても metric 計算パスを検証できる。
 使用例:
     python eval_survivors_world_detector.py \\
         --annotations data/world_val.json \\
-        --config configs/world_detector_v1.yaml \\
-        --class-map configs/world_class_map_v1.yaml
+        --config configs/world_detector_v2.yaml \\
+        --class-map configs/world_class_map_v2.yaml
 """
 from __future__ import annotations
 
@@ -743,8 +743,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--annotations", required=True, help="GT COCO JSON")
     p.add_argument("--predictions", help="予測 COCO JSON（省略時は synthetic zero prediction）")
-    p.add_argument("--config", default="configs/world_detector_v1.yaml", help="detector config YAML")
-    p.add_argument("--class-map", default="configs/world_class_map_v1.yaml", help="class map YAML")
+    p.add_argument("--config", default="configs/world_detector_v2.yaml", help="detector config YAML")
+    p.add_argument("--class-map", default="configs/world_class_map_v2.yaml", help="class map YAML")
     p.add_argument("--output", help="メトリクス JSON の出力先")
     return p
 

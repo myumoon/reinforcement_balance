@@ -86,7 +86,7 @@ def test_export_checked_labels_clips_sorts_and_keeps_negative_images(tmp_path: P
     source_label = session_a / "00000003.json"
     original_label = source_label.read_bytes()
     output_dir = tmp_path / "export"
-    class_map_path = Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v1.yaml"
+    class_map_path = Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v2.yaml"
 
     result = main(
         [

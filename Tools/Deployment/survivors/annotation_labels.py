@@ -19,7 +19,7 @@ from typing import Iterable, Iterator
 from survivors.vision.world_dataset import load_class_map
 
 
-DEFAULT_CLASS_MAP_PATH = Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v1.yaml"
+DEFAULT_CLASS_MAP_PATH = Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v2.yaml"
 _CLASS_MAP = load_class_map(DEFAULT_CLASS_MAP_PATH)
 WORLD_CLASSES = tuple(
     item["name"] for item in sorted(_CLASS_MAP.foreground_classes, key=lambda item: item["id"])

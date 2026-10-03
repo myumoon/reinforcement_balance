@@ -436,7 +436,7 @@ def test_cli_replays_capture_with_loaded_artifacts(tmp_path: Path, monkeypatch: 
     argv = [
         "replay", "--capture-manifest", str(capture_path), "--output-dir", str(tmp_path / "out"),
         "--combat-package", "c", "--detector-config", "d",
-        "--class-map", str(Path(fixture.__file__).parent / "configs" / "world_class_map_v1.yaml"),
+        "--class-map", str(Path(fixture.__file__).parent / "configs" / "world_class_map_v2.yaml"),
         "--detector-weights", "w", "--detector-manifest", "x", "--campaign-run-mode", "operator_debug_restart",
     ]
     assert cli.main(argv) == 0
@@ -1133,7 +1133,7 @@ def test_cli_suite_replay_compare_golden_and_formal_refusal(tmp_path: Path, monk
     monkeypatch.setattr(cli, "_load_artifacts", load)
     artifacts = [
         "--capture-manifest", str(capture_path), "--combat-package", "c", "--detector-config", "d",
-        "--class-map", str(Path(fixture.__file__).parent / "configs" / "world_class_map_v1.yaml"),
+        "--class-map", str(Path(fixture.__file__).parent / "configs" / "world_class_map_v2.yaml"),
         "--detector-weights", "w", "--detector-manifest", "x",
     ]
     out = tmp_path / "suite"

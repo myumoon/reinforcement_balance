@@ -25,8 +25,8 @@ from survivors.vision.world_detector import (
 
 
 CONFIGS_DIR = pathlib.Path(__file__).parents[2] / "configs"
-DETECTOR_CONFIG_PATH = CONFIGS_DIR / "world_detector_v1.yaml"
-CLASS_MAP_PATH = CONFIGS_DIR / "world_class_map_v1.yaml"
+DETECTOR_CONFIG_PATH = CONFIGS_DIR / "world_detector_v2.yaml"
+CLASS_MAP_PATH = CONFIGS_DIR / "world_class_map_v2.yaml"
 
 
 # ---- config loading ----
@@ -439,7 +439,7 @@ class TestValidateDetectorConfig:
             validate_detector_config(valid_cfg)
 
     def test_default_config_passes(self, valid_cfg):
-        """既定 world_detector_v1.yaml は validate_detector_config を通過する。"""
+        """既定 world_detector_v2.yaml は validate_detector_config を通過する。"""
         from survivors.vision.world_detector import validate_detector_config
         validate_detector_config(valid_cfg)  # no exception
 

@@ -59,7 +59,7 @@ def test_classes_follow_world_class_map_and_append_ui_classes() -> None:
 
     UI クラスは WorldDetector の foreground に混ぜず、末尾へ追加する。
     """
-    class_map_path = Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v1.yaml"
+    class_map_path = Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v2.yaml"
     expected_world = tuple(
         item["name"]
         for item in sorted(load_class_map(class_map_path).foreground_classes, key=lambda item: item["id"])

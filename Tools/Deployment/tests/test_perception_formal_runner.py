@@ -55,8 +55,8 @@ from survivors.perception_snapshot import FormalReplayEvidence
 from survivors.real_obs_assembler import RealObsAssembler
 from survivors.vision.entity_tracker import (
     PlayerAnchorState,
-    TrackedEntityV1,
-    TrackedWorldStateV1,
+    TrackedEntityV2,
+    TrackedWorldStateV2,
 )
 from survivors.vision.hud_parser import (
     HudStateV1,
@@ -168,15 +168,15 @@ def _hud_world(
         inventory, 1.0, real_inventory_hash, (card,), real_candidate_set_hash,
         (), False, False, False, 1.0, "fixture",
     )
-    boss = TrackedEntityV1(
+    boss = TrackedEntityV2(
         1, 2, "enemy_boss", "enemy", 1.0, 1, frame_index,
         0.7, 0.5, 0.2, 0.0, 0.0, 0.0, True, False,
     )
-    hazard = TrackedEntityV1(
+    hazard = TrackedEntityV2(
         2, 3, "hazard_area", "hazard", 1.0, 1, frame_index,
         0.6, 0.5, 0.1, 0.0, 0.0, 0.0, True, False,
     )
-    world = TrackedWorldStateV1(
+    world = TrackedWorldStateV2(
         frame_index, timestamp_ns, [boss, hazard], PlayerAnchorState(0.5, 0.5, 1.0, False)
     )
     return hud, world

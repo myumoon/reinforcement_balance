@@ -14,7 +14,7 @@ from survivors.vision.entity_tracker import (
     EntityTracker,
     Track,
     TrackedWorldState,
-    TrackedWorldStateV1,
+    TrackedWorldStateV2,
 )
 from survivors.vision.world_detector import DetectionResult
 
@@ -222,16 +222,16 @@ class TestTrackAttributes:
         assert vx <= 100  # raw 値未満（EMA 初期は raw = EMA のこともある）
 
 
-# ---- TrackedWorldStateV1 schema ----
+# ---- TrackedWorldStateV2 schema ----
 
-class TestTrackedWorldStateV1:
-    """TrackedWorldStateV1 のフィールド・スキーマハッシュを golden fixture で固定する。"""
+class TestTrackedWorldStateV2:
+    """TrackedWorldStateV2 のフィールド・スキーマハッシュを golden fixture で固定する。"""
 
     def test_state_has_required_fields(self):
         tracker = _make_tracker()
         det = _make_detection([[100, 200, 200, 300]], [0.9], [2])
         state = tracker.update(det, frame_index=0, timestamp_ns=12345)
-        v1 = TrackedWorldStateV1.from_state(state, frame_index=0, timestamp_ns=12345)
+        v1 = TrackedWorldStateV2.from_state(state, frame_index=0, timestamp_ns=12345)
 
         assert hasattr(v1, "frame_index")
         assert hasattr(v1, "timestamp_ns")
@@ -253,7 +253,7 @@ class TestTrackedWorldStateV1:
 
     def test_schema_hash_is_stable(self):
         """スキーマハッシュが変わっていないことを確認する。"""
-        # TrackedWorldStateV1 のフィールド名セットを固定する
+        # TrackedWorldStateV2 のフィールド名セットを固定する
         expected_track_fields = {
             "track_id", "class_id", "class_name", "coarse_class",
             "confidence", "age", "last_seen_frame_index",
@@ -262,7 +262,7 @@ class TestTrackedWorldStateV1:
             "velocity_x", "velocity_y",
             "on_screen", "clipped",
         }
-        actual_fields = set(TrackedWorldStateV1.track_field_names())
+        actual_fields = set(TrackedWorldStateV2.track_field_names())
         assert actual_fields == expected_track_fields
 
     def test_on_screen_flag(self):
@@ -270,7 +270,7 @@ class TestTrackedWorldStateV1:
         tracker = _make_tracker()
         det = _make_detection([[0, 0, 100, 100]], [0.9], [1])
         state = tracker.update(det, frame_index=0, timestamp_ns=0)
-        v1 = TrackedWorldStateV1.from_state(state, frame_index=0, timestamp_ns=0)
+        v1 = TrackedWorldStateV2.from_state(state, frame_index=0, timestamp_ns=0)
         assert v1.tracks[0].on_screen is True
 
     def test_partially_visible_entity_is_on_screen(self):
@@ -279,7 +279,7 @@ class TestTrackedWorldStateV1:
         # box が x=-10 から x=20（画面内に 20px 見えている）
         det = _make_detection([[-10, 100, 20, 200]], [0.9], [1])
         state = tracker.update(det, frame_index=0, timestamp_ns=0)
-        v1 = TrackedWorldStateV1.from_state(state, frame_index=0, timestamp_ns=0)
+        v1 = TrackedWorldStateV2.from_state(state, frame_index=0, timestamp_ns=0)
         # 矩形交差: x2=20 > 0, y2=200 > 0, x1=-10 < 1920, y1=100 < 1080
         assert v1.tracks[0].on_screen is True
         assert v1.tracks[0].clipped is True  # 画面外にはみ出しているので clipped
@@ -288,6 +288,6 @@ class TestTrackedWorldStateV1:
         tracker = _make_tracker()
         det = _make_detection([[960, 540, 1060, 640]], [0.95], [1])  # player_anchor
         state = tracker.update(det, frame_index=0, timestamp_ns=0)
-        v1 = TrackedWorldStateV1.from_state(state, frame_index=0, timestamp_ns=0)
+        v1 = TrackedWorldStateV2.from_state(state, frame_index=0, timestamp_ns=0)
         # player_anchor がいる → player_relative 座標が計算できる
         assert v1.player_anchor is not None

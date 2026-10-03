@@ -5,7 +5,7 @@
 from __future__ import annotations
 import math
 from .deploy_obs_adapter import NamedEstimate
-from .vision.entity_tracker import TrackedEntityV1, TrackedWorldStateV1
+from .vision.entity_tracker import TrackedEntityV2, TrackedWorldStateV2
 def directional_bin(dx: float, dy: float, bin_count: int = 8) -> int:
     """相対ベクトルを C++ BuildDirectionalDensityFeatures と同じ bin へ写す。
 
@@ -17,26 +17,26 @@ def directional_bin(dx: float, dy: float, bin_count: int = 8) -> int:
         raise ValueError("bin_count must be positive int")
     angle01 = (math.atan2(float(dy), float(dx)) + math.pi) / (2.0 * math.pi)
     return max(0, min(bin_count - 1, math.floor(angle01 * bin_count)))
-def _visible(tracks: list[TrackedEntityV1], coarse_class: str, threshold: float) -> list[TrackedEntityV1]:
+def _visible(tracks: list[TrackedEntityV2], coarse_class: str, threshold: float) -> list[TrackedEntityV2]:
     """指定 class の安全に可視な track だけを返す。
 
     all-state count を使わず on_screen・clipped・confidence を同じ入口で検査します。
     """
     return [track for track in tracks if track.coarse_class == coarse_class and track.on_screen and not track.clipped and track.confidence >= threshold]
 def build_screen_space_estimates(
-    world: TrackedWorldStateV1,
+    world: TrackedWorldStateV2,
     *,
     directional_bins: int = 8,
     max_enemy_count: int = 20,
     max_gem_count: int = 20,
     min_confidence: float = .35,
 ) -> dict[str, NamedEstimate]:
-    """TrackedWorldStateV1 から release-safe な画面特徴を構築する。
+    """TrackedWorldStateV2 から release-safe な画面特徴を構築する。
 
     deploy schema 外の density は item context 用で、呼び出し側が名前 allow-list で分離します。
     """
-    if not isinstance(world, TrackedWorldStateV1):
-        raise TypeError("world must be TrackedWorldStateV1")
+    if not isinstance(world, TrackedWorldStateV2):
+        raise TypeError("world must be TrackedWorldStateV2")
     if type(max_enemy_count) is not int or type(max_gem_count) is not int or min(max_enemy_count, max_gem_count) <= 0:
         raise ValueError("density normalizers must be positive ints")
     enemies = _visible(world.tracks, "enemy", min_confidence)

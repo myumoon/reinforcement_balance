@@ -1,0 +1,71 @@
+# world_class_map_v2 — WorldDetector クラスラベル定義（武器エフェクト4クラス追加版）。
+#
+# background=0 固定 + foreground 15 クラスで合計 16 クラス。
+# ID 1〜11 は world_class_map_v1.yaml と名前・順序・大分類が完全に同じで、
+# ID 12〜15 に武器エフェクト（大分類 weapon）を追加している。
+# ファイル形式は v1 と同じなので schema_version は world_class_map.v1 のまま、
+# 内容の版を class_map_version: 2 で表す。クラスの追加・削除・並べ替えは class_map_version を上げる。
+# このマップの hash は 04-07 / 04-08 / 04-09 の checkpoint・package が照合する。
+schema_version: world_class_map.v1
+
+# クラスマップ内容の版。v1 の 11 クラスへ weapon 4 クラスを足した版なので 2。
+# consumer は class map ファイルの hash で照合し、別の版で作った成果物を拒否する。
+class_map_version: 2
+
+# 背景クラス。torchvision SSD 系が必要とする予約 ID。
+background_label: 0
+background_name: __background__
+
+# 前景 15 クラス。ID は 1 始まりで連番。
+# deploy obs が使う coarse category (anchor / enemy / gem / pickup / hazard / weapon) を優先し、
+# exact sprite identity は含めない。
+foreground_classes:
+  - id: 1
+    name: player_anchor
+    coarse_category: anchor
+  - id: 2
+    name: enemy_normal
+    coarse_category: enemy
+  - id: 3
+    name: enemy_elite
+    coarse_category: enemy
+  - id: 4
+    name: enemy_boss
+    coarse_category: enemy
+  - id: 5
+    name: gem_blue
+    coarse_category: gem
+  - id: 6
+    name: gem_green
+    coarse_category: gem
+  - id: 7
+    name: gem_red
+    coarse_category: gem
+  - id: 8
+    name: pickup_heal
+    coarse_category: pickup
+  - id: 9
+    name: pickup_special
+    coarse_category: pickup
+  - id: 10
+    name: hazard_projectile
+    coarse_category: hazard
+  - id: 11
+    name: hazard_area
+    coarse_category: hazard
+  # 以下は v2 で追加した武器エフェクト。tracker は大分類 weapon 内でも細分類が一致するときだけ同じ track にする。
+  - id: 12
+    name: weapon_projectile
+    coarse_category: weapon
+  - id: 13
+    name: weapon_zone
+    coarse_category: weapon
+  - id: 14
+    name: weapon_orbit
+    coarse_category: weapon
+  - id: 15
+    name: weapon_aura
+    coarse_category: weapon
+
+# 合計クラス数（background + foreground）。モデルヘッドの num_classes と一致する必要がある。
+num_classes: 16

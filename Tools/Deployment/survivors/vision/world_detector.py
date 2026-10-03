@@ -23,7 +23,7 @@ import yaml
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
-# 04-06 world_class_map_v1.yaml の foreground クラス名（background 除く）
+# 04-06 world_class_map_v2.yaml の foreground クラス名（background 除く）
 _KNOWN_CLASS_NAMES = frozenset([
     "player_anchor", "enemy_normal", "enemy_elite", "enemy_boss",
     "gem_blue", "gem_green", "gem_red",

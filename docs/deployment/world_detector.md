@@ -7,11 +7,11 @@ world エンティティを検出し、フレーム間でトラック ID を維�
 
 - **検出:** torchvision SSDLite320_MobileNet_V3_Large（head を 12 クラスに置換）
 - **追跡:** normalized center distance + IoU + class penalty の deterministic greedy matching
-- **出力:** `TrackedWorldStateV1`（04-09 が deploy obs に変換）
+- **出力:** `TrackedWorldStateV2`（04-09 が deploy obs に変換）
 
 ## クラス定義
 
-`configs/world_class_map_v1.yaml` で固定（background 0 + foreground 11 = 12 クラス）。
+`configs/world_class_map_v2.yaml` で固定（background 0 + foreground 11 = 12 クラス）。
 
 | ID | 名前 | coarse_category |
 |----|------|----------------|
@@ -37,11 +37,11 @@ Tools/Deployment/
 ├── survivors/vision/
 │   ├── world_dataset.py          # COCO dataset loader + preflight + session split
 │   ├── world_detector.py         # SSDLite320 adapter + DetectionResult + CheckpointManifest
-│   ├── entity_tracker.py         # greedy tracker + TrackedWorldStateV1
+│   ├── entity_tracker.py         # greedy tracker + TrackedWorldStateV2
 │   └── world_detector_package.py # 開発 package writer / restore (04-07)
 ├── configs/
-│   ├── world_class_map_v1.yaml   # 12 クラス固定 class map
-│   └── world_detector_v1.yaml    # 学習・推論設定（formal_detector_eligible=false）
+│   ├── world_class_map_v2.yaml   # 12 クラス固定 class map
+│   └── world_detector_v2.yaml    # 学習・推論設定（formal_detector_eligible=false）
 ├── train_survivors_world_detector.py   # 学習 CLI（DataLoader / optimizer / checkpoint selection）
 ├── eval_survivors_world_detector.py    # 評価 CLI（mAP50:95 / performance gate）
 └── mine_survivors_active_learning.py   # active learning マイニング CLI
@@ -63,8 +63,8 @@ cd Tools/Deployment
 python train_survivors_world_detector.py \
     --annotations data/world_annotations.json \
     --split data/split.json \
-    --config configs/world_detector_v1.yaml \
-    --class-map configs/world_class_map_v1.yaml \
+    --config configs/world_detector_v2.yaml \
+    --class-map configs/world_class_map_v2.yaml \
     --output runs/world_detector_dev \
     --dry-run
 ```
@@ -79,8 +79,8 @@ python train_survivors_world_detector.py \
 python eval_survivors_world_detector.py \
     --annotations data/world_val.json \
     --predictions data/world_predictions.json \
-    --config configs/world_detector_v1.yaml \
-    --class-map configs/world_class_map_v1.yaml \
+    --config configs/world_detector_v2.yaml \
+    --class-map configs/world_class_map_v2.yaml \
     --output runs/metrics.json
 ```
 
@@ -201,7 +201,7 @@ gate_result = compute_dev_diagnostics(
 # gate_result.passed が False なら開発 diagnostic FAIL
 ```
 
-`world_detector_v1.yaml` の `dev_diagnostics` セクションに閾値を定義する。
+`world_detector_v2.yaml` の `dev_diagnostics` セクションに閾値を定義する。
 formal 性能判定・threshold・session-cluster CI は 04-08 に委譲する。
 development diagnostics の `passed=True` は formal PASSではない。
 
@@ -219,10 +219,10 @@ pkg_path = publish_development_package(
     cm_path=cm_path,
     weight_path=weight_path,
 )
-state = restore_package(pkg_path, frame_bgr)  # TrackedWorldStateV1 を返す
+state = restore_package(pkg_path, frame_bgr)  # TrackedWorldStateV2 を返す
 ```
 
 - `formal_detector_eligible=false` の package は `assert_formal_eligible()` で拒否される。
-- `contract_hash` が TrackedWorldStateV1 フィールド定義と一致しない場合は `PackageSchemaError`。
+- `contract_hash` が TrackedWorldStateV2 フィールド定義と一致しない場合は `PackageSchemaError`。
 - `publish_formal_package()` は引数にかかわらず `FormalPackageRejectedError` を送出する（04-08 で実装）。
 - manifest には `development_only=true` と `training_mode` が記録される。

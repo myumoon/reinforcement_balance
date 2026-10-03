@@ -19,8 +19,8 @@ import pytest
 # ---- helpers ----
 
 CONFIGS_DIR = pathlib.Path(__file__).parents[2] / "configs"
-DETECTOR_CONFIG_PATH = CONFIGS_DIR / "world_detector_v1.yaml"
-CLASS_MAP_PATH = CONFIGS_DIR / "world_class_map_v1.yaml"
+DETECTOR_CONFIG_PATH = CONFIGS_DIR / "world_detector_v2.yaml"
+CLASS_MAP_PATH = CONFIGS_DIR / "world_class_map_v2.yaml"
 
 
 def _make_coco(
@@ -955,8 +955,8 @@ class TestPackagePublish:
             cm_path=CLASS_MAP_PATH,
         )
         pkg_dir = pkg_path.parent
-        assert (pkg_dir / "world_detector_v1.yaml").exists()
-        assert (pkg_dir / "world_class_map_v1.yaml").exists()
+        assert (pkg_dir / "world_detector_v2.yaml").exists()
+        assert (pkg_dir / "world_class_map_v2.yaml").exists()
 
     def test_published_package_is_formal_ineligible(self, tmp_path):
         """開発 package の formal_detector_eligible は常に False。"""
@@ -1171,7 +1171,7 @@ class TestPackagePublish:
 
 
 class TestPackageRestore:
-    """restore_package が package 内 config を使って TrackedWorldStateV1 を返す。"""
+    """restore_package が package 内 config を使って TrackedWorldStateV2 を返す。"""
 
     def _publish(self, tmp_path) -> pathlib.Path:
         """テスト用 development package を publish して manifest_path を返す。"""
@@ -1189,15 +1189,15 @@ class TestPackageRestore:
         )
 
     def test_restore_returns_tracked_world_state_v1(self, tmp_path):
-        """restore_package は package 内 config を使って TrackedWorldStateV1 を返す。"""
+        """restore_package は package 内 config を使って TrackedWorldStateV2 を返す。"""
         from survivors.vision.world_detector_package import restore_package
-        from survivors.vision.entity_tracker import TrackedWorldStateV1
+        from survivors.vision.entity_tracker import TrackedWorldStateV2
 
         pkg_path = self._publish(tmp_path)
         frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
         state = restore_package(pkg_path, frame)
 
-        assert isinstance(state, TrackedWorldStateV1)
+        assert isinstance(state, TrackedWorldStateV2)
         assert state.frame_index == 0
         assert isinstance(state.tracks, list)
 
@@ -1216,7 +1216,7 @@ class TestPackageRestore:
 
         pkg_path = self._publish(tmp_path)
         # config を改ざん
-        cfg_in_pkg = pkg_path.parent / "world_detector_v1.yaml"
+        cfg_in_pkg = pkg_path.parent / "world_detector_v2.yaml"
         original = cfg_in_pkg.read_text(encoding="utf-8")
         cfg_in_pkg.write_text(original + "\n# tampered", encoding="utf-8")
 
@@ -1261,7 +1261,7 @@ class TestPackageRestore:
 # ---- 新規回帰テスト: P1/P2 findings ----
 
 class TestDefaultConfigGuard:
-    """既定 world_detector_v1.yaml が _reject_unimplemented_config() を通過することを確認する。"""
+    """既定 world_detector_v2.yaml が _reject_unimplemented_config() を通過することを確認する。"""
 
     def test_default_config_passes_config_guard(self):
         """リポジトリ同梱の既定 config が未実装設定ガードを通過する。"""
@@ -1657,31 +1657,31 @@ class TestIter11Regressions:
 class TestIter12Regressions:
     """iter12 P1/P2 修正 4 件の回帰テスト。"""
 
-    # ---- Fix 1: contract_hash が TrackedWorldStateV1・PlayerAnchorState を含む ----
+    # ---- Fix 1: contract_hash が TrackedWorldStateV2・PlayerAnchorState を含む ----
 
     def test_contract_hash_differs_from_entity_only_hash(self):
-        """contract_hash が TrackedEntityV1 だけのハッシュと異なる（P1 回帰テスト）。
+        """contract_hash が TrackedEntityV2 だけのハッシュと異なる（P1 回帰テスト）。
 
-        旧実装は track_fields（TrackedEntityV1 フィールド名のみ）だけをハッシュしていた。
+        旧実装は track_fields（TrackedEntityV2 フィールド名のみ）だけをハッシュしていた。
         修正後は 3 クラス全体のフィールド名＋型を含むため、旧ハッシュと一致しない。
         """
         import hashlib
         import json
-        from survivors.vision.entity_tracker import TrackedWorldStateV1
+        from survivors.vision.entity_tracker import TrackedWorldStateV2
         from survivors.vision.world_detector_package import _compute_contract_hash
 
-        old_payload = json.dumps({"track_fields": TrackedWorldStateV1.track_field_names()}, sort_keys=True)
+        old_payload = json.dumps({"track_fields": TrackedWorldStateV2.track_field_names()}, sort_keys=True)
         old_hash = hashlib.sha256(old_payload.encode()).hexdigest()
         new_hash = _compute_contract_hash()
         assert old_hash != new_hash, (
-            "contract_hash は TrackedWorldStateV1・PlayerAnchorState を含むため旧ハッシュと異なるはず"
+            "contract_hash は TrackedWorldStateV2・PlayerAnchorState を含むため旧ハッシュと異なるはず"
         )
 
     def test_contract_hash_covers_world_and_anchor_fields(self):
         """contract_hash のペイロードに world/anchor クラス名が含まれる（P1 回帰テスト）。"""
         import dataclasses
         import json
-        from survivors.vision.entity_tracker import TrackedWorldStateV1, TrackedEntityV1, PlayerAnchorState
+        from survivors.vision.entity_tracker import TrackedWorldStateV2, TrackedEntityV2, PlayerAnchorState
         from survivors.vision.world_detector_package import _compute_contract_hash
 
         # _compute_contract_hash が生成するデスクリプタと同じ構造を再現して一致確認
@@ -1689,8 +1689,8 @@ class TestIter12Regressions:
             return {f.name: str(f.type) for f in dataclasses.fields(cls)}
 
         expected = {
-            "TrackedWorldStateV1": _descriptor(TrackedWorldStateV1),
-            "TrackedEntityV1": _descriptor(TrackedEntityV1),
+            "TrackedWorldStateV2": _descriptor(TrackedWorldStateV2),
+            "TrackedEntityV2": _descriptor(TrackedEntityV2),
             "PlayerAnchorState": _descriptor(PlayerAnchorState),
         }
         import hashlib
@@ -1699,22 +1699,22 @@ class TestIter12Regressions:
         assert _compute_contract_hash() == expected_hash
 
     def test_contract_hash_changes_when_world_field_removed(self):
-        """TrackedWorldStateV1 のフィールドが変わると contract_hash が変わる（P1 回帰テスト）。"""
+        """TrackedWorldStateV2 のフィールドが変わると contract_hash が変わる（P1 回帰テスト）。"""
         import dataclasses
         import hashlib
         import json
-        from survivors.vision.entity_tracker import TrackedWorldStateV1, TrackedEntityV1, PlayerAnchorState
+        from survivors.vision.entity_tracker import TrackedWorldStateV2, TrackedEntityV2, PlayerAnchorState
 
         # フィールドが 1 つ少ない仮想デスクリプタを作る
         def _descriptor(cls):
             return {f.name: str(f.type) for f in dataclasses.fields(cls)}
 
-        all_fields = _descriptor(TrackedWorldStateV1)
+        all_fields = _descriptor(TrackedWorldStateV2)
         # player_anchor を取り除いた仮想デスクリプタ
         reduced = {k: v for k, v in all_fields.items() if k != "player_anchor"}
         fake_descriptor = {
-            "TrackedWorldStateV1": reduced,
-            "TrackedEntityV1": _descriptor(TrackedEntityV1),
+            "TrackedWorldStateV2": reduced,
+            "TrackedEntityV2": _descriptor(TrackedEntityV2),
             "PlayerAnchorState": _descriptor(PlayerAnchorState),
         }
         fake_hash = hashlib.sha256(json.dumps(fake_descriptor, sort_keys=True).encode()).hexdigest()
@@ -1800,7 +1800,7 @@ class TestIter12Regressions:
         from survivors.vision.world_detector import load_detector_config
 
         cfg = load_detector_config(DETECTOR_CONFIG_PATH)
-        cfg["class_map_config"] = "configs/world_class_map_v1.yaml"
+        cfg["class_map_config"] = "configs/world_class_map_v2.yaml"
         with pytest.raises(ValueError, match="class_map_config"):
             _reject_unimplemented_config(cfg)
 

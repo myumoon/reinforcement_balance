@@ -33,7 +33,7 @@ from survivors.vision.world_detector import CheckpointManifest, DetectionResult,
 import run_survivors_controller as cli
 
 _PIXELS = np.zeros((1080, 1920, 4), dtype=np.uint8)
-_CLASS_MAP = Path(cli.__file__).parent / "configs" / "world_class_map_v1.yaml"
+_CLASS_MAP = Path(cli.__file__).parent / "configs" / "world_class_map_v2.yaml"
 _REQUIRED = [
     "--combat-package", "c", "--detector-config", "d.yaml", "--class-map", str(_CLASS_MAP),
     "--detector-weights", "w.pt", "--detector-manifest", "manifest.json",

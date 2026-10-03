@@ -26,9 +26,10 @@ class DatasetPreflightError(ValueError):
 
 @dataclass(frozen=True)
 class WorldClassMap:
-    """background 0 + foreground 11 の合計 12 クラス固定マップ。
+    """background 0 + foreground N クラスの class map（v1=12, v2=16 クラス）。
 
-    ID ↔ 名前の変換を提供し、未知ラベルへのアクセスは KeyError を返す。
+    ID ↔ 名前、名前 → 大分類（coarse_category）の変換を提供し、未知ラベルへのアクセスは KeyError を返す。
+    クラス数は YAML の num_classes で決まり、foreground 数 + 1 と一致しなければ読み込み時に拒否する。
     04-07 / 04-08 / 04-09 が同一 hash で参照する。
     """
 
@@ -65,6 +66,18 @@ class WorldClassMap:
             raise KeyError(f"未知 class name: {name}")
         return self._name_to_id[name]
 
+    def coarse_for(self, name_or_id: str | int) -> str:
+        """クラス名または class_id → 大分類（coarse_category）。
+
+        tracker・annotation が大分類を直書きせず、class map から引くための入口。
+        background と未知のクラスは KeyError。
+        """
+        name = self.id_to_name(name_or_id) if isinstance(name_or_id, int) else name_or_id
+        for fc in self.foreground_classes:
+            if fc["name"] == name:
+                return fc["coarse_category"]
+        raise KeyError(f"大分類の無い class: {name_or_id}")
+
     @property
     def all_class_names(self) -> list[str]:
         """background を含む全クラス名を ID 順に返す。"""
@@ -74,7 +87,8 @@ class WorldClassMap:
 def load_class_map(path: pathlib.Path | str) -> WorldClassMap:
     """YAML ファイルから WorldClassMap を読み込む。
 
-    スキーマバージョンが一致しない場合は ValueError。
+    スキーマバージョンが一致しない場合、または num_classes が
+    background + foreground 数と一致しない場合は ValueError。
     """
     path = pathlib.Path(path)
     with path.open(encoding="utf-8") as f:
@@ -82,6 +96,9 @@ def load_class_map(path: pathlib.Path | str) -> WorldClassMap:
 
     if data.get("schema_version") != "world_class_map.v1":
         raise ValueError(f"未知の schema_version: {data.get('schema_version')}")
+
+    if data.get("num_classes") != len(data.get("foreground_classes") or ()) + 1:
+        raise ValueError(f"num_classes {data.get('num_classes')} が background + foreground 数と一致しません")
 
     return WorldClassMap(
         schema_version=data["schema_version"],

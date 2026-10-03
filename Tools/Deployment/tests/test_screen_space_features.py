@@ -6,14 +6,14 @@ C++ と同じ方位規則と、画面外情報を捨てる境界を固定しま�
 import pytest
 
 from survivors.screen_space_features import build_screen_space_estimates, directional_bin
-from survivors.vision.entity_tracker import PlayerAnchorState, TrackedEntityV1, TrackedWorldStateV1
+from survivors.vision.entity_tracker import PlayerAnchorState, TrackedEntityV2, TrackedWorldStateV2
 
-def _track(track_id: int, coarse: str, x: float, y: float, *, on_screen=True, clipped=False) -> TrackedEntityV1:
+def _track(track_id: int, coarse: str, x: float, y: float, *, on_screen=True, clipped=False) -> TrackedEntityV2:
     """指定した player-relative 座標の track を作る。
 
     detector を介さず feature の可視性規則だけを試します。
     """
-    return TrackedEntityV1(
+    return TrackedEntityV2(
         track_id, 2, coarse, coarse, .9, 2, 9, .5 + x, .5 + y, x, y,
         0., 0., on_screen, clipped,
     )
@@ -33,7 +33,7 @@ def test_only_unclipped_on_screen_tracks_affect_counts_and_nearest() -> None:
 
     tracker の全状態件数ではなく、現在見えている敵と gem だけを数えます。
     """
-    world = TrackedWorldStateV1(
+    world = TrackedWorldStateV2(
         frame_index=10, timestamp_ns=1_000,
         tracks=[
             _track(1, "enemy", .2, 0.),
@@ -56,7 +56,7 @@ def test_no_visible_enemy_omits_nearest_but_returns_zero_densities() -> None:
 
     欠損 nearest とゼロ件 density を区別し、過去の位置を再利用しません。
     """
-    world = TrackedWorldStateV1(0, 10, [], PlayerAnchorState(.5, .5, .1, True))
+    world = TrackedWorldStateV2(0, 10, [], PlayerAnchorState(.5, .5, .1, True))
     estimates = build_screen_space_estimates(world)
     assert "nearest_enemy_offset" not in estimates
     assert estimates["visible_enemy_count"].value == (0.,)
@@ -68,7 +68,7 @@ def test_nearest_enemy_offset_validity_uses_anchor_confidence() -> None:
 
     relative 座標の精度は anchor と enemy 両方に依存するため min を取ります。
     """
-    world = TrackedWorldStateV1(
+    world = TrackedWorldStateV2(
         frame_index=10, timestamp_ns=1_000,
         tracks=[_track(1, "enemy", .2, 0.)],
         player_anchor=PlayerAnchorState(.5, .5, .3, False),  # confidence=0.3 < enemy confidence=0.9
@@ -82,7 +82,7 @@ def test_nearest_enemy_offset_validity_zero_when_anchor_is_fallback() -> None:
 
     player 未検出の代替座標から計算した offset は信頼できません。
     """
-    world = TrackedWorldStateV1(
+    world = TrackedWorldStateV2(
         frame_index=10, timestamp_ns=1_000,
         tracks=[_track(1, "enemy", .2, 0.)],
         player_anchor=PlayerAnchorState(.5, .5, .9, True),  # is_fallback=True

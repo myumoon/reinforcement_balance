@@ -77,7 +77,7 @@ class Track:
 class PlayerAnchorState:
     """player_anchor の位置（または fallback）。
 
-    TrackedWorldStateV1 が player-relative 座標を計算するために使う。
+    TrackedWorldStateV2 が player-relative 座標を計算するために使う。
     """
 
     normalized_cx: float
@@ -90,7 +90,7 @@ class PlayerAnchorState:
 class TrackedWorldState:
     """1 フレームの全トラック状態（tracker 内部で使用）。
 
-    TrackedWorldStateV1.from_state() で外部 schema へ変換する。
+    TrackedWorldStateV2.from_state() で外部 schema へ変換する。
     """
 
     frame_index: int
@@ -104,7 +104,7 @@ class TrackedWorldState:
 # ---- V1 schema ----
 
 @dataclass(frozen=True)
-class TrackedEntityV1:
+class TrackedEntityV2:
     """04-09 が消費する個別トラックの v1 schema。フィールドは golden fixture で固定。"""
 
     track_id: int
@@ -125,7 +125,7 @@ class TrackedEntityV1:
 
 
 @dataclass(frozen=True)
-class TrackedWorldStateV1:
+class TrackedWorldStateV2:
     """TrackedWorldState の v1 export schema。04-09 (real_obs_assembler) が参照する。
 
     timestamp / confidence / age / on_screen / clipped / coarse_class を含む。
@@ -133,7 +133,7 @@ class TrackedWorldStateV1:
 
     frame_index: int
     timestamp_ns: int
-    tracks: list[TrackedEntityV1]
+    tracks: list[TrackedEntityV2]
     player_anchor: PlayerAnchorState | None
 
     @classmethod
@@ -143,7 +143,7 @@ class TrackedWorldStateV1:
         frame_index: int,
         timestamp_ns: int,
         class_map_path: "pathlib.Path | None" = None,
-    ) -> "TrackedWorldStateV1":
+    ) -> "TrackedWorldStateV2":
         """TrackedWorldState → V1 schema へ変換する。
 
         class_map_path が指定されない場合はモジュール相対のデフォルトを使用する。
@@ -152,7 +152,7 @@ class TrackedWorldStateV1:
         from survivors.vision.world_dataset import load_class_map
         import pathlib
         if class_map_path is None:
-            class_map_path = pathlib.Path(__file__).parents[2] / "configs" / "world_class_map_v1.yaml"
+            class_map_path = pathlib.Path(__file__).parents[2] / "configs" / "world_class_map_v2.yaml"
         cm = load_class_map(class_map_path)
 
         _COARSE = {
@@ -166,7 +166,7 @@ class TrackedWorldStateV1:
         anchor_cx = state.player_anchor.normalized_cx
         anchor_cy = state.player_anchor.normalized_cy
 
-        entities: list[TrackedEntityV1] = []
+        entities: list[TrackedEntityV2] = []
         for t in state.tracks:
             cx = (t.box_xyxy[0] + t.box_xyxy[2]) / 2.0 / state.image_width
             cy = (t.box_xyxy[1] + t.box_xyxy[3]) / 2.0 / state.image_height
@@ -189,7 +189,7 @@ class TrackedWorldStateV1:
             coarse = _COARSE.get(name, "unknown")
 
             entities.append(
-                TrackedEntityV1(
+                TrackedEntityV2(
                     track_id=t.track_id,
                     class_id=t.class_id,
                     class_name=name,
@@ -217,8 +217,8 @@ class TrackedWorldStateV1:
 
     @staticmethod
     def track_field_names() -> list[str]:
-        """TrackedEntityV1 のフィールド名リストを返す（golden fixture 固定用）。"""
-        return [f.name for f in dataclasses.fields(TrackedEntityV1)]
+        """TrackedEntityV2 のフィールド名リストを返す（golden fixture 固定用）。"""
+        return [f.name for f in dataclasses.fields(TrackedEntityV2)]
 
 
 # ---- tracker ----

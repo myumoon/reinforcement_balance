@@ -1,0 +1,113 @@
+# world_detector_v2 — WorldDetector 学習・推論設定（world_class_map_v2 用、development-only）。
+#
+# world_class_map_v2.yaml（16 クラス、武器エフェクト4クラス入り）と組み合わせて使う設定。
+# v1 との違いは num_classes: 16 と tracker.max_age_by_class の weapon 4 クラスだけ。
+# formal_detector_eligible=false のため、このままでは正式パッケージへ昇格できない。
+# formal weight / threshold / resolved config の差し替えは 04-08 で実施する。
+schema_version: world_detector.v2
+
+# 開発用フラグ。false のまま配布したモデルは正式ローダーに拒否される。
+formal_detector_eligible: false
+
+# --- モデルアーキテクチャ ---
+# 未実装 architecture を指定したときは silent fallback せず即エラーとする。
+model:
+  architecture: ssdlite320
+  # torchvision の SSDLite320_MobileNet_V3_Large を使用し、head の num_classes を 16 へ置換する。
+  # class map v2 の background + foreground 数と一致しなければロード時に拒否される。
+  backbone: mobilenet_v3_large
+  num_classes: 16
+  # 入力解像度 (W, H)。SSDLite320 の標準入力サイズ。
+  input_size: [320, 320]
+  # pretrained backbone は 04-07 で実装する。現在はランダム初期化のみ。
+  pretrained_backbone: false
+
+# --- 入力・前処理 ---
+# augmentation / lr_scheduler は未実装のため記載しない。
+# _reject_unimplemented_config() がこれらのキーを検出するとエラーになる。
+input:
+  normalize:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+
+# --- 学習・オプティマイザー ---
+training:
+  batch_size: 8
+  optimizer:
+    sgd:
+      lr: 0.01
+      momentum: 0.9
+      weight_decay: 0.0005
+  max_epochs: 50
+  # preflight チェックの最小要件。満たさなければ training step 0 のまま停止する。
+  preflight:
+    min_frames: 300
+    min_entities: 500
+    min_classes: 6
+    min_time_bands: 4
+    # split ごとの最小要件（run_split_preflight に使用）。
+    min_frames_per_split: 50
+    min_entities_per_split: 100
+    min_classes_per_split: 4
+
+# --- チェックポイント選択規則 ---
+# 学習開始前に manifest へ固定し、validation で best checkpoint を一度だけ選択する。
+checkpoint_selection:
+  metric: val_map50_95
+  keep_top_k: 3
+  save_every_n_epochs: 5
+
+# --- tracker 設定 ---
+tracker:
+  max_age_by_class:
+    player_anchor: 10
+    enemy_normal: 5
+    enemy_elite: 5
+    enemy_boss: 8
+    gem_blue: 4
+    gem_green: 4
+    gem_red: 4
+    pickup_heal: 4
+    pickup_special: 4
+    hazard_projectile: 3
+    hazard_area: 4
+    # weapon 4 クラスの値は Common の deploy_obs_v2_features.yaml track_max_age_frames と同じにする。
+    weapon_projectile: 3
+    weapon_zone: 10
+    weapon_orbit: 5
+    weapon_aura: 10
+  max_match_cost: 0.7
+  velocity_ema_alpha: 0.6
+  confidence_decay_per_frame: 0.9
+
+# --- 開発用 diagnostics 閾値 ---
+# 実装済み指標の開発用基準値。formal 合否判定・release gate ではない。
+# GPU latency / track ID switch / formal session CI は 04-08 で実装する（現在 unsupported）。
+dev_diagnostics:
+  map50_95_min: 0.0
+  class_recall_min:
+    enemy_normal: 0.90
+    enemy_elite: 0.90
+    enemy_boss: 0.98
+    gem_blue: 0.92
+    gem_green: 0.92
+    gem_red: 0.92
+  density_correlation_min: 0.85
+  nearest_distance_median_max: 0.04
+  slice_gate:
+    heavy_effect:
+      recall_min: 0.80
+      min_instances: 4
+      min_sessions: 4
+    late_game:
+      recall_min: 0.80
+      min_instances: 4
+      min_sessions: 4
+    boss:
+      recall_min: 0.98
+      min_instances: 3
+      min_sessions: 3
+    hazard:
+      recall_min: 0.80
+      min_instances: 4
+      min_sessions: 4

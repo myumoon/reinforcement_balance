@@ -25,7 +25,7 @@ from survivors.vision.world_dataset import (
 # ---- fixtures ----
 
 CONFIGS_DIR = pathlib.Path(__file__).parents[2] / "configs"
-CLASS_MAP_PATH = CONFIGS_DIR / "world_class_map_v1.yaml"
+CLASS_MAP_PATH = CONFIGS_DIR / "world_class_map_v2.yaml"
 
 
 def _coco_record(
