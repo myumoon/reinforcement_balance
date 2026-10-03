@@ -197,6 +197,7 @@ struct FProjectileState
 	// bPiercing=false かつ MaxPierceCount=0 の場合は bPiercing の挙動（1体で消滅）を使用
 	int32                MaxPierceCount = 0;
 	float                KnockbackStrength = 0.f;    // ノックバック強度（シム座標単位）
+	int32                EffectId = 0;  // deploy raw 用の安定 id（SpawnProjectile が NextEffectId から振る。RNG 不使用）
 };
 
 // グラウンドゾーン（Santa Water / La Borra 用）
@@ -212,6 +213,7 @@ struct FGroundZoneState
 	EWeaponType        WeaponType   = EWeaponType::None;
 	bool               bIsWarning   = false;
 	TMap<int32, float> EnemyLastHitTime; // Key: FEnemyState::UniqueId, Value: 最終ヒット時刻
+	int32              EffectId     = 0;  // deploy raw 用の安定 id（SpawnGroundZone が NextEffectId から振る。RNG 不使用）
 };
 
 // フロアヒールアイテム
@@ -317,6 +319,7 @@ struct FProjectileObsState
 	EProjectileObsKind Kind        = EProjectileObsKind::None;
 	int32            WeaponSlotIdx = -1;
 	bool             bIsWarning    = false;
+	int64            EntityId      = 0;  // deploy raw 用の安定 id（SurvivorsDeployRaw::MakeEntityId。flat obs には入らない）
 };
 
 // ---- 既存強型（後方互換維持） ------------------------------------------------

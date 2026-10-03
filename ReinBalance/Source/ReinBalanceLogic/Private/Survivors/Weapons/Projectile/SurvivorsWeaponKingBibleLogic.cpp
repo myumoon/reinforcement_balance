@@ -59,6 +59,8 @@ void FSurvivorsWeaponKingBibleLogic::CacheParams()
 void FSurvivorsWeaponKingBibleLogic::ActivateOrbs(const FPassiveEffects& PE)
 {
 	bOrbsActive = true;
+	// 周期ごとに新しい deploy raw id を振る（RNG は使わない単調カウンタ）
+	if (Logic) { OrbitCycleId = Logic->AllocateEffectId(); }
 	ActiveTimer = CachedDuration * PE.DurationMult;
 
 	const float CooldownInterval = (WeaponType == EWeaponType::UnholyVespers)
