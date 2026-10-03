@@ -125,7 +125,8 @@ class DeployRawEnv:
     def __init__(self, env: Any, viewport: tuple[int, int] = (1920, 1080)) -> None:
         """包む SurvivorsEnv と、投影に使う仮想 viewport（px）を保持する。
 
-        viewport は sim カメラの 16:9（800u × 450u）と同じ縦横比にすると縦横の縮尺が等しくなります。
+        viewport は sim カメラの 16:9（800u × 450u）と同じ縦横比にする必要があります。
+        比率が違うと縦横の縮尺がずれるため、v2 wrapper が観測時に拒否します（fail-closed）。
         """
         ensure(isinstance(viewport, tuple) and len(viewport) == 2 and all(type(v) is int and v > 0 for v in viewport), "viewport must be a positive int pair")
         self.env, self.viewport = env, viewport

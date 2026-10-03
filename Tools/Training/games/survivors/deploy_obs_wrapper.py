@@ -18,7 +18,7 @@ from survivors.deploy_obs_adapter import (
 )
 from reinbalance_survivors_contracts.deploy_obs import DEPLOY_OBS_V2_SCHEMA_VERSION, DeployObservation, DeployObsSchema
 from reinbalance_survivors_contracts.deploy_obs_v2_features import (
-    HudSlot, TrackPx, build_deploy_obs_v2, effect_duration_s, is_track_visible, load_deploy_obs_v2_feature_params,
+    HudSlot, TrackPx, build_deploy_obs_v2, is_track_visible, load_deploy_obs_v2_feature_params,
 )
 from reinbalance_survivors_contracts.ui_intent import ensure, is_strict_number
 
@@ -315,6 +315,11 @@ class DeployObsWrapper:
         params = load_deploy_obs_v2_feature_params()
         max_age = params["track_max_age_frames"]
         viewport, camera = _validated_viewport(raw["viewport"]), raw["target_camera"]
+        # v2 は縦横とも W/2 で正規化する等方座標なので、viewport と camera の縦横比が違うと y 方向が黙って歪む
+        ensure(
+            math.isclose(viewport[0] * camera["half_height"], viewport[1] * camera["half_width"], rel_tol=1e-3),
+            "v2 viewport aspect must match target_camera half_width/half_height",
+        )
         now_s = raw["timestamp_ns"] / 1e9
         px_per_world = viewport[0] / (2.0 * camera["half_width"])
         self._frame += 1
@@ -343,28 +348,37 @@ class DeployObsWrapper:
             self.assert_release_artifact_allowed()
             ensure(observation.provenance == "release", "release wrapper requires release provenance")
             return observation.as_policy_tensor(self.schema)
-        self.last_ttl_error_s = self._ttl_errors(raw, hud_slots, now_s, params)
+        self.last_ttl_error_s = self._ttl_errors(raw, observation, tracks, viewport, (player_x, player_y), params)
         oracle = DeployObservation(observation.values, observation.validity, observation.age, observation.schema_hash, observation.timestamp_ns, "oracle_diagnostic")
         return oracle.as_policy_tensor(self.schema)
 
-    def _ttl_errors(self, raw: Mapping[str, Any], hud_slots: Sequence[HudSlot], now_s: float, params: Mapping[str, Any]) -> dict[int, float]:
-        """oracle 専用: zone / orbit の推定残り時間と sim の真の残り時間の差を entity ごとに返す。
+    def _ttl_errors(
+        self, raw: Mapping[str, Any], observation: DeployObservation, tracks: Sequence[TrackPx],
+        viewport: tuple[int, int], player_px: tuple[float, float], params: Mapping[str, Any],
+    ) -> dict[int, float]:
+        """oracle 専用: release ビルダーが実際に出した zone / orbit の残り時間と sim の真の残り時間の差を返す。
 
-        推定値は release と同じ「持続時間表 −（現在時刻 − 初観測時刻）」で、武器は sim の真の slot から引きます。
-        今フレームで見えていて初観測時刻を持つエフェクトだけを対象にします（projectile / aura は持続時間表が無い）。
+        推定式は再実装せず、ビルダー出力の weapon_orbit_ttl / weapon_zone_ttl（正規化値）を秒へ戻して使います。
+        各値がどの entity のものかは、ビルダーと同じ並び（orbit は最古の初観測、zone はプレイヤーからの距離 → id 順）で対応付けます。
+        ビルダーが無効にした値（emitter が一意に決まらない等）は誤差に含めず、真値はビルダーと同じく 0..MaxProjectileObsTtl に clip します。
         """
-        weapons = {slot.index: slot for slot in hud_slots if slot.kind == "weapon"}
+        max_ttl = float(params["max_projectile_obs_ttl_s"])
         effect_of = params["entity_classes"]["effect"]
+        half = viewport[0] / 2.0
+        true_ttl = {e["entity_id"]: e["ttl_true_s"] for e in raw["world_entities"]}
+        visible = [t for t in tracks if is_track_visible(t, viewport)]
+        orbits = sorted((t for t in visible if effect_of.get(t.class_name) == "orbit"), key=lambda t: (t.first_seen_s, t.track_id))[:1]
+        zones = sorted(
+            (t for t in visible if effect_of.get(t.class_name) == "zone"),
+            key=lambda t: (math.hypot((t.cx_px - player_px[0]) / half, (t.cy_px - player_px[1]) / half), t.track_id),
+        )
         errors = {}
-        for entity in raw["world_entities"]:
-            tracked = self._tracks.get(entity["entity_id"])
-            if effect_of.get(entity["class_name"]) not in ("zone", "orbit") or tracked is None or tracked[1] != self._frame:
-                continue
-            weapon = weapons.get(entity["slot"])
-            if weapon is None or weapon.type_name not in params["effect_durations"] or weapon.level is None:
-                continue
-            estimated = effect_duration_s(weapon.type_name, weapon.level, float(raw["inventory"]["duration_mult"])) - (now_s - tracked[0])
-            errors[entity["entity_id"]] = estimated - float(entity["ttl_true_s"])
+        for name, picked in (("weapon_orbit_ttl", orbits), ("weapon_zone_ttl", zones)):
+            offset, size = self.schema.layout[name]
+            for j, track in enumerate(picked[:size]):
+                truth = true_ttl.get(track.track_id)
+                if observation.validity[offset + j] > 0 and truth is not None:
+                    errors[track.track_id] = float(observation.values[offset + j]) * max_ttl - min(max(float(truth), 0.0), max_ttl)
         return errors
 
     def _with_ttl_error(self, info: Any) -> Any:

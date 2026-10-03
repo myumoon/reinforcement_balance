@@ -407,11 +407,49 @@ def test_v2_oracle_reports_ttl_error_against_true_ttl():
 
     oracle = DeployObsWrapper.oracle_diagnostic(TwoFrameEnv(), V2)
     _, info = oracle.reset()
-    assert info["k"] == 1 and info["deploy_ttl_error_s"] == {7: pytest.approx(0.1)}
+    assert info["k"] == 1 and info["deploy_ttl_error_s"] == {7: pytest.approx(0.1, abs=1e-5)}
     _, reward, _, _, info = oracle.step(0)
-    assert reward == 0.5 and info["k"] == 2 and info["deploy_ttl_error_s"] == {7: pytest.approx(0.1)}
+    assert reward == 0.5 and info["k"] == 2 and info["deploy_ttl_error_s"] == {7: pytest.approx(0.1, abs=1e-5)}
     release = DeployObsWrapper.release(TwoFrameEnv(), V2)
     assert "deploy_ttl_error_s" not in release.reset()[1]
+
+
+def test_v2_oracle_ttl_error_follows_release_builder_output():
+    """oracle の残り時間誤差は、release ビルダーが実際に出した値（clip・無効化込み）と真値の差になる。
+
+    orbit は最古の初観測の本が対象になり、zone は emitter が一意に決まらない構成（FireWand + SantaWater）では
+    ビルダーが残り時間を無効にするので誤差を出しません。真値は 0..MaxProjectileObsTtl に clip して比べます。
+    """
+    max_ttl = V2_PARAMS["max_projectile_obs_ttl_s"]
+    orbit_duration = effect_duration_s("KingBible", 2, 1.0)
+    oracle = DeployObsWrapper.oracle_diagnostic(None, V2)
+    oracle.observation(_v2_raw([_v2_entity(20, "weapon_orbit", 0., 60., 1.0, ttl_true_s=orbit_duration)], 1.0))
+    oracle.observation(_v2_raw([
+        _v2_entity(20, "weapon_orbit", 0., 60., 1.5, ttl_true_s=orbit_duration - 0.7),
+        _v2_entity(21, "weapon_orbit", 60., 0., 1.5, ttl_true_s=orbit_duration - 0.7),
+        _v2_entity(7, "weapon_zone", 50., 0., 1.5, ttl_true_s=max_ttl + 5.0),
+    ], 1.5))
+    # orbit: 推定 = duration − 0.5、真値 = duration − 0.7 → +0.2。zone は SantaWater Lv1 の推定と clip 済み真値 8 の差
+    zone_expected = min(effect_duration_s("SantaWater", 1, 1.0), max_ttl) - max_ttl
+    assert oracle.last_ttl_error_s == {20: pytest.approx(0.2, abs=1e-5), 7: pytest.approx(zone_expected, abs=1e-5)}
+
+    ambiguous = _v2_raw([_v2_entity(7, "weapon_zone", 50., 0., 1.0, ttl_true_s=1.0)], 1.0)
+    ambiguous["inventory"]["weapon_slots"][4] = {"index": 4, "type_name": "FireWand", "level": 1}
+    oracle = DeployObsWrapper.oracle_diagnostic(None, V2)
+    oracle.observation(ambiguous)
+    assert oracle.last_ttl_error_s == {}
+
+
+def test_v2_rejects_viewport_aspect_mismatching_camera():
+    """v2 は viewport と camera の縦横比が違う raw を拒否する（等方座標が歪むため）。
+
+    sim カメラ 800u × 450u に 1000×1000 の viewport を組み合わせると ContractValidationError になります。
+    """
+    raw = _v2_raw([_v2_entity(1, "enemy_normal", 100., 50., 1.0)])
+    DeployObsWrapper.release(None, V2).observation(raw)
+    raw["viewport"] = (1000, 1000)
+    with pytest.raises(ContractValidationError, match="aspect"):
+        DeployObsWrapper.release(None, V2).observation(raw)
 
 
 def _mutate(path, value=None, *, drop=False):

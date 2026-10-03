@@ -60,7 +60,8 @@ SurvivorsEnv（/params deploy_raw=true）
 - v2 raw dict の entity は `entity_id`・`class_name`（Common `deploy_obs_v2_features.yaml` の entity 語彙）・`radius_world`・`world_x/y`・`occluded`・`timestamp_ns` に加えて、武器エフェクトだけが `slot`・`ttl_true_s`・`warning` を持つ。inventory は武器・パッシブ各 6 枠（`index`・`type_name`・`level`）と `duration_mult`。v2 raw に `privileged` mapping は無い。v1 raw は v1 schema のときだけ受け付ける。
 - release は world 座標を target camera で px へ投影し（半径は `radius_world × viewport幅 / (2 × 半幅)`）、可視判定（中心が画面内・遮蔽なし）は Common の `is_track_visible` に任せる。entity の `slot`・`ttl_true_s`・`warning` は読まない。
 - 武器エフェクトの残り時間は、wrapper が entity_id ごとに「初めて画面内に見えた時刻」を保持し、Common の持続時間表から推定する。Common の `track_max_age_frames`（class ごと）フレーム続けて見えなければ記録を捨て、reset ですべて捨てる（実機 tracker が track を作り直すのと同じ規則）。
-- `oracle_diagnostic()` は同じ tensor に加えて、zone / orbit の「推定残り時間 − sim の真の残り時間（秒）」を `info["deploy_ttl_error_s"]`（entity_id → 秒）に出す。fidelity の診断専用。
+- release の v2 は縦横とも viewport 幅/2 で正規化するので、viewport の縦横比が target camera の `half_width / half_height`（sim は 16:9）と違う raw は拒否する。
+- `oracle_diagnostic()` は同じ tensor に加えて、「release ビルダーが実際に出した zone / orbit の残り時間 − sim の真の残り時間（秒、0..8 に clip）」を `info["deploy_ttl_error_s"]`（entity_id → 秒）に出す。推定式は Training に持たず、ビルダー出力を秒へ戻して比べる。ビルダーが無効にした値（emitter が一意に決まらない構成など）は含めない。fidelity の診断専用。
 - `deploy_raw_env.py` と `deploy_obs_wrapper.py` は fidelity の `deploy_release_adapter` producer 閉包に入っているので、変更すると deploy 系 gating hash が変わり既存 verdict は失効する。
 - テストの fixture `Tools/Training/tests/survivors/fixtures/deploy_raw_llt_v1.json` は C++ の JSON 生成関数を LLT から呼んで書き出したもので、実 UE5（PIE）から取得した応答ではない。
 
