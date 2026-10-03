@@ -1,0 +1,64 @@
+# HUD の item identity（icon_matcher が返す名前）→ Common の武器・パッシブ語彙名の対応表。
+#
+# 実機の HUD は atlas manifest の小文字 id（例: whip）でスロットの中身を返し、
+# DeployObs v2 の共有ビルダーは C++ EWeaponType / EPassiveItemType の名前（例: Whip）を受け取ります。
+# この表に無い identity はスロットの中身を「不明」として扱います（推測で語彙へ寄せない）。
+# atlas の実名が分かっているもの（whip, gold, chicken）はそのまま、それ以外は Common 名の snake_case を既定にしています。
+# Tools/Deployment/survivors/hud_identity_vocabulary.py が fail-closed で読み込みます。
+
+# この対応表の版。対応を変えたら上げる。
+schema_version: hud_identity_vocabulary.v1
+
+# 武器スロット（inventory 0-5）に入る identity → Common weapon_vocabulary の名前。進化武器を含む。
+weapons:
+  garlic: Garlic
+  whip: Whip
+  magic_wand: MagicWand
+  knife: Knife
+  axe: Axe
+  cross: Cross
+  king_bible: KingBible
+  fire_wand: FireWand
+  santa_water: SantaWater
+  runetracer: Runetracer
+  lightning_ring: LightningRing
+  pentagram: Pentagram
+  peachone: Peachone
+  ebony_wings: EbonyWings
+  laurel: Laurel
+  soul_eater: SoulEater
+  bloody_tear: BloodyTear
+  holy_wand: HolyWand
+  thousand_edge: ThousandEdge
+  death_spiral: DeathSpiral
+  heaven_sword: HeavenSword
+  unholy_vespers: UnholyVespers
+  hellfire: Hellfire
+  la_borra: LaBorra
+  no_future: NoFuture
+  thunder_loop: ThunderLoop
+  gorgeous_moon: GorgeousMoon
+  vandalier: Vandalier
+
+# パッシブスロット（inventory 6-11）に入る identity → Common passive_vocabulary の名前。
+passives:
+  spinach: Spinach
+  armor: Armor
+  hollow_heart: HollowHeart
+  pummarola: Pummarola
+  empty_tome: EmptyTome
+  candelabrador: Candelabrador
+  bracer: Bracer
+  spellbinder: Spellbinder
+  duplicator: Duplicator
+  wings: Wings
+  attractorb: Attractorb
+  clover: Clover
+  crown: Crown
+  stone_mask: StoneMask
+  skull_o_maniac: SkullOManiac
+  tirajisu: Tirajisu
+  torronas_box: TorronasBox
+
+# 武器・パッシブではない identity（レベルアップ画面の代替報酬など）。スロットに出たら「不明」として扱う。
+non_items: [gold, chicken]
