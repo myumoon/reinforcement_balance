@@ -170,11 +170,11 @@ def _hud_world(
     )
     boss = TrackedEntityV2(
         1, 2, "enemy_boss", "enemy", 1.0, 1, frame_index,
-        0.7, 0.5, 0.2, 0.0, 0.0, 0.0, True, False,
+        0.7, 0.5, 0.2, 0.0, 0.0, 0.0, True, False, 0.05, 0.05, 0,
     )
     hazard = TrackedEntityV2(
         2, 3, "hazard_area", "hazard", 1.0, 1, frame_index,
-        0.6, 0.5, 0.1, 0.0, 0.0, 0.0, True, False,
+        0.6, 0.5, 0.1, 0.0, 0.0, 0.0, True, False, 0.05, 0.05, 0,
     )
     world = TrackedWorldStateV2(
         frame_index, timestamp_ns, [boss, hazard], PlayerAnchorState(0.5, 0.5, 1.0, False)

@@ -27,7 +27,7 @@ from survivors.runtime.artifact_bundle import (
     RuntimeBundle,
 )
 from survivors.target_profile import load_target_profile
-from survivors.vision.entity_tracker import EntityTracker
+from survivors.vision.entity_tracker import EntityTracker, default_class_map
 from survivors.vision.world_detector import CheckpointManifest, DetectionResult, FormalDetectorRejectedError
 
 import run_survivors_controller as cli
@@ -159,7 +159,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_load_combat_package", lambda _p: (_combat_policy(), {"model_sha256": "6" * 64}))
     monkeypatch.setattr(
         cli, "_load_detector",
-        lambda _a: (state.detector, EntityTracker({i: 5 for i in range(12)}, 0.7, 0.6, 0.9), _detector_manifest()),
+        lambda _a: (state.detector, EntityTracker({i: 5 for i in range(default_class_map().num_classes)}, 0.7, 0.6, 0.9, coarse_by_class_id=default_class_map().coarse_by_class_id()), _detector_manifest()),
     )
     monkeypatch.setattr(cli, "_open_capture", _forbidden("_open_capture"))
     monkeypatch.setattr(cli, "InputLeaseController", _forbidden("InputLeaseController"))
@@ -286,7 +286,7 @@ def test_health_stop_exit_code_becomes_process_exit_code(env):
     env.detector = EmptyDetector(fail=True)
     env.monkeypatch.setattr(
         cli, "_load_detector",
-        lambda _a: (env.detector, EntityTracker({i: 5 for i in range(12)}, 0.7, 0.6, 0.9), _detector_manifest()),
+        lambda _a: (env.detector, EntityTracker({i: 5 for i in range(default_class_map().num_classes)}, 0.7, 0.6, 0.9, coarse_by_class_id=default_class_map().coarse_by_class_id()), _detector_manifest()),
     )
     env.use_capture()
     assert _main(env, "--max-frames", "3") == EXIT_HEALTH_STOP

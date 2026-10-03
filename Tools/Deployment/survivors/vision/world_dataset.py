@@ -78,6 +78,13 @@ class WorldClassMap:
                 return fc["coarse_category"]
         raise KeyError(f"大分類の無い class: {name_or_id}")
 
+    def coarse_by_class_id(self) -> dict[int, str]:
+        """foreground の class_id → 大分類の表を返す（EntityTracker の必須引数用）。
+
+        background は大分類を持たないので含まない。
+        """
+        return {fc["id"]: fc["coarse_category"] for fc in self.foreground_classes}
+
     @property
     def all_class_names(self) -> list[str]:
         """background を含む全クラス名を ID 順に返す。"""

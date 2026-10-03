@@ -2,20 +2,47 @@
 
 normalized center distance + IoU + class penalty の deterministic greedy matching で
 DetectionResult とトラックを対応付ける。
+大分類（class map の coarse_category）が違う組は対応付けず、大分類 weapon では
+細分類（class）が一致するときだけ対応付ける。
 
-各トラックは velocity EMA / confidence decay / age / last-seen timestamp を保持する。
+各トラックは velocity EMA / confidence decay / age / last-seen timestamp / 初観測時刻を保持する。
 player_anchor (class_id=1) が未検出のときは viewport 中央を low confidence で返す。
 """
 from __future__ import annotations
 
 import dataclasses
 import itertools
+import pathlib
 from dataclasses import dataclass, field
-from typing import Iterator
+from functools import lru_cache
+from typing import Iterator, Mapping
 
 import numpy as np
 
+from survivors.vision.world_dataset import WorldClassMap, load_class_map
 from survivors.vision.world_detector import DetectionResult
+
+
+# ---- class map ----
+
+DEFAULT_CLASS_MAP_PATH = pathlib.Path(__file__).resolve().parents[2] / "configs" / "world_class_map_v2.yaml"
+
+
+@lru_cache(maxsize=None)
+def _cached_class_map(path: pathlib.Path) -> WorldClassMap:
+    """class map をパスごとに1回だけ読み込んで共有する。
+
+    from_state はフレームごとに呼ばれるので、毎回 YAML を読み直さないためのキャッシュ。
+    """
+    return load_class_map(path)
+
+
+def default_class_map() -> WorldClassMap:
+    """既定の class map（world_class_map_v2.yaml）を返す。
+
+    tracker の大分類表や from_state の既定値はここから作り、クラス表を直書きしない。
+    """
+    return _cached_class_map(DEFAULT_CLASS_MAP_PATH)
 
 
 # ---- track ----
@@ -28,12 +55,14 @@ class Track:
     """1 エンティティのトラック状態。
 
     フレームをまたいで ID を維持し、velocity EMA と confidence decay を適用する。
+    box_xyxy は平滑化せず最新の検出矩形で置き換え、class_id は生成時から変えない。
     """
 
     track_id: int
     class_id: int
     box_xyxy: np.ndarray        # (4,) float32 現在 box
     confidence: float
+    first_seen_timestamp_ns: int  # track を生成したフレームの時刻
     velocity_x: float = 0.0    # pixel/frame EMA
     velocity_y: float = 0.0
     age: int = 0
@@ -101,11 +130,16 @@ class TrackedWorldState:
     image_height: int
 
 
-# ---- V1 schema ----
+# ---- V2 schema ----
 
 @dataclass(frozen=True)
 class TrackedEntityV2:
-    """04-09 が消費する個別トラックの v1 schema。フィールドは golden fixture で固定。"""
+    """04-09 / 04-13 が消費する個別トラックの v2 schema。フィールドは golden fixture で固定。
+
+    v1 の 15 field の末尾に、最新検出矩形の正規化幅・高さ（平滑化なし）と
+    track 生成フレームの時刻 first_seen_timestamp_ns を足したもの。
+    track が途切れて作り直されると first_seen_timestamp_ns も新しい時刻になる。
+    """
 
     track_id: int
     class_id: int
@@ -122,13 +156,17 @@ class TrackedEntityV2:
     velocity_y: float
     on_screen: bool
     clipped: bool
+    normalized_width: float
+    normalized_height: float
+    first_seen_timestamp_ns: int
 
 
 @dataclass(frozen=True)
 class TrackedWorldStateV2:
-    """TrackedWorldState の v1 export schema。04-09 (real_obs_assembler) が参照する。
+    """TrackedWorldState の v2 export schema。04-09 (real_obs_assembler) が参照する。
 
-    timestamp / confidence / age / on_screen / clipped / coarse_class を含む。
+    timestamp / confidence / age / on_screen / clipped / coarse_class / 矩形サイズ / 初観測時刻を含む。
+    v1 からの変更は TrackedEntityV2 の 3 field 追加だけ。
     """
 
     frame_index: int
@@ -144,24 +182,13 @@ class TrackedWorldStateV2:
         timestamp_ns: int,
         class_map_path: "pathlib.Path | None" = None,
     ) -> "TrackedWorldStateV2":
-        """TrackedWorldState → V1 schema へ変換する。
+        """TrackedWorldState → V2 schema へ変換する。
 
-        class_map_path が指定されない場合はモジュール相対のデフォルトを使用する。
+        class_map_path が指定されない場合は既定の world_class_map_v2.yaml を使用する。
         package から restore する場合は package 内の class_map を渡すこと。
+        大分類（coarse_class）は class map の coarse_category から引く。
         """
-        from survivors.vision.world_dataset import load_class_map
-        import pathlib
-        if class_map_path is None:
-            class_map_path = pathlib.Path(__file__).parents[2] / "configs" / "world_class_map_v2.yaml"
-        cm = load_class_map(class_map_path)
-
-        _COARSE = {
-            "player_anchor": "anchor",
-            "enemy_normal": "enemy", "enemy_elite": "enemy", "enemy_boss": "enemy",
-            "gem_blue": "gem", "gem_green": "gem", "gem_red": "gem",
-            "pickup_heal": "pickup", "pickup_special": "pickup",
-            "hazard_projectile": "hazard", "hazard_area": "hazard",
-        }
+        cm = _cached_class_map(pathlib.Path(class_map_path or DEFAULT_CLASS_MAP_PATH))
 
         anchor_cx = state.player_anchor.normalized_cx
         anchor_cy = state.player_anchor.normalized_cy
@@ -186,7 +213,10 @@ class TrackedWorldStateV2:
                 name = cm.id_to_name(t.class_id)
             except KeyError:
                 name = "unknown"
-            coarse = _COARSE.get(name, "unknown")
+            try:
+                coarse = cm.coarse_for(name)
+            except KeyError:
+                coarse = "unknown"
 
             entities.append(
                 TrackedEntityV2(
@@ -205,6 +235,9 @@ class TrackedWorldStateV2:
                     velocity_y=t.velocity_y,
                     on_screen=on_screen,
                     clipped=clipped,
+                    normalized_width=(t.box_xyxy[2] - t.box_xyxy[0]) / state.image_width,
+                    normalized_height=(t.box_xyxy[3] - t.box_xyxy[1]) / state.image_height,
+                    first_seen_timestamp_ns=t.first_seen_timestamp_ns,
                 )
             )
 
@@ -232,6 +265,8 @@ class EntityTracker:
 
     class-specific max_age で未検出トラックを削除し、
     player_anchor 未検出時は viewport 中央 (0.5, 0.5) を fallback で返す。
+    coarse_by_class_id（class_id → class map の大分類）は必須で、大分類が違う組と、
+    大分類 weapon で細分類が違う組はマッチさせない。
     """
 
     def __init__(
@@ -240,7 +275,10 @@ class EntityTracker:
         max_match_cost: float,
         velocity_ema_alpha: float,
         confidence_decay_per_frame: float,
+        *,
+        coarse_by_class_id: Mapping[int, str],
     ) -> None:
+        self._coarse_by_class_id = dict(coarse_by_class_id)
         self._max_age_by_class = max_age_by_class
         self._max_match_cost = max_match_cost
         self._ema_alpha = velocity_ema_alpha
@@ -284,6 +322,7 @@ class EntityTracker:
                     class_id=int(detection.class_ids[i]),
                     box_xyxy=detection.boxes_xyxy[i].copy(),
                     confidence=float(detection.scores[i]),
+                    first_seen_timestamp_ns=timestamp_ns,
                     last_seen_frame_index=frame_index,
                 )
                 self._tracks.append(new_track)
@@ -330,6 +369,8 @@ class EntityTracker:
     ) -> tuple[list[int], list[int]]:
         """normalized center distance + IoU + class penalty の greedy matching。
 
+        大分類が違う組、または大分類 weapon で class が違う組の cost は無限大にし、
+        max_match_cost を必ず超えるので対応付けない（新しい track になる）。
         Returns: (matched_track_ids, matched_det_indices)
         """
         if not self._tracks or len(detection) == 0:
@@ -351,9 +392,18 @@ class EntityTracker:
                 dcx = (dx1 + dx2) / 2.0 / detection.image_width
                 dcy = (dy1 + dy2) / 2.0 / detection.image_height
 
+                det_class_id = int(detection.class_ids[di])
+                same_class = track.class_id == det_class_id
+                track_coarse = self._coarse_by_class_id.get(track.class_id)
+                if track_coarse != self._coarse_by_class_id.get(det_class_id) or (
+                    track_coarse == "weapon" and not same_class
+                ):
+                    cost[ti, di] = np.inf
+                    continue
+
                 dist = np.sqrt((tcx - dcx) ** 2 + (tcy - dcy) ** 2)
                 iou = _iou(track.box_xyxy, detection.boxes_xyxy[di])
-                class_penalty = 0.0 if track.class_id == int(detection.class_ids[di]) else 0.4
+                class_penalty = 0.0 if same_class else 0.4
 
                 # ponytail: O(n_tracks * n_dets) で密度が低いゲームには十分
                 cost[ti, di] = 0.4 * dist + 0.4 * (1.0 - iou) + 0.2 * class_penalty

@@ -106,7 +106,7 @@ def _hud_world(screen_state: str = "gameplay", *, ts: int = 1_000_000_000):
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
+    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False, .05, .05, 0)
     world = TrackedWorldStateV2(4, ts, [visible], PlayerAnchorState(.5, .5, .9, False))
     return hud, world
 

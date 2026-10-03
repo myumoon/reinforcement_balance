@@ -28,7 +28,7 @@ from survivors.controller.health_monitor import HealthMonitor
 from survivors.controller.state_machine import CampaignRunMode, ControllerState
 from survivors.controller.telemetry import TelemetrySessionHeader, TelemetryWriter
 from survivors.controller.ui_navigation import Effect
-from survivors.vision.entity_tracker import EntityTracker
+from survivors.vision.entity_tracker import EntityTracker, default_class_map
 from survivors.vision.world_detector import DetectionResult
 
 MS = 1_000_000
@@ -280,7 +280,7 @@ def _build(tmp_path, mode, script, *, effects=(), terminal_state=None, detector=
     )
     parts.controller = SurvivorsController(
         mode=mode, session_id="session-1", capture=parts.capture, detector=parts.detector,
-        tracker=EntityTracker({i: 5 for i in range(12)}, 0.7, 0.6, 0.9), hud_parser=parts.hud,
+        tracker=EntityTracker({i: 5 for i in range(default_class_map().num_classes)}, 0.7, 0.6, 0.9, coarse_by_class_id=default_class_map().coarse_by_class_id()), hud_parser=parts.hud,
         assembler=FakeAssembler(emit_every), runtime=parts.runtime, state_machine=parts.sm,
         health=HealthMonitor(), telemetry=TelemetryWriter(parts.path, header), schema=_SCHEMA,
         model_hashes=_MODEL_HASHES, input_controller=parts.input, clock_ns=clock, sleep=lambda _: None,

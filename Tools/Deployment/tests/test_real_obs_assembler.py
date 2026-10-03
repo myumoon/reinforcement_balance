@@ -28,8 +28,8 @@ def _inputs(state="gameplay", *, ts=1_000_000_000) -> tuple[HudStateV1, TrackedW
         ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
         False, False, False, .9, "ok",
     )
-    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
-    leaked = TrackedEntityV2(2, 2, "enemy_normal", "enemy", .99, 1, 4, .51, .5, .01, 0., 0., 0., False, False)
+    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False, .05, .05, 0)
+    leaked = TrackedEntityV2(2, 2, "enemy_normal", "enemy", .99, 1, 4, .51, .5, .01, 0., 0., 0., False, False, .05, .05, 0)
     world = TrackedWorldStateV2(4, ts, [visible, leaked], PlayerAnchorState(.5, .5, .9, False))
     return hud, world
 
@@ -233,7 +233,7 @@ def test_item_context_world_age_and_snapshot_age_computed_independently() -> Non
     schema = DeployObsSchema.default_v1()
     assembler = RealObsAssembler()
     hud_gp, _ = _inputs("gameplay")  # ts=1B
-    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
+    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False, .05, .05, 0)
     world_skewed = TrackedWorldStateV2(4, 960_000_000, [visible], PlayerAnchorState(.5, .5, .9, False))
     assembler.assemble(hud_gp, world_skewed, schema, (1000, 1000))
     card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
@@ -446,7 +446,7 @@ def test_item_context_fallback_anchor_resets_direction_to_neutral() -> None:
     schema = DeployObsSchema.default_v1()
     assembler = RealObsAssembler()
     # is_fallback=True の gameplay frame でキャッシュを構築
-    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
+    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False, .05, .05, 0)
     world_gp_fb = TrackedWorldStateV2(4, 1_000_000_000, [visible], PlayerAnchorState(.5, .5, .9, True))
     hud_gp, _ = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp_fb, schema, (1000, 1000))
@@ -474,7 +474,7 @@ def test_item_context_real_anchor_preserves_direction() -> None:
     """
     schema = DeployObsSchema.default_v1()
     assembler = RealObsAssembler()
-    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False)
+    visible = TrackedEntityV2(1, 2, "enemy_normal", "enemy", .9, 1, 4, .7, .5, .2, 0., 0., 0., True, False, .05, .05, 0)
     world_gp = TrackedWorldStateV2(4, 1_000_000_000, [visible], PlayerAnchorState(.5, .5, .9, False))
     hud_gp, _ = _inputs("gameplay")
     assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
@@ -763,3 +763,39 @@ def test_no_config_button_is_none() -> None:
     snap = assembler.assemble(hud, TrackedWorldStateV2(5, 2_000_000_000, [], PlayerAnchorState(.5, .5, .9, False)), schema, (1000, 1000))
     assert snap is not None and snap.ui_policy_input is not None
     assert snap.ui_policy_input.button is None
+
+
+def test_weapon_tracks_do_not_raise_hazard_or_boss_flag() -> None:
+    """tracker が作った weapon track は item context の hazard_flag / boss_flag を立てない。
+
+    weapon は大分類 weapon なので、hazard / enemy だけを見る2つの flag に影響しないことを確認します。
+    """
+    from survivors.vision.entity_tracker import EntityTracker, default_class_map
+    from survivors.vision.world_detector import DetectionResult
+
+    cm = default_class_map()
+    tracker = EntityTracker({i: 5 for i in range(cm.num_classes)}, 0.7, 0.6, 0.9, coarse_by_class_id=cm.coarse_by_class_id())
+    weapon_ids = [cm.name_to_id(n) for n in ("weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura")]
+    boxes = [[600 + 40 * i, 400, 630 + 40 * i, 430] for i in range(4)] + [[700, 500, 730, 530]]
+    det = DetectionResult(
+        boxes_xyxy=np.array(boxes, dtype=np.float32), scores=np.full(5, .9, dtype=np.float32),
+        class_ids=np.array(weapon_ids + [cm.name_to_id("enemy_normal")], dtype=np.int32),
+        image_width=1000, image_height=1000,
+    )
+    world_gp = TrackedWorldStateV2.from_state(tracker.update(det, 4, 1_000_000_000), 4, 1_000_000_000)
+    assert sorted(t.coarse_class for t in world_gp.tracks) == ["enemy"] + ["weapon"] * 4
+    schema = DeployObsSchema.default_v1()
+    assembler = RealObsAssembler()
+    hud_gp, _ = _inputs("gameplay")
+    assembler.assemble(hud_gp, world_gp, schema, (1000, 1000))
+    card = ParsedCard(0, "knife", "weapon", 2, .99, "ok", (100, 100, 400, 500))
+    hud_lu = HudStateV1(
+        "hud_state.v1", "session", 5, 2_000_000_000, "a" * 64, "level_up_items", .9, "ok",
+        20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", 4, .9, "ok",
+        ("whip",) + (None,) * 11, .9, "b" * 64, (card,), "c" * 64, (),
+        False, False, False, .9, "ok",
+    )
+    snapshot = assembler.assemble(hud_lu, TrackedWorldStateV2(5, 2_000_000_000, [], world_gp.player_anchor), schema, (1000, 1000))
+    assert snapshot is not None and snapshot.item_context is not None
+    assert snapshot.item_context.hazard_flag is False
+    assert snapshot.item_context.boss_flag is False

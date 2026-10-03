@@ -15,7 +15,7 @@ def _track(track_id: int, coarse: str, x: float, y: float, *, on_screen=True, cl
     """
     return TrackedEntityV2(
         track_id, 2, coarse, coarse, .9, 2, 9, .5 + x, .5 + y, x, y,
-        0., 0., on_screen, clipped,
+        0., 0., on_screen, clipped, .05, .05, 0,
     )
 
 def test_directional_bin_matches_cpp_atan2_plus_pi_mapping() -> None:

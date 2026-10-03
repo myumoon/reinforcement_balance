@@ -557,6 +557,7 @@ def restore_package(
         max_match_cost=tracker_cfg.get("max_match_cost", 0.7),
         velocity_ema_alpha=tracker_cfg.get("velocity_ema_alpha", 0.6),
         confidence_decay_per_frame=tracker_cfg.get("confidence_decay_per_frame", 0.9),
+        coarse_by_class_id=cm.coarse_by_class_id(),
     )
 
     state = tracker.update(result, frame_index=0, timestamp_ns=0)
