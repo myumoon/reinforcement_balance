@@ -89,10 +89,11 @@ def test_candidate_selection_filters_deduplicates_and_applies_stride(tmp_path, c
         assert hashlib.sha256(output.read_bytes()).digest() == hashlib.sha256(source.read_bytes()).digest()
     class_lines = (work_root / "classes.txt").read_text(encoding="utf-8").splitlines()
     assert class_lines == list(ALL_CLASSES)
-    # 実データの classes.txt と同じく、labeled_region の後ろに武器エフェクト4クラスが並ぶ。
-    assert class_lines[-5:] == [
-        "labeled_region", "weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura"
+    # class map v2 で武器エフェクトは world クラスになり、UI クラスより前（world の末尾）に並ぶ。
+    assert class_lines[class_lines.index("hud_hp") - 4:class_lines.index("hud_hp")] == [
+        "weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura"
     ]
+    assert class_lines[-1] == "labeled_region"
     output = capsys.readouterr().out
     assert "総数: 5" in output
     assert "foreground: 4" in output

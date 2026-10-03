@@ -25,7 +25,6 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
 from survivors.annotation_labels import (
     REGION_LABEL,
-    WEAPON_EFFECT_CLASSES,
     WORLD_CLASSES,
     LabelBox,
     clip_box,
@@ -143,9 +142,9 @@ def _load_fixed_boxes(path: Path, items: object) -> tuple[LabelBox, ...]:
 
 
 def _check_detector_label(path: Path, where: str, label: object) -> str:
-    """下書き検出器で扱えるラベル（WORLD_CLASSES + WEAPON_EFFECT_CLASSES）かを検証する。
+    """下書き検出器で扱えるラベル（WORLD_CLASSES）かを検証する。
 
-    画面内の物体と武器エフェクトは下書きできるが、
+    画面内の物体と武器エフェクト（class map v2 で WORLD_CLASSES に入った）は下書きできるが、
     UI クラスや labeled_region、未知の名前は設定エラーにする。
     """
     if not isinstance(label, str):
@@ -156,8 +155,8 @@ def _check_detector_label(path: Path, where: str, label: object) -> str:
         validate_label(label)
     except ValueError as exc:
         raise ValueError(f"{path}: {where}: {exc}") from exc
-    if label not in WORLD_CLASSES + WEAPON_EFFECT_CLASSES:
-        raise ValueError(f"{path}: {where} must be a world or weapon effect class: {label!r}")
+    if label not in WORLD_CLASSES:
+        raise ValueError(f"{path}: {where} must be a world class: {label!r}")
     return label
 
 

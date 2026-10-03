@@ -561,7 +561,7 @@ def restore_package(
     )
 
     state = tracker.update(result, frame_index=0, timestamp_ns=0)
-    v1 = TrackedWorldStateV2.from_state(state, frame_index=0, timestamp_ns=0, class_map_path=cm_path)
+    v2 = TrackedWorldStateV2.from_state(state, frame_index=0, timestamp_ns=0, class_map_path=cm_path)
 
     # -- schema 検証は上の contract_hash 比較で実施済み（_compute_contract_hash が3クラス全体をカバー）
-    return v1
+    return v2

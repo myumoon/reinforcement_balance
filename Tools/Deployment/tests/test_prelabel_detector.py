@@ -146,7 +146,7 @@ def test_load_config_rejects_invalid_values(tmp_path, mutation):
 def test_load_config_accepts_weapon_effect_labels_and_aliases(tmp_path):
     """武器エフェクトクラスは検出ラベルにも別名の両側にも使える。
 
-    下書き可能クラスは WORLD_CLASSES + WEAPON_EFFECT_CLASSES。
+    下書き可能クラスは WORLD_CLASSES（class map v2 で weapon_* を含む）。
     """
     data = copy.deepcopy(_raw_config())
     data["detector"].update(labels=["weapon_aura", "enemy_normal"], label_aliases={"weapon_orbit": "weapon_aura"})

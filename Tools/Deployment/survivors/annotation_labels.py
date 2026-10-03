@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
 
+from reinbalance_survivors_contracts.deploy_obs_v2_features import load_deploy_obs_v2_feature_params
 from survivors.vision.world_dataset import load_class_map
 
 
@@ -27,42 +28,18 @@ WORLD_CLASSES = tuple(
 UI_CLASSES = ("hud_hp", "hud_xp", "card", "button", "death_result")
 # この矩形を持つ確認済みフレームは「矩形の内側だけ漏れなくラベル済み」を意味する（物体ではない）。
 REGION_LABEL = "labeled_region"
-# プレイヤー自身の武器エフェクト（敵側の hazard_* とは別）。アノテーション専用で world class map には入れない。
-# 種類は sim の EProjectileObsKind（Projectile / GroundZone / Orbit / Aura）に合わせる。
-WEAPON_EFFECT_CLASSES = ("weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura")
-# 武器（C++ EWeaponType 名）→ 画面に付けるラベル集合。C++ GetProjectileObsView と
-# Common の deploy_obs_v2_features.yaml weapon_effect_kinds を正とし、空集合の武器には付けない。
+# プレイヤー自身の武器エフェクト（敵側の hazard_* とは別）。class map v2 の大分類 weapon のクラスで、
+# WORLD_CLASSES にも含まれる。種類は sim の EProjectileObsKind（Projectile / GroundZone / Orbit / Aura）に対応する。
+WEAPON_EFFECT_CLASSES = tuple(name for name in WORLD_CLASSES if _CLASS_MAP.coarse_for(name) == "weapon")
+# 武器（C++ EWeaponType 名）→ 画面に付けるラベル集合。Common の deploy_obs_v2_features.yaml
+# weapon_effect_kinds（種類名 projectile 等）に weapon_ を前置して作り、表を二重に持たない。
+# Common に無い武器（Pentagram など）は空集合で、ラベルを付けない。
+_FEATURE_PARAMS = load_deploy_obs_v2_feature_params()
 WEAPON_EFFECT_KINDS: dict[str, tuple[str, ...]] = {
-    "Garlic": ("weapon_aura",),
-    "SoulEater": ("weapon_aura",),
-    "Whip": ("weapon_projectile",),
-    "BloodyTear": ("weapon_projectile",),
-    "MagicWand": ("weapon_projectile",),
-    "HolyWand": ("weapon_projectile",),
-    "Knife": ("weapon_projectile",),
-    "ThousandEdge": ("weapon_projectile",),
-    "Axe": ("weapon_projectile",),
-    "DeathSpiral": ("weapon_projectile",),
-    "Cross": ("weapon_projectile",),
-    "HeavenSword": ("weapon_projectile",),
-    "KingBible": ("weapon_orbit",),
-    "UnholyVespers": ("weapon_orbit",),
-    "FireWand": ("weapon_projectile", "weapon_zone"),
-    "Hellfire": ("weapon_projectile", "weapon_zone"),
-    "SantaWater": ("weapon_zone",),
-    "LaBorra": ("weapon_zone",),
-    "Runetracer": ("weapon_projectile",),
-    "NoFuture": ("weapon_projectile",),
-    "LightningRing": ("weapon_zone",),
-    "ThunderLoop": ("weapon_zone",),
-    "Peachone": ("weapon_projectile",),
-    "EbonyWings": ("weapon_projectile",),
-    "Vandalier": ("weapon_projectile",),
-    "Pentagram": (),
-    "GorgeousMoon": (),
-    "Laurel": (),
+    weapon: tuple(f"weapon_{kind}" for kind in _FEATURE_PARAMS["weapon_effect_kinds"].get(weapon, ()))
+    for weapon in _FEATURE_PARAMS["weapon_vocabulary"][1:-1]
 }
-ALL_CLASSES = WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,) + WEAPON_EFFECT_CLASSES
+ALL_CLASSES = WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,)
 _FRAME_STEM = re.compile(r"^\d{8}$")
 
 
