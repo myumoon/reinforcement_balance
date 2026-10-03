@@ -108,14 +108,19 @@ class CombatDistillationDataset:
         """release optimizer が利用できる dataset だけを step 0 で許可する。
         unobservable source、hard teacher actions、train 外 split、別 schema/oracle tensor を対称に拒否します。
         """
+        self.assert_release_observations(schema)
+        if any(split != "train" for split in self.splits):
+            raise ValueError("split leakage: release training accepts train sequences only")
+    def assert_release_observations(self, schema: DeployObsSchema) -> None:
+        """split を問わず、全 valid step の観測が release DeployObs として正しいか検査する。
+        validation split の保存前にも、oracle 値（unobservable segment の非 neutral 値）や別 schema・教師 action の混入を拒否します。
+        """
         if not isinstance(schema, DeployObsSchema) or self.deploy_schema_hash != schema.schema_hash:
             raise ValueError("deploy schema hash mismatch")
         if "unobservable" in self.observation_source_classes:
             raise ValueError("unobservable privileged raw observations are forbidden")
         if self.teacher_actions is not None:
             raise ValueError("teacher actions are forbidden in release training")
-        if any(split != "train" for split in self.splits):
-            raise ValueError("split leakage: release training accepts train sequences only")
         if self.observations.shape[2] != schema.dim * 3:
             raise ValueError("DeployObs tensor dimension mismatch")
         for batch, time in zip(*np.nonzero(self.valid_mask), strict=True):

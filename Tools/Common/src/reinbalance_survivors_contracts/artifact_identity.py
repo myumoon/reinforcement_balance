@@ -31,6 +31,7 @@ ARTIFACT_NODE_KINDS = frozenset(
         "source_descriptor",
         "teacher_validation_verdict",
         "choice_dataset_release",
+        "combat_distillation_dataset",
         "item_selector_release",
         "combat_student_release",
         "perception_calibration_profile",

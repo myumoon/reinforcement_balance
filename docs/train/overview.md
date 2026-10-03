@@ -45,7 +45,7 @@ DeployObs schema または release adapter の producer hash を変更した場�
 
 ## DeployObs v2 wrapper と deploy_raw
 
-Training の既定 DeployObs schema は v2（`DeployObsSchema.default_v2()`）。`deployable_policy_trainer.py` と `perception_error_wrapper.py` の既定が v2 になり、v1 で作った dataset / checkpoint は schema hash 不一致で拒否される。`collect_survivors_combat_distillation.py` は 03-08 で切り替えるまで v1 のまま。
+Training の既定 DeployObs schema は v2（`DeployObsSchema.default_v2()`）。`deployable_policy_trainer.py` と `perception_error_wrapper.py` の既定が v2 になり、v1 で作った dataset / checkpoint は schema hash 不一致で拒否される。`collect_survivors_combat_distillation.py` も 03-08 で v2 に切り替えた（synthetic 経路を含む）。
 
 UE5 から v2 観測を作る経路は次のとおり。
 
@@ -384,9 +384,60 @@ missing/stale な場合は `ValueError` で fail closed にする。development 
 package を原子的に構築する。`development_only` または `formal_student_eligible` が不正なら
 package 前に `ValueError` を送出し、load 側でも同じ gate を繰り返す。
 
-`collect_survivors_combat_distillation.py` は development 用の synthetic dataset を生成する CLI。
-`--source-descriptor` を省略すると synthetic fixture を `development_only` として保存し、
-正式収集は 04-07 `D04-PERCEPTION-CALIBRATION` 到着後に実装する。
+`collect_survivors_combat_distillation.py` は蒸留 dataset の収集 CLI。既定 schema は DeployObs v2。
+`--source-descriptor` を省略すると UE5 に接続しない synthetic fixture を `development_only` として保存する
+（正式 student 訓練には使えない）。`--source-descriptor` を指定すると正式収集になる。
+
+### 正式蒸留データ収集 (03-08)
+
+`games/survivors/distillation_collector.py` が、UE5 で教師を動かしながら同じ step の DeployObs v2 を記録する。
+
+- 1 step ごとに、UE5 応答の flat obs（教師の入力）と同じ応答の `deploy_raw` を受け取る。
+  `DeployRawEnv` が flat obs を `last_flat_obs` に残し、`deploy_raw` は `DeployObsWrapper.release()`（Common の共有ビルダー）だけで v2 tensor にする。
+- 教師（`ValueSourceTeacher`: 01-01 の `load_value_source` で検証した model + VecNormalize）は決定的に推論し、
+  行動分布の logits・value・行動を同じ添字に記録する。教師の行動は release dataset に入れない（`CollectedSequences.teacher_actions` で診断用に保持するだけ）。
+- 教師の LSTM 状態は episode ごとに零へ戻し、最初の step だけ `episode_start=True` を渡す。
+- episode は `--sequence-length` ごとの行に分ける。各行の先頭が reset 境界で、そこから `--burn-in` step が burn-in。
+  末尾は padding（logits / value は 0、`valid_mask` は False）。
+- split は episode 単位で割り当てる（`--validation-every` 個目ごとに validation、0 なら全部 train）。同じ episode の行が別 split に分かれることはない。
+- 保存前に train は `assert_release_training_ready()`、validation は `assert_release_observations()` を通す。
+  unobservable segment（enemy_hp・cooldown）に oracle 値が 1 step でも入っていれば拒否する。
+- `deploy_raw` が無い応答、`/params deploy_raw=true` の失敗、非数・形違いの flat obs や教師出力は、黙ってスキップせず収集を失敗させる。
+
+開始条件は fail closed で、次の順に検査する。どれかが欠ける・失敗すると stderr に 1 行出して **終了コード 3** を返し、UE5 へは接続しない（dataset も保存しない）。
+
+1. `--fidelity-verdict` / `--artifact-store` / `--generated-input-descriptor` / `--ubt-action-graph` がすべて指定されている
+2. 教師 source descriptor が存在し、`load_value_source` の検証（hash・model・VecNormalize）を通る
+3. fidelity verdict が読めて、現在の producer hash（`resolve_current_gating_producer_hashes`）に対する `integration` stage として `verify_current_fidelity` を通る
+4. verdict に `blocking_reasons` が無い
+
+モジュール関数 `run_formal_collection()` も同じ順序で検査し、保存関数 `save_dataset_artifact()` も保存直前に verdict を再検証する。
+
+保存先: `--output` に `train/`・`validation/`（`data.npz` + `manifest.json`）と `artifact_descriptor.json` を書き、
+同じファイルを `--artifact-store` に登録する。descriptor は `node_kind=combat_distillation_dataset` で、
+親は教師 source descriptor と fidelity verdict の 2 つの `source_descriptor` node。`identity_metadata` には
+DeployObs schema hash / version、dataset schema version、`deploy_raw` schema version、教師 identity、verdict identity、
+episode 数・sequence 長・burn-in・seed・収集 step 数を記録する（dataset 自体の schema version は v1 のまま）。
+dataset の logical id は教師 identity・verdict identity と、収集設定・教師 descriptor・保存ファイル内容の digest から作るため、
+同じ store・教師・verdict・seed で再収集しても別 dataset として登録される。書き出しは `--output` の隣の一時 directory で行い、
+store 登録まで成功したときだけ `--output` へ rename する（失敗時は `--output` を作らず終了コード 3）。
+`--artifact-store` を開けない場合は UE5 へ接続する前に終了コード 3 で止まる。
+
+前提 artifact（merge 後の手動作業）: 03-07 merge 後に再発行した integration fidelity verdict と、Phase 5 教師の source descriptor（01-01 release）。
+正式収集は 03-05 `D03-DEPLOY-STUDENT-RELEASE` の最初の手順として、学習とは別プロセスで実行する（`deploy_raw` 付き応答は大きく収集が遅い）。
+
+```bash
+python collect_survivors_combat_distillation.py \
+  --output D:/reinbalance-data/combat-distillation/run-001 \
+  --source-descriptor D:/reinbalance-artifacts/phase5-teacher/source_descriptor.json \
+  --fidelity-verdict D:/reinbalance-artifacts/fidelity/integration-verdict.json \
+  --artifact-store D:/reinbalance-artifacts/store \
+  --generated-input-descriptor D:/reinbalance-artifacts/fidelity/generated-inputs.json \
+  --ubt-action-graph D:/reinbalance-artifacts/fidelity/ubt-action-graph.json \
+  --ue5-port 8767 --episodes 64 --sequence-length 64 --burn-in 16 --validation-every 5 --seed 0
+```
+
+終了コード: 0 = 保存成功、3 = 開始条件の不足・検証失敗、または収集中の契約違反（正式経路）、2 = synthetic 経路の保存失敗。
 
 `train_survivors_deployable_policy.py` は distillation 訓練の CLI エントリポイント。
 `--formal-deps` を省略すると development mode で動作し、生成 checkpoint は正式 package に昇格できない。
@@ -399,7 +450,7 @@ store の所在を指す JSON と期待値を同じ入力から読むと、そ�
 store・commit・期待値を自己整合的に用意できてしまい照合が無意味になるため、
 期待値は起動スクリプト / CI 設定など別チャネルで管理・レビューする。
 
-`eval_survivors_deployable_policy.py` は packaged policy を synthetic dataset で再評価して
+`eval_survivors_deployable_policy.py` は packaged policy を dataset（synthetic、または正式収集の `validation/`）で再評価して
 actor KL / value Huber を JSON report として保存する evaluation CLI。
 
 ```bash
