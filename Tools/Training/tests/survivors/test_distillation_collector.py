@@ -18,7 +18,7 @@ from games.survivors.deploy_obs_wrapper import DeployObsWrapper
 from games.survivors.deploy_raw_env import DeployRawEnv
 from reinbalance_survivors_contracts.artifact_dag import validate_artifact_dag
 from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
-from reinbalance_survivors_contracts.artifact_store import ArtifactStore
+from reinbalance_survivors_contracts.artifact_store import ArtifactStore, ArtifactStoreError
 from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from reinbalance_survivors_contracts.fidelity_verdict import (
@@ -315,10 +315,10 @@ def _formal_inputs(tmp_path, verdict):
     return descriptor, verdict_path
 
 
-def _run(tmp_path, *, verdict_path, hashes, descriptor, teacher_factory=None, env=None):
+def _run(tmp_path, *, verdict_path, hashes, descriptor, teacher_factory=None, env=None, output="out", episodes=5):
     """run_formal_collection を fake で呼び、(descriptor, 作られた env の一覧) を返す。
 
-    5 episode・長さ 4・burn-in 2・validation_every 5・seed 7 の固定設定で収集します。
+    既定は 5 episode・長さ 4・burn-in 2・validation_every 5・seed 7 で、output 名と episode 数だけ変えられます。
     """
     created = []
 
@@ -332,11 +332,80 @@ def _run(tmp_path, *, verdict_path, hashes, descriptor, teacher_factory=None, en
 
     descriptor_node = collector.run_formal_collection(
         source_descriptor=descriptor, fidelity_verdict=verdict_path, current_gating_producer_hashes=hashes,
-        env_factory=env_factory, artifact_store=tmp_path / "store", output=tmp_path / "out",
-        episodes=5, sequence_length=4, burn_in=2, validation_every=5, seed=7,
+        env_factory=env_factory, artifact_store=tmp_path / "store", output=tmp_path / output,
+        episodes=episodes, sequence_length=4, burn_in=2, validation_every=5, seed=7,
         teacher_factory=teacher_factory or (lambda path: FakeTeacher()),
     )
     return descriptor_node, created
+
+
+def _resolve_descriptor(store, node):
+    """store に登録された dataset descriptor を logical id から読み戻す。
+
+    2 回目の収集後も 1 回目の descriptor が壊れず残っていることの確認に使います。
+    """
+    ref = store.resolve(f"{node.logical_id}/descriptors/{node.identity_hash}.json")
+    return ArtifactDescriptor.from_wire(json.loads(store.object_path(ref.store_uri).read_bytes()))
+
+
+def test_second_formal_collection_with_same_teacher_verdict_seed_saves_separate_dataset(tmp_path):
+    """同じ store・教師・verdict・seed で episodes だけ変えた 2 回目の正式収集も成功し、両方が resolve できる。
+
+    logical id に収集設定と内容 digest が入るので、1 回目の id を再束縛しようとして失敗することはありません。
+    """
+    verdict, hashes = _verdict()
+    descriptor, verdict_path = _formal_inputs(tmp_path, verdict)
+    first, _ = _run(tmp_path, verdict_path=verdict_path, hashes=hashes, descriptor=descriptor, output="out1", episodes=5)
+    second, _ = _run(tmp_path, verdict_path=verdict_path, hashes=hashes, descriptor=descriptor, output="out2", episodes=10)
+    assert first.logical_id != second.logical_id
+    store = ArtifactStore(tmp_path / "store")
+    assert _resolve_descriptor(store, first) == first and _resolve_descriptor(store, second) == second
+    assert second.identity_metadata["episodes"] == 10
+    assert (tmp_path / "out1" / "artifact_descriptor.json").is_file()
+    assert (tmp_path / "out2" / "artifact_descriptor.json").is_file()
+
+
+def test_store_failure_leaves_no_partial_output(tmp_path, monkeypatch):
+    """dataset ファイルの store 登録が失敗すると、output も一時 directory も残さず例外を返す。
+
+    split を書いた後の train/data.npz の put で失敗させ、半端な train/ が output に残らないことを確かめます。
+    """
+    verdict, hashes = _verdict()
+    descriptor, verdict_path = _formal_inputs(tmp_path, verdict)
+    original = ArtifactStore.put_bytes
+
+    def failing_put(self, *, logical_id, data, media_type):
+        """train/data.npz の登録だけ失敗させる。
+
+        それ以外の put は本物の store に通します。
+        """
+        if logical_id.endswith("/train/data.npz"):
+            raise ArtifactStoreError("injected store failure")
+        return original(self, logical_id=logical_id, data=data, media_type=media_type)
+
+    monkeypatch.setattr(ArtifactStore, "put_bytes", failing_put)
+    with pytest.raises(ArtifactStoreError, match="injected"):
+        _run(tmp_path, verdict_path=verdict_path, hashes=hashes, descriptor=descriptor)
+    assert not (tmp_path / "out").exists()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".out.")]
+
+
+def test_unusable_store_stops_before_connecting(tmp_path):
+    """store root を開けない（ファイルが置かれている）場合は env に接続する前に止まる。
+
+    UE5 の収集時間を無駄にしないよう、store の問題は開始条件の段階で検出します。
+    """
+    verdict, hashes = _verdict()
+    descriptor, verdict_path = _formal_inputs(tmp_path, verdict)
+    (tmp_path / "store").write_bytes(b"not a directory")
+    created = []
+    with pytest.raises(OSError):
+        collector.run_formal_collection(
+            source_descriptor=descriptor, fidelity_verdict=verdict_path, current_gating_producer_hashes=hashes,
+            env_factory=lambda: created.append(1), artifact_store=tmp_path / "store", output=tmp_path / "out",
+            episodes=1, sequence_length=4, burn_in=2, teacher_factory=lambda path: FakeTeacher(),
+        )
+    assert created == [] and not (tmp_path / "out").exists()
 
 
 def test_formal_collection_saves_dataset_and_parent_identities_to_artifact_store(tmp_path):
@@ -423,7 +492,7 @@ def test_save_rechecks_fidelity_verdict(tmp_path):
     result, _, _ = _collect(episodes=1)
     with pytest.raises(ValueError, match="gating producer hashes differ"):
         collector.save_dataset_artifact(
-            result, schema=V2, output=tmp_path / "out", artifact_store=tmp_path / "store", dataset_id="ds",
+            result, schema=V2, output=tmp_path / "out", artifact_store=tmp_path / "store",
             teacher_identity_sha256="d" * 64, teacher_descriptor_path=descriptor, verdict=verdict,
             current_gating_producer_hashes={**hashes, GATING_KEYS[0]: "b" * 64}, collection_config={},
         )

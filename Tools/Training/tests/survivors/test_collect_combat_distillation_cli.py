@@ -5,6 +5,7 @@ synthetic は DeployObs v2 の dataset を保存し、正式経路は前提 arti
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,8 @@ import pytest
 import collect_survivors_combat_distillation as cli
 from games.survivors import distillation_collector as collector
 from games.survivors.combat_distillation_dataset import CombatDistillationDataset
+from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
+from reinbalance_survivors_contracts.artifact_store import ArtifactStore, ArtifactStoreError
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from test_distillation_collector import FakeSurvivorsEnv, FakeTeacher, _formal_inputs, _verdict
 from test_documented_formal_cli import _documented_argv
@@ -29,17 +32,19 @@ def test_synthetic_path_saves_v2_dataset(tmp_path):
     assert dataset.observations.shape == (4, 8, DeployObsSchema.default_v2().dim * 3)
 
 
-def _formal_argv(tmp_path, descriptor, verdict_path, *, drop=()):
+def _formal_argv(tmp_path, descriptor, verdict_path, *, drop=(), output="out", episodes=5):
     """正式経路の argv を作る。
 
-    drop に入れた flag は省き、前提 artifact の指定漏れを再現します。
+    drop に入れた flag は省き、前提 artifact の指定漏れを再現します。output 名と episode 数も変えられます。
     """
     values = {
         "--source-descriptor": descriptor, "--fidelity-verdict": verdict_path,
         "--artifact-store": tmp_path / "store", "--generated-input-descriptor": tmp_path / "generated-inputs.json",
         "--ubt-action-graph": tmp_path / "ubt-action-graph.json",
     }
-    argv = ["--output", str(tmp_path / "out"), "--episodes", "5", "--sequence-length", "4", "--burn-in", "2"]
+    argv = [
+        "--output", str(tmp_path / output), "--episodes", str(episodes), "--sequence-length", "4", "--burn-in", "2",
+    ]
     for flag, value in values.items():
         if flag not in drop:
             argv += [flag, str(value)]
@@ -73,6 +78,58 @@ def test_formal_path_collects_and_saves_with_all_prerequisites(tmp_path, fake_fo
     assert cli.main(_formal_argv(tmp_path, descriptor, verdict_path)) == 0
     assert len(envs) == 1 and envs[0].closed
     assert {p.name for p in (tmp_path / "out").iterdir()} == {"train", "validation", "artifact_descriptor.json"}
+
+
+def test_formal_path_second_collection_in_same_store_succeeds(tmp_path, fake_formal):
+    """同じ store・教師・verdict・seed で episodes を変えた 2 回目の CLI 収集も 0 で、別 dataset として保存される。
+
+    logical id の衝突で収集後に終了コード 3 になる不具合の回帰テストです。
+    """
+    verdict, envs = fake_formal
+    descriptor, verdict_path = _formal_inputs(tmp_path, verdict)
+    assert cli.main(_formal_argv(tmp_path, descriptor, verdict_path, output="out1", episodes=5)) == 0
+    assert cli.main(_formal_argv(tmp_path, descriptor, verdict_path, output="out2", episodes=10)) == 0
+    ids = {
+        ArtifactDescriptor.from_wire(json.loads((tmp_path / name / "artifact_descriptor.json").read_bytes())).logical_id
+        for name in ("out1", "out2")
+    }
+    assert len(ids) == 2 and len(envs) == 2
+
+
+def test_formal_path_store_failure_exits_3_without_partial_output(tmp_path, fake_formal, monkeypatch):
+    """収集後の store 登録が失敗すると終了コード 3 で、--output には何も残らない。
+
+    train/data.npz の put だけを失敗させ、一時 directory も片付けられることを確かめます。
+    """
+    verdict, _ = fake_formal
+    descriptor, verdict_path = _formal_inputs(tmp_path, verdict)
+    original = ArtifactStore.put_bytes
+
+    def failing_put(self, *, logical_id, data, media_type):
+        """train/data.npz の登録だけ失敗させる。
+
+        それ以外の put は本物の store に通します。
+        """
+        if logical_id.endswith("/train/data.npz"):
+            raise ArtifactStoreError("injected store failure")
+        return original(self, logical_id=logical_id, data=data, media_type=media_type)
+
+    monkeypatch.setattr(ArtifactStore, "put_bytes", failing_put)
+    assert cli.main(_formal_argv(tmp_path, descriptor, verdict_path)) == 3
+    assert not (tmp_path / "out").exists()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".out.")]
+
+
+def test_formal_path_unusable_store_exits_3_without_connecting(tmp_path, fake_formal):
+    """--artifact-store を開けない場合は UE5 に接続する前に終了コード 3 で止まる。
+
+    store の場所にファイルを置き、収集を始める前に検出されることを確かめます。
+    """
+    verdict, envs = fake_formal
+    descriptor, verdict_path = _formal_inputs(tmp_path, verdict)
+    (tmp_path / "store").write_bytes(b"not a directory")
+    assert cli.main(_formal_argv(tmp_path, descriptor, verdict_path)) == 3
+    assert envs == [] and not (tmp_path / "out").exists()
 
 
 @pytest.mark.parametrize("flag", ["--fidelity-verdict", "--artifact-store", "--generated-input-descriptor", "--ubt-action-graph"])

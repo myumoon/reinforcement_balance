@@ -418,6 +418,10 @@ package 前に `ValueError` を送出し、load 側でも同じ gate を繰り�
 親は教師 source descriptor と fidelity verdict の 2 つの `source_descriptor` node。`identity_metadata` には
 DeployObs schema hash / version、dataset schema version、`deploy_raw` schema version、教師 identity、verdict identity、
 episode 数・sequence 長・burn-in・seed・収集 step 数を記録する（dataset 自体の schema version は v1 のまま）。
+dataset の logical id は教師 identity・verdict identity と、収集設定・教師 descriptor・保存ファイル内容の digest から作るため、
+同じ store・教師・verdict・seed で再収集しても別 dataset として登録される。書き出しは `--output` の隣の一時 directory で行い、
+store 登録まで成功したときだけ `--output` へ rename する（失敗時は `--output` を作らず終了コード 3）。
+`--artifact-store` を開けない場合は UE5 へ接続する前に終了コード 3 で止まる。
 
 前提 artifact（merge 後の手動作業）: 03-07 merge 後に再発行した integration fidelity verdict と、Phase 5 教師の source descriptor（01-01 release）。
 正式収集は 03-05 `D03-DEPLOY-STUDENT-RELEASE` の最初の手順として、学習とは別プロセスで実行する（`deploy_raw` 付き応答は大きく収集が遅い）。

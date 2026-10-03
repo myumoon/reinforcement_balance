@@ -8,6 +8,8 @@ fail-closed の開始条件（教師 descriptor・integration fidelity verdict�
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -20,7 +22,7 @@ from games.survivors.deploy_raw_env import DEPLOY_RAW_SCHEMA_VERSION, DeployRawE
 from reinbalance_survivors_contracts.artifact_dag import validate_artifact_dag
 from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
 from reinbalance_survivors_contracts.artifact_store import ArtifactStore
-from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
+from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes, sha256_hex
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from reinbalance_survivors_contracts.fidelity_verdict import FidelityVerdict, verify_current_fidelity
 
@@ -312,7 +314,6 @@ def save_dataset_artifact(
     schema: DeployObsSchema,
     output: Path,
     artifact_store: Path,
-    dataset_id: str,
     teacher_identity_sha256: str,
     teacher_descriptor_path: Path,
     verdict: FidelityVerdict,
@@ -323,6 +324,8 @@ def save_dataset_artifact(
 
     保存直前にも fidelity verdict を再検証し、train は release 学習 gate、validation は release 観測検査を通します。
     教師 descriptor と verdict は source_descriptor の root node、dataset は combat_distillation_dataset node になります。
+    dataset の logical id は収集設定と保存ファイルの内容 digest から作るので、別の収集が同じ id に当たりません。
+    書き出しは output の隣の一時 directory で行い、store 登録まで成功したときだけ output へ rename します。
     """
     checked = checked_fidelity_verdict(verdict, current_gating_producer_hashes)
     if "train" not in collected.datasets:
@@ -332,7 +335,58 @@ def save_dataset_artifact(
             dataset.assert_release_training_ready(schema)
         else:
             dataset.assert_release_observations(schema)
+    output = Path(output)
+    if output.exists():
+        raise CollectionError("dataset output already exists")
     store = ArtifactStore(artifact_store)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", suffix=".partial", dir=output.parent))
+    try:
+        node = _publish_dataset(
+            collected, schema=schema, staging=staging, store=store, checked=checked,
+            teacher_identity_sha256=teacher_identity_sha256, teacher_descriptor_path=Path(teacher_descriptor_path),
+            collection_config=collection_config,
+        )
+        staging.rename(output)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return node
+
+
+def _publish_dataset(
+    collected: CollectedSequences,
+    *,
+    schema: DeployObsSchema,
+    staging: Path,
+    store: ArtifactStore,
+    checked: FidelityVerdict,
+    teacher_identity_sha256: str,
+    teacher_descriptor_path: Path,
+    collection_config: Mapping[str, Any],
+) -> ArtifactDescriptor:
+    """一時 directory に split を書き、内容 digest 入りの logical id で store へ登録して descriptor を返す。
+
+    logical id の下に置く bytes はすべて id の材料（設定・教師 descriptor・verdict・dataset ファイル）から決まるため、
+    同じ id への再登録は同じ bytes の冪等な put になり、別内容での再束縛は起きません。
+    """
+    for split, dataset in collected.datasets.items():
+        dataset.save(staging / split)
+    split_files = {
+        f"{split}/{name}": (staging / split / name, media)
+        for split in collected.datasets
+        for name, media in (("data.npz", "application/x-npz"), ("manifest.json", "application/json"))
+    }
+    digest = canonical_hash({
+        "collection_config": dict(collection_config),
+        "teacher_identity_sha256": teacher_identity_sha256,
+        "teacher_descriptor_sha256": sha256_hex(teacher_descriptor_path.read_bytes()),
+        "fidelity_verdict_identity_hash": checked.identity_hash,
+        "files": {rel: sha256_hex(path.read_bytes()) for rel, (path, _media) in split_files.items()},
+    })
+    dataset_id = (
+        f"survivors-combat-distillation-{teacher_identity_sha256[:12]}-{checked.identity_hash[:12]}-{digest[:16]}"
+    )
     teacher_node = ArtifactDescriptor(
         logical_id=f"{dataset_id}/parents/teacher_source_descriptor", node_kind="source_descriptor",
         producer_id="value_source_descriptor", producer_version="v1",
@@ -354,13 +408,10 @@ def save_dataset_artifact(
             data=canonical_json_bytes(checked.to_wire()), media_type="application/json",
         ),),
     )
-    files = []
-    for split, dataset in collected.datasets.items():
-        dataset.save(Path(output) / split)
-        for name, media in (("data.npz", "application/x-npz"), ("manifest.json", "application/json")):
-            files.append(store.put(
-                logical_id=f"{dataset_id}/{split}/{name}", source_path=Path(output) / split / name, media_type=media,
-            ))
+    files = [
+        store.put(logical_id=f"{dataset_id}/{rel}", source_path=path, media_type=media)
+        for rel, (path, media) in split_files.items()
+    ]
     dataset_node = ArtifactDescriptor(
         logical_id=dataset_id, node_kind="combat_distillation_dataset",
         producer_id=PRODUCER_ID, producer_version=PRODUCER_VERSION,
@@ -384,7 +435,7 @@ def save_dataset_artifact(
             logical_id=f"{dataset_id}/descriptors/{node.identity_hash}.json",
             data=canonical_json_bytes(node.to_wire()), media_type="application/json",
         )
-    (Path(output) / "artifact_descriptor.json").write_bytes(canonical_json_bytes(dataset_node.to_wire()))
+    (staging / "artifact_descriptor.json").write_bytes(canonical_json_bytes(dataset_node.to_wire()))
     return dataset_node
 
 
@@ -406,14 +457,15 @@ def run_formal_collection(
 ) -> ArtifactDescriptor:
     """開始条件を固定の順序で検査してから収集し、artifact store へ保存する正式経路の入口。
 
-    順序: 教師 descriptor のロード → verdict の読込と current-hash 再検証 → blocking なし → env 接続・収集 → 保存。
-    どこかで失敗すると env には接続せず（または収集結果を捨てて）例外を返します。
+    順序: 教師 descriptor のロード → verdict の読込と current-hash 再検証 → blocking なし → output 未使用・store を開ける
+    → env 接続・収集 → 保存。どこかで失敗すると env には接続せず（または収集結果を捨てて）例外を返します。
     """
     schema = DeployObsSchema.default_v2() if schema is None else schema
     teacher = teacher_factory(Path(source_descriptor))
     verdict = checked_fidelity_verdict(read_fidelity_verdict(fidelity_verdict), current_gating_producer_hashes)
     if Path(output).exists():
         raise CollectionError("dataset output already exists")
+    ArtifactStore(artifact_store)  # store root を作れない・壊れている場合は UE5 に接続する前に止める
     env = env_factory()
     try:
         collected = collect_sequences(
@@ -424,9 +476,8 @@ def run_formal_collection(
         close = getattr(env, "close", None)
         if callable(close):
             close()
-    dataset_id = f"survivors-combat-distillation-{teacher.identity_sha256[:12]}-{verdict.identity_hash[:12]}-seed-{seed}"
     return save_dataset_artifact(
-        collected, schema=schema, output=output, artifact_store=artifact_store, dataset_id=dataset_id,
+        collected, schema=schema, output=output, artifact_store=artifact_store,
         teacher_identity_sha256=teacher.identity_sha256, teacher_descriptor_path=Path(source_descriptor),
         verdict=verdict, current_gating_producer_hashes=current_gating_producer_hashes,
         collection_config={
