@@ -242,22 +242,25 @@ def test_recursive_header_set_is_bound_to_each_cpp_gating_hash(tmp_path, key) ->
 
 
 def test_deploy_obs_v2_sources_are_bound_to_deploy_gating_hashes(tmp_path) -> None:
-    """DeployObs v2 の schema・ビルダー・yaml を1 byte 変えると deploy 系 gating hash が変わる。
+    """DeployObs v2 の schema・ビルダー・yaml・sim adapter を1 byte 変えると deploy 系 gating hash が変わる。
 
     packaged manifest の deploy_obs_schema / deploy_release_adapter entry をそのまま使い、
     実ファイルの内容を一時 repo へ写して stale verdict を検出できることを固定します。
+    Training の deploy_raw_env.py / deploy_obs_wrapper.py（03-07）は release adapter 側だけに入ります。
     """
     repo = Path(__file__).resolve().parents[3]
     packaged = load_producer_path_manifest()
     common = "Tools/Common/src/reinbalance_survivors_contracts/"
     schema_paths = [f"{common}deploy_obs.py", f"{common}schemas/deploy_obs_v2.yaml", f"{common}deploy_obs_v2_features.py", f"{common}schemas/deploy_obs_v2_features.yaml"]
+    adapter_paths = schema_paths[2:] + ["Tools/Training/games/survivors/deploy_raw_env.py", "Tools/Training/games/survivors/deploy_obs_wrapper.py"]
     assert list(packaged.producers["deploy_obs_schema"]["ordered_exact_paths"]) == schema_paths
-    assert list(packaged.producers["deploy_release_adapter"]["ordered_exact_paths"]) == schema_paths[2:]
+    assert list(packaged.producers["deploy_release_adapter"]["ordered_exact_paths"]) == adapter_paths
     (tmp_path / "Module/Private").mkdir(parents=True)
     (tmp_path / "Module/Public").mkdir()
     (tmp_path / "Module/Module.Build.cs").write_text("module", encoding="utf-8")
     (tmp_path / "Module/Private/Weapon.cpp").write_text("one", encoding="utf-8")
-    for relative in schema_paths:
+    all_paths = schema_paths + adapter_paths[2:]
+    for relative in all_paths:
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((repo / relative).read_bytes())
@@ -267,11 +270,12 @@ def test_deploy_obs_v2_sources_are_bound_to_deploy_gating_hashes(tmp_path) -> No
     manifest = type(packaged)("v", producers, "f" * 64)
     generated = {"deploy_obs_schema": {"v": 1}, "deploy_release_adapter": {"v": 1}}
     previous = resolve_gating_producer_hashes(tmp_path, manifest, generated, _attestation(tmp_path))
-    for relative in schema_paths:
+    for relative in all_paths:
         target = tmp_path / relative
         target.write_bytes(target.read_bytes() + b" ")
         current = resolve_gating_producer_hashes(tmp_path, manifest, generated, _attestation(tmp_path))
-        assert current["deploy_obs_schema"] != previous["deploy_obs_schema"], relative
+        schema_changed = current["deploy_obs_schema"] != previous["deploy_obs_schema"]
+        assert schema_changed == (relative in schema_paths), relative
         adapter_changed = current["deploy_release_adapter"] != previous["deploy_release_adapter"]
-        assert adapter_changed == (relative in schema_paths[2:]), relative
+        assert adapter_changed == (relative in adapter_paths), relative
         previous = current
