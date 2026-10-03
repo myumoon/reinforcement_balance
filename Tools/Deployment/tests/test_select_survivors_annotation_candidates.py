@@ -87,7 +87,12 @@ def test_candidate_selection_filters_deduplicates_and_applies_stride(tmp_path, c
         source = manifest.session_path / record.object_path
         output = output_dir / f"{frame_id:08d}.png"
         assert hashlib.sha256(output.read_bytes()).digest() == hashlib.sha256(source.read_bytes()).digest()
-    assert (work_root / "classes.txt").read_text(encoding="utf-8").splitlines() == list(ALL_CLASSES)
+    class_lines = (work_root / "classes.txt").read_text(encoding="utf-8").splitlines()
+    assert class_lines == list(ALL_CLASSES)
+    # 実データの classes.txt と同じく、labeled_region の後ろに武器エフェクト4クラスが並ぶ。
+    assert class_lines[-5:] == [
+        "labeled_region", "weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura"
+    ]
     output = capsys.readouterr().out
     assert "総数: 5" in output
     assert "foreground: 4" in output
