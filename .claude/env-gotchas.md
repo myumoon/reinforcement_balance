@@ -6,3 +6,5 @@ Edit ツールの new_string 末尾の空白は落ちることがある（"after
 Windows の Anaconda で全 Deployment テストを回すとき、`subprocess.run(text=True)` の子 CLI 出力が CP932 decode failure になる場合があるため、Git Bash 実行時に `PYTHONUTF8=1` を付ける。
 Claude の Bash ツールで quoted heredoc(<<'EOF')に書いた Python raw 文字列の `\\` が `\` に潰れることがある（named pipe 名 `\\.\pipe\...` が壊れた）。Windows path/pipe 名は定数（PIPE_PREFIX 等）から組み立てる。
 Windows の Python で `Path.write_text()` / `open(..., "w")` を newline 指定なしで使うと LF ファイルが CRLF に変わり diff 全行変更になる。既存ファイルの書き換えは `newline="\n"` を付けるか Edit ツールを使う。
+ReinBalanceLogicTests (LLT) 内では FFileHelper::SaveStringToFile が false を返す（UE file manager が書けない）。fixture の読み書きは std::ofstream/std::ifstream を使い、パスは __FILE__ + NormalizeFilename + CollapseRelativeDirectories で作る。
+UE5.4 の Build.bat 出力には "Result: Succeeded" 行が出ない。成功判定は exit code 0 と "Target is up to date"/WriteMetadata 行で行う。
