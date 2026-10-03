@@ -96,3 +96,10 @@ effect_durations:
   ThunderLoop: {fixed_s: 0.15, scaled_by_level_s: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
   KingBible: {fixed_s: 0.0, scaled_by_level_s: [3.0, 3.0, 3.0, 3.5, 3.5, 3.5, 4.0, 4.0]}
   UnholyVespers: {fixed_s: 0.0, scaled_by_level_s: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]}
+
+# 持続時間倍率を増やすパッシブのレベル別加算値（C++ ComputePassiveEffects の DurationMult を正とする）。
+# 倍率 = 1 + 所持パッシブの加算値の合計。Spellbinder は 0.10×Lv、TorronasBox は 0.04 + 0.03×min(Lv-1, 7)。
+# 表の長さはそのパッシブの最大レベル（C++ PassiveMaxLevel）。
+duration_mult_bonus_by_level:
+  Spellbinder: [0.1, 0.2, 0.3, 0.4, 0.5]
+  TorronasBox: [0.04, 0.07, 0.1, 0.13, 0.16, 0.19, 0.22, 0.25, 0.25]

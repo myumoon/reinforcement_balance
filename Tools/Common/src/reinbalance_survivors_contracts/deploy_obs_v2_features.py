@@ -30,7 +30,7 @@ _PARAM_KEYS = frozenset({
     "projectile_density_norm", "visible_enemy_count_norm", "level_norm", "zone_slots",
     "max_projectile_obs_ttl_s", "max_weapon_slots", "max_passive_slots", "max_weapon_level",
     "max_passive_level", "weapon_vocabulary", "passive_vocabulary", "weapon_category_vocabulary",
-    "weapon_coarse_category", "weapon_effect_kinds", "effect_durations",
+    "weapon_coarse_category", "weapon_effect_kinds", "effect_durations", "duration_mult_bonus_by_level",
 })
 _DENSITY_KEYS = frozenset({"nearest_dist_max", "near", "mid", "near_norm", "mid_norm"})
 # UE の KINDA_SMALL_NUMBER。C++ BuildDirDensity と同じく、これ以下の距離は方向が無いので除外する。
@@ -105,6 +105,11 @@ def _validate_params(data: Any) -> None:
         scaled = row["scaled_by_level_s"]
         ensure(isinstance(scaled, list) and len(scaled) == data["max_weapon_level"], f"{weapon} duration table length mismatch")
         ensure(all(is_strict_number(v) and math.isfinite(float(v)) and v >= 0 for v in (row["fixed_s"], *scaled)), f"{weapon} durations must be finite non-negative")
+    bonus = data["duration_mult_bonus_by_level"]
+    ensure(isinstance(bonus, dict) and set(bonus) <= set(data["passive_vocabulary"][1:-1]), "duration_mult_bonus_by_level has unknown passive")
+    for passive, table in bonus.items():
+        ensure(isinstance(table, list) and 1 <= len(table) <= data["max_passive_level"], f"{passive} bonus table length invalid")
+        ensure(all(is_strict_number(v) and math.isfinite(float(v)) and v >= 0 for v in table), f"{passive} bonus must be finite non-negative")
 
 
 @lru_cache(maxsize=1)
@@ -349,6 +354,36 @@ def _hud_slots(hud_slots: Sequence[HudSlot] | None, params: Mapping[str, Any]) -
         ensure(slot.level is None or slot.level <= max_level, "hud slot level above maximum")
         target[slot.index] = slot
     return weapons, passives
+
+
+def duration_mult_from_hud_slots(hud_slots: Sequence[HudSlot] | None) -> float | None:
+    """パッシブスロットから持続時間倍率（1 + Spellbinder 等の加算）を C++ と同じ規則で求める。
+
+    全パッシブスロットが読めていて、倍率に効くパッシブ（Spellbinder・TorronasBox）のレベルが
+    分かるときだけ値を返します。スロットが読めない・語彙外の名前がある・レベルが分からない・
+    表に無いレベルのときは、倍率に効くパッシブが隠れている可能性があるので None（不明）を返します。
+    sim は C++ が計算した倍率を、実機は HUD のスロットからこの関数で求めた倍率をビルダーへ渡します。
+    """
+    if hud_slots is None:
+        return None
+    params = load_deploy_obs_v2_feature_params()
+    _, passives = _hud_slots(hud_slots, params)
+    if any(i not in passives for i in range(params["max_passive_slots"])):
+        return None
+    bonus = params["duration_mult_bonus_by_level"]
+    total = 1.0
+    for slot in passives.values():
+        if slot.type_name is None:
+            continue
+        if slot.type_name not in params["passive_vocabulary"][1:-1]:
+            return None
+        table = bonus.get(slot.type_name)
+        if table is None:
+            continue
+        if slot.level is None or slot.level > len(table):
+            return None
+        total += float(table[slot.level - 1])
+    return total
 
 
 def build_deploy_obs_v2(

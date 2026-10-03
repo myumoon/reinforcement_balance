@@ -183,3 +183,29 @@ def test_weapon_effect_kinds_match_cpp_projectile_obs_view():
     assert table == expected
     assert table["FireWand"] == table["Hellfire"] == {"projectile", "zone"}
     assert table["LightningRing"] == table["ThunderLoop"] == {"zone"}
+
+
+def test_duration_mult_bonus_tables_match_cpp_passive_effects():
+    """持続時間倍率の加算表が C++ ComputePassiveEffects / SurvivorsWikiSpec と一致する。
+
+    実機は HUD のパッシブから倍率を求めるので、DurationMult を増やすパッシブの種類と
+    レベル別の加算値・最大レベルが sim と同じであることを C++ ソースから確かめます。
+    """
+    params = load_deploy_obs_v2_feature_params()
+    bonus = params["duration_mult_bonus_by_level"]
+    wiki = _read(PUBLIC / "SurvivorsWikiSpec.h")
+    logic = _read(PRIVATE / "SurvivorsGameLogic.cpp")
+    body = re.search(r"FPassiveEffects FSurvivorsGameLogic::ComputePassiveEffects\(\) const\s*{(?P<body>.*?)\n}", logic, re.DOTALL)
+    assert body is not None
+    cases = re.findall(r"case EPassiveItemType::(\w+):(.*?)break;", body.group("body"), re.DOTALL)
+    assert {name for name, text in cases if "DurationMult" in text} == set(bonus)
+    names = _enum_names(_read(PUBLIC / "SurvivorsTypes.h"), "EPassiveItemType")
+    max_levels = [int(v) for v in re.search(r"PassiveMaxLevel\[PassiveTypeCount\]\s*=\s*{([^}]*)}", wiki).group(1).split(",")]
+    per_level = _constant(wiki, "SpellbinderDurationPerLevel")
+    first, step = _constant(wiki, "TorronasLevel1Omni"), _constant(wiki, "TorronasLevel2To8OmniPerLevel")
+    expected = {
+        "Spellbinder": [per_level * lv for lv in range(1, max_levels[names.index("Spellbinder")] + 1)],
+        "TorronasBox": [first + step * min(lv - 1, 7) for lv in range(1, max_levels[names.index("TorronasBox")] + 1)],
+    }
+    for passive, values in expected.items():
+        assert [round(v, 6) for v in bonus[passive]] == [round(v, 6) for v in values], passive
