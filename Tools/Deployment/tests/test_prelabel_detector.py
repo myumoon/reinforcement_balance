@@ -78,6 +78,7 @@ def test_bundled_v2_config_loads_expected_values():
     detector = config.detector
     assert detector.labels == (
         "enemy_normal", "enemy_elite", "gem_blue", "gem_green", "gem_red", "pickup_heal", "pickup_special",
+        "weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura",
     )
     assert detector.label_aliases == {"enemy_boss": "enemy_normal"}
     assert (detector.score_threshold, detector.input_scale, detector.crop_size, detector.min_box_size) == (0.5, 2.0, 480, 6.0)
@@ -101,7 +102,9 @@ def test_bundled_v2_config_loads_expected_values():
         lambda data: data["detector"].update(labels=["gem_blue", "gem_blue", "enemy_normal"]),
         lambda data: data["detector"].update(labels=["unknown_label", "enemy_normal"]),
         lambda data: data["detector"].update(labels=["hud_hp", "enemy_normal"]),
+        lambda data: data["detector"].update(labels=["death_result", "weapon_aura"]),
         lambda data: data["detector"].update(labels=[REGION_LABEL, "enemy_normal"]),
+        lambda data: data["detector"].update(label_aliases={"card": "weapon_zone"}),
         lambda data: data["detector"].update(label_aliases={"enemy_elite": "gem_green_missing"}),
         lambda data: data["detector"].update(label_aliases={"enemy_elite": "player_anchor"}),
         lambda data: data["detector"].update(label_aliases={"gem_blue": "enemy_normal"}),
@@ -138,6 +141,22 @@ def test_load_config_rejects_invalid_values(tmp_path, mutation):
 
     with pytest.raises(ValueError, match="invalid.yaml"):
         load_config(config_path)
+
+
+def test_load_config_accepts_weapon_effect_labels_and_aliases(tmp_path):
+    """武器エフェクトクラスは検出ラベルにも別名の両側にも使える。
+
+    下書き可能クラスは WORLD_CLASSES + WEAPON_EFFECT_CLASSES。
+    """
+    data = copy.deepcopy(_raw_config())
+    data["detector"].update(labels=["weapon_aura", "enemy_normal"], label_aliases={"weapon_orbit": "weapon_aura"})
+    config_path = tmp_path / "weapon.yaml"
+    config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    detector = load_config(config_path).detector
+
+    assert detector.labels == ("weapon_aura", "enemy_normal")
+    assert detector.label_aliases == {"weapon_orbit": "weapon_aura"}
 
 
 def _write_frame(session_dir, frame_id, boxes, *, checked, png=True):

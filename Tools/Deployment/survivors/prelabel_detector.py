@@ -25,6 +25,7 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
 from survivors.annotation_labels import (
     REGION_LABEL,
+    WEAPON_EFFECT_CLASSES,
     WORLD_CLASSES,
     LabelBox,
     clip_box,
@@ -141,9 +142,10 @@ def _load_fixed_boxes(path: Path, items: object) -> tuple[LabelBox, ...]:
     return tuple(boxes)
 
 
-def _check_world_label(path: Path, where: str, label: object) -> str:
-    """検出器で扱えるラベル（WORLD_CLASSES のみ）かを検証する。
+def _check_detector_label(path: Path, where: str, label: object) -> str:
+    """下書き検出器で扱えるラベル（WORLD_CLASSES + WEAPON_EFFECT_CLASSES）かを検証する。
 
+    画面内の物体と武器エフェクトは下書きできるが、
     UI クラスや labeled_region、未知の名前は設定エラーにする。
     """
     if not isinstance(label, str):
@@ -154,8 +156,8 @@ def _check_world_label(path: Path, where: str, label: object) -> str:
         validate_label(label)
     except ValueError as exc:
         raise ValueError(f"{path}: {where}: {exc}") from exc
-    if label not in WORLD_CLASSES:
-        raise ValueError(f"{path}: {where} must be a world class: {label!r}")
+    if label not in WORLD_CLASSES + WEAPON_EFFECT_CLASSES:
+        raise ValueError(f"{path}: {where} must be a world or weapon effect class: {label!r}")
     return label
 
 
@@ -170,7 +172,7 @@ def _load_detector_settings(path: Path, section: object) -> DetectorSettings:
     raw_labels = section["labels"]
     if not isinstance(raw_labels, list) or not raw_labels:
         raise ValueError(f"{path}: detector.labels must be a non-empty list")
-    labels = tuple(_check_world_label(path, "detector.labels", label) for label in raw_labels)
+    labels = tuple(_check_detector_label(path, "detector.labels", label) for label in raw_labels)
     if len(set(labels)) != len(labels):
         raise ValueError(f"{path}: detector.labels must not contain duplicates")
 
@@ -179,8 +181,8 @@ def _load_detector_settings(path: Path, section: object) -> DetectorSettings:
         raise ValueError(f"{path}: detector.label_aliases must be a mapping")
     aliases = {}
     for key, value in raw_aliases.items():
-        key = _check_world_label(path, "detector.label_aliases key", key)
-        value = _check_world_label(path, f"detector.label_aliases[{key}]", value)
+        key = _check_detector_label(path, "detector.label_aliases key", key)
+        value = _check_detector_label(path, f"detector.label_aliases[{key}]", value)
         if key in labels:
             raise ValueError(f"{path}: detector.label_aliases key {key!r} is already a detector label")
         if value not in labels:
