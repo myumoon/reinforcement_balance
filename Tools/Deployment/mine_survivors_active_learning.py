@@ -105,15 +105,18 @@ def mine_top_k(
     class_counts: dict[int, int],
     total_samples: int,
     top_k: int,
+    *,
+    num_classes: int,
 ) -> list[MiningResult]:
     """candidates からスコア上位 top_k のフレームを返す。
 
     candidates の各要素は image_id, file_name, class_probs, n_track_breaks,
     gt_count, pred_count, dominant_class_id を持つ dict。
+    class_probs が無い候補は、class map の num_classes 個の一様分布として扱う。
     """
     results: list[MiningResult] = []
     for cand in candidates:
-        class_probs = np.array(cand.get("class_probs", [1.0 / 12] * 12), dtype=np.float32)
+        class_probs = np.array(cand.get("class_probs", [1.0 / num_classes] * num_classes), dtype=np.float32)
         score = compute_active_learning_score(
             class_probs=class_probs,
             n_track_breaks=cand.get("n_track_breaks", 0),
@@ -155,6 +158,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--annotations", required=True, help="既存 GT COCO JSON（クラス分布の計算に使用）")
     p.add_argument("--candidate-frames", required=True, help="候補フレーム JSON（image_id, class_probs 等を含む）")
     p.add_argument("--top-k", type=int, default=100, help="出力する上位フレーム数")
+    p.add_argument("--class-map", default=str(pathlib.Path(__file__).resolve().parent / "configs" / "world_class_map_v2.yaml"), help="class map YAML（クラス数の取得に使用）")
     p.add_argument("--output", help="mining 結果 JSON の出力先")
     return p
 
@@ -175,7 +179,10 @@ def main(argv: list[str] | None = None) -> int:
     total_samples = len(gt_anns)
 
     candidates = json.loads(cand_path.read_text(encoding="utf-8"))
-    results = mine_top_k(candidates, class_counts, total_samples, args.top_k)
+    from survivors.vision.world_dataset import load_class_map
+
+    num_classes = load_class_map(args.class_map).num_classes
+    results = mine_top_k(candidates, class_counts, total_samples, args.top_k, num_classes=num_classes)
 
     output = [
         {

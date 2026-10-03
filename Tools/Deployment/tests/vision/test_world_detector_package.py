@@ -16,11 +16,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from survivors.vision.world_dataset import load_class_map
+
 # ---- helpers ----
 
 CONFIGS_DIR = pathlib.Path(__file__).parents[2] / "configs"
 DETECTOR_CONFIG_PATH = CONFIGS_DIR / "world_detector_v2.yaml"
 CLASS_MAP_PATH = CONFIGS_DIR / "world_class_map_v2.yaml"
+_NUM_CLASSES = load_class_map(CLASS_MAP_PATH).num_classes
 
 
 def _make_coco(
@@ -1188,7 +1191,7 @@ class TestPackageRestore:
             cm_path=CLASS_MAP_PATH,
         )
 
-    def test_restore_returns_tracked_world_state_v1(self, tmp_path):
+    def test_restore_returns_tracked_world_state_v2(self, tmp_path):
         """restore_package は package 内 config を使って TrackedWorldStateV2 を返す。"""
         from survivors.vision.world_detector_package import restore_package
         from survivors.vision.entity_tracker import TrackedWorldStateV2
@@ -1255,6 +1258,85 @@ class TestPackageRestore:
 
         frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
         with pytest.raises(PackageSchemaError, match="model_hash"):
+            restore_package(pkg_path, frame)
+
+
+class TestClassMapV2PackageCompatibility:
+    """class map v2 / TrackedWorldStateV2 への移行で、旧 package・旧 checkpoint が既存照合で拒否される。"""
+
+    @staticmethod
+    def _v1_contract_hash() -> str:
+        """V1 時代（15 field・V1 型名）の contract_hash を再現する。"""
+        import dataclasses
+        import hashlib
+        from survivors.vision.entity_tracker import PlayerAnchorState, TrackedEntityV2, TrackedWorldStateV2
+
+        new_fields = {"normalized_width", "normalized_height", "first_seen_timestamp_ns"}
+        entity = {f.name: str(f.type) for f in dataclasses.fields(TrackedEntityV2) if f.name not in new_fields}
+        world = {f.name: str(f.type).replace("V2", "V1") for f in dataclasses.fields(TrackedWorldStateV2)}
+        descriptor = {
+            "TrackedWorldStateV1": world,
+            "TrackedEntityV1": entity,
+            "PlayerAnchorState": {f.name: str(f.type) for f in dataclasses.fields(PlayerAnchorState)},
+        }
+        return hashlib.sha256(json.dumps(descriptor, sort_keys=True).encode()).hexdigest()
+
+    def test_contract_hash_changed_from_v1(self):
+        """V2 化で contract_hash が V1 時代の値から変わっている。"""
+        from survivors.vision.world_detector_package import _compute_contract_hash
+
+        assert _compute_contract_hash() != self._v1_contract_hash()
+
+    def test_old_contract_hash_package_is_rejected(self, tmp_path, monkeypatch):
+        """V1 contract_hash で publish された package は restore 時に contract_hash 不一致で拒否される。"""
+        from survivors.vision import world_detector_package as wdp
+
+        store = tmp_path / "store"
+        store.mkdir()
+        with monkeypatch.context() as m:
+            m.setattr(wdp, "_compute_contract_hash", self._v1_contract_hash)
+            pkg_path = wdp.publish_development_package(
+                _make_checkpoint_manifest(), {}, {}, store,
+                cfg_path=DETECTOR_CONFIG_PATH, cm_path=CLASS_MAP_PATH,
+            )
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        with pytest.raises(wdp.PackageSchemaError, match="contract_hash"):
+            wdp.restore_package(pkg_path, frame)
+
+    def test_v1_class_map_checkpoint_rejected_at_publish(self, tmp_path):
+        """v1 class map hash の checkpoint は v2 class map で publish しようとすると class_map hash 照合で拒否される。"""
+        from survivors.vision.world_detector import CheckpointManifest
+        from survivors.vision.world_detector_package import publish_development_package
+
+        ckpt = CheckpointManifest(
+            model_hash="a" * 64, data_hash="b" * 64,
+            config_hash=_sha256_file(DETECTOR_CONFIG_PATH), build_hash="d" * 64,
+            class_map_hash=_sha256_file(CONFIGS_DIR / "world_class_map_v1.yaml"),
+            formal_detector_eligible=False,
+        )
+        store = tmp_path / "store"
+        store.mkdir()
+        with pytest.raises(ValueError, match="class_map"):
+            publish_development_package(
+                ckpt, {}, {}, store, cfg_path=DETECTOR_CONFIG_PATH, cm_path=CLASS_MAP_PATH,
+            )
+
+    def test_package_with_v1_class_map_and_v2_config_fails_closed(self, tmp_path):
+        """v2 config と v1 class map を詰めた package は restore 時に num_classes 不一致で拒否される。"""
+        from survivors.vision.world_detector import CheckpointManifest
+        from survivors.vision.world_detector_package import publish_development_package, restore_package
+
+        v1_map = CONFIGS_DIR / "world_class_map_v1.yaml"
+        ckpt = CheckpointManifest(
+            model_hash="a" * 64, data_hash="b" * 64,
+            config_hash=_sha256_file(DETECTOR_CONFIG_PATH), build_hash="d" * 64,
+            class_map_hash=_sha256_file(v1_map), formal_detector_eligible=False,
+        )
+        store = tmp_path / "store"
+        store.mkdir()
+        pkg_path = publish_development_package(ckpt, {}, {}, store, cfg_path=DETECTOR_CONFIG_PATH, cm_path=v1_map)
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        with pytest.raises(ValueError, match="num_classes"):
             restore_package(pkg_path, frame)
 
 
@@ -1558,36 +1640,34 @@ class TestIter11Regressions:
     def test_nearest_distance_over_1_is_rejected(self):
         """nearest_distance_error > 1.0 は passed=False になる（P1 回帰テスト）。"""
         from eval_survivors_world_detector import compute_dev_diagnostics, evaluate_from_predictions
-        m = evaluate_from_predictions([], [], num_classes=12)
+        m = evaluate_from_predictions([], [], num_classes=_NUM_CLASSES)
         m.nearest_distance_error = 2.0
         result = compute_dev_diagnostics(
             metrics=m,
             gate_cfg={"nearest_distance_median_max": 3.0},  # 閾値が大きくても distance>1 は拒否
             class_name_by_id={},
-            num_classes=12,
         )
         assert not result.passed
 
     def test_invalid_nd_max_over_1_is_rejected(self):
         """nearest_distance_median_max > 1.0 の閾値自体も fail-closed で拒否（P1 回帰テスト）。"""
         from eval_survivors_world_detector import compute_dev_diagnostics, evaluate_from_predictions
-        m = evaluate_from_predictions([], [], num_classes=12)
+        m = evaluate_from_predictions([], [], num_classes=_NUM_CLASSES)
         m.nearest_distance_error = 0.5
         result = compute_dev_diagnostics(
             metrics=m,
             gate_cfg={"nearest_distance_median_max": 3.0},  # 閾値が [0,1] 外
             class_name_by_id={},
-            num_classes=12,
         )
         assert not result.passed
 
     def test_slice_negative_min_instances_is_rejected(self):
         """slice の min_instances < 1 は passed=False になる（P1 回帰テスト）。"""
         from eval_survivors_world_detector import compute_dev_diagnostics, evaluate_from_predictions
-        m = evaluate_from_predictions([], [], num_classes=12)
+        m = evaluate_from_predictions([], [], num_classes=_NUM_CLASSES)
         gate_cfg = {"slice_gate": {"boss": {"recall_min": 0.5, "min_instances": -1, "min_sessions": 1}}}
         result = compute_dev_diagnostics(
-            metrics=m, gate_cfg=gate_cfg, class_name_by_id={}, num_classes=12,
+            metrics=m, gate_cfg=gate_cfg, class_name_by_id={},
             slice_annotations={"boss": []}, slice_predictions={"boss": []},
         )
         assert not result.passed

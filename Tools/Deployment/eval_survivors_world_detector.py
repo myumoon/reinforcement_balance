@@ -554,7 +554,6 @@ def compute_dev_diagnostics(
     slice_annotations: dict[str, list[dict]] | None = None,
     slice_predictions: dict[str, list[dict]] | None = None,
     gpu_p95_latency_ms: float | None = None,
-    num_classes: int = 12,
 ) -> DevDiagnosticsResult:
     """EvalMetrics と diagnostic 設定を照合し、実装済み指標の合否を返す（development diagnostics）。
 

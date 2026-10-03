@@ -6,11 +6,16 @@ track_id_switches の unsupported 明示を synthetic prediction で検証する
 from __future__ import annotations
 
 import json
+import pathlib
 
 import numpy as np
 import pytest
 
 from eval_survivors_world_detector import evaluate_from_predictions, EvalMetrics, _UNSUPPORTED
+from survivors.vision.world_dataset import load_class_map
+
+# 評価関数のクラス数は既定 class map（v2）から取る。リテラルで複製しない。
+NUM_CLASSES = load_class_map(pathlib.Path(__file__).parents[2] / "configs" / "world_class_map_v2.yaml").num_classes
 
 
 def _gt(image_id: int, bbox_xywh: list, category_id: int) -> dict:
@@ -33,7 +38,7 @@ class TestClassRecallOneToOne:
             _gt(0, [110, 110, 50, 50], 2),  # 同クラス GT 2 件
         ]
         preds = [_pred(0, [100, 100, 50, 50], 2, score=0.9)]  # 予測 1 件
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         # 一対一 matching → recall = 1/2 = 0.5、1.0 にはならない
         assert metrics.class_recall[2] <= 0.5 + 1e-6
 
@@ -41,7 +46,7 @@ class TestClassRecallOneToOne:
         """GT ≡ 予測 1 件ずつのとき recall = 1.0。"""
         gts = [_gt(0, [100, 100, 50, 50], 3)]
         preds = [_pred(0, [100, 100, 50, 50], 3)]
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         assert abs(metrics.class_recall[3] - 1.0) < 1e-6
 
 
@@ -51,19 +56,19 @@ class TestDensityAndNearestDistance:
     def test_density_error_nonzero_on_mismatch(self):
         gts = [_gt(0, [0, 0, 50, 50], 1), _gt(0, [100, 0, 50, 50], 1)]
         preds = [_pred(0, [0, 0, 50, 50], 1)]  # 1 件少ない
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         assert metrics.density_error > 0.0
 
     def test_nearest_distance_error_nonzero(self):
         gts = [_gt(0, [0, 0, 50, 50], 2)]
         preds = [_pred(0, [500, 500, 50, 50], 2)]  # 遠い場所に予測
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         assert metrics.nearest_distance_error > 0.0
 
     def test_nearest_distance_zero_on_perfect_match(self):
         gts = [_gt(0, [100, 100, 50, 50], 3)]
         preds = [_pred(0, [100, 100, 50, 50], 3)]
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         assert metrics.nearest_distance_error < 1e-3
 
 
@@ -106,7 +111,7 @@ class TestNearestDistanceNormalization:
         from eval_survivors_world_detector import evaluate_from_predictions
         gts = [{"image_id": 0, "category_id": 1, "bbox": [0, 0, 10, 10]}]
         preds = [{"image_id": 0, "category_id": 1, "bbox": [1910, 1070, 10, 10], "score": 0.9}]
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         assert 0.0 < metrics.nearest_distance_error <= 1.0, \
             f"viewport 正規化後は 0〜1 の範囲を期待、実際={metrics.nearest_distance_error}"
 
@@ -115,14 +120,14 @@ class TestNearestDistanceNormalization:
         import numpy as np
         from eval_survivors_world_detector import evaluate_from_predictions
         gts = [{"image_id": 0, "category_id": 1, "bbox": [0, 0, 50, 50]}]
-        metrics = evaluate_from_predictions(gts, [], num_classes=12)
+        metrics = evaluate_from_predictions(gts, [], num_classes=NUM_CLASSES)
         assert abs(metrics.nearest_distance_error - 1.0) < 1e-6
 
     def test_perfect_match_gives_zero(self):
         from eval_survivors_world_detector import evaluate_from_predictions
         gts = [{"image_id": 0, "category_id": 1, "bbox": [100, 100, 50, 50]}]
         preds = [{"image_id": 0, "category_id": 1, "bbox": [100, 100, 50, 50], "score": 0.9}]
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         assert metrics.nearest_distance_error < 1e-6
 
 
@@ -136,7 +141,7 @@ class TestMapCrossImage:
             _pred(0, [0, 0, 50, 50], 1, score=0.9),   # image 0: TP
             _pred(1, [200, 200, 50, 50], 1, score=0.1),  # image 1: FP (no GT)
         ]
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         assert abs(metrics.proxy_ap50_95 - 1.0) < 1e-4, (
             f"クロス画像でFPが後続 → AP=1.0 を期待、実際={metrics.proxy_ap50_95}"
         )
@@ -145,7 +150,7 @@ class TestMapCrossImage:
         """class1を完全検出・class2を全欠落 → class平均mAP=0.5。"""
         gts = [_gt(0, [0, 0, 50, 50], 1), _gt(0, [200, 0, 50, 50], 2)]
         preds = [_pred(0, [0, 0, 50, 50], 1, score=0.9)]  # class2の予測なし
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         assert abs(metrics.proxy_ap50_95 - 0.5) < 1e-4, (
             f"class1=AP1.0, class2=AP0.0 → 平均0.5を期待、実際={metrics.proxy_ap50_95}"
         )
@@ -157,7 +162,7 @@ class TestMapCrossImage:
         gts = [_gt(0, [50, 200, 50, 50], 1), _gt(1, [1800, 200, 50, 50], 1)]
         preds = [_pred(0, [1800, 200, 50, 50], 1, score=0.9),
                  _pred(1, [50, 200, 50, 50], 1, score=0.8)]
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         assert metrics.proxy_ap50_95 < 1e-4, (
             f"位置入れ替えは全FP → mAP≈0を期待、実際={metrics.proxy_ap50_95}"
         )
@@ -174,7 +179,7 @@ class TestDensityCorrelationImageAware:
         gts = [_gt(0, [100, 500, 50, 50], 1), _gt(1, [1800, 500, 50, 50], 1)]
         preds = [_pred(0, [1800, 500, 50, 50], 1, score=0.9),
                  _pred(1, [100, 500, 50, 50], 1, score=0.8)]
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         assert metrics.density_correlation < 0.5, (
             f"位置が全画像でずれているので correlation は低くなるはず、実際={metrics.density_correlation}"
         )
@@ -197,7 +202,7 @@ class TestNearestDistanceMedian:
             _pred(0, [200, 100, 10, 10], 1, score=0.8),  # GT2 に完全一致
             _pred(0, [1900, 1070, 10, 10], 1, score=0.7),  # GT3 から遠い
         ]
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         # distances: [0, 0, ~vp_diag] / vp_diag → median=0
         assert metrics.nearest_distance_error < 1e-6, (
             f"median は 0 を期待（外れ値 1 つは median を変えない）、実際={metrics.nearest_distance_error}"
@@ -210,13 +215,13 @@ class TestTrackIdSwitchesUnsupported:
     def test_track_id_switches_is_unsupported(self):
         gts = [_gt(0, [0, 0, 50, 50], 1)]
         preds = [_pred(0, [0, 0, 50, 50], 1)]
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         assert metrics.track_id_switches == _UNSUPPORTED
 
     def test_to_json_contains_unsupported_marker(self):
         gts = [_gt(0, [0, 0, 50, 50], 1)]
         preds = []
-        metrics = evaluate_from_predictions(gts, preds, num_classes=12)
+        metrics = evaluate_from_predictions(gts, preds, num_classes=NUM_CLASSES)
         js = json.loads(metrics.to_json())
         assert js["track_id_switches"] == _UNSUPPORTED
 
@@ -229,7 +234,7 @@ class TestDiagnosticRangeValidation:
         base = evaluate_from_predictions(
             [_gt(0, [10, 10, 50, 50], 1)],
             [_pred(0, [10, 10, 50, 50], 1, score=0.9)],
-            num_classes=12,
+            num_classes=NUM_CLASSES,
         )
         for k, v in overrides.items():
             setattr(base, k, v)
@@ -241,7 +246,6 @@ class TestDiagnosticRangeValidation:
             metrics=metrics,
             gate_cfg={"map50_95_min": 0.0, "density_correlation_min": -1.0, "nearest_distance_median_max": 1.0},
             class_name_by_id={1: "cls1"},
-            num_classes=12,
         )
         return result.passed
 
@@ -264,7 +268,6 @@ class TestDiagnosticRangeValidation:
             metrics=m,
             gate_cfg={"class_recall_min": {"cls1": 0.0}},
             class_name_by_id={1: "cls1"},
-            num_classes=12,
         )
         assert not result.passed
 
