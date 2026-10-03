@@ -481,7 +481,6 @@ public:
 			const FString SpawnDebugJson = Game->GetSpawnDebugJson();
 			Result.InfoJson = SerializeJsonObject(BuildLevelUpInfoObject(
 				Pending, Game->GetLevelUpBacklog(), &SpawnDebugJson, Game));
-			AppendDeployRawIfEnabled(Result.InfoJson, Game);
 			FString ValidationError;
 			if (!ValidateObservationForResponse(
 				Game, Result.Obs, ValidationError))
@@ -525,6 +524,9 @@ public:
 				EHttpServerResponseCodes::ServerError));
 			return;
 		}
+		// 単体経路（ProcessStep）と並列経路（ParallelSetupActor → BuildInfoJson）の
+		// 両方がここを通るので、deploy_raw の付与はこの1か所だけで行う。
+		AppendDeployRawIfEnabled(Result.InfoJson, Game);
 		Callback(MakeJsonResponse(BuildStepJson(Result)));
 	}
 

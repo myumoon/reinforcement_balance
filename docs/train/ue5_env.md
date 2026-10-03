@@ -28,7 +28,7 @@ DeployObs v2 の観測を Training 側で作るための raw state。既定は�
 
 - 有効化: `POST /params {"deploy_raw": true}`。JSON bool 以外は `{"error":"deploy_raw must be bool"}` で拒否し、同じリクエストの他の項目も更新しない。`false` で無効化。reset では解除されない。
 - 有効時の `/reset` 応答: `{"obs":[...],"obs_schema_hash":"...","deploy_raw":{...}}`
-- 有効時の `/step` 応答: `info` に `deploy_raw` キーが増える（既存キーはそのまま）。
+- 有効時の `/step` 応答: `info` に `deploy_raw` キーが増える（既存キーはそのまま）。単体経路（`ProcessStep`）と並列経路（`SurvivorsParallelSetupActor` → `BuildInfoJson`）のどちらも `CompleteStep` で1回だけ付与するので、並列 map でも同じ形になる。
 - Training 側の読み手は `Tools/Training/games/survivors/deploy_raw_env.py`（`DeployRawEnv`）。
 
 `deploy_raw` のキー（順序固定・全キー必須）:
@@ -59,6 +59,7 @@ DeployObs v2 の観測を Training 側で作るための raw state。既定は�
 - 武器エフェクトの範囲は `GetProjectileObsView()` と同じ（orbit は King Bible / Unholy Vespers、aura は Garlic / Soul Eater）。King Bible の本は周期ごとに新しい id になる。
 - sim に遮蔽は無いので `occluded` は出さない（Python 側で常に false）。
 - 実 UE5（PIE）から取得した応答の fixture はまだ無い（WAITING_MANUAL）。Python テストは LLT が C++ の JSON 生成関数から書き出した `Tools/Training/tests/survivors/fixtures/deploy_raw_llt_v1.json` を使う。
+- fixture の再生成: LLT `SurvivorsDeployRawTests.cpp` の `[fixture]` テストは毎回、現在の C++ 出力と fixture が完全一致することを確認する。C++ 側を意図して変えたときだけ、短いドライブ（例: `subst W: <worktree>`）から `REINBALANCE_WRITE_DEPLOY_RAW_FIXTURE=1 ./ReinBalance/Binaries/Win64/ReinBalanceLogicTests/ReinBalanceLogicTests.exe -r console "[fixture]"` で書き直す。
 
 ---
 
