@@ -53,6 +53,7 @@ def test_fingerprint_expected_keys():
         "ui_intent_v1_qualname",
         "non_model_ui_policy_config_hash",
         "deploy_obs_v1_schema_hash",
+        "deploy_obs_v2_schema_hash",
         "action_semantics_v1_hash",
     }
     assert fp["ui_intent_v1_qualname"] == (

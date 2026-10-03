@@ -1,0 +1,98 @@
+# DeployObs v2 の共有特徴量ビルダーが使うパラメータ・語彙・武器対応表・持続時間表。
+#
+# sim（03-07）と実機（04-13）が同じ値で特徴量を作るため、数値と表はこのファイルにだけ置きます。
+# 武器・パッシブの語彙、武器→エフェクト種類、持続時間、上限定数は C++ を正とし、
+# Tools/Common/tests/test_deploy_obs_v2_cpp_parity.py が C++ ソースとの一致を確認します。
+# 距離は「プレイヤー基準・縦横同じ縮尺・viewport 半幅（W/2）で割る」座標系の値です。
+
+# この設定ファイル自体の版。形式を変えたら上げる。
+schema_version: deploy_obs_v2_features.v1
+
+# track の class 名と、v2 特徴量での役割。ここに無い class（player_anchor・pickup・hazard 等）は使わない。
+entity_classes:
+  enemy: [enemy_normal, enemy_elite, enemy_boss]
+  gem: [gem_blue, gem_green, gem_red]
+  rare_gem: [gem_green, gem_red]
+  effect: {weapon_projectile: projectile, weapon_zone: zone, weapon_orbit: orbit, weapon_aura: aura}
+
+# 実機 tracker が weapon 4クラスの track を消すまでの見えないフレーム数（sim の初観測時刻破棄にも同じ値を使う）。
+# 初期値。実機 tracker 設定との一致は 04-13 のテストで保証する。
+track_max_age_frames: {weapon_projectile: 3, weapon_aura: 10, weapon_orbit: 5, weapon_zone: 10}
+
+# 方向ビンの数。C++ の EnemyDensityDirCount / GemDensityDirCount と同じ16。
+direction_bins: 16
+
+# 方向ごとの最寄り距離・近距離帯・中距離帯の境界と密度の正規化係数（半幅正規化空間の値）。
+# 教師の 600u / 1400u は画面外を含むため流用せず、画面内に収まる値にしている。
+density:
+  enemy: {nearest_dist_max: 1.0, near: 0.25, mid: 0.6, near_norm: 4.0, mid_norm: 6.0}
+  gem: {nearest_dist_max: 1.0, near: 0.25, mid: 0.6, near_norm: 6.0, mid_norm: 10.0}
+
+# projectile 方向別密度の正規化係数（1ビンあたりこの個数で 1.0）。
+projectile_density_norm: 4.0
+
+# v1 から引き継ぐ segment の正規化（v1 の Deployment 経路と同じ値）。
+visible_enemy_count_norm: 20.0
+level_norm: 99.0
+
+# 最寄りから何個の zone を weapon_zone_geometry に入れるか。
+zone_slots: 4
+
+# C++ SurvivorsGameConstants / SurvivorsWikiSpec の上限定数。
+max_projectile_obs_ttl_s: 8.0
+max_weapon_slots: 6
+max_passive_slots: 6
+max_weapon_level: 8
+# パッシブレベルの正規化に使う最大レベル（C++ PassiveMaxLevel 配列の最大値）。
+max_passive_level: 9
+
+# 武器種類の語彙。並び順は C++ EWeaponType の値（None=0 から）と一致し、末尾 unknown は語彙外用の予約。
+weapon_vocabulary: [None, Garlic, Whip, MagicWand, Knife, Axe, Cross, KingBible, FireWand, SantaWater, Runetracer, LightningRing, Pentagram, Peachone, EbonyWings, Laurel, SoulEater, BloodyTear, HolyWand, ThousandEdge, DeathSpiral, HeavenSword, UnholyVespers, Hellfire, LaBorra, NoFuture, ThunderLoop, GorgeousMoon, Vandalier, unknown]
+
+# パッシブ種類の語彙。並び順は C++ EPassiveItemType の値（None=0 から）と一致し、末尾 unknown は予約。
+passive_vocabulary: [None, Spinach, Armor, HollowHeart, Pummarola, EmptyTome, Candelabrador, Bracer, Spellbinder, Duplicator, Wings, Attractorb, Clover, Crown, StoneMask, SkullOManiac, Tirajisu, TorronasBox, unknown]
+
+# v1 segment weapon_category の粗い分類（1番目の武器から作る）。ここに無い武器は unknown。
+weapon_category_vocabulary: [aura, projectile, melee, unknown]
+weapon_coarse_category: {Garlic: aura, KingBible: aura, SantaWater: aura, Whip: melee, Knife: melee, MagicWand: projectile, FireWand: projectile, HolyWand: projectile, Axe: projectile, Cross: projectile}
+
+# 武器→画面に出すエフェクト種類の集合（C++ GetProjectileObsView を正とする）。ここに無い武器は何も出さない。
+weapon_effect_kinds:
+  Garlic: [aura]
+  SoulEater: [aura]
+  Whip: [projectile]
+  BloodyTear: [projectile]
+  MagicWand: [projectile]
+  HolyWand: [projectile]
+  Knife: [projectile]
+  ThousandEdge: [projectile]
+  Axe: [projectile]
+  DeathSpiral: [projectile]
+  Cross: [projectile]
+  HeavenSword: [projectile]
+  KingBible: [orbit]
+  UnholyVespers: [orbit]
+  FireWand: [projectile, zone]
+  Hellfire: [projectile, zone]
+  SantaWater: [zone]
+  LaBorra: [zone]
+  Runetracer: [projectile]
+  NoFuture: [projectile]
+  LightningRing: [zone]
+  ThunderLoop: [zone]
+  Peachone: [projectile]
+  EbonyWings: [projectile]
+  Vandalier: [projectile]
+
+# zone / orbit の持続時間（秒） = fixed_s + scaled_by_level_s[レベル-1] × 持続時間倍率。
+# SantaWater 系は警告時間 0.10s + Duration(Lv)×倍率、FireWand 系の爆発は 0.2×倍率、
+# LightningRing 系のマーカーは 0.15s 固定、KingBible 系は Duration(Lv)×倍率。
+effect_durations:
+  SantaWater: {fixed_s: 0.1, scaled_by_level_s: [2.0, 2.0, 2.5, 2.5, 2.75, 2.75, 3.0, 3.0]}
+  LaBorra: {fixed_s: 0.1, scaled_by_level_s: [4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0]}
+  FireWand: {fixed_s: 0.0, scaled_by_level_s: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]}
+  Hellfire: {fixed_s: 0.0, scaled_by_level_s: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]}
+  LightningRing: {fixed_s: 0.15, scaled_by_level_s: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+  ThunderLoop: {fixed_s: 0.15, scaled_by_level_s: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+  KingBible: {fixed_s: 0.0, scaled_by_level_s: [3.0, 3.0, 3.0, 3.5, 3.5, 3.5, 4.0, 4.0]}
+  UnholyVespers: {fixed_s: 0.0, scaled_by_level_s: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]}

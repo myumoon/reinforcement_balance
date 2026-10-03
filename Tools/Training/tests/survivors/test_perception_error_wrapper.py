@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
+from reinbalance_survivors_contracts.deploy_obs_v2_features import HudSlot, TrackPx, build_deploy_obs_v2
 from reinbalance_survivors_contracts.perception_error import PerceptionErrorProfile
 from survivors.deploy_obs_adapter import visible_track_estimates
 from games.survivors.perception_error_wrapper import PerceptionErrorWrapper
@@ -482,3 +483,62 @@ def test_bootstrap_profile_learning_loop_remains_finite():
         assert np.all(np.isfinite(observation))
         assert np.isfinite(reward)
         assert not terminated and not truncated
+
+
+def _v2_release_tensor(cx: float) -> np.ndarray:
+    """共有ビルダーで作った有効な release DeployObs v2 tensor を返す。
+
+    敵・ジェム・zone・projectile が見え、HUD 全スロットが読めた状態で、
+    新しい v2 segment にも有効な値が入るようにします。
+    """
+    slots = [HudSlot("weapon", i, "SantaWater" if i == 0 else None, 2 if i == 0 else None) for i in range(6)]
+    slots += [HudSlot("passive", i, None, None) for i in range(6)]
+    tracks = [
+        TrackPx("enemy_normal", cx, 540.0, 10.0, 1, 0.0, False),
+        TrackPx("gem_red", 900.0, 500.0, 4.0, 2, 0.0, False),
+        TrackPx("weapon_zone", 1000.0, 600.0, 30.0, 3, 0.9, False),
+        TrackPx("weapon_projectile", 800.0, 540.0, 5.0, 4, 0.0, False),
+    ]
+    observation = build_deploy_obs_v2(
+        viewport_wh=(1920, 1080), player_px=(960.0, 540.0), tracks=tracks, hud_slots=slots,
+        now_s=1.0, duration_mult=1.0, world_valid=True, hp_ratio=0.5, player_level=3,
+    )
+    return observation.as_policy_tensor(DeployObsSchema.default_v2())
+
+
+def test_v2_schema_applies_source_class_errors_to_new_segments_and_default_stays_v1():
+    """v2 schema を渡すと 3×dim_v2 を受け付け、latency・burst dropout が新しい v2 segment にも掛かる。
+
+    画面・HUD・時間推定の segment は欠損化と age 加算の対象、bias と unobservable は対象外で、
+    schema を渡さない既定は v1 のまま（v2 tensor は shape 不一致で拒否）であることを確かめます。
+    """
+    v2 = DeployObsSchema.default_v2()
+    first, second = _v2_release_tensor(1100.0), _v2_release_tensor(1300.0)
+    new_fields = [field for field in v2.fields[10:]]
+    assert {field.source_class for field in new_fields} == {"screen_world_observed", "hud_inventory", "temporal_inferred"}
+
+    wrapper = PerceptionErrorWrapper(StaticDeployEnv(first), _profile(burst_enter_prob=1.0, burst_exit_prob=0.0, burst_dropout_prob=1.0), v2, seed=5)
+    assert wrapper.observation_space.shape == (3 * v2.dim,) and wrapper.schema is v2
+    dropped = wrapper.corrupt_observation(first)
+    for field in v2.fields:
+        offset, size = v2.layout[field.name]
+        validity = dropped[v2.dim + offset:v2.dim + offset + size]
+        if field.source_class in {"constant", "unobservable"}:
+            assert np.array_equal(validity, first[v2.dim + offset:v2.dim + offset + size]), field.name
+        else:
+            assert np.all(validity == 0) and np.all(dropped[offset:offset + size] == field.neutral), field.name
+
+    latency = PerceptionErrorWrapper(StaticDeployEnv(first), _profile(latency_mean_frames=1.0), v2, seed=3)
+    latency.corrupt_observation(first)
+    delayed = latency.corrupt_observation(second)
+    offset, size = v2.layout["enemy_nearest_dist_16dir"]
+    assert not np.array_equal(first[offset:offset + size], second[offset:offset + size])
+    assert np.array_equal(delayed[offset:offset + size], first[offset:offset + size])
+    for name in ("enemy_nearest_dist_16dir", "weapon_zone_geometry", "weapon_zone_ttl", "weapon_slot_ids"):
+        offset, size = v2.layout[name]
+        assert np.all(delayed[2 * v2.dim + offset:2 * v2.dim + offset + size] > 0), name
+
+    default = PerceptionErrorWrapper(StaticDeployEnv(), _profile(), seed=1)
+    assert default.schema == DeployObsSchema.default_v1() == SCHEMA
+    with pytest.raises(Exception, match="observation_space"):
+        PerceptionErrorWrapper(StaticDeployEnv(first), _profile(), seed=1)

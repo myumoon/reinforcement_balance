@@ -1,0 +1,46 @@
+# DeployObs v2 の segment 順序・幅・取得元・範囲・欠損値を定める schema。
+#
+# 実機に持っていく戦闘方策の入力の並びを、Training と Deployment で同じにするための設定です。
+# 内容は DeployObsSchema.default_v2() と完全に一致し、テストでその一致を確認しています。
+# 位置・距離は「プレイヤー基準・縦横同じ縮尺・viewport 半幅で割る」座標系で表します。
+
+# schema の版。deploy_obs.py の DEPLOY_OBS_V2_SCHEMA_VERSION と一致させる。
+schema_version: deploy_obs.v2
+# segment の一覧。記載順がそのまま tensor 上の並び（offset）になる。
+fields:
+  # v1 から引き継ぐ10 segment（default_v1() と同じ名前・幅・設定）
+  - {name: player_hp, size: 1, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 1000.0, stale_after_ms: 250.0}
+  - {name: level, size: 1, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 2000.0, stale_after_ms: 1000.0}
+  - {name: player_screen_pos, size: 2, source_class: screen_world_observed, minimum: -1.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: nearest_enemy_offset, size: 2, source_class: screen_world_observed, minimum: -1.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: visible_enemy_count, size: 1, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: movement_direction, size: 2, source_class: temporal_inferred, minimum: -1.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: weapon_category, size: 1, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 1.0, max_age_ms: 5000.0, stale_after_ms: 2000.0}
+  - {name: bias, size: 1, source_class: constant, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 1.0, stale_after_ms: 1.0}
+  - {name: enemy_hp, size: 1, source_class: unobservable, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 1.0, stale_after_ms: 0.0}
+  - {name: cooldown, size: 1, source_class: unobservable, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 1.0, stale_after_ms: 0.0}
+  # 敵・全ジェム・レアジェム（緑・赤）の16方向特徴（最寄り距離・近距離密度・中距離密度）
+  - {name: enemy_nearest_dist_16dir, size: 16, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 1.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: enemy_density_near_16dir, size: 16, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: enemy_density_mid_16dir, size: 16, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: gem_nearest_dist_16dir, size: 16, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 1.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: gem_density_near_16dir, size: 16, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: gem_density_mid_16dir, size: 16, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: rare_gem_nearest_dist_16dir, size: 16, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 1.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: rare_gem_density_near_16dir, size: 16, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: rare_gem_density_mid_16dir, size: 16, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  # HUD から読む武器・パッシブのスロット種類とレベル
+  - {name: weapon_slot_ids, size: 6, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 5000.0, stale_after_ms: 2000.0}
+  - {name: weapon_slot_levels, size: 6, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 5000.0, stale_after_ms: 2000.0}
+  - {name: passive_slot_ids, size: 6, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 5000.0, stale_after_ms: 2000.0}
+  - {name: passive_slot_levels, size: 6, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 5000.0, stale_after_ms: 2000.0}
+  # 武器エフェクト（aura・orbit・zone・projectile）の画面観測とスロット・残り時間
+  - {name: weapon_aura_radius, size: 1, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: weapon_aura_slot, size: 1, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 5000.0, stale_after_ms: 2000.0}
+  - {name: weapon_orbit_radius, size: 1, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: weapon_orbit_slot, size: 1, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 5000.0, stale_after_ms: 2000.0}
+  - {name: weapon_orbit_ttl, size: 1, source_class: temporal_inferred, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: weapon_zone_geometry, size: 12, source_class: screen_world_observed, minimum: -1.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: weapon_zone_slot, size: 4, source_class: hud_inventory, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 5000.0, stale_after_ms: 2000.0}
+  - {name: weapon_zone_ttl, size: 4, source_class: temporal_inferred, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}
+  - {name: weapon_projectile_density_16dir, size: 16, source_class: screen_world_observed, minimum: 0.0, maximum: 1.0, neutral: 0.0, max_age_ms: 500.0, stale_after_ms: 100.0}

@@ -26,4 +26,4 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-reinbalance_survivors_contracts = ["schemas/*.json"]
+reinbalance_survivors_contracts = ["schemas/*.json", "schemas/*.yaml"]

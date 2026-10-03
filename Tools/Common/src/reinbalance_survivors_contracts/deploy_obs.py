@@ -1,7 +1,8 @@
-"""DeployObsV1 の順序・範囲・欠損表現を固定する共有契約。
+"""DeployObs v1/v2 の順序・範囲・欠損表現を固定する共有契約。
 
 画面から得られる情報を Training と Deployment が同じ並びの
 value・validity・age に変換できるよう、検証とハッシュ計算を一か所に集めます。
+v2 は v1 の10 segment を先頭に残し、方向別分布・武器構成・武器エフェクトを後ろへ足します。
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from .canonical_json import canonical_hash
 from .ui_intent import ContractValidationError, ensure, is_strict_number
 
 DEPLOY_OBS_SCHEMA_VERSION = "deploy_obs.v1"
+DEPLOY_OBS_V2_SCHEMA_VERSION = "deploy_obs.v2"
 OBSERVATION_PROVENANCE = frozenset({"release", "oracle_diagnostic"})
 SOURCE_CLASSES = frozenset(
     {"hud_inventory", "screen_world_observed", "temporal_inferred", "constant", "unobservable"}
@@ -25,6 +27,20 @@ DEPLOY_OBS_V1_SEGMENTS = (
     "visible_enemy_count", "movement_direction", "weapon_category", "bias",
     "enemy_hp", "cooldown",
 )
+DEPLOY_OBS_V2_SEGMENTS = DEPLOY_OBS_V1_SEGMENTS + (
+    "enemy_nearest_dist_16dir", "enemy_density_near_16dir", "enemy_density_mid_16dir",
+    "gem_nearest_dist_16dir", "gem_density_near_16dir", "gem_density_mid_16dir",
+    "rare_gem_nearest_dist_16dir", "rare_gem_density_near_16dir", "rare_gem_density_mid_16dir",
+    "weapon_slot_ids", "weapon_slot_levels", "passive_slot_ids", "passive_slot_levels",
+    "weapon_aura_radius", "weapon_aura_slot",
+    "weapon_orbit_radius", "weapon_orbit_slot", "weapon_orbit_ttl",
+    "weapon_zone_geometry", "weapon_zone_slot", "weapon_zone_ttl",
+    "weapon_projectile_density_16dir",
+)
+_SEGMENTS_BY_VERSION = {
+    DEPLOY_OBS_SCHEMA_VERSION: DEPLOY_OBS_V1_SEGMENTS,
+    DEPLOY_OBS_V2_SCHEMA_VERSION: DEPLOY_OBS_V2_SEGMENTS,
+}
 _FIELD_KEYS = frozenset(
     {"name", "size", "source_class", "minimum", "maximum", "neutral", "max_age_ms", "stale_after_ms"}
 )
@@ -86,9 +102,10 @@ class DeployObsField:
 
 @dataclass(frozen=True)
 class DeployObsSchema:
-    """DeployObsV1 の全 segment を順序付きで保持する schema。
+    """DeployObs の全 segment を schema version ごとの順序で保持する schema。
 
     offset は記載順から計算し、絶対位置を設定ファイルへ埋め込みません。
+    v1 と v2 は segment 列が異なり、version ごとの完全一致だけを受け付けます。
     """
 
     fields: tuple[DeployObsField, ...]
@@ -99,12 +116,12 @@ class DeployObsSchema:
 
         segment の欠落や重複を producer 間のずれとして早期に拒否します。
         """
-        ensure(self.schema_version == DEPLOY_OBS_SCHEMA_VERSION, "unsupported schema version")
+        ensure(_is_supported_version(self.schema_version), "unsupported schema version")
         ensure(isinstance(self.fields, tuple) and bool(self.fields), "fields must be non-empty tuple")
         ensure(all(isinstance(field, DeployObsField) for field in self.fields), "invalid field type")
         names = [field.name for field in self.fields]
         ensure(len(names) == len(set(names)), "duplicate segment")
-        ensure(tuple(names) == DEPLOY_OBS_V1_SEGMENTS, "missing, unknown, or reordered segment")
+        ensure(tuple(names) == _SEGMENTS_BY_VERSION[self.schema_version], "missing, unknown, or reordered segment")
 
     @property
     def dim(self) -> int:
@@ -150,9 +167,9 @@ class DeployObsSchema:
         """
         ensure(isinstance(data, Mapping), "schema must be mapping")
         ensure(set(data) == _SCHEMA_KEYS, "schema keys mismatch")
-        ensure(data["schema_version"] == DEPLOY_OBS_SCHEMA_VERSION, "unsupported schema version")
+        ensure(_is_supported_version(data["schema_version"]), "unsupported schema version")
         ensure(isinstance(data["fields"], list), "fields must be list")
-        return cls(tuple(DeployObsField.from_wire(field) for field in data["fields"]))
+        return cls(tuple(DeployObsField.from_wire(field) for field in data["fields"]), data["schema_version"])
 
     @classmethod
     def default_v1(cls) -> "DeployObsSchema":
@@ -173,6 +190,53 @@ class DeployObsSchema:
             ("cooldown", 1, "unobservable", 0., 1., 0., 1., 0.),
         )
         return cls(tuple(DeployObsField(*row) for row in rows))
+
+    @classmethod
+    def default_v2(cls) -> "DeployObsSchema":
+        """v1 の10 segment に方向別分布・武器構成・武器エフェクトを足した v2 schema を返す。
+
+        先頭は default_v1() と同じ field をそのまま使い、後ろに v2 の segment を記載順で足します。
+        鮮度設定は同じ取得元の v1 値（画面: 500/100ms、HUD: 5000/2000ms、時間推定: 500/100ms）を流用します。
+        package-data の deploy_obs_v2.yaml と内容が一致することをテストで固定しています。
+        """
+        swo, hud, tmp = ("screen_world_observed", 500., 100.), ("hud_inventory", 5000., 2000.), ("temporal_inferred", 500., 100.)
+        rows = (
+            ("enemy_nearest_dist_16dir", 16, swo, 0., 1., 1.),
+            ("enemy_density_near_16dir", 16, swo, 0., 1., 0.),
+            ("enemy_density_mid_16dir", 16, swo, 0., 1., 0.),
+            ("gem_nearest_dist_16dir", 16, swo, 0., 1., 1.),
+            ("gem_density_near_16dir", 16, swo, 0., 1., 0.),
+            ("gem_density_mid_16dir", 16, swo, 0., 1., 0.),
+            ("rare_gem_nearest_dist_16dir", 16, swo, 0., 1., 1.),
+            ("rare_gem_density_near_16dir", 16, swo, 0., 1., 0.),
+            ("rare_gem_density_mid_16dir", 16, swo, 0., 1., 0.),
+            ("weapon_slot_ids", 6, hud, 0., 1., 0.),
+            ("weapon_slot_levels", 6, hud, 0., 1., 0.),
+            ("passive_slot_ids", 6, hud, 0., 1., 0.),
+            ("passive_slot_levels", 6, hud, 0., 1., 0.),
+            ("weapon_aura_radius", 1, swo, 0., 1., 0.),
+            ("weapon_aura_slot", 1, hud, 0., 1., 0.),
+            ("weapon_orbit_radius", 1, swo, 0., 1., 0.),
+            ("weapon_orbit_slot", 1, hud, 0., 1., 0.),
+            ("weapon_orbit_ttl", 1, tmp, 0., 1., 0.),
+            ("weapon_zone_geometry", 12, swo, -1., 1., 0.),
+            ("weapon_zone_slot", 4, hud, 0., 1., 0.),
+            ("weapon_zone_ttl", 4, tmp, 0., 1., 0.),
+            ("weapon_projectile_density_16dir", 16, swo, 0., 1., 0.),
+        )
+        added = tuple(
+            DeployObsField(name, size, source[0], low, high, neutral, source[1], source[2])
+            for name, size, source, low, high, neutral in rows
+        )
+        return cls(cls.default_v1().fields + added, DEPLOY_OBS_V2_SCHEMA_VERSION)
+
+
+def _is_supported_version(value: Any) -> bool:
+    """schema version が既知の文字列かどうかを返す。
+
+    dict 検索の前に型を確かめ、unhashable な wire 値で TypeError を出さず契約エラーへ寄せます。
+    """
+    return isinstance(value, str) and value in _SEGMENTS_BY_VERSION
 
 
 @dataclass(frozen=True)
