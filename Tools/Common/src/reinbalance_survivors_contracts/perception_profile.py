@@ -141,7 +141,11 @@ def _strict_number(value: object, label: str) -> float:
 
 @dataclass(frozen=True, slots=True)
 class CalibrationResidual:
-    """キャリブレーション残差の1標本。confidence と age_frames で重み付けする。"""
+    """キャリブレーション残差の1標本。confidence と age_frames で重み付けする。
+
+    field は _RESIDUAL_FIELDS（04-13 で DeployObs v2 の obs_v2_* を追加）のどれかで、
+    値域が決まっている field（確率・非負・0/1）は生成時に範囲を確かめます。
+    """
 
     session_id: str
     frame_id: str
