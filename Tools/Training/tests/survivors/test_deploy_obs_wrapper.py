@@ -208,3 +208,347 @@ def test_camera_scale_changes_projection_clipping_and_visible_count_without_leak
         camera_half_width=5,
     )
     assert np.array_equal(narrow, wrapper.observation(changed_truth))
+
+
+# ---- DeployObs v2（03-07）----
+
+import json
+import math
+from copy import deepcopy
+
+from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
+from reinbalance_survivors_contracts.deploy_obs_v2_features import effect_duration_s, load_deploy_obs_v2_feature_params
+from reinbalance_survivors_contracts.ui_intent import ContractValidationError
+
+V2 = DeployObsSchema.default_v2()
+V2_PARAMS = load_deploy_obs_v2_feature_params()
+GOLDEN_V2 = Path(__file__).parents[3] / "Common" / "tests" / "fixtures" / "deploy_obs_v2_golden_v1.json"
+_EFFECT_SLOT = {"weapon_zone": 0, "weapon_orbit": 1, "weapon_aura": 2, "weapon_projectile": 3}
+
+
+def _v2_entity(entity_id, class_name, x, y, t_s, *, ttl_true_s=1.0, warning=False, radius=10.0):
+    """v2 raw の entity 1 行を作る（武器エフェクトだけ slot・真の残り時間・warning を持つ）。
+
+    slot は _v2_raw の武器スロット（SantaWater / KingBible / Garlic / Knife）に合わせます。
+    """
+    effect = class_name in _EFFECT_SLOT
+    return {
+        "entity_id": entity_id, "class_name": class_name, "world_x": x, "world_y": y, "radius_world": radius,
+        "occluded": False, "timestamp_ns": int(round(t_s * 1e9)),
+        "slot": _EFFECT_SLOT[class_name] if effect else None,
+        "ttl_true_s": ttl_true_s if effect else None, "warning": warning if effect else False,
+    }
+
+
+def _v2_raw(entities, t_s=1.0):
+    """sim カメラ（800u × 450u）と 1920×1080 viewport の v2 raw state を作る。
+
+    武器は zone=SantaWater・orbit=KingBible・aura=Garlic・projectile=Knife の各1つで、
+    どのエフェクト種類も出しうる武器が一意に決まります。
+    """
+    ts = int(round(t_s * 1e9))
+    weapons = [("SantaWater", 1), ("KingBible", 2), ("Garlic", 1), ("Knife", 3), (None, None), (None, None)]
+    return {
+        "timestamp_ns": ts, "viewport": (1920, 1080),
+        "target_camera": {"center_x": 0., "center_y": 0., "half_width": 400., "half_height": 225.},
+        "hud": {"player_hp": .5, "level": 3}, "player_world": {"x": 0., "y": 0.},
+        "world_entities": entities,
+        "temporal": {"movement_direction": (0., 0.), "timestamp_ns": ts},
+        "inventory": {
+            "weapon_slots": [{"index": i, "type_name": n, "level": lv} for i, (n, lv) in enumerate(weapons)],
+            "passive_slots": [{"index": i, "type_name": None, "level": None} for i in range(6)],
+            "duration_mult": 1.0,
+        },
+    }
+
+
+def _segment(tensor, name, plane=0):
+    """policy tensor の value / validity / age 平面から segment を切り出す。
+
+    plane は 0=value, 1=validity, 2=age です。
+    """
+    offset, size = V2.layout[name]
+    return tensor[plane * V2.dim + offset:plane * V2.dim + offset + size]
+
+
+def test_v2_release_estimates_zone_ttl_from_first_seen_not_true_ttl():
+    """release の zone 残り時間は初観測時刻＋持続時間表から推定し、sim の真値を読まない。
+
+    0.5 秒後の推定値が (持続時間 − 0.5) / MaxTtl になり、真の残り時間を変えても tensor が同じことを確かめます。
+    """
+    wrapper = DeployObsWrapper.release(None, V2)
+    wrapper.observation(_v2_raw([_v2_entity(7, "weapon_zone", 50., 0., 1.0)], 1.0))
+    tensor = wrapper.observation(_v2_raw([_v2_entity(7, "weapon_zone", 50., 0., 1.5, ttl_true_s=0.01)], 1.5))
+    expected = (effect_duration_s("SantaWater", 1, 1.0) - 0.5) / V2_PARAMS["max_projectile_obs_ttl_s"]
+    assert _segment(tensor, "weapon_zone_ttl")[0] == pytest.approx(expected, abs=1e-6)
+    other = DeployObsWrapper.release(None, V2)
+    other.observation(_v2_raw([_v2_entity(7, "weapon_zone", 50., 0., 1.0, ttl_true_s=99.)], 1.0))
+    assert np.array_equal(tensor, other.observation(_v2_raw([_v2_entity(7, "weapon_zone", 50., 0., 1.5, ttl_true_s=7.)], 1.5)))
+
+
+@pytest.mark.parametrize("class_name", sorted(_EFFECT_SLOT))
+def test_v2_first_seen_is_dropped_after_max_age_unseen_frames_and_on_reset(class_name):
+    """4種類の武器エフェクトとも、max_age フレーム続けて見えなければ初観測時刻を捨てる。
+
+    max_age−1 フレームの欠落なら初観測時刻を保ち、max_age フレームの欠落後は新しい時刻になります。
+    reset ではすべての記録を捨てます。画面外（x=1000u）を「見えない」として使います。
+    """
+    max_age = V2_PARAMS["track_max_age_frames"][class_name]
+
+    class StaticEnv:
+        """reset で可視の entity 1つを返すだけの環境。
+
+        reset 後の記録が新しい episode の1フレーム分だけになることを確かめるために使います。
+        """
+
+        def reset(self, **kwargs):
+            """t=50 s の可視フレームと空 info を返す。
+
+            引数は受け取るだけで使いません。
+            """
+            return _v2_raw([_v2_entity(9, class_name, 10., 10., 50.)], 50.), {}
+
+    wrapper = DeployObsWrapper.release(StaticEnv(), V2)
+    t = 1.0
+
+    def frame(visible):
+        """1 フレーム進め、entity を画面内（visible）か画面外に置く。
+
+        時刻は 0.1 秒ずつ進めます。
+        """
+        nonlocal t
+        t += 0.1
+        wrapper.observation(_v2_raw([_v2_entity(9, class_name, 10. if visible else 1000., 10., t)], t))
+
+    frame(True)
+    first = wrapper._tracks[9][0]
+    for _ in range(max_age - 1):
+        frame(False)
+    frame(True)
+    assert wrapper._tracks[9][0] == first
+    for _ in range(max_age):
+        frame(False)
+    assert 9 not in wrapper._tracks
+    frame(True)
+    assert wrapper._tracks[9][0] == pytest.approx(t) != first
+    wrapper.reset()
+    assert wrapper._tracks == {9: (50., 1, class_name)}
+
+
+def test_v2_release_ignores_privileged_entity_fields_and_offscreen_positions():
+    """release は slot 以外の sim 専用欄（真の残り時間・warning）と画面外 entity の位置・数を読まない。
+
+    これらを変えても release tensor は同じで、画面内の敵を動かすと変わる（比較が有効な）ことも確かめます。
+    """
+    def build(ttl, warning, offscreen):
+        """条件を変えた同じ画面内 state の release tensor を作る。
+
+        offscreen は画面外に置く boss の x 座標の列です。
+        """
+        entities = [
+            _v2_entity(1, "enemy_normal", 100., 50., 1.0),
+            _v2_entity(2, "weapon_zone", -80., 20., 1.0, ttl_true_s=ttl, warning=warning),
+            _v2_entity(3, "weapon_orbit", 0., 60., 1.0, ttl_true_s=ttl, warning=warning),
+            _v2_entity(4, "weapon_projectile", 30., -30., 1.0, ttl_true_s=ttl, warning=warning),
+            _v2_entity(5, "weapon_aura", 0., 0., 1.0, ttl_true_s=ttl, warning=warning, radius=40.),
+        ] + [_v2_entity(100 + i, "enemy_boss", x, 0., 1.0) for i, x in enumerate(offscreen)]
+        return DeployObsWrapper.release(None, V2).observation(_v2_raw(entities))
+
+    base = build(1.0, False, [900.])
+    assert np.array_equal(base, build(7.5, True, [950., -1200., 3000.]))
+    moved = DeployObsWrapper.release(None, V2).observation(_v2_raw([_v2_entity(1, "enemy_normal", 10., 50., 1.0)]))
+    assert not np.array_equal(base, moved)
+
+
+def test_v2_release_ignores_effect_slot_field():
+    """release は武器エフェクトの sim 上の slot 欄を読まず、HUD のスロットだけから emitter を決める。
+
+    同じ zone の slot 欄を 0 と 5 に変えても release tensor が同じことを確かめます。
+    """
+    def build(slot):
+        """zone の slot 欄だけを変えた release tensor を作る。
+
+        slot 5 は空き枠ですが、release はこの欄を参照しないので結果は変わりません。
+        """
+        entity = _v2_entity(2, "weapon_zone", -80., 20., 1.0)
+        entity["slot"] = slot
+        return DeployObsWrapper.release(None, V2).observation(_v2_raw([entity]))
+
+    assert np.array_equal(build(0), build(5))
+
+
+def test_v2_oracle_reports_ttl_error_against_true_ttl():
+    """oracle_diagnostic は zone / orbit の推定残り時間と真値の差を info に出す。
+
+    release は同じ入力で誤差を出さず、projectile（持続時間表が無い）は対象外です。
+    """
+    duration = effect_duration_s("SantaWater", 1, 1.0)
+
+    class TwoFrameEnv:
+        """reset と step で同じ zone を 0.25 秒ずらして返す環境。
+
+        真の残り時間は推定値より 0.1 秒短くしてあります。
+        """
+
+        def reset(self, **kwargs):
+            """t=1.0 の初観測フレームを返す。
+
+            projectile も1つ置き、誤差の対象外になることを確かめます。
+            """
+            return _v2_raw([_v2_entity(7, "weapon_zone", 50., 0., 1.0, ttl_true_s=duration - 0.1),
+                            _v2_entity(8, "weapon_projectile", 0., 50., 1.0)], 1.0), {"k": 1}
+
+        def step(self, action):
+            """t=1.25 のフレームと固定 reward を返す。
+
+            info の既存キーは wrapper がそのまま残します。
+            """
+            return _v2_raw([_v2_entity(7, "weapon_zone", 50., 0., 1.25, ttl_true_s=duration - 0.35)], 1.25), 0.5, False, False, {"k": 2}
+
+    oracle = DeployObsWrapper.oracle_diagnostic(TwoFrameEnv(), V2)
+    _, info = oracle.reset()
+    assert info["k"] == 1 and info["deploy_ttl_error_s"] == {7: pytest.approx(0.1)}
+    _, reward, _, _, info = oracle.step(0)
+    assert reward == 0.5 and info["k"] == 2 and info["deploy_ttl_error_s"] == {7: pytest.approx(0.1)}
+    release = DeployObsWrapper.release(TwoFrameEnv(), V2)
+    assert "deploy_ttl_error_s" not in release.reset()[1]
+
+
+def _mutate(path, value=None, *, drop=False):
+    """raw の入れ子の位置 path を value にする（drop なら消す）mutation を作る。
+
+    path の最後が新しいキーなら未知キーの追加になります。
+    """
+    def apply(raw):
+        """raw をその場で書き換える。
+
+        deepcopy した raw に対して呼び出します。
+        """
+        target = raw
+        for key in path[:-1]:
+            target = target[key]
+        if drop:
+            del target[path[-1]]
+        else:
+            target[path[-1]] = value
+    return apply
+
+
+@pytest.mark.parametrize("mutation", [
+    _mutate(("privileged",), {}),
+    _mutate(("inventory",), drop=True),
+    _mutate(("hud", "elapsed_s"), 1.0),
+    _mutate(("hud", "level"), .5),
+    _mutate(("inventory", "duration_mult"), 0.),
+    _mutate(("inventory", "weapon_slots", 0, "type_name"), "Sword"),
+    _mutate(("inventory", "weapon_slots", 0, "level"), None),
+    _mutate(("inventory", "weapon_slots", 0, "level"), 9),
+    _mutate(("inventory", "passive_slots"), []),
+    _mutate(("world_entities", 0, "extra"), 1),
+    _mutate(("world_entities", 0, "radius_world"), drop=True),
+    _mutate(("world_entities", 0, "radius_world"), -1.),
+    _mutate(("world_entities", 0, "class_name"), "player_anchor"),
+    _mutate(("world_entities", 0, "entity_id"), "1"),
+    _mutate(("world_entities", 1, "entity_id"), 1),
+    _mutate(("world_entities", 0, "slot"), 0),
+    _mutate(("world_entities", 0, "warning"), True),
+    _mutate(("world_entities", 1, "slot"), None),
+    _mutate(("world_entities", 1, "slot"), 6),
+    _mutate(("world_entities", 1, "ttl_true_s"), math.nan),
+    _mutate(("world_entities", 1, "warning"), 0),
+])
+def test_v2_wrapper_rejects_invalid_raw(mutation):
+    """v2 raw の未知キー・欠損キー・非数・語彙外・id 重複・欄の矛盾を拒否する。
+
+    release で読まない欄（slot・ttl_true_s・warning）も入口で同じく検証します。
+    """
+    raw = _v2_raw([_v2_entity(1, "enemy_normal", 10., 0., 1.0), _v2_entity(2, "weapon_zone", 20., 0., 1.0)])
+    DeployObsWrapper.release(None, V2).observation(deepcopy(raw))
+    mutation(raw)
+    with pytest.raises(ContractValidationError):
+        DeployObsWrapper.release(None, V2).observation(raw)
+
+
+def test_v1_and_v2_raw_contracts_are_not_interchangeable():
+    """v1 schema の wrapper は v2 raw を、v2 schema の wrapper は v1 raw を拒否する。
+
+    schema version で分岐し、どちらの版も相手の raw を黙って受け取らないことを確かめます。
+    """
+    with pytest.raises(ContractValidationError):
+        DeployObsWrapper.release(None, V2).observation(_raw())
+    with pytest.raises(ContractValidationError):
+        DeployObsWrapper.release(None, load_schema(CONFIG)).observation(_v2_raw([]))
+
+
+def _golden_frames(case, scale=0.5):
+    """golden の px 入力を、wrapper へ渡す world 座標の v2 raw の時系列へ逆変換する。
+
+    camera 半幅 = viewport 幅 × scale / 2（縦も同じ縮尺）として x = (px/W*2−1)*半幅 で world に戻し、
+    各 track が first_seen_s の時刻に初めて現れるフレーム列を作ります。Common 語彙外の class は除きます。
+    """
+    data = case["input"]
+    width, height = data["viewport_wh"]
+    half_w, half_h = width * scale / 2, height * scale / 2
+    classes = V2_PARAMS["entity_classes"]
+    vocabulary = set(classes["enemy"]) | set(classes["gem"]) | set(classes["effect"])
+    tracks = [t for t in data["tracks"] if t["class_name"] in vocabulary]
+
+    def world(px, py):
+        """px 座標を world 座標へ戻す。
+
+        _project_point の逆変換です。
+        """
+        return (px / width * 2 - 1) * half_w, (py / height * 2 - 1) * half_h
+
+    slots = {(s["kind"], s["index"]): s for s in data["hud_slots"]}
+    for now in sorted({t["first_seen_s"] for t in tracks} | {data["now_s"]}):
+        ts = int(round(now * 1e9))
+        entities = []
+        for t in tracks:
+            if t["first_seen_s"] > now:
+                continue
+            x, y = world(t["cx_px"], t["cy_px"])
+            effect = t["class_name"] in classes["effect"]
+            entities.append({
+                "entity_id": t["track_id"], "class_name": t["class_name"], "world_x": x, "world_y": y,
+                "radius_world": t["radius_px"] * 2 * half_w / width, "occluded": t["occluded"], "timestamp_ns": ts,
+                "slot": 0 if effect else None, "ttl_true_s": 0.0 if effect else None, "warning": False,
+            })
+        player = world(*data["player_px"])
+        yield {
+            "timestamp_ns": ts, "viewport": (width, height),
+            "target_camera": {"center_x": 0., "center_y": 0., "half_width": half_w, "half_height": half_h},
+            "hud": {"player_hp": data.get("hp_ratio", .5), "level": data.get("player_level", 1)},
+            "player_world": {"x": player[0], "y": player[1]}, "world_entities": entities,
+            "temporal": {"movement_direction": tuple(data.get("movement_direction") or (0., 0.)), "timestamp_ns": ts},
+            "inventory": {
+                "weapon_slots": [{k: slots[("weapon", i)][k] for k in ("index", "type_name", "level")} for i in range(6)],
+                "passive_slots": [{k: slots[("passive", i)][k] for k in ("index", "type_name", "level")} for i in range(6)],
+                "duration_mult": data["duration_mult"],
+            },
+        }
+
+
+def test_v2_wrapper_matches_common_golden_through_projection():
+    """wrapper の投影・半径 px 変換・初観測時刻の追跡を通した結果が Common golden と一致する。
+
+    mixed_combat は全平面が一致、fire_wand_and_santa_water_ambiguous は sim が常に持つ
+    HP・レベル・移動方向の3 segment を除いて一致します。world_invalid_partial_hud は
+    sim が常に全 HUD・world を知っている（world_valid=False や欠けた HUD を作らない）ので対象外です。
+    """
+    golden = json.loads(GOLDEN_V2.read_text(encoding="utf-8"))
+    assert golden["schema_hash"] == V2.schema_hash
+    cases = {case["name"]: case for case in golden["cases"]}
+    assert set(cases) == {"mixed_combat", "fire_wand_and_santa_water_ambiguous", "world_invalid_partial_hud"}
+    for name, sim_supplied in (("mixed_combat", ()), ("fire_wand_and_santa_water_ambiguous", ("player_hp", "level", "movement_direction"))):
+        wrapper = DeployObsWrapper.release(None, V2)
+        for raw in _golden_frames(cases[name]):
+            tensor = wrapper.observation(raw)
+        expected = np.concatenate([np.asarray(cases[name]["expected"][p], np.float32) for p in ("values", "validity", "age")])
+        mask = np.ones(3 * V2.dim, bool)
+        for segment in sim_supplied:
+            offset, size = V2.layout[segment]
+            for plane in range(3):
+                mask[plane * V2.dim + offset:plane * V2.dim + offset + size] = False
+        np.testing.assert_allclose(tensor[mask], expected[mask], atol=1e-6, err_msg=name)
+        assert all(_segment(tensor, s, 1)[0] == 1.0 for s in sim_supplied)
