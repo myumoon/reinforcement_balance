@@ -46,6 +46,8 @@ python Tools/Deployment/train_survivors_prelabel_detector.py `
 
 work-root 内の `checked: true` の JSON だけを使って学習し、重みを `<work-root>/prelabel_detector.pt` に保存します（`--output` で変更可）。確認済みフレームが1枚も無い場合はエラーで終了します。初回は pytorch.org から事前学習重み（約 74MB）を自動でダウンロードします。GPU があれば自動で使い、数分で終わります。
 
+武器エフェクト4クラス（`weapon_projectile` / `weapon_zone` / `weapon_orbit` / `weapon_aura`）を検出するラベルに追加したため、追加前に学習した `prelabel_detector.pt` はラベル不一致のエラーで読み込めません。この CLI で**再学習**してください。Garlic の輪（`weapon_aura`）の下書き精度が出ない場合は、設定の `detector.labels` から `weapon_aura` だけ外して再学習します。
+
 ### 3-3. 下書きを作る
 
 ```powershell
@@ -63,6 +65,15 @@ python Tools/Deployment/prelabel_survivors_frames.py `
 ### 既存 work-root の classes.txt
 
 `labeled_region` を追加する前に作った work-root では、`classes.txt` に `labeled_region` がありません。末尾に1行 `labeled_region` を追記してから X-AnyLabeling で読み込み直してください。
+
+武器エフェクトクラスを追加する前に作った work-root では、`classes.txt` の `labeled_region` の後ろに次の4行を**この順で**追記し、X-AnyLabeling で読み込み直してください（新しく候補を抽出した work-root には最初から入っています）。
+
+```text
+weapon_projectile
+weapon_zone
+weapon_orbit
+weapon_aura
+```
 
 ## 4. X-AnyLabeling で確認・修正する
 
@@ -86,6 +97,8 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 
 `world_coco.json` と `ui_coco.json` が作られます。
 
+武器エフェクト（`weapon_*`）は現在の world class map（v1）に無いため、**当面は COCO 出力から矩形だけ除外**されます。フレーム自体と他の矩形は出力され、`weapon_*` しか無いフレームも矩形 0 個の画像として出力されます。除外した数は「武器エフェクトで除外した矩形数」として表示されます。この除外は world class map v2 で解除される予定です。
+
 ## クラス早見表
 
 | クラス | 対象 |
@@ -99,16 +112,42 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 | `card` / `button` | レベルアップカード / 選択ボタン |
 | `death_result` | 死亡・結果画面の領域 |
 | `labeled_region` | ラベルを付け終えた範囲（学習用。物体ではない） |
+| `weapon_projectile` | プレイヤーの武器の弾・斬撃（1つごとに1矩形） |
+| `weapon_zone` | プレイヤーの武器が地面に出す範囲（炎・爆発・落雷） |
+| `weapon_orbit` | プレイヤーの周りを回る武器（King Bible の本。1冊ごとに1矩形） |
+| `weapon_aura` | プレイヤーを中心とするオーラ（Garlic の輪。見えている輪を囲む1矩形） |
 
 宝箱は `chest` ではなく `pickup_special` として付けます。`card`、`button`、`death_result`、`hazard_projectile`、`hazard_area` は自動下書きされないため、GUI で必要な矩形を追加してください。
 
+### 武器エフェクトのクラス対応表
+
+プレイヤー自身の武器エフェクトには `weapon_*` を付けます。クラスはシミュレーターが観測する4種類（Projectile / GroundZone / Orbit / Aura）に合わせています（`Tools/Deployment/survivors/annotation_labels.py` の `WEAPON_EFFECT_KINDS`）。
+
+| 武器（進化後） | ラベル |
+|---|---|
+| Whip（Bloody Tear）、Magic Wand（Holy Wand）、Knife（Thousand Edge）、Axe（Death Spiral）、Cross（Heaven Sword）、Runetracer（NO FUTURE） | `weapon_projectile`（弾・斬撃1つごとに1矩形） |
+| Fire Wand（Hellfire） | 火球は `weapon_projectile`、着弾後の爆発範囲は `weapon_zone` |
+| Santa Water（La Borra） | `weapon_zone`（炎の範囲） |
+| Lightning Ring（Thunder Loop） | `weapon_zone`（落雷の範囲） |
+| King Bible（Unholy Vespers） | `weapon_orbit`（1冊ごとに1矩形） |
+| Garlic（Soul Eater） | `weapon_aura`（見えている輪を囲む1矩形） |
+| Peachone、Ebony Wings、Vandalier | 照準・爆発は `weapon_projectile`。**鳥本体には付けない** |
+
+次のものには何も付けません。
+
+- Pentagram（Gorgeous Moon）の画面フラッシュ、Laurel の盾（物体として観測されないため）
+- 燭台などの壊せる置物（武器ではなく、`hazard_*` でもない）
+- Peachone / Ebony Wings / Vandalier の鳥本体
+
+矩形は `R`（または円ツール）で、見えているエフェクトの外形をぴったり囲みます。複数の弾が重なっていても、見分けられる限り1つずつ付けます。
+
 `enemy_elite` は下書き用検出器が区別して学習するため、下書きでも `enemy_elite` として出ます。ただし確認済みのサンプルが少ないうちは `enemy_normal` と取り違えることがあるので、GUI で確認してください。`enemy_boss` は検出器の学習時に `enemy_normal` として扱われるため、下書きでは `enemy_normal` として出ます。GUI で正しいクラスへ直してください。
 
-`hazard_projectile` / `hazard_area` は、プレイヤーに害を与える**敵側**の弾や範囲攻撃にだけ付けます。Garlic のオーラ、斧、Santa Water の炎、Peachone / Ebony Wings の照準など、**プレイヤー自身の武器エフェクトには付けません**（燭台などの壊せる置物も対象外です）。実機の観測では `hazard_*` が 1 つでも見えると `hazard_flag` が真になり、アイテム選択の判断材料として方策へ渡されます（`Tools/Deployment/survivors/real_obs_assembler.py`）。プレイヤーの周りに常にある Garlic を `hazard_area` にすると、この値がほぼ常に真になり意味を失います。
+`hazard_projectile` / `hazard_area` は、プレイヤーに害を与える**敵側**の弾や範囲攻撃にだけ付けます。Garlic のオーラ、斧、Santa Water の炎、Peachone / Ebony Wings の照準など、**プレイヤー自身の武器エフェクトには付けず、上の対応表の `weapon_*` を付けます**（燭台などの壊せる置物はどちらの対象でもありません）。実機の観測では `hazard_*` が 1 つでも見えると `hazard_flag` が真になり、アイテム選択の判断材料として方策へ渡されます（`Tools/Deployment/survivors/real_obs_assembler.py`）。プレイヤーの周りに常にある Garlic を `hazard_area` にすると、この値がほぼ常に真になり意味を失います。
 
 `labeled_region` を含む確認済みフレームは範囲外が未ラベルのため、COCO 出力から除外されます（出力時に「範囲限定でスキップした数」として表示されます）。COCO に含めたいフレームは画面全体をラベルし、`labeled_region` を消してください。
 
-`hazard_projectile` / `hazard_area` は円（circle）ツールで描いても構いません。中心点と円周上の一点から外接する矩形へ自動変換されます。
+`hazard_projectile` / `hazard_area` / `weapon_*` は円（circle）ツールで描いても構いません。中心点と円周上の一点から外接する矩形へ自動変換されます。
 
 タイプミスで未知のラベル名が付いた shape や、rectangle/circle 以外の未対応図形は、そのファイルを読む際に警告を表示して読み飛ばされます（ファイル全体は失敗しません）。警告は `prelabel_survivors_frames.py` や `export_survivors_annotations_coco.py` の実行時に標準エラー出力へ表示されるので、意図しない読み飛ばしがないか確認してください。
 
@@ -122,6 +161,51 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 `enemy_boss` が 1 体でも見えると、実機の観測では `boss_flag` が真になり、アイテム選択の判断材料として方策へ渡されます（`Tools/Deployment/survivors/real_obs_assembler.py`）。元ボスの雑魚敵を `enemy_boss` で付けると、ステージ後半がずっとボス戦として扱われてしまいます。
 
 下書き用検出器は `enemy_boss` を `enemy_normal` にまとめて学習するため、この区別は下書きの精度には影響しません。効くのは COCO 出力で学習する本番の検出器（[world_detector.md](world_detector.md)）です。
+
+## 付け替え CLI（propose → 確認 → apply）
+
+武器エフェクト用クラスを追加する前は、武器エフェクトに `hazard_projectile` / `hazard_area` を付けていた確認済みフレームがあります。`relabel_survivors_annotations.py` で `weapon_*` へ付け替えます。確認済みデータを書き換えるので、**対応表をユーザーが確認してから** apply します。
+
+1. **propose（データは書き換えない）**
+
+   ```powershell
+   python Tools/Deployment/relabel_survivors_annotations.py propose `
+     --work-root "D:\captures\annotation_work" `
+     --output "D:\captures\relabel_mapping.json" `
+     --sheet "D:\captures\relabel_sheet.png"
+   ```
+
+   旧ラベル（既定 `hazard_projectile` と `hazard_area`。`--old-labels` で変更可）の shape を全 session から集め、対応表 JSON と番号付きの一覧画像を作ります。一覧画像の番号は対応表の `id` です。既存の対応表は上書きしません。提案の規則は次のとおりです。
+
+   - `hazard_projectile` → `weapon_projectile`
+   - `hazard_area` で、矩形の中心が `player_anchor` の中心（JSON に無ければ設定の固定矩形の中心）から `--aura-radius-px`（既定 40）以内 → `weapon_aura`
+   - それ以外 → `review`（人が決める）
+
+   距離だけで判定するため、プレイヤー付近の Santa Water の炎を `weapon_aura` と誤提案することがあります。
+
+2. **対応表を確認・修正する**
+
+   一覧画像を見ながら、対応表の各行の `proposed_label` を決めます。使える値は共通クラス名（`weapon_zone` など）、`delete`（shape を削除）、旧ラベルと同じ名前（変更なし）です。`review` を1行でも残すと apply は失敗します。`file`・`shape_index`・`old_label`・`bbox` は変えないでください。
+
+3. **apply**
+
+   ```powershell
+   python Tools/Deployment/relabel_survivors_annotations.py apply `
+     --work-root "D:\captures\annotation_work" `
+     --mapping "D:\captures\relabel_mapping.json"
+   ```
+
+   書き込む前に全行を検証し、`review` が残っている行、未知のラベル、propose の後で旧ラベルや矩形が変わった shape が1つでもあれば、**何も書かずに終了コード 1** で止まります。検証が通ると、書き換える JSON を丸ごと `<work-root>/_relabel_backup/<YYYYmmdd-HHMMSS>/`（`--backup-dir` で変更可）へコピーしてから、該当 shape のラベル変更・削除だけを行います。`checked`、円（circle）の形、`flags` などその他の内容はそのまま残ります。元に戻すときはバックアップのファイルを同じ相対パスへコピーし直します。
+
+## 確認済みフレームの見直し手順
+
+確認済み（`checked: true`）フレームは「対象クラスがすべてラベル済み」という意味です。武器エフェクト用クラスを追加する前に確認したフレームには、`hazard_*` で付けていたもの以外の武器エフェクト（鞭・ナイフ・Magic Wand の弾など）が未ラベルのまま残っています。このまま学習すると、未ラベルのエフェクトが背景として学習されてしまいます。付け替え（apply）と同時に、次の手順で見直してください。
+
+1. `classes.txt` に `weapon_*` の4行があることを確認する（[既存 work-root の classes.txt](#既存-work-root-の-classestxt)）。
+2. 上の付け替え CLI で `hazard_*` を `weapon_*` へ付け替える。
+3. 既存の確認済みフレームをすべて X-AnyLabeling で開き直し、上の対応表に従って未ラベルの武器エフェクトを漏れなく追加する。`labeled_region` 付きのフレームは範囲の内側だけで構いません。
+4. 追加し終えたら確認済み（`Ctrl+Alt+K`）に戻す。
+5. 下書き用検出器を再学習する（[3-2](#3-2-下書き用検出器を学習する)）。
 
 ## 2周目以降の運用
 

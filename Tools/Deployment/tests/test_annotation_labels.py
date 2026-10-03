@@ -14,13 +14,17 @@ from survivors.annotation_labels import (
     ALL_CLASSES,
     REGION_LABEL,
     UI_CLASSES,
+    WEAPON_EFFECT_CLASSES,
+    WEAPON_EFFECT_KINDS,
     WORLD_CLASSES,
     LabelBox,
     clip_box,
     iter_frame_files,
     read_label_file,
+    validate_label,
     write_label_file,
 )
+from reinbalance_survivors_contracts.deploy_obs_v2_features import load_deploy_obs_v2_feature_params
 from survivors.vision.world_dataset import load_class_map
 
 
@@ -64,7 +68,45 @@ def test_classes_follow_world_class_map_and_append_ui_classes() -> None:
     assert WORLD_CLASSES == expected_world
     assert UI_CLASSES == ("hud_hp", "hud_xp", "card", "button", "death_result")
     assert REGION_LABEL == "labeled_region"
-    assert ALL_CLASSES == WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,)
+    assert WEAPON_EFFECT_CLASSES == ("weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura")
+    assert ALL_CLASSES == WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,) + WEAPON_EFFECT_CLASSES
+    # 実データの classes.txt（2026-10-02 に末尾へ4行追記済み）と同じ並び。
+    assert ALL_CLASSES[-5:] == ("labeled_region", *WEAPON_EFFECT_CLASSES)
+
+
+def test_weapon_effect_kinds_match_common_deploy_obs_v2_features() -> None:
+    """武器→ラベル対応表が Common の weapon_effect_kinds と一致する。
+
+    Common の種類名（projectile 等）に weapon_ を前置した集合と比べ、
+    Common に無い武器（Pentagram など）は空集合であることも確認する。
+    """
+    params = load_deploy_obs_v2_feature_params()
+    weapons = set(params["weapon_vocabulary"][1:-1])
+    common = params["weapon_effect_kinds"]
+
+    assert set(WEAPON_EFFECT_KINDS) == weapons
+    for weapon in weapons:
+        expected = {f"weapon_{kind}" for kind in common.get(weapon, ())}
+        assert set(WEAPON_EFFECT_KINDS[weapon]) == expected, weapon
+        assert set(WEAPON_EFFECT_KINDS[weapon]) <= set(WEAPON_EFFECT_CLASSES)
+
+
+def test_validate_and_read_accept_weapon_effect_labels(tmp_path: Path) -> None:
+    """validate_label と read_label_file が weapon_* を受け付ける。
+
+    以前は未知ラベルとして読み飛ばされていたクラスが、今は矩形として読める。
+    """
+    for label in WEAPON_EFFECT_CLASSES:
+        assert validate_label(label) == label
+    path = tmp_path / "00000001.json"
+    path.write_text(
+        json.dumps(_label_payload([_shape(label=label) for label in WEAPON_EFFECT_CLASSES])),
+        encoding="utf-8",
+    )
+
+    boxes, _ = read_label_file(path)
+
+    assert [box.label for box in boxes] == list(WEAPON_EFFECT_CLASSES)
 
 
 def test_write_and_read_label_file_preserve_contract(tmp_path: Path) -> None:

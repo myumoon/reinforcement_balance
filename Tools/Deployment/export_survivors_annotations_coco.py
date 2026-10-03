@@ -17,6 +17,7 @@ from survivors.annotation_labels import (
     DEFAULT_CLASS_MAP_PATH,
     REGION_LABEL,
     UI_CLASSES,
+    WEAPON_EFFECT_CLASSES,
     WORLD_CLASSES,
     clip_box,
     iter_frame_files,
@@ -82,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         ui_annotations: list[dict] = []
         skipped_unconfirmed = 0
         skipped_region = 0
+        skipped_weapon = 0
 
         for session_id in session_ids:
             session_dir = args.work_root / session_id
@@ -117,6 +119,10 @@ def main(argv: list[str] | None = None) -> int:
                 ui_images.append(image_entry.copy())
 
                 for box in boxes:
+                    # weapon_* は world class map v1 に無いアノテーション専用クラス。矩形だけ除外する（04-12 で解除）。
+                    if box.label in WEAPON_EFFECT_CLASSES:
+                        skipped_weapon += 1
+                        continue
                     clipped = clip_box(box, image_width=image_width, image_height=image_height)
                     if clipped is None:
                         print(
@@ -161,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"採用画像数: {len(world_images)}")
         print(f"未確認でスキップした数: {skipped_unconfirmed}")
         print(f"範囲限定でスキップした数: {skipped_region}")
+        print(f"武器エフェクトで除外した矩形数: {skipped_weapon}")
         print(f"world 矩形数: {len(world_annotations)}")
         print(f"ui 矩形数: {len(ui_annotations)}")
         return 0

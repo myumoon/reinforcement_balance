@@ -13,8 +13,10 @@ fixed_boxes:
 
 # 下書き用検出器（torchvision Faster R-CNN MobileNetV3）の学習・推論設定。
 # labels の並びが検出器のクラス番号になるため、変えたら再学習が必要。
+# 武器エフェクト4クラス（weapon_*）を追加したので、追加前の prelabel_detector.pt は
+# 読み込み時にラベル不一致エラーになる。train_survivors_prelabel_detector.py で再学習すること。
 detector:
-  labels: [enemy_normal, enemy_elite, gem_blue, gem_green, gem_red, pickup_heal, pickup_special]
+  labels: [enemy_normal, enemy_elite, gem_blue, gem_green, gem_red, pickup_heal, pickup_special, weapon_projectile, weapon_zone, weapon_orbit, weapon_aura]
   label_aliases: {enemy_boss: enemy_normal}
   score_threshold: 0.5
   input_scale: 2

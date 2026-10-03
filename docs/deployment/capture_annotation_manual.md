@@ -91,6 +91,9 @@ python Tools/Deployment/prelabel_survivors_frames.py `
 - 下書きは `checked: false` で保存され、JSON がまだ無い画像にのみ作成されます（既存 JSON は上書きされません）。下書きに `labeled_region` は書かれません。
 - 設定は [annotation_prelabel_v2.yaml](../../Tools/Deployment/configs/annotation_prelabel_v2.yaml) です。学習後に `input_scale` や `labels` を変えた場合は重みと一致しないためエラーになるので、再学習してください。
 - 既存 work-root の `classes.txt` に `labeled_region` が無い場合は、末尾に1行 `labeled_region` を追記してから X-AnyLabeling で読み込み直してください。
+- 既存 work-root の `classes.txt` に武器エフェクト4クラスが無い場合は、`labeled_region` の後ろに `weapon_projectile`、`weapon_zone`、`weapon_orbit`、`weapon_aura` の4行をこの順で追記してから読み込み直してください。
+- 検出するラベルに `weapon_*` の4クラスを追加したため、追加前に学習した `prelabel_detector.pt` はラベル不一致のエラーになります。(2) で再学習してください。
+- 武器エフェクト用クラスを追加する前に `hazard_*` で付けた武器エフェクトは、`relabel_survivors_annotations.py`（propose → 対応表の確認 → apply）で `weapon_*` へ付け替え、既存の確認済みフレームを開き直して未ラベルの武器エフェクトを追加します。手順は [`annotation_gui.md`](annotation_gui.md) の「付け替え CLI」「確認済みフレームの見直し手順」を参照してください。
 
 **(4) 反復する**
 
@@ -128,12 +131,25 @@ python Tools/Deployment/prelabel_survivors_frames.py `
 | `card` / `button` | レベルアップカード / 選択ボタン |
 | `death_result` | 死亡・結果画面の領域 |
 | `labeled_region` | ラベルを付け終えた範囲（学習用。物体ではない） |
+| `weapon_projectile` | プレイヤーの武器の弾・斬撃（1つごとに1矩形） |
+| `weapon_zone` | プレイヤーの武器が地面に出す範囲（炎・爆発・落雷） |
+| `weapon_orbit` | プレイヤーの周りを回る武器（King Bible の本。1冊ごとに1矩形） |
+| `weapon_aura` | プレイヤーを中心とするオーラ（Garlic の輪。見えている輪を囲む1矩形） |
 
 宝箱は `chest` ではなく `pickup_special` として付けます。
 
 - `card` / `button` / `death_result` / `hazard_projectile` / `hazard_area` は自動下書きされないため、GUI で手動追加が必要です。
 - `enemy_elite` は下書きでも `enemy_elite` として出ますが、サンプルが少ないうちは `enemy_normal` と取り違えることがあるので確認してください。`enemy_boss` は下書きでは `enemy_normal` として出るので、GUI で正しいクラスへ直してください。
-- `hazard_projectile` / `hazard_area` は**敵側**の弾や範囲攻撃にだけ付けます。Garlic・斧・Santa Water・Peachone の照準など、プレイヤー自身の武器エフェクトには付けません（理由は [`annotation_gui.md`](annotation_gui.md) を参照）。
+- `hazard_projectile` / `hazard_area` は**敵側**の弾や範囲攻撃にだけ付けます。Garlic・斧・Santa Water・Peachone の照準など、プレイヤー自身の武器エフェクトには付けず、`weapon_*` を付けます（理由は [`annotation_gui.md`](annotation_gui.md) を参照）。
+- 武器エフェクトは次の対応表どおりに付けます（詳細は [`annotation_gui.md`](annotation_gui.md) の「武器エフェクトのクラス対応表」）。
+  - Whip・Magic Wand・Knife・Axe・Cross・Runetracer（進化後も同じ）の弾・斬撃 → `weapon_projectile`（1つごとに1矩形）
+  - Fire Wand（Hellfire）の火球 → `weapon_projectile`、着弾後の爆発範囲 → `weapon_zone`
+  - Santa Water（La Borra）の炎、Lightning Ring（Thunder Loop）の落雷 → `weapon_zone`
+  - King Bible（Unholy Vespers）の本 → `weapon_orbit`（1冊ごとに1矩形）
+  - Garlic（Soul Eater）の輪 → `weapon_aura`（見えている輪を囲む1矩形）
+  - Peachone・Ebony Wings・Vandalier の照準・爆発 → `weapon_projectile`（鳥本体には付けない）
+  - Pentagram（Gorgeous Moon）の画面フラッシュ、Laurel の盾、燭台などの壊せる置物 → 何も付けない
+- `weapon_*` は world class map v1 に無いため、当面は COCO 出力から矩形だけ除外されます（フレームと他の矩形は出力されます）。
 - `enemy_boss` はボスとして出現した個体（倒すと宝箱を落とす個体）にだけ付けます。ステージ後半に、序盤〜中盤のボスと同じ見た目の敵が雑魚敵として群れで出てきた場合は `enemy_normal` です。迷ったら `enemy_normal` にしてください（理由は [`annotation_gui.md`](annotation_gui.md) の「ボスと元ボスの雑魚敵」を参照）。
 - `labeled_region` を含む確認済みフレームは範囲外が未ラベルのため、COCO 出力から除外されます。COCO に含めたいフレームは画面全体をラベルし、`labeled_region` を消してください。
 

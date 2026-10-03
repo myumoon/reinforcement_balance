@@ -230,3 +230,42 @@ def test_export_accepts_repeated_session_id_filters(tmp_path: Path) -> None:
         ("session-a", 1),
         ("session-b", 2),
     ]
+
+
+def test_export_drops_weapon_effect_boxes_but_keeps_frames(tmp_path: Path, capsys) -> None:
+    """weapon_* の矩形だけを除外し、フレームと他の矩形は出力する。
+
+    weapon_* だけのフレームも矩形0の画像として残り、除外数が表示される。
+    """
+    work_root = tmp_path / "work"
+    session = work_root / "session-a"
+    _write_png(session / "00000001.png")
+    _write_label(
+        session / "00000001.json",
+        [
+            _shape("gem_blue", [[1, 1], [3, 3]]),
+            _shape("weapon_aura", [[0, 0], [9, 7]]),
+            _shape("hud_hp", [[5, 1], [7, 3]]),
+        ],
+        checked=True,
+    )
+    _write_png(session / "00000002.png")
+    _write_label(
+        session / "00000002.json",
+        [_shape("weapon_projectile", [[1, 1], [2, 2]]), _shape("weapon_zone", [[3, 3], [6, 6]])],
+        checked=True,
+    )
+    output_dir = tmp_path / "export"
+
+    result = main(["--work-root", str(work_root), "--output-dir", str(output_dir)])
+
+    assert result == 0
+    world = json.loads((output_dir / "world_coco.json").read_text(encoding="utf-8"))
+    ui = json.loads((output_dir / "ui_coco.json").read_text(encoding="utf-8"))
+    assert [item["frame_id"] for item in world["images"]] == [1, 2]
+    assert [item["frame_id"] for item in ui["images"]] == [1, 2]
+    assert [(item["image_id"], item["bbox"]) for item in world["annotations"]] == [(1, [1.0, 1.0, 2.0, 2.0])]
+    assert [(item["image_id"], item["category_id"]) for item in ui["annotations"]] == [(1, 1)]
+    category_names = {item["name"] for item in world["categories"] + ui["categories"]}
+    assert not any(name.startswith("weapon_") for name in category_names)
+    assert "武器エフェクトで除外した矩形数: 3" in capsys.readouterr().out

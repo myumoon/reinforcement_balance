@@ -27,7 +27,42 @@ WORLD_CLASSES = tuple(
 UI_CLASSES = ("hud_hp", "hud_xp", "card", "button", "death_result")
 # この矩形を持つ確認済みフレームは「矩形の内側だけ漏れなくラベル済み」を意味する（物体ではない）。
 REGION_LABEL = "labeled_region"
-ALL_CLASSES = WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,)
+# プレイヤー自身の武器エフェクト（敵側の hazard_* とは別）。アノテーション専用で world class map には入れない。
+# 種類は sim の EProjectileObsKind（Projectile / GroundZone / Orbit / Aura）に合わせる。
+WEAPON_EFFECT_CLASSES = ("weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura")
+# 武器（C++ EWeaponType 名）→ 画面に付けるラベル集合。C++ GetProjectileObsView と
+# Common の deploy_obs_v2_features.yaml weapon_effect_kinds を正とし、空集合の武器には付けない。
+WEAPON_EFFECT_KINDS: dict[str, tuple[str, ...]] = {
+    "Garlic": ("weapon_aura",),
+    "SoulEater": ("weapon_aura",),
+    "Whip": ("weapon_projectile",),
+    "BloodyTear": ("weapon_projectile",),
+    "MagicWand": ("weapon_projectile",),
+    "HolyWand": ("weapon_projectile",),
+    "Knife": ("weapon_projectile",),
+    "ThousandEdge": ("weapon_projectile",),
+    "Axe": ("weapon_projectile",),
+    "DeathSpiral": ("weapon_projectile",),
+    "Cross": ("weapon_projectile",),
+    "HeavenSword": ("weapon_projectile",),
+    "KingBible": ("weapon_orbit",),
+    "UnholyVespers": ("weapon_orbit",),
+    "FireWand": ("weapon_projectile", "weapon_zone"),
+    "Hellfire": ("weapon_projectile", "weapon_zone"),
+    "SantaWater": ("weapon_zone",),
+    "LaBorra": ("weapon_zone",),
+    "Runetracer": ("weapon_projectile",),
+    "NoFuture": ("weapon_projectile",),
+    "LightningRing": ("weapon_zone",),
+    "ThunderLoop": ("weapon_zone",),
+    "Peachone": ("weapon_projectile",),
+    "EbonyWings": ("weapon_projectile",),
+    "Vandalier": ("weapon_projectile",),
+    "Pentagram": (),
+    "GorgeousMoon": (),
+    "Laurel": (),
+}
+ALL_CLASSES = WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,) + WEAPON_EFFECT_CLASSES
 _FRAME_STEM = re.compile(r"^\d{8}$")
 
 
