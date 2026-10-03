@@ -149,6 +149,10 @@ class TestWorldClassMap:
         ]
 
     def test_coarse_for_name_and_id(self):
+        """coarse_for は名前でも ID でも大分類を返し、background・未知名は KeyError。
+
+        tracker と annotation が大分類を直書きせずに引くための入口なので、境界の挙動を固定する。
+        """
         cm = load_class_map(CLASS_MAP_PATH)
         assert cm.coarse_for("player_anchor") == "anchor"
         assert cm.coarse_for(15) == "weapon"

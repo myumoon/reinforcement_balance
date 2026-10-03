@@ -41,6 +41,10 @@ class TestDetectorConfig:
         assert cfg["formal_detector_eligible"] is False
 
     def test_num_classes_is_16(self):
+        """既定 config（v2）の num_classes は class map v2 と同じ 16。
+
+        background 1 + foreground 15（武器エフェクト4クラスを含む）の合計。
+        """
         cfg = load_detector_config(DETECTOR_CONFIG_PATH)
         assert cfg["model"]["num_classes"] == 16
 
