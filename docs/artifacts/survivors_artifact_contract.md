@@ -22,6 +22,15 @@ source_descriptor
   -> goal_evidence
 ```
 
+combat 生徒の蒸留 dataset（03-08）は別の枝として、教師 source descriptor と
+integration fidelity verdict（どちらも `source_descriptor` の root node）を親に持つ。
+
+```text
+source_descriptor（教師） + source_descriptor（fidelity verdict）
+  -> combat_distillation_dataset
+  -> combat_student_release
+```
+
 保存形式では child descriptor だけが immutable parent hash を `parents` に保持する。
 parent descriptor から descendant を参照しない。source descriptor、validation verdict、
 dataset manifest は in-place 更新せず、変更が必要な場合は新しい descriptor node を作る。

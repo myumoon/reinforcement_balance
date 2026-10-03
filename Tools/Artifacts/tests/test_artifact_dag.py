@@ -391,3 +391,38 @@ def test_self_reference_or_mutual_reference_wire_is_rejected():
 
     with pytest.raises(ArtifactDagValidationError):
         validate_artifact_dag([wire])
+
+
+def test_combat_distillation_dataset_with_teacher_and_fidelity_sources_feeds_student():
+    """combat 蒸留 dataset は教師と fidelity verdict の source_descriptor 2 つを親にでき、生徒の親になれる。
+
+    03-08 の正式収集が保存する lineage（教師 + verdict → dataset → combat student）が DAG 検証を通ることを固定します。
+    """
+    teacher = _node("teacher-source", "source_descriptor", ch="a")
+    fidelity = _node("fidelity-source", "source_descriptor", ch="b")
+    dataset = _node(
+        "combat-distillation", "combat_distillation_dataset",
+        parents=(teacher.node_ref(), fidelity.node_ref()), ch="c",
+    )
+    student = _node("combat-student", "combat_student_release", parents=(dataset.node_ref(),), ch="d")
+
+    report = validate_artifact_dag([student, dataset, fidelity, teacher])
+
+    assert report.node_count == 4
+    assert report.topological_identity_hashes[-1] == student.identity_hash
+
+
+@pytest.mark.parametrize("parent_kind", ["teacher_validation_verdict", "choice_dataset_release"])
+def test_combat_distillation_dataset_rejects_non_source_parent(parent_kind):
+    """combat 蒸留 dataset は source_descriptor 以外を親にできない。
+
+    verdict や別 dataset を親にした lineage を、未登録の edge として拒否します。
+    """
+    source = _node("teacher-source", "source_descriptor", ch="a")
+    verdict = _node("teacher-verdict", "teacher_validation_verdict", parents=(source.node_ref(),), ch="b")
+    choice = _node("choice-dataset", "choice_dataset_release", parents=(verdict.node_ref(),), ch="e")
+    parent = {"teacher_validation_verdict": verdict, "choice_dataset_release": choice}[parent_kind]
+    dataset = _node("combat-distillation", "combat_distillation_dataset", parents=(parent.node_ref(),), ch="c")
+
+    with pytest.raises(ArtifactDagValidationError, match="cannot use"):
+        validate_artifact_dag([dataset, choice, verdict, source])

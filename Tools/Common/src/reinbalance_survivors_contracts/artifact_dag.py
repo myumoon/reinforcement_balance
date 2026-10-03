@@ -26,8 +26,10 @@ ALLOWED_PARENT_KINDS: dict[str, frozenset[str]] = {
     "source_descriptor": frozenset(),
     "teacher_validation_verdict": frozenset({"source_descriptor"}),
     "choice_dataset_release": frozenset({"teacher_validation_verdict"}),
+    # combat 蒸留 dataset は教師 source descriptor と integration fidelity verdict（どちらも root 入力）を親に持つ
+    "combat_distillation_dataset": frozenset({"source_descriptor"}),
     "item_selector_release": frozenset({"choice_dataset_release"}),
-    "combat_student_release": frozenset({"choice_dataset_release"}),
+    "combat_student_release": frozenset({"choice_dataset_release", "combat_distillation_dataset"}),
     # perception calibration は source_descriptor（capture dataset）を親に持つ
     "perception_calibration_profile": frozenset({"source_descriptor"}),
     # perception final verdict は calibration profile を必須親とする
@@ -80,6 +82,7 @@ _KIND_ORDER = {
     "source_descriptor": 0,
     "teacher_validation_verdict": 1,
     "perception_calibration_profile": 1,
+    "combat_distillation_dataset": 1,
     "choice_dataset_release": 2,
     "perception_final_verdict": 2,
     "item_selector_release": 3,
