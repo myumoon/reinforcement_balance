@@ -62,7 +62,9 @@ def hud_slots_from_inventory(
 ) -> list[HudSlot]:
     """HUD の在庫（武器6 + パッシブ6）を HudSlot 列へ変換する。
 
-    None は空スロット確定、対応表に無い identity はそのスロットを渡さず「不明」にします。
+    空スロット用 identity（対応表の empty_slot）の枠だけを空スロット確定にします。None は
+    icon_matcher が読めなかった枠（low_margin・低信頼・遮蔽）と空枠を区別できないので、
+    対応表に無い identity と同じくそのスロットを渡さず「不明」（validity 0）にします。
     レベルは level_of（追跡器）から引き、上限を超えるような値は信用せず None（不明）にします。
     """
     params = load_deploy_obs_v2_feature_params()
@@ -74,6 +76,8 @@ def hud_slots_from_inventory(
     for position, identity in enumerate(inventory):
         kind, index = ("weapon", position) if position < weapon_count else ("passive", position - weapon_count)
         if identity is None:
+            continue
+        if identity == vocabulary.empty_slot:
             slots.append(HudSlot(kind, index, None, None))
             continue
         name = vocabulary.type_name(identity, kind)

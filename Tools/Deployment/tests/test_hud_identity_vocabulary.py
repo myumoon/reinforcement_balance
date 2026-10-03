@@ -76,6 +76,11 @@ def test_type_name_rejects_wrong_kind_and_unknown_identity():
     lambda d: d["non_items"].append("whip"),
     lambda d: d["non_items"].append("gold"),
     lambda d: d.update(weapons={}),
+    lambda d: d.pop("empty_slot"),
+    lambda d: d.update(empty_slot=None),
+    lambda d: d.update(empty_slot="whip"),
+    lambda d: d.update(empty_slot="gold"),
+    lambda d: d.update(empty_slot="Empty"),
 ])
 def test_invalid_tables_are_rejected(mutate):
     """未知キー・版違い・語彙外の対応先・重複を読み込み時に拒否する。

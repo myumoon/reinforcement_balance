@@ -17,19 +17,21 @@ from reinbalance_survivors_contracts.deploy_obs_v2_features import load_deploy_o
 
 HUD_IDENTITY_VOCABULARY_VERSION = "hud_identity_vocabulary.v1"
 DEFAULT_PATH = Path(__file__).resolve().parents[1] / "configs" / "hud_identity_vocabulary_v1.yaml"
-_KEYS = frozenset({"schema_version", "weapons", "passives", "non_items"})
+_KEYS = frozenset({"schema_version", "weapons", "passives", "non_items", "empty_slot"})
 
 
 @dataclass(frozen=True)
 class HudIdentityVocabulary:
-    """武器・パッシブ・非アイテムの identity 対応表。
+    """武器・パッシブ・非アイテム・空スロットの identity 対応表。
 
     weapons / passives は identity → Common 語彙名、non_items はスロットに入らない identity の集合です。
+    empty_slot は空スロット用テンプレートの identity で、在庫の None（読めなかった枠）とは区別します。
     """
 
     weapons: Mapping[str, str]
     passives: Mapping[str, str]
     non_items: frozenset[str]
+    empty_slot: str
 
     def type_name(self, identity: str, kind: str) -> str | None:
         """identity を指定スロット種別の Common 語彙名へ写す。
@@ -74,7 +76,10 @@ def _parse(data: Any) -> HudIdentityVocabulary:
         raise ValueError("non_items must be a list of lowercase identities")
     if seen & set(non_items) or len(set(non_items)) != len(non_items):
         raise ValueError("non_items overlaps items or is duplicated")
-    return HudIdentityVocabulary(tables["weapons"], tables["passives"], frozenset(non_items))
+    empty_slot = data["empty_slot"]
+    if not isinstance(empty_slot, str) or not empty_slot or empty_slot != empty_slot.lower() or empty_slot in seen | set(non_items):
+        raise ValueError("empty_slot must be a lowercase identity distinct from items and non_items")
+    return HudIdentityVocabulary(tables["weapons"], tables["passives"], frozenset(non_items), empty_slot)
 
 
 def load_hud_identity_vocabulary(path: str | Path = DEFAULT_PATH) -> HudIdentityVocabulary:

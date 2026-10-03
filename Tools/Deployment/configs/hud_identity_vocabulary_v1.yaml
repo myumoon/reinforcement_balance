@@ -62,3 +62,7 @@ passives:
 
 # 武器・パッシブではない identity（レベルアップ画面の代替報酬など）。スロットに出たら「不明」として扱う。
 non_items: [gold, chicken]
+
+# 空スロット用テンプレートの identity。HUD 在庫でこの名前の枠だけを「空スロット確定」として扱う。
+# 在庫の None は「読めなかった（low_margin・低信頼・遮蔽）」と区別できないので、常に「不明」として扱う。
+empty_slot: empty_slot

@@ -8,14 +8,16 @@ from __future__ import annotations
 from survivors.slot_level_tracker import SlotLevelTracker
 from survivors.vision.hud_parser import HudStateV1, ParsedCard
 
+EMPTY = "empty_slot"
+
 
 def _hud(state: str = "gameplay", *, inventory=("whip",), level: int | None = 1, cards=(), skip=False,
          session="s", confidence=.9) -> HudStateV1:
     """追跡器に必要な項目だけを変えた HudStateV1 を作る。
 
-    在庫は先頭から詰め、残りは空スロットにします。
+    在庫は先頭から詰め、残りは空スロット確定（empty_slot）にします。None を渡すと読めなかった枠です。
     """
-    inv = tuple(inventory) + (None,) * (12 - len(inventory))
+    inv = tuple(inventory) + (EMPTY,) * (12 - len(inventory))
     return HudStateV1(
         "hud_state.v1", session, 1, 1, "a" * 64, state, confidence, "ok",
         20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", level, .9, "ok",
@@ -182,3 +184,52 @@ def test_low_confidence_screen_changes_nothing():
     tracker.observe(_hud("chest", confidence=.2))
     tracker.observe(_hud(inventory=("whip", "garlic"), confidence=.2))
     assert tracker.level("whip") == 1 and tracker.level("garlic") is None
+
+
+def test_b_unread_new_slot_after_level_up_does_not_infer_owned_pick():
+    """読めない枠（None）が残ったまま戻ったら、所持カードが1枚でもレベルを推測しない。
+
+    garlic を取ったがアイコンが low_margin で None のままのケースです。新アイテムを取ったのか
+    whip を強化したのか決められないので whip は None（不明）になります。
+    """
+    tracker = SlotLevelTracker()
+    unread_after = ("whip", None)
+    _level_up(tracker, [_card("whip", 2), _card("garlic", 1, index=1)], after_inventory=unread_after)
+    assert tracker.level("whip") is None
+    # 後で garlic が読めても、直前に読めていなかった枠から出たので Lv1 とは断定しない
+    tracker.observe(_hud(inventory=("whip", "garlic"), level=2))
+    assert tracker.level("garlic") is None
+
+
+def test_b_all_slots_read_still_sets_level():
+    """全枠が identity か空確定として読めていれば、従来どおり所持カード1枚でレベルが確定する。
+
+    読めない枠の規則が、読めている場合の判定を壊していないことの確認です。
+    """
+    tracker = SlotLevelTracker()
+    _level_up(tracker, [_card("whip", 2), _card("garlic", 1, index=1)], after_inventory=("whip", EMPTY))
+    assert tracker.level("whip") == 2
+
+
+def test_b_new_identity_from_previously_unread_slot_is_not_treated_as_pick():
+    """直前に読めなかった枠から現れた identity は、今回選んだ新アイテムとは断定しない。
+
+    前から持っていた garlic が読めるようになっただけの可能性があるので、garlic も、
+    カードにある所持 whip も None（不明）にします。
+    """
+    tracker = SlotLevelTracker()
+    before = ("whip", None)
+    _level_up(tracker, [_card("whip", 2), _card("garlic", 2, index=1)], inventory=before, after_inventory=("whip", "garlic"))
+    assert tracker.level("whip") is None and tracker.level("garlic") is None
+
+
+def test_a_first_gameplay_frame_counts_new_identities_even_with_unread_slots():
+    """session 最初の gameplay では、読めない枠があっても見えた identity を Lv1 とする（ラン開始の初期武器）。
+
+    読めなかった枠の identity は、その後に読めても出所が不確かなので不明のままです。
+    """
+    tracker = SlotLevelTracker()
+    tracker.observe(_hud(inventory=("whip", None)))
+    assert tracker.level("whip") == 1
+    tracker.observe(_hud(inventory=("whip", "garlic")))
+    assert tracker.level("garlic") is None

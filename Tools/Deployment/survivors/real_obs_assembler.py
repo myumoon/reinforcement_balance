@@ -13,6 +13,7 @@ from reinbalance_survivors_contracts.ui_policy import (
 )
 from .deploy_obs_adapter import NamedEstimate, build_deploy_observation, normalized_category
 from .deploy_obs_v2_input import build_v2_observation, hud_slots_from_inventory
+from .hud_identity_vocabulary import load_hud_identity_vocabulary
 from .perception_snapshot import PerceptionSnapshot, UiPresentationSnapshotV1, build_ui_presentation_from_hud
 from .screen_space_features import build_screen_space_estimates
 from .slot_level_tracker import SlotLevelTracker
@@ -159,7 +160,8 @@ def _item_context(
     # has_prerequisite は画面から観測不可。context_danger_occupancy_v1 スキーマで
     # occupancy (0=空, 1=占有) を使う。simulator の context_danger_v1 とは別スキーマのため
     # 対応する専用モデルが必要。parser が per-slot level を提供すれば context_danger_v1 へ移行可。
-    inventory_levels = tuple(1 if item is not None else 0 for item in joined.hud.inventory)
+    empty = load_hud_identity_vocabulary().empty_slot  # 空スロット確定の identity も空(0)として数える
+    inventory_levels = tuple(1 if item is not None and item != empty else 0 for item in joined.hud.inventory)
     nearest = screen.get("nearest_enemy_offset")
     radius = screen.get("nearest_enemy_screen_radius")
     enemy_density = screen["enemy_density"].value[0]
