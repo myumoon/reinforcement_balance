@@ -1,4 +1,9 @@
-"""Typed 04-09 snapshot replay による Survivors perception benchmark。"""
+"""Typed 04-09 snapshot replay による Survivors perception benchmark。
+
+正解と予測の PerceptionSnapshot を tick ごとに比べ、画面状態・HUD・world・UI ROI の指標と
+slice ごとの件数・信頼区間を集計し、formal gate で合否を決めます。
+04-13 で DeployObs v2 の誤差指標・weapon slice・出現数依存 slice の「該当なし」規則を追加しました。
+"""
 
 from __future__ import annotations
 
@@ -402,6 +407,12 @@ class SnapshotReplayTick:
 
 @dataclass
 class BenchmarkReport:
+    """1回の benchmark 実行で集計した指標・slice 件数・gate 結果。
+
+    metrics_wire() の内容が final verdict の metrics になり、読み込み時に gate を再計算します。
+    absent_slices は「該当なし」とした slice と実測出現数、obs_v2_errors は v2 segment の誤差です。
+    """
+
     development_only: bool
     formal_perception_verdict_eligible: bool
     session_kind: str
@@ -439,6 +450,11 @@ class BenchmarkReport:
     passed: bool = False
 
     def metrics_wire(self) -> dict[str, Any]:
+        """gate 再計算に使う指標だけを dict で返す。
+
+        合否・blocking 理由・formal 可否などの判定結果は含めず、
+        absent_slices・obs_v2_errors を含む全指標を verdict の metrics として渡します。
+        """
         omitted = {
             "development_only",
             "formal_perception_verdict_eligible",
@@ -899,7 +915,12 @@ def _empty_report(*, development_only: bool, formal_eligible: bool) -> Benchmark
 
 
 def _metric_gate(metrics: dict[str, Any], *, formal: bool = False) -> list[str]:
-    """writer/loader と benchmark が共有する stale-proof threshold gate。"""
+    """writer/loader と benchmark が共有する stale-proof threshold gate。
+
+    指標ごとの閾値と、formal=True のときは slice の下限件数・CI 下限を確かめて blocking 理由を返します。
+    出現数依存 slice が下限未満なら「該当なし」として下限・CI 判定から外し、
+    absent_slices が slice_counts から再計算した値と違えば blocking にします。
+    """
     blocking: list[str] = []
     counts = metrics["slice_counts"]
     required = {
@@ -994,7 +1015,11 @@ def _metric_gate(metrics: dict[str, Any], *, formal: bool = False) -> list[str]:
 def recompute_gate_from_metrics(
     metrics: dict[str, Any], *, formal: bool = False
 ) -> tuple[bool, list[str]]:
-    """verdict loader 用に metric mapping を型検証して gate を再計算する。"""
+    """verdict loader 用に metric mapping を型検証して gate を再計算する。
+
+    保存済み metrics のキー集合・件数・slice 要約・absent_slices・obs_v2_errors の形を厳密に確かめ、
+    不正なら ValueError、正しければ _metric_gate で (合否, blocking 理由) を返します。
+    """
     if not isinstance(metrics, dict):
         raise ValueError("metrics must be a dict")
     required = set(_empty_report(development_only=True, formal_eligible=False).metrics_wire())
@@ -1094,6 +1119,11 @@ def _run_benchmark_common(
     formal_eligible: bool, rng_seed: int, n_bootstrap: int, alpha: float,
     formal_evidence: Mapping[str, FormalReplayEvidence] | None = None,
 ) -> BenchmarkReport:
+    """snapshot replay tick または BenchmarkRecord 列から BenchmarkReport を集計する。
+
+    snapshot 入力では named slice（foreground class・event・time band）の件数と、
+    正解・予測の DeployObs v2 の誤差（obs_v2_errors）も数え、absent_slices を実測件数から求めます。
+    """
     if type(rng_seed) is not int:
         raise ValueError("rng_seed must be an int")
     # validate bootstrap arguments even when a slice is empty.
