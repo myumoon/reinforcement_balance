@@ -22,6 +22,46 @@ ReinBalance/Source/ReinBalanceEditor/Public/Training/SurvivorsHttpEnvService.h
 
 ---
 
+## deploy_raw（opt-in）
+
+DeployObs v2 の観測を Training 側で作るための raw state。既定は無効で、無効のときの `/reset`・`/step` 応答、flat obs、`obs_schema_hash` は従来と同一（キー自体を出さない）。
+
+- 有効化: `POST /params {"deploy_raw": true}`。JSON bool 以外は `{"error":"deploy_raw must be bool"}` で拒否し、同じリクエストの他の項目も更新しない。`false` で無効化。reset では解除されない。
+- 有効時の `/reset` 応答: `{"obs":[...],"obs_schema_hash":"...","deploy_raw":{...}}`
+- 有効時の `/step` 応答: `info` に `deploy_raw` キーが増える（既存キーはそのまま）。
+- Training 側の読み手は `Tools/Training/games/survivors/deploy_raw_env.py`（`DeployRawEnv`）。
+
+`deploy_raw` のキー（順序固定・全キー必須）:
+
+| キー | 型 | 内容 |
+|---|---|---|
+| `schema_version` | str | `"survivors_deploy_raw.v1"` |
+| `elapsed_s` | float | 経過時間（秒）。Python 側の timestamp はこれを ns にしたもの |
+| `camera` | object | `center_x` / `center_y`（= 自機位置）、`half_width` 400、`half_height` 225、`cull_margin` 100（u） |
+| `player` | object | `world_x` / `world_y`、`hp_ratio`（0〜1）、`level`（int） |
+| `duration_mult` | float | パッシブによる持続時間倍率 |
+| `weapon_slots` / `passive_slots` | list × 6 | `{"index", "type_id", "level"}`。`type_id` は C++ `EWeaponType` / `EPassiveItemType` の値（空き = 0、level 0） |
+| `entities` | list | 下表 |
+
+`entities` の各要素:
+
+| キー | 型 | 内容 |
+|---|---|---|
+| `entity_id` | int | 同じ物体なら tick をまたいで不変、生成のたびに新しい id。上位ビット（`>> 40`）が id 空間（1 敵 / 2 ジェム / 3 projectile / 4 zone / 5 orbit / 6 aura） |
+| `class_name` | str | `enemy_normal` / `enemy_boss` / `gem_blue` / `gem_green` / `gem_red` / `weapon_projectile` / `weapon_zone` / `weapon_orbit` / `weapon_aura` |
+| `world_x` / `world_y` | float | 世界座標 |
+| `radius_world` | float | 敵は当たり判定半径、ジェムは 0、武器エフェクトは `GetProjectileObsView()` の半径 |
+| `slot` | int \| null | 武器エフェクトだけ。出した武器のスロット |
+| `ttl_true_s` | float \| null | 武器エフェクトだけ。sim の真の残り時間（oracle 診断専用。release では使わない） |
+| `warning` | bool | 武器エフェクトの予兆表示中（Santa Water など）。敵・ジェムは false |
+
+- entity はカメラ範囲＋余白（`|dx| <= 400+100`、`|dy| <= 225+100`、境界を含む）で除外済み。最終的な可視判定（中心が画面内）は Python 側で行う。
+- 武器エフェクトの範囲は `GetProjectileObsView()` と同じ（orbit は King Bible / Unholy Vespers、aura は Garlic / Soul Eater）。King Bible の本は周期ごとに新しい id になる。
+- sim に遮蔽は無いので `occluded` は出さない（Python 側で常に false）。
+- 実 UE5（PIE）から取得した応答の fixture はまだ無い（WAITING_MANUAL）。Python テストは LLT が C++ の JSON 生成関数から書き出した `Tools/Training/tests/survivors/fixtures/deploy_raw_llt_v1.json` を使う。
+
+---
+
 ## `/params` エンドポイントの挙動
 
 ### 即時反映（リセット待ちなし）
