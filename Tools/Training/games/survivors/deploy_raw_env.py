@@ -131,6 +131,8 @@ class DeployRawEnv:
         ensure(isinstance(viewport, tuple) and len(viewport) == 2 and all(type(v) is int and v > 0 for v in viewport), "viewport must be a positive int pair")
         self.env, self.viewport = env, viewport
         self._last_player: tuple[float, float] | None = None
+        # 直近の reset/step 応答の flat obs（同じ応答の deploy_raw と対になる。蒸留収集の教師入力に使う）
+        self.last_flat_obs: Any = None
 
     def _convert(self, payload: Any) -> dict[str, Any]:
         """deploy_raw を raw dict にし、前フレームとの位置差から移動方向を入れる。
@@ -153,10 +155,10 @@ class DeployRawEnv:
         /params の失敗や deploy_raw の欠落は黙って flat obs に戻さず例外にします。
         """
         ensure(self.env.set_params(deploy_raw=True) is True, "failed to enable deploy_raw via /params")
-        _obs, info = self.env.reset(seed=seed, options=options)
+        obs, info = self.env.reset(seed=seed, options=options)
         response = self.env.last_reset_response
         ensure(isinstance(response, Mapping) and "deploy_raw" in response, "reset response has no deploy_raw")
-        self._last_player = None
+        self._last_player, self.last_flat_obs = None, obs
         return self._convert(response["deploy_raw"]), info
 
     def step(self, action: Any):
@@ -164,7 +166,8 @@ class DeployRawEnv:
 
         返す info からは deploy_raw を取り除きます（観測として返すため）。
         """
-        _obs, reward, terminated, truncated, info = self.env.step(action)
+        obs, reward, terminated, truncated, info = self.env.step(action)
         ensure(isinstance(info, Mapping) and "deploy_raw" in info, "step info has no deploy_raw")
+        self.last_flat_obs = obs
         rest = {key: value for key, value in info.items() if key != "deploy_raw"}
         return self._convert(info["deploy_raw"]), reward, terminated, truncated, rest
