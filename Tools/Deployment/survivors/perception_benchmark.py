@@ -10,6 +10,9 @@ from typing import Any, Final, Literal, Mapping, Sequence
 import numpy as np
 
 from reinbalance_survivors_contracts.canonical_json import canonical_hash
+from reinbalance_survivors_contracts.deploy_obs import DeployObservation, DeployObsSchema
+from reinbalance_survivors_contracts.deploy_obs_v2_features import load_deploy_obs_v2_feature_params
+from reinbalance_survivors_contracts.perception_profile import OBS_V2_RESIDUAL_FIELDS
 
 from .perception_snapshot import (
     FormalReplayEvidence,
@@ -76,9 +79,19 @@ _FORMAL_FOREGROUND_CLASSES: Final[tuple[str, ...]] = (
     "pickup_special",
     "hazard_projectile",
     "hazard_area",
+    "weapon_projectile",
+    "weapon_zone",
+    "weapon_aura",
+    "weapon_orbit",
 )
+# weapon_orbit（King Bible）は Mad Forest 標準ビルドで出現が少ないため下限を 50 にする。
+# 他の foreground class は従来どおり 200（下限を満たさないときは下の「該当なし」規則で扱う）。
+_FORMAL_FOREGROUND_FLOOR_OVERRIDES: Final[Mapping[str, int]] = {"weapon_orbit": 50}
 _FORMAL_SLICE_COUNT_FLOORS: Final[Mapping[str, int]] = {
-    **{f"foreground_class:{name}": 200 for name in _FORMAL_FOREGROUND_CLASSES},
+    **{
+        f"foreground_class:{name}": _FORMAL_FOREGROUND_FLOOR_OVERRIDES.get(name, 200)
+        for name in _FORMAL_FOREGROUND_CLASSES
+    },
     "event:boss": 100,
     "event:hazard": 100,
     "event:level_up": 100,
@@ -108,6 +121,100 @@ _FORMAL_SLICE_THRESHOLDS: Final[Mapping[str, float]] = {
 _FORMAL_REQUIRED_SLICES: Final[frozenset[str]] = frozenset(
     set(_FORMAL_TIME_BANDS) | set(_FORMAL_SLICE_COUNT_FLOORS)
 )
+# 「出現数依存 slice」: ステージによっては出現自体が少ない slice（敵の弾・範囲攻撃と
+# プレイヤーの武器エフェクト）。正式収録の出現数が下限未満なら「該当なし」として
+# 実測の出現数を BenchmarkReport.absent_slices に記録し、正式判定の必須条件から外す。
+# 下限そのものは下げない。ここに無い slice は従来どおり下限未満で失敗する。
+_FORMAL_OCCURRENCE_DEPENDENT_SLICES: Final[frozenset[str]] = frozenset({
+    "foreground_class:hazard_projectile",
+    "foreground_class:hazard_area",
+    "foreground_class:weapon_projectile",
+    "foreground_class:weapon_zone",
+    "foreground_class:weapon_aura",
+    "foreground_class:weapon_orbit",
+    "event:hazard",
+})
+
+
+_V2_SCHEMA: Final[DeployObsSchema] = DeployObsSchema.default_v2()
+_OBS_V2_DIR16_SEGMENTS: Final[tuple[tuple[str, str], ...]] = (
+    ("obs_v2_enemy_dir16_l1", "enemy_nearest_dist_16dir"),
+    ("obs_v2_enemy_dir16_l1", "enemy_density_near_16dir"),
+    ("obs_v2_enemy_dir16_l1", "enemy_density_mid_16dir"),
+    ("obs_v2_gem_dir16_l1", "gem_nearest_dist_16dir"),
+    ("obs_v2_gem_dir16_l1", "gem_density_near_16dir"),
+    ("obs_v2_gem_dir16_l1", "gem_density_mid_16dir"),
+    ("obs_v2_rare_gem_dir16_l1", "rare_gem_nearest_dist_16dir"),
+    ("obs_v2_rare_gem_dir16_l1", "rare_gem_density_near_16dir"),
+    ("obs_v2_rare_gem_dir16_l1", "rare_gem_density_mid_16dir"),
+    ("obs_v2_projectile_dir16_l1", "weapon_projectile_density_16dir"),
+)
+
+
+def obs_v2_residuals(ground: DeployObservation, predicted: DeployObservation) -> list[tuple[str, float]]:
+    """正解と予測の DeployObs v2 から、新 segment ごとの残差（field 名, 値）を列挙する。
+
+    16方向特徴は segment 全体の L1 誤差、zone は位置の距離と半径の差、スロットは種類 id の
+    不一致（0/1）、残り時間は「予測 − 正解」の秒（初観測の基準ずれを含む）です。
+    正解・予測の両方で有効（validity>0）な要素だけを比べ、どちらかが v2 でなければ何も返しません。
+    benchmark の誤差指標と calibration 残差の両方がこの関数を使います。
+    """
+    if ground.schema_hash != _V2_SCHEMA.schema_hash or predicted.schema_hash != _V2_SCHEMA.schema_hash:
+        return []
+    layout = _V2_SCHEMA.layout
+
+    def segment(name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """segment の正解値・予測値・両方有効のマスクを返す。
+
+        比較対象を両方有効な要素へ絞るための補助です。
+        """
+        offset, size = layout[name]
+        part = slice(offset, offset + size)
+        both = (ground.validity[part] > 0) & (predicted.validity[part] > 0)
+        return ground.values[part].astype(float), predicted.values[part].astype(float), both
+
+    out: list[tuple[str, float]] = []
+    for field_name, name in _OBS_V2_DIR16_SEGMENTS:
+        g, p, both = segment(name)
+        if both.all():
+            out.append((field_name, float(np.abs(p - g).sum())))
+    g, p, both = segment("weapon_zone_geometry")
+    for j in range(len(g) // 3):
+        # 正解・予測の両方で zone が見えている枠（半径 > 0）だけを比べる（見逃しは foreground slice で測る）
+        if both[3 * j:3 * j + 3].all() and g[3 * j + 2] > 0 and p[3 * j + 2] > 0:
+            out.append(("obs_v2_zone_position", math.hypot(p[3 * j] - g[3 * j], p[3 * j + 1] - g[3 * j + 1])))
+            out.append(("obs_v2_zone_radius", float(p[3 * j + 2] - g[3 * j + 2])))
+    for name in ("weapon_slot_ids", "passive_slot_ids"):
+        g, p, both = segment(name)
+        out.extend(("obs_v2_slot_id_mismatch", float(not math.isclose(gv, pv, abs_tol=1e-6))) for gv, pv, ok in zip(g, p, both) if ok)
+    # 残り時間は正解・予測の両方でエフェクトが見えている（半径 > 0）枠だけを比べる。
+    # 「無い」同士の 0 を混ぜると初観測ずれの平均が薄まるためです。
+    max_ttl = float(load_deploy_obs_v2_feature_params()["max_projectile_obs_ttl_s"])
+    g_geo, p_geo, _ = segment("weapon_zone_geometry")
+    g_orbit, p_orbit, _ = segment("weapon_orbit_radius")
+    for name, g_radius, p_radius in (
+        ("weapon_orbit_ttl", g_orbit, p_orbit),
+        ("weapon_zone_ttl", g_geo[2::3], p_geo[2::3]),
+    ):
+        g, p, both = segment(name)
+        out.extend(
+            ("obs_v2_ttl_first_seen_offset_s", float(p[i] - g[i]) * max_ttl)
+            for i in range(len(g)) if both[i] and g_radius[i] > 0 and p_radius[i] > 0
+        )
+    return out
+
+
+def formal_absent_slices(slice_counts: Mapping[str, int]) -> dict[str, int]:
+    """出現数依存 slice のうち、実測の出現数が下限未満のものを slice 名 → 出現数で返す。
+
+    ここで返した slice だけが「該当なし」として正式判定の必須条件から外れます。
+    出現数は slice_counts の実測値をそのまま使い、推測や下限の変更はしません。
+    """
+    return {
+        name: int(slice_counts.get(name, 0))
+        for name in sorted(_FORMAL_OCCURRENCE_DEPENDENT_SLICES)
+        if slice_counts.get(name, 0) < _FORMAL_SLICE_COUNT_FLOORS[name]
+    }
 _NAMED_SLICE_PREFIXES: Final[frozenset[str]] = frozenset(
     {"screen_state", "time_band", "foreground_class", "event"}
 )
@@ -152,6 +259,7 @@ def formal_threshold_content_hash() -> str:
         "slice_session_floors": dict(sorted(_FORMAL_SLICE_SESSION_FLOORS.items())),
         "slice_thresholds": dict(sorted(_FORMAL_SLICE_THRESHOLDS.items())),
         "time_bands": sorted(_FORMAL_TIME_BANDS),
+        "occurrence_dependent_slices": sorted(_FORMAL_OCCURRENCE_DEPENDENT_SLICES),
     })
 
 
@@ -322,6 +430,11 @@ class BenchmarkReport:
     slice_counts: dict[str, int] = field(default_factory=dict)
     slice_session_counts: dict[str, int] = field(default_factory=dict)
     slices: list[dict[str, Any]] = field(default_factory=list)
+    # 「該当なし」とした出現数依存 slice（slice 名 → 実測の出現数）。final verdict の metrics に残る。
+    absent_slices: dict[str, int] = field(default_factory=dict)
+    # DeployObs v2 の新 segment ごとの誤差指標（残差 field → 絶対値の平均 mean_abs と件数 count）。
+    # 実データでの基準が決まるまでは gate に使わず記録だけする。
+    obs_v2_errors: dict[str, dict[str, float | int]] = field(default_factory=dict)
     blocking_reasons: list[str] = field(default_factory=list)
     passed: bool = False
 
@@ -846,7 +959,14 @@ def _metric_gate(metrics: dict[str, Any], *, formal: bool = False) -> list[str]:
             summary["name"]: summary for summary in metrics["slices"]
             if summary["name"] != "overall_screen_state"
         }
+        # 「該当なし」は slice_counts の実測値から再計算した結果とだけ一致を認める。
+        # 保存済み metrics の absent_slices を書き換えて必須条件を外すことはできない。
+        absent = formal_absent_slices(counts)
+        if metrics["absent_slices"] != absent:
+            blocking.append("absent_slices does not match measured occurrence counts")
         for name, floor in sorted(_FORMAL_SLICE_COUNT_FLOORS.items()):
+            if name in absent:
+                continue
             count = counts.get(name, 0)
             if count < floor:
                 blocking.append(
@@ -858,7 +978,7 @@ def _metric_gate(metrics: dict[str, Any], *, formal: bool = False) -> list[str]:
                 blocking.append(
                     f"formal slice '{name}': {count} sessions < {floor} required"
                 )
-        for name in sorted(_FORMAL_REQUIRED_SLICES):
+        for name in sorted(_FORMAL_REQUIRED_SLICES - set(absent)):
             summary = summaries.get(name)
             threshold = _FORMAL_SLICE_THRESHOLDS[name]
             if summary is None or summary["ci_lower"] is None:
@@ -908,6 +1028,20 @@ def recompute_gate_from_metrics(
         for key, value in metrics["slice_session_counts"].items()
     ):
         raise ValueError("slice_session_counts must contain named non-negative counts")
+    if not isinstance(metrics["absent_slices"], dict) or not all(
+        key in _FORMAL_OCCURRENCE_DEPENDENT_SLICES and type(value) is int and value >= 0
+        for key, value in metrics["absent_slices"].items()
+    ):
+        raise ValueError("absent_slices must map occurrence-dependent slices to non-negative counts")
+    if not isinstance(metrics["obs_v2_errors"], dict):
+        raise ValueError("obs_v2_errors must be a dict")
+    for key, row in metrics["obs_v2_errors"].items():
+        if (
+            key not in OBS_V2_RESIDUAL_FIELDS or not isinstance(row, dict) or set(row) != {"mean_abs", "count"}
+            or type(row["count"]) is not int or row["count"] <= 0
+            or _strict_float(row["mean_abs"], f"obs_v2_errors[{key}].mean_abs") < 0.0
+        ):
+            raise ValueError("obs_v2_errors entries do not match the exact schema")
     if not isinstance(metrics["slices"], list):
         raise ValueError("slices must be a list")
     for summary in metrics["slices"]:
@@ -932,7 +1066,7 @@ def recompute_gate_from_metrics(
         if type(metrics[name]) is not int or metrics[name] < 0:
             raise ValueError(f"{name} must be a non-negative integer")
     for name, value in metrics.items():
-        if name in {"slice_counts", "slice_session_counts", "slices", "expected_tick_count", "observed_tick_count", "latency_tick_count", "total_records", "roi_false_positive_count"}:
+        if name in {"slice_counts", "slice_session_counts", "slices", "absent_slices", "obs_v2_errors", "expected_tick_count", "observed_tick_count", "latency_tick_count", "total_records", "roi_false_positive_count"}:
             continue
         _strict_float(value, name)
     for name in (
@@ -982,6 +1116,7 @@ def _run_benchmark_common(
     foreground_frame_counts: dict[str, int] = defaultdict(int)
     event_occurrence_counts: dict[str, int] = defaultdict(int)
     event_prev_present: dict[tuple[str, str], bool] = {}
+    obs_v2_abs: dict[str, list[float]] = defaultdict(list)
     if raw_values and all(isinstance(value, SnapshotReplayTick) for value in raw_values):
         # V1 snapshot を変更せず、ground-truth tick から汎用 named slice label を派生する。
         # 同じ tick 内の複数 metric record ではなく slice ごとに一度だけ数える。
@@ -1067,6 +1202,9 @@ def _run_benchmark_common(
             for _evt in _EVENT_LABELS:
                 if _evt not in slice_counts_for_tick:
                     event_prev_present[(tick.session_id, _evt)] = False
+            if tick.predicted is not None:
+                for name, residual in obs_v2_residuals(tick.ground_truth.deploy_obs, tick.predicted.deploy_obs):
+                    obs_v2_abs[name].append(abs(residual))
         for label, sessions in foreground_entity_ids.items():
             named_slice_counts[label] += sum(len(ids) for ids in sessions.values())
         for label, count in foreground_frame_counts.items():
@@ -1220,6 +1358,11 @@ def _run_benchmark_common(
         expected_tick_count=len(expected_set), observed_tick_count=len(observed_set),
         latency_tick_count=len(positive_latencies), slice_counts=slice_counts,
         slice_session_counts=slice_session_counts, slices=slice_summaries,
+        absent_slices=formal_absent_slices(slice_counts),
+        obs_v2_errors={
+            name: {"mean_abs": float(np.mean(values)), "count": len(values)}
+            for name, values in sorted(obs_v2_abs.items())
+        },
     )
     report.blocking_reasons = _metric_gate(report.metrics_wire())
     report.passed = not report.blocking_reasons

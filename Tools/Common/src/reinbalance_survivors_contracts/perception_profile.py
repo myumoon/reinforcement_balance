@@ -21,7 +21,8 @@ from .artifact_store import ArtifactStore, ArtifactStoreError
 from .canonical_json import canonical_hash, sha256_hex
 from .perception_error import ITEM_CATEGORY_SIZE, PerceptionErrorProfile
 
-CALIBRATION_ARTIFACT_SCHEMA_VERSION: Final[str] = "perception_calibration_profile.v1"
+# v2（04-13）: artifact に DeployObs v2 segment の誤差統計 segment_error_stats を追加した。
+CALIBRATION_ARTIFACT_SCHEMA_VERSION: Final[str] = "perception_calibration_profile.v2"
 
 # producer(benchmark_survivors_perception)が発行する calibration node の node_kind。
 CALIBRATION_PROFILE_NODE_KIND: Final[str] = "perception_calibration_profile"
@@ -52,6 +53,28 @@ _RESIDUAL_FIELDS: Final[frozenset[str]] = frozenset(
         "item_category", "enemy_category",
     }
 )
+
+# DeployObs v2 の新 segment ごとの残差 field（04-13）。
+# 16方向特徴は segment ごとの L1 誤差、zone は位置（距離）と半径（符号付き）の誤差、
+# スロットは種類 id の不一致（0/1、平均が誤り率で 1-平均が正解率）、
+# ttl は「予測 − 正解」の残り時間（秒、符号付き）。ttl の符号付き平均が
+# 初観測の基準ずれ（Santa Water の警告時間・Peachone の照準など）の calibration 項目になる。
+OBS_V2_RESIDUAL_FIELDS: Final[tuple[str, ...]] = (
+    "obs_v2_enemy_dir16_l1",
+    "obs_v2_gem_dir16_l1",
+    "obs_v2_rare_gem_dir16_l1",
+    "obs_v2_projectile_dir16_l1",
+    "obs_v2_zone_position",
+    "obs_v2_zone_radius",
+    "obs_v2_slot_id_mismatch",
+    "obs_v2_ttl_first_seen_offset_s",
+)
+_NONNEGATIVE_OBS_V2_FIELDS: Final[frozenset[str]] = frozenset({
+    "obs_v2_enemy_dir16_l1", "obs_v2_gem_dir16_l1", "obs_v2_rare_gem_dir16_l1",
+    "obs_v2_projectile_dir16_l1", "obs_v2_zone_position",
+})
+_RESIDUAL_FIELDS = _RESIDUAL_FIELDS | frozenset(OBS_V2_RESIDUAL_FIELDS)
+_SEGMENT_STAT_KEYS: Final[frozenset[str]] = frozenset({"mean", "std", "count"})
 
 
 class HashMismatchError(ValueError):
@@ -144,9 +167,11 @@ class CalibrationResidual:
         } and not 0.0 <= self.residual <= 1.0:
             raise InvalidResidualError(f"{self.field} residual must be in [0, 1]")
         if self.field in {
-            "coord_quantization_px", "unknown_screen_collapse_duration",
+            "coord_quantization_px", "unknown_screen_collapse_duration", *_NONNEGATIVE_OBS_V2_FIELDS,
         } and self.residual < 0.0:
             raise InvalidResidualError(f"{self.field} residual must be non-negative")
+        if self.field == "obs_v2_slot_id_mismatch" and self.residual not in (0.0, 1.0):
+            raise InvalidResidualError("obs_v2_slot_id_mismatch residual must be 0 or 1")
         confidence = _strict_number(self.confidence, "confidence")
         if not 0.0 <= confidence <= 1.0:
             raise InvalidResidualError("confidence must be in [0, 1]")
@@ -181,6 +206,9 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
 
     calibration_session_hashes: Mapping[str, str] = field(default_factory=dict)
     field_sample_counts: Mapping[str, int] = field(default_factory=dict)
+    # DeployObs v2 segment の誤差統計（残差 field → mean・std・count）。v1 profile と同じ
+    # PerceptionErrorProfile 本体には入れず、artifact に付けて sim 側の誤差 wrapper が参照できるようにする。
+    segment_error_stats: Mapping[str, Mapping[str, float | int]] = field(default_factory=dict)
     fit_code_hash: str = ""
     development_only: bool = True
     # store 検証経路で束縛された calibration descriptor の identity hash（wire には含めない）。
@@ -203,6 +231,16 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
         counts = dict(self.field_sample_counts)
         if not counts or not all(type(n) is str and type(c) is int and c > 0 for n, c in counts.items()):
             raise ValueError("field_sample_counts must contain positive integer counts")
+        stats = {name: dict(row) for name, row in dict(self.segment_error_stats).items()}
+        for name, row in stats.items():
+            if name not in OBS_V2_RESIDUAL_FIELDS or set(row) != _SEGMENT_STAT_KEYS:
+                raise ValueError(f"segment_error_stats[{name!r}] does not match the schema")
+            if type(row["count"]) is not int or row["count"] <= 0 or counts.get(name) != row["count"]:
+                raise ValueError(f"segment_error_stats[{name!r}].count must equal field_sample_counts")
+            for key in ("mean", "std"):
+                row[key] = _strict_number(row[key], f"segment_error_stats[{name!r}].{key}")
+            if row["std"] < 0.0:
+                raise ValueError(f"segment_error_stats[{name!r}].std must be non-negative")
         _require_sha256(self.fit_code_hash, "fit_code_hash")
         if type(self.development_only) is not bool:
             raise ValueError("development_only must be bool")
@@ -212,6 +250,9 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
             )
         object.__setattr__(self, "calibration_session_hashes", MappingProxyType(hashes))
         object.__setattr__(self, "field_sample_counts", MappingProxyType(counts))
+        object.__setattr__(self, "segment_error_stats", MappingProxyType({
+            name: MappingProxyType(row) for name, row in sorted(stats.items())
+        }))
 
     def to_artifact_wire(self) -> dict[str, Any]:
         return {
@@ -220,6 +261,7 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
             "profile_hash": self.profile_hash,
             "calibration_session_hashes": dict(self.calibration_session_hashes),
             "field_sample_counts": dict(self.field_sample_counts),
+            "segment_error_stats": {name: dict(row) for name, row in self.segment_error_stats.items()},
             "fit_code_hash": self.fit_code_hash,
             "development_only": self.development_only,
         }
@@ -248,8 +290,8 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
         """
         expected = {
             "schema_version", "profile", "profile_hash",
-            "calibration_session_hashes", "field_sample_counts", "fit_code_hash",
-            "development_only",
+            "calibration_session_hashes", "field_sample_counts", "segment_error_stats",
+            "fit_code_hash", "development_only",
         }
         if not isinstance(data, Mapping) or set(data) != expected:
             raise ValueError("calibration artifact fields do not match schema")
@@ -269,6 +311,7 @@ class FittedPerceptionErrorProfile(PerceptionErrorProfile):
             **profile.to_wire(),
             calibration_session_hashes=data["calibration_session_hashes"],
             field_sample_counts=data["field_sample_counts"],
+            segment_error_stats=data["segment_error_stats"],
             fit_code_hash=data["fit_code_hash"],
             development_only=data["development_only"],
             calibration_descriptor_hash=calibration_descriptor_hash,
