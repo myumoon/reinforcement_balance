@@ -1275,8 +1275,8 @@ class TestClassMapV2PackageCompatibility:
         entity = {f.name: str(f.type) for f in dataclasses.fields(TrackedEntityV2) if f.name not in new_fields}
         world = {f.name: str(f.type).replace("V2", "V1") for f in dataclasses.fields(TrackedWorldStateV2)}
         descriptor = {
-            "TrackedWorldStateV1": world,
-            "TrackedEntityV1": entity,
+            TrackedWorldStateV2.__name__.replace("V2", "V1"): world,
+            TrackedEntityV2.__name__.replace("V2", "V1"): entity,
             "PlayerAnchorState": {f.name: str(f.type) for f in dataclasses.fields(PlayerAnchorState)},
         }
         return hashlib.sha256(json.dumps(descriptor, sort_keys=True).encode()).hexdigest()

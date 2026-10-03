@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 
 from mine_survivors_active_learning import entropy_score, main, mine_top_k
+from survivors.vision.world_dataset import load_class_map
 
 
 def test_missing_class_probs_uses_class_map_num_classes(tmp_path):
@@ -24,4 +26,5 @@ def test_missing_class_probs_uses_class_map_num_classes(tmp_path):
     entropy = json.loads(out.read_text(encoding="utf-8"))[0]["components"]["entropy"]
     expected = mine_top_k([{"image_id": 1}], {2: 1}, 1, 1, num_classes=16)[0].components["entropy"]
     assert math.isclose(entropy, expected, rel_tol=1e-6)
-    assert not math.isclose(entropy, entropy_score([1.0 / 12] * 12), rel_tol=1e-6)
+    v1_classes = load_class_map(Path(__file__).resolve().parents[1] / "configs" / "world_class_map_v1.yaml").num_classes
+    assert not math.isclose(entropy, entropy_score([1.0 / v1_classes] * v1_classes), rel_tol=1e-6)

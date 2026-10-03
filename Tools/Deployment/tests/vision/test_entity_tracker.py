@@ -39,7 +39,7 @@ def _make_detection(
 
 
 _CLASS_MAP = default_class_map()
-_COARSE_BY_ID = _CLASS_MAP.coarse_by_class_id()
+COARSE_BY_ID = _CLASS_MAP.coarse_by_class_id()
 
 
 def _make_tracker(max_age_default: int = 5) -> EntityTracker:
@@ -49,7 +49,7 @@ def _make_tracker(max_age_default: int = 5) -> EntityTracker:
         max_match_cost=0.7,
         velocity_ema_alpha=0.6,
         confidence_decay_per_frame=0.9,
-        coarse_by_class_id=_COARSE_BY_ID,
+        coarse_by_class_id=COARSE_BY_ID,
     )
 
 
@@ -100,7 +100,7 @@ class TestMaxAgeExpiry:
             max_match_cost=0.7,
             velocity_ema_alpha=0.6,
             confidence_decay_per_frame=0.9,
-            coarse_by_class_id=_COARSE_BY_ID,
+            coarse_by_class_id=COARSE_BY_ID,
         )
         det = _make_detection([[100, 200, 200, 300]], [0.9], [1])
         tracker.update(det, frame_index=0, timestamp_ns=1000)
@@ -121,7 +121,7 @@ class TestMaxAgeExpiry:
             max_match_cost=0.7,
             velocity_ema_alpha=0.6,
             confidence_decay_per_frame=0.9,
-            coarse_by_class_id=_COARSE_BY_ID,
+            coarse_by_class_id=COARSE_BY_ID,
         )
         det = _make_detection([[100, 200, 200, 300]], [0.9], [1])
         tracker.update(det, frame_index=0, timestamp_ns=1000)
@@ -164,7 +164,7 @@ class TestOcclusion:
             max_match_cost=0.7,
             velocity_ema_alpha=0.6,
             confidence_decay_per_frame=0.8,
-            coarse_by_class_id=_COARSE_BY_ID,
+            coarse_by_class_id=COARSE_BY_ID,
         )
         det = _make_detection([[100, 200, 200, 300]], [0.9], [1])
         tracker.update(det, frame_index=0, timestamp_ns=0)
@@ -220,7 +220,7 @@ class TestTrackAttributes:
             max_match_cost=0.7,
             velocity_ema_alpha=0.5,
             confidence_decay_per_frame=0.9,
-            coarse_by_class_id=_COARSE_BY_ID,
+            coarse_by_class_id=COARSE_BY_ID,
         )
         det0 = _make_detection([[100, 100, 200, 200]], [0.9], [1])
         tracker.update(det0, frame_index=0, timestamp_ns=0)
@@ -297,7 +297,7 @@ class TestTrackedWorldStateV2:
             max_match_cost=0.7,
             velocity_ema_alpha=0.6,
             confidence_decay_per_frame=0.9,
-            coarse_by_class_id=_COARSE_BY_ID,
+            coarse_by_class_id=COARSE_BY_ID,
         )
         box = [[100, 200, 200, 300]]
         tracker.update(_make_detection(box, [0.9], [2]), frame_index=0, timestamp_ns=1000)
