@@ -1,7 +1,7 @@
 """WorldDetector — 本家 Survivors 画面のエンティティ検出器。
 
 torchvision の SSDLite320_MobileNet_V3_Large を骨格とし、head の出力クラス数を
-12（background 0 + foreground 11）へ置換する。
+class map の num_classes（v1=12, v2=16。background 0 + foreground）へ置換する。
 feasibility config で列挙されている architecture 以外を指定した場合は
 silent fallback せずに UnknownArchitectureError を送出する。
 
@@ -16,6 +16,7 @@ import math
 import pathlib
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Mapping
 
 import numpy as np
@@ -23,13 +24,27 @@ import yaml
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
-# 04-06 world_class_map_v2.yaml の foreground クラス名（background 除く）
-_KNOWN_CLASS_NAMES = frozenset([
-    "player_anchor", "enemy_normal", "enemy_elite", "enemy_boss",
-    "gem_blue", "gem_green", "gem_red",
-    "pickup_heal", "pickup_special",
-    "hazard_projectile", "hazard_area",
-])
+_CONFIGS_DIR = pathlib.Path(__file__).resolve().parents[2] / "configs"
+
+# detector config の schema_version ごとに対応する class map ファイル。
+# 期待 num_classes と既知クラス名はこの class map から導出し、リテラルで複製しない。
+_CLASS_MAP_FOR_CONFIG_SCHEMA = {
+    "world_detector.v1": "world_class_map_v1.yaml",
+    "world_detector.v2": "world_class_map_v2.yaml",
+}
+
+
+@lru_cache(maxsize=None)
+def _schema_class_map(schema_version: str) -> tuple[int, frozenset[str]]:
+    """config schema_version に対応する class map の (num_classes, foreground クラス名集合) を返す。
+
+    v1 config は 12 クラス、v2 config は 16 クラスの class map と対になる。
+    validator はこの値で num_classes とクラス名キーを検証する。
+    """
+    from survivors.vision.world_dataset import load_class_map
+
+    cm = load_class_map(_CONFIGS_DIR / _CLASS_MAP_FOR_CONFIG_SCHEMA[schema_version])
+    return cm.num_classes, frozenset(fc["name"] for fc in cm.foreground_classes)
 
 _ALLOWED_TOP_LEVEL_KEYS = frozenset([
     "schema_version", "formal_detector_eligible",
@@ -95,7 +110,7 @@ def _vnum(
 
 
 def validate_detector_config(config: Mapping[str, Any]) -> None:
-    """world_detector.v1 config の共有バリデーション境界。
+    """world_detector.v1 / v2 config の共有バリデーション境界。
 
     全 public 入口から必ず呼ぶ。未知キー・型違い・非有限値・未実装値を
     model / tracker 構築・推論・publish より前に拒否する。
@@ -114,10 +129,12 @@ def validate_detector_config(config: Mapping[str, Any]) -> None:
     if missing:
         raise ValueError(f"config に必須 key が欠落しています: {sorted(missing)}")
 
-    if config["schema_version"] != "world_detector.v1":
+    if config["schema_version"] not in _CLASS_MAP_FOR_CONFIG_SCHEMA:
         raise ValueError(
-            f"schema_version は 'world_detector.v1' が必要。got: {config['schema_version']!r}"
+            f"schema_version は {sorted(_CLASS_MAP_FOR_CONFIG_SCHEMA)} のいずれかが必要。"
+            f" got: {config['schema_version']!r}"
         )
+    expected_nc, known_class_names = _schema_class_map(config["schema_version"])
 
     fde = config["formal_detector_eligible"]
     if not isinstance(fde, bool) or fde is not False:
@@ -150,8 +167,10 @@ def validate_detector_config(config: Mapping[str, Any]) -> None:
             f" int 1 や文字列 'false' は不可。got: {ptb!r}"
         )
     nc = model.get("num_classes")
-    if isinstance(nc, bool) or not isinstance(nc, int) or nc != 12:
-        raise ValueError(f"model.num_classes は int 12 のみ。got: {nc!r}")
+    if isinstance(nc, bool) or not isinstance(nc, int) or nc != expected_nc:
+        raise ValueError(
+            f"model.num_classes は {config['schema_version']} の class map と同じ int {expected_nc} のみ。got: {nc!r}"
+        )
     inp_size = model.get("input_size")
     if not isinstance(inp_size, list) or len(inp_size) != 2:
         raise ValueError(f"model.input_size は 2 要素 list が必要。got: {inp_size!r}")
@@ -274,10 +293,10 @@ def validate_detector_config(config: Mapping[str, Any]) -> None:
     if not isinstance(max_age, dict):
         raise ValueError("tracker.max_age_by_class は dict が必要。")
     for _cls_name, _age in max_age.items():
-        if _cls_name not in _KNOWN_CLASS_NAMES:
+        if _cls_name not in known_class_names:
             raise ValueError(
                 f"tracker.max_age_by_class に未知の class 名があります: {_cls_name!r}"
-                f" (04-06 class map 外)"
+                f" ({config['schema_version']} の class map 外)"
             )
         _vnum(_age, f"tracker.max_age_by_class.{_cls_name}", lo=0, require_int=True)
     _vnum(tracker.get("max_match_cost"), "tracker.max_match_cost", lo=0)
@@ -302,7 +321,7 @@ def validate_detector_config(config: Mapping[str, Any]) -> None:
     if not isinstance(class_recall_min, dict):
         raise ValueError("dev_diagnostics.class_recall_min は dict が必要。")
     for _cls_name, _threshold in class_recall_min.items():
-        if _cls_name not in _KNOWN_CLASS_NAMES:
+        if _cls_name not in known_class_names:
             raise ValueError(
                 f"dev_diagnostics.class_recall_min に未知の class 名があります: {_cls_name!r}"
             )
@@ -525,7 +544,7 @@ class CheckpointManifest:
 class WorldDetector:
     """SSDLite320_MobileNet_V3_Large ベースの world entity 検出器。
 
-    head の num_classes を 12 へ置換し、foreground 11 クラスを検出する。
+    head の num_classes を class map の num_classes（v2 は 16）へ置換し、foreground クラスを検出する。
     weight なしでも from_config() でインスタンスを生成でき、infer() を呼べる（推論精度は無意味）。
     """
 
@@ -639,7 +658,7 @@ class WorldDetector:
 # ---- internal builder ----
 
 def _build_ssdlite320(num_classes: int) -> Any:
-    """SSDLite320 を num_classes=12 で構築する。
+    """SSDLite320 を class map 由来の num_classes で構築する。
 
     torch が利用できない環境では stub を返す。
     """

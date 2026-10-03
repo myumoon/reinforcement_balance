@@ -119,15 +119,51 @@ class TestWorldClassMap:
 
     def test_load_class_map_file(self):
         cm = load_class_map(CLASS_MAP_PATH)
-        assert cm.num_classes == 12
+        assert cm.num_classes == 16
+        assert cm.class_map_version == 2
         assert cm.background_label == 0
         assert cm.background_name == "__background__"
+        # ファイル形式は v1 と同じなので schema_version は据え置き。
         assert cm.schema_version == "world_class_map.v1"
 
-    def test_foreground_ids_are_1_to_11(self):
+    def test_foreground_ids_are_1_to_15(self):
         cm = load_class_map(CLASS_MAP_PATH)
         ids = [fc["id"] for fc in cm.foreground_classes]
-        assert ids == list(range(1, 12))
+        assert ids == list(range(1, 16))
+
+    def test_v2_ids_1_to_11_match_v1_exactly(self):
+        """v2 の ID 1〜11 は v1 と名前・大分類・順序が完全一致する。"""
+        v1 = load_class_map(CLASS_MAP_PATH.parent / "world_class_map_v1.yaml")
+        v2 = load_class_map(CLASS_MAP_PATH)
+        assert v1.num_classes == 12
+        assert list(v2.foreground_classes[:11]) == list(v1.foreground_classes)
+
+    def test_v2_weapon_classes(self):
+        """ID 12〜15 は weapon 大分類の4クラス。"""
+        cm = load_class_map(CLASS_MAP_PATH)
+        assert [(fc["id"], fc["name"], fc["coarse_category"]) for fc in cm.foreground_classes[11:]] == [
+            (12, "weapon_projectile", "weapon"),
+            (13, "weapon_zone", "weapon"),
+            (14, "weapon_orbit", "weapon"),
+            (15, "weapon_aura", "weapon"),
+        ]
+
+    def test_coarse_for_name_and_id(self):
+        cm = load_class_map(CLASS_MAP_PATH)
+        assert cm.coarse_for("player_anchor") == "anchor"
+        assert cm.coarse_for(15) == "weapon"
+        with pytest.raises(KeyError):
+            cm.coarse_for(0)
+        with pytest.raises(KeyError):
+            cm.coarse_for("nope")
+
+    def test_num_classes_mismatch_with_foreground_rejected(self, tmp_path):
+        """num_classes が background + foreground 数と合わない class map は拒否する。"""
+        text = CLASS_MAP_PATH.read_text(encoding="utf-8").replace("num_classes: 16", "num_classes: 12")
+        bad = tmp_path / "bad.yaml"
+        bad.write_text(text, encoding="utf-8")
+        with pytest.raises(ValueError, match="num_classes"):
+            load_class_map(bad)
 
     def test_id_to_name_roundtrip(self):
         cm = load_class_map(CLASS_MAP_PATH)
@@ -138,7 +174,7 @@ class TestWorldClassMap:
     def test_unknown_label_rejected(self):
         cm = load_class_map(CLASS_MAP_PATH)
         with pytest.raises(KeyError):
-            cm.id_to_name(12)
+            cm.id_to_name(16)
 
     def test_name_to_id_roundtrip(self):
         cm = load_class_map(CLASS_MAP_PATH)
