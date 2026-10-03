@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[3]
 GOLDEN = ROOT / "Tools/Common/tests/fixtures/deploy_obs_v2_golden_v1.json"
 DETECTOR_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "world_detector_v2.yaml"
 V2 = DeployObsSchema.default_v2()
+EMPTY = load_hud_identity_vocabulary().empty_slot
 
 
 def _entity(class_name: str, cx: float, cy: float, *, w: float = .02, h: float = .02, track_id: int = 1,
@@ -61,17 +62,18 @@ def _world_from_case(data: dict) -> TrackedWorldStateV2:
 def _inventory_from_case(slots: list[dict]) -> tuple[tuple[str | None, ...], dict[str, int | None]]:
     """golden case の hud_slots を HUD 在庫 identity と identity→レベル表へ逆変換する。
 
-    対応表を逆引きして identity にし、渡されていない（不明な）スロットには表に無い identity を置きます。
+    対応表を逆引きして identity にし、空スロットは empty_slot、渡されていない（不明な）スロットは
+    偶数枠を表に無い identity・奇数枠を読めなかった枠（None）にして両方の「不明」経路を通します。
     """
     vocab = load_hud_identity_vocabulary()
     reverse = {("weapon", name): ident for ident, name in vocab.weapons.items()}
     reverse.update({("passive", name): ident for ident, name in vocab.passives.items()})
-    inventory: list[str | None] = [f"unrecognized_{i}" for i in range(12)]
+    inventory: list[str | None] = [f"unrecognized_{i}" if i % 2 == 0 else None for i in range(12)]
     levels: dict[str, int | None] = {}
     for slot in slots:
         position = slot["index"] + (0 if slot["kind"] == "weapon" else 6)
         if slot["type_name"] is None:
-            inventory[position] = None
+            inventory[position] = vocab.empty_slot
             continue
         identity = reverse[(slot["kind"], slot["type_name"])]
         inventory[position] = identity
@@ -174,20 +176,21 @@ def test_missing_or_fallback_anchor_makes_world_unknown(anchor):
 
 
 def test_hud_slots_from_inventory_rules():
-    """在庫 → HudSlot の変換規則: None は空確定、表に無い・種別違いは渡さない、上限超えレベルは不明。
+    """在庫 → HudSlot の変換規則: empty_slot だけが空確定、None（読めない枠）・表に無い・種別違いは渡さない、上限超えレベルは不明。
 
     渡されなかったスロットはビルダーで「不明」（validity 0）になります。
     """
-    inventory = ("whip", None, "spinach", "mystery", "garlic", None,
-                 "spellbinder", "whip", None, None, None, "armor")
+    inventory = ("whip", EMPTY, "spinach", "mystery", "garlic", None,
+                 "spellbinder", "whip", EMPTY, None, EMPTY, "armor")
     levels = {"whip": 3, "garlic": 99, "spellbinder": 2, "armor": None}
     slots = {(s.kind, s.index): s for s in hud_slots_from_inventory(inventory, levels.get)}
     assert slots[("weapon", 0)] == HudSlot("weapon", 0, "Whip", 3)
     assert slots[("weapon", 1)] == HudSlot("weapon", 1, None, None)
-    assert ("weapon", 2) not in slots and ("weapon", 3) not in slots
+    assert ("weapon", 2) not in slots and ("weapon", 3) not in slots and ("weapon", 5) not in slots
     assert slots[("weapon", 4)] == HudSlot("weapon", 4, "Garlic", None)
     assert slots[("passive", 0)] == HudSlot("passive", 0, "Spellbinder", 2)
-    assert ("passive", 1) not in slots
+    assert ("passive", 1) not in slots and ("passive", 3) not in slots
+    assert slots[("passive", 2)] == HudSlot("passive", 2, None, None)
     assert slots[("passive", 5)] == HudSlot("passive", 5, "Armor", None)
     with pytest.raises(ValueError):
         hud_slots_from_inventory(inventory[:6], levels.get)
