@@ -286,7 +286,8 @@ class DeployablePolicyTrainer:
         self.optimizer = th.optim.AdamW(model.parameters(), lr=learning_rate)
         self.curriculum = CurriculumState(curriculum_config or CurriculumConfig())
         self.training_steps, self._formal_identities = 0, None
-        self.schema = DeployObsSchema.default_v1()
+        # Training の既定は DeployObs v2。v1 の dataset / checkpoint は schema hash 不一致で拒否される。
+        self.schema = DeployObsSchema.default_v2()
         self.corrupt_fn = corrupt_fn
     def _step_zero_gate(self, dataset: CombatDistillationDataset) -> None:
         """全 release leakage と formal dependency を最初の optimizer 呼出し前に検証する。
