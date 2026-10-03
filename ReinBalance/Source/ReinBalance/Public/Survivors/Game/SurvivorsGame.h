@@ -321,6 +321,15 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
 	bool bEnableEvolutions = true;
 
+	/**
+	 * HTTP の /reset・/step 応答に deploy_raw（DeployObs v2 用の raw state）を含めるか。
+	 *
+	 * /params の deploy_raw: true/false でだけ切り替わり、reset では解除しない。既定は無効で、
+	 * 無効のときは応答・flat obs・obs_schema_hash が従来と完全に同じになる。
+	 */
+	UPROPERTY(Transient)
+	bool bDeployRawEnabled = false;
+
 	/** リプレイ旧フェーズ比率（0.0〜1.0） */
 	UPROPERTY(EditAnywhere, Category = "Survivors|Train")
 	float ReplayOldPhaseFraction = 0.0f;
