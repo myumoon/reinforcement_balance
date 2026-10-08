@@ -63,7 +63,7 @@ SurvivorsEnv（/params deploy_raw=true）
 - release の v2 は縦横とも viewport 幅/2 で正規化するので、viewport の縦横比が target camera の `half_width / half_height`（sim は 16:9）と違う raw は拒否する。
 - `oracle_diagnostic()` は同じ tensor に加えて、「release ビルダーが実際に出した zone / orbit の残り時間 − sim の真の残り時間（秒、0..8 に clip）」を `info["deploy_ttl_error_s"]`（entity_id → 秒）に出す。推定式は Training に持たず、ビルダー出力を秒へ戻して比べる。ビルダーが無効にした値（emitter が一意に決まらない構成など）は含めない。fidelity の診断専用。
 - `deploy_raw_env.py` と `deploy_obs_wrapper.py` は fidelity の `deploy_release_adapter` producer 閉包に入っているので、変更すると deploy 系 gating hash が変わり既存 verdict は失効する。
-- テストの fixture `Tools/Training/tests/survivors/fixtures/deploy_raw_llt_v1.json` は C++ の JSON 生成関数を LLT から呼んで書き出したもので、実 UE5（PIE）から取得した応答ではない。
+- Python テストの正は実 UE5 Editor PIE から取得した `Tools/Training/tests/survivors/fixtures/deploy_raw_pie_v1.json`。`deploy_raw_llt_v1.json` は C++ LLT の `[fixture]` テスト専用。再取得は PIE 起動中に `python Tools/Training/capture_survivors_deploy_raw_fixture.py --output Tools/Training/tests/survivors/fixtures/deploy_raw_pie_v1.json`（既定 port 8767、変更時は `--port`）を実行する。
 
 ## Perception error profile
 

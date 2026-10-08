@@ -1,0 +1,2264 @@
+{
+  "description": "deploy_raw captured from a live UE5 Editor PIE session via SurvivorsHttpEnvService (/params deploy_raw:true + initial_weapon_slots, /reset seed, /step with steps=1). Same seed/loadout/action rule as the LLT fixture deploy_raw_llt_v1.json.",
+  "seed": 73013,
+  "action_rule": "action of step k (1-based) = (k - 1) % 9",
+  "initial_weapons": [
+    "Knife",
+    "SantaWater",
+    "KingBible",
+    "Garlic",
+    "FireWand",
+    "Peachone"
+  ],
+  "obs_schema_hash": "84a7f054d4a4c8fa7b22dba61a95a5b3",
+  "responses": [
+    {
+      "endpoint": "/reset",
+      "step": 0,
+      "deploy_raw": {
+        "schema_version": "survivors_deploy_raw.v1",
+        "elapsed_s": 0,
+        "camera": {
+          "center_x": 0,
+          "center_y": 0,
+          "half_width": 400,
+          "half_height": 225,
+          "cull_margin": 100
+        },
+        "player": {
+          "world_x": 0,
+          "world_y": 0,
+          "hp_ratio": 1,
+          "level": 1
+        },
+        "duration_mult": 1,
+        "weapon_slots": [
+          {
+            "index": 0,
+            "type_id": 4,
+            "level": 4
+          },
+          {
+            "index": 1,
+            "type_id": 9,
+            "level": 4
+          },
+          {
+            "index": 2,
+            "type_id": 7,
+            "level": 4
+          },
+          {
+            "index": 3,
+            "type_id": 1,
+            "level": 4
+          },
+          {
+            "index": 4,
+            "type_id": 8,
+            "level": 4
+          },
+          {
+            "index": 5,
+            "type_id": 13,
+            "level": 4
+          }
+        ],
+        "passive_slots": [
+          {
+            "index": 0,
+            "type_id": 0,
+            "level": 0
+          },
+          {
+            "index": 1,
+            "type_id": 0,
+            "level": 0
+          },
+          {
+            "index": 2,
+            "type_id": 0,
+            "level": 0
+          },
+          {
+            "index": 3,
+            "type_id": 0,
+            "level": 0
+          },
+          {
+            "index": 4,
+            "type_id": 0,
+            "level": 0
+          },
+          {
+            "index": 5,
+            "type_id": 0,
+            "level": 0
+          }
+        ],
+        "entities": [
+          {
+            "entity_id": 6597069767425,
+            "class_name": "weapon_aura",
+            "world_x": 0,
+            "world_y": 0,
+            "radius_world": 40,
+            "slot": 3,
+            "ttl_true_s": 8,
+            "warning": false
+          }
+        ]
+      }
+    },
+    {
+      "endpoint": "/step",
+      "step": 60,
+      "info": {
+        "deploy_raw": {
+          "schema_version": "survivors_deploy_raw.v1",
+          "elapsed_s": 0.999999702,
+          "camera": {
+            "center_x": 2.2761426,
+            "center_y": -0.942809105,
+            "half_width": 400,
+            "half_height": 225,
+            "cull_margin": 100
+          },
+          "player": {
+            "world_x": 2.2761426,
+            "world_y": -0.942809105,
+            "hp_ratio": 1,
+            "level": 1
+          },
+          "duration_mult": 1,
+          "weapon_slots": [
+            {
+              "index": 0,
+              "type_id": 4,
+              "level": 4
+            },
+            {
+              "index": 1,
+              "type_id": 9,
+              "level": 4
+            },
+            {
+              "index": 2,
+              "type_id": 7,
+              "level": 4
+            },
+            {
+              "index": 3,
+              "type_id": 1,
+              "level": 4
+            },
+            {
+              "index": 4,
+              "type_id": 8,
+              "level": 4
+            },
+            {
+              "index": 5,
+              "type_id": 13,
+              "level": 4
+            }
+          ],
+          "passive_slots": [
+            {
+              "index": 0,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 1,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 2,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 3,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 4,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 5,
+              "type_id": 0,
+              "level": 0
+            }
+          ],
+          "entities": [
+            {
+              "entity_id": 3298534883331,
+              "class_name": "weapon_projectile",
+              "world_x": 109.865753,
+              "world_y": 54.3759079,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 8.00001526,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883332,
+              "class_name": "weapon_projectile",
+              "world_x": 104.496475,
+              "world_y": 64.2975006,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 8.00001526,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883333,
+              "class_name": "weapon_projectile",
+              "world_x": 98.233696,
+              "world_y": 73.6807098,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 8.00001526,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883334,
+              "class_name": "weapon_projectile",
+              "world_x": 91.1309433,
+              "world_y": 82.4453125,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 8.00001526,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883340,
+              "class_name": "weapon_projectile",
+              "world_x": -201.986313,
+              "world_y": 205.260071,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.616667509,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883345,
+              "class_name": "weapon_projectile",
+              "world_x": 4.56475019,
+              "world_y": -255.366684,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.716667414,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883351,
+              "class_name": "weapon_projectile",
+              "world_x": 157.073578,
+              "world_y": 161.185028,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.816667318,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883356,
+              "class_name": "weapon_projectile",
+              "world_x": -138.829636,
+              "world_y": 130.106659,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.916667223,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883378,
+              "class_name": "weapon_projectile",
+              "world_x": 106.432251,
+              "world_y": 131.954102,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 3.7252903e-09,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883379,
+              "class_name": "weapon_projectile",
+              "world_x": 94.708313,
+              "world_y": 106.669632,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0333333388,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883380,
+              "class_name": "weapon_projectile",
+              "world_x": 129.506042,
+              "world_y": 83.9729309,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0500000045,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883381,
+              "class_name": "weapon_projectile",
+              "world_x": 147.549728,
+              "world_y": 143.461502,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0833333358,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511105,
+              "class_name": "weapon_zone",
+              "world_x": 127.242126,
+              "world_y": 59.7237434,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 1.60000086,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511125,
+              "class_name": "weapon_zone",
+              "world_x": 80.9997101,
+              "world_y": 115.52198,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 1.90000057,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511140,
+              "class_name": "weapon_zone",
+              "world_x": 13.0534945,
+              "world_y": 140.72345,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 2.20000029,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511153,
+              "class_name": "weapon_zone",
+              "world_x": -58.3904495,
+              "world_y": 128.575455,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 2.5,
+              "warning": true
+            },
+            {
+              "entity_id": 5497558139392,
+              "class_name": "weapon_orbit",
+              "world_x": 31.5583019,
+              "world_y": -56.158802,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 2.5166676,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139393,
+              "class_name": "weapon_orbit",
+              "world_x": 35.4535332,
+              "world_y": 52.0242691,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 2.5166676,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139394,
+              "class_name": "weapon_orbit",
+              "world_x": -60.1833878,
+              "world_y": 1.30606413,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 2.5166676,
+              "warning": false
+            },
+            {
+              "entity_id": 6597069767425,
+              "class_name": "weapon_aura",
+              "world_x": 2.2761426,
+              "world_y": -0.942809105,
+              "radius_world": 40,
+              "slot": 3,
+              "ttl_true_s": 8,
+              "warning": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "endpoint": "/step",
+      "step": 61,
+      "info": {
+        "deploy_raw": {
+          "schema_version": "survivors_deploy_raw.v1",
+          "elapsed_s": 1.01666641,
+          "camera": {
+            "center_x": 0.942809105,
+            "center_y": -0.942809105,
+            "half_width": 400,
+            "half_height": 225,
+            "cull_margin": 100
+          },
+          "player": {
+            "world_x": 0.942809105,
+            "world_y": -0.942809105,
+            "hp_ratio": 1,
+            "level": 1
+          },
+          "duration_mult": 1,
+          "weapon_slots": [
+            {
+              "index": 0,
+              "type_id": 4,
+              "level": 4
+            },
+            {
+              "index": 1,
+              "type_id": 9,
+              "level": 4
+            },
+            {
+              "index": 2,
+              "type_id": 7,
+              "level": 4
+            },
+            {
+              "index": 3,
+              "type_id": 1,
+              "level": 4
+            },
+            {
+              "index": 4,
+              "type_id": 8,
+              "level": 4
+            },
+            {
+              "index": 5,
+              "type_id": 13,
+              "level": 4
+            }
+          ],
+          "passive_slots": [
+            {
+              "index": 0,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 1,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 2,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 3,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 4,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 5,
+              "type_id": 0,
+              "level": 0
+            }
+          ],
+          "entities": [
+            {
+              "entity_id": 3298534883331,
+              "class_name": "weapon_projectile",
+              "world_x": 111.696854,
+              "world_y": 55.2599487,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 7.98334837,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883332,
+              "class_name": "weapon_projectile",
+              "world_x": 106.238083,
+              "world_y": 65.3469009,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 7.98334837,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883333,
+              "class_name": "weapon_projectile",
+              "world_x": 99.8709259,
+              "world_y": 74.8864975,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 7.98334837,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883334,
+              "class_name": "weapon_projectile",
+              "world_x": 92.6497879,
+              "world_y": 83.7971802,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 7.98334837,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883340,
+              "class_name": "weapon_projectile",
+              "world_x": -205.828262,
+              "world_y": 209.10202,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.600000858,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883345,
+              "class_name": "weapon_projectile",
+              "world_x": 4.56475019,
+              "world_y": -260.800018,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.700000763,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883351,
+              "class_name": "weapon_projectile",
+              "world_x": 160.915527,
+              "world_y": 165.026978,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.800000668,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883356,
+              "class_name": "weapon_projectile",
+              "world_x": -142.671585,
+              "world_y": 133.948608,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.900000572,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883379,
+              "class_name": "weapon_projectile",
+              "world_x": 94.708313,
+              "world_y": 106.669632,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0166666713,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883380,
+              "class_name": "weapon_projectile",
+              "world_x": 129.506042,
+              "world_y": 83.9729309,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0333333388,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883381,
+              "class_name": "weapon_projectile",
+              "world_x": 147.549728,
+              "world_y": 143.461502,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0666666701,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883382,
+              "class_name": "weapon_projectile",
+              "world_x": 145.241821,
+              "world_y": 133.133636,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0833333358,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511105,
+              "class_name": "weapon_zone",
+              "world_x": 127.242126,
+              "world_y": 59.7237434,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 1.58333421,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511125,
+              "class_name": "weapon_zone",
+              "world_x": 80.9997101,
+              "world_y": 115.52198,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 1.88333392,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511140,
+              "class_name": "weapon_zone",
+              "world_x": 13.0534945,
+              "world_y": 140.72345,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 2.18333364,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511153,
+              "class_name": "weapon_zone",
+              "world_x": -58.3904495,
+              "world_y": 128.575455,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 2.48333335,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139392,
+              "class_name": "weapon_orbit",
+              "world_x": 34.8944626,
+              "world_y": -53.4169579,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 2.50000095,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139393,
+              "class_name": "weapon_orbit",
+              "world_x": 29.4109192,
+              "world_y": 54.6972466,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 2.50000095,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139394,
+              "class_name": "weapon_orbit",
+              "world_x": -61.4769554,
+              "world_y": -4.1087265,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 2.50000095,
+              "warning": false
+            },
+            {
+              "entity_id": 6597069767425,
+              "class_name": "weapon_aura",
+              "world_x": 0.942809105,
+              "world_y": -0.942809105,
+              "radius_world": 40,
+              "slot": 3,
+              "ttl_true_s": 8,
+              "warning": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "endpoint": "/step",
+      "step": 62,
+      "info": {
+        "deploy_raw": {
+          "schema_version": "survivors_deploy_raw.v1",
+          "elapsed_s": 1.03333306,
+          "camera": {
+            "center_x": -1.11022302e-16,
+            "center_y": 0,
+            "half_width": 400,
+            "half_height": 225,
+            "cull_margin": 100
+          },
+          "player": {
+            "world_x": -1.11022302e-16,
+            "world_y": 0,
+            "hp_ratio": 1,
+            "level": 1
+          },
+          "duration_mult": 1,
+          "weapon_slots": [
+            {
+              "index": 0,
+              "type_id": 4,
+              "level": 4
+            },
+            {
+              "index": 1,
+              "type_id": 9,
+              "level": 4
+            },
+            {
+              "index": 2,
+              "type_id": 7,
+              "level": 4
+            },
+            {
+              "index": 3,
+              "type_id": 1,
+              "level": 4
+            },
+            {
+              "index": 4,
+              "type_id": 8,
+              "level": 4
+            },
+            {
+              "index": 5,
+              "type_id": 13,
+              "level": 4
+            }
+          ],
+          "passive_slots": [
+            {
+              "index": 0,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 1,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 2,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 3,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 4,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 5,
+              "type_id": 0,
+              "level": 0
+            }
+          ],
+          "entities": [
+            {
+              "entity_id": 3298534883331,
+              "class_name": "weapon_projectile",
+              "world_x": 113.527946,
+              "world_y": 56.1439934,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 7.96668148,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883332,
+              "class_name": "weapon_projectile",
+              "world_x": 107.979691,
+              "world_y": 66.3963013,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 7.96668148,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883333,
+              "class_name": "weapon_projectile",
+              "world_x": 101.508156,
+              "world_y": 76.0922928,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 7.96668148,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883334,
+              "class_name": "weapon_projectile",
+              "world_x": 94.1686401,
+              "world_y": 85.1490479,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 7.96668148,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883340,
+              "class_name": "weapon_projectile",
+              "world_x": -209.670212,
+              "world_y": 212.94397,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.583334208,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883345,
+              "class_name": "weapon_projectile",
+              "world_x": 4.56475019,
+              "world_y": -266.233337,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.683334112,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883351,
+              "class_name": "weapon_projectile",
+              "world_x": 164.757477,
+              "world_y": 168.868927,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.783334017,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883356,
+              "class_name": "weapon_projectile",
+              "world_x": -146.513519,
+              "world_y": 137.790558,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.883333921,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883379,
+              "class_name": "weapon_projectile",
+              "world_x": 94.708313,
+              "world_y": 106.669632,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 3.7252903e-09,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883380,
+              "class_name": "weapon_projectile",
+              "world_x": 129.506042,
+              "world_y": 83.9729309,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0166666713,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883381,
+              "class_name": "weapon_projectile",
+              "world_x": 147.549728,
+              "world_y": 143.461502,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0500000045,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883382,
+              "class_name": "weapon_projectile",
+              "world_x": 145.241821,
+              "world_y": 133.133636,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0666666701,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883383,
+              "class_name": "weapon_projectile",
+              "world_x": 1.27714443,
+              "world_y": 8.96103859,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 1.48333335,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511105,
+              "class_name": "weapon_zone",
+              "world_x": 127.242126,
+              "world_y": 59.7237434,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 1.56666756,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511125,
+              "class_name": "weapon_zone",
+              "world_x": 80.9997101,
+              "world_y": 115.52198,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 1.86666727,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511140,
+              "class_name": "weapon_zone",
+              "world_x": 13.0534945,
+              "world_y": 140.72345,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 2.16666698,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511153,
+              "class_name": "weapon_zone",
+              "world_x": -58.3904495,
+              "world_y": 128.575455,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 2.4666667,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139392,
+              "class_name": "weapon_orbit",
+              "world_x": 38.3662872,
+              "world_y": -49.3384094,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 2.4833343,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139393,
+              "class_name": "weapon_orbit",
+              "world_x": 23.5451927,
+              "world_y": 57.8953781,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 2.4833343,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139394,
+              "class_name": "weapon_orbit",
+              "world_x": -61.9114647,
+              "world_y": -8.55694389,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 2.4833343,
+              "warning": false
+            },
+            {
+              "entity_id": 6597069767425,
+              "class_name": "weapon_aura",
+              "world_x": -1.11022302e-16,
+              "world_y": 0,
+              "radius_world": 40,
+              "slot": 3,
+              "ttl_true_s": 8,
+              "warning": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "endpoint": "/step",
+      "step": 63,
+      "info": {
+        "deploy_raw": {
+          "schema_version": "survivors_deploy_raw.v1",
+          "elapsed_s": 1.04999971,
+          "camera": {
+            "center_x": -1.11022302e-16,
+            "center_y": 0,
+            "half_width": 400,
+            "half_height": 225,
+            "cull_margin": 100
+          },
+          "player": {
+            "world_x": -1.11022302e-16,
+            "world_y": 0,
+            "hp_ratio": 1,
+            "level": 1
+          },
+          "duration_mult": 1,
+          "weapon_slots": [
+            {
+              "index": 0,
+              "type_id": 4,
+              "level": 4
+            },
+            {
+              "index": 1,
+              "type_id": 9,
+              "level": 4
+            },
+            {
+              "index": 2,
+              "type_id": 7,
+              "level": 4
+            },
+            {
+              "index": 3,
+              "type_id": 1,
+              "level": 4
+            },
+            {
+              "index": 4,
+              "type_id": 8,
+              "level": 4
+            },
+            {
+              "index": 5,
+              "type_id": 13,
+              "level": 4
+            }
+          ],
+          "passive_slots": [
+            {
+              "index": 0,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 1,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 2,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 3,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 4,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 5,
+              "type_id": 0,
+              "level": 0
+            }
+          ],
+          "entities": [
+            {
+              "entity_id": 3298534883331,
+              "class_name": "weapon_projectile",
+              "world_x": 115.359039,
+              "world_y": 57.0280342,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 7.95001459,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883332,
+              "class_name": "weapon_projectile",
+              "world_x": 109.721298,
+              "world_y": 67.4457092,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 7.95001459,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883333,
+              "class_name": "weapon_projectile",
+              "world_x": 103.145386,
+              "world_y": 77.2980804,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 7.95001459,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883334,
+              "class_name": "weapon_projectile",
+              "world_x": 95.6874847,
+              "world_y": 86.5009155,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 7.95001459,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883340,
+              "class_name": "weapon_projectile",
+              "world_x": -213.512146,
+              "world_y": 216.785919,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.566667557,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883345,
+              "class_name": "weapon_projectile",
+              "world_x": 4.56475019,
+              "world_y": -271.666687,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.666667461,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883351,
+              "class_name": "weapon_projectile",
+              "world_x": 168.599426,
+              "world_y": 172.710861,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.766667366,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883356,
+              "class_name": "weapon_projectile",
+              "world_x": -150.355469,
+              "world_y": 141.632507,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.866667271,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883380,
+              "class_name": "weapon_projectile",
+              "world_x": 129.506042,
+              "world_y": 83.9729309,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 3.7252903e-09,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883381,
+              "class_name": "weapon_projectile",
+              "world_x": 147.549728,
+              "world_y": 143.461502,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0333333388,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883382,
+              "class_name": "weapon_projectile",
+              "world_x": 145.241821,
+              "world_y": 133.133636,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0500000045,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883383,
+              "class_name": "weapon_projectile",
+              "world_x": -2.56480265,
+              "world_y": 12.8029852,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 1.4666667,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883384,
+              "class_name": "weapon_projectile",
+              "world_x": 154.676193,
+              "world_y": 114.386681,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0833333358,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511105,
+              "class_name": "weapon_zone",
+              "world_x": 127.242126,
+              "world_y": 59.7237434,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 1.55000091,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511125,
+              "class_name": "weapon_zone",
+              "world_x": 80.9997101,
+              "world_y": 115.52198,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 1.85000062,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511140,
+              "class_name": "weapon_zone",
+              "world_x": 13.0534945,
+              "world_y": 140.72345,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 2.15000033,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511153,
+              "class_name": "weapon_zone",
+              "world_x": -58.3904495,
+              "world_y": 128.575455,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 2.45000005,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139392,
+              "class_name": "weapon_orbit",
+              "world_x": 42.4929314,
+              "world_y": -45.8323212,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 2.46666765,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139393,
+              "class_name": "weapon_orbit",
+              "world_x": 18.4454784,
+              "world_y": 59.7161102,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 2.46666765,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139394,
+              "class_name": "weapon_orbit",
+              "world_x": -60.9384193,
+              "world_y": -13.8837976,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 2.46666765,
+              "warning": false
+            },
+            {
+              "entity_id": 6597069767425,
+              "class_name": "weapon_aura",
+              "world_x": -1.11022302e-16,
+              "world_y": 0,
+              "radius_world": 40,
+              "slot": 3,
+              "ttl_true_s": 8,
+              "warning": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "endpoint": "/step",
+      "step": 180,
+      "info": {
+        "deploy_raw": {
+          "schema_version": "survivors_deploy_raw.v1",
+          "elapsed_s": 2.99999785,
+          "camera": {
+            "center_x": -1.11022302e-16,
+            "center_y": 0,
+            "half_width": 400,
+            "half_height": 225,
+            "cull_margin": 100
+          },
+          "player": {
+            "world_x": -1.11022302e-16,
+            "world_y": 0,
+            "hp_ratio": 1,
+            "level": 1
+          },
+          "duration_mult": 1,
+          "weapon_slots": [
+            {
+              "index": 0,
+              "type_id": 4,
+              "level": 4
+            },
+            {
+              "index": 1,
+              "type_id": 9,
+              "level": 4
+            },
+            {
+              "index": 2,
+              "type_id": 7,
+              "level": 4
+            },
+            {
+              "index": 3,
+              "type_id": 1,
+              "level": 4
+            },
+            {
+              "index": 4,
+              "type_id": 8,
+              "level": 4
+            },
+            {
+              "index": 5,
+              "type_id": 13,
+              "level": 4
+            }
+          ],
+          "passive_slots": [
+            {
+              "index": 0,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 1,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 2,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 3,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 4,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 5,
+              "type_id": 0,
+              "level": 0
+            }
+          ],
+          "entities": [
+            {
+              "entity_id": 1099511627776,
+              "class_name": "enemy_normal",
+              "world_x": -440.999878,
+              "world_y": 16.6069908,
+              "radius_world": 10,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 1099511627777,
+              "class_name": "enemy_normal",
+              "world_x": 314.451111,
+              "world_y": -308.105377,
+              "radius_world": 10,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 1099511627778,
+              "class_name": "enemy_normal",
+              "world_x": 310.741852,
+              "world_y": -313.488129,
+              "radius_world": 10,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 1099511627780,
+              "class_name": "enemy_normal",
+              "world_x": 477.525909,
+              "world_y": -91.8692551,
+              "radius_world": 10,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883331,
+              "class_name": "weapon_projectile",
+              "world_x": 329.59726,
+              "world_y": 160.46106,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 5.99998856,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883332,
+              "class_name": "weapon_projectile",
+              "world_x": 313.489441,
+              "world_y": 190.22583,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 5.99998856,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883333,
+              "class_name": "weapon_projectile",
+              "world_x": 294.70108,
+              "world_y": 218.375473,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 5.99998856,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883334,
+              "class_name": "weapon_projectile",
+              "world_x": 273.392822,
+              "world_y": 244.669281,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 5.99998856,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883428,
+              "class_name": "weapon_projectile",
+              "world_x": -224.434341,
+              "world_y": -219.898193,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.533334255,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883434,
+              "class_name": "weapon_projectile",
+              "world_x": 198.883392,
+              "world_y": -194.880814,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.650000811,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883439,
+              "class_name": "weapon_projectile",
+              "world_x": -0.290489197,
+              "world_y": 245.833344,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.750000715,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883444,
+              "class_name": "weapon_projectile",
+              "world_x": -210.957199,
+              "world_y": -2.40505934,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.85000062,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883449,
+              "class_name": "weapon_projectile",
+              "world_x": 134.253723,
+              "world_y": -121.200401,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.950000525,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883468,
+              "class_name": "weapon_projectile",
+              "world_x": -116.499817,
+              "world_y": 137.065384,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 3.7252903e-09,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883469,
+              "class_name": "weapon_projectile",
+              "world_x": -121.37001,
+              "world_y": 129.653244,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0333333388,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883470,
+              "class_name": "weapon_projectile",
+              "world_x": -108.155518,
+              "world_y": 106.995712,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0500000045,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883471,
+              "class_name": "weapon_projectile",
+              "world_x": -98.4617157,
+              "world_y": 116.601128,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0833333358,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511140,
+              "class_name": "weapon_zone",
+              "world_x": 13.0534945,
+              "world_y": 140.72345,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 0.200001702,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511153,
+              "class_name": "weapon_zone",
+              "world_x": -58.3904495,
+              "world_y": 128.575455,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 0.500001907,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139392,
+              "class_name": "weapon_orbit",
+              "world_x": -62.1362991,
+              "world_y": 6.73280191,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 0.516669512,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139393,
+              "class_name": "weapon_orbit",
+              "world_x": 25.2373848,
+              "world_y": -57.1780243,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 0.516669512,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139394,
+              "class_name": "weapon_orbit",
+              "world_x": 36.8989372,
+              "world_y": 50.445179,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 0.516669512,
+              "warning": false
+            },
+            {
+              "entity_id": 6597069767425,
+              "class_name": "weapon_aura",
+              "world_x": -1.11022302e-16,
+              "world_y": 0,
+              "radius_world": 40,
+              "slot": 3,
+              "ttl_true_s": 8,
+              "warning": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "endpoint": "/step",
+      "step": 181,
+      "info": {
+        "deploy_raw": {
+          "schema_version": "survivors_deploy_raw.v1",
+          "elapsed_s": 3.01666451,
+          "camera": {
+            "center_x": -1.11022302e-16,
+            "center_y": 1.33333337,
+            "half_width": 400,
+            "half_height": 225,
+            "cull_margin": 100
+          },
+          "player": {
+            "world_x": -1.11022302e-16,
+            "world_y": 1.33333337,
+            "hp_ratio": 1,
+            "level": 1
+          },
+          "duration_mult": 1,
+          "weapon_slots": [
+            {
+              "index": 0,
+              "type_id": 4,
+              "level": 4
+            },
+            {
+              "index": 1,
+              "type_id": 9,
+              "level": 4
+            },
+            {
+              "index": 2,
+              "type_id": 7,
+              "level": 4
+            },
+            {
+              "index": 3,
+              "type_id": 1,
+              "level": 4
+            },
+            {
+              "index": 4,
+              "type_id": 8,
+              "level": 4
+            },
+            {
+              "index": 5,
+              "type_id": 13,
+              "level": 4
+            }
+          ],
+          "passive_slots": [
+            {
+              "index": 0,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 1,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 2,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 3,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 4,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 5,
+              "type_id": 0,
+              "level": 0
+            }
+          ],
+          "entities": [
+            {
+              "entity_id": 1099511627776,
+              "class_name": "enemy_normal",
+              "world_x": -440.416901,
+              "world_y": 16.5867996,
+              "radius_world": 10,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 1099511627777,
+              "class_name": "enemy_normal",
+              "world_x": 314.035339,
+              "world_y": -307.696228,
+              "radius_world": 10,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 1099511627778,
+              "class_name": "enemy_normal",
+              "world_x": 310.332092,
+              "world_y": -313.072968,
+              "radius_world": 10,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 1099511627780,
+              "class_name": "enemy_normal",
+              "world_x": 476.953369,
+              "world_y": -91.7575073,
+              "radius_world": 10,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883331,
+              "class_name": "weapon_projectile",
+              "world_x": 331.428345,
+              "world_y": 161.345093,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 5.98332167,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883332,
+              "class_name": "weapon_projectile",
+              "world_x": 315.231049,
+              "world_y": 191.275238,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 5.98332167,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883333,
+              "class_name": "weapon_projectile",
+              "world_x": 296.338318,
+              "world_y": 219.581253,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 5.98332167,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883334,
+              "class_name": "weapon_projectile",
+              "world_x": 274.911682,
+              "world_y": 246.021133,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 5.98332167,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883428,
+              "class_name": "weapon_projectile",
+              "world_x": -228.276291,
+              "world_y": -223.740128,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.516667604,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883434,
+              "class_name": "weapon_projectile",
+              "world_x": 202.725342,
+              "world_y": -198.722763,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.63333416,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883439,
+              "class_name": "weapon_projectile",
+              "world_x": -0.290489197,
+              "world_y": 251.266678,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.733334064,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883444,
+              "class_name": "weapon_projectile",
+              "world_x": -216.390533,
+              "world_y": -2.40505934,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.833333969,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883449,
+              "class_name": "weapon_projectile",
+              "world_x": 138.095673,
+              "world_y": -125.042351,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.933333874,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883469,
+              "class_name": "weapon_projectile",
+              "world_x": -121.37001,
+              "world_y": 129.653244,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0166666713,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883470,
+              "class_name": "weapon_projectile",
+              "world_x": -108.155518,
+              "world_y": 106.995712,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0333333388,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883471,
+              "class_name": "weapon_projectile",
+              "world_x": -98.4617157,
+              "world_y": 116.601128,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0666666701,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883472,
+              "class_name": "weapon_projectile",
+              "world_x": -138.158249,
+              "world_y": 81.1568146,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0833333358,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511140,
+              "class_name": "weapon_zone",
+              "world_x": 13.0534945,
+              "world_y": 140.72345,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 0.183335036,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511153,
+              "class_name": "weapon_zone",
+              "world_x": -58.3904495,
+              "world_y": 128.575455,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 0.483335227,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139392,
+              "class_name": "weapon_orbit",
+              "world_x": -62.4858665,
+              "world_y": 2.6624341,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 0.500002861,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139393,
+              "class_name": "weapon_orbit",
+              "world_x": 30.0919628,
+              "world_y": -53.445549,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 0.500002861,
+              "warning": false
+            },
+            {
+              "entity_id": 5497558139394,
+              "class_name": "weapon_orbit",
+              "world_x": 32.3939285,
+              "world_y": 54.7831345,
+              "radius_world": 10,
+              "slot": 2,
+              "ttl_true_s": 0.500002861,
+              "warning": false
+            },
+            {
+              "entity_id": 6597069767425,
+              "class_name": "weapon_aura",
+              "world_x": -1.11022302e-16,
+              "world_y": 1.33333337,
+              "radius_world": 40,
+              "slot": 3,
+              "ttl_true_s": 8,
+              "warning": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "endpoint": "/step",
+      "step": 360,
+      "info": {
+        "deploy_raw": {
+          "schema_version": "survivors_deploy_raw.v1",
+          "elapsed_s": 6.00002337,
+          "camera": {
+            "center_x": -1.11022302e-16,
+            "center_y": 0,
+            "half_width": 400,
+            "half_height": 225,
+            "cull_margin": 100
+          },
+          "player": {
+            "world_x": -1.11022302e-16,
+            "world_y": 0,
+            "hp_ratio": 1,
+            "level": 1
+          },
+          "duration_mult": 1,
+          "weapon_slots": [
+            {
+              "index": 0,
+              "type_id": 4,
+              "level": 4
+            },
+            {
+              "index": 1,
+              "type_id": 9,
+              "level": 4
+            },
+            {
+              "index": 2,
+              "type_id": 7,
+              "level": 4
+            },
+            {
+              "index": 3,
+              "type_id": 1,
+              "level": 4
+            },
+            {
+              "index": 4,
+              "type_id": 8,
+              "level": 4
+            },
+            {
+              "index": 5,
+              "type_id": 13,
+              "level": 4
+            }
+          ],
+          "passive_slots": [
+            {
+              "index": 0,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 1,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 2,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 3,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 4,
+              "type_id": 0,
+              "level": 0
+            },
+            {
+              "index": 5,
+              "type_id": 0,
+              "level": 0
+            }
+          ],
+          "entities": [
+            {
+              "entity_id": 1099511627776,
+              "class_name": "enemy_normal",
+              "world_x": -336.069153,
+              "world_y": 12.8071117,
+              "radius_world": 10,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 1099511627779,
+              "class_name": "enemy_normal",
+              "world_x": -207.161957,
+              "world_y": 295.960388,
+              "radius_world": 10,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 1099511627780,
+              "class_name": "enemy_normal",
+              "world_x": 374.451874,
+              "world_y": -71.8527679,
+              "radius_world": 10,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 1099511627782,
+              "class_name": "enemy_normal",
+              "world_x": -469.174866,
+              "world_y": -183.957184,
+              "radius_world": 10,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 2199023255553,
+              "class_name": "gem_blue",
+              "world_x": 304.070343,
+              "world_y": -297.862732,
+              "radius_world": 0,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 2199023255554,
+              "class_name": "gem_blue",
+              "world_x": 293.554932,
+              "world_y": -296.028046,
+              "radius_world": 0,
+              "slot": null,
+              "ttl_true_s": null,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883473,
+              "class_name": "weapon_projectile",
+              "world_x": -262.244995,
+              "world_y": -249.127823,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 6.01665545,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883474,
+              "class_name": "weapon_projectile",
+              "world_x": -237.897415,
+              "world_y": -272.36377,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 6.01665545,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883475,
+              "class_name": "weapon_projectile",
+              "world_x": -211.507599,
+              "world_y": -293.251465,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 6.01665545,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883476,
+              "class_name": "weapon_projectile",
+              "world_x": -183.301361,
+              "world_y": -311.612122,
+              "radius_world": 8,
+              "slot": 4,
+              "ttl_true_s": 6.01665545,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883571,
+              "class_name": "weapon_projectile",
+              "world_x": -206.403503,
+              "world_y": 216.210663,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.583334208,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883578,
+              "class_name": "weapon_projectile",
+              "world_x": -259.857208,
+              "world_y": 2.43200231,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.700000763,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883583,
+              "class_name": "weapon_projectile",
+              "world_x": 165.494888,
+              "world_y": -159.114273,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.800000668,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883588,
+              "class_name": "weapon_projectile",
+              "world_x": -3.15123916,
+              "world_y": 196.93335,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 0.900000572,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883594,
+              "class_name": "weapon_projectile",
+              "world_x": -162.057205,
+              "world_y": -5.05013371,
+              "radius_world": 6,
+              "slot": 0,
+              "ttl_true_s": 1.00000048,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883611,
+              "class_name": "weapon_projectile",
+              "world_x": 0.850279868,
+              "world_y": -182.674774,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 3.7252903e-09,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883612,
+              "class_name": "weapon_projectile",
+              "world_x": 5.67336893,
+              "world_y": -190.275787,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0333333388,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883613,
+              "class_name": "weapon_projectile",
+              "world_x": -20.7059097,
+              "world_y": -173.894791,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0500000045,
+              "warning": false
+            },
+            {
+              "entity_id": 3298534883614,
+              "class_name": "weapon_projectile",
+              "world_x": 30.5358849,
+              "world_y": -157.096771,
+              "radius_world": 6.30000019,
+              "slot": 5,
+              "ttl_true_s": 0.0833333358,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511322,
+              "class_name": "weapon_zone",
+              "world_x": 43.9445572,
+              "world_y": -131.591003,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 1.10000134,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511335,
+              "class_name": "weapon_zone",
+              "world_x": 104.519257,
+              "world_y": -91.810257,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 1.40000105,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511349,
+              "class_name": "weapon_zone",
+              "world_x": 137.08812,
+              "world_y": -27.0717144,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 1.70000076,
+              "warning": false
+            },
+            {
+              "entity_id": 4398046511365,
+              "class_name": "weapon_zone",
+              "world_x": 132.924332,
+              "world_y": 45.2778893,
+              "radius_world": 42,
+              "slot": 1,
+              "ttl_true_s": 2.00000048,
+              "warning": false
+            },
+            {
+              "entity_id": 6597069767425,
+              "class_name": "weapon_aura",
+              "world_x": -1.11022302e-16,
+              "world_y": 0,
+              "radius_world": 40,
+              "slot": 3,
+              "ttl_true_s": 8,
+              "warning": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
