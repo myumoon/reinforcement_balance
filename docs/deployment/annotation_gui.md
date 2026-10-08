@@ -133,19 +133,19 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 | Lightning Ring（Thunder Loop） | `weapon_zone`（落雷の範囲） |
 | King Bible（Unholy Vespers） | `weapon_orbit`（1冊ごとに1矩形） |
 | Garlic（Soul Eater） | `weapon_aura`（見えている輪を囲む1矩形） |
-| Peachone、Ebony Wings、Vandalier | 照準・爆発は `weapon_projectile`。**鳥本体には付けない** |
+| Peachone、Ebony Wings、Vandalier | 着弾の爆発（小さな光）だけを `weapon_projectile`。**照準の円と鳥本体には付けない** |
 
 次のものには何も付けません。
 
 - Pentagram（Gorgeous Moon）の画面フラッシュ、Laurel の盾（物体として観測されないため）
 - 燭台などの壊せる置物（武器ではなく、`hazard_*` でもない）
-- Peachone / Ebony Wings / Vandalier の鳥本体
+- Peachone / Ebony Wings / Vandalier の鳥本体と、照準の大きな円（シミュレーターは照準の円の中に小さな着弾を 0.1 秒ずつ出すだけで、円そのものを観測しない。円を `weapon_projectile` にすると、実機の projectile 密度だけが円の表示中ずっと高くなり、教師と食い違う）
 
 矩形は `R`（または円ツール）で、見えているエフェクトの外形をぴったり囲みます。複数の弾が重なっていても、見分けられる限り1つずつ付けます。
 
 `enemy_elite` は下書き用検出器が区別して学習するため、下書きでも `enemy_elite` として出ます。ただし確認済みのサンプルが少ないうちは `enemy_normal` と取り違えることがあるので、GUI で確認してください。`enemy_boss` は検出器の学習時に `enemy_normal` として扱われるため、下書きでは `enemy_normal` として出ます。GUI で正しいクラスへ直してください。
 
-`hazard_projectile` / `hazard_area` は、プレイヤーに害を与える**敵側**の弾や範囲攻撃にだけ付けます。Garlic のオーラ、斧、Santa Water の炎、Peachone / Ebony Wings の照準など、**プレイヤー自身の武器エフェクトには付けず、上の対応表の `weapon_*` を付けます**（燭台などの壊せる置物はどちらの対象でもありません）。実機の観測では `hazard_*` が 1 つでも見えると `hazard_flag` が真になり、アイテム選択の判断材料として方策へ渡されます（`Tools/Deployment/survivors/real_obs_assembler.py`）。プレイヤーの周りに常にある Garlic を `hazard_area` にすると、この値がほぼ常に真になり意味を失います。
+`hazard_projectile` / `hazard_area` は、プレイヤーに害を与える**敵側**の弾や範囲攻撃にだけ付けます。Garlic のオーラ、斧、Santa Water の炎、Peachone / Ebony Wings の照準など、**プレイヤー自身の武器エフェクトには付けず、上の対応表に従って `weapon_*` を付けるか、何も付けません**（燭台などの壊せる置物はどちらの対象でもありません）。実機の観測では `hazard_*` が 1 つでも見えると `hazard_flag` が真になり、アイテム選択の判断材料として方策へ渡されます（`Tools/Deployment/survivors/real_obs_assembler.py`）。プレイヤーの周りに常にある Garlic を `hazard_area` にすると、この値がほぼ常に真になり意味を失います。
 
 `labeled_region` を含む確認済みフレームは範囲外が未ラベルのため、COCO 出力から除外されます（出力時に「範囲限定でスキップした数」として表示されます）。COCO に含めたいフレームは画面全体をラベルし、`labeled_region` を消してください。
 

@@ -140,14 +140,14 @@ python Tools/Deployment/prelabel_survivors_frames.py `
 
 - `card` / `button` / `death_result` / `hazard_projectile` / `hazard_area` は自動下書きされないため、GUI で手動追加が必要です。
 - `enemy_elite` は下書きでも `enemy_elite` として出ますが、サンプルが少ないうちは `enemy_normal` と取り違えることがあるので確認してください。`enemy_boss` は下書きでは `enemy_normal` として出るので、GUI で正しいクラスへ直してください。
-- `hazard_projectile` / `hazard_area` は**敵側**の弾や範囲攻撃にだけ付けます。Garlic・斧・Santa Water・Peachone の照準など、プレイヤー自身の武器エフェクトには付けず、`weapon_*` を付けます（理由は [`annotation_gui.md`](annotation_gui.md) を参照）。
+- `hazard_projectile` / `hazard_area` は**敵側**の弾や範囲攻撃にだけ付けます。Garlic・斧・Santa Water・Peachone の照準など、プレイヤー自身の武器エフェクトには付けず、`weapon_*` を付けるか何も付けません（理由は [`annotation_gui.md`](annotation_gui.md) を参照）。
 - 武器エフェクトは次の対応表どおりに付けます（詳細は [`annotation_gui.md`](annotation_gui.md) の「武器エフェクトのクラス対応表」）。
   - Whip・Magic Wand・Knife・Axe・Cross・Runetracer（進化後も同じ）の弾・斬撃 → `weapon_projectile`（1つごとに1矩形）
   - Fire Wand（Hellfire）の火球 → `weapon_projectile`、着弾後の爆発範囲 → `weapon_zone`
   - Santa Water（La Borra）の炎、Lightning Ring（Thunder Loop）の落雷 → `weapon_zone`
   - King Bible（Unholy Vespers）の本 → `weapon_orbit`（1冊ごとに1矩形）
   - Garlic（Soul Eater）の輪 → `weapon_aura`（見えている輪を囲む1矩形）
-  - Peachone・Ebony Wings・Vandalier の照準・爆発 → `weapon_projectile`（鳥本体には付けない）
+  - Peachone・Ebony Wings・Vandalier の着弾の爆発 → `weapon_projectile`（照準の円と鳥本体には付けない）
   - Pentagram（Gorgeous Moon）の画面フラッシュ、Laurel の盾、燭台などの壊せる置物 → 何も付けない
 - `weapon_*` は world class map v1 に無いため、当面は COCO 出力から矩形だけ除外されます（フレームと他の矩形は出力されます）。
 - `enemy_boss` はボスとして出現した個体（倒すと宝箱を落とす個体）にだけ付けます。ステージ後半に、序盤〜中盤のボスと同じ見た目の敵が雑魚敵として群れで出てきた場合は `enemy_normal` です。迷ったら `enemy_normal` にしてください（理由は [`annotation_gui.md`](annotation_gui.md) の「ボスと元ボスの雑魚敵」を参照）。
