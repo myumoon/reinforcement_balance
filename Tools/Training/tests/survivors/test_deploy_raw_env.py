@@ -1,8 +1,7 @@
-"""deploy_raw（UE5 HTTP）→ v2 raw dict 変換と DeployRawEnv の fail-closed 動作を検証する。
+"""実 UE5 PIE の deploy_raw と DeployRawEnv の fail-closed 動作を検証する。
 
-C++ の JSON 生成関数を LLT から呼んで書き出した fixture（deploy_raw_llt_v1.json）を唯一の正として読み、
-変換結果が DeployObsWrapper（v2）を通って Common ビルダーの v2 tensor になることを確かめます。
-実 UE5（PIE）から取得した応答ではない点に注意（WAITING_MANUAL）。
+Python テストでは deploy_raw_pie_v1.json を正として読み、raw dict が DeployObsWrapper の v2 tensor になることを確かめます。
+LLT fixture との producer 共通部分も比較します。deploy_raw_llt_v1.json は C++ LLT の [fixture] テスト専用です。
 """
 
 from copy import deepcopy
@@ -18,7 +17,8 @@ from games.survivors.deploy_raw_env import DeployRawEnv, deploy_raw_to_raw
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from reinbalance_survivors_contracts.ui_intent import ContractValidationError as ContractError
 
-FIXTURE = Path(__file__).parent / "fixtures" / "deploy_raw_llt_v1.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "deploy_raw_pie_v1.json"
+LLT_FIXTURE = Path(__file__).parent / "fixtures" / "deploy_raw_llt_v1.json"
 V2 = DeployObsSchema.default_v2()
 
 
@@ -101,6 +101,30 @@ def test_fixture_reset_and_steps_become_v2_tensors_through_release_wrapper():
         assert tensor.shape == (3 * V2.dim,) and np.all(np.isfinite(tensor))
     classes = {e["class_name"] for p in payloads for e in p["entities"]}
     assert classes == {"enemy_normal", "gem_blue", "weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura"}
+
+
+def test_pie_fixture_matches_llt_raw_producer_fields():
+    """PIE と LLT の fixture が共通の deploy_raw producer 項目を返す。
+
+    reset の deploy_raw 全体と obs schema hash、各 step の共通項目を比べます。
+    敵やジェムはレベル設定で数が変わるため、step の entities は比較しません。
+    """
+    pie = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    llt = json.loads(LLT_FIXTURE.read_text(encoding="utf-8"))
+    assert pie["obs_schema_hash"] == llt["obs_schema_hash"]
+
+    pie_reset = next(r for r in pie["responses"] if r["endpoint"] == "/reset")
+    llt_reset = next(r for r in llt["responses"] if r["endpoint"] == "/reset")
+    assert pie_reset["deploy_raw"] == llt_reset["deploy_raw"]
+
+    pie_steps = [r for r in pie["responses"] if r["endpoint"] == "/step"]
+    llt_steps = [r for r in llt["responses"] if r["endpoint"] == "/step"]
+    assert [r["step"] for r in pie_steps] == [r["step"] for r in llt_steps]
+    fields = ("elapsed_s", "camera", "player", "weapon_slots", "passive_slots", "duration_mult")
+    for pie_response, llt_response in zip(pie_steps, llt_steps):
+        pie_raw = pie_response["info"]["deploy_raw"]
+        llt_raw = llt_response["info"]["deploy_raw"]
+        assert {key: pie_raw[key] for key in fields} == {key: llt_raw[key] for key in fields}
 
 
 def test_slot_type_ids_map_to_common_vocabulary_names():

@@ -58,7 +58,8 @@ DeployObs v2 の観測を Training 側で作るための raw state。既定は�
 - entity はカメラ範囲＋余白（`|dx| <= 400+100`、`|dy| <= 225+100`、境界を含む）で除外済み。最終的な可視判定（中心が画面内）は Python 側で行う。
 - 武器エフェクトの範囲は `GetProjectileObsView()` と同じ（orbit は King Bible / Unholy Vespers、aura は Garlic / Soul Eater）。King Bible の本は周期ごとに新しい id になる。
 - sim に遮蔽は無いので `occluded` は出さない（Python 側で常に false）。
-- 実 UE5（PIE）から取得した応答の fixture はまだ無い（WAITING_MANUAL）。Python テストは LLT が C++ の JSON 生成関数から書き出した `Tools/Training/tests/survivors/fixtures/deploy_raw_llt_v1.json` を使う。
+- Python テストの正は、実 UE5 Editor PIE の HTTP 応答を保存した `Tools/Training/tests/survivors/fixtures/deploy_raw_pie_v1.json`。`deploy_raw_llt_v1.json` は C++ LLT の `[fixture]` テスト専用。
+- PIE fixture の再取得（既定 port 8767）: `python Tools/Training/capture_survivors_deploy_raw_fixture.py --output Tools/Training/tests/survivors/fixtures/deploy_raw_pie_v1.json`。別 port は `--port` で指定する。
 - fixture の再生成: LLT `SurvivorsDeployRawTests.cpp` の `[fixture]` テストは毎回、現在の C++ 出力と fixture が完全一致することを確認する。C++ 側を意図して変えたときだけ、短いドライブ（例: `subst W: <worktree>`）から `REINBALANCE_WRITE_DEPLOY_RAW_FIXTURE=1 ./ReinBalance/Binaries/Win64/ReinBalanceLogicTests/ReinBalanceLogicTests.exe -r console "[fixture]"` で書き直す。
 
 ---

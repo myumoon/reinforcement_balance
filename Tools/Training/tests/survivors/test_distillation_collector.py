@@ -25,7 +25,7 @@ from reinbalance_survivors_contracts.fidelity_verdict import (
     GATING_KEYS, BlockingReason, FidelityMetric, FidelityVerdict,
 )
 
-FIXTURE = Path(__file__).parent / "fixtures" / "deploy_raw_llt_v1.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "deploy_raw_pie_v1.json"
 V2 = DeployObsSchema.default_v2()
 ACTION_DIM = 9
 STEPS_PER_EPISODE = 7  # fixture は reset + step 7 応答。最後の step で終了するので記録は 7 step
