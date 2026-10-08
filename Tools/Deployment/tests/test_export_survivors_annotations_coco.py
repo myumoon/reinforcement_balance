@@ -183,6 +183,31 @@ def test_export_skips_checked_frames_with_labeled_region(tmp_path: Path, capsys)
     assert "範囲限定でスキップした数: 1" in capsys.readouterr().out
 
 
+def test_export_drops_annotation_only_boxes_but_keeps_frame(tmp_path: Path, capsys) -> None:
+    """weapon_target（照準）の矩形だけを world/ui 両方の COCO から外し、フレームは残す。
+
+    アノテーション専用クラスは class map に無いので、UI 扱いで落ちたり例外になったりしないことも確かめる。
+    """
+    work_root = tmp_path / "work"
+    session = work_root / "session-a"
+    _write_png(session / "00000001.png")
+    _write_label(
+        session / "00000001.json",
+        [_shape("weapon_target", [[0, 0], [6, 6]]), _shape("gem_blue", [[1, 1], [3, 3]])],
+        checked=True,
+    )
+    output_dir = tmp_path / "export"
+
+    assert main(["--work-root", str(work_root), "--output-dir", str(output_dir)]) == 0
+
+    world = json.loads((output_dir / "world_coco.json").read_text(encoding="utf-8"))
+    ui = json.loads((output_dir / "ui_coco.json").read_text(encoding="utf-8"))
+    assert [image["frame_id"] for image in world["images"]] == [1]
+    assert len(world["annotations"]) == 1 and ui["annotations"] == []
+    assert "weapon_target" not in [c["name"] for c in world["categories"] + ui["categories"]]
+    assert "アノテーション専用で除外した矩形数: 1" in capsys.readouterr().out
+
+
 def test_export_rejects_checked_label_without_matching_png(tmp_path: Path, capsys) -> None:
     """確認済み JSON に対応する PNG がなければ CLI を失敗させる。
 

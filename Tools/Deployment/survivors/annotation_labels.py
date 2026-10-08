@@ -39,7 +39,10 @@ WEAPON_EFFECT_KINDS: dict[str, tuple[str, ...]] = {
     weapon: tuple(f"weapon_{kind}" for kind in _FEATURE_PARAMS["weapon_effect_kinds"].get(weapon, ()))
     for weapon in _FEATURE_PARAMS["weapon_vocabulary"][1:-1]
 }
-ALL_CLASSES = WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,)
+# アノテーション専用クラス。データは集めるが world class map・下書き検出器・COCO には入れない。
+# weapon_target は Peachone / Ebony Wings / Vandalier の照準の円（sim の観測に対応物が無いため保留）。
+ANNOTATION_ONLY_CLASSES = ("weapon_target",)
+ALL_CLASSES = WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,) + ANNOTATION_ONLY_CLASSES
 _FRAME_STEM = re.compile(r"^\d{8}$")
 
 

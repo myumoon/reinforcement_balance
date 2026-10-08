@@ -92,6 +92,7 @@ python Tools/Deployment/prelabel_survivors_frames.py `
 - 設定は [annotation_prelabel_v2.yaml](../../Tools/Deployment/configs/annotation_prelabel_v2.yaml) です。学習後に `input_scale` や `labels` を変えた場合は重みと一致しないためエラーになるので、再学習してください。
 - 既存 work-root の `classes.txt` に `labeled_region` が無い場合は、末尾に1行 `labeled_region` を追記してから X-AnyLabeling で読み込み直してください。
 - 既存 work-root の `classes.txt` に武器エフェクト4クラスが無い場合は、`labeled_region` の後ろに `weapon_projectile`、`weapon_zone`、`weapon_orbit`、`weapon_aura` の4行をこの順で追記してから読み込み直してください。既に末尾へ4行を追記した `classes.txt` はそのまま使えます（新しく作る `classes.txt` では world class map v2 に合わせて `hazard_area` の後ろに並びますが、JSON はラベル名で保存されるため、違いは X-AnyLabeling の表示順だけです）。
+- 既存 work-root の `classes.txt` に `weapon_target`（照準の円、アノテーション専用）が無い場合は、末尾に1行 `weapon_target` を追記してから読み込み直してください。
 - 検出するラベルに `weapon_*` の4クラスを追加したため、追加前に学習した `prelabel_detector.pt` はラベル不一致のエラーになります。(2) で再学習してください。
 - 武器エフェクト用クラスを追加する前に `hazard_*` で付けた武器エフェクトは、`relabel_survivors_annotations.py`（propose → 対応表の確認 → apply）で `weapon_*` へ付け替え、既存の確認済みフレームを開き直して未ラベルの武器エフェクトを追加します。手順は [`annotation_gui.md`](annotation_gui.md) の「付け替え CLI」「確認済みフレームの見直し手順」を参照してください。
 
@@ -147,7 +148,7 @@ python Tools/Deployment/prelabel_survivors_frames.py `
   - Santa Water（La Borra）の炎、Lightning Ring（Thunder Loop）の落雷 → `weapon_zone`
   - King Bible（Unholy Vespers）の本 → `weapon_orbit`（1冊ごとに1矩形）
   - Garlic（Soul Eater）の輪 → `weapon_aura`（見えている輪を囲む1矩形）
-  - Peachone・Ebony Wings・Vandalier の着弾の爆発 → `weapon_projectile`（照準の円と鳥本体には付けない）
+  - Peachone・Ebony Wings・Vandalier の着弾の爆発 → `weapon_projectile`、照準の大きな円 → `weapon_target`（アノテーション専用。下書きには出ないので手で付ける。鳥本体には付けない）
   - Pentagram（Gorgeous Moon）の画面フラッシュ、Laurel の盾、燭台などの壊せる置物 → 何も付けない
 - `weapon_*` は world class map v1 に無いため、当面は COCO 出力から矩形だけ除外されます（フレームと他の矩形は出力されます）。
 - `enemy_boss` はボスとして出現した個体（倒すと宝箱を落とす個体）にだけ付けます。ステージ後半に、序盤〜中盤のボスと同じ見た目の敵が雑魚敵として群れで出てきた場合は `enemy_normal` です。迷ったら `enemy_normal` にしてください（理由は [`annotation_gui.md`](annotation_gui.md) の「ボスと元ボスの雑魚敵」を参照）。

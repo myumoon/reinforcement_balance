@@ -70,6 +70,8 @@ python Tools/Deployment/prelabel_survivors_frames.py `
 
 world class map v2 で武器エフェクトが world クラス（ID 12〜15）になったため、新しく作る `classes.txt` では4行が `hazard_area` の後ろ（UI クラスより前）に並びます。**既に末尾へ4行を追記した `classes.txt` はそのまま使えます。** JSON にはラベル名で保存されるので、並びの違いは X-AnyLabeling のラベル一覧の表示順が変わるだけで、移行作業は不要です。
 
+`weapon_target` を追加する前に作った `classes.txt` には `weapon_target` がありません。末尾に1行 `weapon_target` を追記してから読み込み直してください（新しく候補を抽出すると最初から末尾に入ります）。
+
 ```text
 weapon_projectile
 weapon_zone
@@ -133,13 +135,15 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 | Lightning Ring（Thunder Loop） | `weapon_zone`（落雷の範囲） |
 | King Bible（Unholy Vespers） | `weapon_orbit`（1冊ごとに1矩形） |
 | Garlic（Soul Eater） | `weapon_aura`（見えている輪を囲む1矩形） |
-| Peachone、Ebony Wings、Vandalier | 着弾の爆発（小さな光）だけを `weapon_projectile`。**照準の円と鳥本体には付けない** |
+| Peachone、Ebony Wings、Vandalier | 着弾の爆発（小さな光）は `weapon_projectile`、照準の大きな円は `weapon_target`。**鳥本体には付けない** |
 
 次のものには何も付けません。
 
 - Pentagram（Gorgeous Moon）の画面フラッシュ、Laurel の盾（物体として観測されないため）
 - 燭台などの壊せる置物（武器ではなく、`hazard_*` でもない）
-- Peachone / Ebony Wings / Vandalier の鳥本体と、照準の大きな円（シミュレーターは照準の円の中に小さな着弾を 0.1 秒ずつ出すだけで、円そのものを観測しない。円を `weapon_projectile` にすると、実機の projectile 密度だけが円の表示中ずっと高くなり、教師と食い違う）
+- Peachone / Ebony Wings / Vandalier の鳥本体
+
+照準の円は `weapon_projectile` ではなく、**アノテーション専用クラス `weapon_target`** を付けます。シミュレーターは照準の円の中に小さな着弾を 0.1 秒ずつ出すだけで、円そのものを観測しません。円を `weapon_projectile` にすると、実機の projectile 密度だけが円の表示中ずっと高くなり、教師と食い違います。一方で照準の位置は移動の判断材料になりうるため、観測に入れるかを後で決められるよう、データだけ `weapon_target` として集めます。`weapon_target` は world class map・下書き検出器・COCO 出力のどれにも入りません（COCO 出力では「アノテーション専用で除外した矩形数」として数えられます）。下書きには出ないので、手で付けてください。
 
 矩形は `R`（または円ツール）で、見えているエフェクトの外形をぴったり囲みます。複数の弾が重なっていても、見分けられる限り1つずつ付けます。
 

@@ -93,7 +93,8 @@ def test_candidate_selection_filters_deduplicates_and_applies_stride(tmp_path, c
     assert class_lines[class_lines.index("hud_hp") - 4:class_lines.index("hud_hp")] == [
         "weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura"
     ]
-    assert class_lines[-1] == "labeled_region"
+    # labeled_region の後ろにアノテーション専用クラス（照準）を足すので、既存 classes.txt は末尾追記で済む。
+    assert class_lines[-2:] == ["labeled_region", "weapon_target"]
     output = capsys.readouterr().out
     assert "総数: 5" in output
     assert "foreground: 4" in output
