@@ -143,7 +143,7 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 - 燭台などの壊せる置物（武器ではなく、`hazard_*` でもない）
 - Peachone / Ebony Wings / Vandalier の鳥本体
 
-照準の円は `weapon_projectile` ではなく、**アノテーション専用クラス `weapon_target`** を付けます。シミュレーターは照準の円の中に小さな着弾を 0.1 秒ずつ出すだけで、円そのものを観測しません。円を `weapon_projectile` にすると、実機の projectile 密度だけが円の表示中ずっと高くなり、教師と食い違います。一方で照準の位置は移動の判断材料になりうるため、観測に入れるかを後で決められるよう、データだけ `weapon_target` として集めます。`weapon_target` は world class map・下書き検出器・COCO 出力のどれにも入りません（COCO 出力では「アノテーション専用で除外した矩形数」として数えられます）。下書きには出ないので、手で付けてください。
+照準の円は `weapon_projectile` ではなく、**アノテーション専用クラス `weapon_target`** を付けます。シミュレーターは照準の円の中に小さな着弾を 0.1 秒ずつ出すだけで、円そのものを観測しません。円を `weapon_projectile` にすると、実機の projectile 密度だけが円の表示中ずっと高くなり、教師と食い違います。一方で照準の位置は移動の判断材料になりうるため、観測に入れるかを後で決められるよう、データだけ `weapon_target` として集めます。`weapon_target` は world class map と COCO 出力には入りません（COCO 出力では「アノテーション専用で除外した矩形数」として数えられます）。手で付ける手間を減らすため、**下書き用検出器の対象には入っており、下書きにも出ます**（確認済みの `weapon_target` で学習するので、追加後は検出器の再学習が必要です）。見本が少ないうちは明るい／暗い楕円を照準と誤検出しやすいため、`weapon_target` だけ下書きのしきい値を高く（`annotation_prelabel_v2.yaml` の `label_score_thresholds`、初期値 0.92）しています。それでも残る誤検出は消してください。
 
 矩形は `R`（または円ツール）で、見えているエフェクトの外形をぴったり囲みます。複数の弾が重なっていても、見分けられる限り1つずつ付けます。
 

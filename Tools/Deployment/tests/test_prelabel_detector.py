@@ -78,9 +78,10 @@ def test_bundled_v2_config_loads_expected_values():
     detector = config.detector
     assert detector.labels == (
         "enemy_normal", "enemy_elite", "gem_blue", "gem_green", "gem_red", "pickup_heal", "pickup_special",
-        "weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura",
+        "weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura", "weapon_target",
     )
     assert detector.label_aliases == {"enemy_boss": "enemy_normal"}
+    assert detector.label_score_thresholds == {"weapon_target": 0.92}
     assert (detector.score_threshold, detector.input_scale, detector.crop_size, detector.min_box_size) == (0.5, 2.0, 480, 6.0)
     assert (detector.iterations, detector.batch_size, detector.seed) == (1500, 4, 0)
     assert (detector.learning_rate, detector.momentum, detector.weight_decay) == (0.01, 0.9, 0.0001)
@@ -114,6 +115,12 @@ def test_bundled_v2_config_loads_expected_values():
         lambda data: data["detector"].update(score_threshold=0),
         lambda data: data["detector"].update(score_threshold=1.5),
         lambda data: data["detector"].update(score_threshold="0.5"),
+        lambda data: data["detector"].update(label_score_thresholds=["weapon_target"]),
+        lambda data: data["detector"].update(label_score_thresholds={"hud_hp": 0.9}),
+        lambda data: data["detector"].update(label_score_thresholds={"weapon_target": 0}),
+        lambda data: data["detector"].update(label_score_thresholds={"weapon_target": 1.5}),
+        lambda data: data["detector"].update(label_score_thresholds={"weapon_target": "0.9"}),
+        lambda data: data["detector"].pop("label_score_thresholds"),
         lambda data: data["detector"].update(input_scale=0),
         lambda data: data["detector"].update(input_scale=float("inf")),
         lambda data: data["detector"].update(crop_size=True),
@@ -149,7 +156,9 @@ def test_load_config_accepts_weapon_effect_labels_and_aliases(tmp_path):
     下書き可能クラスは WORLD_CLASSES（class map v2 で weapon_* を含む）。
     """
     data = copy.deepcopy(_raw_config())
-    data["detector"].update(labels=["weapon_aura", "enemy_normal"], label_aliases={"weapon_orbit": "weapon_aura"})
+    data["detector"].update(
+        labels=["weapon_aura", "enemy_normal"], label_aliases={"weapon_orbit": "weapon_aura"}, label_score_thresholds={}
+    )
     config_path = tmp_path / "weapon.yaml"
     config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
 
@@ -157,6 +166,19 @@ def test_load_config_accepts_weapon_effect_labels_and_aliases(tmp_path):
 
     assert detector.labels == ("weapon_aura", "enemy_normal")
     assert detector.label_aliases == {"weapon_orbit": "weapon_aura"}
+
+
+def test_load_config_accepts_annotation_only_label(tmp_path):
+    """アノテーション専用クラス（照準の weapon_target）も下書きの検出ラベルに使える。
+
+    world class map には無いクラスだが、手で付ける手間を減らすため下書きの対象にできる。
+    """
+    data = copy.deepcopy(_raw_config())
+    data["detector"].update(labels=["enemy_normal", "weapon_target"], label_aliases={})
+    config_path = tmp_path / "target.yaml"
+    config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    assert load_config(config_path).detector.labels == ("enemy_normal", "weapon_target")
 
 
 def _write_frame(session_dir, frame_id, boxes, *, checked, png=True):
@@ -368,6 +390,21 @@ def test_predict_boxes_applies_score_threshold(trained):
     model, settings, image, _ = trained
 
     assert predict_boxes(model, image, dataclasses.replace(settings, score_threshold=1.0), device="cpu") == []
+
+
+def test_predict_boxes_applies_label_score_threshold(trained):
+    """label_score_thresholds のラベルだけ、全体より高いしきい値で落とす。
+
+    他のラベルの検出は全体の score_threshold のまま残る。
+    """
+    model, settings, image, _ = trained
+    base = dataclasses.replace(settings, label_score_thresholds={})
+    boxes = predict_boxes(model, image, base, device="cpu")
+    target = boxes[0].label
+
+    filtered = predict_boxes(model, image, dataclasses.replace(base, label_score_thresholds={target: 1.0}), device="cpu")
+
+    assert filtered == [box for box in boxes if box.label != target]
 
 
 @pytest.mark.parametrize(

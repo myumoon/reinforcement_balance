@@ -16,9 +16,14 @@ fixed_boxes:
 # 武器エフェクト4クラス（weapon_*）を追加したので、追加前の prelabel_detector.pt は
 # 読み込み時にラベル不一致エラーになる。train_survivors_prelabel_detector.py で再学習すること。
 detector:
-  labels: [enemy_normal, enemy_elite, gem_blue, gem_green, gem_red, pickup_heal, pickup_special, weapon_projectile, weapon_zone, weapon_orbit, weapon_aura]
+  # weapon_target（照準の円）はアノテーション専用だが、手で付ける手間を減らすため下書きの対象にする。
+  labels: [enemy_normal, enemy_elite, gem_blue, gem_green, gem_red, pickup_heal, pickup_special, weapon_projectile, weapon_zone, weapon_orbit, weapon_aura, weapon_target]
   label_aliases: {enemy_boss: enemy_normal}
   score_threshold: 0.5
+  # ラベルごとに score_threshold を上書きする。weapon_target は見本が少ないうちは
+  # 明るい／暗い楕円を誤検出するため高めにする（2026-10-09 に下書き40件を目視して決めた値。
+  # 0.92 以上はほぼ照準、未満は大半が誤検出だった）。見本が増えたら見直す。
+  label_score_thresholds: {weapon_target: 0.92}
   input_scale: 2
   crop_size: 480
   min_box_size: 6
