@@ -14,6 +14,7 @@ from pathlib import Path
 import cv2
 
 from survivors.annotation_labels import (
+    ANNOTATION_ONLY_CLASSES,
     DEFAULT_CLASS_MAP_PATH,
     REGION_LABEL,
     UI_CLASSES,
@@ -82,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         ui_annotations: list[dict] = []
         skipped_unconfirmed = 0
         skipped_region = 0
+        skipped_annotation_only = 0
 
         for session_id in session_ids:
             session_dir = args.work_root / session_id
@@ -117,6 +119,10 @@ def main(argv: list[str] | None = None) -> int:
                 ui_images.append(image_entry.copy())
 
                 for box in boxes:
+                    # アノテーション専用クラス（照準など）は world/ui どちらの COCO にも入れない。
+                    if box.label in ANNOTATION_ONLY_CLASSES:
+                        skipped_annotation_only += 1
+                        continue
                     clipped = clip_box(box, image_width=image_width, image_height=image_height)
                     if clipped is None:
                         print(
@@ -161,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"採用画像数: {len(world_images)}")
         print(f"未確認でスキップした数: {skipped_unconfirmed}")
         print(f"範囲限定でスキップした数: {skipped_region}")
+        print(f"アノテーション専用で除外した矩形数: {skipped_annotation_only}")
         print(f"world 矩形数: {len(world_annotations)}")
         print(f"ui 矩形数: {len(ui_annotations)}")
         return 0

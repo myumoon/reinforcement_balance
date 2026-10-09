@@ -71,7 +71,7 @@ def test_classes_follow_world_class_map_and_append_ui_classes() -> None:
     assert WEAPON_EFFECT_CLASSES == ("weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura")
     # weapon は class map v2 の world クラス（ID 12〜15）なので WORLD_CLASSES の末尾に入る。
     assert WORLD_CLASSES[-4:] == WEAPON_EFFECT_CLASSES
-    assert ALL_CLASSES == WORLD_CLASSES + UI_CLASSES + (REGION_LABEL,)
+    assert ALL_CLASSES == WORLD_CLASSES + UI_CLASSES + (REGION_LABEL, "weapon_target")
 
 
 def test_class_map_v2_names_match_common_entity_vocabulary() -> None:
