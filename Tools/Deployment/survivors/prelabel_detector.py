@@ -24,6 +24,7 @@ from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
 from survivors.annotation_labels import (
+    ANNOTATION_ONLY_CLASSES,
     REGION_LABEL,
     WORLD_CLASSES,
     LabelBox,
@@ -40,7 +41,7 @@ _WEIGHTS_FORMAT = "annotation_prelabel_detector.v1"
 _IMAGE_WIDTH = 1920
 _IMAGE_HEIGHT = 1080
 _DETECTOR_KEYS = {
-    "labels", "label_aliases", "score_threshold", "input_scale", "crop_size", "min_box_size",
+    "labels", "label_aliases", "score_threshold", "label_score_thresholds", "input_scale", "crop_size", "min_box_size",
     "iterations", "batch_size", "learning_rate", "momentum", "weight_decay", "seed",
 }
 _LOG_EVERY = 100
@@ -55,11 +56,13 @@ class DetectorSettings:
 
     labels の並びがそのまま検出器のクラス番号（1 始まり、0 は背景）になる。
     label_aliases は確認済みラベルを学習前に別名へまとめる対応表。
+    label_score_thresholds はラベルごとに score_threshold を上書きする下書きしきい値。
     """
 
     labels: tuple[str, ...]
     label_aliases: dict[str, str]
     score_threshold: float
+    label_score_thresholds: dict[str, float]
     input_scale: float
     crop_size: int
     min_box_size: float
@@ -142,9 +145,10 @@ def _load_fixed_boxes(path: Path, items: object) -> tuple[LabelBox, ...]:
 
 
 def _check_detector_label(path: Path, where: str, label: object) -> str:
-    """下書き検出器で扱えるラベル（WORLD_CLASSES）かを検証する。
+    """下書き検出器で扱えるラベル（WORLD_CLASSES とアノテーション専用クラス）かを検証する。
 
-    画面内の物体と武器エフェクト（class map v2 で WORLD_CLASSES に入った）は下書きできるが、
+    画面内の物体・武器エフェクト（class map v2 で WORLD_CLASSES に入った）と、
+    アノテーション専用クラス（照準の weapon_target）は下書きできる。
     UI クラスや labeled_region、未知の名前は設定エラーにする。
     """
     if not isinstance(label, str):
@@ -155,8 +159,8 @@ def _check_detector_label(path: Path, where: str, label: object) -> str:
         validate_label(label)
     except ValueError as exc:
         raise ValueError(f"{path}: {where}: {exc}") from exc
-    if label not in WORLD_CLASSES:
-        raise ValueError(f"{path}: {where} must be a world class: {label!r}")
+    if label not in WORLD_CLASSES and label not in ANNOTATION_ONLY_CLASSES:
+        raise ValueError(f"{path}: {where} must be a world or annotation-only class: {label!r}")
     return label
 
 
@@ -205,6 +209,16 @@ def _load_detector_settings(path: Path, section: object) -> DetectorSettings:
         raise ValueError(f"{path}: detector.momentum must be in [0, 1)")
     if numbers["weight_decay"] < 0:
         raise ValueError(f"{path}: detector.weight_decay must be non-negative")
+    raw_thresholds = section["label_score_thresholds"]
+    if not isinstance(raw_thresholds, dict):
+        raise ValueError(f"{path}: detector.label_score_thresholds must be a mapping")
+    thresholds = {}
+    for key, value in raw_thresholds.items():
+        if key not in labels:
+            raise ValueError(f"{path}: detector.label_score_thresholds key {key!r} is not in detector.labels")
+        if not _is_number(value) or not 0 < float(value) <= 1:
+            raise ValueError(f"{path}: detector.label_score_thresholds[{key}] must be in (0, 1]")
+        thresholds[key] = float(value)
     for key in ("crop_size", "iterations", "batch_size"):
         if not _is_positive_int(section[key]):
             raise ValueError(f"{path}: detector.{key} must be a positive integer")
@@ -215,6 +229,7 @@ def _load_detector_settings(path: Path, section: object) -> DetectorSettings:
     return DetectorSettings(
         labels=labels,
         label_aliases=aliases,
+        label_score_thresholds=thresholds,
         crop_size=section["crop_size"],
         iterations=section["iterations"],
         batch_size=section["batch_size"],
@@ -483,11 +498,10 @@ def predict_boxes(
     for box, score, label in zip(
         output["boxes"].cpu().tolist(), output["scores"].cpu().tolist(), output["labels"].cpu().tolist()
     ):
-        if score < settings.score_threshold:
+        name = settings.labels[label - 1]
+        if score < settings.label_score_thresholds.get(name, settings.score_threshold):
             continue
-        clipped = clip_box(
-            LabelBox(settings.labels[label - 1], *box, score=float(score)), image_width=width, image_height=height
-        )
+        clipped = clip_box(LabelBox(name, *box, score=float(score)), image_width=width, image_height=height)
         if clipped is not None:
             results.append(clipped)
     return results
