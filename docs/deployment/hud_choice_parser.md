@@ -85,7 +85,7 @@ parser の精度を測るための正解値です。capture session 配下の `h
 | `expected_timer_seconds`／`expected_level`／`expected_hp_ratio`／`expected_xp_ratio` | 数値または null | 読めない値は null |
 | `expected_items` | 12 個の str（item_id か `"empty_slot"`）または null | slot 0〜5 が武器、6〜11 がパッシブ。確定行では slot 単位の null を禁止し、1 slot でも読めなければ配列全体を null にします |
 | `expected_slot_levels` | 12 個の int または null、または全体が null | 段階マークの点灯数。`roi_layout.SLOT_LEVEL_VISIBLE_STATES`（`level_up_items`／`level_up_fallback`）の画面でだけ非 null にできます。item の slot は 1〜9、`empty_slot` の slot は null。`expected_items` が null なら必ず null |
-| `expected_choice` | str の配列または null | 画面の card の item_id（上から） |
+| `expected_choice` | str の配列または null | 画面の card の item_id（上から）。card は level-up 画面にしか出ないので、確定行では `level_up_items`／`level_up_fallback` 以外の state なら null にします |
 | `roi_name`／`expected_roi` | `"hud"`／`[l, t, r, b]` または null | HUD あり状態（gameplay／level_up_items／level_up_fallback／chest）では HP バー〜XP バーの矩形 `[0, 32, 1920, 75]`、HUD なし状態では null（負例）。state から自動で決まり、人は編集しません |
 | `draft_source` | object | 下書きを作った `parser_artifact_hash` と `atlas_content_hash`（atlas 無しは `"none"`） |
 

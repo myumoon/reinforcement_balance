@@ -43,6 +43,8 @@ MAX_SLOT_LEVEL: Final[int] = 9
 HUD_VISIBLE_STATES: Final[frozenset[str]] = frozenset(
     {"gameplay", "level_up_items", "level_up_fallback", "chest"}
 )
+# card（expected_choice）が出る画面状態。確定行ではこれ以外の state の expected_choice は null
+LEVEL_UP_STATES: Final[frozenset[str]] = frozenset({"level_up_items", "level_up_fallback"})
 # HUD truth の ROI 名（hud_calibration の roi_name と同じ）
 HUD_ROI_NAME: Final[str] = "hud"
 # 1 画面の基準解像度
@@ -143,7 +145,11 @@ def expected_roi_for_state(state: str) -> tuple[int, int, int, int] | None:
 
 
 def _is_number(value: object) -> bool:
-    """bool を除く有限の int／float なら True。"""
+    """bool を除く有限の int／float なら True。
+
+    True/False も int の仲間として扱われるので、ここで数値から外す。
+    NaN や無限大も正解値としては使えないので False にする。
+    """
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
 
 
@@ -154,6 +160,7 @@ def validate_record(record: HudTruthRecord) -> tuple[str, ...]:
     confirmed=False の下書きでは slot 単位の null を許す。
     expected_slot_levels は段階マークが見える画面でだけ非 null にでき、
     item の slot は 1..9、empty_slot の slot は null でなければならない。
+    確定行の expected_choice は level-up 画面（LEVEL_UP_STATES）でだけ非 null にできる。
     CLI の受理判定・write_hud_truth・test はすべてこの関数を通す。
     """
     errors: list[str] = []
@@ -229,6 +236,11 @@ def validate_record(record: HudTruthRecord) -> tuple[str, ...]:
 
     choice = record.expected_choice
     if choice is not None:
+        if strict and state not in LEVEL_UP_STATES:
+            errors.append(
+                f"expected_choice must be null for state {state!r} on confirmed rows "
+                f"(cards are shown only in {sorted(LEVEL_UP_STATES)}; set choice null)"
+            )
         for index, item in enumerate(choice):
             if not isinstance(item, str) or not item:
                 errors.append(f"expected_choice[{index}] must be a non-empty item_id")
@@ -249,12 +261,19 @@ def validate_record(record: HudTruthRecord) -> tuple[str, ...]:
 
 
 def _hud_truth_path(session_path: os.PathLike[str] | str) -> Path:
-    """session 配下の hud_truth.jsonl の path を返す。"""
+    """session 配下の hud_truth.jsonl の path を返す。
+
+    読み込みと書き込みで同じ場所を使うため、path の組み立てをここに集める。
+    """
     return Path(session_path) / HUD_TRUTH_FILENAME
 
 
 def _sorted_unique(records: list[HudTruthRecord]) -> list[HudTruthRecord]:
-    """frame_id 昇順に並べ、重複 frame_id があれば ValueError。"""
+    """frame_id 昇順に並べ、重複 frame_id があれば ValueError。
+
+    1 frame に正解値は 1 行だけなので、同じ frame_id が 2 行あれば壊れたデータとして扱う。
+    並べた後なら隣同士を比べるだけで重複が見つかる。
+    """
     ordered = sorted(records, key=lambda record: record.frame_id)
     for previous, current in zip(ordered, ordered[1:]):
         if previous.frame_id == current.frame_id:
@@ -385,12 +404,18 @@ def with_state(record: HudTruthRecord, state: str) -> HudTruthRecord:
 
 
 def _parse_null(token: str) -> bool:
-    """null を表す token（null または -）なら True。"""
+    """null を表す token（null または -）なら True。
+
+    行コマンドで「値が読めない」を入れるときの書き方を 1 か所で決める。
+    """
     return token in {"null", "-"}
 
 
 def _parse_slot(token: str) -> int:
-    """slot 番号（0..11）を int で返す。範囲外は ValueError。"""
+    """slot 番号（0..11）を int で返す。範囲外は ValueError。
+
+    0..5 が武器、6..11 がパッシブの slot。数字でない token も ValueError になる。
+    """
     slot = int(token)
     if not 0 <= slot < INV_SLOT_COUNT:
         raise ValueError(f"slot must be 0..{INV_SLOT_COUNT - 1}, got {slot}")
@@ -398,18 +423,28 @@ def _parse_slot(token: str) -> int:
 
 
 def _parse_level_token(token: str) -> int | None:
-    """slot level の token（数字か -）を int か None に変換する。"""
+    """slot level の token（数字か -）を int か None に変換する。
+
+    空き slot や読めない slot は - で入れる。範囲の検査は validate_record に任せる。
+    """
     return None if _parse_null(token) else int(token)
 
 
 def _apply_set(record: HudTruthRecord, args: list[str]) -> HudTruthRecord:
-    """set サブコマンドを適用した record を返す（書式の誤りは ValueError）。"""
+    """set サブコマンドを適用した record を返す（書式の誤りは ValueError）。
+
+    args は「set」の後ろの token 列（先頭が field 名）。元の record は変えず、新しい record を返す。
+    値として正しいかどうかは呼び出し側の apply_command が validate_record で確かめる。
+    """
     if not args:
         raise ValueError("set needs a field name")
     name, rest = args[0], args[1:]
 
     def one() -> str:
-        """引数が 1 個であることを確かめて返す。"""
+        """引数が 1 個であることを確かめて返す。
+
+        set timer 1 2 のように値が多すぎる・足りない入力を ValueError で断る。
+        """
         if len(rest) != 1:
             raise ValueError(f"set {name} needs exactly one value")
         return rest[0]

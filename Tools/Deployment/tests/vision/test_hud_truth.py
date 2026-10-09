@@ -41,7 +41,11 @@ LEVELS = (3, 1, None, None, None, None, 2, None, None, None, None, None)
 
 
 def _record(state: str = "gameplay", **overrides) -> HudTruthRecord:
-    """妥当な未確定 record を作り、overrides で field を差し替える。"""
+    """妥当な未確定 record を作り、overrides で field を差し替える。
+
+    各 test は検査したい field だけを overrides で変え、それ以外は規則を満たす値のままにする。
+    expected_roi は state から決まる値を入れておく。
+    """
     base = HudTruthRecord(
         schema_version="hud_truth.v1",
         session_id="session-001",
@@ -65,19 +69,31 @@ def _record(state: str = "gameplay", **overrides) -> HudTruthRecord:
 
 
 class _FixedParser:
-    """parse で決まった HudStateV1 を返す parser の代役。"""
+    """parse で決まった HudStateV1 を返す parser の代役。
+
+    inventory や cards を自由に組んだ HudStateV1 で draft_from_parser を試すために使う。
+    """
 
     def __init__(self, state) -> None:
-        """返す HudStateV1 を受け取る。"""
+        """返す HudStateV1 を受け取る。
+
+        受け取った state は parse のたびにそのまま返す。
+        """
         self.state = state
 
     def parse(self, frame_bgra, **_kwargs):
-        """受け取った frame を無視して固定の state を返す。"""
+        """受け取った frame を無視して固定の state を返す。
+
+        本物の HudParser.parse と同じ呼び方ができるよう、keyword 引数は受け流す。
+        """
         return self.state
 
 
 def _draft(state, frame) -> HudTruthRecord:
-    """固定 state の parser で下書きを作る。"""
+    """固定 state の parser で下書きを作る。
+
+    session・frame 番号・annotator などの付帯情報は固定値にする。
+    """
     return draft_from_parser(
         frame, _FixedParser(state), session_id="session-001", frame_index=3,
         captured_monotonic_ns=100, annotator_id="tester", atlas_content_hash="none",
@@ -85,7 +101,10 @@ def _draft(state, frame) -> HudTruthRecord:
 
 
 def test_draft_copies_hud_state_and_nulls_partial_inventory(gameplay_frame, dummy_parser_artifact_hash):
-    """下書きは HudStateV1 を写し、読めない slot があれば items 全体を null にする。"""
+    """下書きは HudStateV1 を写し、読めない slot があれば items 全体を null にする。
+
+    slot level は常に null、card の item_id（None を除く）は expected_choice に入ることも確かめる。
+    """
     state = HudParser(parser_artifact_hash=dummy_parser_artifact_hash).parse(
         gameplay_frame, session_id="session-001", frame_index=3, captured_monotonic_ns=100
     )
@@ -117,7 +136,10 @@ def test_draft_copies_hud_state_and_nulls_partial_inventory(gameplay_frame, dumm
 
 
 def test_expected_roi_for_state_hud_and_negative_states():
-    """HUD あり状態は HP〜XP バーの pixel 矩形、HUD なし状態は None。"""
+    """HUD あり状態は HP〜XP バーの pixel 矩形、HUD なし状態は None。
+
+    1920×1080 の基準解像度での矩形を固定値で確かめる。
+    """
     roi = expected_roi_for_state("gameplay")
     assert roi == (0, 32, 1920, 75)
     for state in ("level_up_items", "level_up_fallback", "chest"):
@@ -141,14 +163,20 @@ def test_expected_roi_for_state_hud_and_negative_states():
     ],
 )
 def test_apply_command_updates_fields(line, field, value):
-    """set コマンドで対応する field が更新される。"""
+    """set コマンドで対応する field が更新される。
+
+    1 コマンドにつき 1 field だけが期待どおりの値に変わることを確かめる。
+    """
     updated, error = apply_command(_record(expected_choice=("x",)), line)
     assert error is None
     assert getattr(updated, field) == value
 
 
 def test_set_item_on_null_items_starts_partial_draft():
-    """items が null でも set item で 1 slot ずつ入れられる（未確定のうちは他 slot は null）。"""
+    """items が null でも set item で 1 slot ずつ入れられる（未確定のうちは他 slot は null）。
+
+    slot が埋まりきらないまま ok すると、確定行の規則で拒否される。
+    """
     updated, error = apply_command(_record(expected_items=None), "set item 0 whip")
     assert error is None
     assert updated.expected_items == ("whip",) + (None,) * (INV_SLOT_COUNT - 1)
@@ -157,7 +185,10 @@ def test_set_item_on_null_items_starts_partial_draft():
 
 
 def test_set_state_updates_roi_and_drops_levels():
-    """set state は ROI を自動更新し、段階マークが出ない state では levels を null にする。"""
+    """set state は ROI を自動更新し、段階マークが出ない state では levels を null にする。
+
+    level-up 画面どうしの切り替えでは levels を残し、未知の state は拒否する。
+    """
     record = _record("level_up_items", expected_slot_levels=LEVELS)
     updated, error = apply_command(record, "set state death")
     assert error is None
@@ -174,7 +205,10 @@ def test_set_state_updates_roi_and_drops_levels():
 
 
 def test_set_levels_accepts_valid_levels():
-    """level-up 画面では set levels と set level-of で slot level を入れられる。"""
+    """level-up 画面では set levels と set level-of で slot level を入れられる。
+
+    入れた値のまま ok で確定でき、set levels null で全体を null に戻せる。
+    """
     record = _record("level_up_items")
     updated, error = apply_command(record, "set levels 3 1 - - - - 2 - - - - -")
     assert error is None
@@ -204,7 +238,10 @@ def test_set_levels_accepts_valid_levels():
     ],
 )
 def test_apply_command_rejects_without_change(state, line, reason):
-    """不正なコマンドは record を変えず理由を返す。"""
+    """不正なコマンドは record を変えず理由を返す。
+
+    返る record は元と同じ object で、理由の文字列に原因の手がかりが入る。
+    """
     record = _record(state)
     updated, error = apply_command(record, line)
     assert updated is record
@@ -212,14 +249,20 @@ def test_apply_command_rejects_without_change(state, line, reason):
 
 
 def test_set_levels_rejected_when_items_null():
-    """expected_items が null の frame には slot level を入れられない。"""
+    """expected_items が null の frame には slot level を入れられない。
+
+    どの slot に何があるか分からないと、段階の値も意味を持たないため。
+    """
     record = _record("level_up_items", expected_items=None)
     _, error = apply_command(record, "set levels 3 1 - - - - 2 - - - - -")
     assert error is not None and "expected_items is null" in error
 
 
 def test_set_items_null_also_drops_levels():
-    """set items null は expected_slot_levels も null にする（items null なら levels も null）。"""
+    """set items null は expected_slot_levels も null にする（items null なら levels も null）。
+
+    items だけ null にして levels が残る食い違いを作らないことを確かめる。
+    """
     record = _record("level_up_items", expected_slot_levels=LEVELS)
     updated, error = apply_command(record, "set items null")
     assert error is None
@@ -227,7 +270,10 @@ def test_set_items_null_also_drops_levels():
 
 
 def test_validate_is_lenient_for_unconfirmed_drafts():
-    """未確定の下書きは slot 単位の null を許し、確定行では拒否する。"""
+    """未確定の下書きは slot 単位の null を許し、確定行では拒否する。
+
+    items と slot level の両方で、確定した瞬間に slot 単位 null が違反になることを確かめる。
+    """
     partial = ("whip",) + (None,) * (INV_SLOT_COUNT - 1)
     draft = _record("level_up_items", expected_items=partial,
                     expected_slot_levels=(2,) + (None,) * (INV_SLOT_COUNT - 1))
@@ -241,7 +287,10 @@ def test_validate_is_lenient_for_unconfirmed_drafts():
 
 
 def test_validate_rejects_roi_mismatch_and_bad_state():
-    """expected_roi が state から決まる値と違う、または state が未知なら違反。"""
+    """expected_roi が state から決まる値と違う、または state が未知なら違反。
+
+    items の長さ違いも違反になり、SLOT_LEVEL_VISIBLE_STATES は level-up の 2 状態だけ。
+    """
     assert validate_record(_record(expected_roi=None))
     assert validate_record(_record("death", expected_roi=(0, 0, 1, 1)))
     assert validate_record(_record(expected_screen_state="flying", expected_roi=None))
@@ -249,8 +298,26 @@ def test_validate_rejects_roi_mismatch_and_bad_state():
     assert SLOT_LEVEL_VISIBLE_STATES == frozenset({"level_up_items", "level_up_fallback"})
 
 
+def test_validate_rejects_choice_outside_level_up_on_confirmed_rows():
+    """確定行の expected_choice は level-up 画面でだけ非 null にできる。
+
+    card は level-up 画面にしか出ないので、gameplay の確定行に choice があれば違反にする。
+    未確定の下書きでは許し、ok の時点で set choice null を求める。
+    """
+    gameplay = _record("gameplay", expected_choice=("whip",), confirmed=True, confirmed_at=NOW)
+    assert any("expected_choice" in error for error in validate_record(gameplay))
+    assert validate_record(replace(gameplay, confirmed=False, confirmed_at=None)) == ()
+    for state in ("level_up_items", "level_up_fallback"):
+        assert validate_record(replace(gameplay, expected_screen_state=state)) == ()
+    _, error = apply_command(replace(gameplay, confirmed=False, confirmed_at=None), "ok", now=NOW)
+    assert error is not None and "expected_choice" in error
+
+
 def test_hud_truth_jsonl_round_trip_preserves_unknown_fields(tmp_path):
-    """書いて読むと frame_id 昇順になり、未知 field も保持される。"""
+    """書いて読むと frame_id 昇順になり、未知 field も保持される。
+
+    もう一度書き戻しても同じ内容になり、一時ファイルが残らないことも確かめる。
+    """
     first = _record(frame_id=9, extra={"note": "keep me"})
     second = _record("level_up_items", frame_id=2, expected_slot_levels=LEVELS,
                      expected_choice=("whip", "axe"), confirmed=True, confirmed_at=NOW)
@@ -268,7 +335,10 @@ def test_hud_truth_jsonl_round_trip_preserves_unknown_fields(tmp_path):
 
 
 def test_write_rejects_duplicates_and_invalid_confirmed_rows(tmp_path):
-    """重複 frame_id と、規則違反の確定行は書かずに ValueError。"""
+    """重複 frame_id と、規則違反の確定行は書かずに ValueError。
+
+    読み込み側でも、重複 frame_id を含む file は ValueError になる。
+    """
     with pytest.raises(ValueError, match="duplicate"):
         write_hud_truth(tmp_path, [_record(), _record()])
     bad = _record(confirmed=True, confirmed_at=NOW, expected_slot_levels=LEVELS)
@@ -283,7 +353,10 @@ def test_write_rejects_duplicates_and_invalid_confirmed_rows(tmp_path):
 
 
 def test_load_frame_pixels_verifies_sha256(tmp_path, gameplay_frame):
-    """PNG を BGRA で読み、object_sha256 が違えば ValueError。"""
+    """PNG を BGRA で読み、object_sha256 が違えば ValueError。
+
+    合成 session に 1 枚書き、読み戻した画素が元の frame と一致することも確かめる。
+    """
     writer = DatasetWriter(tmp_path, "session-001", PROFILE_HASH, BUILD_ID)
     writer.write_frame(CapturedFrame(
         frame_bgra=gameplay_frame, captured_monotonic_ns=100, session_frame_index=0,
@@ -301,7 +374,10 @@ def test_load_frame_pixels_verifies_sha256(tmp_path, gameplay_frame):
 
 
 def test_hud_calibration_ignores_slot_levels_as_unknown_field():
-    """hud_calibration._validate_annotation は expected_slot_levels を未知 field として無視する。"""
+    """hud_calibration._validate_annotation は expected_slot_levels を未知 field として無視する。
+
+    _validate_annotation は expected_choice を str|None として検査するので、choice は null にしておく。
+    """
     record = _record("level_up_items", expected_slot_levels=LEVELS, confirmed=True, confirmed_at=NOW)
     wire = record.to_wire()
     assert wire["expected_slot_levels"] == list(LEVELS)
@@ -310,7 +386,10 @@ def test_hud_calibration_ignores_slot_levels_as_unknown_field():
 
 
 def _write_session(store_root: Path, frame) -> None:
-    """同じ合成 frame を 3 枚持つ capture session を store_root に作る。"""
+    """同じ合成 frame を 3 枚持つ capture session を store_root に作る。
+
+    frame_id は 0, 1, 2。CLI の test はこの session に対して実行する。
+    """
     writer = DatasetWriter(store_root, "session-001", PROFILE_HASH, BUILD_ID)
     for frame_id in range(3):
         writer.write_frame(CapturedFrame(
@@ -322,7 +401,10 @@ def _write_session(store_root: Path, frame) -> None:
 
 
 def _write_label(path: Path, *, checked: bool, labels: tuple[str, ...] = ()) -> None:
-    """X-AnyLabeling 形式の label JSON を書く。"""
+    """X-AnyLabeling 形式の label JSON を書く。
+
+    labels の名前ごとに矩形を 1 つ置き、checked で確認済みかどうかを決める。
+    """
     shapes = [{"label": label, "shape_type": "rectangle", "points": [[10, 10], [100, 100]]} for label in labels]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"shapes": shapes, "imagePath": path.stem + ".png",
@@ -330,7 +412,11 @@ def _write_label(path: Path, *, checked: bool, labels: tuple[str, ...] = ()) -> 
 
 
 def test_cli_annotates_checked_frames_with_labels_and_resume(tmp_path, gameplay_frame):
-    """CLI は checked label の frame を下書きし、undo・ok・ok-range・--resume が働く。"""
+    """CLI は checked label の frame を下書きし、undo・ok・ok-range・--resume が働く。
+
+    対象 frame の指定が無ければ parser.error で終わり、既存の hud_truth.jsonl は --resume なしでは上書きしない。
+    --from-labels の card bbox で level_up_items になった frame では ok-range が止まる。
+    """
     import io
     import annotate_survivors_hud_truth as cli
 
@@ -365,3 +451,68 @@ def test_cli_annotates_checked_frames_with_labels_and_resume(tmp_path, gameplay_
     assert [(r.frame_id, r.confirmed) for r in records] == [(0, True), (1, False), (2, True)]
     assert records[1].expected_screen_state == "level_up_items"
     assert records[1].expected_level == 9
+
+
+def test_cli_ok_range_stops_on_edit_of_shown_frame(tmp_path, gameplay_frame):
+    """ok-range は表示中 frame の人の編集が引き継ぎ値と違えば止まり、編集を上書きしない。
+
+    frame 0 を level 4 で確定した後、frame 1 で level 9 に直してから ok-range すると、
+    frame 1 で止まり、level 9 の未確定行として保存される（後続の frame 2 も確定しない）。
+    """
+    import io
+    import annotate_survivors_hud_truth as cli
+
+    store = tmp_path / "store"
+    _write_session(store, gameplay_frame)
+    out = io.StringIO()
+    code = cli.main(
+        ["--store-root", str(store), "--session-id", "session-001", "--annotator-id", "t",
+         "--frame-ids", "0", "1", "2"],
+        stdin=io.StringIO("set level 4\nok\nset level 9\nok-range 1 2\n"), stdout=out,
+    )
+    assert code == 0, out.getvalue()
+    assert "停止: frame 1" in out.getvalue() and "expected_level" in out.getvalue()
+    assert "ok-range:" not in out.getvalue()
+    records = read_hud_truth(store / "capture_sessions" / "session-001")
+    assert [(r.frame_id, r.expected_level, r.confirmed) for r in records] == [(0, 4, True), (1, 9, False)]
+
+
+def test_cli_ok_range_respects_resumed_unconfirmed_rows(tmp_path, gameplay_frame):
+    """ok-range は --resume で読んだ未確定行を比較対象にし、確定するときは extra を保持する。
+
+    範囲内の未確定行（人が skip で残した level 9）が引き継ぎ値と違えばそこで止まる。
+    人が値を直した後の ok-range では、後続の未確定行を引き継ぎ値で確定し、その行の未知 field を残す。
+    """
+    import io
+    import annotate_survivors_hud_truth as cli
+
+    store = tmp_path / "store"
+    _write_session(store, gameplay_frame)
+    session_path = store / "capture_sessions" / "session-001"
+    args = ["--store-root", str(store), "--session-id", "session-001", "--annotator-id", "t",
+            "--frame-ids", "0", "1", "2"]
+    assert cli.main(args, stdin=io.StringIO("set level 4\nok\nquit\n"), stdout=io.StringIO()) == 0
+    first = read_hud_truth(session_path)[0]
+    unconfirmed = replace(first, confirmed=False, confirmed_at=None)
+    write_hud_truth(session_path, [
+        first,
+        replace(unconfirmed, frame_id=1, expected_level=9),
+        replace(unconfirmed, frame_id=2, extra={"note": "keep me"}),
+    ])
+
+    out = io.StringIO()
+    code = cli.main(args + ["--resume"], stdin=io.StringIO("ok-range 1 2\n"), stdout=out)
+    assert code == 0, out.getvalue()
+    assert "停止: frame 1" in out.getvalue() and "expected_level" in out.getvalue()
+    records = read_hud_truth(session_path)
+    assert [(r.frame_id, r.expected_level, r.confirmed) for r in records] == [
+        (0, 4, True), (1, 9, False), (2, 4, False)]
+
+    out = io.StringIO()
+    code = cli.main(args + ["--resume"], stdin=io.StringIO("set level 4\nok-range 1 2\n"), stdout=out)
+    assert code == 0, out.getvalue()
+    assert "ok-range: 2 frame を確定" in out.getvalue()
+    records = read_hud_truth(session_path)
+    assert [(r.frame_id, r.expected_level, r.confirmed) for r in records] == [
+        (0, 4, True), (1, 4, True), (2, 4, True)]
+    assert records[2].extra == {"note": "keep me"}

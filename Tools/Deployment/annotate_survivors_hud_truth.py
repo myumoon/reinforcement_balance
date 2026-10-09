@@ -80,7 +80,11 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _checked_frame_ids(work_root: Path, session_id: str) -> list[int]:
-    """work root の session で checked: true の label がある frame_id を昇順で返す。"""
+    """work root の session で checked: true の label がある frame_id を昇順で返す。
+
+    X-AnyLabeling で人が確認済みにした frame だけを、HUD 正解値を付ける対象にする。
+    label JSON は読むだけで書き換えない。
+    """
     return [
         frame_id
         for frame_id, _png, label in iter_frame_files(work_root / session_id)
@@ -107,24 +111,33 @@ def _label_state(label_path: Path, parser_state: str) -> tuple[str | None, str |
 
 
 def _format_slots(values: tuple | None) -> str:
-    """12 slot の値を武器 6・パッシブ 6 に分けた 1 行にする（null は -）。"""
+    """12 slot の値を武器 6・パッシブ 6 に分けた 1 行にする（null は -）。
+
+    画面の HUD と同じ並びで見比べられるよう、w: に武器、p: にパッシブを出す。
+    配列全体が null なら null とだけ出す。
+    """
     if values is None:
         return "null"
     cells = ["-" if value is None else str(value) for value in values]
     return f"w: {' '.join(cells[:6])}  p: {' '.join(cells[6:])}"
 
 
-def _carry_conflicts(draft: HudTruthRecord, carry: HudTruthRecord) -> list[str]:
-    """下書きで読めている field のうち、引き継ぎ値と食い違うものを列挙する。"""
+def _carry_conflicts(subject: HudTruthRecord, carry: HudTruthRecord) -> list[str]:
+    """subject で値が入っている field のうち、引き継ぎ値と食い違うものを列挙する。
+
+    subject は表示中 frame なら人の編集を含む値、後続 frame なら保存済みの行か parser の下書き。
+    null の field は「わからない」なので比べない。timer・HP・XP は許容差の範囲なら同じとみなす。
+    1 つでも食い違えば ok-range はその frame で止まり、人の値を上書きしない。
+    """
     conflicts: list[str] = []
     for name in _DISCRETE_FIELDS:
-        value = getattr(draft, name)
+        value = getattr(subject, name)
         if value is not None and value != getattr(carry, name):
-            conflicts.append(f"{name}: 下書き={value!r} 引き継ぎ={getattr(carry, name)!r}")
+            conflicts.append(f"{name}: 現在={value!r} 引き継ぎ={getattr(carry, name)!r}")
     for name, tolerance in _CONTINUOUS_FIELDS:
-        value, carried = getattr(draft, name), getattr(carry, name)
+        value, carried = getattr(subject, name), getattr(carry, name)
         if value is not None and (carried is None or abs(value - carried) > tolerance):
-            conflicts.append(f"{name}: 下書き={value!r} 引き継ぎ={carried!r}")
+            conflicts.append(f"{name}: 現在={value!r} 引き継ぎ={carried!r}")
     return conflicts
 
 
@@ -136,7 +149,11 @@ class _Drafter:
     """
 
     def __init__(self, args: argparse.Namespace, session_path: Path, frame_records: tuple[FrameRecord, ...]) -> None:
-        """parser・atlas・frame 一覧を用意する。"""
+        """parser・atlas・frame 一覧を用意する。
+
+        --atlas が無ければ icon 照合なしの parser を作る（所持 item は読めず下書きは null になる）。
+        frame は frame_id 順に並べ、遡り parse の範囲を二分探索で引けるようにする。
+        """
         matcher = IconMatcher.load_development(args.atlas) if args.atlas else None
         self.atlas_hash = matcher.manifest.atlas_content_hash if matcher else NO_ATLAS_HASH
         self.parser = HudParser(parser_artifact_hash=f"development:{self.atlas_hash}", icon_matcher=matcher)
@@ -149,7 +166,11 @@ class _Drafter:
         self.hints: dict[int, str] = {}
 
     def _parse(self, position: int) -> None:
-        """position の frame を parse して結果を捨てる（時間方向の状態だけを進める）。"""
+        """position の frame を parse して結果を捨てる（時間方向の状態だけを進める）。
+
+        parser は前の frame の結果を覚えて判定を安定させるので、対象 frame の前を流しておく。
+        ここで得た HudStateV1 は下書きには使わない。
+        """
         record = self.records[position]
         self.parser.parse(
             load_frame_pixels(self.session_path, record),
@@ -159,7 +180,11 @@ class _Drafter:
         )
 
     def draft(self, frame_id: int) -> HudTruthRecord:
-        """frame_id の下書きを返す（--from-labels なら label の state を優先する）。"""
+        """frame_id の下書きを返す（--from-labels なら label の state を優先する）。
+
+        f-30 から（最大 400 frame）遡って parse してから対象 frame を parse する。
+        前回の続きなら途中から再開し、離れた窓なら parser の時間方向の状態を消してから始める。
+        """
         position = bisect_left(self.frame_ids, frame_id)
         start = max(bisect_left(self.frame_ids, frame_id - BACKTRACK_FRAMES), position - MAX_WARMUP_FRAMES)
         if self.last_parsed is not None and start <= self.last_parsed + 1 <= position:
@@ -188,13 +213,20 @@ class _Drafter:
         return draft
 
     def png_path(self, frame_id: int) -> Path:
-        """frame_id の PNG の絶対 path を返す。"""
+        """frame_id の PNG の絶対 path を返す。
+
+        CLI は画像を開かないので、この path を別窓の画像ビューアで開いて見比べる。
+        """
         record = self.records[bisect_left(self.frame_ids, frame_id)]
         return (self.session_path / record.object_path).resolve()
 
 
 def _show(out: TextIO, drafter: _Drafter, record: HudTruthRecord, index: int, total: int) -> None:
-    """1 frame 分の下書きを text で表示する。"""
+    """1 frame 分の下書きを text で表示する。
+
+    毎 frame の先頭に「state は目視で確認」の注意と PNG の path を出す。
+    所持 item と slot level は武器・パッシブに分けて表示する。
+    """
     print(f"=== frame {record.frame_id:08d} ({index + 1}/{total}) {record.session_id} ===", file=out)
     print(STATE_NOTICE, file=out)
     print(f"png: {drafter.png_path(record.frame_id)}", file=out)
@@ -240,13 +272,19 @@ def run(args: argparse.Namespace, stdin: TextIO, out: TextIO) -> int:
     since_save = 0
 
     def save() -> None:
-        """現在の records を保存する。"""
+        """現在の records を保存する。
+
+        未確定の行も含めて hud_truth.jsonl に書き、--resume で続きから作業できるようにする。
+        """
         if records or existing:
             path = write_hud_truth(session_path, list(records.values()))
             print(f"saved: {path} ({len(records)} records)", file=out)
 
     def advance(count: int) -> None:
-        """count frame 進んだことを数え、SAVE_EVERY ごとに保存する。"""
+        """count frame 進んだことを数え、SAVE_EVERY ごとに保存する。
+
+        途中で落ちても失うのは最後の保存以降の数 frame だけにするための途中保存。
+        """
         nonlocal since_save
         since_save += count
         if since_save >= SAVE_EVERY:
@@ -298,35 +336,36 @@ def run(args: argparse.Namespace, stdin: TextIO, out: TextIO) -> int:
                     print("拒否: 引き継ぐ確認値（この frame より前の確定行）がありません", file=out)
                     continue
                 carry = max(carries, key=lambda r: r.frame_id)
-                draft, done = base, 0
+                # 比較対象は表示中 frame なら人の編集を含む current、後続 frame なら保存済みの行か下書き
+                draft, subject, done = base, current, 0
                 while True:
-                    conflicts = _carry_conflicts(draft, carry)
+                    conflicts = _carry_conflicts(subject, carry)
                     if conflicts:
-                        print(f"停止: frame {draft.frame_id} の下書きが引き継ぎ値と違います", file=out)
+                        print(f"停止: frame {subject.frame_id} の値が引き継ぎ値と違います", file=out)
                         for conflict in conflicts:
                             print(f"  {conflict}", file=out)
                         break
                     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
                     confirmed = replace(
-                        carry, frame_id=draft.frame_id, annotator_id=args.annotator_id,
-                        draft_source=draft.draft_source, confirmed_at=stamp, extra={},
+                        carry, frame_id=subject.frame_id, annotator_id=args.annotator_id,
+                        draft_source=subject.draft_source, confirmed_at=stamp, extra=subject.extra,
                     )
                     errors = validate_record(confirmed)
                     if errors:
-                        print(f"停止: frame {draft.frame_id}: {'; '.join(errors)}", file=out)
+                        print(f"停止: frame {subject.frame_id}: {'; '.join(errors)}", file=out)
                         break
-                    records[draft.frame_id] = carry = confirmed
+                    records[subject.frame_id] = carry = confirmed
                     position, done = position + 1, done + 1
                     if position >= len(targets) or targets[position] > last:
-                        draft = None
+                        draft = subject = None
                         break
                     draft = drafter.draft(targets[position])
+                    subject = records.get(draft.frame_id, draft)
                 if done:
                     history.append(snapshot)
                     print(f"ok-range: {done} frame を確定", file=out)
                     advance(done)
-                    base = draft
-                    current = None if draft is None else records.get(draft.frame_id, draft)
+                    base, current = draft, subject
                     if current is not None:
                         _show(out, drafter, current, position, len(targets))
                 continue
