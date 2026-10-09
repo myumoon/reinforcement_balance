@@ -12,10 +12,11 @@ fixed_boxes:
   - {label: hud_xp, bbox: [96, 0, 1824, 36]}
 
 # 下書きから外す画面範囲（1920x1080 画面座標）。中心が bbox に入る labels の検出を書かない。
-# 左上のアイテム欄（武器6枠＋パッシブ6枠のアイコン）は、斧・King Bible などのアイコンを
-# 武器エフェクトと誤検出するため、weapon_* と weapon_target だけ外す（敵やジェムは本物が通るので外さない）。
+# 左上のアイテム欄（武器6枠＋パッシブ6枠のアイコン）は、アイコンを武器エフェクト・敵・ジェムと
+# 誤検出するため、全ラベルを外す。アイテム欄の中は手でも何も付けない（後ろを通る本物の敵・ジェムも含む）。
 ignore_regions:
-  - {labels: [weapon_projectile, weapon_zone, weapon_orbit, weapon_aura, weapon_target], bbox: [96, 36, 390, 130]}
+  - labels: [enemy_normal, enemy_elite, gem_blue, gem_green, gem_red, pickup_heal, pickup_special, weapon_projectile, weapon_zone, weapon_orbit, weapon_aura, weapon_target]
+    bbox: [96, 36, 390, 130]
 
 # 下書き用検出器（torchvision Faster R-CNN MobileNetV3）の学習・推論設定。
 # labels の並びが検出器のクラス番号になるため、変えたら再学習が必要。

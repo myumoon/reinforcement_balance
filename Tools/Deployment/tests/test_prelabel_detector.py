@@ -84,11 +84,7 @@ def test_bundled_v2_config_loads_expected_values():
     )
     assert detector.label_aliases == {"enemy_boss": "enemy_normal"}
     assert detector.label_score_thresholds == {"weapon_target": 0.92}
-    assert config.ignore_regions == (
-        IgnoreRegion(
-            ("weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura", "weapon_target"), 96, 36, 390, 130
-        ),
-    )
+    assert config.ignore_regions == (IgnoreRegion(detector.labels, 96, 36, 390, 130),)
     assert (detector.score_threshold, detector.input_scale, detector.crop_size, detector.min_box_size) == (0.5, 2.0, 480, 6.0)
     assert (detector.iterations, detector.batch_size, detector.seed) == (1500, 4, 0)
     assert (detector.learning_rate, detector.momentum, detector.weight_decay) == (0.01, 0.9, 0.0001)

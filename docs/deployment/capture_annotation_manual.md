@@ -149,7 +149,7 @@ python Tools/Deployment/prelabel_survivors_frames.py `
   - King Bible（Unholy Vespers）の本 → `weapon_orbit`（1冊ごとに1矩形）
   - Garlic（Soul Eater）の輪 → `weapon_aura`（見えている輪を囲む1矩形）
   - Peachone・Ebony Wings・Vandalier の着弾の爆発 → `weapon_projectile`、照準の大きな円 → `weapon_target`（アノテーション専用で COCO には出ないが、下書きには出る。鳥本体には付けない）
-  - 画面左上のアイテム欄のアイコンには、武器の絵でも何も付けない（UI であり、ゲーム内の物体ではない）
+  - 画面左上のアイテム欄の中（アイコンが並ぶ範囲）には何も付けない。アイコンにも、アイコンの後ろを通る本物の敵・ジェムにも付けない（アイコンと見分けにくいため。下書きにも出ない）
   - Pentagram（Gorgeous Moon）の画面フラッシュ、Laurel の盾、燭台などの壊せる置物 → 何も付けない
 - `weapon_*` は world class map v1 に無いため、当面は COCO 出力から矩形だけ除外されます（フレームと他の矩形は出力されます）。
 - `enemy_boss` はボスとして出現した個体（倒すと宝箱を落とす個体）にだけ付けます。ステージ後半に、序盤〜中盤のボスと同じ見た目の敵が雑魚敵として群れで出てきた場合は `enemy_normal` です。迷ったら `enemy_normal` にしてください（理由は [`annotation_gui.md`](annotation_gui.md) の「ボスと元ボスの雑魚敵」を参照）。
