@@ -18,9 +18,11 @@ import yaml
 from survivors.annotation_labels import REGION_LABEL, LabelBox, write_label_file
 from survivors.prelabel_detector import (
     DEFAULT_CONFIG_PATH,
+    IgnoreRegion,
     TrainingFrame,
     build_model,
     collect_training_frames,
+    drop_ignored,
     load_config,
     load_detector,
     predict_boxes,
@@ -82,6 +84,11 @@ def test_bundled_v2_config_loads_expected_values():
     )
     assert detector.label_aliases == {"enemy_boss": "enemy_normal"}
     assert detector.label_score_thresholds == {"weapon_target": 0.92}
+    assert config.ignore_regions == (
+        IgnoreRegion(
+            ("weapon_projectile", "weapon_zone", "weapon_orbit", "weapon_aura", "weapon_target"), 96, 36, 390, 130
+        ),
+    )
     assert (detector.score_threshold, detector.input_scale, detector.crop_size, detector.min_box_size) == (0.5, 2.0, 480, 6.0)
     assert (detector.iterations, detector.batch_size, detector.seed) == (1500, 4, 0)
     assert (detector.learning_rate, detector.momentum, detector.weight_decay) == (0.01, 0.9, 0.0001)
@@ -97,6 +104,13 @@ def test_bundled_v2_config_loads_expected_values():
         lambda data: data["fixed_boxes"][0].update(label=REGION_LABEL),
         lambda data: data["fixed_boxes"][0].update(bbox=[0, 0, 2000, 40]),
         lambda data: data["fixed_boxes"][0].update(bbox=[0, 0, float("nan"), 40]),
+        lambda data: data.pop("ignore_regions"),
+        lambda data: data.update(ignore_regions={"labels": ["weapon_orbit"]}),
+        lambda data: data["ignore_regions"][0].update(extra=1),
+        lambda data: data["ignore_regions"][0].update(labels=[]),
+        lambda data: data["ignore_regions"][0].update(labels=["hud_hp"]),
+        lambda data: data["ignore_regions"][0].update(bbox=[0, 0, 2000, 40]),
+        lambda data: data["ignore_regions"][0].update(bbox=[10, 10, 5, 40]),
         lambda data: data["detector"].update(extra=1),
         lambda data: data["detector"].pop("seed"),
         lambda data: data["detector"].update(labels=[]),
@@ -159,6 +173,7 @@ def test_load_config_accepts_weapon_effect_labels_and_aliases(tmp_path):
     data["detector"].update(
         labels=["weapon_aura", "enemy_normal"], label_aliases={"weapon_orbit": "weapon_aura"}, label_score_thresholds={}
     )
+    data["ignore_regions"] = []
     config_path = tmp_path / "weapon.yaml"
     config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
 
@@ -175,10 +190,25 @@ def test_load_config_accepts_annotation_only_label(tmp_path):
     """
     data = copy.deepcopy(_raw_config())
     data["detector"].update(labels=["enemy_normal", "weapon_target"], label_aliases={})
+    data["ignore_regions"] = []
     config_path = tmp_path / "target.yaml"
     config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
 
     assert load_config(config_path).detector.labels == ("enemy_normal", "weapon_target")
+
+
+def test_drop_ignored_removes_only_listed_labels_centered_inside():
+    """ignore_regions の対象ラベルで中心が範囲内のものだけ外し、他は残す。
+
+    範囲内を通る敵（対象外ラベル）と、範囲外の武器エフェクトは下書きに残る。
+    """
+    region = IgnoreRegion(("weapon_orbit",), 100, 40, 200, 80)
+    icon = LabelBox("weapon_orbit", 120, 45, 150, 75, 0.99)
+    enemy_inside = LabelBox("enemy_normal", 120, 45, 150, 75, 0.99)
+    orbit_outside = LabelBox("weapon_orbit", 400, 400, 430, 430, 0.99)
+    edge = LabelBox("weapon_orbit", 180, 60, 240, 100, 0.99)  # 中心 (210, 80) は範囲外
+
+    assert drop_ignored([icon, enemy_inside, orbit_outside, edge], (region,)) == [enemy_inside, orbit_outside, edge]
 
 
 def _write_frame(session_dir, frame_id, boxes, *, checked, png=True):

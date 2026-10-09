@@ -83,6 +83,22 @@ class PrelabelConfig:
 
     fixed_boxes: tuple[LabelBox, ...]
     detector: DetectorSettings
+    ignore_regions: tuple["IgnoreRegion", ...]
+
+
+@dataclass(frozen=True)
+class IgnoreRegion:
+    """下書きから外す画面範囲と、外す対象のラベル。
+
+    中心が left/top/right/bottom の内側に入る、labels のどれかの検出を下書きに書かない。
+    左上のアイテム欄のアイコンを武器エフェクトと誤検出するのを防ぐために使う。
+    """
+
+    labels: tuple[str, ...]
+    left: float
+    top: float
+    right: float
+    bottom: float
 
 
 @dataclass(frozen=True)
@@ -135,13 +151,56 @@ def _load_fixed_boxes(path: Path, items: object) -> tuple[LabelBox, ...]:
             validate_label(label)
         except ValueError as exc:
             raise ValueError(f"{path}: fixed_boxes[{index}]: {exc}") from exc
-        if not isinstance(bbox, list) or len(bbox) != 4 or not all(_is_number(value) for value in bbox):
-            raise ValueError(f"{path}: fixed_boxes[{index}].bbox must contain four finite numbers")
-        left, top, right, bottom = (float(value) for value in bbox)
-        if left < 0 or top < 0 or right <= left or bottom <= top or right > _IMAGE_WIDTH or bottom > _IMAGE_HEIGHT:
-            raise ValueError(f"{path}: fixed_boxes[{index}].bbox is outside 1920x1080 image bounds")
-        boxes.append(LabelBox(label, left, top, right, bottom))
+        boxes.append(LabelBox(label, *_load_bbox(path, f"fixed_boxes[{index}]", bbox)))
     return tuple(boxes)
+
+
+def _load_bbox(path: Path, where: str, bbox: object) -> tuple[float, float, float, float]:
+    """[left, top, right, bottom] を検証して float の組にする。
+
+    4つの有限数で、1920x1080 画面の内側に収まり、幅と高さが正である必要がある。
+    """
+    if not isinstance(bbox, list) or len(bbox) != 4 or not all(_is_number(value) for value in bbox):
+        raise ValueError(f"{path}: {where}.bbox must contain four finite numbers")
+    left, top, right, bottom = (float(value) for value in bbox)
+    if left < 0 or top < 0 or right <= left or bottom <= top or right > _IMAGE_WIDTH or bottom > _IMAGE_HEIGHT:
+        raise ValueError(f"{path}: {where}.bbox is outside 1920x1080 image bounds")
+    return left, top, right, bottom
+
+
+def _load_ignore_regions(path: Path, items: object, detector_labels: tuple[str, ...]) -> tuple[IgnoreRegion, ...]:
+    """ignore_regions セクションを検証して IgnoreRegion の並びにする。
+
+    各要素は labels と bbox だけを持つ。labels は空でない検出ラベルの並びで、
+    検出器が出さないラベルを書くと効かない設定になるので設定エラーにする。
+    """
+    if not isinstance(items, list):
+        raise ValueError(f"{path}: ignore_regions must be a list")
+    regions = []
+    for index, item in enumerate(items):
+        where = f"ignore_regions[{index}]"
+        if not isinstance(item, dict) or set(item) != {"labels", "bbox"}:
+            raise ValueError(f"{path}: {where} must contain only labels and bbox")
+        labels = item["labels"]
+        if not isinstance(labels, list) or not labels or any(label not in detector_labels for label in labels):
+            raise ValueError(f"{path}: {where}.labels must be a non-empty list of detector labels")
+        regions.append(IgnoreRegion(tuple(labels), *_load_bbox(path, where, item["bbox"])))
+    return tuple(regions)
+
+
+def drop_ignored(boxes: list[LabelBox], regions: tuple[IgnoreRegion, ...]) -> list[LabelBox]:
+    """中心が ignore_regions に入る対象ラベルの矩形を取り除く。
+
+    対象外のラベル（範囲内を通る敵やジェムなど）はそのまま残す。
+    """
+    def ignored(box: LabelBox) -> bool:
+        cx, cy = (box.left + box.right) / 2, (box.top + box.bottom) / 2
+        return any(
+            box.label in region.labels and region.left <= cx < region.right and region.top <= cy < region.bottom
+            for region in regions
+        )
+
+    return [box for box in boxes if not ignored(box)]
 
 
 def _check_detector_label(path: Path, where: str, label: object) -> str:
@@ -249,13 +308,15 @@ def load_config(path: Path | str) -> PrelabelConfig:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         raise ValueError(f"{path}: cannot read config: {exc}") from exc
-    if not isinstance(data, dict) or set(data) != {"schema_version", "fixed_boxes", "detector"}:
-        raise ValueError(f"{path}: expected schema_version, fixed_boxes, and detector")
+    if not isinstance(data, dict) or set(data) != {"schema_version", "fixed_boxes", "ignore_regions", "detector"}:
+        raise ValueError(f"{path}: expected schema_version, fixed_boxes, ignore_regions, and detector")
     if data["schema_version"] != "annotation_prelabel.v2":
         raise ValueError(f"{path}: unsupported schema_version: {data['schema_version']!r}")
+    detector = _load_detector_settings(path, data["detector"])
     return PrelabelConfig(
         fixed_boxes=_load_fixed_boxes(path, data["fixed_boxes"]),
-        detector=_load_detector_settings(path, data["detector"]),
+        detector=detector,
+        ignore_regions=_load_ignore_regions(path, data["ignore_regions"], detector.labels),
     )
 
 
