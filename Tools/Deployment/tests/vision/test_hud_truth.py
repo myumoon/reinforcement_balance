@@ -307,3 +307,61 @@ def test_hud_calibration_ignores_slot_levels_as_unknown_field():
     assert wire["expected_slot_levels"] == list(LEVELS)
     assert wire["expected_choice"] is None
     _validate_annotation(wire)
+
+
+def _write_session(store_root: Path, frame) -> None:
+    """同じ合成 frame を 3 枚持つ capture session を store_root に作る。"""
+    writer = DatasetWriter(store_root, "session-001", PROFILE_HASH, BUILD_ID)
+    for frame_id in range(3):
+        writer.write_frame(CapturedFrame(
+            frame_bgra=frame, captured_monotonic_ns=100 + frame_id, session_frame_index=frame_id,
+            client_rect_screen_px=(0, 0, 1920, 1080), foreground=True,
+            target_profile_hash=PROFILE_HASH, game_build_id=BUILD_ID,
+        ))
+    writer.publish(operator_checkpoint="synthetic")
+
+
+def _write_label(path: Path, *, checked: bool, labels: tuple[str, ...] = ()) -> None:
+    """X-AnyLabeling 形式の label JSON を書く。"""
+    shapes = [{"label": label, "shape_type": "rectangle", "points": [[10, 10], [100, 100]]} for label in labels]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"shapes": shapes, "imagePath": path.stem + ".png",
+                                "imageData": None, "checked": checked}), encoding="utf-8")
+
+
+def test_cli_annotates_checked_frames_with_labels_and_resume(tmp_path, gameplay_frame):
+    """CLI は checked label の frame を下書きし、undo・ok・ok-range・--resume が働く。"""
+    import io
+    import annotate_survivors_hud_truth as cli
+
+    store, work = tmp_path / "store", tmp_path / "work"
+    _write_session(store, gameplay_frame)
+    _write_label(work / "session-001" / "00000000.json", checked=True)
+    _write_label(work / "session-001" / "00000001.json", checked=False, labels=("card",))
+    _write_label(work / "session-001" / "00000002.json", checked=True)
+    session_path = store / "capture_sessions" / "session-001"
+    base_args = ["--store-root", str(store), "--session-id", "session-001", "--annotator-id", "tester"]
+
+    with pytest.raises(SystemExit):
+        cli.main(base_args)
+    out = io.StringIO()
+    code = cli.main(base_args + ["--work-root", str(work)],
+                    stdin=io.StringIO("set level 7\nundo\nok\nok-range 2 2\n"), stdout=out)
+    assert code == 0, out.getvalue()
+    assert cli.STATE_NOTICE in out.getvalue()
+    assert "ok-range: 1 frame を確定" in out.getvalue()
+    records = read_hud_truth(session_path)
+    assert [(r.frame_id, r.expected_screen_state, r.confirmed) for r in records] == [
+        (0, "gameplay", True), (2, "gameplay", True)]
+    assert records[0].expected_level != 7
+    assert cli.main(base_args + ["--frame-ids", "0", "1"], stdin=io.StringIO(""), stdout=out) == 1
+
+    out = io.StringIO()
+    code = cli.main(base_args + ["--frame-ids", "0", "1", "2", "--resume", "--work-root", str(work), "--from-labels"],
+                    stdin=io.StringIO("ok-range 1 1\nset level 9\n"), stdout=out)
+    assert code == 0, out.getvalue()
+    assert "停止: frame 1" in out.getvalue() and "expected_screen_state" in out.getvalue()
+    records = read_hud_truth(session_path)
+    assert [(r.frame_id, r.confirmed) for r in records] == [(0, True), (1, False), (2, True)]
+    assert records[1].expected_screen_state == "level_up_items"
+    assert records[1].expected_level == 9
