@@ -122,6 +122,27 @@ def test_prelabel_writes_fixed_and_detected_boxes_and_preserves_existing_json(tm
     assert "既存 JSON スキップ数: 2" in output
 
 
+def test_prelabel_drops_detections_in_ignore_regions(tmp_path, monkeypatch, capsys, fake_detector):
+    """ignore_regions に入る武器エフェクトの検出は下書きに書かない。
+
+    左上のアイテム欄のアイコンを武器エフェクトと誤検出しても、対象ラベルなら除かれる。
+    """
+    work_root, session, config_path = _setup(tmp_path)
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data["ignore_regions"] = [{"labels": ["weapon_orbit"], "bbox": [0, 0, 20, 20]}]
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    icon = LabelBox("weapon_orbit", 2, 2, 12, 12, 0.99)
+    monkeypatch.setattr(prelabel_survivors_frames, "predict_boxes", lambda *args, **kwargs: [icon, _DETECTED])
+    _write_image(session / "00000001.png")
+
+    assert main(["--work-root", str(work_root), "--session-id", "s1", "--config", str(config_path)]) == 0
+
+    boxes, _ = read_label_file(session / "00000001.json")
+    labels = [box.label for box in boxes]
+    assert "weapon_orbit" not in labels
+    assert _DETECTED.label in labels
+
+
 def test_prelabel_skips_json_created_after_frame_listing(tmp_path, monkeypatch, capsys, fake_detector):
     """一覧取得後に現れた人手 JSON を置換せず、スキップ数に含める。
 

@@ -26,6 +26,7 @@ from survivors.prelabel_detector import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_WEIGHTS_NAME,
     default_device,
+    drop_ignored,
     load_config,
     load_detector,
     predict_boxes,
@@ -113,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
                 if (clipped := clip_box(box, image_width=width, image_height=height)) is not None
             ]
             if model is not None:
-                boxes.extend(predict_boxes(model, image, config.detector, device=device))
+                boxes.extend(drop_ignored(predict_boxes(model, image, config.detector, device=device), config.ignore_regions))
             wrote_label = write_label_file(
                 json_path or png_path.with_suffix(".json"),
                 boxes,
