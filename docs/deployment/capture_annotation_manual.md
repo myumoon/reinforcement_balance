@@ -169,6 +169,90 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 
 武器エフェクト（`weapon_*`）は world class map v2 の world クラスとして、`world_coco.json` の category 12〜15（`weapon_projectile` / `weapon_zone` / `weapon_orbit` / `weapon_aura`）に出力されます（以前のような除外はありません）。
 
+### 2-7. HUD の正解値を付ける
+
+bbox とは別に、HUD の正解値（画面状態、タイマー、レベル、HP・XP の割合、所持アイテム、アイテムごとのレベル、カード）を frame ごとに確定し、セッションの `hud_truth.jsonl` に保存します。HUD を読む parser の精度を測るときの正解に使います。
+
+- 書き込むのは `<RecordRoot>/capture_sessions/<session-id>/hud_truth.jsonl` だけです。`annotations.jsonl`、X-AnyLabeling の label JSON、COCO、frame PNG、session manifest は読むだけで変更しないので、既存の bbox アノテーションには影響しません。
+- 画像は開きません。表示される `png:` の path を X-AnyLabeling や画像ビューアの別窓で見ながら作業します。
+
+```powershell
+python Tools/Deployment/annotate_survivors_hud_truth.py `
+  --store-root "<RecordRoot>" `
+  --session-id session-0004 `
+  --annotator-id <自分の ID> `
+  --work-root "<WorkRoot>" `
+  --from-labels
+```
+
+- 対象 frame は、`--work-root` にある `checked: true` の label の frame（COCO 出力と同じ集合）です。`--frame-ids 7193 7194` のように直接指定もできます。どちらも無いとエラーになります。
+- `--from-labels`: label に `card` の矩形がある frame は、画面状態の下書きを `level_up_items` にします。`death_result` の矩形がある frame は parser の `death`／`result` 判定を残し（それ以外の判定なら `death`）、どちらなのかは人が `set state death|result` で確定してください。`--work-root` が必要です。
+- `--atlas <development atlas>`: アイコン照合に使う atlas。省略するとアイテムの下書きは入りません（`items: null`）。
+- `--resume`: 前回の `hud_truth.jsonl` を読み、確定済みの frame を飛ばして続きから始めます。`hud_truth.jsonl` があるのに `--resume` を付けないとエラーになります（上書き防止）。
+- 保存は `quit` のとき、20 frame 進むごと、入力の終わり（Ctrl+Z / Ctrl+D）やエラーで止まったときに行われます。
+
+#### 画面状態は必ず目視で確認する
+
+各 frame の先頭に「state は目視で確認」の注意が出ます。`expected_screen_state` は下書きを信用せず、必ず画像を見て確かめてください。04-20（段階マークの読み取り）が merge されるまでは、parser が level-up 画面を `gameplay` と判定します。`--from-labels` を使うか、`set state level_up_items` で直してください。
+
+#### コマンド早見表
+
+slot 番号は 0〜11 です（0〜5 が武器、6〜11 がパッシブ。画面左上のパネルの左から順）。値の `-` と `null` は「読めない」を表します。
+
+| コマンド | 意味 |
+|---|---|
+| `ok` | 表示中の値で確定して次の frame へ |
+| `ok-range A B` | 表示中の frame から B までを、直前に確定した値を引き継いで一括確定する。下書きで読めている値が引き継ぎ値と違う frame があれば、違う項目を一覧で出してそこで止まる（タイマーが 1 秒以上進む範囲では止まるので、その frame は 1 つずつ確定する） |
+| `skip` | 確定せずに次の frame へ |
+| `undo` | 直前の操作を取り消す（前の frame の確定も戻せる） |
+| `quit` | 保存して終了 |
+| `set state <state>` | 画面状態（`gameplay`、`level_up_items`、`level_up_fallback`、`chest`、`paused`、`target_reached_transition`、`death`、`result`、`unknown`）。HUD の ROI は自動で決まり、段階マークが出ない画面にするとアイテムのレベルは null に戻る |
+| `set timer 123.0` | タイマー（秒）。`set timer null` で不明 |
+| `set level 7` | プレイヤーのレベル |
+| `set hp 0.85`／`set xp 0.2` | HP・XP バーの割合（0〜1） |
+| `set item SLOT <item_id>`／`set item SLOT empty_slot` | 1 slot のアイテム。空き枠は `empty_slot` |
+| `set items null` | アイテムを読めない frame（1 slot でも読めないとき）。アイテムのレベルも null になる |
+| `set choice a\|b\|c`／`set choice null` | 画面のカードの item_id（上から `\|` 区切り） |
+| `set levels v1 ... v12` | 12 slot 分のアイテムのレベル。空き枠は `-` |
+| `set level-of SLOT N` | 1 slot だけレベルを直す（先に `set levels` で全体を入れておく） |
+| `set levels null` | アイテムのレベルを読めない frame |
+
+確定するときは、アイテムを 12 slot すべて入れるか `set items null` にします。1 slot でも読めないときに一部だけ入れて確定することはできません。規則に合わないコマンドは値を変えずに理由を表示します。
+
+#### 段階マーク（アイテムのレベル）の読み方
+
+level-up 画面の左上パネルでは、武器（上段 6 枠）とパッシブ（下段 6 枠）のアイコンの下に、小さな四角が 1 行 3 個まで並びます。
+
+```
+ [アイコン]      [アイコン]     [アイコン]
+  ■■■            ■■□            ■□
+  ■□□            □□
+  □□
+ 武器 Lv4（最大 8） パッシブ Lv2（最大 5）  指輪 Lv1（最大 2）
+ ■ = 点灯（金色）  □ = 消灯（暗色）
+```
+
+- 点灯している四角の数がレベルです。点灯と消灯を合わせた数は最大レベルで、入力には使いません。
+- 段階マークが出るのは level-up 画面（`level_up_items`／`level_up_fallback`）だけです。gameplay や宝箱の画面ではアイコンしか出ないので、`set levels` は受け付けません。
+- 空き枠は `-` にします。1 枠でも読めない frame は `set levels` を入れずに null のままにします。
+- パネルが滑り込んでくる途中の frame でも、人が読めるなら付けてかまいません。parser がそうした frame で読めない（None）と返しても、それは「未読」であって誤りとは扱いません。
+
+例: 武器 2 個（Lv3、Lv1）とパッシブ 1 個（Lv2）を持っているとき
+
+```
+set item 0 whip
+set item 1 magic_wand
+...（残りの slot も empty_slot まで入れる）
+set levels 3 1 - - - - 2 - - - - -
+```
+
+#### 注意点
+
+- 対象 frame はとびとびなので、各 frame の下書きを作る前に、その frame の 30 frame 前から順に parser に通してタイマーなどの時間方向の状態をそろえます（結果は捨てます）。前の frame と連続しないときは状態をリセットしてから始めます。それでも疎な frame では、時間方向のフィルタ（タイマーやレベルの逆行チェック）が十分に効かないことがあるので、下書きの値は必ず確認してください。
+- 04-20 merge 後は、遡りの開始点が「段階マークが見えない frame のさらに 10 frame 前」（上限 400 frame）になるので、長い level-up 画面では 1 frame の下書きに数十秒かかります。
+- 04-20 merge 後は、level-up 画面の下書きにアイテムのレベルが入ります。また `expected_items` の下書きは「直前の gameplay frame の所持アイテムを位置で結び付けた値」になり、level-up の前に gameplay が 3 frame 無い frame（セッションの先頭など）では null になることがあります。
+- 04-20 merge 前は、parser の所持アイテムの位置がずれているため、アイテムの下書きはほぼ null です。本格的な運用は 04-20 merge 後に始め、それまでは CLI の動作確認と画面状態・タイマーの確認に留めます。
+
 ## 参考
 
 - 録画の内部実装・アーキテクチャ・テスト: [`capture_dataset.md`](capture_dataset.md)、[`capture_core.md`](capture_core.md)
