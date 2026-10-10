@@ -137,7 +137,8 @@ _ANCHOR_SAMPLE_POINTS = (
 class PixelROI:
     """ピクセル座標で表した矩形 ROI。
 
-    画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+    左上と右下の座標で、画像から切り出す領域を表します。
+    右端と下端の画素は切り出しに含みません。
     """
 
     x0: int
@@ -149,7 +150,7 @@ class PixelROI:
     def width(self) -> int:
         """矩形の横幅を画素数で返す。
 
-        画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+        右端の x 座標から左端の x 座標を引き、切り出し画像の列数を求めます。
         """
         return self.x1 - self.x0
 
@@ -157,21 +158,22 @@ class PixelROI:
     def height(self) -> int:
         """矩形の高さを画素数で返す。
 
-        画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+        下端の y 座標から上端の y 座標を引き、切り出し画像の行数を求めます。
         """
         return self.y1 - self.y0
 
     def crop(self, frame_bgra: NDArray[np.uint8]) -> NDArray[np.uint8]:
         """フレーム配列から ROI を切り出す。
 
-        画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+        y0 から y1 の直前までの行と、x0 から x1 の直前までの列を取り出します。
+        BGRA の色成分はそのまま残します。
         """
         return frame_bgra[self.y0:self.y1, self.x0:self.x1]
 
     def as_xyxy(self) -> tuple[int, int, int, int]:
         """矩形の四辺を座標の組で返す。
 
-        画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+        左・上・右・下の順に整数座標を並べ、照合結果などの矩形情報として使えるようにします。
         """
         return (self.x0, self.y0, self.x1, self.y1)
 
@@ -183,7 +185,8 @@ def norm_to_pixels(
 ) -> PixelROI:
     """正規化 ROI をピクセル ROI に変換する。
 
-    画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+    画面サイズを掛けて整数座標へ変え、画面の外にはみ出す部分を収めます。
+    切り出し領域は縦横とも最低一画素を確保します。
     """
     x0 = max(0, min(int(norm.x0 * width), width - 1))
     y0 = max(0, min(int(norm.y0 * height), height - 1))
@@ -195,7 +198,8 @@ def norm_to_pixels(
 def card_rois_for_count(count: int, width: int = 1920, height: int = 1080) -> tuple[PixelROI, ...]:
     """カード枚数に応じた ROI リストを返す。不明枚数は空を返す。
 
-    画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+    対応する枚数のカード配置を CARD_ROIS から選び、指定画面サイズの矩形へ変換します。
+    定義されていない枚数では領域を推測せず、空のタプルを返します。
     """
     norms = CARD_ROIS.get(count)
     if norms is None:
