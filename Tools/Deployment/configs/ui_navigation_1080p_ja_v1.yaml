@@ -27,7 +27,7 @@ min_target_confidence: 0.5
 # 各画面での ack 待ち timeout(ミリ秒)。超えると emergency stop へ fail-closed する。
 timeouts_ms:
   level_up: 2000
-  chest: 5000
+  chest: 60000  # 実測でパネル出現から終了ボタンまで約21秒かかるため余裕を持つ。
   unknown: 1000
   run_setup: 15000
   target_reached: 5000

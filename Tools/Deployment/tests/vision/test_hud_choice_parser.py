@@ -34,6 +34,7 @@ from survivors.vision.icon_matcher import (
 )
 from build_survivors_icon_atlas import build_development_atlas
 from .test_slot_level_parser import paint_slot
+from .conftest import _make_gameplay_frame, _make_levelup_frame
 
 _DUMMY_ARTIFACT_HASH = "c" * 64
 _DUMMY_PROFILE_HASH = "a" * 64
@@ -602,16 +603,16 @@ class TestFormalParserEligibility:
         assert isinstance(result, HudStateV1)
 
     def test_target_taxonomy_card_count_covered(self):
-        """target_profile の level_up_card_counts が [3, 4] = CARD_ROIS キー一致。
+        """対象プロファイルのカード枚数を実測配置で扱える。
 
-    対象プロファイルが指定する各カード枚数について、切り出し用の配置が CARD_ROIS にあることを確かめます。
+        最後のカードまで矩形があり、画面からはみ出さないことを確かめます。
         """
         from survivors.target_profile import load_target_profile
-        from survivors.vision.roi_layout import CARD_ROIS
+        from survivors.vision.roi_layout import card_roi
         profile = load_target_profile()
         counts = profile.sections["choice_taxonomy"]["level_up_card_counts"]
         for count in counts:
-            assert count in CARD_ROIS, f"CARD_ROIS missing count={count}"
+            assert card_roi(count - 1).y1 <= 1080
 
     def test_fallback_vocabulary_in_closed_taxonomy(self):
         """fallback vocabulary が closed taxonomy と一致している。
@@ -795,10 +796,10 @@ class TestSlotPanelIntegration:
         if reason:
             assert "slot0:" + reason in joined.screen_state_reason
 
-    def test_card_contrast_clears_inventory_but_panel_hold_does_not(self, monkeypatch):
-        """カード由来の三枚だけを宝箱相当の消去条件にする。
+    def test_card_transient_preserves_inventory_and_panel_hold(self, monkeypatch):
+        """滑り込みのカードは訪問前在庫を壊さない。
 
-        パネルの hold は保存在庫を保ち、実カード判定が三回続くと全枠を消します。
+        右枠がまだ立たない低信頼フレームを挟んでも、次の格子と位置結合できます。
         """
         parser, _ = self._parser(monkeypatch)
         gameplay = self._seed(parser)
@@ -808,13 +809,16 @@ class TestSlotPanelIntegration:
         for _ in range(3):
             self._read(parser, gameplay)
         assert parser._gameplay_inventory[0] == "whip"
-        cards = TestDetectScreenState()._fill_cards(gameplay, 3)
-        for _ in range(2):
+        cards = _make_levelup_frame()
+        cards[300:900, 1268:1282, :3] = 0
+        for _ in range(3):
             result = self._read(parser, cards)
-            assert result.screen_state_reason.startswith("hud_card_contrast")
+            assert result.screen_state_reason == "card_transient"
+            assert result.screen_state_confidence == .45
+            assert result.inventory_levels == (None,) * 12
         assert parser._gameplay_inventory[0] == "whip"
-        self._read(parser, cards)
-        assert parser._gameplay_inventory == [None] * 12
+        self._read(parser, panel)
+        assert self._read(parser, panel).inventory[0] == "whip"
 
     @pytest.mark.parametrize("state", ["chest", "death", "result", "unknown"])
     def test_terminal_state_clears_all_gameplay_history(self, monkeypatch, state):
@@ -896,42 +900,27 @@ class TestDetectScreenState:
     _W, _H = 1920, 1080
 
     def _hud_frame(self) -> np.ndarray:
-        """HP/XP バーのみの合成フレーム (カードなし、layout_score > 0.3 になる)。
+        """上端 XP バーの金枠二本を持つ画面を作る。
 
-    通常プレイの HUD と判定できるよう HP と XP の領域を塗り、カード領域を空のままにした画像を用意します。
+        格子のテストも同じ通常プレイ画面を入口にします。
         """
-        from survivors.vision.roi_layout import HP_BAR_ROI, XP_BAR_ROI, norm_to_pixels
-        frame = np.zeros((self._H, self._W, 4), dtype=np.uint8)
-        for roi_norm, bgr in ((HP_BAR_ROI, (0, 0, 200)), (XP_BAR_ROI, (200, 0, 0))):
-            roi = norm_to_pixels(roi_norm, self._W, self._H)
-            frame[roi.y0:roi.y1, roi.x0:roi.x1, :3] = bgr
-            frame[roi.y0:roi.y1, roi.x0:roi.x1, 3] = 255
-        return frame
+        return _make_gameplay_frame()
 
     def _fill_cards(self, frame: np.ndarray, count: int) -> np.ndarray:
-        """指定枚数の全カード ROI を明るい灰色で塗りつぶす。
+        """指定枚数の実配置カードと中央ウィンドウを描く。
 
-    三枚または四枚の配置に従ってカード領域を塗り、領域間の暗い隙間は残します。
+        枠と灰色面を持つ縦並びを共通 fixture から作ります。
         """
-        from survivors.vision.roi_layout import CARD_ROIS, norm_to_pixels
-        frame = frame.copy()
-        for norm in CARD_ROIS[count]:
-            roi = norm_to_pixels(norm, self._W, self._H)
-            frame[roi.y0:roi.y1, roi.x0:roi.x1, :3] = 128
-            frame[roi.y0:roi.y1, roi.x0:roi.x1, 3] = 255
-        return frame
+        return _make_levelup_frame(count)
 
     def test_hud_single_bright_object_is_gameplay(self):
         """HUD + 1枚のカード ROI のみ明るい (非カード物体) → gameplay。
 
     一つの明るい物体だけではカードの並びが揃わず、アイテム選択画面へ誤判定しないことを確かめます。
         """
-        from survivors.vision.roi_layout import CARD_ROIS, norm_to_pixels
         frame = self._hud_frame()
         # 1スロットだけ明るくする (完全なカードレイアウトではない)
-        roi = norm_to_pixels(CARD_ROIS[3][0], self._W, self._H)
-        frame[roi.y0:roi.y1, roi.x0:roi.x1, :3] = 128
-        frame[roi.y0:roi.y1, roi.x0:roi.x1, 3] = 255
+        frame[267:271, 656:1265, :3] = (102, 203, 255)
         state, _, _ = _detect_screen_state(frame, width=self._W, height=self._H)
         assert state == "gameplay", f"Expected 'gameplay', got '{state}'"
 
@@ -976,3 +965,297 @@ class TestDetectScreenState:
         frame = self._fill_cards(self._hud_frame(), 4)
         state, _, _ = _detect_screen_state(frame, width=self._W, height=self._H)
         assert state == "level_up_items", f"Expected 'level_up_items', got '{state}'"
+
+
+class TestMeasuredLayout:
+    """実測配置の画面判定と本番 choice 配線を検証する。
+
+    未計測の能力や宝箱を開く操作を候補へ出さず、短い遮蔽だけを保持します。
+    """
+
+    @pytest.mark.parametrize("count", [1, 2, 3, 4])
+    def test_card_counts_and_unknown_identities(self, count):
+        """一枚から四枚の選択肢を上から順に返す。
+
+        atlas がなければアイテム名は未知でも、枚数とクリック矩形は実測値になります。
+        """
+        from survivors.vision.roi_layout import card_roi
+        frame = _make_levelup_frame(count)
+        assert _detect_screen_state(frame) == ("level_up_items", .70, f"card_rows:{count}")
+        result = ChoiceParser().parse(frame, screen_state="level_up_items")
+        assert len(result.cards) == count
+        for k, card in enumerate(result.cards):
+            assert card.roi_xyxy == card_roi(k).as_xyxy()
+            assert card.item_id is None and card.kind == "unknown" and card.level is None
+            assert card.confidence == 0. and card.reason == "no_matcher"
+
+    @pytest.mark.parametrize("bgr", [(70, 60, 100), (255, 255, 255)])
+    def test_colored_and_bright_no_hud_frames_are_unknown(self, bgr):
+        """明るさだけでタイトルや白画面を結果にしない。
+
+        旧 layout score が高くなる色でも、実測の枠がない画像は不明のままです。
+        """
+        frame = np.full((1080, 1920, 4), 255, dtype=np.uint8)
+        frame[..., :3] = bgr
+        assert _detect_screen_state(frame) == ("unknown", .30, "no_hud")
+
+    @pytest.mark.parametrize("hud", [False, True])
+    def test_yellow_flash_is_chest(self, hud):
+        """黄色い光は HUD の有無によらず宝箱になる。
+
+        白飛びでバーが消えても、結果画面には分類しません。
+        """
+        frame = _make_gameplay_frame() if hud else np.zeros((1080, 1920, 4), dtype=np.uint8)
+        frame[100:, :, :3] = (20, 220, 240)
+        assert _detect_screen_state(frame) == ("chest", .60, "chest_flash")
+
+    @pytest.mark.parametrize("variant", ["panel", "white_border", "gold_only", "decay"])
+    def test_chest_panel_not_card_transient(self, variant):
+        """宝箱の光や金色の行だけではカード過渡にしない。
+
+        上枠の白飛びと黄色い光の減衰も、灰色面なしの宝箱パネルへ落とします。
+        """
+        frame = _make_levelup_frame(0)
+        if variant == "white_border":
+            frame[111:117, 642:1278, :3] = (255, 248, 255)
+        if variant in {"gold_only", "decay"}:
+            for top in (267, 424, 581):
+                frame[top + 1:top + 4, 700:900 if variant == "gold_only" else 1200, :3] = (102, 203, 255)
+        if variant == "decay":
+            frame[100:220, :, :3] = (20, 220, 240)
+            frame[111:117, 660:1260, :3] = (102, 203, 255)
+        assert _detect_screen_state(frame) == ("chest", .65, "chest_panel")
+
+    @pytest.mark.parametrize("count", [2, 3])
+    def test_missing_right_border_is_card_transient(self, count):
+        """右枠が立つ前は低信頼の過渡に留める。
+
+        灰色面が見えていても、滑り込み中はカード候補を返しません。
+        """
+        frame = _make_levelup_frame(count)
+        frame[300:900, 1268:1282, :3] = 0
+        assert _detect_screen_state(frame) == ("level_up_items", .45, "card_transient")
+        assert ChoiceParser().parse(frame, screen_state="level_up_items").cards == ()
+
+    @pytest.mark.parametrize("dim", [False, True])
+    def test_pause_needs_dim_hud_and_resume(self, dim):
+        """半暗の HUD と再開ボタンで一時停止を判定する。
+
+        通常 HUD に青い物体があるだけでは paused にしません。
+        """
+        frame = _make_gameplay_frame()
+        if dim:
+            frame[(2, 32), 300:1600, :3] = (51, 102, 127)
+        frame[952:1033, 1448:1732, :3] = (198, 61, 38)
+        assert _detect_screen_state(frame) == (("paused", .70, "pause_menu") if dim else ("gameplay", .60, "hud_present"))
+        assert ChoiceParser().parse(frame, screen_state="paused").buttons == ()
+
+    def test_death_with_red_tinted_hud(self):
+        """赤く染まったバーと GAME OVER・赤ボタンで死亡を認める。
+
+        枠の青成分が変わっても warm クラスなら HUD の証拠にできます。
+        """
+        frame = _make_gameplay_frame()
+        frame[(2, 32), 300:1600, :3] = (87, 128, 249)
+        frame[292:352, 709:1202, :3] = (102, 203, 255)
+        frame[708:780, 819:1101, :3] = (12, 43, 211)
+        assert _detect_screen_state(frame) == ("death", .70, "game_over")
+
+    @pytest.mark.parametrize("hud", [False, True])
+    def test_result_panel_independent_of_hud(self, hud):
+        """結果パネルは HUD の有無に依存せず認める。
+
+        大きな枠と背景色を揃え、通常プレイへの誤分類を防ぎます。
+        """
+        frame = _make_gameplay_frame() if hud else np.zeros((1080, 1920, 4), dtype=np.uint8)
+        frame[66:922, 277:1644, :3] = (102, 203, 255)
+        frame[72:912, 283:1638, :3] = (116, 79, 75)
+        assert _detect_screen_state(frame) == ("result", .70, "result_panel")
+
+    def test_unsupported_resolution_and_empty(self):
+        """未計測の解像度と空画像を拒否する。
+
+        実画像と設定値が食い違う場合もカードやボタンを推測しません。
+        """
+        frame = np.zeros((720, 1280, 4), dtype=np.uint8)
+        for kwargs in ({}, {"width": 1280, "height": 720}):
+            assert _detect_screen_state(frame, **kwargs) == ("unknown", 0., "unsupported_resolution")
+        assert _detect_screen_state(np.zeros((0, 0, 4), dtype=np.uint8)) == ("unknown", 0., "empty_frame")
+        for parser in (ChoiceParser(), ChoiceParser(width=1280, height=720)):
+            result = parser.parse(frame, screen_state="level_up_items")
+            assert result.screen_state == "unknown" and result.cards == () and result.buttons == ()
+
+    def test_reroll_inner_color_and_fail_closed_capability(self):
+        """リロールは金枠なしでも青い内側で検出する。
+
+        未計測の skip と banish は返さず、能力信頼度も零に保ちます。
+        """
+        frame = _make_levelup_frame()
+        frame[253:317, 1413:1693, :3] = (205, 64, 39)
+        result = ChoiceParser().parse(frame, screen_state="level_up_items")
+        assert result.reroll_available and [b.button_type for b in result.buttons] == ["reroll"]
+        assert not result.skip_available and not result.banish_available
+        assert result.capability_confidence == 0. and result.capability_reason == "skip_banish_roi_undefined"
+
+    @pytest.mark.parametrize("phase", ["open", "close", "no_button"])
+    def test_ack_chest_requires_shortened_panel(self, phase):
+        """縮んだパネルの終了ボタンだけを ack_chest にする。
+
+        開くボタン自身の短い金枠も描き、閾値に届かないことを確かめます。
+        """
+        frame = _make_levelup_frame(0)
+        if phase != "no_button":
+            frame[835:902, 822:1098, :3] = (255, 96, 64)
+        frame[910:913, 810:1109, :3] = (102, 203, 255)
+        if phase == "close":
+            frame[914:919, 660:1260, :3] = (102, 203, 255)
+        result = ChoiceParser().parse(frame, screen_state="chest")
+        assert [b.button_type for b in result.buttons] == (["ack_chest"] if phase == "close" else [])
+
+    @pytest.mark.parametrize("state", ["death", "result"])
+    def test_confirm_uses_only_inner_color(self, state):
+        """終端の終了ボタンは対応する内側の色で観測する。
+
+        金枠を省いても死亡は赤、結果は青で confirm が返ります。
+        """
+        frame = np.zeros((1080, 1920, 4), dtype=np.uint8)
+        if state == "death":
+            frame[708:780, 819:1101, :3] = (12, 43, 211)
+        else:
+            frame[974:1040, 821:1099, :3] = (255, 96, 64)
+        assert [b.button_type for b in ChoiceParser().parse(frame, screen_state=state).buttons] == ["confirm"]
+
+    def test_hud_parser_wires_cards_buttons_and_hash(self):
+        """本番入口に cards・buttons・候補 hash を配線する。
+
+        通常プレイへ戻ると選択情報は空になり、能力は適用外になります。
+        """
+        parser = HudParser(parser_artifact_hash=_DUMMY_ARTIFACT_HASH)
+        frame = _make_levelup_frame()
+        frame[253:317, 1413:1693, :3] = (205, 64, 39)
+        result = self._read(parser, frame)
+        assert len(result.cards) == 3 and result.reroll_available
+        assert result.candidate_set_hash == _compute_candidate_set_hash(result.screen_state, result.cards)
+        assert result.candidate_set_hash != _compute_candidate_set_hash(result.screen_state, ())
+        gameplay = self._read(parser, _make_gameplay_frame())
+        assert gameplay.cards == () and gameplay.buttons == () and gameplay.capability_reason == "not_applicable"
+
+    def _read(self, parser, frame):
+        """同じ session の一枚を本番 parser に流す。
+
+        保持の回数だけを比較できるよう、数字や在庫は fixture のままにします。
+        """
+        return parser.parse(frame, session_id=_SESSION_ID, frame_index=0, captured_monotonic_ns=0)
+
+    def test_chest_hold_expires_after_fourteen_unknown_frames(self):
+        """不明十四枚を保持し十五枚目で chest の保持を切る。
+
+        保持の結果が新しい宝箱証拠として再計上されることを防ぎます。
+        """
+        parser = HudParser(parser_artifact_hash=_DUMMY_ARTIFACT_HASH)
+        assert self._read(parser, _make_levelup_frame(0)).screen_state == "chest"
+        black = np.zeros((1080, 1920, 4), dtype=np.uint8)
+        for _ in range(14):
+            held = self._read(parser, black)
+            assert (held.screen_state, held.screen_state_confidence, held.screen_state_reason) == ("chest", .50, "chest_hold")
+        assert self._read(parser, black).screen_state == "unknown"
+
+    def test_chest_hold_does_not_delay_gameplay_and_resets(self):
+        """通常プレイを保持せず reset で宝箱記憶を消す。
+
+        新しい session の黒画面が直前の宝箱に分類されないことを確かめます。
+        """
+        parser = HudParser(parser_artifact_hash=_DUMMY_ARTIFACT_HASH)
+        self._read(parser, _make_levelup_frame(0))
+        assert self._read(parser, _make_gameplay_frame()).screen_state == "gameplay"
+        self._read(parser, _make_levelup_frame(0))
+        parser.reset_temporal_state()
+        assert parser._chest_hold == 0
+        assert self._read(parser, np.zeros((1080, 1920, 4), dtype=np.uint8)).screen_state == "unknown"
+
+    def test_shared_hud_types_keep_reexports(self):
+        """移動したカード型とボタン型の旧 import を維持する。
+
+        hud_parser からも新 module からも同一の型を読み込めます。
+        """
+        from survivors.vision import hud_types
+        assert hud_types.ParsedCard is ParsedCard and hud_types.ParsedButton is ParsedButton
+
+    @pytest.mark.parametrize("items", [("whip",), ("whip", "gold"), ("whip", "gold", "chicken"),
+                                       ("whip", "gold", "chicken", "whip"), ("gold", "chicken", "gold")])
+    def test_card_surface_identities_from_development_atlas(self, dev_atlas_manifest, items):
+        """開発 atlas のカード色を実測位置の icon から照合する。
+
+        各 item の一 level だけを使い、カードの画素サイズで feature を作って位置と surface を検証します。
+        """
+        from dataclasses import replace
+        from build_survivors_icon_atlas import _make_synth_template, _ITEM_COLORS_BGR
+        from survivors.vision.icon_matcher import build_template_feature
+        entries = tuple(e for e in dev_atlas_manifest.entries if e.item_id in items and e.level == e.max_level)
+        icons = tuple(_make_synth_template(item, next(e.max_level for e in entries if e.item_id == item),
+                                           _ITEM_COLORS_BGR[item]) for item in items)
+        # 合成64px円を縮めた際の edge 差を、実ゲームの同一 crop 照合と混同しない。
+        ys = np.linspace(0, 63, 55).astype(int)
+        xs = np.linspace(0, 63, 51).astype(int)
+        icons = tuple(icon[ys[:, None], xs[None, :]] for icon in icons)
+        features = {item: build_template_feature(icon) for item, icon in zip(items, icons)}
+        entries = tuple(replace(e, feature=features[e.item_id]) if e.surface == "card" else e for e in entries)
+        matcher = IconMatcher(replace(dev_atlas_manifest, entries=entries))
+        result = ChoiceParser(icon_matcher=matcher).parse(_make_levelup_frame(len(items), icons), screen_state="level_up_items")
+        assert tuple(c.item_id for c in result.cards) == items
+        assert all(c.level is None and c.confidence >= .5 for c in result.cards)
+        fallback = sum(item in {"gold", "chicken"} for item in items) > len(items) // 2
+        assert result.screen_state == ("level_up_fallback" if fallback else "level_up_items")
+        if fallback:
+            assert all(c.kind == "fallback" for c in result.cards if c.item_id in {"gold", "chicken"})
+
+    def test_black_card_icons_stay_unknown(self, dev_atlas_manifest):
+        """黒い icon は名前を推測しない。
+
+        カード面と枚数が明確でも、atlas と区別できない icon は未知のまま返します。
+        """
+        result = ChoiceParser(icon_matcher=IconMatcher(dev_atlas_manifest)).parse(_make_levelup_frame(), screen_state="level_up_items")
+        assert len(result.cards) == 3 and all(c.item_id is None for c in result.cards)
+
+    def test_pixel_rois_are_bounded_disjoint_and_exact(self):
+        """全実測 ROI が画面内にありカード同士が重ならない。
+
+        icon は各カードの内側に収まり、未計測の解像度で拡大縮小しません。
+        """
+        from survivors.vision import roi_layout as layout
+        width, height = layout.REFERENCE_SIZE
+        for value in vars(layout).values():
+            if isinstance(value, layout.PixelROI):
+                assert 0 <= value.x0 < value.x1 <= width and 0 <= value.y0 < value.y1 <= height
+        cards = [layout.card_roi(k) for k in range(4)]
+        assert [c.as_xyxy() for c in cards] == [(656, y, 1265, y + 154) for y in (267, 424, 581, 738)]
+        assert all(a.y1 <= b.y0 for a, b in zip(cards, cards[1:]))
+        for k, card in enumerate(cards):
+            icon = layout.card_icon_roi(k)
+            assert icon.as_xyxy() == (669, card.y0 + 13, 720, card.y0 + 68)
+            assert card.x0 < icon.x0 < icon.x1 < card.x1 and card.y0 < icon.y0 < icon.y1 < card.y1
+        for function in (layout.card_roi, layout.card_icon_roi):
+            for args in ((-1,), (4,), (0, 1280, 720)):
+                with pytest.raises(ValueError):
+                    function(*args)
+
+    @pytest.mark.parametrize("state", ["gameplay", "level_up_items", "death", "result", "paused"])
+    def test_chest_hold_never_replaces_other_known_states(self, monkeypatch, state):
+        """宝箱の保持は他の既知状態を上書きしない。
+
+        死亡や一時停止へ切り替わった時点で、その状態を即座に観測へ渡します。
+        """
+        parser = HudParser(parser_artifact_hash=_DUMMY_ARTIFACT_HASH)
+        self._read(parser, _make_levelup_frame(0))
+        monkeypatch.setattr("survivors.vision.hud_parser._detect_screen_state", lambda *a, **k: (state, .70, "known_state"))
+        assert self._read(parser, _make_gameplay_frame()).screen_state == state
+
+    def test_unsupported_resolution_cannot_inherit_chest_hold(self):
+        """解像度違いを直前の宝箱保持で隠さない。
+
+        小さいフレームが混ざると unknown を返し、クリック候補を空にします。
+        """
+        parser = HudParser(parser_artifact_hash=_DUMMY_ARTIFACT_HASH)
+        self._read(parser, _make_levelup_frame(0))
+        result = self._read(parser, np.zeros((720, 1280, 4), dtype=np.uint8))
+        assert (result.screen_state, result.screen_state_reason, result.cards, result.buttons) == ("unknown", "unsupported_resolution", (), ())

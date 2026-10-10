@@ -128,14 +128,17 @@ def build_development_atlas(
         for level in range(1, max_level + 1):
             template_bgra = _make_synth_template(item_id, level, color_bgr)
             feature = build_template_feature(template_bgra)
-            entries.append(TemplateEntry(
-                item_id=item_id,
-                kind=kind,
-                level=level,
-                max_level=max_level,
-                feature=feature,
-            ))
+            for surface in ("inventory", "card"):
+                entries.append(TemplateEntry(
+                    item_id=item_id,
+                    kind=kind,
+                    level=level,
+                    max_level=max_level,
+                    feature=feature,
+                    surface=surface,
+                ))
 
+    entries.sort(key=lambda entry: (entry.item_id, entry.surface, entry.level))
     # atlas_content_hash: 全エントリの feature を結合した SHA-256
     all_features = np.concatenate([e.feature for e in entries]).tobytes()
     atlas_content_hash = hashlib.sha256(all_features).hexdigest()
@@ -156,7 +159,10 @@ def build_development_atlas(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI エントリーポイント。"""
+    """開発 atlas 生成 CLI を実行する。
+
+    出力先と対象の hash を引数から読み、正式利用できない合成画像集を保存します。
+    """
     parser = argparse.ArgumentParser(
         description="開発用合成 Survivors アイコン atlas を生成する"
     )

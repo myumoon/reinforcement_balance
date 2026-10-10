@@ -23,13 +23,10 @@ from .roi_layout import (
     TIMER_ROI,
     LEVEL_ROI,
     INV_SLOT_ROIS,
-    SCREEN_CENTER_ROI,
-    CARD_ROIS,
-    CARD_GAP_ROIS,
+    REFERENCE_SIZE,
     EMPTY_SLOT_ID,
     SLOT_LEVEL_VISIBLE_STATES,
     norm_to_pixels,
-    layout_validity_score,
 )
 from .digit_parser import (
     TimerResult,
@@ -42,6 +39,13 @@ from .digit_parser import (
 from .bar_parser import BarResult, parse_hp_bar, parse_xp_bar
 from .icon_matcher import AtlasManifest, IconMatcher, MatchResult
 from .slot_level_parser import SlotLevelResult, parse_slot_levels, has_panel_evidence
+from .hud_types import ParsedCard, ParsedButton, _compute_candidate_set_hash
+from .choice_parser import ChoiceParser
+from .screen_layout import (
+    _card_count, _detect_card_rows, hud_present, pause_menu_present,
+    window_present, yellow_fraction, card_grey_fraction,
+    result_panel_present, game_over_present,
+)
 
 # HudStateV1 のスキーマバージョン
 HUD_STATE_SCHEMA_VERSION: Final[str] = "hud_state.v1"
@@ -66,43 +70,8 @@ INV_SLOT_COUNT: Final[int] = 12
 _STATE_LOW_CONF: Final[float] = 0.35
 _PANEL_HOLD_FRAMES = 3
 _GAMEPLAY_NONE_RESET_FRAMES = 30
-_CARD_CONTRAST_RESET_FRAMES = 3
+_CHEST_HOLD_FRAMES = 15
 _SLOT_LEVEL_CONFIDENCE = 0.5
-
-# 画面中央領域の支配色 HSV 範囲 (UI オーバーレイ検出用)
-# レベルアップ画面: 暗い背景に明るいカード
-_LEVELUP_OVERLAY_BRIGHTNESS_THRESHOLD: Final[float] = 0.25
-
-
-@dataclass(frozen=True, slots=True)
-class ParsedCard:
-    """レベルアップカードスロットの解析結果。
-
-    カードの位置、アイテム名、種別、レベルと読み取りの信頼度をまとめます。
-    アイテム名やレベルが読めなかった場合は None のまま残します。
-    """
-
-    slot_index: int
-    item_id: str | None    # 語彙アイテム ID; unknown なら None
-    kind: str              # "weapon", "passive", "evolved", "fallback", "unknown"
-    level: int | None      # アイテムレベル; unknown なら None
-    confidence: float      # 0.0..1.0
-    reason: str
-    roi_xyxy: tuple[int, int, int, int] | None  # ピクセル ROI (x0,y0,x1,y1)
-
-
-@dataclass(frozen=True, slots=True)
-class ParsedButton:
-    """UI ボタンの解析結果 (reroll/skip/banish/ack_chest/confirm)。
-
-    ボタンの種類と画面上の位置に、検出の信頼度と判定理由を添えます。
-    """
-
-    button_type: str       # "reroll", "skip", "banish", "ack_chest", "confirm"
-    confidence: float
-    reason: str
-    roi_xyxy: tuple[int, int, int, int] | None
-
 
 @dataclass(frozen=True)
 class HudStateV1:
@@ -359,54 +328,6 @@ def _compute_inventory_hash(inventory: tuple[str | None, ...]) -> str:
     return canonical_hash({"slots": list(inventory)})
 
 
-def _compute_candidate_set_hash(screen_state: str, cards: tuple[ParsedCard, ...]) -> str:
-    """画面状態とカード ID セットの canonical hash を計算する。
-
-    カード名を並べ替えて画面状態と組み合わせるので、同じ候補なら表示順に左右されません。
-    読めないカード名は unknown として区別します。
-    """
-    card_ids = sorted(c.item_id or "unknown" for c in cards)
-    return canonical_hash({"screen_state": screen_state, "card_ids": card_ids})
-
-
-def _mean_roi_brightness(
-    frame_bgra: NDArray[np.uint8],
-    norms: tuple,
-    width: int,
-    height: int,
-) -> float:
-    """指定 ROI 群の平均輝度 (0.0..1.0) を返す。
-
-    各領域の色成分の平均を0〜1へ直してから、領域同士の平均を求めます。
-    空の切り出しは除き、対象が一つもなければ0を返します。
-    """
-    vals: list[float] = []
-    for norm in norms:
-        crop = norm_to_pixels(norm, width, height).crop(frame_bgra)
-        if crop.size > 0:
-            vals.append(float(np.mean(crop[..., :3])) / 255.0)
-    return sum(vals) / len(vals) if vals else 0.0
-
-
-def _min_roi_brightness(
-    frame_bgra: NDArray[np.uint8],
-    norms: tuple,
-    width: int,
-    height: int,
-) -> float:
-    """指定 ROI 群の最小スロット輝度 (0.0..1.0) を返す。
-
-    各領域の平均輝度を0〜1で求め、最も暗い領域の値を返します。
-    空の切り出しは除き、対象が一つもなければ0を返します。
-    """
-    vals: list[float] = []
-    for norm in norms:
-        crop = norm_to_pixels(norm, width, height).crop(frame_bgra)
-        if crop.size > 0:
-            vals.append(float(np.mean(crop[..., :3])) / 255.0)
-    return min(vals) if vals else 0.0
-
-
 def _detect_screen_state(
     frame_bgra: NDArray[np.uint8],
     *,
@@ -416,48 +337,44 @@ def _detect_screen_state(
 ) -> tuple[str, float, str]:
     """画面全体の特徴から UI 状態を分類して返す。
 
-    Returns: (state, confidence, reason)
+    枠・カード行・ボタンの実測条件を上から評価し、状態・信頼度・理由を返します。
     """
+    if (width, height) != REFERENCE_SIZE:
+        return ("unknown", 0.0, "unsupported_resolution")
     if frame_bgra.size == 0:
         return ("unknown", 0.0, "empty_frame")
-
-    center_roi = norm_to_pixels(SCREEN_CENTER_ROI, width, height)
-    center = center_roi.crop(frame_bgra)
-
-    if center.size == 0:
-        return ("unknown", 0.0, "empty_center_roi")
-
-    # グレースケール輝度
-    bgr = center[..., :3].astype(np.float32)
-    brightness = float(np.mean(bgr)) / 255.0
-
-    # HP/XP バーの存在チェックでゲームプレイ中かを判定
-    layout_score = layout_validity_score(frame_bgra, width=width, height=height)
-
-    # 画面全体の平均輝度
-    full_brightness = float(np.mean(frame_bgra[..., :3])) / 255.0
-
-    if layout_score > 0.3:
-        if panel_evidence:
-            return ("level_up_items", 0.60, "slot_panel")
-        # カード固有の構造証拠:
-        #   1) 全スロットが一定輝度以上 (min > 0.08) → 未描画スロットを除外
-        #   2) カード平均輝度がギャップより有意に高い (contrast > 0.10) → 均一背景・帯を除外
-        for cnt in (3, 4):
-            min_card = _min_roi_brightness(frame_bgra, CARD_ROIS[cnt], width, height)
-            mean_card = _mean_roi_brightness(frame_bgra, CARD_ROIS[cnt], width, height)
-            mean_gap = _mean_roi_brightness(frame_bgra, CARD_GAP_ROIS[cnt], width, height)
-            if min_card > 0.08 and mean_card - mean_gap > 0.10:
-                return ("level_up_items", 0.55, f"hud_card_contrast_{cnt}")
-        return ("gameplay", 0.60, f"hud_present:{layout_score:.2f}")
-
-    # HUD なし
-    if full_brightness > 0.70:
-        return ("result", 0.50, "bright_full_screen")
-    # ponytail: 死亡固有 ROI なし; 暗さだけでは death 確定不可なので unknown を返す
+    if frame_bgra.shape != (REFERENCE_SIZE[1], REFERENCE_SIZE[0], 4):
+        return ("unknown", 0.0, "unsupported_resolution")
+    yellow = yellow_fraction(frame_bgra)
+    if yellow >= .30:
+        return ("chest", .60, "chest_flash")
+    if pause_menu_present(frame_bgra):
+        return ("paused", .70, "pause_menu")
+    # 白一色は全ての border 帯を満たすため、枠を持つパネルとして扱わない。
+    if np.all(frame_bgra[..., :3] > 230):
+        return ("unknown", .30, "no_hud")
+    top, bottom, right = window_present(frame_bgra)
+    if top and bottom:
+        count = _card_count(_detect_card_rows(frame_bgra))
+        if right and count >= 1 and yellow < .05:
+            return ("level_up_items", .70, f"card_rows:{count}")
+        if card_grey_fraction(frame_bgra) >= .20:
+            return ("level_up_items", .45, "card_transient")
+        return ("chest", .65, "chest_panel")
+    if result_panel_present(frame_bgra):
+        return ("result", .70, "result_panel")
+    hud = hud_present(frame_bgra)
+    if hud and panel_evidence:
+        return ("level_up_items", .60, "slot_panel")
+    if hud and game_over_present(frame_bgra):
+        return ("death", .70, "game_over")
+    if hud:
+        return ("gameplay", .60, "hud_present")
+    brightness = float(np.mean(frame_bgra[410:669, 729:1190, :3])) / 255.
+    full_brightness = float(np.mean(frame_bgra[..., :3])) / 255.
     if brightness < 0.15 and full_brightness < 0.20:
         return ("unknown", 0.35, "dark_no_hud")
-    return ("unknown", 0.30, f"layout_score_low:{layout_score:.2f}")
+    return ("unknown", 0.30, "no_hud")
 
 
 class HudParser:
@@ -485,6 +402,7 @@ class HudParser:
         self._matcher = icon_matcher
         self._width = width
         self._height = height
+        self._choice = ChoiceParser(icon_matcher=icon_matcher, width=width, height=height)
 
         self.reset_temporal_state()
 
@@ -496,6 +414,7 @@ class HudParser:
         self._prev_timer_seconds = None
         self._prev_level = None
         self._panel_hold = 0
+        self._chest_hold = 0
         self._slot_prev: list[tuple[int | None, bool] | None] = [None] * INV_SLOT_COUNT
         self._slot_adopted: list[tuple[int | None, bool] | None] = [None] * INV_SLOT_COUNT
         self._slot_cell_counts = [0] * INV_SLOT_COUNT
@@ -510,7 +429,6 @@ class HudParser:
         self._gameplay_inventory: list[str | None] = [None] * INV_SLOT_COUNT
         self._gameplay_prev: list[tuple[str | None, ...]] = []
         self._gameplay_none_count = [0] * INV_SLOT_COUNT
-        self._card_contrast_count = 0
 
     def _observe_gameplay_inventory(self, inventory: tuple[str | None, ...]) -> None:
         """gameplay 在庫を枠ごとに三枚一致で保存する。
@@ -604,6 +522,12 @@ class HudParser:
         state, state_conf, state_reason = _detect_screen_state(
             frame_bgra, width=w, height=h, panel_evidence=panel_active
         )
+        if state == "chest":
+            self._chest_hold = _CHEST_HOLD_FRAMES
+        else:
+            self._chest_hold = max(0, self._chest_hold - 1)
+            if state == "unknown" and self._chest_hold > 0 and state_reason != "unsupported_resolution":
+                state, state_conf, state_reason = "chest", .50, "chest_hold"
         if not evidence:
             if state_reason == "slot_panel":
                 state_reason = "slot_panel_hold"
@@ -646,16 +570,9 @@ class HudParser:
         # ── インベントリ ───────────────────────────────────────────
         inventory, inv_conf = self._parse_inventory(frame_bgra, w, h)
         if state == "gameplay":
-            self._card_contrast_count = 0
             self._observe_gameplay_inventory(inventory)
-        elif state == "level_up_items" and state_reason.startswith("hud_card_contrast"):
-            self._card_contrast_count += 1
-            if self._card_contrast_count >= _CARD_CONTRAST_RESET_FRAMES:
-                self._reset_gameplay_inventory()
         elif state in {"chest", "death", "result", "unknown"}:
             self._reset_gameplay_inventory()
-        else:
-            self._card_contrast_count = 0
         inventory_levels: tuple[int | None, ...] = (None,) * INV_SLOT_COUNT
         levels_conf = 0.0
         if state in SLOT_LEVEL_VISIBLE_STATES and state_conf >= _SLOT_LEVEL_CONFIDENCE:
@@ -664,10 +581,23 @@ class HudParser:
                 state_reason += ";" + ";".join(join_reasons)
         inv_hash = _compute_inventory_hash(inventory)
 
-        # ── カード・ボタン (choice_parser が担当; ここでは空) ────────
+        # ── カード・ボタン ──────────────────────────────────────────
         cards: tuple[ParsedCard, ...] = ()
         buttons: tuple[ParsedButton, ...] = ()
         candidate_set_hash = _compute_candidate_set_hash(state, cards)
+        reroll_available = skip_available = banish_available = False
+        capability_confidence = 0.0
+        capability_reason = "not_applicable"
+        if state in {"level_up_items", "level_up_fallback", "chest", "death", "result"}:
+            choice = self._choice.parse(frame_bgra, screen_state=state)
+            state = choice.screen_state
+            cards, buttons = choice.cards, choice.buttons
+            candidate_set_hash = choice.candidate_set_hash
+            reroll_available = choice.reroll_available
+            skip_available = choice.skip_available
+            banish_available = choice.banish_available
+            capability_confidence = choice.capability_confidence
+            capability_reason = choice.capability_reason
 
         return HudStateV1(
             schema_version=HUD_STATE_SCHEMA_VERSION,
@@ -697,11 +627,11 @@ class HudParser:
             cards=cards,
             candidate_set_hash=candidate_set_hash,
             buttons=buttons,
-            reroll_available=False,
-            skip_available=False,
-            banish_available=False,
-            capability_confidence=0.0,
-            capability_reason="not_parsed_by_hud_parser",
+            reroll_available=reroll_available,
+            skip_available=skip_available,
+            banish_available=banish_available,
+            capability_confidence=capability_confidence,
+            capability_reason=capability_reason,
             inventory_levels=inventory_levels,
             inventory_levels_confidence=levels_conf,
         )

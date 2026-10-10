@@ -206,6 +206,10 @@ attempt を許可するのは debug restart モードだけ)。
 
 ## 非保証範囲
 
+04-22 の実測配置では宝箱のパネル出現から終了ボタンまで約21秒かかるため、`NavigationProfile.chest_timeout_ns` と出荷 YAML の `timeouts_ms.chest` は60秒です。LEVEL_UP の timeout は2秒のままです。atlas がない、または card surface の template がない場合は候補が invalid になり、クリックせず `level_up_timeout` で停止します。
+
+CHEST は「開く」のボタンを出さず、終了ボタンが出るまで待ちます。自動で開くかは録画で未確認で、手動が必要なら60秒で停止します。終了の retry は初回・再観測の target confidence がともに .99 以上の場合だけ可能です。フェード中の初回 target が .99 未満で終了画面が残ると、既存の同等性 gate により `ui_retry_precondition_failed` で停止します。
+
 - 実機での座標解決精度・実際の click 命中率は本ドキュメントの範囲外です
   (D04 capture dataset 以降のキャリブレーション対象)。`Tools/Deployment/configs/ui_navigation_1080p_ja_v1.yaml`
   は timeout/retry/confidence のプロファイルのみを持ち、座標は一切含みません。

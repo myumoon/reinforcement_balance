@@ -364,7 +364,7 @@ def draft_from_parser(
         captured_monotonic_ns=captured_monotonic_ns,
     )
     inventory = tuple(state.inventory)
-    choice = tuple(card.item_id for card in state.cards if card.item_id is not None)
+    choice = None if any(card.item_id is None for card in state.cards) else tuple(card.item_id for card in state.cards)
     return HudTruthRecord(
         schema_version=HUD_TRUTH_SCHEMA_VERSION,
         session_id=session_id,

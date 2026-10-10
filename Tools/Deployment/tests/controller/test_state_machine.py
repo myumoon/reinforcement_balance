@@ -36,7 +36,10 @@ _TICK_NS = 16_000_000  # 約 60fps 相当の1フレーム。
 def _arm_to_gameplay(
     sm: StateMachine, now_ns: int, *, mode: CampaignRunMode = CampaignRunMode.OPERATOR_DEBUG_RESTART
 ) -> tuple[int, object]:
-    """``StateMachine`` を arm し、GAMEPLAY へ確定させるところまで進める。"""
+    """状態機械を arm して GAMEPLAY まで進める。
+
+    通常プレイから始まる各テストに、同じ起動済み状態と時刻を用意します。
+    """
     sm.arm(campaign_run_mode=mode, run_id="run-1", gameplay_attempt_id="attempt-1", now_ns=now_ns)
     gp = fx.make_perception_snapshot(screen_state="gameplay", snapshot_id="gp-boot", frame_id="fr-boot")
     for _ in range(6):
@@ -47,7 +50,10 @@ def _arm_to_gameplay(
 
 
 def _drive(sm: StateMachine, snapshot, decision, n: int, now_ns: int):
-    """同じ (snapshot, decision) を n tick 分送り、最後の effect を返す。"""
+    """同じ観測と判断を指定 tick 数だけ流す。
+
+    時刻を進め、最後に発生した effect と終了時刻を返します。
+    """
     effects: tuple = ()
     for _ in range(n):
         now_ns += _TICK_NS
@@ -56,14 +62,25 @@ def _drive(sm: StateMachine, snapshot, decision, n: int, now_ns: int):
 
 
 class TestImportBoundaries:
-    """I1/I2: 所有権境界を越える import をソース文字列レベルで禁止する。"""
+    """状態機械の依存境界を検証する。
+
+    画素解析・選択 policy・OS 入力の内部へ制御ロジックが依存しないことを調べます。
+    """
 
     def test_does_not_import_hud_or_vision_internals(self) -> None:
+        """状態機械が vision 内部を import しない。
+
+        観測は公開 snapshot を受け取り、HUD の構造へ直接アクセスしません。
+        """
         source = inspect.getsource(state_machine)
         for forbidden in ("HudState", "hud_parser", "survivors.vision", "real_obs_assembler"):
             assert forbidden not in source
 
     def test_does_not_import_non_model_ui_policy_or_item_selector(self) -> None:
+        """状態機械が item 選択の内部を import しない。
+
+        選ぶ判断と画面遷移の制御を独立させます。
+        """
         source = inspect.getsource(state_machine)
         for forbidden in ("NonModelUiPolicy", "ItemSelector", "decide_non_model_ui_intent"):
             assert forbidden not in source
@@ -71,13 +88,20 @@ class TestImportBoundaries:
     def test_does_not_reference_os_input_apis(self) -> None:
         # input driver は effect executor(ui_navigation.execute_effect)からしか
         # 呼ばれない: state_machine.py 自体は OS 入力 API を一切知らない。
+        """状態機械が OS 入力 API を直接使わない。
+
+        実入力の送信を effect の実行側に任せ、純粋な遷移処理を保ちます。
+        """
         source = inspect.getsource(state_machine)
         for forbidden in ("SendInput", "pyautogui", "win32api", "ctypes", "keyboard"):
             assert forbidden not in source
 
 
 class TestScreenClassification:
-    """``classify_screen_state`` の raw screen_state -> ControllerState 分類。"""
+    """raw screen state を制御状態へ分類する。
+
+    既知の画面、未知文字列、focus の喪失を対応する状態へ分けます。
+    """
 
     @pytest.mark.parametrize(
         "raw,expected",
@@ -94,19 +118,38 @@ class TestScreenClassification:
         ],
     )
     def test_known_screen_states(self, raw: str, expected: ControllerState) -> None:
+        """既知画面が対応する controller state になる。
+
+        カード・宝箱・終端などを遷移表で使う分類へ変換できます。
+        """
         assert classify_screen_state(raw) is expected
 
     def test_unrecognized_string_is_unknown(self) -> None:
+        """未知の画面名は UNKNOWN へ落とす。
+
+        綴り違いを通常プレイとして扱わないことを確認します。
+        """
         assert classify_screen_state("some_future_screen_name") is ControllerState.UNKNOWN
 
     def test_focus_loss_forces_unknown_even_for_gameplay(self) -> None:
+        """focus が失われたら gameplay でも UNKNOWN にする。
+
+        別ウィンドウへ移った状態でゲーム入力を続けません。
+        """
         assert classify_screen_state("gameplay", window_focused=False) is ControllerState.UNKNOWN
 
 
 class TestArmAndAcquireTarget:
-    """DISARMED -> ACQUIRE_TARGET -> RUN_SETUP -> GAMEPLAY の起動シーケンス。"""
+    """明示 arm から通常プレイまでの起動を検証する。
+
+    DISARMED の入力禁止と、観測を連続確認して開始する順序を調べます。
+    """
 
     def test_disarmed_ignores_all_input_until_armed(self) -> None:
+        """arm 前の DISARMED は入力を無視する。
+
+        画面が認識できたことだけでは自動的に操作を始めません。
+        """
         sm = StateMachine()
         gp = fx.make_perception_snapshot(screen_state="gameplay")
         effects = sm.step(gp, fx.make_move_decision(gp), now_ns=1_000_000_000)
@@ -114,12 +157,20 @@ class TestArmAndAcquireTarget:
         assert sm.context.state is ControllerState.DISARMED
 
     def test_arm_requires_disarmed_state(self) -> None:
+        """arm は DISARMED からだけ受け付ける。
+
+        実行中の文脈を不意に上書きする再 arm を拒否します。
+        """
         sm = StateMachine()
         sm.arm(campaign_run_mode=CampaignRunMode.OPERATOR_DEBUG_RESTART, run_id="r", gameplay_attempt_id="a", now_ns=0)
         with pytest.raises(ValueError):
             sm.arm(campaign_run_mode=CampaignRunMode.OPERATOR_DEBUG_RESTART, run_id="r", gameplay_attempt_id="a", now_ns=1)
 
     def test_three_frame_debounce_required_before_run_setup(self) -> None:
+        """開始準備への遷移には三枚連続を要求する。
+
+        一度だけ見えた画面で run を開始しないことを確認します。
+        """
         sm = StateMachine()
         sm.arm(campaign_run_mode=CampaignRunMode.OPERATOR_DEBUG_RESTART, run_id="r", gameplay_attempt_id="a", now_ns=0)
         gp = fx.make_perception_snapshot(screen_state="gameplay")
@@ -133,6 +184,10 @@ class TestArmAndAcquireTarget:
         assert sm.context.state is ControllerState.RUN_SETUP
 
     def test_single_frame_flicker_does_not_confirm(self) -> None:
+        """一枚の画面揺れを確定しない。
+
+        次の frame が戻ったときは連続確認をやり直します。
+        """
         sm = StateMachine()
         sm.arm(campaign_run_mode=CampaignRunMode.OPERATOR_DEBUG_RESTART, run_id="r", gameplay_attempt_id="a", now_ns=0)
         gp = fx.make_perception_snapshot(screen_state="gameplay")
@@ -150,6 +205,10 @@ class TestArmAndAcquireTarget:
         assert sm.context.state is ControllerState.RUN_SETUP
 
     def test_run_setup_timeout_fails_closed(self) -> None:
+        """開始準備が進まなければ timeout で停止する。
+
+        不明画面を待ち続ける正式 run を失敗として一度だけ確定します。
+        """
         sm = StateMachine()
         sm.arm(campaign_run_mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT, run_id="r", gameplay_attempt_id="a", now_ns=0)
         stuck = fx.make_perception_snapshot(screen_state="unknown")
@@ -164,9 +223,16 @@ class TestArmAndAcquireTarget:
 
 
 class TestGameplayMovement:
-    """GAMEPLAY 中の movement effect と、それ以外の kind の扱い。"""
+    """GAMEPLAY の移動判断を検証する。
+
+    move は action を渡し、操作不要の判断からは入力を作りません。
+    """
 
     def test_move_decision_forwards_action_index(self) -> None:
+        """移動判断の action index を effect へ渡す。
+
+        選ばれた方向を状態機械が別の番号に変換しないことを確認します。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         now += _TICK_NS
@@ -176,6 +242,10 @@ class TestGameplayMovement:
         assert effects[0].action_index == 5
 
     def test_no_op_decision_produces_no_effect(self) -> None:
+        """no-op 判断では effect を作らない。
+
+        入力不要の観測に移動や UI 操作が混ざりません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         now += _TICK_NS
@@ -184,9 +254,16 @@ class TestGameplayMovement:
 
 
 class TestLevelUpOrderingAndRetry:
-    """M3/M4: gameplay -> level_up の順序、retry/stuck 挙動。"""
+    """レベルアップの解除・クリック・再送順序を検証する。
+
+    選択画面では移動を止め、確認待ちと一回の retry を守ります。
+    """
 
     def _enter_level_up(self, sm: StateMachine, now: int, *, choice_index: int = 0):
+        """カード候補を持つ LEVEL_UP へ進める。
+
+        初回クリック前の状態を揃え、各テストで順序や再送だけを変えます。
+        """
         lu = fx.make_perception_snapshot(
             screen_state="level_up_items",
             snapshot_id="lu-0",
@@ -203,6 +280,10 @@ class TestLevelUpOrderingAndRetry:
         return now, lu, intent, decision, effects
 
     def test_movement_withheld_during_level_up(self) -> None:
+        """LEVEL_UP 中は移動入力を送らない。
+
+        UI の選択待ちに combat の action が混ざらないことを確認します。
+        """
         sm = StateMachine()
         now, _gp = _arm_to_gameplay(sm, 0)
         now, lu, intent, decision, entry_effects = self._enter_level_up(sm, now)
@@ -217,6 +298,10 @@ class TestLevelUpOrderingAndRetry:
         assert "move" not in kinds
 
     def test_click_ordering_release_before_click_and_resume_after_ack(self) -> None:
+        """解除を先に送り、適用確認後に移動を再開する。
+
+        選択前の held input を外し、通常プレイが確定するまで再移動しません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         now, lu, intent, decision, _ = self._enter_level_up(sm, now)
@@ -246,6 +331,10 @@ class TestLevelUpOrderingAndRetry:
         assert [effect.kind for effect in effects] == ["move"]
 
     def test_duplicate_frame_and_decision_does_not_double_click(self) -> None:
+        """同一観測と判断の重複で二重クリックしない。
+
+        新しい frame を得ずに何度 step しても追加送信はありません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         now, lu, intent, decision, _ = self._enter_level_up(sm, now)
@@ -262,6 +351,10 @@ class TestLevelUpOrderingAndRetry:
         # M4 fix: 初回 click 直後、ack 待ち window(既定 200ms)が経過するまでは
         # newer snapshot で precondition を満たしていても retry してはならない
         # (capture/perception 遅延中の二重click防止)。
+        """確認待ち時間内は retry を送らない。
+
+        撮影や反映の遅延がある間に二重クリックすることを防ぎます。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         now, lu, intent, decision, _ = self._enter_level_up(sm, now)
@@ -295,6 +388,10 @@ class TestLevelUpOrderingAndRetry:
         assert sm.context.ui_attempt.retried is False
 
     def test_retry_allowed_once_after_ack_wait_window_with_small_roi_jitter(self) -> None:
+        """確認待ち後の小さい矩形揺れには一回だけ再送する。
+
+        同じカードと認められる新観測でも、三回目のクリックは許しません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         now, lu, intent, decision, _ = self._enter_level_up(sm, now)
@@ -351,6 +448,10 @@ class TestLevelUpOrderingAndRetry:
         assert effects == ()
 
     def test_choice_count_change_mid_attempt_fails_closed(self) -> None:
+        """試行中に候補枚数が変わったら停止する。
+
+        古い選択番号を入れ替わったカード集合へ適用しません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         now, lu, intent, decision, _ = self._enter_level_up(sm, now)
@@ -374,6 +475,10 @@ class TestLevelUpOrderingAndRetry:
         assert effects and effects[0].kind == "release_all"
 
     def test_click_miss_zero_candidates_eventually_fails_closed(self) -> None:
+        """クリック後に候補が読めなくなると最終的に停止する。
+
+        有効な target を推測で補わず、待ち時間の上限を守ります。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT)
         lu_empty = fx.make_perception_snapshot(screen_state="level_up_items", snapshot_id="lu-empty", candidates=())
@@ -391,6 +496,10 @@ class TestLevelUpOrderingAndRetry:
         assert sm.context.state is ControllerState.FORMAL_RUN_TERMINAL_FAILURE
 
     def test_stuck_level_up_after_timeout_fails_closed_non_formal(self) -> None:
+        """進まない level-up は debug mode でも停止する。
+
+        候補なしで待つ画面に移動を送り続けず、DISARMED へ戻します。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.OPERATOR_DEBUG_RESTART)
         lu_empty = fx.make_perception_snapshot(screen_state="level_up_items", snapshot_id="lu-stuck", candidates=())
@@ -407,6 +516,10 @@ class TestLevelUpOrderingAndRetry:
         assert effects == (effects[0],) and effects[0].kind == "release_all"
 
     def test_unexpected_direct_transition_between_modal_screens_fails_closed(self) -> None:
+        """カードから宝箱への不意の modal 遷移を停止する。
+
+        予定外の UI を同じクリック試行の続きとして扱いません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         now, lu, intent, decision, _ = self._enter_level_up(sm, now)
@@ -419,6 +532,7 @@ class TestLevelUpOrderingAndRetry:
 
 class TestApplyAckRecognition:
     """M12/M15: apply ack(ui_state_key/candidate_set_hash/inventory_hash の変化)を
+
     intent identity の変化と誤認しない。ただし debounce_frames 連続で安定し、
     かつ retry_after_ns 経過するまでは apply ack と確定しない(M15 fix: 1フレーム
     だけの揺れで無制限に re-click しないように安定条件を必須にした)。
@@ -443,6 +557,10 @@ class TestApplyAckRecognition:
     def _enter_level_up_with_candidate(
         self, sm: StateMachine, now: int, *, snapshot_id: str, choice_id: str, choice_index: int = 0
     ):
+        """指定カードで LEVEL_UP の試行を始める。
+
+        候補集合の変化を調べるテストに、初回操作の観測を用意します。
+        """
         lu = fx.make_perception_snapshot(
             screen_state="level_up_items",
             snapshot_id=snapshot_id,
@@ -457,6 +575,7 @@ class TestApplyAckRecognition:
 
     def test_ui_state_key_jitter_alone_does_not_resend(self) -> None:
         """M15: candidate_set_hash/inventory_hash は不変のまま ui_state_key だけが
+
         A/B と揺れても、intent identity は変わらないので通常の retry 規則
         (initial 1 + retry 最大1 = 合計2)しか送らない(無制限 re-click しない)。
         """
@@ -500,6 +619,7 @@ class TestApplyAckRecognition:
 
     def test_ui_state_key_oscillation_with_fresh_snapshots_never_exceeds_visit_budget(self) -> None:
         """M4 再発防止: 毎tick新しいsnapshot_id・単調増加するcaptured_ns(実機の
+
         実フレームと同じ)を持つui_state_keyのA/B交互揺れを120tick(約2秒、
         level_up timeout未満)与えても、candidate_set_hash/target_indexが不変な
         限りintent identityは変わらないため、``ui_visit_click_count``が2を
@@ -520,6 +640,10 @@ class TestApplyAckRecognition:
         key_b = fx._hash_of("ui-state-key-B")
 
         def _snapshot(tick: int, key: str, captured_ns: int):
+            """揺れる UI key の新しい snapshot を作る。
+
+            frame ごとに identity と撮影時刻を進め、重複観測とは違う揺れを再現します。
+            """
             return fx.make_perception_snapshot(
                 screen_state="level_up_items",
                 snapshot_id=f"lu-osc-{tick}",
@@ -545,6 +669,10 @@ class TestApplyAckRecognition:
         assert not sm.context.terminal_locked
 
     def test_reroll_then_choose_new_candidate_is_not_emergency_stop(self) -> None:
+        """リロール後の新候補選択は停止せず進める。
+
+        確定した候補集合の変更を新しい選択試行として受け付けます。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT)
         lu, intent, decision = self._enter_level_up_with_candidate(sm, now, snapshot_id="lu-a", choice_id="card-a")
@@ -578,6 +706,10 @@ class TestApplyAckRecognition:
         assert effects[1].target.choice_id == "card-z"
 
     def test_consecutive_level_up_after_apply_ack_is_new_initial_click(self) -> None:
+        """適用確認後の次の level-up は新しい初回操作になる。
+
+        連続した訪問でも前の retry と取り違えません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.OPERATOR_DEBUG_RESTART)
         lu, _intent, decision = self._enter_level_up_with_candidate(sm, now, snapshot_id="lu-1st", choice_id="knife")
@@ -607,6 +739,10 @@ class TestApplyAckRecognition:
         # なので、いずれ level_up timeout の fail-closed effect を拾って
         # しまい「停滞し続ける」ことを検証できない。有限tick数で
         # ui_click/ui_keyが一度も出ないことを直接確認する。
+        """適用確認後に届いた古い intent を再送しない。
+
+        source binding の違う判断を新しい画面に使わないことを確認します。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         lu, _intent, decision = self._enter_level_up_with_candidate(sm, now, snapshot_id="lu-b", choice_id="card-b")
@@ -629,9 +765,16 @@ class TestApplyAckRecognition:
 
 
 class TestChestAndConfirmButtons:
-    """chest(ack_chest)/target_reached(confirm)の button click。"""
+    """宝箱終了と目標到達の確認操作を検証する。
+
+    ack_chest はボタン矩形、confirm は Enter に解決されます。
+    """
 
     def test_chest_click_uses_button_target(self) -> None:
+        """宝箱クリックは観測されたボタン target を使う。
+
+        入力解除の後に ack_chest の矩形へ初回操作を送ります。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         chest = fx.make_perception_snapshot(
@@ -648,6 +791,10 @@ class TestChestAndConfirmButtons:
         assert [e.kind for e in effects] == ["release_all", "ui_click"]
 
     def test_confirm_uses_enter_key_not_click(self) -> None:
+        """目標確認は Enter key を送る。
+
+        confirm の矩形があっても座標クリックとして実行しません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         tr = fx.make_perception_snapshot(
@@ -666,9 +813,16 @@ class TestChestAndConfirmButtons:
 
 
 class TestTargetReachedSuccessPriority:
-    """M7: 30:00 evidence 以降は success を最優先で COMPLETE へ収束する。"""
+    """三十分到達後の成功判定を優先する。
+
+    その後に死亡や結果へ進んでも到達証拠を失わないことを確認します。
+    """
 
     def _reach_target(self, sm: StateMachine, now: int):
+        """目標到達画面へ状態機械を進める。
+
+        post-30 の証拠を揃え、終端判定を比較できる状態にします。
+        """
         gp = fx.make_perception_snapshot(screen_state="gameplay", snapshot_id="gp-reach")
         for _ in range(6):
             now += _TICK_NS
@@ -682,6 +836,10 @@ class TestTargetReachedSuccessPriority:
         return now, tr
 
     def test_death_after_target_reached_still_completes(self) -> None:
+        """目標到達後の死亡は成功へ収束する。
+
+        到達済みの run を後から失敗へ上書きしません。
+        """
         sm = StateMachine()
         sm.arm(campaign_run_mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT, run_id="r", gameplay_attempt_id="a", now_ns=0)
         now, _tr = self._reach_target(sm, 0)
@@ -694,6 +852,10 @@ class TestTargetReachedSuccessPriority:
         assert sm.context.state is ControllerState.COMPLETE
 
     def test_result_after_target_reached_completes(self) -> None:
+        """目標到達後の結果画面で成功を確定する。
+
+        終端の表示に変わっても成功の証拠を保持します。
+        """
         sm = StateMachine()
         sm.arm(campaign_run_mode=CampaignRunMode.OPERATOR_DEBUG_RESTART, run_id="r", gameplay_attempt_id="a", now_ns=0)
         now, _tr = self._reach_target(sm, 0)
@@ -708,6 +870,10 @@ class TestTargetReachedSuccessPriority:
     def test_target_reached_timeout_without_confirmation_fails_closed_debug(self) -> None:
         # M7(b) fix: post-30 event(gameplay 再開 or death/result)を確認できない
         # まま timeout した場合は、以前のように無条件で COMPLETE にはしない。
+        """確認なしの目標画面 timeout は debug mode で停止する。
+
+        時間切れを成功の代用にせず、入力を解放して DISARMED へ戻します。
+        """
         sm = StateMachine()
         sm.arm(campaign_run_mode=CampaignRunMode.OPERATOR_DEBUG_RESTART, run_id="r", gameplay_attempt_id="a", now_ns=0)
         now, tr = self._reach_target(sm, 0)
@@ -720,6 +886,10 @@ class TestTargetReachedSuccessPriority:
         assert not sm.context.terminal_locked
 
     def test_target_reached_timeout_without_confirmation_fails_closed_formal(self) -> None:
+        """確認なしの目標画面 timeout は正式失敗になる。
+
+        正式 run の成功を不確かな画面継続だけで決めません。
+        """
         sm = StateMachine()
         sm.arm(campaign_run_mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT, run_id="r", gameplay_attempt_id="a", now_ns=0)
         now, tr = self._reach_target(sm, 0)
@@ -734,6 +904,10 @@ class TestTargetReachedSuccessPriority:
         # M7(b) fix: TARGET_REACHED -> UNKNOWN は illegal transition であり、
         # 以前のように「target_reached 以外へ確定的に移った」というだけで
         # 無条件に COMPLETE にしてはならない。
+        """目標後に UNKNOWN が確定しても成功と断定しない。
+
+        未認識の画面変化は post-30 の適用確認になりません。
+        """
         sm = StateMachine()
         sm.arm(campaign_run_mode=CampaignRunMode.OPERATOR_DEBUG_RESTART, run_id="r", gameplay_attempt_id="a", now_ns=0)
         now, tr = self._reach_target(sm, 0)
@@ -749,6 +923,10 @@ class TestTargetReachedSuccessPriority:
         # という経路でも success_latched が一貫して立つ(以前は
         # _reduce_unknown 経由だけ latch が立たず、直後の death が誤って
         # pre-30 failure 扱いになっていた)。
+        """UNKNOWN 経由の目標到達でも成功記録を立てる。
+
+        一時的な読み違いを挟んでも到達の証拠が反映されます。
+        """
         sm = StateMachine()
         sm.arm(campaign_run_mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT, run_id="r", gameplay_attempt_id="a", now_ns=0)
         now = 0
@@ -779,6 +957,10 @@ class TestTargetReachedSuccessPriority:
         assert sm.context.state is ControllerState.COMPLETE
 
     def test_pre_target_death_is_failure_in_formal_mode(self) -> None:
+        """目標前の死亡は正式 run の失敗になる。
+
+        三十分の証拠がない死亡を成功として確定しません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT)
         death = fx.make_perception_snapshot(screen_state="death", snapshot_id="death-pre-30")
@@ -790,6 +972,10 @@ class TestTargetReachedSuccessPriority:
         assert sm.context.state is ControllerState.FORMAL_RUN_TERMINAL_FAILURE
 
     def test_pre_target_death_restarts_in_operator_debug_mode(self) -> None:
+        """目標前の死亡は debug mode の再開始経路へ進む。
+
+        正式失敗の終了処理と操作者向けの再準備を区別します。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.OPERATOR_DEBUG_RESTART)
         death = fx.make_perception_snapshot(screen_state="death", snapshot_id="death-pre-30-restart")
@@ -809,9 +995,16 @@ class TestTargetReachedSuccessPriority:
 
 
 class TestCombatResetExactlyOnce:
-    """M10: death/result 侵入ごとに combat_reset がちょうど1回出る。"""
+    """死亡・結果へ入るたび combat reset を一回だけ出す。
+
+    同じ終端画面の連続観測で状態リセットが繰り返されないことを確認します。
+    """
 
     def test_combat_reset_emitted_once_per_death_result_entry(self) -> None:
+        """一つの終端訪問につき reset を一回だけ送る。
+
+        別の訪問では再び reset でき、同じ訪問内では重複しません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.OPERATOR_DEBUG_RESTART)
         death = fx.make_perception_snapshot(screen_state="death", snapshot_id="death-reset")
@@ -826,9 +1019,16 @@ class TestCombatResetExactlyOnce:
 
 
 class TestFormalTerminalOrderingAndCas:
-    """M8/M9: terminal effect の順序・exactly-once、2回目 GAMEPLAY entry の拒否。"""
+    """正式終端の順序と一度だけの確定を検証する。
+
+    入力解除・停止・プロセス終了を順に出し、二回目の gameplay 開始を拒否します。
+    """
 
     def test_terminal_effects_are_release_then_stop_then_terminate(self) -> None:
+        """正式終了は解除・停止・終了の順になる。
+
+        キーが押されたままプロセスだけを終了させません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT)
         death = fx.make_perception_snapshot(screen_state="death", snapshot_id="death-order")
@@ -841,6 +1041,10 @@ class TestFormalTerminalOrderingAndCas:
         assert [e.kind for e in effects] == ["release_all", "controller_stop", "process_terminate"]
 
     def test_terminal_is_compare_and_set_exactly_once(self) -> None:
+        """正式終端は一度しか確定しない。
+
+        後の frame や別の終端理由が確定済みの結果を上書きできません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT)
         death = fx.make_perception_snapshot(screen_state="death", snapshot_id="death-cas")
@@ -861,6 +1065,10 @@ class TestFormalTerminalOrderingAndCas:
     def test_formal_single_attempt_rejects_second_gameplay_entry(self) -> None:
         # 自然な画面遷移では formal mode は死亡後 RUN_SETUP へ戻らないため、
         # reducer の guard 自体をピンポイントに(直接 context を用意して)検証する。
+        """単一試行の正式 mode は二回目の gameplay を拒否する。
+
+        終了後の画面変化で別 run の実行を始めません。
+        """
         ctx = StateContext(
             state=ControllerState.RUN_SETUP,
             campaign_run_mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT,
@@ -876,12 +1084,19 @@ class TestFormalTerminalOrderingAndCas:
 
 
 class TestArmResetsRunContext:
-    """M9: ``arm()`` は profile 以外の実行文脈を毎回まっさらに作り直す。"""
+    """再 arm は前 run の文脈を消す。
+
+    成功記録や訪問数、未完了操作を次の run へ持ち越しません。
+    """
 
     def test_rearm_after_debug_target_reached_timeout_resets_stale_success_latch(self) -> None:
         # 前 run が TARGET_REACHED まで到達した(success_latched=True)まま
         # debug モードで fail-closed(DISARMED)し、再arm した場合、新しい run の
         # pre-30 death が誤って COMPLETE になってはならない。
+        """debug timeout 後の再 arm で成功記録を消す。
+
+        次の run の早い死亡が前の目標到達により成功扱いになりません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.OPERATOR_DEBUG_RESTART)
         tr = fx.make_perception_snapshot(screen_state="target_reached_transition", snapshot_id="tr-stale", buttons=())
@@ -922,6 +1137,10 @@ class TestArmResetsRunContext:
         # 前 run(debug restart)で既に gameplay_entries=1 のまま manual abort で
         # DISARMED へ戻り、次の process/run を formal_single_attempt で
         # re-arm した場合、最初の GAMEPLAY entry を拒否してはならない。
+        """debug から正式 mode への再 arm で開始回数を消す。
+
+        次の正式 run の初回 gameplay が二回目として拒否されないことを確認します。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.OPERATOR_DEBUG_RESTART)
         assert sm.context.gameplay_entries == 1
@@ -935,9 +1154,16 @@ class TestArmResetsRunContext:
 
 
 class TestPausedUnknownRecover:
-    """PAUSED(indefinite)/UNKNOWN(1s timeout)/RECOVER(再確定バッファ、input 0)。"""
+    """一時停止・不明・復帰の入力規則を検証する。
+
+    paused は無期限に待ち、unknown は一秒で停止し、復帰は再確認を経ます。
+    """
 
     def test_paused_waits_indefinitely_without_any_effect(self) -> None:
+        """一時停止は時間制限なしで入力を送らない。
+
+        長く待っても timeout やクリックを作りません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         paused = fx.make_perception_snapshot(screen_state="paused", snapshot_id="paused-0")
@@ -952,6 +1178,10 @@ class TestPausedUnknownRecover:
         assert sm.context.state is ControllerState.PAUSED
 
     def test_paused_recovers_to_gameplay_via_recover_buffer(self) -> None:
+        """一時停止後は復帰バッファを通って通常プレイへ戻る。
+
+        再開画面を一枚見ただけで移動を再開しません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         paused = fx.make_perception_snapshot(screen_state="paused", snapshot_id="paused-1")
@@ -970,6 +1200,10 @@ class TestPausedUnknownRecover:
         assert sm.context.state is ControllerState.GAMEPLAY
 
     def test_unknown_never_emits_any_input(self) -> None:
+        """UNKNOWN 中は入力を送らない。
+
+        移動や UI の判断が届いても実行 effect に変換しません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         unk = fx.make_perception_snapshot(screen_state="totally_unrecognized", snapshot_id="unk-0")
@@ -983,6 +1217,10 @@ class TestPausedUnknownRecover:
             assert effects == ()
 
     def test_unknown_timeout_fails_closed_after_one_second(self) -> None:
+        """不明画面が一秒続くと停止する。
+
+        認識できない状態を無期限に操作待ちとして扱いません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.OPERATOR_DEBUG_RESTART)
         unk = fx.make_perception_snapshot(screen_state="totally_unrecognized", snapshot_id="unk-timeout")
@@ -998,6 +1236,10 @@ class TestPausedUnknownRecover:
         assert effects == (effects[0],) and effects[0].kind == "release_all"
 
     def test_focus_loss_during_gameplay_routes_through_unknown(self) -> None:
+        """プレイ中の focus 喪失は UNKNOWN を経由する。
+
+        ゲーム以外のウィンドウへ held input を送り続けません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0)
         for _ in range(3):
@@ -1007,9 +1249,16 @@ class TestPausedUnknownRecover:
 
 
 class TestGlobalSafetySignals:
-    """manual abort / ``kind="stop"`` は、どの状態からでも最優先で emergency stop する。"""
+    """手動停止と stop 判断を全状態より優先する。
+
+    UI の確認待ちがあっても入力を即時に解放できます。
+    """
 
     def test_manual_abort_overrides_everything(self) -> None:
+        """手動 abort は通常遷移に優先する。
+
+        新しい判断や成功候補があっても停止操作を後回しにしません。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT)
         now += _TICK_NS
@@ -1018,6 +1267,10 @@ class TestGlobalSafetySignals:
         assert [e.kind for e in effects] == ["release_all", "controller_stop", "process_terminate"]
 
     def test_stop_decision_triggers_immediate_emergency_stop_from_gameplay(self) -> None:
+        """GAMEPLAY の stop 判断で直ちに入力を解除する。
+
+        次の画面確認を待たずに DISARMED へ戻ります。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.OPERATOR_DEBUG_RESTART)
         now += _TICK_NS
@@ -1026,6 +1279,10 @@ class TestGlobalSafetySignals:
         assert effects and effects[0].kind == "release_all"
 
     def test_stop_decision_triggers_immediate_emergency_stop_from_level_up(self) -> None:
+        """LEVEL_UP の stop 判断でも直ちに停止する。
+
+        カードのクリック試行を続けず入力を解放します。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.OPERATOR_DEBUG_RESTART)
         lu = fx.make_perception_snapshot(
@@ -1075,6 +1332,10 @@ class TestTransitionTable:
         move_action: int | None = None,
         now_ns: int = 500_000_000,
     ):
+        """画面分類を連続して確定させる。
+
+        遷移表の各行に同じ debounce 条件を与えて結果を比べます。
+        """
         profile = NavigationProfile.default_v1()
         raw = self._CATEGORY_RAW[category]
         snapshot = fx.make_perception_snapshot(
@@ -1263,6 +1524,10 @@ class TestTransitionTable:
         expected_to_state: ControllerState,
         expected_kinds: tuple[str, ...],
     ) -> None:
+        """確定画面の遷移表と effect を照合する。
+
+        開始状態・次の画面・実行 mode の組ごとに合法な遷移と停止を検証します。
+        """
         extra = {"success_latched": True} if from_state is ControllerState.TARGET_REACHED_PENDING_TRANSITION else {}
         new_ctx, effects = self._confirm(from_state, category, mode, extra=extra)
         assert new_ctx.state is expected_to_state
@@ -1306,6 +1571,10 @@ class TestTransitionTable:
     def test_target_reached_confirmed_unknown_sends_zero_ui_input(self) -> None:
         # M15 fix: confirmed UNKNOWN の間、confirm button の ui_key を送り続けない
         # (以前は timeout の5秒間 Enter を送り続けていた)。
+        """目標後の確定 UNKNOWN は UI 入力を送らない。
+
+        読めない終了画面へ Enter やクリックを繰り返しません。
+        """
         profile = NavigationProfile.default_v1()
         new_ctx, effects = self._target_reached_confirm_button_step(
             category_raw="totally_unrecognized_table_probe",
@@ -1318,6 +1587,10 @@ class TestTransitionTable:
     def test_target_reached_confirmed_paused_sends_zero_ui_input(self) -> None:
         # M15 fix: confirmed PAUSED の間も同様に入力0を維持する
         # (PAUSED は他の状態では無期限待機・入力0が原則であり、それと矛盾しない)。
+        """目標後の確定 PAUSED でも UI 入力を送らない。
+
+        操作者の一時停止を確認操作の継続として扱いません。
+        """
         profile = NavigationProfile.default_v1()
         new_ctx, effects = self._target_reached_confirm_button_step(
             category_raw="paused",
@@ -1330,6 +1603,10 @@ class TestTransitionTable:
     def test_target_reached_focus_loss_sends_zero_ui_input(self) -> None:
         # M15 fix: window_focused=False は強制的に UNKNOWN 分類になり、
         # confirm 済みでなくても(debounce 未確定でも)入力0のまま待つ。
+        """目標後の focus 喪失では確認入力を止める。
+
+        別ウィンドウへ Enter を送り続けないことを確認します。
+        """
         new_ctx, effects = self._target_reached_confirm_button_step(
             category_raw="target_reached_transition",
             pending_category=None,
@@ -1341,6 +1618,10 @@ class TestTransitionTable:
 
     def test_target_reached_confirmed_level_up_fails_closed(self) -> None:
         # modal screen の unexpected_ui_transition と挙動を揃える(状態間の一貫性)。
+        """目標後にカード画面が確定したら停止する。
+
+        予定外の選択画面を成功確認として通しません。
+        """
         profile = NavigationProfile.default_v1()
         new_ctx, effects = self._target_reached_confirm_button_step(
             category_raw="level_up_items",
@@ -1352,6 +1633,10 @@ class TestTransitionTable:
 
     @pytest.mark.parametrize("mode", [CampaignRunMode.OPERATOR_DEBUG_RESTART, CampaignRunMode.FORMAL_SINGLE_ATTEMPT])
     def test_target_reached_gameplay_confirm_completes_regardless_of_mode(self, mode: CampaignRunMode) -> None:
+        """目標後の gameplay 確認は mode によらず成功になる。
+
+        正式と debug の両方で同じ post-30 確定証拠を使います。
+        """
         new_ctx, effects = self._confirm(
             ControllerState.TARGET_REACHED_PENDING_TRANSITION,
             ControllerState.GAMEPLAY,
@@ -1363,6 +1648,10 @@ class TestTransitionTable:
         assert [effect.kind for effect in effects] == ["release_all", "controller_stop", "process_terminate"]
 
     def test_gameplay_stay_forwards_move_effect(self) -> None:
+        """通常プレイ継続中は移動 effect を渡す。
+
+        画面状態が変わらない tick では選択された action を実行できます。
+        """
         new_ctx, effects = self._confirm(
             ControllerState.GAMEPLAY, ControllerState.GAMEPLAY, CampaignRunMode.OPERATOR_DEBUG_RESTART, move_action=4
         )
@@ -1371,6 +1660,10 @@ class TestTransitionTable:
         assert effects[0].action_index == 4
 
     def test_target_reached_entry_from_gameplay_sets_success_latch(self) -> None:
+        """gameplay から目標画面へ入ると成功記録を立てる。
+
+        終端確認まで到達済みの事実を保持します。
+        """
         new_ctx, _effects = self._confirm(
             ControllerState.GAMEPLAY,
             ControllerState.TARGET_REACHED_PENDING_TRANSITION,
@@ -1380,6 +1673,10 @@ class TestTransitionTable:
 
     def test_target_reached_entry_from_unknown_sets_success_latch(self) -> None:
         # M7(a) の table-driven 側の固定: UNKNOWN 経由でも success_latched が立つ。
+        """UNKNOWN から目標画面へ入っても成功記録を立てる。
+
+        観測の空白があっても新しい到達証拠を採用します。
+        """
         new_ctx, _effects = self._confirm(
             ControllerState.UNKNOWN,
             ControllerState.TARGET_REACHED_PENDING_TRANSITION,
@@ -1398,6 +1695,10 @@ class TestGoldenEndToEnd:
     """
 
     def test_full_run_reaches_complete_with_expected_effect_sequence(self) -> None:
+        """一 run の全体列が予定した順序で成功へ進む。
+
+        起動・移動・UI 操作・目標確認を通して effect の順番を照合します。
+        """
         sm = StateMachine()
         now, gp = _arm_to_gameplay(sm, 0, mode=CampaignRunMode.FORMAL_SINGLE_ATTEMPT)
 
@@ -1520,6 +1821,10 @@ class TestNoiseInvariantProperty:
         return run_ids
 
     def test_random_noisy_sequences_never_violate_safety_invariants(self) -> None:
+        """ノイズを含む多数の画面列でも入力の不変条件を守る。
+
+        訪問ごとの送信上限、停止時の解除、移動禁止状態を乱数列で確認します。
+        """
         rng = random.Random(20260925)
         visited_states: set[ControllerState] = set()
         ui_click_count = 0
@@ -1683,3 +1988,119 @@ class TestNoiseInvariantProperty:
         assert not missing, f"訪問できなかった状態がある: {missing}"
         assert ui_click_count > 0, "ui_click effect が一度も出なかった"
         assert ui_key_count > 0, "ui_key effect が一度も出なかった"
+
+
+class TestMeasuredModalReplay:
+    """録画に近い三十 fps の長い宝箱とカード過渡を再生する。
+
+    開く段階では候補なしで待ち、終了だけをクリックし、読めないカードは timeout で停止します。
+    """
+
+    def _tick(self, sm, state, tick, now, *, buttons=(), candidates=(), stable_key="modal"):
+        """新しい撮影時刻と identity で一 tick を進める。
+
+        終了ボタンが残る間は UI key を固定し、confidence のフェードだけでは別操作にしません。
+        """
+        now += 33_333_334
+        snapshot = fx.make_perception_snapshot(screen_state=state, snapshot_id=f"replay-{tick}",
+                                              frame_id=f"frame-{tick}", captured_ns=now,
+                                              ui_state_key=fx._hash_of(stable_key), buttons=buttons, candidates=candidates,
+                                              candidate_set_hash=fx._hash_of("replay-candidates"))
+        if state == "chest":
+            intent = fx.make_button_intent(snapshot, kind=UiIntentKind.ACK_CHEST, semantic_action="ack_chest")
+            decision = fx.make_ui_decision(snapshot, intent)
+        elif state == "level_up_items":
+            intent = fx.make_choose_card_intent(snapshot)
+            decision = fx.make_ui_decision(snapshot, intent)
+        else:
+            decision = fx.make_move_decision(snapshot)
+        return now, sm.step(snapshot, decision, now_ns=now)
+
+    @pytest.mark.parametrize("retry", [False, True])
+    def test_chest_waits_twenty_one_seconds_then_closes(self, retry):
+        """宝箱を六百四十 frame 待って終了を一回または retry 付きで押す。
+
+        初回と再観測がともに信頼度 .99 以上なら、二百 ms 後の一回の retry を送れます。
+        """
+        sm = StateMachine()
+        now, _ = _arm_to_gameplay(sm, 0)
+        for tick in range(640):
+            now, effects = self._tick(sm, "chest", tick, now)
+            assert all(e.kind not in {"ui_click", "move"} for e in effects)
+            assert sm.context.state in {ControllerState.GAMEPLAY, ControllerState.CHEST}
+        assert sm.context.state is ControllerState.CHEST
+        modes = []
+        for tick in range(640, 650 if retry else 641):
+            buttons = (fx.make_button_target(semantic_action="ack_chest", confidence=.99 if retry else .85),)
+            now, effects = self._tick(sm, "chest", tick, now, buttons=buttons, stable_key="chest-close")
+            modes.extend(e.mode for e in effects if e.kind == "ui_click")
+            assert sm.context.state is ControllerState.CHEST
+        assert modes == (["initial", "retry"] if retry else ["initial"])
+        assert sm.context.ui_visit_click_count == (2 if retry else 1)
+        for tick in range(650, 653):
+            now, _ = self._tick(sm, "gameplay", tick, now, stable_key="gameplay-return")
+        assert sm.context.state is ControllerState.GAMEPLAY
+
+    def test_fading_chest_button_cannot_retry_below_equivalence_gate(self):
+        """フェード中の初回クリックは既存の .99 retry gate を満たさない。
+
+        終了画面が残ると二百 ms 後に停止する制約を、判定コードを変えずに記録します。
+        """
+        sm = StateMachine()
+        now, _ = _arm_to_gameplay(sm, 0)
+        for tick in range(3):
+            now, _ = self._tick(sm, "chest", tick, now)
+        for tick in range(3, 14):
+            button = fx.make_button_target(semantic_action="ack_chest", confidence=.85 if tick == 3 else .99)
+            now, effects = self._tick(sm, "chest", tick, now, buttons=(button,), stable_key="chest-close")
+            if tick == 3:
+                assert [e.mode for e in effects if e.kind == "ui_click"] == ["initial"]
+            if sm.context.state is ControllerState.DISARMED:
+                break
+        assert sm.context.state is ControllerState.DISARMED
+        assert sm.context.terminal_reason == "ui_retry_precondition_failed"
+
+    def test_old_five_second_chest_timeout_stops_before_close(self):
+        """旧五秒 profile では演出終了前に停止する。
+
+        既定を六十秒へ上げる理由を、同じ frame 列との比較で固定します。
+        """
+        sm = StateMachine(profile=NavigationProfile(chest_timeout_ns=5_000_000_000))
+        now, _ = _arm_to_gameplay(sm, 0)
+        for tick in range(640):
+            now, _ = self._tick(sm, "chest", tick, now)
+            if sm.context.state is ControllerState.DISARMED:
+                break
+        assert sm.context.state is ControllerState.DISARMED
+        assert sm.context.terminal_reason == "chest_timeout"
+        assert tick < 640 and sm.context.ui_visit_click_count == 0
+
+    def test_invalid_card_candidates_fail_closed_after_two_seconds(self):
+        """atlas なしの低信頼候補ではクリックせず二秒で停止する。
+
+        状態を正しく level-up と認めても、未知のカードに推測で入力を送りません。
+        """
+        sm = StateMachine()
+        now, _ = _arm_to_gameplay(sm, 0)
+        candidates = (fx.make_candidate_target(validity=False, confidence=0.),)
+        for tick in range(80):
+            now, effects = self._tick(sm, "level_up_items", tick, now, candidates=candidates)
+            assert all(e.kind != "ui_click" for e in effects)
+            if sm.context.state is ControllerState.DISARMED:
+                break
+        assert sm.context.state is ControllerState.DISARMED
+        assert sm.context.terminal_reason == "level_up_timeout"
+
+    def test_card_transient_then_rows_enters_level_up_normally(self):
+        """過渡一枚と定常カードの連続で LEVEL_UP へ入る。
+
+        controller は confidence を見ないため、両方の raw state が同じなら通常の debounce になります。
+        """
+        sm = StateMachine()
+        now, _ = _arm_to_gameplay(sm, 0)
+        for tick in range(4):
+            candidate = fx.make_candidate_target(validity=False, confidence=0. if tick == 0 else .9)
+            now, _ = self._tick(sm, "level_up_items", tick, now, candidates=(candidate,),
+                                stable_key="card-transient" if tick == 0 else "card-rows:3")
+        assert sm.context.state is ControllerState.LEVEL_UP
+        assert sm.context.ui_visit_click_count == 0

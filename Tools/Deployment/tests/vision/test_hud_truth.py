@@ -103,7 +103,7 @@ def _draft(state, frame) -> HudTruthRecord:
 def test_draft_copies_hud_state_and_nulls_partial_inventory(gameplay_frame, dummy_parser_artifact_hash):
     """下書きは HudStateV1 を写し、読めない slot があれば items 全体を null にする。
 
-    不読在庫では段階値も null、card の item_id（None を除く）は expected_choice に入ることも確かめる。
+    不読在庫では段階値も null、未読 card があれば選択肢全体も null にします。
     """
     state = HudParser(parser_artifact_hash=dummy_parser_artifact_hash).parse(
         gameplay_frame, session_id="session-001", frame_index=3, captured_monotonic_ns=100
@@ -131,8 +131,11 @@ def test_draft_copies_hud_state_and_nulls_partial_inventory(gameplay_frame, dumm
     draft = _draft(full, gameplay_frame)
     assert draft.expected_items == ITEMS
     assert draft.expected_slot_levels is None
-    assert draft.expected_choice == ("whip", "spinach")
+    assert draft.expected_choice is None
     assert draft.expected_roi == expected_roi_for_state("level_up_items")
+    complete_cards = (cards[0], replace(cards[1], item_id="axe", kind="weapon"), cards[2])
+    complete = _draft(replace(full, cards=complete_cards), gameplay_frame)
+    assert complete.expected_choice == ("whip", "axe", "spinach")
 
 
 @pytest.mark.parametrize("items,confidence,state_name,expected", [
