@@ -2016,11 +2016,29 @@ class TestMeasuredModalReplay:
             decision = fx.make_move_decision(snapshot)
         return now, sm.step(snapshot, decision, now_ns=now)
 
+    def _chest_buttons(self, *, fading=False):
+        """白文字入りの終了画面を本番 parser と UI 変換へ通す。
+
+        retry の信頼度を手入力せず、フェード中に候補が消えることも同じ入口で確認します。
+        """
+        from ..vision.conftest import _make_levelup_frame
+        from survivors.vision.hud_parser import HudParser
+        from survivors.perception_snapshot import build_ui_presentation_from_hud
+        frame = _make_levelup_frame(0)
+        frame[835:902, 822:1098, :3] = (205, 64, 39)
+        frame[858:874, 920:1000, :3] = 255
+        if fading:
+            frame[835:841, 822:1098, :3] = 0
+        frame[914:919, 660:1260, :3] = (102, 203, 255)
+        hud = HudParser(parser_artifact_hash=fx._hash_of("parser_artifact")).parse(
+            frame, session_id="chest-replay", frame_index=0, captured_monotonic_ns=0)
+        return build_ui_presentation_from_hud(hud, (1920, 1080)).buttons
+
     @pytest.mark.parametrize("retry", [False, True])
     def test_chest_waits_twenty_one_seconds_then_closes(self, retry):
         """宝箱を六百四十 frame 待って終了を一回または retry 付きで押す。
 
-        初回と再観測がともに信頼度 .99 以上なら、二百 ms 後の一回の retry を送れます。
+        白文字入りの本番解析結果で初回を送り、二百 ms 後に同じボタンへ一度だけ retry します。
         """
         sm = StateMachine()
         now, _ = _arm_to_gameplay(sm, 0)
@@ -2029,9 +2047,10 @@ class TestMeasuredModalReplay:
             assert all(e.kind not in {"ui_click", "move"} for e in effects)
             assert sm.context.state in {ControllerState.GAMEPLAY, ControllerState.CHEST}
         assert sm.context.state is ControllerState.CHEST
+        buttons = self._chest_buttons()
+        assert len(buttons) == 1 and buttons[0].confidence >= .99
         modes = []
         for tick in range(640, 650 if retry else 641):
-            buttons = (fx.make_button_target(semantic_action="ack_chest", confidence=.99 if retry else .85),)
             now, effects = self._tick(sm, "chest", tick, now, buttons=buttons, stable_key="chest-close")
             modes.extend(e.mode for e in effects if e.kind == "ui_click")
             assert sm.context.state is ControllerState.CHEST
@@ -2041,24 +2060,28 @@ class TestMeasuredModalReplay:
             now, _ = self._tick(sm, "gameplay", tick, now, stable_key="gameplay-return")
         assert sm.context.state is ControllerState.GAMEPLAY
 
-    def test_fading_chest_button_cannot_retry_below_equivalence_gate(self):
-        """フェード中の初回クリックは既存の .99 retry gate を満たさない。
+    def test_fading_chest_waits_for_stable_button_then_retries(self):
+        """フェードを待ち、定常の終了ボタンで initial と retry を送る。
 
-        終了画面が残ると二百 ms 後に停止する制約を、判定コードを変えずに記録します。
+        本番 parser が候補を出すまでクリックせず、その後画面が残っても再送で停止しません。
         """
         sm = StateMachine()
         now, _ = _arm_to_gameplay(sm, 0)
         for tick in range(3):
             now, _ = self._tick(sm, "chest", tick, now)
-        for tick in range(3, 14):
-            button = fx.make_button_target(semantic_action="ack_chest", confidence=.85 if tick == 3 else .99)
-            now, effects = self._tick(sm, "chest", tick, now, buttons=(button,), stable_key="chest-close")
-            if tick == 3:
-                assert [e.mode for e in effects if e.kind == "ui_click"] == ["initial"]
-            if sm.context.state is ControllerState.DISARMED:
-                break
-        assert sm.context.state is ControllerState.DISARMED
-        assert sm.context.terminal_reason == "ui_retry_precondition_failed"
+        fading = self._chest_buttons(fading=True)
+        assert fading == ()
+        for tick in range(3, 6):
+            now, effects = self._tick(sm, "chest", tick, now, buttons=fading, stable_key="chest-fade")
+            assert all(e.kind != "ui_click" for e in effects)
+            assert sm.context.state is ControllerState.CHEST and sm.context.ui_visit_click_count == 0
+        buttons = self._chest_buttons()
+        modes = []
+        for tick in range(6, 16):
+            now, effects = self._tick(sm, "chest", tick, now, buttons=buttons, stable_key="chest-close")
+            modes.extend(e.mode for e in effects if e.kind == "ui_click")
+            assert sm.context.state is ControllerState.CHEST
+        assert modes == ["initial", "retry"] and sm.context.ui_visit_click_count == 2
 
     def test_old_five_second_chest_timeout_stops_before_close(self):
         """旧五秒 profile では演出終了前に停止する。
