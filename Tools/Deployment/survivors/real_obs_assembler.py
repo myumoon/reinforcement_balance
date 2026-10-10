@@ -301,7 +301,9 @@ class RealObsAssembler:
             self._last_gameplay_world = joined.world
             self._last_gameplay_screen = screen
             self._last_gameplay_ns = joined.captured_ns
-        self._slot_levels.observe(joined.hud)
+        # 補完前の None を選択差分の判定に使い、temporal が拒否した古い HUD は渡さない。
+        if hud.session_id == joined.hud.session_id and hud.captured_monotonic_ns == joined.hud.captured_monotonic_ns:
+            self._slot_levels.observe(hud)
         if schema.schema_version == DEPLOY_OBS_V2_SCHEMA_VERSION:
             deploy_obs = self._v2_observation(joined, schema, viewport)
         else:
