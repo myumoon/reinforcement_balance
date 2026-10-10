@@ -50,14 +50,17 @@ class ChoiceParseResult:
 
 
 def _color_button(frame, button_type, roi, inner_roi, classifier, color):
-    """ボタン内側の色の割合から一つの観測を作る。
+    """ボタン内側の色から、操作可能な定常表示を観測する。
 
-    半分以上が対象色なら矩形を返し、金枠や白文字の形は条件にしません。
+    終了は青九割、文字量の多いリロールは八割五分を必要とし、フェードを除きます。
+    操作ボタンの信頼度は白文字で減らさず、観測専用の confirm は色割合を維持します。
     """
     fraction = pixel_fraction(inner_roi.crop(frame), classifier)
-    if fraction < .50:
+    minimum = {"ack_chest": .90, "reroll": .85}.get(button_type, .50)
+    if fraction < minimum:
         return ()
-    return (ParsedButton(button_type, min(1., fraction), f"{color}:{fraction:.2f}", roi.as_xyxy()),)
+    confidence = 1.0 if button_type in {"ack_chest", "reroll"} else fraction
+    return (ParsedButton(button_type, confidence, f"{color}:{fraction:.2f}", roi.as_xyxy()),)
 
 
 class ChoiceParser:
