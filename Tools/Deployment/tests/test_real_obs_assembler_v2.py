@@ -116,6 +116,107 @@ def test_non_combat_frame_makes_world_and_hud_values_unknown():
         assert not any(valid), name
 
 
+@pytest.mark.parametrize("schema", [DeployObsSchema.default_v1(), V2], ids=["v1", "v2"])
+@pytest.mark.parametrize("state", ["level_up_items", "level_up_fallback"])
+@pytest.mark.parametrize("position,identity", [(1, "garlic"), (6, "spellbinder")])
+def test_level_up_unread_baseline_is_not_filled_for_tracker(schema, state, position, identity):
+    """パネルの不明枠を古い identity と結び付けず、強化も新規取得も推測しない。
+
+    一枚だけ読めたアイコンの後にパネルが None を返す三フレーム列を、v1/v2 の本番経路へ通します。
+    whip の +1 と、不明だった枠への Lv1・パネル段階値の採用をどちらも拒否します。
+    """
+    assembler = RealObsAssembler()
+    inventory = ["whip"] + [EMPTY] * 11
+    inventory[position] = identity
+    baseline = inventory.copy()
+    baseline[position] = None
+    levels = [2] + [None] * 11
+    levels[position] = 4
+    card = ParsedCard(0, "whip", "weapon", 3, .99, "ok", (100, 100, 400, 500))
+    assembler.assemble(_hud(ts=1_000_000_000, inventory=inventory), _world(1_000_000_000), schema, VIEWPORT)
+    assembler.assemble(
+        _hud(state, ts=1_100_000_000, inventory=baseline, cards=(card,), frame=2, levels=levels),
+        _world(1_100_000_000), schema, VIEWPORT,
+    )
+    snap = assembler.assemble(
+        _hud(ts=1_200_000_000, inventory=inventory, frame=3), _world(1_200_000_000), schema, VIEWPORT,
+    )
+    assert assembler._slot_levels.level("whip") is None
+    assert assembler._slot_levels.level(identity) is None
+    if schema.schema_version == V2.schema_version:
+        assert _segment(snap.deploy_obs, "weapon_slot_levels")[1][0] == 0.
+        segment = "weapon_slot_levels" if position < 6 else "passive_slot_levels"
+        assert _segment(snap.deploy_obs, segment)[1][position % 6] == 0.
+
+
+@pytest.mark.parametrize("state", ["level_up_items", "level_up_fallback"])
+@pytest.mark.parametrize("position,identity", [(1, "garlic"), (6, "spellbinder")])
+def test_level_up_unread_return_does_not_allow_owned_increment(state, position, identity):
+    """gameplay 復帰時の不明枠が補完されても、所持カードの +1 を確定しない。
+
+    パネルの全枠は読めていますが、戻った画面の一枠を None にします。
+    whip の強化は不明とし、読めていた別アイテムの基準レベル4だけを保ちます。
+    """
+    assembler = RealObsAssembler()
+    inventory = ["whip"] + [EMPTY] * 11
+    inventory[position] = identity
+    levels = [2] + [None] * 11
+    levels[position] = 4
+    card = ParsedCard(0, "whip", "weapon", 3, .99, "ok", (100, 100, 400, 500))
+    assembler.assemble(_hud(ts=1_000_000_000, inventory=inventory), _world(1_000_000_000), V2, VIEWPORT)
+    assembler.assemble(
+        _hud(state, ts=1_100_000_000, inventory=inventory, cards=(card,), frame=2, levels=levels),
+        _world(1_100_000_000), V2, VIEWPORT,
+    )
+    inventory[position] = None
+    snap = assembler.assemble(
+        _hud(ts=1_200_000_000, inventory=inventory, frame=3), _world(1_200_000_000), V2, VIEWPORT,
+    )
+    assert assembler._slot_levels.level("whip") is None
+    assert assembler._slot_levels.level(identity) == 4
+    assert _segment(snap.deploy_obs, "weapon_slot_levels")[1][0] == 0.
+
+
+@pytest.mark.parametrize("state", ["level_up_items", "level_up_fallback"])
+def test_level_up_confirmed_empty_still_allows_fresh_pick(state):
+    """パネルで空と確定した枠への取得は、復帰後も Lv1 として採用する。
+
+    前の生読みが garlic でも、基準が empty_slot なら garlic の新規取得と判定します。
+    新規取得があるため、所持カードとして見えた whip は基準レベル2を保ちます。
+    """
+    assembler = RealObsAssembler()
+    card = ParsedCard(0, "whip", "weapon", 3, .99, "ok", (100, 100, 400, 500))
+    assembler.assemble(_hud(ts=1_000_000_000, inventory=("whip", "garlic")), _world(1_000_000_000), V2, VIEWPORT)
+    assembler.assemble(
+        _hud(state, ts=1_100_000_000, inventory=("whip", EMPTY), cards=(card,), frame=2, levels=(2,)),
+        _world(1_100_000_000), V2, VIEWPORT,
+    )
+    snap = assembler.assemble(
+        _hud(ts=1_200_000_000, inventory=("whip", "garlic"), frame=3), _world(1_200_000_000), V2, VIEWPORT,
+    )
+    assert assembler._slot_levels.level("whip") == 2
+    assert assembler._slot_levels.level("garlic") == 1
+    assert _segment(snap.deploy_obs, "weapon_slot_levels")[1][:2] == [1., 1.]
+
+
+@pytest.mark.parametrize("old_session", [False, True])
+def test_rejected_hud_does_not_reach_slot_tracker(old_session):
+    """時刻が古い HUD と旧セッションの HUD を段階値の基準に使わない。
+
+    TemporalAssembler が拒否したパネルを後から渡しても、次の gameplay は whip の Lv1 を保ちます。
+    旧セッションでは保持中 HUD と同じ時刻を使い、時刻の比較だけで通さないことも確かめます。
+    """
+    assembler = RealObsAssembler()
+    assembler.assemble(_hud(ts=1_000_000_000), _world(1_000_000_000), V2, VIEWPORT)
+    panel = _hud("level_up_items", ts=1_000_000_000 if old_session else 900_000_000, frame=2, levels=(4,))
+    if old_session:
+        panel = dataclasses.replace(panel, session_id="old-session")
+    assembler.assemble(panel, _world(1_100_000_000), V2, VIEWPORT)
+    snap = assembler.assemble(_hud(ts=1_200_000_000, frame=3), _world(1_200_000_000), V2, VIEWPORT)
+    assert assembler._slot_levels.level("whip") == 1
+    assert _segment(snap.deploy_obs, "weapon_slot_levels")[1][0] == 1.
+
+
 def test_duration_mult_comes_from_passive_slots_via_common():
     """パッシブの Spellbinder から Common の関数で求めた倍率が orbit の残り時間に使われる。
 
@@ -143,14 +244,14 @@ class _ScriptedMatcher:
     def __init__(self, results):
         """解析に使う初期状態を準備する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        指定された照合結果を、呼び出すたびに一件ずつ取り出せるようにします。
         """
         self._results = iter(results)
 
     def match(self, crop):
         """次の枠の結果を返す（crop は見ない）。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        実際の画像照合を省き、スロット順に決めておいた MatchResult を返します。
         """
         return next(self._results)
 
@@ -158,7 +259,7 @@ class _ScriptedMatcher:
 def _parsed_inventory(results) -> tuple:
     """12 枠分の MatchResult を HudParser の在庫解析に通した identity 列を返す。
 
-    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    合成フレームと照合結果の代役を使い、空枠と読めない枠が在庫にどう反映されるかを調べます。
     """
     parser = HudParser(parser_artifact_hash="a" * 64, icon_matcher=_ScriptedMatcher(results))
     inventory, _ = parser._parse_inventory(np.zeros((1080, 1920, 4), np.uint8), 1920, 1080)
@@ -168,7 +269,7 @@ def _parsed_inventory(results) -> tuple:
 def _ok(item_id, kind="weapon") -> MatchResult:
     """読めた枠の結果。
 
-    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    指定アイテムを信頼度0.9で確定した MatchResult を、スロットのテスト入力として作ります。
     """
     return MatchResult(item_id, kind, 1, .9, "ok")
 
@@ -208,7 +309,7 @@ def test_low_margin_slot_is_unknown_not_confirmed_empty(unread):
 def test_confirmed_empty_slots_keep_slot_and_effect_validity():
     """全枠が identity か空確定なら、スロット・倍率・orbit の残り時間は従来どおり validity 1。
 
-    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    whip と Spellbinder 以外を空枠にしても、観測値や持続時間を不明扱いにしないことを確かめます。
     """
     inventory = _parsed_inventory([_ok("king_bible")] + [_ok(EMPTY, "unknown")] * 11)
     ts = 3_000_000_000
@@ -221,7 +322,7 @@ def test_confirmed_empty_slots_keep_slot_and_effect_validity():
 def test_duration_mult_is_unknown_when_a_passive_slot_is_unread():
     """passive 枠が1つでも読めない（None）と Common の倍率関数は None（不明）を返す。
 
-    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    空と確定した枠では倍率を計算できますが、読めないパッシブ枠があると効果を推測しません。
     """
     from reinbalance_survivors_contracts.deploy_obs_v2_features import duration_mult_from_hud_slots
     from survivors.deploy_obs_v2_input import hud_slots_from_inventory
