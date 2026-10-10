@@ -522,11 +522,15 @@ class HudParser:
         state, state_conf, state_reason = _detect_screen_state(
             frame_bgra, width=w, height=h, panel_evidence=panel_active
         )
+        if state not in SLOT_LEVEL_VISIBLE_STATES:
+            evidence = panel_active = False
+            self._panel_hold = 0
         if state == "chest":
             self._chest_hold = _CHEST_HOLD_FRAMES
         else:
             self._chest_hold = max(0, self._chest_hold - 1)
-            if state == "unknown" and self._chest_hold > 0 and state_reason != "unsupported_resolution":
+            if (state == "unknown" and self._chest_hold > 0
+                    and state_reason not in {"unsupported_resolution", "empty_frame"}):
                 state, state_conf, state_reason = "chest", .50, "chest_hold"
         if not evidence:
             if state_reason == "slot_panel":
