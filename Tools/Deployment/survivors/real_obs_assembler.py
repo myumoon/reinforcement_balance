@@ -156,10 +156,10 @@ def _item_context(
     choices = tuple(c for c in choices if c.item_id in valid_ui_ids)
     if not choices:
         return None, ()
-    # ponytail: HudStateV1.inventory は identity のみ保持。slot level・evolution_readiness・is_union・
-    # has_prerequisite は画面から観測不可。context_danger_occupancy_v1 スキーマで
+    # 段階値は level-up の inventory_levels と追跡器が保持する。ここでは identity の占有だけを
+    # context_danger_occupancy_v1 スキーマで使う。evolution_readiness・is_union・has_prerequisite は未観測。
     # occupancy (0=空, 1=占有) を使う。simulator の context_danger_v1 とは別スキーマのため
-    # 対応する専用モデルが必要。parser が per-slot level を提供すれば context_danger_v1 へ移行可。
+    # 対応する専用モデルが必要。実レベルを使う context_danger_v1 への移行にはスキーマとモデルの切替が要る。
     empty = load_hud_identity_vocabulary().empty_slot  # 空スロット確定の identity も空(0)として数える
     inventory_levels = tuple(1 if item is not None and item != empty else 0 for item in joined.hud.inventory)
     nearest = screen.get("nearest_enemy_offset")

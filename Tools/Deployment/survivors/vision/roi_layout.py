@@ -18,6 +18,11 @@ from numpy.typing import NDArray
 # 1920x1080 を基準に Vampire Survivors の HUD 配置から導いた値
 # 04-04/04-05 のキャリブレーションで上書きされる予定
 class _N(NamedTuple):
+    """画面内の矩形を正規化座標で表す。
+
+    各辺を画面の幅と高さに対する割合で保存します。
+    """
+
     x0: float
     y0: float
     x1: float
@@ -38,13 +43,39 @@ LEVEL_ROI = _N(0.020, 0.005, 0.100, 0.042)
 
 # インベントリスロット (6 weapon + 6 passive = 12 スロット)
 # スロット0〜5: 武器、スロット6〜11: パッシブ
-# 画面左下に横並び
-_INV_Y0, _INV_Y1 = 0.866, 0.972
-_INV_SLOT_W = 0.047
+# 左上の二段。1920x1080 の gameplay アイコン枠を正規化する
 INV_SLOT_ROIS: tuple[_N, ...] = tuple(
-    _N(i * _INV_SLOT_W, _INV_Y0, (i + 1) * _INV_SLOT_W, _INV_Y1)
+    _N((100 + 46 * (i % 6)) / 1920, (40 if i < 6 else 86) / 1080,
+       (142 + 46 * (i % 6)) / 1920, (82 if i < 6 else 128) / 1080)
     for i in range(12)
 )
+
+EMPTY_SLOT_ID = "empty_slot"
+
+
+class SlotLevelPipGrid(NamedTuple):
+    """段階マークの格子とパネル下端の測定座標。
+
+    横方向は画面幅、縦方向は画面高さに対する割合です。
+    内部サンプルとセル寸法は縦横の割合を持ち、丸めは画素へ戻すときだけ行います。
+    """
+
+    cell_x0: float = 124 / 1920
+    slot_dx: float = 45.75 / 1920
+    col_dx: float = 13.5 / 1920
+    cols: int = 3
+    weapon_row_y0: tuple[float, float, float] = (110 / 1080, 124 / 1080, 137 / 1080)
+    passive_row_y0: tuple[float, float] = (213 / 1080, 226 / 1080)
+    inner_offset: tuple[float, float] = (3 / 1920, 3 / 1080)
+    inner_size: tuple[float, float] = (5 / 1920, 5 / 1080)
+    cell_w: float = 10 / 1920
+    cell_h: float = 9 / 1080
+    row_span_x: tuple[float, float] = (120 / 1920, 400 / 1920)
+    bottom_scan_y: tuple[float, float] = (140 / 1080, 300 / 1080)
+    bottom_gold_ratio: float = 0.9
+
+
+SLOT_LEVEL_PIP_GRID = SlotLevelPipGrid()
 
 # 段階マーク（アイコン下の小さな四角の列）が見える画面状態の集合
 # level-up 画面の左上パネルにだけ出る。gameplay・chest では出ないので、
@@ -104,7 +135,10 @@ _ANCHOR_SAMPLE_POINTS = (
 
 @dataclass(frozen=True, slots=True)
 class PixelROI:
-    """ピクセル座標で表した矩形 ROI。"""
+    """ピクセル座標で表した矩形 ROI。
+
+    画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+    """
 
     x0: int
     y0: int
@@ -113,17 +147,32 @@ class PixelROI:
 
     @property
     def width(self) -> int:
+        """矩形の横幅を画素数で返す。
+
+        画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+        """
         return self.x1 - self.x0
 
     @property
     def height(self) -> int:
+        """矩形の高さを画素数で返す。
+
+        画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+        """
         return self.y1 - self.y0
 
     def crop(self, frame_bgra: NDArray[np.uint8]) -> NDArray[np.uint8]:
-        """フレーム配列から ROI を切り出す。"""
+        """フレーム配列から ROI を切り出す。
+
+        画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+        """
         return frame_bgra[self.y0:self.y1, self.x0:self.x1]
 
     def as_xyxy(self) -> tuple[int, int, int, int]:
+        """矩形の四辺を座標の組で返す。
+
+        画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+        """
         return (self.x0, self.y0, self.x1, self.y1)
 
 
@@ -132,7 +181,10 @@ def norm_to_pixels(
     width: int = 1920,
     height: int = 1080,
 ) -> PixelROI:
-    """正規化 ROI をピクセル ROI に変換する。"""
+    """正規化 ROI をピクセル ROI に変換する。
+
+    画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+    """
     x0 = max(0, min(int(norm.x0 * width), width - 1))
     y0 = max(0, min(int(norm.y0 * height), height - 1))
     x1 = max(x0 + 1, min(int(norm.x1 * width), width))
@@ -141,7 +193,10 @@ def norm_to_pixels(
 
 
 def card_rois_for_count(count: int, width: int = 1920, height: int = 1080) -> tuple[PixelROI, ...]:
-    """カード枚数に応じた ROI リストを返す。不明枚数は空を返す。"""
+    """カード枚数に応じた ROI リストを返す。不明枚数は空を返す。
+
+    画面内の位置を呼出し元へ渡し、同じ範囲で切り出しや座標変換を行えます。
+    """
     norms = CARD_ROIS.get(count)
     if norms is None:
         return ()

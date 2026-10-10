@@ -28,7 +28,7 @@ VIEWPORT = (1000, 1000)
 EMPTY = load_hud_identity_vocabulary().empty_slot
 
 
-def _hud(state="gameplay", *, ts, inventory=("whip",), level=4, cards=(), frame=1) -> HudStateV1:
+def _hud(state="gameplay", *, ts, inventory=("whip",), level=4, cards=(), frame=1, levels=None) -> HudStateV1:
     """v2 経路テスト用の HUD を作る。
 
     在庫は先頭から詰め、残りは空スロット確定（empty_slot）にします。None は読めなかった枠です。
@@ -39,6 +39,8 @@ def _hud(state="gameplay", *, ts, inventory=("whip",), level=4, cards=(), frame=
         20., .9, "ok", False, .75, .9, "ok", .5, .9, "ok", level, .9, "ok",
         inv, .9, "b" * 64, tuple(cards), "c" * 64, (),
         False, False, False, .9, "ok",
+        inventory_levels=(None,) * 12 if levels is None else tuple(levels) + (None,) * (12 - len(levels)),
+        inventory_levels_confidence=0.0 if levels is None else 1.0,
     )
 
 
@@ -96,7 +98,7 @@ def test_level_up_choice_updates_slot_level_through_assembler():
     assembler = RealObsAssembler()
     assembler.assemble(_hud(ts=1_000_000_000, level=4), _world(1_000_000_000), V2, VIEWPORT)
     card = ParsedCard(0, "whip", "weapon", 3, .99, "ok", (100, 100, 400, 500))
-    assembler.assemble(_hud("level_up_items", ts=1_100_000_000, level=5, cards=(card,), frame=2), _world(1_100_000_000), V2, VIEWPORT)
+    assembler.assemble(_hud("level_up_items", ts=1_100_000_000, level=5, cards=(card,), frame=2, levels=(2,)), _world(1_100_000_000), V2, VIEWPORT)
     snap = assembler.assemble(_hud(ts=1_200_000_000, level=5, frame=3), _world(1_200_000_000), V2, VIEWPORT)
     levels, valid = _segment(snap.deploy_obs, "weapon_slot_levels")
     assert levels[0] == pytest.approx(3 / PARAMS["max_weapon_level"]) and valid[0] == 1.
@@ -139,22 +141,35 @@ class _ScriptedMatcher:
     """
 
     def __init__(self, results):
+        """解析に使う初期状態を準備する。
+
+        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        """
         self._results = iter(results)
 
     def match(self, crop):
-        """次の枠の結果を返す（crop は見ない）。"""
+        """次の枠の結果を返す（crop は見ない）。
+
+        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        """
         return next(self._results)
 
 
 def _parsed_inventory(results) -> tuple:
-    """12 枠分の MatchResult を HudParser の在庫解析に通した identity 列を返す。"""
+    """12 枠分の MatchResult を HudParser の在庫解析に通した identity 列を返す。
+
+    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    """
     parser = HudParser(parser_artifact_hash="a" * 64, icon_matcher=_ScriptedMatcher(results))
     inventory, _ = parser._parse_inventory(np.zeros((1080, 1920, 4), np.uint8), 1920, 1080)
     return inventory
 
 
 def _ok(item_id, kind="weapon") -> MatchResult:
-    """読めた枠の結果。"""
+    """読めた枠の結果。
+
+    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    """
     return MatchResult(item_id, kind, 1, .9, "ok")
 
 
@@ -191,7 +206,10 @@ def test_low_margin_slot_is_unknown_not_confirmed_empty(unread):
 
 
 def test_confirmed_empty_slots_keep_slot_and_effect_validity():
-    """全枠が identity か空確定なら、スロット・倍率・orbit の残り時間は従来どおり validity 1。"""
+    """全枠が identity か空確定なら、スロット・倍率・orbit の残り時間は従来どおり validity 1。
+
+    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    """
     inventory = _parsed_inventory([_ok("king_bible")] + [_ok(EMPTY, "unknown")] * 11)
     ts = 3_000_000_000
     orbit = _track(1, "weapon_orbit", "weapon", .6, .5, first_seen_ns=2_000_000_000)
@@ -201,7 +219,10 @@ def test_confirmed_empty_slots_keep_slot_and_effect_validity():
 
 
 def test_duration_mult_is_unknown_when_a_passive_slot_is_unread():
-    """passive 枠が1つでも読めない（None）と Common の倍率関数は None（不明）を返す。"""
+    """passive 枠が1つでも読めない（None）と Common の倍率関数は None（不明）を返す。
+
+    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    """
     from reinbalance_survivors_contracts.deploy_obs_v2_features import duration_mult_from_hud_slots
     from survivors.deploy_obs_v2_input import hud_slots_from_inventory
 

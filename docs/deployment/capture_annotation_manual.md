@@ -193,7 +193,7 @@ python Tools/Deployment/annotate_survivors_hud_truth.py `
 
 #### 画面状態は必ず目視で確認する
 
-各 frame の先頭に「state は目視で確認」の注意が出ます。`expected_screen_state` は下書きを信用せず、必ず画像を見て確かめてください。04-20（段階マークの読み取り）が merge されるまでは、parser が level-up 画面を `gameplay` と判定します。`--from-labels` を使うか、`set state level_up_items` で直してください。
+各 frame の先頭に「state は目視で確認」の注意が出ます。`expected_screen_state` は下書きを信用せず、必ず画像を見て確かめてください。level-up は左上パネルの段階マークの格子で判定します。過渡・宝箱などで判定が違う場合は、`--from-labels` または `set state level_up_items` で直してください。
 
 #### コマンド早見表
 
@@ -248,10 +248,10 @@ set levels 3 1 - - - - 2 - - - - -
 
 #### 注意点
 
-- 対象 frame はとびとびなので、各 frame の下書きを作る前に、その frame の 30 frame 前から順に parser に通してタイマーなどの時間方向の状態をそろえます（結果は捨てます）。前の frame と連続しないときは状態をリセットしてから始めます。それでも疎な frame では、時間方向のフィルタ（タイマーやレベルの逆行チェック）が十分に効かないことがあるので、下書きの値は必ず確認してください。
-- 04-20 merge 後は、遡りの開始点が「段階マークが見えない frame のさらに 10 frame 前」（上限 400 frame）になるので、長い level-up 画面では 1 frame の下書きに数十秒かかります。
-- 04-20 merge 後は、level-up 画面の下書きにアイテムのレベルが入ります。また `expected_items` の下書きは「直前の gameplay frame の所持アイテムを位置で結び付けた値」になり、level-up の前に gameplay が 3 frame 無い frame（セッションの先頭など）では null になることがあります。
-- 04-20 merge 前は、parser の所持アイテムの位置がずれているため、アイテムの下書きはほぼ null です。本格的な運用は 04-20 merge 後に始め、それまでは CLI の動作確認と画面状態・タイマーの確認に留めます。
+- 対象 frame から、段階マーク格子の証拠が無い frame まで遡り、さらに十枚前から連続して parser に通します。前の target と窓が連続しない場合は `reset_temporal_state()` で状態を消してから始めます。長い level-up の後半では数百枚を読み、下書き一枚に数十秒かかることがあります。
+- level-up の下書きには、段階値の信頼度が .5 以上ならアイテムのレベルが入ります。`expected_items` が null の場合はレベルも null のままです。点灯数は選択前の値なので、目視で確認してください。
+- level-up の `expected_items` は、訪問直前の gameplay 在庫を slot ごとに三枚一致で保存し、位置で結び付けた値です。訪問前に gameplay が三枚無い session 先頭や、identity が読めない枠がある場合は全体が null になりえます。パネルの空枠と種別が食い違う枠は結合しません。
+- 正式 atlas が無い場合や `--atlas` を指定しない場合、所持 identity は読めません。段階マーク自体が読めても、items と levels の下書きは null になる場合があります。
 
 ## 参考
 

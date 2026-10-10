@@ -30,11 +30,10 @@ from survivors.vision.hud_truth import (
     write_hud_truth,
 )
 from survivors.vision.icon_matcher import IconMatcher
+from survivors.vision.slot_level_parser import parse_slot_levels, has_panel_evidence
 
-# 下書きの前に遡って parse する frame 数（04-20 の段階マーク証拠が入るまでの暫定値）
-BACKTRACK_FRAMES = 30
-# 遡り parse の上限 frame 数
-MAX_WARMUP_FRAMES = 400
+# 格子の証拠が消える地点より前に読み、gameplay 在庫の三枚一致を作る frame 数
+GAMEPLAY_WARMUP_FRAMES = 10
 # この frame 数を確定・skip するたびに途中保存する
 SAVE_EVERY = 20
 # atlas を使わないときに draft_source へ入れる値
@@ -182,11 +181,18 @@ class _Drafter:
     def draft(self, frame_id: int) -> HudTruthRecord:
         """frame_id の下書きを返す（--from-labels なら label の state を優先する）。
 
-        f-30 から（最大 400 frame）遡って parse してから対象 frame を parse する。
+        格子の証拠が消える frame まで遡り、さらに十枚前から連続して parse する。
         前回の続きなら途中から再開し、離れた窓なら parser の時間方向の状態を消してから始める。
         """
         position = bisect_left(self.frame_ids, frame_id)
-        start = max(bisect_left(self.frame_ids, frame_id - BACKTRACK_FRAMES), position - MAX_WARMUP_FRAMES)
+        start = position
+        while start > 0:
+            pixels = load_frame_pixels(self.session_path, self.records[start])
+            grid = parse_slot_levels(pixels, pixels.shape[1], pixels.shape[0])
+            if not has_panel_evidence(grid):
+                break
+            start -= 1
+        start = max(0, start - GAMEPLAY_WARMUP_FRAMES)
         if self.last_parsed is not None and start <= self.last_parsed + 1 <= position:
             start = self.last_parsed + 1
         else:

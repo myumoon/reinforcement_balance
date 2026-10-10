@@ -354,7 +354,7 @@ def draft_from_parser(
     """parser の HudStateV1 を写した未確定の下書き record を返す。
 
     inventory に読めない slot（None）が 1 つでもあれば expected_items は配列全体を null にする。
-    expected_slot_levels は常に null（段階マークの読み取りは 04-20 で足す）。
+    段階値の信頼度が .5 以上のパネルでは expected_slot_levels に写す（items が null なら null）。
     card の item_id（None を除く）を上から expected_choice に入れ、無ければ null。
     """
     state = parser.parse(
@@ -377,7 +377,9 @@ def draft_from_parser(
         expected_hp_ratio=state.hp_ratio,
         expected_xp_ratio=state.xp_ratio,
         expected_items=None if any(item is None for item in inventory) else inventory,
-        expected_slot_levels=None,
+        expected_slot_levels=(state.inventory_levels if state.inventory_levels_confidence >= .5
+                              and state.screen_state in SLOT_LEVEL_VISIBLE_STATES
+                              and None not in inventory else None),
         expected_choice=choice or None,
         roi_name=HUD_ROI_NAME,
         expected_roi=expected_roi_for_state(state.screen_state),

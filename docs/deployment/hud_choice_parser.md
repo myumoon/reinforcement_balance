@@ -24,6 +24,7 @@ CapturedFrame
 | `survivors/vision/roi_layout.py` | viewport-relative ROI anchors、PixelROI、正規化→ピクセル変換 |
 | `survivors/vision/digit_parser.py` | binarize + connected components + template distance でタイマー/レベルを解析 |
 | `survivors/vision/bar_parser.py` | HSV color segmentation で HP/XP バー充填率を解析 |
+| `survivors/vision/slot_level_parser.py` | 段階マークの色割合・prefix・パネル下端から slot level と空枠を読む |
 | `survivors/vision/icon_matcher.py` | AtlasManifest、IconMatcher、色+エッジ特徴距離マッチング |
 | `survivors/vision/hud_parser.py` | HudStateV1 データ契約、HudParser、ParsedCard、ParsedButton |
 | `survivors/vision/choice_parser.py` | レベルアップカード・ボタン・fallback の choice parser |
@@ -49,14 +50,28 @@ HudStateV1(
     buttons
     reroll_available, skip_available, banish_available
     capability_confidence, capability_reason
+    inventory_levels = (None,) * 12                 # 12個の int 1..9 または None
+    inventory_levels_confidence = 0.0              # 採用した段階値・空枠の割合
 )
 ```
 
 ## Low-confidence ポリシー
 
-- **推測しない**: confidence < 閾値の場合、前回値を再利用せず `value=None` + `reason` を返す
+- **推測しない**: 読めない観測は `None`。段階値は二枚一致した枠を訪問中だけ保持し、短い画素の揺れでは取り消しません
 - **temporal constraints**: タイマーの逆行 (>30s) とレベルの逆行を reject する
 - **unknown/None は伝播する**: assembler (04-09) が invalid field として処理する
+
+## 段階マークと在庫の位置結合
+
+`INV_SLOT_ROIS` は gameplay 左上の武器六枠・パッシブ六枠へ修正しました。1920×1080 では x=`100+46i`、武器 y=40、パッシブ y=86、各枠42×42画素です。段階マークは `SLOT_LEVEL_PIP_GRID` の正規化格子で読み、内部画素の六割が金色なら点灯、暗色なら消灯、灰色ならセル無しとします。全幅の九割が金色かつ直下二行の九割が茶色の最初の行がパネル下端で、その外側の行は除外します。金色だけでは宝箱の光を下端と誤認するため、実測した茶色の縁も確認します。点灯→消灯→セル無しの prefix が崩れる枠や曖昧な枠は不明です。武器八セル・パッシブ五セルの上限超過は `over_max` になり、宝箱の全点灯を証拠にしません。
+
+下端を確認でき、二セル以上の valid slot が一つでもあれば、HUD のある画面を `level_up_items`／reason `slot_panel` と判定します。一セルの進化武器も level 1 ですが、画面判定の証拠には数えません。下端未検出時は全行を解析して段階値を返しますが、背景の偶然の prefix を画面証拠にしないよう `evidence_slots=0` にします。証拠が消えてから三枚は `slot_panel_hold` で同じ状態を保ちます。hold は画面状態だけに効き、新しい段階値を採用しません。各 slot は二枚連続一致で採用し、訪問終了時と `reset_temporal_state()` で全消去します。
+
+半透明パネル上のアイコン照合は行わず、直前 gameplay の在庫を同じ位置で結合します。gameplay は三枚連続の非 None 一致で枠ごとに保存し、None が三十枚続いた枠だけ消去します。`hud_card_contrast*` の level_up_items が三枚続いた場合、および chest／death／result／unknown と reset では在庫と一致履歴を全消去します。slot_panel_hold は数えません。
+
+パネル空枠と gameplay の所持 identity が食い違えば `slotN:empty_mismatch`、段階ありと保存空枠が食い違えば `slotN:identity_mismatch`、表示セル総数と atlas entry の kind が食い違う・種別不明なら `slotN:kind_mismatch` を screen_state_reason に追記して両方を None にします。パネル空枠と保存 None は `empty_slot`、段階ありと保存 None は level のみを出します。`inventory_confidence` は identity（空枠含む）の確定割合、`inventory_levels_confidence` は段階値か空枠を採用した割合です。
+
+wire の二キーは必須で、未知キー・欠落キーは従来どおり拒否します。`inventory_hash` は identity だけのままで、`parser_artifact_hash` の定義と `CARD_ROIS` は変更していません。カード配置、chest／death／result の判定は 04-22 の対象です。座標と色は 1920×1080・既定 UI scale・日本語 UI の収録に限られ、全武器進化後の行位置・九段階パッシブ・paused は未確認です。
 
 ## Development atlas
 

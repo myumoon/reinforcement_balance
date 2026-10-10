@@ -26,6 +26,8 @@ from .roi_layout import (
     SCREEN_CENTER_ROI,
     CARD_ROIS,
     CARD_GAP_ROIS,
+    EMPTY_SLOT_ID,
+    SLOT_LEVEL_VISIBLE_STATES,
     norm_to_pixels,
     layout_validity_score,
 )
@@ -39,6 +41,7 @@ from .digit_parser import (
 )
 from .bar_parser import BarResult, parse_hp_bar, parse_xp_bar
 from .icon_matcher import AtlasManifest, IconMatcher, MatchResult
+from .slot_level_parser import SlotLevelResult, parse_slot_levels, has_panel_evidence
 
 # HudStateV1 のスキーマバージョン
 HUD_STATE_SCHEMA_VERSION: Final[str] = "hud_state.v1"
@@ -61,6 +64,10 @@ INV_SLOT_COUNT: Final[int] = 12
 
 # 状態判定の最低信頼度
 _STATE_LOW_CONF: Final[float] = 0.35
+_PANEL_HOLD_FRAMES = 3
+_GAMEPLAY_NONE_RESET_FRAMES = 30
+_CARD_CONTRAST_RESET_FRAMES = 3
+_SLOT_LEVEL_CONFIDENCE = 0.5
 
 # 画面中央領域の支配色 HSV 範囲 (UI オーバーレイ検出用)
 # レベルアップ画面: 暗い背景に明るいカード
@@ -69,7 +76,10 @@ _LEVELUP_OVERLAY_BRIGHTNESS_THRESHOLD: Final[float] = 0.25
 
 @dataclass(frozen=True, slots=True)
 class ParsedCard:
-    """レベルアップカードスロットの解析結果。"""
+    """レベルアップカードスロットの解析結果。
+
+    保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+    """
 
     slot_index: int
     item_id: str | None    # 語彙アイテム ID; unknown なら None
@@ -82,7 +92,10 @@ class ParsedCard:
 
 @dataclass(frozen=True, slots=True)
 class ParsedButton:
-    """UI ボタンの解析結果 (reroll/skip/banish/ack_chest/confirm)。"""
+    """UI ボタンの解析結果 (reroll/skip/banish/ack_chest/confirm)。
+
+    保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+    """
 
     button_type: str       # "reroll", "skip", "banish", "ack_chest", "confirm"
     confidence: float
@@ -150,13 +163,27 @@ class HudStateV1:
     capability_confidence: float
     capability_reason: str
 
+    inventory_levels: tuple[int | None, ...] = (None,) * INV_SLOT_COUNT
+    inventory_levels_confidence: float = 0.0
+
     def __post_init__(self) -> None:
+        """HUD のスキーマと各観測値の範囲を検証する。
+
+        段階値は整数か不明だけを受け取り、bool や小数を level に変換しません。
+        """
         if self.schema_version != HUD_STATE_SCHEMA_VERSION:
             raise ValueError(f"unsupported hud_state schema: {self.schema_version!r}")
         if self.screen_state not in SCREEN_STATES:
             raise ValueError(f"unknown screen_state: {self.screen_state!r}")
         if len(self.inventory) != INV_SLOT_COUNT:
             raise ValueError(f"inventory must have {INV_SLOT_COUNT} slots, got {len(self.inventory)}")
+        if len(self.inventory_levels) != INV_SLOT_COUNT:
+            raise ValueError(f"inventory_levels must have {INV_SLOT_COUNT} slots")
+        if any(value is not None and (type(value) is not int or not 1 <= value <= 9)
+               for value in self.inventory_levels):
+            raise ValueError("inventory_levels must contain int 1..9 or None")
+        if not (0.0 <= self.inventory_levels_confidence <= 1.0):
+            raise ValueError("inventory_levels_confidence out of range")
         if not (0.0 <= self.screen_state_confidence <= 1.0):
             raise ValueError("screen_state_confidence out of range")
         if self.timer_seconds is not None and not (0.0 <= self.timer_seconds <= 99 * 60.0):
@@ -180,7 +207,10 @@ class HudStateV1:
                 raise ValueError(f"unknown button_type: {btn.button_type!r}")
 
     def to_wire(self) -> dict:
-        """JSON シリアライズ可能な dict に変換する (golden fixture 保存用)。"""
+        """JSON シリアライズ可能な dict に変換する (golden fixture 保存用)。
+
+        保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+        """
         return {
             "schema_version": self.schema_version,
             "session_id": self.session_id,
@@ -206,6 +236,8 @@ class HudStateV1:
             "inventory": list(self.inventory),
             "inventory_confidence": self.inventory_confidence,
             "inventory_hash": self.inventory_hash,
+            "inventory_levels": list(self.inventory_levels),
+            "inventory_levels_confidence": self.inventory_levels_confidence,
             "cards": [
                 {
                     "slot_index": c.slot_index,
@@ -237,7 +269,10 @@ class HudStateV1:
 
     @classmethod
     def from_wire(cls, wire: dict) -> "HudStateV1":
-        """JSON dict から HudStateV1 を復元する (golden fixture 検証用)。"""
+        """JSON dict から HudStateV1 を復元する (golden fixture 検証用)。
+
+        保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+        """
         expected_keys = {
             "schema_version", "session_id", "frame_index", "captured_monotonic_ns",
             "parser_artifact_hash", "screen_state", "screen_state_confidence",
@@ -247,6 +282,7 @@ class HudStateV1:
             "level_reason", "inventory", "inventory_confidence", "inventory_hash",
             "cards", "candidate_set_hash", "buttons", "reroll_available",
             "skip_available", "banish_available", "capability_confidence", "capability_reason",
+            "inventory_levels", "inventory_levels_confidence",
         }
         if set(wire) != expected_keys:
             raise ValueError(
@@ -299,6 +335,8 @@ class HudStateV1:
             inventory=tuple(wire["inventory"]),
             inventory_confidence=wire["inventory_confidence"],
             inventory_hash=wire["inventory_hash"],
+            inventory_levels=tuple(wire["inventory_levels"]),
+            inventory_levels_confidence=wire["inventory_levels_confidence"],
             cards=cards,
             candidate_set_hash=wire["candidate_set_hash"],
             buttons=buttons,
@@ -311,12 +349,18 @@ class HudStateV1:
 
 
 def _compute_inventory_hash(inventory: tuple[str | None, ...]) -> str:
-    """インベントリ tuple の canonical hash を計算する。"""
+    """インベントリ tuple の canonical hash を計算する。
+
+    保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+    """
     return canonical_hash({"slots": list(inventory)})
 
 
 def _compute_candidate_set_hash(screen_state: str, cards: tuple[ParsedCard, ...]) -> str:
-    """画面状態とカード ID セットの canonical hash を計算する。"""
+    """画面状態とカード ID セットの canonical hash を計算する。
+
+    保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+    """
     card_ids = sorted(c.item_id or "unknown" for c in cards)
     return canonical_hash({"screen_state": screen_state, "card_ids": card_ids})
 
@@ -327,7 +371,10 @@ def _mean_roi_brightness(
     width: int,
     height: int,
 ) -> float:
-    """指定 ROI 群の平均輝度 (0.0..1.0) を返す。"""
+    """指定 ROI 群の平均輝度 (0.0..1.0) を返す。
+
+    保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+    """
     vals: list[float] = []
     for norm in norms:
         crop = norm_to_pixels(norm, width, height).crop(frame_bgra)
@@ -342,7 +389,10 @@ def _min_roi_brightness(
     width: int,
     height: int,
 ) -> float:
-    """指定 ROI 群の最小スロット輝度 (0.0..1.0) を返す。"""
+    """指定 ROI 群の最小スロット輝度 (0.0..1.0) を返す。
+
+    保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+    """
     vals: list[float] = []
     for norm in norms:
         crop = norm_to_pixels(norm, width, height).crop(frame_bgra)
@@ -356,6 +406,7 @@ def _detect_screen_state(
     *,
     width: int = 1920,
     height: int = 1080,
+    panel_evidence: bool = False,
 ) -> tuple[str, float, str]:
     """画面全体の特徴から UI 状態を分類して返す。
 
@@ -381,6 +432,8 @@ def _detect_screen_state(
     full_brightness = float(np.mean(frame_bgra[..., :3])) / 255.0
 
     if layout_score > 0.3:
+        if panel_evidence:
+            return ("level_up_items", 0.60, "slot_panel")
         # カード固有の構造証拠:
         #   1) 全スロットが一定輝度以上 (min > 0.08) → 未描画スロットを除外
         #   2) カード平均輝度がギャップより有意に高い (contrast > 0.10) → 均一背景・帯を除外
@@ -415,6 +468,10 @@ class HudParser:
         width: int = 1920,
         height: int = 1080,
     ) -> None:
+        """解析に使う初期状態を準備する。
+
+        保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+        """
         if not isinstance(parser_artifact_hash, str) or not parser_artifact_hash:
             raise ValueError("parser_artifact_hash must be a non-empty string")
         self._artifact_hash = parser_artifact_hash
@@ -422,14 +479,99 @@ class HudParser:
         self._width = width
         self._height = height
 
-        # 時間的状態 (単調性チェック用)
-        self._prev_timer_seconds: float | None = None
-        self._prev_level: int | None = None
+        self.reset_temporal_state()
 
     def reset_temporal_state(self) -> None:
-        """セッション境界でタイマー・レベルの時間的状態をリセットする。"""
+        """セッション境界で全観測の時間的状態をリセットする。
+
+        タイマー・レベル・パネル・訪問前在庫を次のランへ持ち越しません。
+        """
         self._prev_timer_seconds = None
         self._prev_level = None
+        self._panel_hold = 0
+        self._slot_prev: list[tuple[int | None, bool] | None] = [None] * INV_SLOT_COUNT
+        self._slot_adopted: list[tuple[int | None, bool] | None] = [None] * INV_SLOT_COUNT
+        self._slot_cell_counts = [0] * INV_SLOT_COUNT
+        self._slot_prev_cell_counts = [0] * INV_SLOT_COUNT
+        self._reset_gameplay_inventory()
+
+    def _reset_gameplay_inventory(self) -> None:
+        """保存した gameplay 在庫と採用候補を全消去する。
+
+        宝箱・終端・reset の各経路で、古い一致候補が再採用されることを防ぎます。
+        """
+        self._gameplay_inventory: list[str | None] = [None] * INV_SLOT_COUNT
+        self._gameplay_prev: list[tuple[str | None, ...]] = []
+        self._gameplay_none_count = [0] * INV_SLOT_COUNT
+        self._card_contrast_count = 0
+
+    def _observe_gameplay_inventory(self, inventory: tuple[str | None, ...]) -> None:
+        """gameplay 在庫を枠ごとに三枚一致で保存する。
+
+        短い遮蔽では上書きせず、三十枚連続の不読だけで保存値を消します。
+        """
+        for slot, identity in enumerate(inventory):
+            if identity is None:
+                self._gameplay_none_count[slot] += 1
+                if self._gameplay_none_count[slot] >= _GAMEPLAY_NONE_RESET_FRAMES:
+                    self._gameplay_inventory[slot] = None
+            else:
+                self._gameplay_none_count[slot] = 0
+                if len(self._gameplay_prev) == 2 and all(prev[slot] == identity for prev in self._gameplay_prev):
+                    self._gameplay_inventory[slot] = identity
+        self._gameplay_prev = (self._gameplay_prev + [inventory])[-2:]
+
+    def _join_slot_levels(self, grid: SlotLevelResult, evidence: bool):
+        """採用した段階値と訪問前の在庫を位置で結合する。
+
+        hold は採用に使いません。空枠や進化種別が食い違う場合は両方を不明にします。
+        """
+        if evidence:
+            for slot, level in enumerate(grid.levels):
+                candidate = (level, slot in grid.empty_slots)
+                if (candidate == self._slot_prev[slot] and (level is not None or candidate[1])
+                        and grid.cell_counts[slot] == self._slot_prev_cell_counts[slot]):
+                    self._slot_adopted[slot] = candidate
+                    self._slot_cell_counts[slot] = grid.cell_counts[slot]
+                self._slot_prev[slot] = candidate
+                self._slot_prev_cell_counts[slot] = grid.cell_counts[slot]
+        else:
+            # 証拠のないフレームを挟んだ候補は「二枚連続」とみなさない
+            self._slot_prev = [None] * INV_SLOT_COUNT
+            self._slot_prev_cell_counts = [0] * INV_SLOT_COUNT
+        kinds: dict[str, set[str]] = {}
+        if self._matcher is not None:
+            for entry in self._matcher.manifest.entries:
+                kinds.setdefault(entry.item_id, set()).add(entry.kind)
+        inventory: list[str | None] = []
+        levels: list[int | None] = []
+        reasons: list[str] = []
+        for slot, adopted in enumerate(self._slot_adopted):
+            identity = self._gameplay_inventory[slot]
+            level = joined = None
+            if adopted is not None:
+                level, empty = adopted
+                if empty:
+                    if identity in (None, EMPTY_SLOT_ID):
+                        joined = EMPTY_SLOT_ID
+                    else:
+                        reasons.append(f"slot{slot}:empty_mismatch")
+                elif identity == EMPTY_SLOT_ID:
+                    level = None
+                    reasons.append(f"slot{slot}:identity_mismatch")
+                elif identity is not None:
+                    expected_kind = "evolved" if self._slot_cell_counts[slot] == 1 else (
+                        "weapon" if slot < INV_SLOT_COUNT // 2 else "passive")
+                    if kinds.get(identity) == {expected_kind}:
+                        joined = identity
+                    else:
+                        level = None
+                        reasons.append(f"slot{slot}:kind_mismatch")
+            inventory.append(joined)
+            levels.append(level)
+        level_conf = sum(value is not None for value in self._slot_adopted) / INV_SLOT_COUNT
+        inv_conf = sum(value is not None for value in inventory) / INV_SLOT_COUNT
+        return tuple(inventory), inv_conf, tuple(levels), level_conf, reasons
 
     def parse(
         self,
@@ -439,13 +581,30 @@ class HudParser:
         frame_index: int,
         captured_monotonic_ns: int,
     ) -> HudStateV1:
-        """1 フレームを解析して HudStateV1 を返す。"""
+        """1 フレームを解析して HudStateV1 を返す。
+
+        保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+        """
         w, h = self._width, self._height
 
         # ── 画面状態検出 ───────────────────────────────────────────
+        grid = parse_slot_levels(frame_bgra, w, h)
+        evidence = has_panel_evidence(grid)
+        if evidence:
+            self._panel_hold = _PANEL_HOLD_FRAMES
+        panel_active = evidence or self._panel_hold > 0
         state, state_conf, state_reason = _detect_screen_state(
-            frame_bgra, width=w, height=h
+            frame_bgra, width=w, height=h, panel_evidence=panel_active
         )
+        if not evidence:
+            if state_reason == "slot_panel":
+                state_reason = "slot_panel_hold"
+            self._panel_hold = max(0, self._panel_hold - 1)
+            self._slot_prev = [None] * INV_SLOT_COUNT
+            self._slot_prev_cell_counts = [0] * INV_SLOT_COUNT
+        if not panel_active:
+            self._slot_adopted = [None] * INV_SLOT_COUNT
+            self._slot_cell_counts = [0] * INV_SLOT_COUNT
 
         # ── タイマー ───────────────────────────────────────────────
         timer_roi = norm_to_pixels(TIMER_ROI, w, h)
@@ -478,6 +637,23 @@ class HudParser:
 
         # ── インベントリ ───────────────────────────────────────────
         inventory, inv_conf = self._parse_inventory(frame_bgra, w, h)
+        if state == "gameplay":
+            self._card_contrast_count = 0
+            self._observe_gameplay_inventory(inventory)
+        elif state == "level_up_items" and state_reason.startswith("hud_card_contrast"):
+            self._card_contrast_count += 1
+            if self._card_contrast_count >= _CARD_CONTRAST_RESET_FRAMES:
+                self._reset_gameplay_inventory()
+        elif state in {"chest", "death", "result", "unknown"}:
+            self._reset_gameplay_inventory()
+        else:
+            self._card_contrast_count = 0
+        inventory_levels: tuple[int | None, ...] = (None,) * INV_SLOT_COUNT
+        levels_conf = 0.0
+        if state in SLOT_LEVEL_VISIBLE_STATES and state_conf >= _SLOT_LEVEL_CONFIDENCE:
+            inventory, inv_conf, inventory_levels, levels_conf, join_reasons = self._join_slot_levels(grid, evidence)
+            if join_reasons:
+                state_reason += ";" + ";".join(join_reasons)
         inv_hash = _compute_inventory_hash(inventory)
 
         # ── カード・ボタン (choice_parser が担当; ここでは空) ────────
@@ -518,6 +694,8 @@ class HudParser:
             banish_available=False,
             capability_confidence=0.0,
             capability_reason="not_parsed_by_hud_parser",
+            inventory_levels=inventory_levels,
+            inventory_levels_confidence=levels_conf,
         )
 
     def _parse_inventory(
@@ -526,7 +704,10 @@ class HudParser:
         w: int,
         h: int,
     ) -> tuple[tuple[str | None, ...], float]:
-        """インベントリスロットを解析してアイテム ID タプルと平均信頼度を返す。"""
+        """インベントリスロットを解析してアイテム ID タプルと平均信頼度を返す。
+
+        保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+        """
         slots: list[str | None] = []
         confidences: list[float] = []
 
