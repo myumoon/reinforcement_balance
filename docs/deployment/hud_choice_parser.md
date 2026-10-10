@@ -67,7 +67,7 @@ HudStateV1(
 
 `INV_SLOT_ROIS` は gameplay 左上の武器六枠・パッシブ六枠へ修正しました。1920×1080 では x=`100+46i`、武器 y=40、パッシブ y=86、各枠42×42画素です。段階マークは `SLOT_LEVEL_PIP_GRID` の正規化格子で読み、内部画素の六割が金色なら点灯、暗色なら消灯、灰色ならセル無しとします。全幅の九割が金色かつ直下二行の九割が茶色の最初の行がパネル下端で、その外側の行は除外します。金色だけでは宝箱の光を下端と誤認するため、実測した茶色の縁も確認します。点灯→消灯→セル無しの prefix が崩れる枠や曖昧な枠は不明です。武器八セル・パッシブ五セルの上限超過は `over_max` になり、宝箱の全点灯を証拠にしません。
 
-下端を確認でき、二セル以上の valid slot が一つでもあれば、HUD のある画面を `level_up_items`／reason `slot_panel` と判定します。一セルの進化武器も level 1 ですが、画面判定の証拠には数えません。下端未検出時は全行を解析して段階値を返しますが、背景の偶然の prefix を画面証拠にしないよう `evidence_slots=0` にします。証拠が消えてから三枚は `slot_panel_hold` で同じ状態を保ちます。hold は画面状態だけに効き、新しい段階値を採用しません。各 slot は二枚連続一致で採用し、訪問終了時と `reset_temporal_state()` で全消去します。
+下端を確認でき、二セル以上の valid slot が一つでもあれば、HUD のある画面を `level_up_items`／reason `slot_panel` と判定します。一セルの進化武器も level 1 ですが、画面判定の証拠には数えません。下端未検出時は全行を解析して段階値を返しますが、背景の偶然の prefix を画面証拠にしないよう `evidence_slots=0` にします。level-up の証拠が消えてから三枚は `slot_panel_hold` で同じ状態を保ちます。hold は画面状態だけに効き、新しい段階値を採用しません。paused でも格子の証拠が出る実フレームがあるため、level-up 以外では hold と段階値・セル数の一致履歴、採用値を消します。一時停止から再開した一枚目は `gameplay`／`hud_present` になります。各 slot は二枚連続一致で採用し、訪問終了時と `reset_temporal_state()` で全消去します。
 
 半透明パネル上のアイコン照合は行わず、直前 gameplay の在庫を同じ位置で結合します。gameplay は三枚連続の非 None 一致で枠ごとに保存し、None が三十枚続いた枠だけ消去します。chest／death／result／unknown と reset では在庫と一致履歴を全消去します。カードの滑り込み `card_transient`（confidence .45）と `slot_panel_hold` は保存在庫を消しません。
 
@@ -107,11 +107,11 @@ wire の二キーは必須で、未知キー・欠落キーは従来どおり拒
 
 空 frame は `empty_frame`、白一色は枠の構造がないため `no_hud` にします。カード上枠は各 top+1〜+4 の三行、x=700〜1200 の gold が .60 以上で連続数を数えます。中央枠は y=108〜124／905〜970 の各帯に x=660〜1260 の border が .80 以上の一行、右枠は x=1268〜1282 の帯に y=300〜900 の border が .80 以上の一列を要求します。
 
-`HudParser.parse` は常に choice 解析を配線し、fallback が過半なら `level_up_fallback` に精緻化します。atlas がなくても枚数と矩形は残します。skip／banish は未計測のため常に False、`capability_confidence=0.0`／`skip_banish_roi_undefined` です。リロールだけは内側の青で観測します。所持カード選択直後の +1 は skip の確定に信頼度 .5 が必要なので、次のパネルまで段階値は None になります。
+`HudParser.parse` は常に choice 解析を配線し、fallback が過半なら `level_up_fallback` に精緻化します。atlas がなくても枚数と矩形は残します。skip／banish は未計測のため常に False、`capability_confidence=0.0`／`skip_banish_roi_undefined` です。リロールだけは内側の青が .85 以上で観測します。実フレームの「残り N 回」の白字を含む定常値は約 .877 です。所持カード選択直後の +1 は skip の確定に信頼度 .5 が必要なので、次のパネルまで段階値は None になります。
 
-宝箱の `ack_chest` は終了ボタンだけです。y=905〜925 にパネル下枠が縮んだことと青い内側 .50 以上を要求します。「開く」の下枠は y=954〜962 にあり、ボタン自身の短い下端だけでは .80 の閾値に届きません。Common の ACK_CHEST 契約では開く→終了を別 intent にできないため、開くボタンは出しません。自動で開く前提は未確認で、手動が必要なら60秒で停止します。次の録画では宝箱で一度、何も押さずに待ってください。
+宝箱の `ack_chest` は終了ボタンだけです。y=905〜925 にパネル下枠が縮んだことと青い内側 .90 以上を要求します。定常値は白字を含め約 .930、フェード中の約 .841〜.846 は候補に出しません。「開く」の下枠は y=954〜962 にあり、ボタン自身の短い下端だけでは .80 の閾値に届きません。Common の ACK_CHEST 契約では開く→終了を別 intent にできないため、開くボタンは出しません。自動で開く前提は未確認で、手動が必要なら60秒で停止します。次の録画では宝箱で一度、何も押さずに待ってください。
 
-宝箱証拠の後は15 frame の保持を持ち、続く unknown 十四枚を `chest`／.50／`chest_hold` にします。他の既知状態や未対応解像度を上書きせず、reset で消えます。controller の宝箱 timeout は実測約21秒の演出に合わせて60秒です。retry は既存の同等性判定が初回・再観測とも confidence .99 以上を要求します。フェード中や文字を含む青い面の割合が .99 未満なら初回クリック後の再送は `ui_retry_precondition_failed` で停止し、回収を保証しません。
+宝箱証拠の後は15 frame の保持を持ち、続く unknown 十四枚を `chest`／.50／`chest_hold` にします。他の既知状態、未対応解像度、空 frame を上書きせず、reset で消えます。空 frame は `unknown`／0.0／`empty_frame` を維持します。controller の宝箱 timeout は実測約21秒の演出に合わせて60秒です。retry は既存の同等性判定が初回・再観測とも confidence .99 以上を要求します。終了とリロールの検出条件を満たしたボタンは、白字を除いた色割合とは分けて confidence 1.0 を返します。終了はフェードを待って initial を送り、同じボタンが200 ms以上残れば一度だけ retry できます。色割合は reason の `blue:...` に残します。
 
 death／result の `confirm` は観測のみです。`perception_snapshot._UI_SCREEN_STATES` に両状態がないため button target は invalid になり、controller の DEATH_RESULT はクリックしません。paused の cards・buttons は空で、controller は入力なし・timeout なしの PAUSED に入ります。
 
