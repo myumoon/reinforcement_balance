@@ -78,7 +78,8 @@ _LEVELUP_OVERLAY_BRIGHTNESS_THRESHOLD: Final[float] = 0.25
 class ParsedCard:
     """レベルアップカードスロットの解析結果。
 
-    保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+    カードの位置、アイテム名、種別、レベルと読み取りの信頼度をまとめます。
+    アイテム名やレベルが読めなかった場合は None のまま残します。
     """
 
     slot_index: int
@@ -94,7 +95,7 @@ class ParsedCard:
 class ParsedButton:
     """UI ボタンの解析結果 (reroll/skip/banish/ack_chest/confirm)。
 
-    保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+    ボタンの種類と画面上の位置に、検出の信頼度と判定理由を添えます。
     """
 
     button_type: str       # "reroll", "skip", "banish", "ack_chest", "confirm"
@@ -209,7 +210,8 @@ class HudStateV1:
     def to_wire(self) -> dict:
         """JSON シリアライズ可能な dict に変換する (golden fixture 保存用)。
 
-        保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+        在庫・カード・ボタンを JSON に保存できるリストへ変え、HUD の全フィールドを書き出します。
+        読めなかった値は None のまま保存します。
         """
         return {
             "schema_version": self.schema_version,
@@ -271,7 +273,8 @@ class HudStateV1:
     def from_wire(cls, wire: dict) -> "HudStateV1":
         """JSON dict から HudStateV1 を復元する (golden fixture 検証用)。
 
-        保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+        キーの不足や余分なキーを拒否してから、在庫のタプルとカード・ボタンの解析結果を復元します。
+        復元した値は HudStateV1 の値域検証も通します。
         """
         expected_keys = {
             "schema_version", "session_id", "frame_index", "captured_monotonic_ns",
@@ -351,7 +354,7 @@ class HudStateV1:
 def _compute_inventory_hash(inventory: tuple[str | None, ...]) -> str:
     """インベントリ tuple の canonical hash を計算する。
 
-    保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+    スロット順のアイテム名だけをハッシュ化します。段階値や読み取りの信頼度は対象に含めません。
     """
     return canonical_hash({"slots": list(inventory)})
 
@@ -359,7 +362,8 @@ def _compute_inventory_hash(inventory: tuple[str | None, ...]) -> str:
 def _compute_candidate_set_hash(screen_state: str, cards: tuple[ParsedCard, ...]) -> str:
     """画面状態とカード ID セットの canonical hash を計算する。
 
-    保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+    カード名を並べ替えて画面状態と組み合わせるので、同じ候補なら表示順に左右されません。
+    読めないカード名は unknown として区別します。
     """
     card_ids = sorted(c.item_id or "unknown" for c in cards)
     return canonical_hash({"screen_state": screen_state, "card_ids": card_ids})
@@ -373,7 +377,8 @@ def _mean_roi_brightness(
 ) -> float:
     """指定 ROI 群の平均輝度 (0.0..1.0) を返す。
 
-    保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+    各領域の色成分の平均を0〜1へ直してから、領域同士の平均を求めます。
+    空の切り出しは除き、対象が一つもなければ0を返します。
     """
     vals: list[float] = []
     for norm in norms:
@@ -391,7 +396,8 @@ def _min_roi_brightness(
 ) -> float:
     """指定 ROI 群の最小スロット輝度 (0.0..1.0) を返す。
 
-    保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+    各領域の平均輝度を0〜1で求め、最も暗い領域の値を返します。
+    空の切り出しは除き、対象が一つもなければ0を返します。
     """
     vals: list[float] = []
     for norm in norms:
@@ -470,7 +476,8 @@ class HudParser:
     ) -> None:
         """解析に使う初期状態を準備する。
 
-        保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+        解析器を識別するハッシュ、アイコン照合器、画面サイズを設定します。
+        タイマーや在庫などのフレーム間の記録は空の状態から始めます。
         """
         if not isinstance(parser_artifact_hash, str) or not parser_artifact_hash:
             raise ValueError("parser_artifact_hash must be a non-empty string")
@@ -583,7 +590,8 @@ class HudParser:
     ) -> HudStateV1:
         """1 フレームを解析して HudStateV1 を返す。
 
-        保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+        段階格子から画面状態を判定し、バー・数字・在庫・カードを読み取ります。
+        段階値は連続フレームでの安定化と在庫の位置照合を通して採用します。
         """
         w, h = self._width, self._height
 
@@ -706,7 +714,8 @@ class HudParser:
     ) -> tuple[tuple[str | None, ...], float]:
         """インベントリスロットを解析してアイテム ID タプルと平均信頼度を返す。
 
-        保存した値を次の解析や検査へ渡し、呼出し元が同じ契約で扱えるようにします。
+        十二枠の画像を順にアイコン照合器へ渡し、結果のアイテム名と信頼度を集めます。
+        照合器が無い枠や切り出せない枠は、アイテム名を None、信頼度を0にします。
         """
         slots: list[str | None] = []
         confidences: list[float] = []
