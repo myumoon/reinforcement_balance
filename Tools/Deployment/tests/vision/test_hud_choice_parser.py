@@ -46,12 +46,12 @@ _SESSION_ID = "test-session-001"
 class TestHudStateV1Schema:
     """HUD の値域とスキーマを検証する。
 
-    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    HUD・カード・ボタンを作るときに、未対応の種類や範囲外の値を受け付けないことを調べます。
     """
     def _make_valid(self, **kwargs) -> HudStateV1:
         """有効な HUD 契約の基準値を作る。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        正常な gameplay の値を用意し、指定されたフィールドだけを上書きして異常な入力を作れるようにします。
         """
         defaults = dict(
             schema_version=HUD_STATE_SCHEMA_VERSION,
@@ -93,7 +93,7 @@ class TestHudStateV1Schema:
     def test_valid_instance_ok(self):
         """有効な HUD 契約を生成できることを確認する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        基準値から HudStateV1 を作り、スキーマ名と gameplay の画面状態がそのまま保存されるかを調べます。
         """
         s = self._make_valid()
         assert s.schema_version == HUD_STATE_SCHEMA_VERSION
@@ -102,7 +102,7 @@ class TestHudStateV1Schema:
     def test_wrong_schema_version_raises(self):
         """未対応の HUD スキーマを拒否する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        schema_version を未対応の値へ変えた場合に、生成時点で ValueError になることを確かめます。
         """
         with pytest.raises(ValueError, match="schema"):
             self._make_valid(schema_version="hud_state.v99")
@@ -110,7 +110,7 @@ class TestHudStateV1Schema:
     def test_unknown_screen_state_raises(self):
         """未定義の画面状態を拒否する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        HUD の screen_state に定義外の名前を渡すと、生成時点で ValueError になることを確かめます。
         """
         with pytest.raises(ValueError, match="screen_state"):
             self._make_valid(screen_state="flying_saucers")
@@ -118,7 +118,7 @@ class TestHudStateV1Schema:
     def test_wrong_inventory_length_raises(self):
         """十二枠に足りない在庫を拒否する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        在庫の要素数を十二枠より少なくし、スロット構成が不完全な HUD を生成できないことを確かめます。
         """
         with pytest.raises(ValueError, match="inventory"):
             self._make_valid(inventory=tuple([None] * 5))
@@ -126,7 +126,7 @@ class TestHudStateV1Schema:
     def test_hp_ratio_out_of_range_raises(self):
         """範囲外の HP 比率を拒否する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        hp_ratio に0〜1の範囲外の値を渡すと、HUD の値域検証で ValueError になることを確かめます。
         """
         with pytest.raises(ValueError, match="hp_ratio"):
             self._make_valid(hp_ratio=1.5)
@@ -134,7 +134,7 @@ class TestHudStateV1Schema:
     def test_xp_ratio_out_of_range_raises(self):
         """範囲外の XP 比率を拒否する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        xp_ratio に0〜1の範囲外の値を渡すと、HUD の値域検証で ValueError になることを確かめます。
         """
         with pytest.raises(ValueError, match="xp_ratio"):
             self._make_valid(xp_ratio=-0.1)
@@ -142,7 +142,7 @@ class TestHudStateV1Schema:
     def test_level_out_of_range_raises(self):
         """範囲外のプレイヤーレベルを拒否する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        対応するレベル範囲を外れた値で HUD を作り、正常なレベルとして保存されないことを確かめます。
         """
         with pytest.raises(ValueError, match="level"):
             self._make_valid(level=100)
@@ -150,7 +150,7 @@ class TestHudStateV1Schema:
     def test_invalid_card_kind_raises(self):
         """未定義のカード種別を拒否する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        カードの kind に定義外の名前を渡し、HUD のカード検証で ValueError になることを確かめます。
         """
         bad_card = ParsedCard(0, None, "dragon", None, 0.0, "bad", None)
         with pytest.raises(ValueError, match="kind"):
@@ -159,7 +159,7 @@ class TestHudStateV1Schema:
     def test_invalid_button_type_raises(self):
         """未定義のボタン種別を拒否する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        ボタンの button_type に定義外の名前を渡し、HUD のボタン検証で ValueError になることを確かめます。
         """
         bad_btn = ParsedButton("teleport", 0.0, "bad", None)
         with pytest.raises(ValueError, match="button_type"):
@@ -169,7 +169,7 @@ class TestHudStateV1Schema:
     def test_all_screen_states_accepted(self, state: str):
         """全画面状態が HudStateV1 に受け付けられる。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        SCREEN_STATES の各状態で HUD を生成し、定義済みの名前が検証で拒否されないことを確かめます。
         """
         s = self._make_valid(screen_state=state)
         assert s.screen_state == state
@@ -177,7 +177,7 @@ class TestHudStateV1Schema:
     def test_screen_states_exhaustive(self):
         """SCREEN_STATES が想定の状態セットを全て含む。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        gameplay・選択・停止などの状態名を明示した集合と比べ、画面状態の追加漏れや意図しない変更を見つけます。
         """
         expected = {
             "gameplay", "level_up_items", "level_up_fallback",
@@ -192,12 +192,12 @@ class TestHudStateV1Schema:
 class TestHudStateV1RoundTrip:
     """HUD 契約の wire 往復を検証する。
 
-    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    カード・ボタンを含む HUD を辞書へ変換して戻し、値の欠落や余分なキーの受け入れを調べます。
     """
     def _make_with_cards(self) -> HudStateV1:
         """カードとボタンを持つ HUD 契約を作る。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        wire の往復でカードやボタンも比較できるよう、空でない解析結果を持つ HUD を用意します。
         """
         card = ParsedCard(0, "whip", "weapon", 1, 0.8, "ok", (100, 200, 400, 800))
         button = ParsedButton("reroll", 0.7, "fg_ok", (60, 900, 260, 950))
@@ -242,7 +242,7 @@ class TestHudStateV1RoundTrip:
     def test_round_trip(self):
         """HUD 契約を wire 往復して値を保つ。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        to_wire の辞書を from_wire で戻し、カードやボタンも含めて元の HUD と等しくなるかを調べます。
         """
         original = self._make_with_cards()
         wire = original.to_wire()
@@ -252,7 +252,7 @@ class TestHudStateV1RoundTrip:
     def test_wire_is_json_serializable(self):
         """HUD の wire を JSON として保存できることを確認する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        to_wire の辞書を JSON 文字列へ変換し、タプルや解析結果が保存を妨げないことを確かめます。
         """
         original = self._make_with_cards()
         wire = original.to_wire()
@@ -262,7 +262,7 @@ class TestHudStateV1RoundTrip:
     def test_from_wire_extra_field_raises(self):
         """HUD の wire の余分なキーを拒否する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        正しい辞書に未定義のキーを足し、from_wire が黙って読み飛ばさず ValueError にすることを確かめます。
         """
         original = self._make_with_cards()
         wire = original.to_wire()
@@ -273,7 +273,7 @@ class TestHudStateV1RoundTrip:
     def test_from_wire_missing_field_raises(self):
         """HUD の wire の必須キー欠落を拒否する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        正しい辞書からキーを一つ取り除き、from_wire が既定値で埋めず ValueError にすることを確かめます。
         """
         original = self._make_with_cards()
         wire = original.to_wire()
@@ -287,12 +287,12 @@ class TestHudStateV1RoundTrip:
 class TestComputeHashes:
     """在庫と候補集合の hash を検証する。
 
-    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    同じ入力のハッシュが安定し、アイテム名や画面状態を変えるとハッシュも変わることを調べます。
     """
     def test_inventory_hash_deterministic(self):
         """同じ在庫から同じ hash を得る。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        同じスロット順の在庫を二度ハッシュ化し、実行ごとに識別値が変わらないことを確かめます。
         """
         inv = tuple(["whip", None, "gold"] + [None] * 9)
         h1 = _compute_inventory_hash(inv)
@@ -302,7 +302,7 @@ class TestComputeHashes:
     def test_inventory_hash_changes_with_content(self):
         """在庫の変更が hash に反映されることを確認する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        スロットのアイテム名が異なる二つの在庫を比べ、同一の在庫として扱われないことを確かめます。
         """
         inv1 = tuple(["whip"] + [None] * (INV_SLOT_COUNT - 1))
         inv2 = tuple([None] * INV_SLOT_COUNT)
@@ -311,7 +311,7 @@ class TestComputeHashes:
     def test_candidate_set_hash_deterministic(self):
         """同じ候補集合から同じ hash を得る。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        同じ画面状態とカード候補からハッシュを二度求め、候補集合の識別値が安定していることを確かめます。
         """
         card = ParsedCard(0, "whip", "weapon", 1, 0.8, "ok", None)
         h1 = _compute_candidate_set_hash("level_up_items", (card,))
@@ -321,7 +321,7 @@ class TestComputeHashes:
     def test_candidate_set_hash_changes_with_state(self):
         """画面状態の変更が候補 hash に反映されることを確認する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        カード候補が同じでも画面状態を変えると、候補集合のハッシュが変わることを確かめます。
         """
         card = ParsedCard(0, "whip", "weapon", 1, 0.8, "ok", None)
         h1 = _compute_candidate_set_hash("level_up_items", (card,))
@@ -334,12 +334,12 @@ class TestComputeHashes:
 class TestHudParser:
     """HUD の解析結果と時間的な制約を検証する。
 
-    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    合成画像から HUD を生成し、画面状態・wire のフィールド・タイマーの逆行防止・リセットを調べます。
     """
     def test_parse_blank_frame(self, dummy_parser_artifact_hash: str, blank_frame: np.ndarray):
         """全黒フレームで parse が例外なく HudStateV1 を返す。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        何も読めない画像でも、定義済みの画面状態と十二枠の在庫を持つ HUD が返ることを確かめます。
         """
         parser = HudParser(parser_artifact_hash=dummy_parser_artifact_hash)
         result = parser.parse(
@@ -361,7 +361,7 @@ class TestHudParser:
     ):
         """gameplay フレームは例外なく解析される。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        合成した gameplay 画像を渡し、HudStateV1 として受け取れて画面状態が定義内に収まることを確かめます。
         """
         parser = HudParser(parser_artifact_hash=dummy_parser_artifact_hash)
         result = parser.parse(
@@ -378,7 +378,7 @@ class TestHudParser:
     ):
         """HudStateV1 のフィールドセットが exact-set テスト。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        wire のキーを全列挙した集合と比べ、必須フィールドの欠落や意図しない追加を見つけます。
         """
         parser = HudParser(parser_artifact_hash=dummy_parser_artifact_hash)
         result = parser.parse(
@@ -406,7 +406,7 @@ class TestHudParser:
     ):
         """同一パーサーが timer 状態を保持し、逆行を reject する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        前に読んだ時刻より小さいタイマー値を次に読み、過去へ戻る値が None になることを確かめます。
         """
         parser = HudParser(parser_artifact_hash=dummy_parser_artifact_hash)
         parser._prev_timer_seconds = 200.0  # 手動セット
@@ -423,7 +423,7 @@ class TestHudParser:
     ):
         """reset_temporal_state() が prev 値をクリアする。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        タイマーとプレイヤーレベルの過去値を設定してリセットし、次のセッションへ持ち越さないことを確かめます。
         """
         parser = HudParser(parser_artifact_hash=dummy_parser_artifact_hash)
         parser._prev_timer_seconds = 100.0
@@ -435,7 +435,7 @@ class TestHudParser:
     def test_invalid_artifact_hash_raises(self):
         """空の parser artifact hash を拒否する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        解析器を識別する値を空文字にして初期化し、出所を識別できない解析器が作られないことを確かめます。
         """
         with pytest.raises(ValueError):
             HudParser(parser_artifact_hash="")
@@ -446,12 +446,12 @@ class TestHudParser:
 class TestChoiceParser:
     """カードとボタンの解析結果を検証する。
 
-    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    画面状態ごとの候補・ボタンの出し分けと、読めないアイコンを推測しない動作を調べます。
     """
     def test_unknown_screen_state_raises(self, levelup_frame: np.ndarray):
         """未定義の画面状態を拒否する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        カード解析へ定義外の screen_state を渡すと、解析を続けず ValueError になることを確かめます。
         """
         parser = ChoiceParser()
         with pytest.raises(ValueError, match="screen_state"):
@@ -460,7 +460,7 @@ class TestChoiceParser:
     def test_gameplay_state_returns_empty_cards(self, gameplay_frame: np.ndarray):
         """gameplay 状態ではカードとボタンが空。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        通常プレイ中の画像をカード解析へ渡し、選択候補として扱うカードが追加されないことを確かめます。
         """
         parser = ChoiceParser()
         result = parser.parse(gameplay_frame, screen_state="gameplay")
@@ -470,7 +470,7 @@ class TestChoiceParser:
     def test_levelup_state_returns_result(self, levelup_frame: np.ndarray):
         """level_up_items 状態でカード解析が実行される (結果は空でもよい)。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        アイテム選択画面として解析し、候補が読めなくても解析結果と候補集合のハッシュが返ることを確かめます。
         """
         parser = ChoiceParser()
         result = parser.parse(levelup_frame, screen_state="level_up_items")
@@ -481,7 +481,7 @@ class TestChoiceParser:
     def test_chest_state_returns_chest_button(self):
         """chest 状態で ack_chest ボタンが返される可能性がある。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        宝箱画面のボタンが空か、宝箱を閉じる ack_chest を含む結果になることを確かめます。
         """
         # chest ボタン領域に前景を置いた合成フレーム
         frame = np.zeros((1080, 1920, 4), dtype=np.uint8)
@@ -501,7 +501,7 @@ class TestChoiceParser:
     ):
         """低信頼アイコンは item_id=None を返し、推測しない。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        カード領域へ雑音画像を入れ、照合が不確かなカードにアイテム名を割り当てないことを確かめます。
         """
         matcher = IconMatcher.load_development(development_atlas_path)
         parser = ChoiceParser(icon_matcher=matcher)
@@ -516,7 +516,7 @@ class TestChoiceParser:
     def test_fallback_items_are_kind_fallback(self):
         """fallback アイテム (gold/chicken) はカードの kind='fallback' になる。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        fallback 用の語彙に gold と chicken が含まれ、通常アイテムとは別に扱う対象が揃っていることを確かめます。
         """
         # fallback アイコンに見せかけた合成テンプレートでマッチさせる
         # ここでは ParsedCard.kind の検証のみ
@@ -527,7 +527,7 @@ class TestChoiceParser:
     def test_buttons_not_confused_as_cards(self, blank_frame: np.ndarray):
         """reroll/skip/banish ボタンをカードとして誤認識しない。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        ボタン周辺を含む画像を解析し、出力カードのアイテム名にボタンの名前が紛れ込まないことを確かめます。
         """
         # ボタン領域を明るくした合成フレーム
         frame = blank_frame.copy()
@@ -546,7 +546,7 @@ class TestChoiceParser:
     def test_choice_parse_result_fields(self, blank_frame: np.ndarray):
         """ChoiceParseResult の全フィールドが存在する。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        カード・ボタン・各操作の可否など、呼び出し側が使う属性を解析結果から取り出せることを確かめます。
         """
         parser = ChoiceParser()
         result = parser.parse(blank_frame, screen_state="gameplay")
@@ -566,14 +566,14 @@ class TestChoiceParser:
 class TestFormalParserEligibility:
     """開発用 atlas と正式ロードの境界を検証する。
 
-    入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    試作用のアイコン画像集を解析で使えることと、正式成果物としては読み込めないことを分けて調べます。
     """
     def test_development_atlas_rejected_by_formal_loader(
         self, development_atlas_path: Path
     ):
         """development atlas は formal loader に拒否される。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        開発用 atlas を正式ロード処理へ渡し、FormalLoaderRejectedError で止まることを確かめます。
         """
         with pytest.raises(FormalLoaderRejectedError):
             IconMatcher.load_formal(development_atlas_path)
@@ -586,7 +586,7 @@ class TestFormalParserEligibility:
     ):
         """開発用 atlas でも HudParser は動作する (formal eligible チェックなし)。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+        開発用 atlas の照合器で HUD を解析し、正式ロードの資格が無くても試作時の解析は実行できることを確かめます。
         """
         matcher = IconMatcher.load_development(development_atlas_path)
         parser = HudParser(
@@ -604,7 +604,7 @@ class TestFormalParserEligibility:
     def test_target_taxonomy_card_count_covered(self):
         """target_profile の level_up_card_counts が [3, 4] = CARD_ROIS キー一致。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    対象プロファイルが指定する各カード枚数について、切り出し用の配置が CARD_ROIS にあることを確かめます。
         """
         from survivors.target_profile import load_target_profile
         from survivors.vision.roi_layout import CARD_ROIS
@@ -616,7 +616,7 @@ class TestFormalParserEligibility:
     def test_fallback_vocabulary_in_closed_taxonomy(self):
         """fallback vocabulary が closed taxonomy と一致している。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    対象プロファイルの fallback 名と解析器の語彙を比べ、片側だけにあるアイテムが無いことを確かめます。
         """
         from survivors.target_profile import load_target_profile
         from survivors.vision.choice_parser import _FALLBACK_IDS
@@ -627,7 +627,7 @@ class TestFormalParserEligibility:
     def test_capability_buttons_in_closed_taxonomy(self):
         """capability ボタン種別が closed taxonomy と一致している。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    対象プロファイルが許す操作名と解析器のボタン一覧を比べ、名前や種類のずれを見つけます。
         """
         from survivors.target_profile import load_target_profile
         from survivors.vision.choice_parser import _CAPABILITY_BUTTONS
@@ -898,7 +898,7 @@ class TestDetectScreenState:
     def _hud_frame(self) -> np.ndarray:
         """HP/XP バーのみの合成フレーム (カードなし、layout_score > 0.3 になる)。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    通常プレイの HUD と判定できるよう HP と XP の領域を塗り、カード領域を空のままにした画像を用意します。
         """
         from survivors.vision.roi_layout import HP_BAR_ROI, XP_BAR_ROI, norm_to_pixels
         frame = np.zeros((self._H, self._W, 4), dtype=np.uint8)
@@ -911,7 +911,7 @@ class TestDetectScreenState:
     def _fill_cards(self, frame: np.ndarray, count: int) -> np.ndarray:
         """指定枚数の全カード ROI を明るい灰色で塗りつぶす。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    三枚または四枚の配置に従ってカード領域を塗り、領域間の暗い隙間は残します。
         """
         from survivors.vision.roi_layout import CARD_ROIS, norm_to_pixels
         frame = frame.copy()
@@ -924,7 +924,7 @@ class TestDetectScreenState:
     def test_hud_single_bright_object_is_gameplay(self):
         """HUD + 1枚のカード ROI のみ明るい (非カード物体) → gameplay。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    一つの明るい物体だけではカードの並びが揃わず、アイテム選択画面へ誤判定しないことを確かめます。
         """
         from survivors.vision.roi_layout import CARD_ROIS, norm_to_pixels
         frame = self._hud_frame()
@@ -938,7 +938,7 @@ class TestDetectScreenState:
     def test_hud_nonblack_uniform_bg_is_gameplay(self):
         """HUD + 一様な暗灰色背景 RGB(40,40,40) (カードなし) → gameplay。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    真っ黒ではない一様な背景でも、カードと隙間の明るさの差が無ければ通常プレイと判定することを確かめます。
         """
         frame = self._hud_frame()
         # カード y 範囲全体を一様な暗灰色にする (>=32 を満たすが構造なし)
@@ -950,7 +950,7 @@ class TestDetectScreenState:
     def test_hud_crossing_bright_band_is_gameplay(self):
         """HUD + 画面横断の明るい帯 (カードとギャップを均等に照らす) → gameplay。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    領域と隙間が一緒に明るくなる帯を描き、カードの並びとして誤認識しないことを確かめます。
         """
         frame = self._hud_frame()
         # 全横幅の明るい帯 (カード ROI もギャップ ROI も同じ輝度になる)
@@ -962,7 +962,7 @@ class TestDetectScreenState:
     def test_hud_3card_layout_is_level_up_items(self):
         """HUD + 3枚カード全スロット明るい → level_up_items。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    三枚のカード領域だけを明るくし、暗い隙間との組み合わせからアイテム選択画面になることを確かめます。
         """
         frame = self._fill_cards(self._hud_frame(), 3)
         state, _, _ = _detect_screen_state(frame, width=self._W, height=self._H)
@@ -971,7 +971,7 @@ class TestDetectScreenState:
     def test_hud_4card_layout_is_level_up_items(self):
         """HUD + 4枚カード全スロット明るい → level_up_items。
 
-        入力と期待する結果を照合し、この条件で既存の契約が保たれることを確認します。
+    四枚のカード領域だけを明るくし、三枚の配置と同様にアイテム選択画面へ判定できることを確かめます。
         """
         frame = self._fill_cards(self._hud_frame(), 4)
         state, _, _ = _detect_screen_state(frame, width=self._W, height=self._H)
