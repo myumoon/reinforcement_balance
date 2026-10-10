@@ -1097,9 +1097,11 @@ class TestMeasuredLayout:
         assert not result.skip_available and not result.banish_available
         assert result.capability_confidence == 0. and result.capability_reason == "skip_banish_roi_undefined"
 
-    @pytest.mark.parametrize("button_type", ["ack_chest", "reroll"])
-    @pytest.mark.parametrize("white_rows", [5, 11])
-    def test_action_buttons_require_stable_color_and_allow_white_text(self, button_type, white_rows):
+    @pytest.mark.parametrize("button_type, white_rows, visible", [
+        ("ack_chest", 5, True), ("ack_chest", 11, False),
+        ("reroll", 8, True), ("reroll", 11, False),
+    ])
+    def test_action_buttons_require_stable_color_and_allow_white_text(self, button_type, white_rows, visible):
         """操作ボタンは白文字を許し、フェード中の面は出力しない。
 
         定常の青色割合を信頼度へ直結させず、既存 retry gate を満たす観測だけを返します。
@@ -1112,7 +1114,7 @@ class TestMeasuredLayout:
         if button_type == "ack_chest":
             frame[914:919, 660:1260, :3] = (102, 203, 255)
         result = ChoiceParser().parse(frame, screen_state="chest" if button_type == "ack_chest" else "level_up_items")
-        if white_rows == 5:
+        if visible:
             assert len(result.buttons) == 1
             assert result.buttons[0].button_type == button_type
             assert result.buttons[0].confidence >= .99
