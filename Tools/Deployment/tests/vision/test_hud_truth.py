@@ -103,7 +103,7 @@ def _draft(state, frame) -> HudTruthRecord:
 def test_draft_copies_hud_state_and_nulls_partial_inventory(gameplay_frame, dummy_parser_artifact_hash):
     """下書きは HudStateV1 を写し、読めない slot があれば items 全体を null にする。
 
-    slot level は常に null、card の item_id（None を除く）は expected_choice に入ることも確かめる。
+    不読在庫では段階値も null、card の item_id（None を除く）は expected_choice に入ることも確かめる。
     """
     state = HudParser(parser_artifact_hash=dummy_parser_artifact_hash).parse(
         gameplay_frame, session_id="session-001", frame_index=3, captured_monotonic_ns=100
@@ -133,6 +133,28 @@ def test_draft_copies_hud_state_and_nulls_partial_inventory(gameplay_frame, dumm
     assert draft.expected_slot_levels is None
     assert draft.expected_choice == ("whip", "spinach")
     assert draft.expected_roi == expected_roi_for_state("level_up_items")
+
+
+@pytest.mark.parametrize("items,confidence,state_name,expected", [
+    (ITEMS, .5, "level_up_items", LEVELS),
+    (ITEMS, .5, "level_up_fallback", LEVELS),
+    (ITEMS, .49, "level_up_items", None),
+    ((None,) * 12, 1., "level_up_items", None),
+    (ITEMS, 1., "gameplay", None),
+])
+def test_draft_copies_confident_panel_levels(gameplay_frame, dummy_parser_artifact_hash,
+                                           items, confidence, state_name, expected):
+    """パネルの段階値を高信頼かつ在庫全読の下書きへ渡す。
+
+    不読在庫・低信頼・パネル以外の画面では、段階値を null に保ちます。
+    """
+    hud = HudParser(parser_artifact_hash=dummy_parser_artifact_hash).parse(
+        gameplay_frame, session_id="session-001", frame_index=3, captured_monotonic_ns=100)
+    hud = replace(hud, screen_state=state_name, inventory=items,
+                  inventory_levels=LEVELS, inventory_levels_confidence=confidence)
+    draft = _draft(hud, gameplay_frame)
+    assert draft.expected_slot_levels == expected
+    assert draft.to_wire()["expected_slot_levels"] == (list(expected) if expected is not None else None)
 
 
 def test_expected_roi_for_state_hud_and_negative_states():
@@ -409,6 +431,53 @@ def _write_label(path: Path, *, checked: bool, labels: tuple[str, ...] = ()) -> 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"shapes": shapes, "imagePath": path.stem + ".png",
                                 "imageData": None, "checked": checked}), encoding="utf-8")
+
+
+def test_cli_long_panel_backtracks_to_gameplay_and_resets_disjoint_windows(tmp_path, monkeypatch):
+    """長い訪問の後半でも、格子の証拠が消える地点より十枚前から読む。
+
+    続きの target は履歴を再利用し、離れた窓は reset して古い identity を持ち越しません。
+    """
+    from types import SimpleNamespace
+    import annotate_survivors_hud_truth as cli
+    from .test_hud_choice_parser import TestDetectScreenState, TestSlotPanelIntegration
+    args = SimpleNamespace(atlas=None, session_id="session-001", annotator_id="tester", from_labels=False)
+    records = tuple(SimpleNamespace(frame_id=i, captured_monotonic_ns=i) for i in range(130))
+    panel = TestSlotPanelIntegration()._panel()
+    gameplay = TestDetectScreenState()._hud_frame()
+    monkeypatch.setattr(cli, "load_frame_pixels", lambda _, record: panel if 20 <= record.frame_id <= 80 else gameplay)
+    drafter = cli._Drafter(args, tmp_path, records)
+    seen, resets = [], []
+    parse, reset = drafter.parser.parse, drafter.parser.reset_temporal_state
+
+    def observe(frame, **kwargs):
+        """実際の parse の順番を記録する。
+
+        結果は実パーサから返し、連続した入力の範囲だけを比較します。
+        """
+        seen.append(kwargs["frame_index"])
+        return parse(frame, **kwargs)
+
+    def clear():
+        """実際の reset の回数を記録する。
+
+        古い値を消す実装も実行し、呼出し回数だけの mock にしません。
+        """
+        resets.append(True)
+        reset()
+
+    monkeypatch.setattr(drafter.parser, "parse", observe)
+    monkeypatch.setattr(drafter.parser, "reset_temporal_state", clear)
+    drafter.draft(70)
+    assert seen == list(range(9, 71))
+    assert len(resets) == 1
+    seen.clear()
+    drafter.draft(71)
+    assert seen == [71] and len(resets) == 1
+    seen.clear()
+    drafter.draft(120)
+    assert seen == list(range(110, 121))
+    assert len(resets) == 2
 
 
 def test_cli_annotates_checked_frames_with_labels_and_resume(tmp_path, gameplay_frame):

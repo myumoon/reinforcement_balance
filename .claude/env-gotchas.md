@@ -9,3 +9,5 @@ Windows の Python で `Path.write_text()` / `open(..., "w")` を newline 指定
 ReinBalanceLogicTests (LLT) 内では FFileHelper::SaveStringToFile が false を返す（UE file manager が書けない）。fixture の読み書きは std::ofstream/std::ifstream を使い、パスは __FILE__ + NormalizeFilename + CollapseRelativeDirectories で作る。
 UE5.4 の Build.bat 出力には "Result: Succeeded" 行が出ない。成功判定は exit code 0 と "Target is up to date"/WriteMetadata 行で行う。
 Claude の Bash ツールで長い quoted heredoc (cat >> file <<'EOF') が 'unexpected EOF while looking for matching' で丸ごと失敗することがある。長い追記は Write ツールで scratchpad に書いてから cat scratch | tr -d '\r' >> target で足す。
+PowerShell の Start-Process で Python をバックグラウンド実行する場合も `-X utf8` を付ける。PYTHONUTF8 は既存シェルから自動で引き継がれるとは限らず、リダイレクトした日本語ログが CP932 になる。
+Codex の通常 sandbox で exec_command が `helper_unknown_error: setup refresh had errors` により起動できない場合は、読み取り確認にも require_escalated が必要になる。PowerShell で日本語 JSON を読むときは Get-Content -Encoding UTF8 と UTF-8 の Console.OutputEncoding を明示する。

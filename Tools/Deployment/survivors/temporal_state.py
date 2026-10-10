@@ -15,10 +15,12 @@ class TemporalJoin:
     """一回の policy tick で束縛した HUD/world と validity を保持する。
 
     値を保持することと policy が利用可能かを分け、stale 時は fail-closed にします。
+    parser_hud は採用した補完前の HUD で、段階値の追跡に必要な None 枠を保ちます。
     """
     hud: HudStateV1; world: TrackedWorldStateV2; captured_ns: int
     hud_validity: float; world_validity: float
     combat_validity: float; item_validity: float
+    parser_hud: HudStateV1
 class TemporalAssembler:
     """最新 HUD/world を monotonic filter 後に join する stateful assembler。
 
@@ -41,6 +43,7 @@ class TemporalAssembler:
         self.max_stale_ns = {key: round(value * 1_000_000) for key, value in stale.items()}
         self.filter_alpha = filter_alpha
         self._hud: HudStateV1 | None = None
+        self._parser_hud: HudStateV1 | None = None
         self._world: TrackedWorldStateV2 | None = None
         self._last_tick_ns: int | None = None
         self._session_id: str | None = None
@@ -64,6 +67,7 @@ class TemporalAssembler:
         previous = self._hud
         if previous is None:
             self._hud = hud
+            self._parser_hud = hud
             return
         if hud.captured_monotonic_ns < previous.captured_monotonic_ns:
             return
@@ -82,6 +86,7 @@ class TemporalAssembler:
             hud, timer_seconds=timer, level=level, inventory=inventory, hp_ratio=hp, xp_ratio=xp,
             inventory_hash=canonical_hash({"slots": list(inventory)}),
         )
+        self._parser_hud = hud
 
     def _bounded_filter(self, old: float | None, new: float | None) -> float | None:
         """欠損を保ちながら [0,1] 内で EMA filter を適用する。
@@ -132,7 +137,7 @@ class TemporalAssembler:
 
         gameplay と item UI の validity を排他的にし、停止系 state は双方ゼロにします。
         """
-        if self._hud is None or self._world is None or type(now_ns) is not int or now_ns < 0:
+        if self._hud is None or self._parser_hud is None or self._world is None or type(now_ns) is not int or now_ns < 0:
             raise ValueError("temporal sources and valid now_ns are required")
         hud_age = now_ns - self._hud.captured_monotonic_ns
         world_age = now_ns - self._world.timestamp_ns
@@ -142,4 +147,4 @@ class TemporalAssembler:
         confident = self._hud.screen_state_confidence >= _SCREEN_CONFIDENCE_THRESHOLD
         combat = joined_valid if self._hud.screen_state == "gameplay" and confident else 0.
         item = joined_valid if self._hud.screen_state in _ITEM_STATES and confident else 0.
-        return TemporalJoin(self._hud, self._world, now_ns, hud_valid, world_valid, combat, item)
+        return TemporalJoin(self._hud, self._world, now_ns, hud_valid, world_valid, combat, item, self._parser_hud)

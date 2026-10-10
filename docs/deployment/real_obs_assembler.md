@@ -30,15 +30,28 @@
 - この区別は兄弟経路にも同じに適用する: Common の `duration_mult_from_hud_slots`（パッシブ全枠が揃わなければ `None`）と `_emitter` の complete 判定（武器全枠が揃わなければ「無し確定」にしない）は渡されない枠を不明として扱う。`TemporalAssembler.observe_hud` は読めなかった枠で前の identity を保持するが、`empty_slot` は新アイテムで埋まりうるので保持せず `None` に戻す。v1 の occupancy（`inventory_levels`）は `empty_slot` も空（0）と数える。
 - 持続時間倍率は Common の `duration_mult_from_hud_slots`（C++ `ComputePassiveEffects` と同じく `1 + Spellbinder 0.10×Lv + TorronasBox の加算`）で求める。パッシブ枠に不明な枠やレベル不明の Spellbinder / TorronasBox があれば倍率は不明（`None`）で、残り時間も不明になる。
 
-### 武器レベルの取得（調査結果と採用方法）
-- 本家の HUD は左上のスロットにアイコンだけを表示し、スロットごとのレベルは表示しない（右上の `LV` はプレイヤーレベル）。HUD からの読み取りは採用しない。
-- 代わりに `survivors/slot_level_tracker.py` の最小のレベル追跡器を assembler の時系列状態に持ち、tick ごとに HUD を渡す。規則:
-  - (a) 在庫に新しい identity が現れたら Lv1（進化武器も Lv1）。ただし、その枠が直前の gameplay フレームで読めていなかった（`None`）なら前から持っていた可能性があるので不明にする（session 最初の gameplay フレームは除く）。
-  - (b) レベルアップ画面から gameplay に戻ったとき、プレイヤーレベルがちょうど 1 上がり、新しい identity が無く、在庫に読めない枠（`None`）が無く、所持 identity のカードがちょうど 1 枚で skip できない画面だったなら、そのスロットをカードの新レベルにする。読めない枠が残る（新アイテムを取ったが未認識の可能性）・新 identity が直前に読めなかった枠から出た・所持カードが複数・skip 可能なら、カードにある所持スロットを不明にする。レベル差が 1 でない（連続レベルアップ・レベル不明）なら所持全スロットを不明にする。
-  - (c) カードを読めなかった（`item_id` 無し・低信頼・カード無し）ときは所持全スロットを不明。
-  - (d) 宝箱画面の後は所持全スロットと、その直後に現れた identity を不明（結果を読めないため）。
-  - (e) 不明になったスロットは推測で埋めず、そのランの間は不明のまま。(f) session 変更で全消去。
-- 既知の制約: ランの途中から観測を始めると、最初に見えた在庫は Lv1 として数えられる（session の開始とランの開始を揃えて使う）。controller の選択結果（item_session の決定）を assembler へ渡す経路ができれば (b) の曖昧さは無くなる（別 plan として提案）。
+### 武器・パッシブのレベルの取得
+
+level-up 画面の左上パネルには、アイコン下に段階マークが出ます。点灯数が現在レベル、表示セル総数が最大レベルで、選択前の値です。`HudParser` が `inventory_levels` に読み、`SlotLevelTracker` が gameplay 復帰時に選択結果を反映します。
+
+追跡器の規則（class docstring と共通）:
+
+- (a) gameplay で新しい identity が現れたら Lv1（進化武器も Lv1）。直前の同じ枠が None なら None（session 最初の gameplay は除く）。
+- (p) 画面信頼度と段階値信頼度が .5 以上のパネルを、訪問中の選択前の基準値として保持する。後の確定フレームで上書きし、読めたカード（信頼度 .35 以上）と skip（信頼度 .5 以上）も保持する。
+- (r) gameplay 復帰時、基準が無ければ全所持 None。基準があれば identity と level が両方読めた値で辞書を作り直す。基準の空枠に identity が一つだけ現れたら fresh を Lv1、他は基準のまま。二つ以上なら fresh と所持カードを None。fresh が無く、基準・復帰在庫の両方に None が無く、所持カードが一枚で確定した skip が False なら基準値 +1。それ以外は所持カードを None。カードを一枚も読めていなければ全所持 None。
+- (d) 宝箱画面の後は所持全スロットと、その直後に現れた identity を None。
+- (e) None は次に (a) または (p→r) が起きるまで不明のまま。(f) session 変更・reset で全消去。
+
+パネルの identity は、直前の gameplay 在庫を slot 位置で結合します。gameplay は同じ非 None の identity が三枚続いたときだけ保存し、不読では上書きせず三十枚続いた枠だけ消します。パネルは枠ごとに二枚一致で段階値・空枠を採用し、訪問中の一枚の揺れでは取り消しません。保存 identity と表示セル総数が食い違う枠、種別不明の枠は結合しません（一セルは進化武器だけ）。
+
+既知の制約:
+
+- ランの途中から観測を始めると、最初の level-up までは実レベルを確定できません。規則 (a) は session 先頭を Lv1 として扱うため、session とランの開始を揃えてください。
+- cards が読めない環境では、level-up のたびに所持 slot が None に戻ります（カード配置の gap は 04-22 で修正予定）。パネル中の段階値と注釈の下書きは利用できます。
+- 九段階のパッシブは二行の格子に収まらないため None になります。全武器が進化した場合のパネル形状、paused 画面のパネル有無は未確認です。
+- 宝箱で変わった slot は、新しい icon が読めるまで、または None が三十枚続くまで古い identity が残りえます。表示セル総数と種別の照合で、通常武器の古い identity が進化武器へ結合されることを防ぎます。
+- 現在の画面判定は chest／death を返さず、宝箱が gameplay か card contrast 由来の level_up_items に混ざります。後者は三枚続くと保存在庫を全消去します。slot_panel_hold は消去条件に含めません。
+- 色と座標は 1920×1080、日本語 UI、既定 UI scale、左右約96画素の黒帯がある収録で測定した値です。設定を固定し、異なる解像度には格子定数を差し替えてください。二枚連続の段階誤読・三枚連続の identity 誤読や、決定後の遅い slot 採用による apply ack の変化は防げません。
 
 ## Formality
 fixture は development-only です。04-10 の正式 parser artifact hash、calibration replay、fidelity verdict を発行する能力はありません。
