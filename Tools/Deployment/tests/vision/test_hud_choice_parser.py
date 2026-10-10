@@ -1097,6 +1097,54 @@ class TestMeasuredLayout:
         assert not result.skip_available and not result.banish_available
         assert result.capability_confidence == 0. and result.capability_reason == "skip_banish_roi_undefined"
 
+    @pytest.mark.parametrize("button_type", ["ack_chest", "reroll"])
+    @pytest.mark.parametrize("white_rows", [5, 11])
+    def test_action_buttons_require_stable_color_and_allow_white_text(self, button_type, white_rows):
+        """操作ボタンは白文字を許し、フェード中の面は出力しない。
+
+        定常の青色割合を信頼度へ直結させず、既存 retry gate を満たす観測だけを返します。
+        """
+        from survivors.vision import roi_layout as layout
+        frame = _make_levelup_frame(0 if button_type == "ack_chest" else 3)
+        inner = layout.CHEST_ACK_INNER_ROI if button_type == "ack_chest" else layout.REROLL_BUTTON_INNER_ROI
+        inner.crop(frame)[..., :3] = (205, 64, 39)
+        inner.crop(frame)[:white_rows, :, :3] = 255
+        if button_type == "ack_chest":
+            frame[914:919, 660:1260, :3] = (102, 203, 255)
+        result = ChoiceParser().parse(frame, screen_state="chest" if button_type == "ack_chest" else "level_up_items")
+        if white_rows == 5:
+            assert len(result.buttons) == 1
+            assert result.buttons[0].button_type == button_type
+            assert result.buttons[0].confidence >= .99
+        else:
+            assert result.buttons == ()
+            assert not result.reroll_available
+
+    @pytest.mark.parametrize("after_panel", [False, True])
+    def test_paused_grid_cannot_charge_panel_hold_or_adopt_levels(self, after_panel):
+        """一時停止の格子を保持せず、再開の一枚目から gameplay を返す。
+
+        本物の格子証拠を二枚続けても、段階値の一致履歴と採用値へ混ぜません。
+        """
+        from survivors.vision.slot_level_parser import has_panel_evidence, parse_slot_levels
+        paused = TestSlotPanelIntegration()._panel()
+        paused[(2, 32), 300:1600, :3] = (51, 102, 127)
+        paused[952:1033, 1448:1732, :3] = (198, 61, 38)
+        assert has_panel_evidence(parse_slot_levels(paused, 1920, 1080))
+        parser = HudParser(parser_artifact_hash=_DUMMY_ARTIFACT_HASH)
+        if after_panel:
+            for _ in range(2):
+                self._read(parser, TestSlotPanelIntegration()._panel())
+            assert parser._panel_hold > 0 and parser._slot_adopted[0] is not None
+        for _ in range(2):
+            assert self._read(parser, paused).screen_state == "paused"
+            assert parser._panel_hold == 0
+            assert parser._slot_prev == parser._slot_adopted == [None] * 12
+            assert parser._slot_prev_cell_counts == parser._slot_cell_counts == [0] * 12
+        resumed = self._read(parser, _make_gameplay_frame())
+        assert (resumed.screen_state, resumed.screen_state_reason) == ("gameplay", "hud_present")
+        assert resumed.cards == () and resumed.inventory_levels == (None,) * 12
+
     @pytest.mark.parametrize("phase", ["open", "close", "no_button"])
     def test_ack_chest_requires_shortened_panel(self, phase):
         """縮んだパネルの終了ボタンだけを ack_chest にする。
@@ -1250,12 +1298,16 @@ class TestMeasuredLayout:
         monkeypatch.setattr("survivors.vision.hud_parser._detect_screen_state", lambda *a, **k: (state, .70, "known_state"))
         assert self._read(parser, _make_gameplay_frame()).screen_state == state
 
-    def test_unsupported_resolution_cannot_inherit_chest_hold(self):
-        """解像度違いを直前の宝箱保持で隠さない。
+    @pytest.mark.parametrize("shape, reason", [((720, 1280, 4), "unsupported_resolution"),
+                                              ((0, 0, 4), "empty_frame")])
+    def test_invalid_frame_cannot_inherit_modal_hold(self, shape, reason):
+        """解像度違いと空画像を直前の画面保持で隠さない。
 
-        小さいフレームが混ざると unknown を返し、クリック候補を空にします。
+        宝箱と段階格子のどちらを見た後でも、元の理由と信頼度零を維持します。
         """
-        parser = HudParser(parser_artifact_hash=_DUMMY_ARTIFACT_HASH)
-        self._read(parser, _make_levelup_frame(0))
-        result = self._read(parser, np.zeros((720, 1280, 4), dtype=np.uint8))
-        assert (result.screen_state, result.screen_state_reason, result.cards, result.buttons) == ("unknown", "unsupported_resolution", (), ())
+        for prior in (_make_levelup_frame(0), TestSlotPanelIntegration()._panel()):
+            parser = HudParser(parser_artifact_hash=_DUMMY_ARTIFACT_HASH)
+            self._read(parser, prior)
+            result = self._read(parser, np.zeros(shape, dtype=np.uint8))
+            assert (result.screen_state, result.screen_state_confidence, result.screen_state_reason,
+                    result.cards, result.buttons) == ("unknown", 0., reason, (), ())
