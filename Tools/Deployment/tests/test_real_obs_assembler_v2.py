@@ -217,6 +217,36 @@ def test_rejected_hud_does_not_reach_slot_tracker(old_session):
     assert _segment(snap.deploy_obs, "weapon_slot_levels")[1][0] == 1.
 
 
+@pytest.mark.parametrize("state", ["level_up_items", "level_up_fallback"])
+@pytest.mark.parametrize("unread_baseline", [False, True])
+@pytest.mark.parametrize("old_session", [False, True])
+def test_pending_panel_keeps_raw_hud_when_next_input_is_rejected(state, unread_baseline, old_session):
+    """cadence で保留されたパネルは、後続の古い HUD が拒否されても元の在庫で追跡する。
+
+    前の発行から10msでは発行間隔に足りず、次の world 更新で初めて tick が進みます。
+    保留中のパネルが読めていれば Lv3 と Lv4、None 枠を含めば両方不明になることを確かめます。
+    """
+    assembler = RealObsAssembler()
+    card = ParsedCard(0, "whip", "weapon", 3, .99, "ok", (100, 100, 400, 500))
+    assembler.assemble(_hud(ts=1_000_000_000, inventory=("whip", "garlic")), _world(1_000_000_000), V2, VIEWPORT)
+    panel_inventory = ("whip", None if unread_baseline else "garlic")
+    assert assembler.assemble(
+        _hud(state, ts=1_010_000_000, inventory=panel_inventory, levels=(2, 4), cards=(card,), frame=2),
+        _world(1_010_000_000), V2, VIEWPORT,
+    ) is None
+    rejected = _hud(ts=1_010_000_000 if old_session else 990_000_000, frame=3)
+    if old_session:
+        rejected = dataclasses.replace(rejected, session_id="old-session")
+    pending = assembler.assemble(rejected, _world(1_080_000_000), V2, VIEWPORT)
+    assert pending.screen_state == state
+    snap = assembler.assemble(
+        _hud(ts=1_200_000_000, inventory=("whip", "garlic"), frame=4), _world(1_200_000_000), V2, VIEWPORT,
+    )
+    assert assembler._slot_levels.level("whip") == (None if unread_baseline else 3)
+    assert assembler._slot_levels.level("garlic") == (None if unread_baseline else 4)
+    assert _segment(snap.deploy_obs, "weapon_slot_levels")[1][:2] == ([0., 0.] if unread_baseline else [1., 1.])
+
+
 def test_duration_mult_comes_from_passive_slots_via_common():
     """パッシブの Spellbinder から Common の関数で求めた倍率が orbit の残り時間に使われる。
 
