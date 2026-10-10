@@ -47,10 +47,9 @@ level-up 画面の左上パネルには、アイコン下に段階マークが�
 既知の制約:
 
 - ランの途中から観測を始めると、最初の level-up までは実レベルを確定できません。規則 (a) は session 先頭を Lv1 として扱うため、session とランの開始を揃えてください。
-- cards が読めない環境では、level-up のたびに所持 slot が None に戻ります（カード配置の gap は 04-22 で修正予定）。パネル中の段階値と注釈の下書きは利用できます。
-- 九段階のパッシブは二行の格子に収まらないため None になります。全武器が進化した場合のパネル形状、paused 画面のパネル有無は未確認です。
-- 宝箱で変わった slot は、新しい icon が読めるまで、または None が三十枚続くまで古い identity が残りえます。表示セル総数と種別の照合で、通常武器の古い identity が進化武器へ結合されることを防ぎます。
-- 現在の画面判定は chest／death を返さず、宝箱が gameplay か card contrast 由来の level_up_items に混ざります。後者は三枚続くと保存在庫を全消去します。slot_panel_hold は消去条件に含めません。
+- 所持カードを選んだ直後の +1 は、skip／banish の ROI を観測して能力信頼度が .5 以上になるまで発火しません。現在は `capability_confidence=0.0` なので、選択後の所持 slot level は次の level-up の段階マークを読むまで None になります。
+- 九段階のパッシブは二行の格子に収まらないため None になります。全武器が進化した場合のパネル形状は未確認です。一時停止のパネルは半暗なので段階値の証拠にしません。
+- 04-22 の画面判定は level-up／chest／death／result／paused を実測の枠と色で区別します。chest／death／result／unknown で保存在庫を全消去し、card_transient と slot_panel_hold では消しません。宝箱後の slot level は規則 (d) に従い全て None です。
 - 色と座標は 1920×1080、日本語 UI、既定 UI scale、左右約96画素の黒帯がある収録で測定した値です。設定を固定し、異なる解像度には格子定数を差し替えてください。二枚連続の段階誤読・三枚連続の identity 誤読や、決定後の遅い slot 採用による apply ack の変化は防げません。
 
 ## Formality

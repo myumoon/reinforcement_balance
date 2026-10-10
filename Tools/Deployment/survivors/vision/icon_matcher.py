@@ -37,23 +37,33 @@ ATLAS_SCHEMA_VERSION: Final[str] = "icon_atlas.v1"
 
 
 class FormalLoaderRejectedError(ValueError):
-    """development_only=true または formal_parser_eligible=false の atlas を正式ロードした際に送出。"""
+    """開発専用 atlas の正式利用を拒否する例外。
+
+    正式な解析器として使えない画像集を誤って本番へ読み込まないために送出します。
+    """
 
 
 @dataclass(frozen=True, slots=True)
 class TemplateEntry:
-    """atlas 内の 1 テンプレートエントリ。"""
+    """atlas 内の一テンプレートエントリ。
+
+    所持欄とカードの描画を surface で分け、旧 entry は inventory として扱います。
+    """
 
     item_id: str           # vocabulary 語彙の ID ("whip", "gold", "chicken", …)
     kind: str              # "weapon", "passive", "evolved", "fallback", "unknown"
     level: int             # このテンプレートが表すアイテムレベル (1 〜 max_level)
     max_level: int         # アイテムの最大レベル
     feature: NDArray[np.float32]  # 正規化済み特徴ベクトル
+    surface: str = "inventory"
 
 
 @dataclass(frozen=True)
 class AtlasManifest:
-    """アイコン atlas のメタデータと全テンプレート。"""
+    """atlas のメタデータと全テンプレート。
+
+    対象プロファイル、画像集の識別子、正式利用の可否と各 icon の特徴を一緒に保持します。
+    """
 
     schema_version: str
     profile_hash: str          # 対応 target_profile の hash
@@ -64,6 +74,10 @@ class AtlasManifest:
     entries: tuple[TemplateEntry, ...]
 
     def __post_init__(self) -> None:
+        """atlas の schema と正式利用フラグを検証する。
+
+        開発専用と正式利用可能が同時に設定された矛盾を、構築時に拒否します。
+        """
         if self.schema_version != ATLAS_SCHEMA_VERSION:
             raise ValueError(f"unsupported atlas schema: {self.schema_version!r}")
         if not isinstance(self.development_only, bool) or not isinstance(self.formal_parser_eligible, bool):
@@ -74,7 +88,10 @@ class AtlasManifest:
 
 @dataclass(frozen=True, slots=True)
 class MatchResult:
-    """アイコンマッチング結果。"""
+    """icon 照合の結果。
+
+    読めた item ID とレベルに信頼度・理由を添え、不確かな名前は None のまま返します。
+    """
 
     item_id: str | None    # 最良一致アイテム ID; unknown なら None
     kind: str              # "weapon", "passive", "evolved", "fallback", "unknown"
@@ -84,7 +101,10 @@ class MatchResult:
 
 
 def _extract_color_hist(rgb: NDArray[np.uint8]) -> NDArray[np.float32]:
-    """RGB 画像から色ヒストグラム特徴を抽出する (各チャンネル 8 ビン)。"""
+    """RGB の各成分を八区間の histogram にする。
+
+    色の多さを数えて正規化し、画像の大きさが違っても比較できる特徴にします。
+    """
     hist = np.zeros(_COLOR_BINS * 3, dtype=np.float32)
     for ch in range(3):
         for b in range(_COLOR_BINS):
@@ -98,7 +118,10 @@ def _extract_color_hist(rgb: NDArray[np.uint8]) -> NDArray[np.float32]:
 
 
 def _extract_edge_map(gray: NDArray[np.uint8]) -> NDArray[np.float32]:
-    """グレースケール画像からエッジ強度マップを抽出し 8×8 ブロック平均を返す。"""
+    """輪郭の強さを八行八列の平均にまとめる。
+
+    明暗の変化から形の違いを拾い、色だけが似た icon を区別する材料にします。
+    """
     gray_f = gray.astype(np.float32)
     # 簡易 Sobel
     dx = np.abs(np.diff(gray_f, axis=1, append=gray_f[:, -1:]))
@@ -120,7 +143,10 @@ def _extract_edge_map(gray: NDArray[np.uint8]) -> NDArray[np.float32]:
 
 
 def _extract_feature(crop_bgra: NDArray[np.uint8]) -> NDArray[np.float32]:
-    """BGRA クロップから特徴ベクトル (色ヒストグラム + エッジマップ) を抽出する。"""
+    """BGRA crop から色と輪郭の特徴を作る。
+
+    画像を共通サイズへ揃え、色の分布と輪郭を一つの比較用ベクトルに結合します。
+    """
     if crop_bgra.size == 0:
         feat_len = _COLOR_BINS * 3 + _EDGE_BINS * _EDGE_BINS
         return np.zeros(feat_len, dtype=np.float32)
@@ -144,12 +170,18 @@ def _extract_feature(crop_bgra: NDArray[np.uint8]) -> NDArray[np.float32]:
 
 
 def build_template_feature(crop_bgra: NDArray[np.uint8]) -> NDArray[np.float32]:
-    """テンプレート登録用特徴ベクトルを生成して返す (atlas builder 用)。"""
+    """登録用の template feature を生成する。
+
+    照合時と同じ処理を使い、atlas に保存する画像特徴を作ります。
+    """
     return _extract_feature(crop_bgra)
 
 
 def _l2_distance(a: NDArray[np.float32], b: NDArray[np.float32]) -> float:
-    """2 特徴ベクトルの L2 距離を返す。"""
+    """二つの feature の L2 距離を求める。
+
+    対応する成分の差をまとめ、小さいほど画像の特徴が近い値にします。
+    """
     return float(np.linalg.norm(a - b))
 
 
@@ -160,6 +192,10 @@ class IconMatcher:
     """
 
     def __init__(self, manifest: AtlasManifest) -> None:
+        """検証済みの atlas を照合器へ保存する。
+
+        画像集以外のオブジェクトは受け付けず、以後の照合はこのテンプレート群を使います。
+        """
         if not isinstance(manifest, AtlasManifest):
             raise TypeError("manifest must be an AtlasManifest")
         self._manifest = manifest
@@ -181,35 +217,47 @@ class IconMatcher:
 
     @classmethod
     def load_development(cls, atlas_path: Path) -> "IconMatcher":
-        """開発用 atlas をロードする (formal_parser_eligible チェックを行わない)。"""
+        """開発用 JSON atlas を読み込む。
+
+        正式利用の可否で拒否せず、合成画像や scratch atlas をテストへ使えるようにします。
+        """
         manifest = _load_manifest(atlas_path)
         return cls(manifest)
 
     @property
     def manifest(self) -> AtlasManifest:
+        """照合器が使用する atlas を返す。
+
+        呼び出し側が template の種別や出自を参照するための読み取り口です。
+        """
         return self._manifest
 
-    def match(self, crop_bgra: NDArray[np.uint8]) -> MatchResult:
+    def match(self, crop_bgra: NDArray[np.uint8], *, surface: str = "inventory") -> MatchResult:
         """クロップ画像に対してアイコンマッチングを行い結果を返す。
 
-        top-1/top-2 distance margin が _LOW_MARGIN 未満の場合は unknown を返します。
+        指定 surface だけで距離差を比較し、候補がない場合や差が小さい場合は unknown を返します。
         """
         if crop_bgra.ndim != 3 or crop_bgra.shape[2] != 4:
             return MatchResult(None, "unknown", None, 0.0, "invalid_crop")
         if crop_bgra.size == 0:
             return MatchResult(None, "unknown", None, 0.0, "empty_crop")
-        if not self._manifest.entries:
-            return MatchResult(None, "unknown", None, 0.0, "empty_atlas")
+        entries = [entry for entry in self._manifest.entries if entry.surface == surface]
+        if not entries:
+            return MatchResult(None, "unknown", None, 0.0, "no_surface_entries")
 
         query_feat = _extract_feature(crop_bgra)
 
         distances: list[tuple[float, TemplateEntry]] = []
-        for entry in self._manifest.entries:
+        for entry in entries:
             dist = _l2_distance(query_feat, entry.feature)
             distances.append((dist, entry))
 
         distances.sort(key=lambda x: x[0])
         best_dist, best_entry = distances[0]
+
+        # shortcut: card は実測 feature の完全一致だけ採用し、描画差を許す時は実フレームで距離を較正する。
+        if surface == "card" and best_dist != 0.0:
+            return MatchResult(None, "unknown", None, 0.0, "card_template_mismatch")
 
         if len(distances) < 2:
             # atlas に 1 テンプレートしかない → margin = max_dist - best_dist
@@ -244,7 +292,10 @@ class IconMatcher:
 
 
 def _load_manifest(atlas_path: Path) -> AtlasManifest:
-    """JSON atlas ファイルを AtlasManifest としてロードする。"""
+    """JSON atlas をデータ型へ復元する。
+
+    必須項目と surface を確認し、未知の描画面を黙って所持欄へ戻しません。
+    """
     if not atlas_path.is_file():
         raise FileNotFoundError(f"atlas not found: {atlas_path}")
 
@@ -264,6 +315,9 @@ def _load_manifest(atlas_path: Path) -> AtlasManifest:
 
     entries: list[TemplateEntry] = []
     for e in wire["entries"]:
+        surface = e.get("surface", "inventory")
+        if surface not in ("inventory", "card"):
+            raise ValueError(f"unsupported atlas surface: {surface!r}")
         feat = np.array(e["feature"], dtype=np.float32)
         entries.append(TemplateEntry(
             item_id=e["item_id"],
@@ -271,6 +325,7 @@ def _load_manifest(atlas_path: Path) -> AtlasManifest:
             level=int(e["level"]),
             max_level=int(e["max_level"]),
             feature=feat,
+            surface=surface,
         ))
 
     return AtlasManifest(
@@ -285,7 +340,10 @@ def _load_manifest(atlas_path: Path) -> AtlasManifest:
 
 
 def serialize_manifest(manifest: AtlasManifest) -> bytes:
-    """AtlasManifest を JSON bytes にシリアライズする。"""
+    """atlas を安定した JSON bytes にする。
+
+    全 entry の surface を明記し、key 順序と末尾改行を揃えて保存します。
+    """
     wire: dict[str, Any] = {
         "schema_version": manifest.schema_version,
         "profile_hash": manifest.profile_hash,
@@ -300,6 +358,7 @@ def serialize_manifest(manifest: AtlasManifest) -> bytes:
                 "level": e.level,
                 "max_level": e.max_level,
                 "feature": e.feature.tolist(),
+                "surface": e.surface,
             }
             for e in manifest.entries
         ],

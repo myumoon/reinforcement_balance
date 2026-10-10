@@ -82,49 +82,6 @@ SLOT_LEVEL_PIP_GRID = SlotLevelPipGrid()
 # HUD truth の expected_slot_levels はこの集合の画面でだけ非 null にできる。
 SLOT_LEVEL_VISIBLE_STATES: frozenset[str] = frozenset({"level_up_items", "level_up_fallback"})
 
-# レベルアップカード (最大 4 枚) – 3 枚と 4 枚で位置が変わる
-# 3 枚レイアウト: 等間隔 3 分割
-_CARD3_ROIS: tuple[_N, ...] = (
-    _N(0.055, 0.162, 0.345, 0.870),
-    _N(0.375, 0.162, 0.625, 0.870),
-    _N(0.655, 0.162, 0.945, 0.870),
-)
-# 4 枚レイアウト: 等間隔 4 分割
-_CARD4_ROIS: tuple[_N, ...] = (
-    _N(0.030, 0.162, 0.265, 0.870),
-    _N(0.285, 0.162, 0.490, 0.870),
-    _N(0.510, 0.162, 0.715, 0.870),
-    _N(0.735, 0.162, 0.970, 0.870),
-)
-CARD_ROIS: dict[int, tuple[_N, ...]] = {3: _CARD3_ROIS, 4: _CARD4_ROIS}
-
-# カード間ギャップ – レベルアップオーバーレイ背景確認用 (カードより暗いはず)
-CARD_GAP_ROIS: dict[int, tuple[_N, ...]] = {
-    3: (
-        _N(0.345, 0.162, 0.375, 0.870),  # card1-card2 間
-        _N(0.625, 0.162, 0.655, 0.870),  # card2-card3 間
-    ),
-    4: (
-        _N(0.265, 0.162, 0.285, 0.870),  # card1-card2 間
-        _N(0.490, 0.162, 0.510, 0.870),  # card2-card3 間
-        _N(0.715, 0.162, 0.735, 0.870),  # card3-card4 間
-    ),
-}
-
-# ボタン (reroll / skip / banish) – カード下部
-BUTTON_ROIS: dict[str, _N] = {
-    "reroll": _N(0.060, 0.882, 0.265, 0.950),
-    "skip":   _N(0.375, 0.882, 0.625, 0.950),
-    "banish": _N(0.735, 0.882, 0.940, 0.950),
-}
-
-# chest 確認ボタン
-CHEST_ACK_ROI = _N(0.375, 0.700, 0.625, 0.780)
-
-# スクリーン全体領域（状態判定用アンカーサンプル点）
-# 状態判定には中央領域の支配色を使う
-SCREEN_CENTER_ROI = _N(0.380, 0.380, 0.620, 0.620)
-
 # layout validity チェック用アンカー点（HP バー前景色が存在するか等）
 _ANCHOR_SAMPLE_POINTS = (
     (0.5, 0.041),   # HP バー中央
@@ -195,16 +152,57 @@ def norm_to_pixels(
     return PixelROI(x0, y0, x1, y1)
 
 
-def card_rois_for_count(count: int, width: int = 1920, height: int = 1080) -> tuple[PixelROI, ...]:
-    """カード枚数に応じた ROI リストを返す。不明枚数は空を返す。
+# 日本語 UI の実測値。正規化の往復による一画素のずれを避ける。
+REFERENCE_SIZE = (1920, 1080)
+HUD_BAR_ROWS = (2, 32)
+HUD_BAR_X = (300, 1600)
+LEVEL_UP_WINDOW_ROI = PixelROI(642, 111, 1278, 965)
+WINDOW_TOP_BAND = (108, 124)
+WINDOW_BOTTOM_BAND = (905, 970)
+WINDOW_BORDER_X = (660, 1260)
+WINDOW_RIGHT_BAND = (1268, 1282)
+WINDOW_RIGHT_Y = (300, 900)
+CARD_TOP_Y = (267, 424, 581, 738)
+CARD_HEIGHT = 154
+CARD_X = (656, 1265)
+CARD_ROW_BAND_X = (700, 1200)
+CARD_ICON_OFFSET = (669, 13, 720, 68)
+CARD_ZONE_ROI = PixelROI(660, 265, 1260, 740)
+PAUSE_RESUME_INNER_ROI = PixelROI(1448, 952, 1732, 1033)
+REROLL_BUTTON_ROI = PixelROI(1404, 247, 1702, 329)
+REROLL_BUTTON_INNER_ROI = PixelROI(1413, 253, 1693, 317)
+CHEST_ACK_BUTTON_ROI = PixelROI(810, 827, 1107, 913)
+CHEST_ACK_INNER_ROI = PixelROI(822, 835, 1098, 902)
+DEATH_TEXT_ROI = PixelROI(700, 280, 1220, 360)
+DEATH_CONFIRM_ROI = PixelROI(810, 702, 1110, 789)
+DEATH_CONFIRM_INNER_ROI = PixelROI(819, 708, 1101, 780)
+RESULT_WINDOW_ROI = PixelROI(277, 66, 1644, 922)
+RESULT_TOP_BAND = (62, 72)
+RESULT_BOTTOM_BAND = (912, 926)
+RESULT_BORDER_X = (300, 1620)
+RESULT_BG_ROI = PixelROI(300, 80, 1620, 900)
+RESULT_CONFIRM_ROI = PixelROI(812, 968, 1108, 1049)
+RESULT_CONFIRM_INNER_ROI = PixelROI(821, 974, 1099, 1040)
 
-    対応する枚数のカード配置を CARD_ROIS から選び、指定画面サイズの矩形へ変換します。
-    定義されていない枚数では領域を推測せず、空のタプルを返します。
+
+def card_roi(k: int, width: int = 1920, height: int = 1080) -> PixelROI:
+    """上から k 番目のカード矩形を実測座標で返す。
+
+    一枚目を零として数え、未計測の解像度や五枚目以降は受け付けません。
     """
-    norms = CARD_ROIS.get(count)
-    if norms is None:
-        return ()
-    return tuple(norm_to_pixels(n, width, height) for n in norms)
+    if (width, height) != REFERENCE_SIZE or not 0 <= k < len(CARD_TOP_Y):
+        raise ValueError("unsupported card layout")
+    return PixelROI(CARD_X[0], CARD_TOP_Y[k], CARD_X[1], CARD_TOP_Y[k] + CARD_HEIGHT)
+
+
+def card_icon_roi(k: int, width: int = 1920, height: int = 1080) -> PixelROI:
+    """カード左端のアイコン内側だけを返す。
+
+    横位置は画面の絶対座標、縦位置だけは各カード上端からの差です。
+    """
+    top = card_roi(k, width, height).y0
+    x0, y0, x1, y1 = CARD_ICON_OFFSET
+    return PixelROI(x0, top + y0, x1, top + y1)
 
 
 def layout_validity_score(

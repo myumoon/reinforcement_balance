@@ -14,36 +14,29 @@ from typing import Final
 import numpy as np
 from numpy.typing import NDArray
 
-from reinbalance_survivors_contracts.canonical_json import canonical_hash
-
-from .roi_layout import (
-    BUTTON_ROIS,
-    CHEST_ACK_ROI,
-    CARD_ROIS,
-    norm_to_pixels,
-)
-from .icon_matcher import AtlasManifest, IconMatcher, MatchResult
-from .hud_parser import (
-    ParsedCard,
-    ParsedButton,
-    _compute_candidate_set_hash,
-    SCREEN_STATES,
+from . import roi_layout as layout
+from .icon_matcher import IconMatcher
+from .hud_types import ParsedCard, ParsedButton, _compute_candidate_set_hash
+from .screen_layout import (
+    _card_count, _detect_card_rows, classify_blue, classify_red,
+    horizontal_border_present, pixel_fraction, window_present, yellow_fraction,
 )
 
 # choice parser 固有の低信頼しきい値
 _CARD_LOW_CONF: Final[float] = 0.30
-_BUTTON_LOW_CONF: Final[float] = 0.30
 
 # fallback アイテム ID (closed taxonomy: target_profile の fallbacks)
 _FALLBACK_IDS: Final[frozenset[str]] = frozenset({"gold", "chicken"})
 
-# capability ボタン型
+# taxonomy が許す能力名。未計測の skip/banish は解析結果には出さない。
 _CAPABILITY_BUTTONS: Final[tuple[str, ...]] = ("reroll", "skip", "banish")
-
 
 @dataclass(frozen=True, slots=True)
 class ChoiceParseResult:
-    """choice parser の解析結果。"""
+    """choice parser の解析結果。
+
+    カードとボタンに能力の信頼度を添え、fallback の多い画面では状態も精緻化します。
+    """
 
     cards: tuple[ParsedCard, ...]
     buttons: tuple[ParsedButton, ...]
@@ -53,7 +46,21 @@ class ChoiceParseResult:
     capability_confidence: float
     capability_reason: str
     candidate_set_hash: str
-    screen_state: str   # "level_up_items", "level_up_fallback", "chest", "unknown"
+    screen_state: str
+
+
+def _color_button(frame, button_type, roi, inner_roi, classifier, color):
+    """ボタン内側の色から、操作可能な定常表示を観測する。
+
+    終了は青九割、文字量の多いリロールは八割五分を必要とし、フェードを除きます。
+    操作ボタンの信頼度は白文字で減らさず、観測専用の confirm は色割合を維持します。
+    """
+    fraction = pixel_fraction(inner_roi.crop(frame), classifier)
+    minimum = {"ack_chest": .90, "reroll": .85}.get(button_type, .50)
+    if fraction < minimum:
+        return ()
+    confidence = 1.0 if button_type in {"ack_chest", "reroll"} else fraction
+    return (ParsedButton(button_type, confidence, f"{color}:{fraction:.2f}", roi.as_xyxy()),)
 
 
 class ChoiceParser:
@@ -70,6 +77,10 @@ class ChoiceParser:
         width: int = 1920,
         height: int = 1080,
     ) -> None:
+        """照合器と対応画面サイズを保存する。
+
+        時間的な保持は HudParser が担当し、この parser は一枚だけで判断します。
+        """
         self._matcher = icon_matcher
         self._width = width
         self._height = height
@@ -82,13 +93,18 @@ class ChoiceParser:
     ) -> ChoiceParseResult:
         """フレームとヒントとなる screen_state から choice 情報を解析する。
 
-        screen_state が "level_up_items" または "level_up_fallback" のとき
-        カードを、"chest" のとき chest ack ボタンを、それ以外は空を返します。
+        カード、宝箱終了、終端確認を分けて読み、paused と gameplay の候補は空にします。
         """
+        # schema の状態集合を使い、module 読込時の循環を避ける。
+        from .hud_parser import SCREEN_STATES
+
         if screen_state not in SCREEN_STATES:
             raise ValueError(f"unknown screen_state: {screen_state!r}")
 
         w, h = self._width, self._height
+        if frame_bgra.size == 0 or (w, h) != layout.REFERENCE_SIZE or frame_bgra.shape != (1080, 1920, 4):
+            return ChoiceParseResult((), (), False, False, False, 0., "unsupported_resolution_or_empty_frame",
+                                     _compute_candidate_set_hash("unknown", ()), "unknown")
 
         if screen_state in ("level_up_items", "level_up_fallback"):
             cards, inferred_state = self._parse_cards(frame_bgra, w, h, screen_state)
@@ -97,6 +113,10 @@ class ChoiceParser:
             cards = ()
             inferred_state = "chest"
             buttons = self._parse_chest_buttons(frame_bgra, w, h)
+        elif screen_state in {"death", "result"}:
+            cards = ()
+            inferred_state = screen_state
+            buttons = self._parse_confirm_button(frame_bgra, screen_state)
         else:
             cards = ()
             inferred_state = screen_state
@@ -105,12 +125,7 @@ class ChoiceParser:
         # capability ボタンの存否
         btn_types = {b.button_type for b in buttons}
         reroll = "reroll" in btn_types
-        skip = "skip" in btn_types
-        banish = "banish" in btn_types
-
-        cap_confidences = [b.confidence for b in buttons if b.button_type in _CAPABILITY_BUTTONS]
-        cap_conf = float(np.mean(cap_confidences)) if cap_confidences else 0.0
-        cap_reason = "ok" if cap_confidences else "no_capability_buttons"
+        cap_reason = "skip_banish_roi_undefined" if screen_state in {"level_up_items", "level_up_fallback"} else "not_applicable"
 
         csh = _compute_candidate_set_hash(inferred_state, cards)
 
@@ -118,9 +133,9 @@ class ChoiceParser:
             cards=cards,
             buttons=buttons,
             reroll_available=reroll,
-            skip_available=skip,
-            banish_available=banish,
-            capability_confidence=cap_conf,
+            skip_available=False,
+            banish_available=False,
+            capability_confidence=0.0,
             capability_reason=cap_reason,
             candidate_set_hash=csh,
             screen_state=inferred_state,
@@ -133,39 +148,18 @@ class ChoiceParser:
         h: int,
         screen_state: str,
     ) -> tuple[tuple[ParsedCard, ...], str]:
-        """レベルアップカードを解析する (3 枚または 4 枚)。
+        """枠が揃った一枚から四枚のカードを上から読む。
 
-        カード枚数は ROI 内の前景量から推定します。
+        右枠が立たない過渡と、黄色い光が残る宝箱では選択肢を作りません。
         """
-        best_cards: tuple[ParsedCard, ...] = ()
-        best_count = 0
-        best_avg_fg = 0.0
-        inferred_state = screen_state
-
-        # 3 枚・4 枚の両方を試し、前景ピクセル率が高い方を採用
-        for count in (3, 4):
-            norms = CARD_ROIS.get(count, ())
-            cards_for_count: list[ParsedCard] = []
-            total_fg = 0.0
-
-            for i, norm in enumerate(norms):
-                roi = norm_to_pixels(norm, w, h)
-                crop = roi.crop(frame_bgra)
-                fg_ratio = float(np.mean(crop[..., :3] >= 32)) if crop.size > 0 else 0.0
-                total_fg += fg_ratio
-
-                card = self._parse_single_card(crop, slot_index=i, roi_xyxy=roi.as_xyxy())
-                cards_for_count.append(card)
-
-            avg_fg = total_fg / count if count > 0 else 0.0
-
-            if avg_fg > 0.20 and avg_fg > best_avg_fg:
-                best_cards = tuple(cards_for_count)
-                best_count = count
-                best_avg_fg = avg_fg
-
-        if not best_cards:
+        count = _card_count(_detect_card_rows(frame_bgra))
+        if not all(window_present(frame_bgra)) or count == 0 or yellow_fraction(frame_bgra) >= .05:
             return (), screen_state
+        best_cards = tuple(
+            self._parse_single_card(layout.card_icon_roi(k, w, h).crop(frame_bgra),
+                                    slot_index=k, roi_xyxy=layout.card_roi(k, w, h).as_xyxy())
+            for k in range(count)
+        )
 
         # fallback アイテム比率でスクリーン状態を精緻化
         fallback_count = sum(
@@ -186,7 +180,10 @@ class ChoiceParser:
         slot_index: int,
         roi_xyxy: tuple[int, int, int, int],
     ) -> ParsedCard:
-        """カードクロップを 1 枚解析して ParsedCard を返す。"""
+        """カード左端の icon を card surface へ照合する。
+
+        文字のレベルは読まず、テンプレートの level もカードへ採用しません。
+        """
         if self._matcher is None or crop.size == 0:
             return ParsedCard(
                 slot_index=slot_index,
@@ -194,14 +191,11 @@ class ChoiceParser:
                 kind="unknown",
                 level=None,
                 confidence=0.0,
-                reason="no_matcher_or_empty_crop",
+                reason="no_matcher" if self._matcher is None else "empty_crop",
                 roi_xyxy=roi_xyxy,
             )
 
-        # カード全体ではなくアイコン部分 (上部 40%) をマッチングに使う
-        icon_height = max(1, int(crop.shape[0] * 0.40))
-        icon_crop = crop[:icon_height, :]
-        match = self._matcher.match(icon_crop)
+        match = self._matcher.match(crop, surface="card")
 
         if match.item_id is None or match.confidence < _CARD_LOW_CONF:
             return ParsedCard(
@@ -221,7 +215,7 @@ class ChoiceParser:
             slot_index=slot_index,
             item_id=match.item_id,
             kind=kind,
-            level=match.level,
+            level=None,
             confidence=match.confidence,
             reason=match.reason,
             roi_xyxy=roi_xyxy,
@@ -233,25 +227,11 @@ class ChoiceParser:
         w: int,
         h: int,
     ) -> tuple[ParsedButton, ...]:
-        """reroll/skip/banish ボタンの存在を前景量で判定する。
+        """実測済みのリロールボタンだけを読む。
 
-        ボタン領域に前景ピクセルが存在すれば available とみなします。
+        skip と banish の位置は未観測なので、有無も信頼できるとは扱いません。
         """
-        buttons: list[ParsedButton] = []
-        for btn_type, norm in BUTTON_ROIS.items():
-            roi = norm_to_pixels(norm, w, h)
-            crop = roi.crop(frame_bgra)
-            if crop.size == 0:
-                continue
-            fg_ratio = float(np.mean(crop[..., :3] >= 32))
-            if fg_ratio > 0.15:
-                buttons.append(ParsedButton(
-                    button_type=btn_type,
-                    confidence=min(1.0, fg_ratio * 2.0),
-                    reason=f"fg_ratio:{fg_ratio:.2f}",
-                    roi_xyxy=roi.as_xyxy(),
-                ))
-        return tuple(buttons)
+        return _color_button(frame_bgra, "reroll", layout.REROLL_BUTTON_ROI, layout.REROLL_BUTTON_INNER_ROI, classify_blue, "blue")
 
     def _parse_chest_buttons(
         self,
@@ -259,17 +239,19 @@ class ChoiceParser:
         w: int,
         h: int,
     ) -> tuple[ParsedButton, ...]:
-        """chest 確認ボタン (ack_chest) の存在を判定する。"""
-        roi = norm_to_pixels(CHEST_ACK_ROI, w, h)
-        crop = roi.crop(frame_bgra)
-        if crop.size == 0:
+        """下枠が縮んだ終了段階だけを ack_chest にする。
+
+        開くボタンを押すと既存契約では終了を別操作にできないため、長いパネルでは返しません。
+        """
+        if not horizontal_border_present(frame_bgra, (905, 925), layout.WINDOW_BORDER_X):
             return ()
-        fg_ratio = float(np.mean(crop[..., :3] >= 32))
-        if fg_ratio > 0.15:
-            return (ParsedButton(
-                button_type="ack_chest",
-                confidence=min(1.0, fg_ratio * 2.0),
-                reason=f"fg_ratio:{fg_ratio:.2f}",
-                roi_xyxy=roi.as_xyxy(),
-            ),)
-        return ()
+        return _color_button(frame_bgra, "ack_chest", layout.CHEST_ACK_BUTTON_ROI, layout.CHEST_ACK_INNER_ROI, classify_blue, "blue")
+
+    def _parse_confirm_button(self, frame, screen_state):
+        """死亡と結果の終了ボタンを confirm として観測する。
+
+        状態に応じて赤と青の内側を読み、controller の終端動作は変更しません。
+        """
+        if screen_state == "death":
+            return _color_button(frame, "confirm", layout.DEATH_CONFIRM_ROI, layout.DEATH_CONFIRM_INNER_ROI, classify_red, "red")
+        return _color_button(frame, "confirm", layout.RESULT_CONFIRM_ROI, layout.RESULT_CONFIRM_INNER_ROI, classify_blue, "blue")

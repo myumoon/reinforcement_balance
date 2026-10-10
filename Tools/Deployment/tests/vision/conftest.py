@@ -30,14 +30,17 @@ _DUMMY_BUILD_HASH = "b" * 64
 
 
 def _make_blank_frame() -> np.ndarray:
-    """全黒 BGRA フレームを返す。"""
+    """全黒 BGRA フレームを返す。
+
+    UI の枠やバーが一つもない不明画面の土台にします。
+    """
     return np.zeros((FRAME_H, FRAME_W, 4), dtype=np.uint8)
 
 
 def _make_gameplay_frame() -> np.ndarray:
     """gameplay 状態を模した合成フレームを返す。
 
-    HP バー領域 (赤) と XP バー領域 (青) を塗りつぶして HUD を再現します。
+    バーの中身に加え、実画面の上端 XP バーを挟む金枠二本を描きます。
     """
     frame = _make_blank_frame()
     # HP バー: y=33..56, 赤 (B=0, G=0, R=200)
@@ -52,43 +55,67 @@ def _make_gameplay_frame() -> np.ndarray:
     frame[xp_y0:xp_y1, :480, 1] = 0
     frame[xp_y0:xp_y1, :480, 2] = 0
     frame[xp_y0:xp_y1, :, 3] = 255
+    frame[1:4, 96:1824, :3] = (102, 203, 255)
+    frame[31:34, 96:1824, :3] = (102, 204, 255)
     return frame
 
 
-def _make_levelup_frame() -> np.ndarray:
-    """level_up 状態を模した合成フレームを返す (中央が暗いオーバーレイ)。"""
-    frame = _make_blank_frame()
-    # 全画面を暗い背景にする (HUD なし)
-    frame[..., :3] = 20
-    frame[..., 3] = 255
-    # カード領域に明るいパッチを配置 (3 枚カードレイアウト)
-    for card_x0, card_x1 in [(106, 662), (720, 1200), (1258, 1814)]:
-        frame[175:940, card_x0:card_x1, :3] = 80
-        frame[175:940, card_x0:card_x1, 3] = 255
+def _make_levelup_frame(count: int = 3, icons: tuple = ()) -> np.ndarray:
+    """実測位置に中央ウィンドウと縦積みカードを描く。
+
+    一枚から四枚までを同じ間隔で置き、指定した色や画像を左のアイコンへ入れます。
+    count が零の画像は、カードを持たない宝箱パネルにも使えます。
+    """
+    frame = _make_gameplay_frame()
+    gold = (102, 203, 255)
+    frame[111:965, 642:1278, :3] = gold
+    frame[117:959, 648:1272, :3] = (116, 79, 75)
+    for k, top in enumerate((267, 424, 581, 738)[:count]):
+        frame[top:top + 154, 656:1265, :3] = gold
+        frame[top + 6:top + 148, 662:1259, :3] = 134
+        icon = icons[k] if k < len(icons) else (0, 0, 0)
+        if isinstance(icon, np.ndarray):
+            ys = np.linspace(0, icon.shape[0] - 1, 55).astype(int)
+            xs = np.linspace(0, icon.shape[1] - 1, 51).astype(int)
+            frame[top + 13:top + 68, 669:720] = icon[ys[:, None], xs[None, :]]
+        else:
+            frame[top + 13:top + 68, 669:720, :3] = icon
     return frame
 
 
 @pytest.fixture
 def blank_frame() -> np.ndarray:
-    """全黒フレーム。"""
+    """全黒フレームを供給する。
+
+    検出できない場面で値を推測しないテストに使います。
+    """
     return _make_blank_frame()
 
 
 @pytest.fixture
 def gameplay_frame() -> np.ndarray:
-    """gameplay 合成フレーム。"""
+    """通常プレイの合成フレームを供給する。
+
+    HUD はあり、カードウィンドウはありません。
+    """
     return _make_gameplay_frame()
 
 
 @pytest.fixture
 def levelup_frame() -> np.ndarray:
-    """level_up 合成フレーム。"""
+    """三枚の選択肢がある合成フレームを供給する。
+
+    中央の金枠に、実画面と同じ縦並びの灰色カードを描きます。
+    """
     return _make_levelup_frame()
 
 
 @pytest.fixture
 def development_atlas_path(tmp_path: Path) -> Path:
-    """開発用合成 atlas を tmp_path に生成してパスを返す。"""
+    """開発用合成 atlas を一時ディレクトリに生成する。
+
+    本番用として使えない印を持つ JSON を fixture ごとに作ります。
+    """
     atlas_path = tmp_path / "dev_atlas.json"
     build_development_atlas(
         atlas_path,
@@ -100,11 +127,18 @@ def development_atlas_path(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def dev_atlas_manifest(development_atlas_path: Path) -> AtlasManifest:
-    """開発用 AtlasManifest を返す。"""
+    """生成した開発 atlas の読込結果を返す。
+
+    JSON の内容を照合器と同じ入口から読みます。
+    """
     from survivors.vision.icon_matcher import _load_manifest
     return _load_manifest(development_atlas_path)
 
 
 @pytest.fixture
 def dummy_parser_artifact_hash() -> str:
+    """テスト用の parser 識別子を返す。
+
+    実ファイルのハッシュとは区別できる固定値です。
+    """
     return "c" * 64

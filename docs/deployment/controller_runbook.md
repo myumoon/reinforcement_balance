@@ -78,6 +78,10 @@ python run_survivors_controller.py \
 
 ## 終了コード
 
+1920×1080 日本語 UI の画面判定を実測配置へ修正しました。宝箱演出は約21秒なので、既定 `chest_timeout` は60秒です。「開く」は操作候補に出さず、縮んだパネルの終了ボタンだけを押します。自動で開くかは未確認のため、次回録画で一度何も押さずに待ってください。手動が必要な仕様なら60秒で停止します。
+
+atlas がない、または card surface の template がない level-up ではカードが invalid になり、入力せず2秒で `level_up_timeout` に停止します。一時停止は入力なし・timeout なしで、再開時に段階格子の保持を持ち越しません。death／result の confirm は観測のみでクリックしません。終了は青い内側が .90 以上になるまで待ち、白字入りの定常ボタンを confidence 1.0 で返します。リロールは白字の面積が大きいため .85 以上で同じ信頼度を返します。既存 retry gate は .99 のままで、終了が初回クリック後200 ms以上残れば一度だけ再送できます。
+
 `run_survivors_controller.py` は `SurvivorsController.run()` の戻り値をそのまま
 プロセス終了コードにします(`controller.py` の `EXIT_*` 定数と
 `run_survivors_controller.py` の `EXIT_LIVE_REJECTED`)。

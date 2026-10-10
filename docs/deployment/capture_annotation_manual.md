@@ -193,7 +193,11 @@ python Tools/Deployment/annotate_survivors_hud_truth.py `
 
 #### 画面状態は必ず目視で確認する
 
-各 frame の先頭に「state は目視で確認」の注意が出ます。`expected_screen_state` は下書きを信用せず、必ず画像を見て確かめてください。level-up は左上パネルの段階マークの格子で判定します。過渡・宝箱などで判定が違う場合は、`--from-labels` または `set state level_up_items` で直してください。
+各 frame の先頭に「state は目視で確認」の注意が出ます。04-20／04-22 反映後は、実測した枠と色で level-up・chest・death・result・paused を判定し、card surface の atlas があれば `expected_choice` の下書きも入ります。それでも `expected_screen_state` とカード名は必ず画像で確かめてください。過渡などで状態が違う場合は、`--from-labels` または `set state <state>` で直してください。
+
+カードは上から順に記録します。一枚でも item_id が読めなければ choice 全体が null になるので、`set choice id1|id2|id3`（枚数に合わせる）で全カードを入れてください。所持欄の inventory template とカードの card template は別 entry です。atlas なしではカード枚数と位置だけが読め、名前の下書きは入りません。
+
+次の録画では宝箱で一度、何も押さずに待って自動で開くか確認してください。parser は契約上「開く」を ack_chest にせず、終了ボタンだけを返します。手動で開く必要がある場合、現 controller は60秒で停止します。
 
 #### コマンド早見表
 

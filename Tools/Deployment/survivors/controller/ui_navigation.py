@@ -99,7 +99,7 @@ class NavigationProfile:
     retry_after_ns: int = _DEFAULT_RETRY_AFTER_NS
     min_target_confidence: float = _MIN_TARGET_CONFIDENCE
     level_up_timeout_ns: int = 2_000_000_000
-    chest_timeout_ns: int = 5_000_000_000
+    chest_timeout_ns: int = 60_000_000_000
     unknown_timeout_ns: int = 1_000_000_000
     run_setup_timeout_ns: int = 15_000_000_000
     target_reached_timeout_ns: int = 5_000_000_000
@@ -146,12 +146,18 @@ class NavigationProfile:
 
     @classmethod
     def default_v1(cls) -> "NavigationProfile":
-        """コード内蔵の既定プロファイルを返す(YAML が無くても動く既定値)。"""
+        """内蔵の既定 profile を返す。
+
+        設定ファイルがなくても同じ timeout と retry の条件で起動できます。
+        """
         return cls()
 
     @classmethod
     def from_wire(cls, data: Mapping[str, Any]) -> "NavigationProfile":
-        """YAML から読み込んだ dict を検証して `NavigationProfile` を作る。"""
+        """YAML の辞書から navigation profile を構築する。
+
+        許される項目だけを読み、時間を内部の nanosecond 単位へ直して検証します。
+        """
         unknown = set(data) - _PROFILE_WIRE_KEYS
         if unknown:
             raise ValueError(f"unknown NavigationProfile fields: {sorted(unknown)}")
@@ -160,6 +166,10 @@ class NavigationProfile:
             raise ValueError("timeouts_ms must be a mapping")
 
         def _ms_to_ns(key: str, default_ns: int) -> int:
+            """設定の millisecond を nanosecond に変換する。
+
+            指定のない timeout は既定値を使い、設定と実行時刻の単位を揃えます。
+            """
             if key not in timeouts_ms:
                 return default_ns
             return int(timeouts_ms[key]) * 1_000_000
@@ -256,7 +266,10 @@ class ExecutionOutcome:
 
 
 def _roi_center(roi: NormalizedRoi) -> tuple[float, float]:
-    """ROI の中心座標(0.0〜1.0 正規化)を返す。"""
+    """正規化 ROI の中心を返す。
+
+    矩形の両端を平均し、クリック先の横・縦位置を求めます。
+    """
     return ((roi.left + roi.right) / 2.0, (roi.top + roi.bottom) / 2.0)
 
 
@@ -322,7 +335,10 @@ def choose_card(
     *,
     min_confidence: float = _MIN_TARGET_CONFIDENCE,
 ) -> UiCandidateTargetV1 | None:
-    """``choose_card`` intent を、target index と semantic_kind/candidate_set_hash が一致する候補へ解決する。"""
+    """カード選択 intent を対応候補へ解決する。
+
+    候補番号・種類・候補集合 hash が一致する target だけを返します。
+    """
     if intent.kind is not UiIntentKind.CHOOSE_CARD:
         return None
     target = _lookup_target(intent, presentation, min_confidence=min_confidence)
@@ -335,7 +351,10 @@ def choose_fallback(
     *,
     min_confidence: float = _MIN_TARGET_CONFIDENCE,
 ) -> UiCandidateTargetV1 | None:
-    """``choose_fallback`` intent を、target id/index と semantic_kind が一致する候補へ解決する。"""
+    """fallback 選択 intent を対応候補へ解決する。
+
+    gold や chicken の ID と番号が一致する target を探します。
+    """
     if intent.kind is not UiIntentKind.CHOOSE_FALLBACK:
         return None
     target = _lookup_target(intent, presentation, min_confidence=min_confidence)
@@ -348,7 +367,10 @@ def choose_button(
     *,
     min_confidence: float = _MIN_TARGET_CONFIDENCE,
 ) -> UiButtonTargetV1 | None:
-    """reroll/skip/banish/ack_chest/confirm intent を semantic/capability が一致するボタンへ解決する。"""
+    """ボタン intent を対応する操作へ解決する。
+
+    操作名と能力の有効性が一致したボタンだけを送信先にします。
+    """
     if intent.kind not in (
         UiIntentKind.REROLL,
         UiIntentKind.SKIP,
