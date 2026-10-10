@@ -67,6 +67,32 @@ HudStateV1(
 `IconMatcher.load_formal()` はこの atlas を `FormalLoaderRejectedError` で拒否します。
 正式 atlas は 04-05 で実ゲーム画像から生成します。
 
+## HUD truth（`hud_truth.v1`）
+
+parser の精度を測るための正解値です。capture session 配下の `hud_truth.jsonl` に 1 行 1 frame で保存します。`annotations.jsonl`（bbox）や X-AnyLabeling の label JSON とは別の file で、既存の annotation は読み書きしません。付け方は [`capture_annotation_manual.md`](capture_annotation_manual.md) の「2-7. HUD の正解値を付ける」を参照してください。
+
+- 実装: `survivors/vision/hud_truth.py`（record・検査・読み書き・下書き・行コマンド）、CLI は `Tools/Deployment/annotate_survivors_hud_truth.py`
+- 読み書き: `read_hud_truth(session_path)`／`write_hud_truth(session_path, records)`。`frame_id` の昇順で書き、重複した `frame_id` は `ValueError` になります。書き込みは一時 file → fsync → replace の順です。
+- 未知の key は読むときに `HudTruthRecord.extra` に入り、書き戻すときにそのまま残ります。
+
+| field | 型 | 内容 |
+|---|---|---|
+| `schema_version` | str | `"hud_truth.v1"` |
+| `session_id`／`frame_id` | str／int | 対象 frame |
+| `annotator_id` | str | 確認者 |
+| `confirmed`／`confirmed_at` | bool／ISO8601 または null | 人が確定したか、確定した時刻 |
+| `expected_screen_state` | str | `SCREEN_STATES` のいずれか |
+| `expected_timer_seconds`／`expected_level`／`expected_hp_ratio`／`expected_xp_ratio` | 数値または null | 読めない値は null |
+| `expected_items` | 12 個の str（item_id か `"empty_slot"`）または null | slot 0〜5 が武器、6〜11 がパッシブ。確定行では slot 単位の null を禁止し、1 slot でも読めなければ配列全体を null にします |
+| `expected_slot_levels` | 12 個の int または null、または全体が null | 段階マークの点灯数。`roi_layout.SLOT_LEVEL_VISIBLE_STATES`（`level_up_items`／`level_up_fallback`）の画面でだけ非 null にできます。item の slot は 1〜9、`empty_slot` の slot は null。`expected_items` が null なら必ず null |
+| `expected_choice` | str の配列または null | 画面の card の item_id（上から）。card は level-up 画面にしか出ないので、確定行では `level_up_items`／`level_up_fallback` 以外の state なら null にします |
+| `roi_name`／`expected_roi` | `"hud"`／`[l, t, r, b]` または null | HUD あり状態（gameplay／level_up_items／level_up_fallback／chest）では HP バー〜XP バーの矩形 `[0, 32, 1920, 75]`、HUD なし状態では null（負例）。state から自動で決まり、人は編集しません |
+| `draft_source` | object | 下書きを作った `parser_artifact_hash` と `atlas_content_hash`（atlas 無しは `"none"`） |
+
+規則は `validate_record(record)` だけにあり、CLI の行コマンドの受理判定、`write_hud_truth` の確定行チェック、test のすべてがこの関数を使います。確定していない下書きでは slot 単位の null を許します。
+
+`hud_calibration._validate_annotation` は `expected_slot_levels` を知らない field として無視します。ただし `expected_choice` は `str|None` として検査するので、`validate` へ渡すときは list を `|` 連結の str に変換します（04-14 の責務）。
+
 ## テスト実行
 
 ```bash

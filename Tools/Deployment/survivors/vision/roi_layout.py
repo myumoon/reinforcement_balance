@@ -46,6 +46,11 @@ INV_SLOT_ROIS: tuple[_N, ...] = tuple(
     for i in range(12)
 )
 
+# 段階マーク（アイコン下の小さな四角の列）が見える画面状態の集合
+# level-up 画面の左上パネルにだけ出る。gameplay・chest では出ないので、
+# HUD truth の expected_slot_levels はこの集合の画面でだけ非 null にできる。
+SLOT_LEVEL_VISIBLE_STATES: frozenset[str] = frozenset({"level_up_items", "level_up_fallback"})
+
 # レベルアップカード (最大 4 枚) – 3 枚と 4 枚で位置が変わる
 # 3 枚レイアウト: 等間隔 3 分割
 _CARD3_ROIS: tuple[_N, ...] = (
