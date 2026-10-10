@@ -2021,10 +2021,12 @@ class TestMeasuredModalReplay:
 
         retry の信頼度を手入力せず、フェード中に候補が消えることも同じ入口で確認します。
         """
-        from ..vision.conftest import _make_levelup_frame
+        import numpy as np
         from survivors.vision.hud_parser import HudParser
         from survivors.perception_snapshot import build_ui_presentation_from_hud
-        frame = _make_levelup_frame(0)
+        frame = np.zeros((1080, 1920, 4), dtype=np.uint8)
+        frame[111:965, 642:1278, :3] = (102, 203, 255)
+        frame[117:959, 648:1272, :3] = (116, 79, 75)
         frame[835:902, 822:1098, :3] = (205, 64, 39)
         frame[858:874, 920:1000, :3] = 255
         if fading:
