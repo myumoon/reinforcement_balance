@@ -12,3 +12,4 @@ Claude の Bash ツールで長い quoted heredoc (cat >> file <<'EOF') が 'une
 PowerShell の Start-Process で Python をバックグラウンド実行する場合も `-X utf8` を付ける。PYTHONUTF8 は既存シェルから自動で引き継がれるとは限らず、リダイレクトした日本語ログが CP932 になる。
 Codex の通常 sandbox で exec_command が `helper_unknown_error: setup refresh had errors` により起動できない場合は、読み取り確認にも require_escalated が必要になる。PowerShell で日本語 JSON を読むときは Get-Content -Encoding UTF8 と UTF-8 の Console.OutputEncoding を明示する。
 Windows PowerShell の native `python -c '..."key"...'` は内部の二重引用符が落ちることがある。Python 内の文字列は単引用符にし、PowerShell 側を二重引用符で包むか scratch script を使う。
+- 2026-10-11: Deployment の controller test は単独実行時に controller が top-level package になるため `..vision.conftest` は ImportError。vision fixture を相対 import せず、必要な合成画素を対象 test 内で描く。
