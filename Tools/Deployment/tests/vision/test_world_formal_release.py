@@ -955,7 +955,8 @@ def _formal_preflight_inputs(tmp_path, *, mutation: str | None = None) -> dict:
     freezer.assign("model_train", ["train"])
     freezer.assign("model_validation", ["validation-0", "validation-1", "validation-2"])
     freezer.assign("error_calibration", ["sealed"])
-    split_path = freezer.freeze().path
+    freezer.freeze()
+    split_path = freezer.manifest_path
     if mutation == "unfrozen-split":
         split_wire = json.loads(split_path.read_text(encoding="utf-8"))
         split_wire["frozen"] = False
@@ -1233,7 +1234,13 @@ def test_formal_error_ci_gates_fail_on_session_concentrated_false_positives(tmp_
         threshold_rule={"kind": "max_mean_recall_subject_to_precision", "precision_floor": 0.8, "candidates": [0.5]},
     )
 
-    assert verdict.metrics["instance_pooled_recall"] >= 0.8
+    total_ground_truth = sum(len(items) for items in annotations_by_session.values())
+    total_predictions = sum(
+        len(frame["scores"])
+        for frames in detections_by_session.values()
+        for frame in frames
+    )
+    assert total_ground_truth / total_predictions >= 0.8
     assert verdict.gates["thresholds"]["density_error_ci_upper_max"] == 0.20
     assert verdict.gates["thresholds"]["nearest_distance_error_ci_upper_max"] == 0.04
     assert verdict.gates["results"]["density_error_ci"]["passed"] is False
