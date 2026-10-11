@@ -375,7 +375,7 @@ def _check_minimum_counts(
     counts = _slice_counts(records)
     for category in ("time_bands", "screen_states", "card_counts", "item_classes", "buttons"):
         requirements = minimum_counts[category]
-        if not isinstance(requirements, Mapping) or not requirements:
+        if not isinstance(requirements, Mapping) or (category != "buttons" and not requirements):
             raise FormalPreflightError(f"minimum_counts.{category} must be a non-empty mapping")
         if any(not isinstance(selector, str) for selector in requirements):
             raise FormalPreflightError(f"minimum_counts.{category} keys must be strings")
@@ -685,6 +685,63 @@ def _session_frames(value: object) -> tuple[Path, Mapping[int, Any]]:
     return session_path, records
 
 
+def _validate_formal_inputs(
+    frames_by_session: Mapping[str, object],
+    truth: Sequence[object],
+    preflight: PreflightReport,
+    split_name: str,
+) -> None:
+    """formal atlas／予測の session と truth を preflight identity に結び付ける。
+
+後段へ渡す値が preflight 後に差し替わっていないことを同じ入口条件で確認します。
+    """
+    if not isinstance(preflight, PreflightReport):
+        raise FormalPreflightError("formal inputs require a PreflightReport")
+    try:
+        preflight = PreflightReport.from_wire(preflight.to_wire())
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise FormalPreflightError("invalid formal preflight report") from exc
+    if split_name == "model_train":
+        expected_sessions = preflight.train_sessions
+        expected_count = preflight.train_record_count
+        expected_hash = preflight.train_truth_canonical_hash
+    elif split_name == "model_validation":
+        expected_sessions = preflight.validation_sessions
+        expected_count = preflight.validation_record_count
+        expected_hash = preflight.validation_truth_canonical_hash
+    else:
+        raise FormalPreflightError(f"invalid formal split: {split_name}")
+    expected_session_set = set(expected_sessions)
+    if (
+        len(expected_session_set) != len(expected_sessions)
+        or set(frames_by_session) != expected_session_set
+    ):
+        raise FormalPreflightError(f"{split_name} sessions differ from preflight")
+    frame_ids: dict[str, set[int]] = {}
+    for session_id, manifest in frames_by_session.items():
+        if (
+            getattr(manifest, "session_id", None) != session_id
+            or getattr(manifest, "formal_dataset_eligible", None) is not True
+            or getattr(manifest, "pixel_source", None) != "lossless_png"
+            or getattr(manifest, "target_profile_hash", None) != preflight.target_profile_hash
+            or getattr(manifest, "game_build_id", None) != preflight.game_build_id
+        ):
+            raise FormalPreflightError(f"session is not eligible for this formal build: {session_id}")
+        _, records = _session_frames(manifest)
+        if len(records) != len(manifest.frame_records):
+            raise FormalPreflightError(f"session contains duplicate frame ids: {session_id}")
+        frame_ids[session_id] = set(records)
+    confirmed = [record for record in truth if _value(record, "confirmed") is True]
+    keys = [(_value(record, "session_id"), _value(record, "frame_id")) for record in confirmed]
+    if (
+        len(confirmed) != expected_count
+        or len(set(keys)) != len(keys)
+        or any(session_id not in expected_session_set or frame_id not in frame_ids[session_id] for session_id, frame_id in keys)
+        or canonical_hash(sorted((_wire(record) for record in confirmed), key=lambda item: (item["session_id"], item["frame_id"]))) != expected_hash
+    ):
+        raise FormalPreflightError(f"{split_name} truth changed after preflight")
+
+
 def _frame(session: object, frame_id: int, cache: dict[tuple[str, int], np.ndarray]) -> tuple[np.ndarray, Any]:
     """必要 frame を一度だけ decode し、隣接処理で共有する。
 
@@ -705,6 +762,7 @@ def build_formal_atlas(
     train_frames_by_session: Mapping[str, object],
     train_truth: Sequence[object],
     vocabulary_path: str | Path,
+    preflight: PreflightReport,
     profile_hash: str,
     build_hash: str,
     min_crops: int = 3,
@@ -716,6 +774,9 @@ def build_formal_atlas(
     """
     if type(min_crops) is not int or min_crops < 1:
         raise FormalAtlasError("min_crops must be a positive integer")
+    _validate_formal_inputs(train_frames_by_session, train_truth, preflight, "model_train")
+    if profile_hash != preflight.target_profile_hash or build_hash != preflight.game_build_id:
+        raise FormalPreflightError("formal atlas profile/build differs from preflight")
     vocabulary, empty_slot = _load_vocabulary(vocabulary_path)
     grouped: dict[tuple[str, str], list[np.ndarray]] = defaultdict(list)
     frame_hashes: dict[tuple[str, str], set[str]] = defaultdict(set)
@@ -801,6 +862,7 @@ def predict_validation_records(
     validation_frames_by_session: Mapping[str, object],
     validation_truth: Sequence[object],
     atlas: IconMatcher,
+    preflight: PreflightReport,
 ) -> list[dict[str, Any]]:
     """HudParser を session ごとに reset し、truth と独立した予測値を追加する。
 
@@ -808,6 +870,12 @@ def predict_validation_records(
     """
     if not isinstance(atlas, IconMatcher) or atlas.manifest.development_only or not atlas.manifest.formal_parser_eligible:
         raise FormalAtlasError("prediction requires a formal icon atlas")
+    _validate_formal_inputs(validation_frames_by_session, validation_truth, preflight, "model_validation")
+    if (
+        atlas.manifest.profile_hash != preflight.target_profile_hash
+        or atlas.manifest.build_hash != preflight.game_build_id
+    ):
+        raise FormalPreflightError("formal prediction atlas profile/build differs from preflight")
     records_by_session: dict[str, list[object]] = defaultdict(list)
     for truth in validation_truth:
         if _value(truth, "confirmed") is True:
@@ -1257,8 +1325,18 @@ def publish_formal_parser_artifact(
         ):
             raise FormalAtlasError(f"invalid provenance for {item_id}")
     package = PackageLoader.load_formal(package_path)
-    if package.meta.atlas_content_hash != formal_report.atlas_content_hash:
-        raise FormalPreflightError("package and formal report atlas hashes differ")
+    package_report = package.formal_validation_report
+    package_preflight = package.preflight_report
+    if (
+        package.meta.preflight_canonical_hash != preflight.preflight_canonical_hash
+        or package.meta.formal_report_canonical_hash != formal_report.formal_report_canonical_hash
+        or package_report.to_wire() != formal_report.to_wire()
+        or package_preflight.to_wire() != preflight.to_wire()
+        or dict(package_report.code_hashes) != dict(preflight.code_hashes)
+        or dict(package_preflight.code_hashes) != dict(preflight.code_hashes)
+        or package.meta.atlas_content_hash != formal_report.atlas_content_hash
+    ):
+        raise FormalPreflightError("package does not match the formal report/preflight")
     package_hash = package.meta.package_hash
     package_bytes = Path(package_path).read_bytes()
     package_sha = _sha256(package_bytes)
