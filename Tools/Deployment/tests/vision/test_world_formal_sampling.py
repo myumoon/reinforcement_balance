@@ -1,4 +1,4 @@
-"""正式学習用 sampler と画像変換の回帰テスト。"""
+"""正式 sampler、loss weighting、画像変換の回帰を検証する。\n\nsession balance と augmentation の edge case を小さな fixture で固定する。"""
 
 from __future__ import annotations
 
@@ -100,6 +100,7 @@ def test_weighted_loss_changes_classification_without_changing_state_dict() -> N
     torch = pytest.importorskip("torch")
 
     class FakeSSD(torch.nn.Module):
+        """weighted loss の境界だけを再現する小さな SSD model。\n\nstate_dict key を固定し torchvision の重い detector 構築を避ける。"""
         def __init__(self):
             """state_dict の比較に使う単一 parameter を持つ。
 
@@ -145,12 +146,12 @@ def test_augmentation_drops_zero_area_boxes_and_their_labels() -> None:
     片方の box が残っても元の label 対応を保つ。
     """
     class FixedRng:
-        """scale を最大に固定するテスト用乱数源。"""
+        """scale jitter の上限を再現する固定乱数源。\n\nbox が画面外へ出る境界を毎回同じ値でテストする。"""
         def random(self):
-            """水平反転を発生させない。"""
+            """水平反転を発生させない値を返す。\n\nこの test では box 切詰めの挙動だけを観測する。"""
             return 0.9
         def uniform(self, _low, _high):
-            """scale を 1.5 に固定する。"""
+            """scale jitter を上限 1.5 に固定する。\n\n一つの box を画像外へ押し出す再現可能な入力にする。"""
             return 1.5
 
     image = np.zeros((100, 100, 3), dtype=np.uint8)
