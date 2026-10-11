@@ -26,7 +26,7 @@ from survivors.vision.hud_calibration import (
 )
 from survivors.vision.hud_formal_release import PreflightReport, validate_formal
 from survivors.vision.hud_parser import HUD_STATE_SCHEMA_VERSION, INV_SLOT_COUNT, HudStateV1, _compute_candidate_set_hash
-from survivors.vision.icon_matcher import AtlasManifest, TemplateEntry
+from survivors.vision.icon_matcher import AtlasManifest, TemplateEntry, serialize_manifest
 from survivors.vision.world_detector import DetectionResult
 from survivors.vision.world_detector_package import (
     PACKAGE_SCHEMA_VERSION,
@@ -269,8 +269,12 @@ def test_formal_predictor_returns_normalized_prediction_and_package_hashes(monke
     import survivors.formal_perception_provider as provider
 
     package = _restored_packages(DEFAULT_CLASS_MAP_PATH.read_bytes())
-    monkeypatch.setattr(provider.PackageLoader, "load_formal", lambda _path: SimpleNamespace(package_hash=PARSER_HASH))
-    monkeypatch.setattr(provider.IconMatcher, "load_formal", lambda _path: object())
+    parser_package = SimpleNamespace(
+        package_hash=PARSER_HASH, meta=SimpleNamespace(atlas_content_hash="a" * 64),
+    )
+    icon_matcher = SimpleNamespace(manifest=parser_package.meta)
+    monkeypatch.setattr(provider.PackageLoader, "load_formal", lambda _path: parser_package)
+    monkeypatch.setattr(provider.IconMatcher, "load_formal", lambda _path: icon_matcher)
     detector = _FixtureDetector()
     class_map = default_class_map()
     tracker = EntityTracker(
@@ -308,11 +312,17 @@ def test_formal_predictor_loads_actual_formal_parser_package(tmp_path: Path, mon
     parser_path = tmp_path / "published-formal-parser.json"
     parser_path.write_bytes(parser_bytes)
     parser_hash = hashlib.sha256(parser_bytes).hexdigest()
-    assert PackageLoader.load_formal(parser_path).package_hash != parser_hash
+    parser_package = PackageLoader.load_formal(parser_path)
+    assert parser_package.package_hash != parser_hash
     package = _restored_packages(
         DEFAULT_CLASS_MAP_PATH.read_bytes(), parser_bytes=parser_bytes,
     )
-    monkeypatch.setattr(provider.IconMatcher, "load_formal", lambda _path: object())
+    monkeypatch.setattr(
+        provider.IconMatcher, "load_formal",
+        lambda _path: SimpleNamespace(
+            manifest=SimpleNamespace(atlas_content_hash=parser_package.meta.atlas_content_hash),
+        ),
+    )
     detector = _FixtureDetector()
     class_map = default_class_map()
     tracker = EntityTracker(
@@ -358,9 +368,14 @@ def test_formal_predictor_rejects_detector_manifest_file_hash_mismatch(monkeypat
     import survivors.formal_perception_provider as provider
     monkeypatch.setattr(
         provider.PackageLoader, "load_formal",
-        lambda _path: SimpleNamespace(package_hash=PARSER_HASH),
+        lambda _path: SimpleNamespace(
+            package_hash=PARSER_HASH, meta=SimpleNamespace(atlas_content_hash="a" * 64),
+        ),
     )
-    monkeypatch.setattr(provider.IconMatcher, "load_formal", lambda _path: object())
+    monkeypatch.setattr(
+        provider.IconMatcher, "load_formal",
+        lambda _path: SimpleNamespace(manifest=SimpleNamespace(atlas_content_hash="a" * 64)),
+    )
     with pytest.raises(ValueError, match="detector manifest file hash"):
         build_formal_predictor(package)
 
@@ -379,17 +394,22 @@ def test_formal_predictor_rejects_detector_model_hash_mismatch(monkeypatch) -> N
     import survivors.formal_perception_provider as provider
     monkeypatch.setattr(
         provider.PackageLoader, "load_formal",
-        lambda _path: SimpleNamespace(package_hash=PARSER_HASH),
+        lambda _path: SimpleNamespace(
+            package_hash=PARSER_HASH, meta=SimpleNamespace(atlas_content_hash="a" * 64),
+        ),
     )
-    monkeypatch.setattr(provider.IconMatcher, "load_formal", lambda _path: object())
+    monkeypatch.setattr(
+        provider.IconMatcher, "load_formal",
+        lambda _path: SimpleNamespace(manifest=SimpleNamespace(atlas_content_hash="a" * 64)),
+    )
     with pytest.raises(ValueError, match="model_hash"):
         build_formal_predictor(package)
 
 
 def test_formal_predictor_uses_formal_parser_loader(monkeypatch) -> None:
-    """development parser package rejection propagates from strict formal loader.
+    """開発用 parser package は strict formal loader で拒否される。
 
-    formal boundary must not silently fall back to a development parser or atlas.
+    formal 経路が開発用 parser や atlas へ黙って fallback しないことを確認する。
     """
     import survivors.formal_perception_provider as provider
 
@@ -399,6 +419,44 @@ def test_formal_predictor_uses_formal_parser_loader(monkeypatch) -> None:
         lambda _path: (_ for _ in ()).throw(FormalPackageMixingError("development package")),
     )
     with pytest.raises(FormalPackageMixingError):
+        build_formal_predictor(package)
+
+
+def test_formal_predictor_rejects_atlas_from_another_formal_package(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """別の正式 atlas が parser package の lineage と異なれば拒否する。
+
+    有効な parser package に異なる atlas hash を持つ正式 manifest を差し込み、provider 境界を試す。
+    """
+    import survivors.formal_perception_provider as provider
+
+    parser_bytes = _formal_parser_package_bytes(tmp_path)
+    parser_path = tmp_path / "parser.json"
+    parser_path.write_bytes(parser_bytes)
+    parser_package = PackageLoader.load_formal(parser_path)
+    expected_atlas_hash = parser_package.meta.atlas_content_hash
+    other_atlas_hash = "0" * 64 if expected_atlas_hash != "0" * 64 else "1" * 64
+    package = _restored_packages(
+        DEFAULT_CLASS_MAP_PATH.read_bytes(), parser_bytes=parser_bytes,
+    )
+    package["parser_package"].files["atlas.json"] = serialize_manifest(
+        AtlasManifest("icon_atlas.v1", "a" * 64, "b" * 64, False, True, other_atlas_hash, ()),
+    )
+    class_map = default_class_map()
+    tracker = EntityTracker(
+        {}, 0.7, 0.6, 0.9,
+        coarse_by_class_id=class_map.coarse_by_class_id(),
+    )
+    monkeypatch.setattr(
+        provider, "load_formal_detector",
+        lambda _path: (
+            _FixtureDetector(), tracker,
+            SimpleNamespace(score_threshold=0.2, model_hash=MODEL_HASH),
+        ),
+    )
+    monkeypatch.setattr(provider, "HudParser", _FixtureHudParser)
+    with pytest.raises(ValueError, match="atlas_content_hash"):
         build_formal_predictor(package)
 
 
