@@ -67,13 +67,21 @@ calibration 残差（`_derive_calibration_residuals`）の両方に使います�
 
 ## Formal provider と ground truth loader
 
-`survivors.formal_perception_provider.build_formal_predictor` は formal parser／detector package だけを復元し、frame ごとに HUD parse、world detection、tracking、`RealObsAssembler` を実行します。予測 provider は annotation、HUD truth、COCO label を読みません。現行 runner は session 開始時に `reset()` を必須呼び出しします。評価窓の境界 reset は、04-18 の窓評価を導入する際に同じ API から呼びます。
+`survivors.formal_perception_provider.build_formal_predictor` は formal parser／detector package だけを復元し、frame ごとに HUD parse、world detection、tracking、`RealObsAssembler` を実行します。予測 provider は annotation、HUD truth、COCO label を読みません。runner は各評価窓の先頭で `reset()` を必須呼び出しし、窓をまたぐ temporal state を持ち越しません。
 
 `survivors.formal_annotation_loader.build_ground_truth_loader` は descriptor で検証した `hud_truth.jsonl`、`frames.jsonl`、session 単位の COCO bytes を index 化し、要求された frame だけを読みます。`formal_ground_truth.ground_truth_snapshot` が HUD truth と COCO box から状態を持たない 1 frame の snapshot を作り、provider と同じ ID 正規化・assembler 規則に通します。`build_survivors_formal_annotations.py` もこの関数を使うため、`annotations.jsonl` の semantic hash と loader の snapshot hash、inventory／candidate hash、foreground／slice diagnostics は一致します。annotation は formal dataset publish の前に生成します。
 
 GT `item_context` の level-up screen はその frame の label box から作ります。runtime provider は直前の gameplay world を level-up context に使うため、時間的な意味は異なります。gameplay の boss／hazard event は visible な label box の rising edge で数え、継続表示中は 1 occurrence、消失後の再出現は次の occurrence になります。foreground entity は frame-local box 単位なので、entity floor は box 出現数で満たされます。
 
 Benchmark の入力は stride 3（約 10 Hz）で評価され、runtime の 30 fps 推論とは時間条件が異なります。gameplay の `event:boss`／`event:hazard` は GT と prediction の存在一致を使い、位置精度は foreground class slice が評価します。
+
+## 事前登録した評価窓（04-18）
+
+formal `error_calibration`／`final_e2e_test` の expected tick は、capture descriptor の `identity_metadata.evaluation_windows` に束縛された `evaluation_windows.v1` の窓内だけです。各窓では plan の `stride` で frame を間引き、窓外 frame は expected tick、invalid tick、遷移残差に含めません。窓内で HUD truth または COCO label が欠けた frame は従来どおり invalid tick になります。
+
+窓は時間帯ごとの固定 offset、run tail、development parser の state rising edge、development world detector の boss rising edge から規則で作ります。sealed session の内容を見て手動で窓を選びません。評価結果が示すのは session 全体ではなく事前登録窓内の性能です。窓 plan と `formal_gates.v1` YAML の bytes hash は capture descriptor と metrics の両方に束縛され、gate 再計算時にも照合します。gate の既定 floor は変更せず、世代固有値は descriptor で指定された YAML を使います。
+
+annotation 前に `plan_survivors_evaluation_windows.py` で plan を生成して session log と artifact store に保管します。`check_survivors_evaluation_coverage.py` は同じ `ground_truth_snapshot`／`slice_counts_for_snapshot` helper で窓内 floor を集計し、不足 frame と slice を表示します。
 
 ## CLI
 

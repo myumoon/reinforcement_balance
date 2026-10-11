@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 
 from Tools.Artifacts.artifact_store import ArtifactStore
 from build_survivors_formal_annotations import main as build_formal_annotations
@@ -34,7 +35,13 @@ from reinbalance_survivors_contracts.canonical_json import canonical_hash, canon
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from survivors.capture.captured_frame import CapturedFrame
 from survivors.capture_dataset import DatasetWriter, SplitFreezer
-from survivors.formal_ground_truth import hud_state_from_truth, normalize_snapshot_ids
+from survivors.evaluation_windows import EvaluationWindowPlan
+from survivors.formal_ground_truth import (
+    coco_image_entries_from_wire,
+    ground_truth_snapshot,
+    hud_state_from_truth,
+    normalize_snapshot_ids,
+)
 from survivors.perception_benchmark import (
     SnapshotReplayTick,
     _foreground_classification_values,
@@ -52,6 +59,8 @@ from survivors.perception_error_fit import (
     _create_formal_lineage_seal,
     _load_formal_verdict_from_verified_store,
 )
+from survivors.vision.entity_tracker import default_class_map
+from survivors.vision.hud_truth import read_hud_truth
 from survivors.perception_session_split import SessionRecord, SessionSplit, validate_split
 from survivors.perception_snapshot import FormalReplayEvidence
 from survivors.real_obs_assembler import RealObsAssembler
@@ -764,12 +773,72 @@ def _request(tmp_path: Path, *, formal_inputs: bool = False):
         "frames_logical_id": model_frames.logical_id,
         "frames_sha256": model_frames.sha256,
     }
+    gates_path = Path(__file__).resolve().parents[1] / "configs" / "formal_gates_minimal_v1.yaml"
+    gates_values = yaml.safe_load(gates_path.read_text(encoding="utf-8"))
+    gates_values["slice_count_floors"] = {
+        name: 2 for name in gates_values["slice_count_floors"]
+    }
+    gates_values["slice_session_floors"] = {
+        name: 0 for name in gates_values["slice_session_floors"]
+    }
+    gates_values["occurrence_dependent_slices"] = sorted(
+        name for name in gates_values["slice_count_floors"]
+        if name != "foreground_class:enemy_boss"
+    )
+    gates_bytes = yaml.safe_dump(gates_values, sort_keys=True).encode("utf-8")
+    gates_ref = store.put_bytes(
+        logical_id="fixtures/capture/formal_gates_test_v1.yaml",
+        data=gates_bytes, media_type="application/yaml",
+    )
+    capture_refs.append(gates_ref)
+    windows_sessions = {
+        session_id: [[0, DatasetWriter.restore(capture_root, session_id, metadata_only=True).frame_count - 1]]
+        for session_id in session_ids
+    }
+    windows_rule = {
+        "fixed_offsets_per_time_band": {
+            "window_frames": 900,
+            "offsets_seconds": {"early": 60, "mid": 900, "late": 1620},
+        },
+        "run_tail": {"seconds": 90},
+        "event_windows": {
+            "detector": "development_hud_parser",
+            "states": ["level_up_items", "level_up_fallback", "chest"],
+            "pre_frames": 60, "post_frames": 120, "max_per_band": 4,
+            "parser_artifact_hash": parser_hash,
+        },
+        "boss_windows": {
+            "detector": "development_world_detector",
+            "checkpoint_hash": model_hash, "score_threshold": 0.35,
+            "pre_frames": 60, "post_frames": 300, "max_per_session": 8,
+        },
+    }
+    windows_plan = EvaluationWindowPlan.create(
+        windows_sessions, rule=windows_rule, stride=1,
+        generated_at_utc="2026-10-11T00:00:00Z",
+    )
+    windows_ref = store.put_bytes(
+        logical_id="fixtures/capture/evaluation_windows.json",
+        data=canonical_json_bytes(windows_plan.to_wire()), media_type="application/json",
+    )
+    capture_refs.append(windows_ref)
     capture_manifest = capture_refs[0]
     capture_descriptor = ArtifactDescriptor(
         logical_id="fixtures/capture", node_kind="source_descriptor",
         producer_id="pytest", producer_version="v1",
         identity_metadata={
             "manifest_logical_id": capture_manifest.logical_id, **bindings,
+            "formal_gates": {
+                "logical_id": gates_ref.logical_id,
+                "sha256": gates_ref.sha256,
+                "schema_version": "formal_gates.v1",
+            },
+            "evaluation_windows": {
+                "sessions": windows_plan.to_wire()["sessions"],
+                "stride": windows_plan.stride,
+                "plan_canonical_hash": windows_plan.plan_canonical_hash,
+            },
+            "evaluation_windows_hash": windows_ref.sha256,
         }, files=tuple(capture_refs),
     )
     descriptors["capture_dataset"] = capture_descriptor
@@ -986,6 +1055,100 @@ def test_formal_predictor_cannot_return_ground_truth_residual_or_evidence(
 
     with pytest.raises(TypeError, match="prediction, latency_ms"):
         module._unpack_prediction_result((None, None, 1.0, FormalReplayEvidence((), ())))
+
+
+def test_replay_uses_registered_windows_and_keeps_missing_window_gt_expected(tmp_path: Path) -> None:
+    """registered window だけを expected tick にし、窓内 GT 欠損は期待母集団に残す。
+    窓外 frame を除外しつつ window ごとの predictor reset を確認する。
+    """
+    parser_hash = "9" * 64
+    capture_root, _split = _capture_fixture(
+        tmp_path, parser_hash, include_formal_truth=True,
+    )
+    manifest = DatasetWriter.restore(capture_root, "cal-0", metadata_only=True)
+    truth_rows = {row.frame_id: row for row in read_hud_truth(manifest.session_path)}
+    coco = coco_image_entries_from_wire(
+        json.loads((capture_root / "fixture-coco" / "cal-0" / "world_coco.json").read_text("utf-8")),
+        session_id="cal-0",
+    )
+    class_map = default_class_map()
+
+    class GroundTruthLoader:
+        """frame 1 のみ GT を返す test loader。
+        窓内 frame 2 を欠損させ、expected tick の扱いを分けて確認する。
+        """
+
+        def load_frame(self, _frame, session_id: str, frame_index: int):
+            """選択 frame 1 の GT snapshot だけを生成する。
+            ほかの frame は ground truth が無い状態を返す。
+            """
+            if frame_index != 1:
+                return None
+            return ground_truth_snapshot(
+                truth_rows[frame_index], coco[frame_index], manifest.frame_records[frame_index],
+                parser_artifact_hash=parser_hash, session_id=session_id,
+                class_map=class_map,
+            )
+
+    class Predictor:
+        """reset 回数を記録する prediction-only provider。
+        全 frame で prediction missing を返し ground truth 混入を防ぐ。
+        """
+
+        resets = 0
+
+        def reset(self) -> None:
+            """window 開始時の reset 回数を記録する。
+            test では provider state 自体は持たない。
+            """
+            self.resets += 1
+
+        def predict_frame(self, *_args):
+            """prediction missing を返し expected tick の母集団だけ確認する。
+            GT snapshot を prediction path に渡さない。
+            """
+            return None, 0.0
+
+    rule = {
+        "fixed_offsets_per_time_band": {
+            "window_frames": 900,
+            "offsets_seconds": {"early": 60, "mid": 900, "late": 1620},
+        },
+        "run_tail": {"seconds": 90},
+        "event_windows": {
+            "detector": "development_hud_parser",
+            "states": ["level_up_items", "level_up_fallback", "chest"],
+            "pre_frames": 60, "post_frames": 120, "max_per_band": 4,
+            "parser_artifact_hash": parser_hash,
+        },
+        "boss_windows": {
+            "detector": "development_world_detector",
+            "checkpoint_hash": "8" * 64, "score_threshold": 0.5,
+            "pre_frames": 60, "post_frames": 300, "max_per_session": 8,
+        },
+    }
+    plan = EvaluationWindowPlan.create(
+        {"cal-0": [(1, 2), (3, 3)]}, rule=rule, stride=1,
+        generated_at_utc="2026-10-11T00:00:00Z",
+    )
+    ground = ground_truth_snapshot(
+        truth_rows[1], coco[1], manifest.frame_records[1],
+        parser_artifact_hash=parser_hash, session_id="cal-0", class_map=class_map,
+    )
+    assert ground is not None
+    predictor = Predictor()
+    ticks, expected, _evidence = _replay_sessions(
+        (manifest,),
+        {"cal-0": SimpleNamespace(kind="error_calibration", source_policy="raw")},
+        predictor, GroundTruthLoader(),
+        {("cal-0", 1): (object(), _ground_truth_semantic_hash(ground))},
+        parser_hash=parser_hash, detector_hash="7" * 64,
+        evaluation_plan=plan,
+    )
+
+    assert [tick.frame_id for tick in expected] == ["cal-0:1", "cal-0:2", "cal-0:3"]
+    assert [tick.frame_id for tick in ticks] == ["cal-0:1"]
+    assert predictor.resets == 2
 
 
 def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path, monkeypatch) -> None:

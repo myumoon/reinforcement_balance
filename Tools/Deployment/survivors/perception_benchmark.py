@@ -27,6 +27,7 @@ from .perception_snapshot import (
     _quantized_target,
     is_equivalent_ui_target,
 )
+from .formal_gates import FormalGates, formal_gates_from_metrics
 
 FieldKind = Literal[
     "screen_state",
@@ -209,17 +210,44 @@ def obs_v2_residuals(ground: DeployObservation, predicted: DeployObservation) ->
     return out
 
 
-def formal_absent_slices(slice_counts: Mapping[str, int]) -> dict[str, int]:
+def formal_absent_slices(
+    slice_counts: Mapping[str, int], gates: FormalGates | None = None,
+) -> dict[str, int]:
     """出現数依存 slice のうち、実測の出現数が下限未満のものを slice 名 → 出現数で返す。
 
     ここで返した slice だけが「該当なし」として正式判定の必須条件から外れます。
     出現数は slice_counts の実測値をそのまま使い、推測や下限の変更はしません。
     """
+    occurrence_dependent = (
+        set(gates.occurrence_dependent_slices)
+        if gates is not None else _FORMAL_OCCURRENCE_DEPENDENT_SLICES
+    )
+    floors = gates.slice_count_floors if gates is not None else _FORMAL_SLICE_COUNT_FLOORS
     return {
         name: int(slice_counts.get(name, 0))
-        for name in sorted(_FORMAL_OCCURRENCE_DEPENDENT_SLICES)
-        if slice_counts.get(name, 0) < _FORMAL_SLICE_COUNT_FLOORS[name]
+        for name in sorted(occurrence_dependent)
+        if slice_counts.get(name, 0) < floors[name]
     }
+
+
+def formal_skipped_bands(metrics: Mapping[str, Any]) -> tuple[str, ...]:
+    """reached_only のとき session floor 未達で判定しない time band を算出する。
+
+    skipped 判定は保存済みフラグを信用せず、slice session count と gates から導出する。
+    """
+    wire = metrics.get("formal_gates")
+    if wire is None:
+        return ()
+    gates = formal_gates_from_metrics(wire)
+    if gates.band_floor_mode != "reached_only":
+        return ()
+    counts = metrics.get("slice_session_counts")
+    if not isinstance(counts, Mapping):
+        raise ValueError("slice_session_counts must be a mapping")
+    return tuple(sorted(
+        name for name, floor in gates.slice_session_floors.items()
+        if counts.get(name, 0) < floor
+    ))
 _NAMED_SLICE_PREFIXES: Final[frozenset[str]] = frozenset(
     {"screen_state", "time_band", "foreground_class", "event"}
 )
@@ -386,10 +414,13 @@ class SnapshotReplayTick:
     ground_truth: PerceptionSnapshot
     predicted: PerceptionSnapshot | None
     latency_ms: float
+    evaluation_window_id: str = ""
 
     def __post_init__(self) -> None:
         _nonempty_str(self.session_id, "SnapshotReplayTick.session_id")
         _nonempty_str(self.frame_id, "SnapshotReplayTick.frame_id")
+        if type(self.evaluation_window_id) is not str:
+            raise ValueError("SnapshotReplayTick.evaluation_window_id must be a string")
         if self.session_kind not in _SESSION_KINDS:
             raise ValueError("unsupported SnapshotReplayTick.session_kind")
         if self.source_policy not in _SOURCE_POLICIES:
@@ -446,6 +477,12 @@ class BenchmarkReport:
     # DeployObs v2 の新 segment ごとの誤差指標（残差 field → 絶対値の平均 mean_abs と件数 count）。
     # 実データでの基準が決まるまでは gate に使わず記録だけする。
     obs_v2_errors: dict[str, dict[str, float | int]] = field(default_factory=dict)
+    formal_gates: dict[str, Any] | None = None
+    formal_skipped_bands: list[str] = field(default_factory=list)
+    evaluation_windows_hash: str | None = None
+    evaluation_window_frame_count: int = 0
+    evaluation_window_coverage: float = 0.0
+    evaluation_window_stride: int = 1
     blocking_reasons: list[str] = field(default_factory=list)
     passed: bool = False
 
@@ -833,7 +870,7 @@ def replay_snapshots(
     """
     records: list[BenchmarkRecord] = []
     previous_targets: dict[
-        tuple[str, tuple[Any, ...]],
+        tuple[str, str, tuple[Any, ...]],
         tuple[PerceptionSnapshot, Any, PerceptionSnapshot | None, Any | None],
     ] = {}
     for tick in ticks:
@@ -918,7 +955,8 @@ def replay_snapshots(
             # current prediction が欠測・unusable でも equivalence 期待 frame では
             # ui_cross_frame_equivalent=False を必ず記録し、失敗 frame が分母から抜けて
             # equivalence rate が過大評価されるのを防ぐ。
-            previous = previous_targets.get((tick.session_id, key))
+            window_key = tick.evaluation_window_id
+            previous = previous_targets.get((tick.session_id, window_key, key))
             if previous is not None:
                 old_ground_snapshot, old_ground_target, old_pred_snapshot, old_pred_target = previous
                 expected_equivalent = is_equivalent_ui_target(
@@ -956,7 +994,7 @@ def replay_snapshots(
             # ground target は常に previous として保持し、prediction は usable な場合だけ
             # 保持する。欠測 prediction を previous に残すと次 frame の equivalence 判定が
             # 過去欠測を equivalent 扱いにしてしまうため None にする。
-            previous_targets[(tick.session_id, key)] = (
+            previous_targets[(tick.session_id, window_key, key)] = (
                 ground, ground_target,
                 predicted if usable else None,
                 pred_target if usable else None,
@@ -995,6 +1033,8 @@ def _metric_gate(metrics: dict[str, Any], *, formal: bool = False) -> list[str]:
     absent_slices が slice_counts から再計算した値と違えば blocking にします。
     """
     blocking: list[str] = []
+    gates_wire = metrics.get("formal_gates")
+    gates = formal_gates_from_metrics(gates_wire) if gates_wire is not None else None
     counts = metrics["slice_counts"]
     required = {
         "screen_state", "timer_seconds", "level", "hp_ratio", "xp_ratio",
@@ -1055,10 +1095,13 @@ def _metric_gate(metrics: dict[str, Any], *, formal: bool = False) -> list[str]:
         }
         # 「該当なし」は slice_counts の実測値から再計算した結果とだけ一致を認める。
         # 保存済み metrics の absent_slices を書き換えて必須条件を外すことはできない。
-        absent = formal_absent_slices(counts)
+        count_floors = gates.slice_count_floors if gates is not None else _FORMAL_SLICE_COUNT_FLOORS
+        session_floors = gates.slice_session_floors if gates is not None else _FORMAL_SLICE_SESSION_FLOORS
+        skipped_bands = set(formal_skipped_bands(metrics))
+        absent = formal_absent_slices(counts, gates)
         if metrics["absent_slices"] != absent:
             blocking.append("absent_slices does not match measured occurrence counts")
-        for name, floor in sorted(_FORMAL_SLICE_COUNT_FLOORS.items()):
+        for name, floor in sorted(count_floors.items()):
             if name in absent:
                 continue
             count = counts.get(name, 0)
@@ -1066,13 +1109,15 @@ def _metric_gate(metrics: dict[str, Any], *, formal: bool = False) -> list[str]:
                 blocking.append(
                     f"formal slice '{name}': {count} records/entities < {floor} required"
                 )
-        for name, floor in sorted(_FORMAL_SLICE_SESSION_FLOORS.items()):
+        for name, floor in sorted(session_floors.items()):
+            if name in skipped_bands:
+                continue
             count = session_counts.get(name, 0)
             if count < floor:
                 blocking.append(
                     f"formal slice '{name}': {count} sessions < {floor} required"
                 )
-        for name in sorted(_FORMAL_REQUIRED_SLICES - set(absent)):
+        for name in sorted(_FORMAL_REQUIRED_SLICES - set(absent) - skipped_bands):
             summary = summaries.get(name)
             threshold = _FORMAL_SLICE_THRESHOLDS[name]
             if summary is None or summary["ci_lower"] is None:
@@ -1098,6 +1143,30 @@ def recompute_gate_from_metrics(
     required = set(_empty_report(development_only=True, formal_eligible=False).metrics_wire())
     if set(metrics) != required:
         raise ValueError("metrics fields do not match BenchmarkReport schema")
+    gates = (
+        formal_gates_from_metrics(metrics["formal_gates"])
+        if metrics["formal_gates"] is not None else None
+    )
+    if (
+        not isinstance(metrics["formal_skipped_bands"], list)
+        or any(type(name) is not str for name in metrics["formal_skipped_bands"])
+        or metrics["formal_skipped_bands"] != list(formal_skipped_bands(metrics))
+    ):
+        raise ValueError("formal_skipped_bands do not match gate mode and session counts")
+    if type(metrics["evaluation_window_frame_count"]) is not int or metrics["evaluation_window_frame_count"] < 0:
+        raise ValueError("evaluation_window_frame_count must be a non-negative integer")
+    if type(metrics["evaluation_window_stride"]) is not int or metrics["evaluation_window_stride"] <= 0:
+        raise ValueError("evaluation_window_stride must be a positive integer")
+    if metrics["evaluation_windows_hash"] is not None:
+        value = metrics["evaluation_windows_hash"]
+        if (
+            type(value) is not str or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError("evaluation_windows_hash must be a lowercase SHA-256")
+    coverage = _ratio(metrics["evaluation_window_coverage"], "evaluation_window_coverage")
+    if metrics["evaluation_window_frame_count"] == 0 and coverage != 0.0:
+        raise ValueError("zero evaluation window frames must have zero coverage")
     # bool/NaN/Inf を再ロード境界でも拒否する。nested count/slice は個別検証する。
     if not isinstance(metrics["slice_counts"], dict):
         raise ValueError("slice_counts must be a dict")
@@ -1126,8 +1195,12 @@ def recompute_gate_from_metrics(
         for key, value in metrics["slice_session_counts"].items()
     ):
         raise ValueError("slice_session_counts must contain named non-negative counts")
+    allowed_absent = (
+        gates.occurrence_dependent_slices
+        if gates is not None else _FORMAL_OCCURRENCE_DEPENDENT_SLICES
+    )
     if not isinstance(metrics["absent_slices"], dict) or not all(
-        key in _FORMAL_OCCURRENCE_DEPENDENT_SLICES and type(value) is int and value >= 0
+        key in allowed_absent and type(value) is int and value >= 0
         for key, value in metrics["absent_slices"].items()
     ):
         raise ValueError("absent_slices must map occurrence-dependent slices to non-negative counts")
@@ -1164,7 +1237,14 @@ def recompute_gate_from_metrics(
         if type(metrics[name]) is not int or metrics[name] < 0:
             raise ValueError(f"{name} must be a non-negative integer")
     for name, value in metrics.items():
-        if name in {"slice_counts", "slice_session_counts", "slices", "absent_slices", "obs_v2_errors", "expected_tick_count", "observed_tick_count", "latency_tick_count", "total_records", "roi_false_positive_count"}:
+        if name in {
+            "slice_counts", "slice_session_counts", "slices", "absent_slices",
+            "obs_v2_errors", "formal_gates", "formal_skipped_bands",
+            "evaluation_windows_hash", "evaluation_window_frame_count",
+            "evaluation_window_coverage", "evaluation_window_stride",
+            "expected_tick_count", "observed_tick_count", "latency_tick_count",
+            "total_records", "roi_false_positive_count",
+        }:
             continue
         _strict_float(value, name)
     for name in (
@@ -1191,6 +1271,7 @@ def _run_benchmark_common(
     *, expected_ticks: Sequence[ExpectedTick] | None, development_only: bool,
     formal_eligible: bool, rng_seed: int, n_bootstrap: int, alpha: float,
     formal_evidence: Mapping[str, FormalReplayEvidence] | None = None,
+    formal_gates: FormalGates | None = None,
 ) -> BenchmarkReport:
     """snapshot replay tick または BenchmarkRecord 列から BenchmarkReport を集計する。
 
@@ -1218,7 +1299,7 @@ def _run_benchmark_common(
     )
     foreground_frame_counts: dict[str, int] = defaultdict(int)
     event_occurrence_counts: dict[str, int] = defaultdict(int)
-    event_prev_present: dict[tuple[str, str], bool] = {}
+    event_prev_present: dict[tuple[str, str, str], bool] = {}
     obs_v2_abs: dict[str, list[float]] = defaultdict(list)
     if raw_values and all(isinstance(value, SnapshotReplayTick) for value in raw_values):
         # V1 snapshot を変更せず、ground-truth tick から汎用 named slice label を派生する。
@@ -1262,7 +1343,7 @@ def _run_benchmark_common(
                             foreground_values.get(label, ())
                         )
                 elif label.startswith("event:"):
-                    key = (tick.session_id, label)
+                    key = (tick.session_id, tick.evaluation_window_id, label)
                     if present and not event_prev_present.get(key, False):
                         event_occurrence_counts[label] += 1
                         # rising-edge のみ metric を記録する。不在 → 不在 や present → present
@@ -1284,7 +1365,7 @@ def _run_benchmark_common(
             # 明示的にリセットしないと「前回 True → 今回不在 → 次回 True」が検出されない。
             for _evt in _EVENT_LABELS:
                 if _evt not in slice_counts_for_tick:
-                    event_prev_present[(tick.session_id, _evt)] = False
+                    event_prev_present[(tick.session_id, tick.evaluation_window_id, _evt)] = False
             if tick.predicted is not None:
                 for name, residual in obs_v2_residuals(tick.ground_truth.deploy_obs, tick.predicted.deploy_obs):
                     obs_v2_abs[name].append(abs(residual))
@@ -1441,12 +1522,14 @@ def _run_benchmark_common(
         expected_tick_count=len(expected_set), observed_tick_count=len(observed_set),
         latency_tick_count=len(positive_latencies), slice_counts=slice_counts,
         slice_session_counts=slice_session_counts, slices=slice_summaries,
-        absent_slices=formal_absent_slices(slice_counts),
+        absent_slices=formal_absent_slices(slice_counts, formal_gates),
         obs_v2_errors={
             name: {"mean_abs": float(np.mean(values)), "count": len(values)}
             for name, values in sorted(obs_v2_abs.items())
         },
+        formal_gates=formal_gates.metrics_wire() if formal_gates is not None else None,
     )
+    report.formal_skipped_bands = list(formal_skipped_bands(report.metrics_wire()))
     report.blocking_reasons = _metric_gate(report.metrics_wire())
     report.passed = not report.blocking_reasons
     return report
@@ -1457,6 +1540,7 @@ def run_benchmark(
     expected_ticks: Sequence[ExpectedTick] | None = None,
     formal_evidence: Mapping[str, FormalReplayEvidence] | None = None,
     rng_seed: int = 0, n_bootstrap: int = 1000, alpha: float = 0.05,
+    formal_gates: FormalGates | None = None,
 ) -> BenchmarkReport:
     """synthetic 入口。development_only は公開引数にせず常に True に固定する。
 
@@ -1466,6 +1550,7 @@ def run_benchmark(
         values, expected_ticks=expected_ticks, development_only=True,
         formal_eligible=False, formal_evidence=formal_evidence,
         rng_seed=rng_seed, n_bootstrap=n_bootstrap, alpha=alpha,
+        formal_gates=formal_gates,
     )
 
 
@@ -1473,6 +1558,7 @@ def _run_formal_benchmark(
     values: Sequence[SnapshotReplayTick], *, expected_ticks: Sequence[ExpectedTick],
     formal_evidence: Mapping[str, FormalReplayEvidence] | None = None,
     rng_seed: int = 0, n_bootstrap: int = 1000, alpha: float = 0.05,
+    formal_gates: FormalGates | None = None,
 ) -> BenchmarkReport:
     """verified formal runner 専用 factory。事前計算 record/bool は受理しない。"""
     if not all(isinstance(value, SnapshotReplayTick) for value in values):
@@ -1481,6 +1567,7 @@ def _run_formal_benchmark(
         run_benchmark(
             values, expected_ticks=expected_ticks, formal_evidence=formal_evidence,
             rng_seed=rng_seed, n_bootstrap=n_bootstrap, alpha=alpha,
+            formal_gates=formal_gates,
         )
     )
 

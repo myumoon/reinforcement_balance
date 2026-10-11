@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import shutil
@@ -17,6 +18,7 @@ import numpy as np
 
 from survivors.annotation_labels import ALL_CLASSES
 from survivors.capture_dataset import DatasetWriter, FrameRecord
+from survivors.evaluation_windows import validate_plan_wire, validate_windows
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -29,8 +31,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--store-root", required=True)
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--work-root")
-    parser.add_argument("--count", type=int, default=200)
-    parser.add_argument("--stride", type=int, default=15)
+    parser.add_argument("--count", type=int)
+    parser.add_argument("--stride", type=int)
+    parser.add_argument("--window-plan")
     return parser
 
 
@@ -123,19 +126,40 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = _parser()
     args = parser.parse_args(argv)
-    if args.count < 1 or args.stride < 1:
+    if args.window_plan and (args.count is not None or args.stride is not None):
+        parser.error("--window-plan cannot be combined with --count or --stride")
+    count = 200 if args.count is None else args.count
+    stride = 15 if args.stride is None else args.stride
+    if count < 1 or stride < 1:
         parser.error("--count and --stride must be positive")
 
     store_root = Path(args.store_root)
     work_root = Path(args.work_root) if args.work_root else store_root / "annotation_work"
     try:
         manifest = DatasetWriter.restore(store_root, args.session_id, metadata_only=True)
-        foreground_count, deduplicated_count, thinned_count, selected = _select_records(
-            manifest.frame_records,
-            manifest.session_path,
-            count=args.count,
-            stride=args.stride,
-        )
+        if args.window_plan:
+            plan = validate_plan_wire(json.loads(Path(args.window_plan).read_text(encoding="utf-8")))
+            if manifest.session_id not in plan.sessions:
+                raise ValueError(f"session {manifest.session_id!r} is not registered in window plan")
+            windows = validate_windows(
+                plan.sessions[manifest.session_id], frame_count=manifest.frame_count
+            )
+            selected = [
+                record for record in manifest.frame_records
+                if any(
+                    start <= record.frame_id <= end
+                    and (record.frame_id - start) % plan.stride == 0
+                    for start, end in windows
+                )
+            ]
+            foreground_count = deduplicated_count = thinned_count = len(selected)
+        else:
+            foreground_count, deduplicated_count, thinned_count, selected = _select_records(
+                manifest.frame_records,
+                manifest.session_path,
+                count=count,
+                stride=stride,
+            )
 
         output_dir = work_root / manifest.session_id
         output_dir.mkdir(parents=True, exist_ok=True)

@@ -322,10 +322,18 @@ def _normalize_typed_split(
 
 
 def _validate_records(
-    records: Sequence[SessionRecord], *, min_benchmark_sessions: int
+    records: Sequence[SessionRecord], *, min_benchmark_sessions: int,
+    min_session_seconds: float = _MIN_SESSION_SECONDS,
 ) -> None:
     if type(min_benchmark_sessions) is not int or min_benchmark_sessions <= 0:
         raise ValueError("min_benchmark_sessions must be a positive integer")
+    if (
+        isinstance(min_session_seconds, bool)
+        or not isinstance(min_session_seconds, (int, float))
+        or not math.isfinite(float(min_session_seconds))
+        or min_session_seconds <= 0
+    ):
+        raise ValueError("min_session_seconds must be positive and finite")
     if not all(isinstance(record, SessionRecord) for record in records):
         raise TypeError("sessions must contain SessionRecord values")
 
@@ -375,10 +383,10 @@ def _validate_records(
                     "build/profile/resolution"
                 )
         for record in benchmark:
-            if record.duration_seconds < _MIN_SESSION_SECONDS:
+            if record.duration_seconds < min_session_seconds:
                 raise ShortSessionError(
                     f"session {record.session_id!r} is {record.duration_seconds:.1f}s "
-                    f"(minimum {_MIN_SESSION_SECONDS:.0f}s)"
+                    f"(minimum {min_session_seconds:.0f}s)"
                 )
             if record.source_policy == "mp4":
                 raise ValueError(
@@ -407,6 +415,7 @@ def validate_split(
     session_manifests: Mapping[str, SessionManifest] | Sequence[SessionManifest] | None = None,
     *,
     min_benchmark_sessions: int = 3,
+    min_session_seconds: float = _MIN_SESSION_SECONDS,
 ) -> SessionSplit:
     """typed capture manifests を restore 後の内容と照合して split を seal する。
 
@@ -421,7 +430,11 @@ def validate_split(
             raise TypeError("session_manifests can only be used with SplitManifest")
         records = list(split_manifest)
         split_hash = ""
-    _validate_records(records, min_benchmark_sessions=min_benchmark_sessions)
+    _validate_records(
+        records,
+        min_benchmark_sessions=min_benchmark_sessions,
+        min_session_seconds=min_session_seconds,
+    )
     return SessionSplit(tuple(records), split_hash)
 
 
