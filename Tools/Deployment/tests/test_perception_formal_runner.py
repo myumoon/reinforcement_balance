@@ -1,4 +1,7 @@
-"""formal runner と typed UiPresentation replay の synthetic store fixture。"""
+"""formal runner と typed UiPresentation replay を検証する。
+
+synthetic capture store を使い、runner の restore・gate・artifact 往復を再現する。
+"""
 
 from __future__ import annotations
 
@@ -1157,8 +1160,13 @@ def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path, mo
     model session の frames binding を許容し、runner と writer の出力を確認する。
     """
     import benchmark_survivors_perception as _bsp
+    assert _bsp.formal_threshold_content_hash() == "22a1d6cb61a71019e217c6f3b09293678a6e05c091b9ae5b09941dfa040699a2"
     _install_public_formal_factories(monkeypatch, _bsp)
     _patch_minimal_test_gates(monkeypatch)
+    monkeypatch.setitem(
+        globals(), "_TIMESTAMPS",
+        [1_000_000_000, 2_000_000_000, 299_000_000_000, 301_000_000_000],
+    )
     request = _request(tmp_path, formal_inputs=True)
     assert "model-train" in request.dependency_descriptors["capture_dataset"].identity_metadata["frames_bindings"]
     result = run_formal_pipeline(request)
@@ -1176,6 +1184,28 @@ def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path, mo
     assert result.descriptors[2].node_kind == "perception_final_verdict"
     assert result.verdict.metrics["slice_counts"]["time_band:early"] == 6
     assert result.verdict.metrics["slice_counts"]["event:hazard"] == 3
+    assert result.verdict.metrics["absent_slices"]["event:result"] == 0
+
+    skipped_metrics = dict(result.verdict.metrics)
+    skipped_metrics["slice_session_counts"] = dict(skipped_metrics["slice_session_counts"])
+    skipped_metrics["slice_session_counts"]["time_band:late"] = 1
+    gates_wire = dict(skipped_metrics["formal_gates"])
+    gate_values = dict(gates_wire["values"])
+    session_floors = dict(gate_values["slice_session_floors"])
+    session_floors["time_band:late"] = 2
+    gate_values["slice_session_floors"] = session_floors
+    gates_wire["values"] = gate_values
+    gates_wire["canonical_hash"] = canonical_hash(gate_values)
+    skipped_metrics["formal_gates"] = gates_wire
+    skipped_metrics["formal_skipped_bands"] = ["time_band:late"]
+    from survivors.perception_benchmark import formal_skipped_bands
+
+    assert formal_skipped_bands(skipped_metrics) == ("time_band:late",)
+    skipped_passed, skipped_reasons = recompute_gate_from_metrics(skipped_metrics, formal=True)
+    assert skipped_passed, skipped_reasons
+    assert not any("time_band:late" in reason for reason in skipped_reasons)
+    recovered = run_formal_pipeline(request)
+    assert recovered.verdict.verdict_id == result.verdict.verdict_id
 
     # 必須 named slice の欠落と rare slice の最低件数未満を再計算 gate が拒否する。
     # persisted metrics 改変でも同じ blocking 判定になることを確認する。
@@ -1271,11 +1301,16 @@ def test_published_calibration_profile_is_consumer_compatible(tmp_path: Path, mo
     assert profile is not None
 
 
-def test_committed_batch_second_recovery_uses_profile_artifact_envelope(
-    tmp_path: Path,
+@pytest.mark.parametrize("tamper", [None, "formal_gates", "evaluation_windows"])
+def test_committed_batch_recovery_binds_evaluation_identity(
+    tmp_path: Path, tamper: str | None,
 ) -> None:
-    """producer descriptorの実payloadから2回復旧してもformal profileを再発行できる。"""
+    """recovery が verdict の gate/窓 identity を capture descriptor に結ぶ。
+
+    完全に再封印した batch でも、descriptor と異なる evaluation hash は拒否する。
+    """
     from test_perception_formal_guard import _passing_formal_verdict_wire
+    from survivors.formal_gates import load_formal_gates
 
     store = ArtifactStore(tmp_path / "artifacts")
     capture_ref = store.put_bytes(
@@ -1300,11 +1335,31 @@ def test_committed_batch_second_recovery_uses_profile_artifact_envelope(
             files=(ref,),
         )
 
+    gates_path = Path(__file__).resolve().parents[1] / "configs" / "formal_gates_minimal_v1.yaml"
+    gates = load_formal_gates(gates_path)
+    windows_hash = "5" * 64
+    capture_root = tmp_path / "captures"
+    with DatasetWriter(capture_root, "cal-0", PROFILE_HASH, "synthetic-build") as writer:
+        writer.write_frame(_captured_frame(0, 0, 1_000_000_000))
+        writer.publish(operator_checkpoint="recovery-fixture")
+    capture_descriptor = replace(
+        source_descriptor("capture", capture_ref),
+        identity_metadata={
+            "content_hash": capture_ref.sha256,
+            "formal_gates": {"sha256": gates.yaml_sha256},
+            "evaluation_windows": {
+                "sessions": {"cal-0": [[0, 0]]},
+                "stride": 1,
+                "plan_canonical_hash": windows_hash,
+            },
+            "evaluation_windows_hash": "6" * 64,
+        },
+    )
     request = FormalBenchmarkRequest(
         store=store,
-        capture_store_root=tmp_path / "captures",
+        capture_store_root=capture_root,
         dependency_descriptors={
-            "capture_dataset": source_descriptor("capture", capture_ref),
+            "capture_dataset": capture_descriptor,
             "target_config": source_descriptor("target", target_ref),
         },
     )
@@ -1401,6 +1456,18 @@ def test_committed_batch_second_recovery_uses_profile_artifact_envelope(
         lineage_seal_hash=seal_ref.sha256,
     )
     verdict_wire = _passing_formal_verdict_wire(subjects)
+    metrics = verdict_wire["metrics"]
+    metrics["formal_gates"] = gates.metrics_wire()
+    metrics["evaluation_windows_hash"] = windows_hash
+    passed, blocking = recompute_gate_from_metrics(metrics, formal=True)
+    assert passed and not blocking
+    verdict_wire["passed"] = passed
+    verdict_wire["blocking_reasons"] = blocking
+    if tamper == "formal_gates":
+        metrics["formal_gates"] = dict(metrics["formal_gates"])
+        metrics["formal_gates"]["yaml_sha256"] = "6" * 64
+    elif tamper == "evaluation_windows":
+        metrics["evaluation_windows_hash"] = "7" * 64
     verdict_wire["seal_id"] = seal.seal_id
     verdict_wire["verdict_id"] = canonical_hash({
         "seal_id": seal.seal_id,
@@ -1453,6 +1520,12 @@ def test_committed_batch_second_recovery_uses_profile_artifact_envelope(
         kind="final_e2e_test",
         source_policy="lossless",
     ),))
+
+    if tamper is not None:
+        expected = "formal_gates" if tamper == "formal_gates" else "evaluation windows"
+        with pytest.raises(ValueError, match=expected):
+            _recover_committed_result(request, split, run_key, payloads)
+        return
 
     first = _recover_committed_result(request, split, run_key, payloads)
     second = _recover_committed_result(request, split, run_key, payloads)
@@ -2071,6 +2144,91 @@ def _make_tick(session_id: str, frame_idx: int, screen_state: str) -> SnapshotRe
         session_id, "final_e2e_test", "lossless",
         snapshot.frame_id, snapshot, snapshot, 0.0,
     )
+
+
+def test_transition_probabilities_convert_after_aggregation() -> None:
+    """stride 確率は標本平均後に consumer tick へ換算する。
+
+    3 transition fields を 0.5 で fit し、30 fps capture と 60 Hz consumer の両方を確認する。
+    """
+    from survivors.perception_error_fit import fit_error_profile
+    import benchmark_survivors_perception as benchmark_module
+
+    ticks = [_make_tick("stride-session", index, "gameplay") for index in range(4)]
+    ticks[1] = replace(ticks[1], predicted=None)
+    raw = _derive_calibration_residuals(
+        ticks, resolution_wh=(1920, 1080), evaluation_stride=3,
+    )
+    assert [row.residual for row in raw if row.field == "burst_enter"] == [1.0, 0.0]
+    assert [row.residual for row in raw if row.field == "unknown_screen_collapse"] == [1.0, 0.0]
+
+    session_ids = ["cal-0", "cal-1", "cal-2"]
+    residuals = [
+        CalibrationResidual(session_id, f"{field}-{index}", field, value, 1.0, 0, 0.0)
+        for session_id in session_ids
+        for field in ("burst_enter", "burst_exit", "unknown_screen_collapse")
+        for index, value in enumerate((1.0, 0.0))
+    ]
+    stride_three = fit_error_profile(
+        residuals, session_ids, [],
+        transition_interval_ticks=benchmark_module._capture_ticks_to_consumer_ticks(1.0, 3),
+    )
+    stride_one = fit_error_profile(
+        residuals, session_ids, [],
+        transition_interval_ticks=benchmark_module._capture_ticks_to_consumer_ticks(1.0, 1),
+    )
+    expected_stride_three = 1.0 - (1.0 - 0.5) ** (1.0 / 6.0)
+    expected_stride_one = 1.0 - (1.0 - 0.5) ** (1.0 / 2.0)
+    for field in ("burst_enter_prob", "burst_exit_prob", "unknown_screen_collapse_prob"):
+        assert getattr(stride_three, field) == pytest.approx(expected_stride_three)
+        assert getattr(stride_one, field) == pytest.approx(expected_stride_one)
+
+
+def test_transition_residuals_do_not_cross_window_boundaries() -> None:
+    """window ごとに別れた transition は互いの前後 frame と比較しない。
+
+    欠測 frame が窓境界をまたいでも人工的な burst/collapse event を数えない。
+    """
+    first = replace(_make_tick("window-boundary", 0, "gameplay"), evaluation_window_id="first")
+    second = replace(
+        _make_tick("window-boundary", 1, "gameplay"),
+        predicted=None, evaluation_window_id="second",
+    )
+    transition_fields = {"burst_enter", "burst_exit", "unknown_screen_collapse"}
+    crossed = _derive_calibration_residuals(
+        [first, second], resolution_wh=(1920, 1080), evaluation_stride=1,
+    )
+    assert not [row for row in crossed if row.field in transition_fields]
+
+
+def test_formal_cli_stdout_reports_skipped_bands(monkeypatch, capsys) -> None:
+    """formal CLI の成功 JSON に判定対象外 band を含める。
+
+    metrics にだけ残る skipped band を利用者が stdout から確認できるようにする。
+    """
+    from types import SimpleNamespace
+    import benchmark_survivors_perception as benchmark_module
+
+    result = SimpleNamespace(
+        verdict=SimpleNamespace(
+            verdict_id="a" * 64, passed=True,
+            metrics={"formal_skipped_bands": ["time_band:late"]},
+        ),
+        verdict_ref=SimpleNamespace(store_uri="artifact://verdict"),
+    )
+    monkeypatch.setattr(benchmark_module, "_load_descriptor", lambda _path: object())
+    monkeypatch.setattr(benchmark_module, "ArtifactStore", lambda _root: object())
+    monkeypatch.setattr(benchmark_module, "run_formal_pipeline", lambda _request: result)
+    argv = []
+    for name in benchmark_module._DEPENDENCY_NAMES:
+        option = name.replace("_", "-")
+        argv.extend((f"--{option}-descriptor", "descriptor.json"))
+        argv.extend((f"--{option}-restore-verdict", "restore.json"))
+    argv.extend(("--artifact-store", "unused", "--capture-store", "unused"))
+
+    assert benchmark_module.main(argv) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["formal_skipped_bands"] == ["time_band:late"]
 
 
 def test_event_rising_edge_counts_two_occurrences_not_four() -> None:
