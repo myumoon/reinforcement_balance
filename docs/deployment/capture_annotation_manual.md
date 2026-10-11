@@ -20,9 +20,10 @@
 ```powershell
 python Tools/Deployment/capture_survivors.py `
   --store-root "<RecordRoot>" `
-  --session-id auto --duration-sec 1800
+  --session-id auto --duration-sec 2700 --planned-split model_train
 ```
 
+- 標準の30分 run はステージ選択から死亡、または30:00到達後の result 画面までを1 session に収録します。収録時間は2700秒以上にし、用途は開始前に `--planned-split` で登録します（詳細は「3-1. session を収録し split を事前登録する」を参照）。
 - `--session-id auto` を指定すると `<RecordRoot>/capture_sessions/` 配下の既存セッション番号の次（`session-0001` から）が自動採番されます。毎回 ID を手入力する必要はありません。
 - 起動直後は対象ウィンドウが前面に来るまで自動でポーリング待機するため、事前の待ち時間は不要です。
 - 収録中に alt-tab などで対象ウィンドウが一時的に前面を失っても収録は中断されません。自動で一時停止し、ウィンドウが前面へ戻ると自動で再開します。一時停止・再開のたびに `capture paused: ...` / `capture resumed: ...` がコンソールに表示されます（解像度変更やプロセス差し替えなど、alt-tab 以外の状態変化は即座に終了します）。
@@ -151,25 +152,10 @@ python Tools/Deployment/prelabel_survivors_frames.py `
   - Peachone・Ebony Wings・Vandalier の着弾の爆発 → `weapon_projectile`、照準の大きな円 → `weapon_target`（アノテーション専用で COCO には出ないが、下書きには出る。鳥本体には付けない）
   - 画面左上のアイテム欄の中（アイコンが並ぶ範囲）には何も付けない。アイコンにも、アイコンの後ろを通る本物の敵・ジェムにも付けない（アイコンと見分けにくいため。下書きにも出ない）
   - Pentagram（Gorgeous Moon）の画面フラッシュ、Laurel の盾、燭台などの壊せる置物 → 何も付けない
-- `weapon_*` は world class map v1 に無いため、当面は COCO 出力から矩形だけ除外されます（フレームと他の矩形は出力されます）。
 - `enemy_boss` はボスとして出現した個体（倒すと宝箱を落とす個体）にだけ付けます。ステージ後半に、序盤〜中盤のボスと同じ見た目の敵が雑魚敵として群れで出てきた場合は `enemy_normal` です。迷ったら `enemy_normal` にしてください（理由は [`annotation_gui.md`](annotation_gui.md) の「ボスと元ボスの雑魚敵」を参照）。
 - `labeled_region` を含む確認済みフレームは範囲外が未ラベルのため、COCO 出力から除外されます。COCO に含めたいフレームは画面全体をラベルし、`labeled_region` を消してください。
 
-### 2-6. COCO JSON を出力する
-
-全セッションの確認が終わったら（またはセッション単位で都度）実行します。
-
-```powershell
-python Tools/Deployment/export_survivors_annotations_coco.py `
-  --work-root "<WorkRoot>" `
-  --output-dir "<DatasetDir>"
-```
-
-`checked: true` の画像だけが出力対象になり、`<DatasetDir>/world_coco.json` と `<DatasetDir>/ui_coco.json` が生成されます。`--session-id` を省略すると work-root 直下の全セッションが対象です。
-
-武器エフェクト（`weapon_*`）は world class map v2 の world クラスとして、`world_coco.json` の category 12〜15（`weapon_projectile` / `weapon_zone` / `weapon_orbit` / `weapon_aura`）に出力されます（以前のような除外はありません）。
-
-### 2-7. HUD の正解値を付ける
+### 2-6. HUD の正解値を付ける
 
 bbox とは別に、HUD の正解値（画面状態、タイマー、レベル、HP・XP の割合、所持アイテム、アイテムごとのレベル、カード）を frame ごとに確定し、セッションの `hud_truth.jsonl` に保存します。HUD を読む parser の精度を測るときの正解に使います。
 
@@ -257,47 +243,82 @@ set levels 3 1 - - - - 2 - - - - -
 - level-up の `expected_items` は、訪問直前の gameplay 在庫を slot ごとに三枚一致で保存し、位置で結び付けた値です。訪問前に gameplay が三枚無い session 先頭や、identity が読めない枠がある場合は全体が null になりえます。パネルの空枠と種別が食い違う枠は結合しません。
 - 正式 atlas が無い場合や `--atlas` を指定しない場合、所持 identity は読めません。段階マーク自体が読めても、items と levels の下書きは null になる場合があります。
 
-## 3. 正式 dataset にする
+### 2-7. COCO JSON を出力する
 
-この操作は manifest の eligibility flag と operator attestation だけを更新します。**今 annotation 中の session には影響しません。** frame PNG、`frames.jsonl`、`annotations.jsonl`、`game_build_id` は変更しません。freeze 後は session manifest hash が固定されるため、順序を **「昇格 → 割当 → freeze」** にしてください。
+HUD truth を確定した後に出力します。`expected_screen_state` は `hud_parser.SCREEN_STATES` の語彙を使い、`death` と `result` を別々に記録してください。
 
-用途は次の4種類から選びます。
+```powershell
+python Tools/Deployment/export_survivors_annotations_coco.py `
+  --work-root "<WorkRoot>" `
+  --output-dir "<DatasetDir>"
+```
 
-| `--planned-split` | 用途 |
-|---|---|
-| `model_train` | 練習用の学習 |
-| `model_validation` | 練習用の確認 |
-| `error_calibration` | 本番テスト用の誤差統計 |
-| `final_e2e_test` | 本番テスト用の最終判定 |
+`checked: true` の画像だけが対象になり、`<DatasetDir>/world_coco.json` と `<DatasetDir>/ui_coco.json` が生成されます。`--session-id` を省略すると work-root 直下の全 session が対象です。`weapon_*` は world class map v2 の world class として `world_coco.json` の category 12〜15 に出力されます。
 
-収録時に用途を記録するには `capture_survivors.py` に `--planned-split` を指定します。収録済み session は resolved profile で build と target hash を照合し、operator の確認内容を記録して昇格します。
+正式利用では、元の収録 session が無い `annotation_work/session-0001` を dataset に含めないでください。`labeled_region` 付き frame は COCO から除外されるため、正式利用する frame は画面全体をラベルして `labeled_region` を付けないでください。
+
+## 3. D04 の収録から正式 dataset への順序
+
+既存 session と annotation は作り直しません。planned split の記録と窓 plan が無い既存 session は `model_train`／`model_validation` または development 用に使い、`error_calibration`／`final_e2e_test` へ移しません。正式 test 用 session は収録前に用途を選び、別の dataset 世代として扱います。
+
+### 3-1. session を収録し split を事前登録する
+
+1 session は1 run 全体です。ステージ選択から死亡または30:00到達後の result 画面までを続けて収録し、途中で session を分けたり途中から始めたりしません。`--duration-sec 2700` 以上で起動し、result 画面を数秒記録してから止めます。収録中は alt-tab しません。
+
+```powershell
+python Tools/Deployment/capture_survivors.py `
+  --store-root "<RecordRoot>" --session-id auto --duration-sec 2700 `
+  --planned-split model_train
+```
+
+`--planned-split` は `model_train`、`model_validation`、`error_calibration`、`final_e2e_test` のいずれかです。用途と `planned_at` は session manifest の `operator_checkpoint` に記録されます。迷ったら `model_train` を明示します。用途を省略した既存 session は model 用として扱い、必要に応じて警告を確認します。
+
+現行の `perception_session_split.py` は session 長 1800 秒以上を要求します。実行時間は終了 deadline より少し短くなるため、1800 秒要件が適用される収録では `--duration-sec 1800` ちょうどを使わず余裕を取ります。calibration／final 用の新しい session は、04-18 merge 後に確定する `formal_gates.v1` の最短長に従います。
+
+### 3-2. 昇格して split を freeze する
+
+昇格は `session_manifest.json` の eligibility と `operator_checkpoint` を更新します。frame PNG、`frames.jsonl`、`annotations.jsonl` は変更しません。順序は必ず **「昇格 → 割当 → freeze」** です。freeze 済み session の manifest は書き換えません。
 
 ```powershell
 python Tools/Deployment/promote_survivors_capture_session.py `
   --store-root "<RecordRoot>" --session-id "<SessionId>" `
   --operator-id "<OperatorId>" --note "実機 build と収録内容を確認" `
-  --target-profile "Tools/Deployment/.env/target_profile.resolved.yaml"
-```
-
-用途を後から直す場合は freeze 前に `--planned-split <用途>` を同じコマンドへ追加します。複数 session は `--all-planned` で一括昇格できます。昇格済み session の用途変更も frozen split が存在しない場合だけ許可されます。
-
-昇格が終わったら、次の CLI を一続きで使い、同じ manifest path の中で割当と freeze を行います。sealed session を後日加えるときは既存 manifest を上書きせず、日付付きの新しい path を指定してください。
-
-```powershell
+  --target-profile "<BackupRoot>/target_profile.resolved.yaml"
 python Tools/Deployment/freeze_survivors_capture_split.py `
   --store-root "<RecordRoot>" `
   --manifest-path "<RecordRoot>/capture_split_manifest.<YYYYMMDD>.json"
 ```
 
-model split の COCO は `export_survivors_annotations_coco.py --store-root <RecordRoot> --split-manifest <SplitManifest> --split model_train|model_validation` で出します。各 image に `session_id`、`frame_id`、`object_sha256` が含まれます。model train と validation の world/UI 出力を `merge_survivors_coco.py` でそれぞれ結合し、二人の独立した work-root に対して `build_survivors_annotation_agreement.py` を実行してから descriptor を発行します。
+`--target-profile` には収録時に複製した resolved YAML の backup copy を指定します。再 resolve して期待 hash を取り直しません。用途を後から直す場合は freeze 前に昇格 CLI の `--planned-split <用途>` を使い、複数 session は `--all-planned` を使えます。sealed session を追加する世代には新しい `--manifest-path` を指定します。
 
-sealed session の formal `annotations.jsonl` は 04-16 の `build_survivors_formal_annotations.py` が作ります。`AnnotationWriter.read_annotations()` は旧 schema 専用なので formal annotation の読み込みに使わないでください。sealed session の COCO は `<RecordRoot>/coco/<SessionId>/` に置き、evaluation windows と `formal_gates.v1` を用意して `publish_survivors_capture_dataset.py` を実行します。publish は descriptor と restore test verdict を出力します。backup と restore の root には、別々の空 directory を指定してください。
+用途は次の4種類です。
 
-```powershell
-python Tools/Deployment/export_survivors_annotations_coco.py `
-  --work-root "<WorkRoot>" --store-root "<RecordRoot>" `
-  --session-id "<SessionId>" --output-dir "<RecordRoot>/coco/<SessionId>"
-```
+| `--planned-split` | 用途 |
+|---|---|
+| `model_train` | 練習用。detector／HUD parser の調整に使う |
+| `model_validation` | 練習用。調整結果の確認に使う。`model_train` と同じ run を入れない |
+| `error_calibration` | 封印。本番 test 用の認識誤差統計を作る |
+| `final_e2e_test` | 封印。本番 test 用の最終判定に1回使う |
+
+### 3-3. annotation、HUD truth、COCO export
+
+model split は従来の候補選択で飛び飛びの frame を annotation します。二重 annotation は2人目が別の work-root を使い、1人目の label と1人目の frame で学習した prelabel を見ずに行います。session ごとに作業開始・終了時刻、frame 数、下書きから修正した frame 数を session log に記録します（feasibility の entities/hour に使います）。
+
+sealed session は 04-18 merge 後にだけ処理します。04-18 merge 前は model split の annotation だけ進めます。封印 session は prelabel の学習、active learning、候補選びの反復に使いません。04-18 merge 後、`plan_survivors_evaluation_windows.py` で窓 plan を保存し、窓内の全 frame を画面全体で annotation します（`labeled_region` は使いません）。その後、この manual の 2-6 で HUD truth、2-7 で COCO export を行います。
+
+HUD truth を先に確定してから、session ごとに capture store の hash と split を束縛した COCO を出力します。model split は train／validation ごとに export し、world／UI の COCO を `merge_survivors_coco.py` で結合します。2人の独立した work-root を `build_survivors_annotation_agreement.py --work-root-a ... --work-root-b ...` に渡して agreement を作ります。
+
+sealed session の formal `annotations.jsonl` は 04-16 merge 後に `build_survivors_formal_annotations.py` で作ります。`AnnotationWriter.read_annotations()` は旧 schema 専用なので使いません。session ごとの COCO は `<RecordRoot>/coco/<SessionId>/` に置き、04-18 merge 後の evaluation windows と `formal_gates.v1` を使って `publish_survivors_capture_dataset.py` を実行します。publish は descriptor と restore verdict を出力します。backup と restore には別々の空 directory を指定してください。
+
+04-18 merge 後に使う最小 gate は `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` です。最短 session 長 300 秒、`event:death` 20 回、`event:result` は floor 未満の実測件数を記録して gate にせず、time band は到達 session が2本以上ある場合だけ判定します。session log に YAML の SHA-256 を記録し、sealed session の annotation 前に確定してください。publish descriptor の `formal_gates.sha256` と一致することを確認し、事後に緩めません。coverage と verdict notes でデータ不足と性能不足を区別します。
+
+正式 annotation 用 CLI が利用できる時期と画面・HUD truth の運用:
+
+- `annotate_survivors_hud_truth.py` は model split の HUD truth に使います。`expected_items`／`expected_slot_levels` の下書きを画像と照合し、必要なら修正して確定します。
+- level-up／宝箱の選択は通常どおり行い、固定ルールや選択ログは設けません。level-up 画面の段階マークから item level を読み、HUD truth の `expected_slot_levels` に記録します。
+- `expected_screen_state` は parser が使う状態語彙に合わせ、`death` と `result` を分けて記録します。両方の画面を収録・確認します。
+
+session log 雛形は [`templates/d04_session_log.md`](templates/d04_session_log.md) です。Git 外へ複製して session ごとに記録してください。
 
 ## 参考
 

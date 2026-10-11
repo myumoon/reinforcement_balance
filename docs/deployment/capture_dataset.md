@@ -57,31 +57,13 @@ Ctrl+C は 1 回目と 2 回目で挙動が異なる:
 
 ## Annotation workflow
 
-GUI を使う手順は [Survivors キャプチャの GUI アノテーション](annotation_gui.md) を参照してください。
+画面 annotation は [D04 capture と annotation の手順](capture_annotation_manual.md) の 2-2〜2-7 に従ってください。`annotate_survivors_frames.py` は旧 stdin CLI で、class 定義が world class map v2 と一致しないため正式 annotation に使用しません。
 
-```bash
-python Tools/Deployment/annotate_survivors_frames.py \
-  --store-root /mnt/d/reinbalance-capture --session-id live-pilot-001 \
-  --annotator-id operator-01 --resume
-```
-
-stdin へ `FRAME_ID CLASS LEFT TOP RIGHT BOTTOM` を入力する。`undo` は最後の annotation を削除、`skip FRAME_ID` は指定フレームをスキップとして記録して進む（再アノテーションするには `write_unskip()` が必要）、`done` は終了する。second review は `--second-review` を付ける（初回レコードは JSONL に残り監査証跡として保持される）。各 annotation は即時 `annotations.jsonl` へ autosave される。
+二重 annotation では2人目に別の work-root を用意し、1人目の label と、1人目の frame で学習した prelabel を見せません。agreement は2つの work-root を入力にして作成します。
 
 ## Split freeze workflow
 
-4 用途は session/build 単位で排他的に割り当て、一度 freeze したら追記も用途変更もしない:
-
-```python
-from survivors.capture_dataset import SplitFreezer
-
-freezer = SplitFreezer("/mnt/d/reinbalance-capture")
-freezer.assign("model_train", ["train-session-001"])
-freezer.assign("model_validation", ["validation-session-001"])
-freezer.assign("error_calibration", ["calibration-session-001"])
-freezer.assign("final_e2e_test", ["final-session-001"])
-manifest = freezer.freeze()
-print(manifest.manifest_sha256)
-```
+収録時に `capture_survivors.py --planned-split <model_train|model_validation|error_calibration|final_e2e_test>` で用途を登録します。昇格 CLI は `operator_checkpoint` の planned split を使い、`freeze_survivors_capture_split.py` が session manifest から割り当てます。個々の session を手で別用途に割り当てず、freeze 後は用途や manifest を変更しません。詳細な CLI と実行順は「Formal promotion と publish」を参照してください。
 
 同一 session の複数用途への割り当て、特に `final_e2e_test` から train/calibration への参照は `SplitConflictError` になる。
 
@@ -98,22 +80,22 @@ session の annotation 作業中でも昇格 CLI は使えます。昇格が変�
 | `error_calibration` | 本番テスト用の誤差統計 |
 | `final_e2e_test` | 本番テスト用の最終判定 |
 
-収録時に用途を記録します。用途を直す場合は freeze 前に昇格 CLI の `--planned-split` で先頭 segment を差し替えてください。
+収録前に用途を決め、`capture_survivors.py --planned-split` で記録します。既存 session は `planned_split` と evaluation window plan が無く、model 調整に使ったものもあるため、`model_train`／`model_validation` または development に限ります。calibration／final へ移すための再 annotation はしません。
 
 ```powershell
 python Tools/Deployment/capture_survivors.py `
-  --store-root "<RecordRoot>" --session-id auto --duration-sec 1800 `
+  --store-root "<RecordRoot>" --session-id auto --duration-sec 2700 `
   --planned-split model_train
 python Tools/Deployment/promote_survivors_capture_session.py `
   --store-root "<RecordRoot>" --session-id "<SessionId>" `
   --operator-id "<OperatorId>" --note "実機 build と収録内容を確認" `
-  --target-profile "Tools/Deployment/.env/target_profile.resolved.yaml"
+  --target-profile "<BackupRoot>/target_profile.resolved.yaml"
 python Tools/Deployment/freeze_survivors_capture_split.py `
   --store-root "<RecordRoot>" `
   --manifest-path "<RecordRoot>/capture_split_manifest.<YYYYMMDD>.json"
 ```
 
-既存の default split を model 用に残す場合、sealed session を追加する世代は別の `--manifest-path` を使います。frozen manifest は上書きしません。`--all-planned` は checkpoint に用途が入った session をまとめて昇格します。用途のない既存 session は個別に `--planned-split model_train` を指定して昇格できます。
+昇格 CLI の `--target-profile` には収録時に backup した resolved YAML を渡します。期待 profile hash はこの copy から読み、`target_resolve` を再実行しません。`--all-planned` は checkpoint に用途が入った session をまとめて昇格します。freeze 前なら同じ昇格 CLI の `--planned-split` で用途を変更できます。既存の frozen manifest は上書きせず、sealed session を加える世代には別の `--manifest-path` を使います。
 
 session 単位の COCO export は capture store の pixel hash と split を束縛します。model train/validation の world/UI 出力はそれぞれ2 split を merge し、二人の独立 annotation の agreement を作ってから publish します。
 
@@ -138,7 +120,9 @@ python Tools/Deployment/build_survivors_annotation_agreement.py `
   --output "<DatasetDir>/annotation_agreement.json"
 ```
 
-sealed session は 04-16 の `build_survivors_formal_annotations.py` で `perception_formal_annotation.v1` を作成し、COCO を `<RecordRoot>/coco/<SessionId>/` に出力してから publish します。formal `annotations.jsonl` は旧 `AnnotationWriter.read_annotations()` では読めません。sealed split を含む publish には `formal_gates.v1` と evaluation windows も必要です。
+04-18 merge 前は model split の annotation だけを進め、sealed session は annotation しません。04-18 merge 後に sealed session の window plan を `plan_survivors_evaluation_windows.py` で作り、annotation 前に保存します。model session は従来の候補選択、sealed session は window plan に従って窓内の全 frame を annotation します。sealed の `--window-plan` 対応を含む手順は 04-18 merge 後に使い、窓内 frame は画面全体をラベルして `labeled_region` を使いません。
+
+04-16 merge 後、sealed session の formal `annotations.jsonl` は `build_survivors_formal_annotations.py` で作成します。formal schema は旧 `AnnotationWriter.read_annotations()` では読めません。session ごとの COCO は `<RecordRoot>/coco/<SessionId>/` へ出力します。正式 gate の既定構成 `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` は 04-18 merge 後に使います。最短 session 長は300秒、`event:death` は20回、`event:result` は floor 未満の実測件数を記録して gate にせず、time band は到達 session が2本以上のときだけ判定します。annotation 前に YAML と SHA-256 を session log に記録し、publish descriptor の `formal_gates.sha256` と照合します。coverage と verdict notes でデータ不足と性能不足を区別します。
 
 ```powershell
 python Tools/Deployment/publish_survivors_capture_dataset.py `
@@ -154,7 +138,7 @@ python Tools/Deployment/publish_survivors_capture_dataset.py `
 
 model-only 世代では `--formal-gates` と `--evaluation-windows` を省略できます。publish は descriptor と全 object を発行し、別の空 restore store への復元 verdict を同時に作ります。
 
-`--evaluation-windows` は `evaluation_windows.v1` を使い、`sessions` を `{session_id: [[start_frame_index, end_frame_index], ...]}`、`stride` を正の整数、`plan_canonical_hash` を SHA-256 として指定します。各 frame 区間は両端を含みます。
+`--evaluation-windows` は publish 時に evaluation windows artifact を指定します。window-plan 作成と sealed frame 配置の CLI は 04-18 merge 後に使います。正式 test 用の最短長 300 秒は pinned `formal_gates.v1` の値であり、現行 `perception_session_split.py` の1800秒条件を適用する運用では `--duration-sec 1800` ちょうどを使わず余裕を取ります。
 
 ## Verification
 

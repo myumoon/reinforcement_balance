@@ -3,6 +3,8 @@
 
 synthetic または live のフレームを受け取り、安全な一時領域を
 経由して完成セッションだけを外部ストアへ公開するコマンドである。
+ライブ収録は deadline より少し前に終了するため、最低 1800 秒が必要な用途では
+`--duration-sec 1800` ちょうどを指定しないこと。
 """
 
 from __future__ import annotations
@@ -80,7 +82,13 @@ def _parser() -> argparse.ArgumentParser:
         "--session-id",
         default=datetime.now(timezone.utc).strftime("survivors-%Y%m%dT%H%M%SZ"),
     )
-    parser.add_argument("--duration-sec", type=float, default=1.0, metavar="N")
+    parser.add_argument(
+        "--duration-sec",
+        type=float,
+        default=1.0,
+        metavar="N",
+        help="収録秒数。最低1800秒が必要な用途では1800ちょうどを指定しないこと",
+    )
     parser.add_argument("--synthetic", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(

@@ -2,6 +2,14 @@
 
 正式 target は `mad_forest_standard_v1.yaml` に固定する。Windows Win64、1920×1080 borderless、日本語 UI、Mad Forest、Antonio、standard 30 分で、Hyper/Hurry/Inverse/Arcana/Limit Break/Golden Eggs/DLC は無効である。build、canonical save、progression、power-up、key binding、choice taxonomy、reference hardware の全フィールドが一致した audit report とその canonical hash がなければ capture/model/runtime/campaign manifest を開始できない。
 
+## D04 capture dataset の profile identity
+
+D04 の session 世代では、収録時点の resolved profile hash を dataset identity として固定します。`.env/target_profile.resolved.yaml` の原本を artifact store と backup volume に複製し、その YAML の SHA-256 と `target_profile_hash` を session log に記録してください。`promote_survivors_capture_session.py --target-profile` にはこの backup copy を渡し、収録時の期待 hash をそこから読みます。hash を取り直すために `target_resolve` を再実行しません。
+
+現在の `CLOSED_TAXONOMY`（例: `unlocked_items=[whip]`）は実 save の解放状態と一致していません。D04 promotion が確認するのは収録時 profile hash との一致であり、この dataset では taxonomy の意味的な正しさを attestation しません。既存 profile の taxonomy を直して hash を変えると、現在の session は同じ generation として昇格できなくなります。現 generation では profile を変更せず、修正した profile を使う収録は新しい dataset generation として始めてください。
+
+この D04 dataset の hash 固定は、後段の runtime／campaign preflight が要求する semantic attestation を置き換えません。runtime／campaign の target 条件は本書の各 gate に従います。
+
 各 formal attempt は game/launcher 停止および cloud sync 明示無効を確認し、original backup を保持する。canonical save は temp copy、canonical hash 検証、atomic replace の順に復元し semantic attestation を再検証する。post-run hash は証跡としてのみ記録し次 run の親にはしない。終了後は operator 承認のもと original backup を同じ方法で復元する。save 内 RNG coupling は否定できないため `rng_control=uncontrolled` とし、統計的独立性は主張しない。
 
 semantic attestation は caller の真偽値ではない。versioned record に記録された canonical save hash、save format、unlock/item/stage/power-up と reroll/skip/banish capability を canonical bytes の hash および attested profile と再照合する。record の欠落・差分は preflight を拒否する。canonical restore、original backup、original restore の source/target はすべて local fixed NTFS volume gate を通し、UNC/removable/non-NTFS はコピー前に拒否する。

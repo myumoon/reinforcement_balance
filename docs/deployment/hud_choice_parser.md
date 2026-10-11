@@ -132,7 +132,7 @@ feature は histogram と edge を要約するため、完全一致しても画�
 
 ## HUD truth（`hud_truth.v1`）
 
-parser の精度を測るための正解値です。capture session 配下の `hud_truth.jsonl` に 1 行 1 frame で保存します。`annotations.jsonl`（bbox）や X-AnyLabeling の label JSON とは別の file で、既存の annotation は読み書きしません。付け方は [`capture_annotation_manual.md`](capture_annotation_manual.md) の「2-7. HUD の正解値を付ける」を参照してください。
+parser の精度を測るための正解値です。capture session 配下の `hud_truth.jsonl` に 1 行 1 frame で保存します。`annotations.jsonl`（bbox）や X-AnyLabeling の label JSON とは別の file で、既存の annotation は読み書きしません。付け方は [`capture_annotation_manual.md`](capture_annotation_manual.md) の「2-6. HUD の正解値を付ける」を参照してください。
 
 - 実装: `survivors/vision/hud_truth.py`（record・検査・読み書き・下書き・行コマンド）、CLI は `Tools/Deployment/annotate_survivors_hud_truth.py`
 - 読み書き: `read_hud_truth(session_path)`／`write_hud_truth(session_path, records)`。`frame_id` の昇順で書き、重複した `frame_id` は `ValueError` になります。書き込みは一時 file → fsync → replace の順です。
