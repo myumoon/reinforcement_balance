@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -807,17 +808,19 @@ def test_capture_publish_cli_retries_restore_with_fresh_roots(tmp_path, monkeypa
     assert ArtifactStore.verify is original_verify
 
 
-def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_path):
-    """sealed session は formal annotation、COCO、gates、window をすべて束縛する。
+def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_path, monkeypatch):
+    """multi-session plan を publish と formal input restore まで通す。
 
-    sealed split の一部だけを開封した descriptor が生成される経路を塞ぐ。
+    sealed split 全件を一度に評価 identity へ結ぶ手順を検証する。
     """
     root = tmp_path / "capture"
     model = _publish_session(root, "model-session")
     sealed = _publish_session(root, "sealed-session")
+    sealed_second = _publish_session(root, "sealed-session-2")
     (model.session_path / "annotations.jsonl").write_bytes(b"")
     (model.session_path / "hud_truth.jsonl").write_text('{"fixture":true}\n', encoding="utf-8")
-    for session in (model, sealed):
+    sealed_sessions = (sealed, sealed_second)
+    for session in (model, *sealed_sessions):
         promote_session(
             root,
             session.session_id,
@@ -828,10 +831,9 @@ def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_p
         )
     freezer = SplitFreezer(root)
     freezer.assign("model_train", ["model-session"])
-    freezer.assign("final_e2e_test", ["sealed-session"])
+    freezer.assign("final_e2e_test", [session.session_id for session in sealed_sessions])
     split = freezer.freeze()
-    gates = tmp_path / "formal_gates.yaml"
-    gates.write_text("schema_version: formal_gates.v1\n", encoding="utf-8")
+    gates = Path(__file__).resolve().parents[1] / "configs" / "formal_gates_minimal_v1.yaml"
     store = ArtifactStore(tmp_path / "artifact-store")
     with pytest.warns(RuntimeWarning, match="evaluation windows are absent"), pytest.raises(
         PublishError, match="formal annotations"
@@ -852,27 +854,63 @@ def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_p
             formal_gates_path=gates,
             allow_missing_formal_annotations=True,
         )
-    formal_row = {
-        "schema_version": "perception_formal_annotation.v1",
-        "session_id": "sealed-session",
-        "frame_index": 0,
-        "raw_card_ids": [],
-        "raw_inventory": [],
-        "ground_truth_semantic_hash": "b" * 64,
-    }
-    (sealed.session_path / "annotations.jsonl").write_text(json.dumps(formal_row) + "\n", encoding="utf-8")
-    coco_dir = root / "coco" / "sealed-session"
-    coco_dir.mkdir(parents=True)
-    (coco_dir / "world_coco.json").write_text('{"images":[],"annotations":[],"categories":[]}\n', encoding="utf-8")
-    (coco_dir / "ui_coco.json").write_text('{"images":[],"annotations":[],"categories":[]}\n', encoding="utf-8")
-    windows = tmp_path / "evaluation_windows.json"
-    windows.write_text(json.dumps({
-        "schema_version": "evaluation_windows.v1",
-        "rule": {},
-        "sessions": {"sealed-session": [[0, 0]]},
-        "stride": 1,
-        "plan_canonical_hash": "c" * 64,
+    for session in sealed_sessions:
+        formal_row = {
+            "schema_version": "perception_formal_annotation.v1",
+            "session_id": session.session_id,
+            "frame_index": 0,
+            "raw_card_ids": [],
+            "raw_inventory": [],
+            "ground_truth_semantic_hash": "b" * 64,
+        }
+        (session.session_path / "annotations.jsonl").write_text(
+            json.dumps(formal_row) + "\n", encoding="utf-8"
+        )
+        coco_dir = root / "coco" / session.session_id
+        coco_dir.mkdir(parents=True)
+        (coco_dir / "world_coco.json").write_text(
+            '{"images":[],"annotations":[],"categories":[]}\n', encoding="utf-8"
+        )
+        (coco_dir / "ui_coco.json").write_text(
+            '{"images":[],"annotations":[],"categories":[]}\n', encoding="utf-8"
+        )
+
+    import plan_survivors_evaluation_windows as window_plan_module
+
+    parser_hash = hashlib.sha256(Path(window_plan_module.hud_parser_module.__file__).read_bytes()).hexdigest()
+    rule_path = tmp_path / "window_rule.yaml"
+    rule_path.write_text(json.dumps({
+        "fixed_offsets_per_time_band": {
+            "window_frames": 4, "offsets_seconds": {"early": 2, "mid": 8, "late": 14},
+        },
+        "run_tail": {"seconds": 3},
+        "event_windows": {
+            "detector": "development_hud_parser",
+            "states": ["level_up_items", "level_up_fallback", "chest"],
+            "pre_frames": 1, "post_frames": 1, "max_per_band": 4,
+            "parser_artifact_hash": parser_hash,
+        },
+        "boss_windows": {
+            "detector": "development_world_detector", "checkpoint_hash": "b" * 64,
+            "score_threshold": 0.5, "pre_frames": 1, "post_frames": 2,
+            "max_per_session": 8,
+        },
     }), encoding="utf-8")
+    monkeypatch.setattr(window_plan_module, "_load_development_detector", lambda _args, _rule: (None, None))
+    monkeypatch.setattr(window_plan_module, "HudParser", lambda **_kwargs: object())
+    monkeypatch.setattr(window_plan_module, "generate_windows", lambda _manifest, _rule, frame_loader: [(0, 0)])
+    windows = tmp_path / "evaluation_windows.json"
+    assert window_plan_module.main([
+        "--store-root", str(root),
+        "--session-id", "sealed-session",
+        "--session-id", "sealed-session-2",
+        "--rule", str(rule_path),
+        "--output", str(windows),
+        "--detector-manifest", str(tmp_path / "detector.json"),
+        "--detector-weights", str(tmp_path / "weights.pt"),
+        "--detector-config", str(tmp_path / "detector.yaml"),
+        "--class-map", str(tmp_path / "class_map.yaml"),
+    ]) == 0
     descriptor = publish_capture_dataset(
         store,
         store_root=root,
@@ -882,6 +920,16 @@ def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_p
         formal_gates_path=gates,
     )
     verify_capture_dataset_descriptor(store, descriptor, root)
+    from types import SimpleNamespace
+    from benchmark_survivors_perception import _capture_evaluation_inputs
+
+    restored_capture = SimpleNamespace(
+        descriptor=descriptor,
+        files={ref.logical_id: store.object_path(ref.store_uri).read_bytes() for ref in descriptor.files},
+    )
+    restored_gates, restored_windows = _capture_evaluation_inputs(restored_capture)
+    assert restored_gates.min_session_seconds == 300
+    assert set(restored_windows.sessions) == {session.session_id for session in sealed_sessions}
     from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
 
     invalid_identity = dict(descriptor.identity_metadata)
@@ -905,7 +953,7 @@ def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_p
         verify_capture_dataset_descriptor(store, invalid_window_descriptor, root)
 
     identity = descriptor.identity_metadata
-    assert set(identity["annotation_bindings"]) == {"sealed-session"}
+    assert set(identity["annotation_bindings"]) == {session.session_id for session in sealed_sessions}
     assert set(identity["model_session_bindings"]) == {"model-session"}
     assert set(identity["annotation_bindings"]["sealed-session"]) == {
         "annotation_logical_id", "annotation_sha256", "session_manifest_logical_id", "session_manifest_sha256"
@@ -913,16 +961,20 @@ def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_p
     assert set(identity["hud_truth_bindings"]["model-session"]) == {
         "hud_truth_logical_id", "hud_truth_sha256"
     }
-    assert set(identity["frames_bindings"]["sealed-session"]) == {"frames_logical_id", "frames_sha256"}
-    assert set(identity["coco_bindings"]) == {"sealed-session"}
-    assert set(identity["coco_bindings"]["sealed-session"]) == {
-        "world_coco_logical_id", "world_coco_sha256", "ui_coco_logical_id", "ui_coco_sha256"
-    }
+    for session in sealed_sessions:
+        assert set(identity["frames_bindings"][session.session_id]) == {
+            "frames_logical_id", "frames_sha256"
+        }
+    assert set(identity["coco_bindings"]) == {session.session_id for session in sealed_sessions}
+    for session in sealed_sessions:
+        assert set(identity["coco_bindings"][session.session_id]) == {
+            "world_coco_logical_id", "world_coco_sha256", "ui_coco_logical_id", "ui_coco_sha256"
+        }
     assert identity["formal_gates"]["schema_version"] == "formal_gates.v1"
     assert identity["evaluation_windows"] == {
-        "sessions": {"sealed-session": [[0, 0]]},
-        "stride": 1,
-        "plan_canonical_hash": "c" * 64,
+        "sessions": {session.session_id: [[0, 0]] for session in sealed_sessions},
+        "stride": 3,
+        "plan_canonical_hash": json.loads(windows.read_text(encoding="utf-8"))["plan_canonical_hash"],
     }
 
     windows.write_text(json.dumps({

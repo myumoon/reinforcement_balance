@@ -1,4 +1,7 @@
-"""ArtifactStore-backed Survivors perception formal benchmark runner。"""
+"""ArtifactStore-backed Survivors perception formal benchmark runner。
+
+事前登録した評価窓と formal gate の識別子を照合し、再開時にも評価条件を保ちます。
+"""
 
 from __future__ import annotations
 
@@ -38,12 +41,15 @@ from survivors.capture_dataset import (
     SplitManifest,
     _split_manifest_from_bytes,
 )
+from survivors.evaluation_windows import EvaluationWindowPlan, validate_plan_wire, validate_windows
+from survivors.formal_gates import FormalGates, load_formal_gates_bytes
 from survivors.perception_snapshot import PerceptionSnapshot
 from survivors.perception_benchmark import (
     ExpectedTick,
     SnapshotReplayTick,
     _FORMAL_FOREGROUND_CLASSES,
     _formalize_benchmark_report,
+    formal_skipped_bands,
     formal_threshold_content_hash,
     obs_v2_residuals,
     run_benchmark,
@@ -65,6 +71,7 @@ from survivors.perception_error_fit import (
     load_final_verdict,
 )
 from survivors.perception_session_split import SessionSplit, validate_split
+from survivors.vision.hud_truth import load_frame_pixels
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +99,7 @@ class FormalPredictor(Protocol):
         ...
 
     def reset(self) -> None:
-        """session 境界で parser・tracker・assembler の時間状態を破棄する。
+        """session/window 境界で parser・tracker・assembler の時間状態を破棄する。
 
         次 session の結果へ前 session の履歴を混ぜないため runner が毎回呼ぶ。
         """
@@ -169,6 +176,7 @@ class FormalBenchmarkResult:
 # consumer(perception_error_wrapper)が latency/stale age を進める frame period と同一。
 # latency_ms → frame 変換をこの固定基準へ束縛し、profile の frame 単位を consumer と一致させる。
 _CONSUMER_FRAME_PERIOD_MS: float = 1000.0 / 60.0
+_CAPTURE_FRAME_PERIOD_MS: float = 1000.0 / 30.0
 
 _DEPENDENCY_NAMES = frozenset(
     {
@@ -404,8 +412,93 @@ def _capture_manifest_bytes(restored: Mapping[str, RestoredFormalArtifact]) -> b
     return capture.files[_manifest_ref(capture.descriptor).logical_id]
 
 
+def _is_sha256(value: object) -> bool:
+    """lowercase SHA-256 hex だけを descriptor identity 値として受け入れる。
+    型と全桁を同時に検査し、不正値が後段へ進まないようにする。
+    """
+    return (
+        type(value) is str and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _capture_evaluation_inputs(
+    capture: RestoredFormalArtifact,
+) -> tuple[FormalGates, EvaluationWindowPlan]:
+    """capture descriptor に封印された formal gates と窓 plan を復元する。
+
+    ArtifactRef bytes、descriptor metadata、plan canonical hash が一致しなければ拒否する。
+    """
+    identity = capture.descriptor.identity_metadata
+    gates_binding = identity.get("formal_gates")
+    if (
+        not isinstance(gates_binding, Mapping)
+        or set(gates_binding) != {"logical_id", "sha256", "schema_version"}
+        or gates_binding.get("schema_version") != "formal_gates.v1"
+    ):
+        raise ValueError("capture descriptor is missing formal_gates binding")
+    gates_id, gates_hash = gates_binding["logical_id"], gates_binding["sha256"]
+    if type(gates_id) is not str or not gates_id or type(gates_hash) is not str or not _is_sha256(gates_hash):
+        raise ValueError("formal_gates logical_id is invalid")
+    gates_bytes = capture.files.get(gates_id)
+    if not isinstance(gates_bytes, bytes) or hashlib.sha256(gates_bytes).hexdigest() != gates_hash:
+        raise ValueError("formal_gates YAML bytes do not match descriptor sha256")
+    gates = load_formal_gates_bytes(gates_bytes)
+
+    windows_binding = identity.get("evaluation_windows")
+    windows_hash = identity.get("evaluation_windows_hash")
+    if not isinstance(windows_binding, Mapping) or set(windows_binding) != {
+        "sessions", "stride", "plan_canonical_hash"
+    }:
+        raise ValueError("capture descriptor is missing evaluation_windows binding")
+    if type(windows_binding["stride"]) is not int or windows_binding["stride"] <= 0:
+        raise ValueError("evaluation windows stride is invalid")
+    if type(windows_hash) is not str or not _is_sha256(windows_hash):
+        raise ValueError("evaluation_windows_hash is invalid")
+    matching = [ref for ref in capture.descriptor.files if ref.sha256 == windows_hash]
+    if len(matching) != 1:
+        raise ValueError("evaluation windows file hash is missing or ambiguous")
+    plan_bytes = capture.files.get(matching[0].logical_id)
+    if not isinstance(plan_bytes, bytes) or hashlib.sha256(plan_bytes).hexdigest() != windows_hash:
+        raise ValueError("evaluation windows bytes do not match descriptor hash")
+    try:
+        plan = validate_plan_wire(json.loads(plan_bytes))
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("evaluation windows plan is invalid JSON") from exc
+    if (
+        {
+            name: [list(pair) for pair in windows]
+            for name, windows in plan.sessions.items()
+        } != windows_binding["sessions"]
+        or plan.stride != windows_binding["stride"]
+        or plan.plan_canonical_hash != windows_binding["plan_canonical_hash"]
+    ):
+        raise ValueError("evaluation windows plan does not match descriptor identity")
+    return gates, plan
+
+
+def _validate_verdict_evaluation_identity(
+    metrics: Mapping[str, Any], capture_descriptor: ArtifactDescriptor,
+) -> None:
+    """verdict の gate/window hash が capture descriptor と一致することを確かめる。"""
+    identity = capture_descriptor.identity_metadata
+    gates_binding = identity.get("formal_gates")
+    windows_binding = identity.get("evaluation_windows")
+    gates_metrics = metrics.get("formal_gates")
+    if not isinstance(gates_binding, Mapping) or not isinstance(gates_metrics, Mapping):
+        raise ValueError("formal verdict is missing its formal_gates identity")
+    if gates_metrics.get("yaml_sha256") != gates_binding.get("sha256"):
+        raise ValueError("formal_gates YAML hash does not match capture descriptor")
+    if (
+        not isinstance(windows_binding, Mapping)
+        or metrics.get("evaluation_windows_hash") != windows_binding.get("plan_canonical_hash")
+    ):
+        raise ValueError("evaluation windows hash does not match capture descriptor")
+
+
 def _restore_split_and_sessions(
-    request: FormalBenchmarkRequest, capture_bytes: bytes
+    request: FormalBenchmarkRequest, capture_bytes: bytes,
+    formal_gates: FormalGates | None = None,
 ) -> tuple[SplitManifest, dict[str, SessionManifest], SessionSplit]:
     split_ref = _manifest_ref(request.dependency_descriptors["capture_dataset"])
     split = _split_manifest_from_bytes(
@@ -413,26 +506,22 @@ def _restore_split_and_sessions(
     )
     if split.manifest_sha256 != split_ref.sha256:
         raise ValueError("capture split manifest is not exact-hash bound to ArtifactRef")
-    # Phase 1: final session は metadata_only で restore してから reservation し、
-    # その後に PNG デコード（full restore）する。競合 runner が reservation 前に
-    # 同じ PNG を読まないよう、デコードと予約の順序を逆転させる。
-    # calibration session は reservation 不要なので最初から full restore する。
-    final_session_ids: set[str] = {
-        unit.session_id
-        for unit in split.splits.get("final_e2e_test", ())
-    }
-
     manifests: dict[str, SessionManifest] = {}
     for split_name, units in split.splits.items():
         for unit in units:
             if unit.session_id in manifests:
                 raise ValueError(f"duplicate session in split: {unit.session_id}")
-            is_final = unit.session_id in final_session_ids
             manifests[unit.session_id] = DatasetWriter.restore(
                 request.capture_store_root, unit.session_id,
-                metadata_only=is_final,  # final は予約前に PNG をデコードしない
+                metadata_only=True,  # replay 窓が選んだ frame だけ後から hash 照合して読む
             )
-    validated = validate_split(split, manifests)
+    validated = (
+        validate_split(split, manifests)
+        if formal_gates is None
+        else validate_split(
+            split, manifests, min_session_seconds=formal_gates.min_session_seconds
+        )
+    )
     for session in validated.sessions:
         if session.kind in {"error_calibration", "final_e2e_test"}:
             manifest = manifests[session.session_id]
@@ -787,6 +876,50 @@ def _calibration_provenance_bytes(
     })
 
 
+def _calibration_window_metadata(
+    request: FormalBenchmarkRequest, session_ids: Sequence[str],
+) -> dict[str, Any]:
+    """calibration sessions の window identity と stride 後 coverage を計算する。
+    metadata-only restore の frame count で算出し、PNG を再 decode しない。
+    """
+    identity = request.dependency_descriptors["capture_dataset"].identity_metadata
+    binding = identity.get("evaluation_windows")
+    if binding is None:
+        return {}
+    if (
+        not isinstance(binding, Mapping)
+        or set(binding) != {"sessions", "stride", "plan_canonical_hash"}
+        or type(binding["stride"]) is not int or binding["stride"] <= 0
+        or not isinstance(binding["sessions"], Mapping)
+        or not _is_sha256(binding["plan_canonical_hash"])
+    ):
+        raise ValueError("calibration evaluation window binding is invalid")
+    selected_count = total_count = 0
+    for session_id in session_ids:
+        manifest = DatasetWriter.restore(
+            request.capture_store_root, session_id, metadata_only=True,
+        )
+        raw_windows = binding["sessions"].get(session_id)
+        if raw_windows is None:
+            raise ValueError(f"calibration session {session_id!r} has no registered windows")
+        windows = validate_windows(raw_windows, frame_count=manifest.frame_count)
+        selected_count += sum(
+            1 for frame in manifest.frame_records
+            if any(
+                start <= frame.frame_id <= end
+                and (frame.frame_id - start) % binding["stride"] == 0
+                for start, end in windows
+            )
+        )
+        total_count += manifest.frame_count
+    return {
+        "evaluation_windows_hash": binding["plan_canonical_hash"],
+        "evaluation_window_frame_count": selected_count,
+        "evaluation_window_coverage": selected_count / total_count if total_count else 0.0,
+        "evaluation_window_stride": binding["stride"],
+    }
+
+
 def _calibration_descriptor_chain(
     request: FormalBenchmarkRequest,
     profile: FittedPerceptionErrorProfile,
@@ -794,12 +927,15 @@ def _calibration_descriptor_chain(
     calibration_logical_id: str,
 ) -> tuple[ArtifactDescriptor, ArtifactDescriptor]:
     capture_ref = _manifest_ref(request.dependency_descriptors["capture_dataset"])
+    window_metadata = _calibration_window_metadata(
+        request, profile.calibration_session_ids,
+    )
     source = ArtifactDescriptor(
         logical_id="perception/capture/source",
         node_kind="source_descriptor",
         producer_id="benchmark_survivors_perception",
         producer_version="v2",
-        identity_metadata={"split_manifest_hash": capture_ref.sha256},
+        identity_metadata={"split_manifest_hash": capture_ref.sha256, **window_metadata},
         files=(capture_ref,),
     )
     profile_bytes = canonical_json_bytes(profile.to_wire())
@@ -816,6 +952,7 @@ def _calibration_descriptor_chain(
             "profile_hash": profile.profile_hash,
             "fit_code_hash": profile.fit_code_hash,
             "subject_hashes": dict(sorted(provenance_subject_hashes.items())),
+            **window_metadata,
         },
         parents=(source.node_ref(),),
         files=(
@@ -972,11 +1109,26 @@ def _collapse_run_lengths(flags: Sequence[bool]) -> list[int]:
     return runs
 
 
+def _capture_ticks_to_consumer_ticks(capture_ticks: float, stride: int) -> float:
+    """30 fps capture の stride 間隔を consumer 60 Hz tick 数へ変換する。
+
+    burst/collapse の標本間隔と run 長を実時間で揃えるため、換算をここへ集約する。
+    """
+    if (
+        isinstance(capture_ticks, bool) or not isinstance(capture_ticks, (int, float))
+        or not math.isfinite(float(capture_ticks)) or capture_ticks < 0
+        or type(stride) is not int or stride <= 0
+    ):
+        raise ValueError("capture_ticks and stride must be non-negative/positive finite values")
+    return float(capture_ticks) * stride * _CAPTURE_FRAME_PERIOD_MS / _CONSUMER_FRAME_PERIOD_MS
+
+
 def _derive_calibration_residuals(
     ticks: list[SnapshotReplayTick],
     *,
     resolution_wh: tuple[int, int],
     frame_period_ms: float = _CONSUMER_FRAME_PERIOD_MS,
+    evaluation_stride: int = 1,
 ) -> list[CalibrationResidual]:
     """runner-owned GT/prediction pair から全 calibration residual を導出する。
 
@@ -987,6 +1139,8 @@ def _derive_calibration_residuals(
     """
     if frame_period_ms <= 0.0:
         raise ValueError("frame_period_ms must be positive")
+    if type(evaluation_stride) is not int or evaluation_stride <= 0:
+        raise ValueError("evaluation_stride must be a positive integer")
     width, height = resolution_wh
     if width <= 0 or height <= 0:
         raise ValueError("resolution_wh must contain positive integers")
@@ -1134,10 +1288,12 @@ def _derive_calibration_residuals(
             )
 
     # --- per-session state-transition residuals（full weight = confidence 1.0） ---
-    by_session: dict[str, list[SnapshotReplayTick]] = {}
+    by_session: dict[tuple[str, str], list[SnapshotReplayTick]] = {}
     for tick in ticks:
-        by_session.setdefault(tick.session_id, []).append(tick)
-    for session_id, session_ticks in by_session.items():
+        by_session.setdefault(
+            (tick.session_id, tick.evaluation_window_id), []
+        ).append(tick)
+    for (session_id, window_id), session_ticks in by_session.items():
         missing = [tick.predicted is None for tick in session_ticks]
         collapsed = [
             tick.predicted is None
@@ -1165,8 +1321,11 @@ def _derive_calibration_residuals(
                     append(session_id, frame_id, "unknown_screen_collapse",
                            float(collapsed[index + 1]), 1.0, 0.0)
         for run_index, run_length in enumerate(_collapse_run_lengths(collapsed)):
-            append(session_id, f"{session_id}:collapse_run:{run_index}",
-                   "unknown_screen_collapse_duration", float(run_length), 1.0, 0.0)
+            append(
+                session_id, f"{session_id}:{window_id}:collapse_run:{run_index}",
+                "unknown_screen_collapse_duration",
+                _capture_ticks_to_consumer_ticks(run_length, evaluation_stride), 1.0, 0.0,
+            )
     return residuals
 
 
@@ -1257,59 +1416,98 @@ def _replay_sessions(
     *,
     parser_hash: str,
     detector_hash: str,
+    evaluation_plan: EvaluationWindowPlan | None = None,
 ) -> tuple[list[SnapshotReplayTick], list[ExpectedTick], dict[str, FormalReplayEvidence]]:
     ticks: list[SnapshotReplayTick] = []
     expected: list[ExpectedTick] = []
     evidence_by_frame: dict[str, FormalReplayEvidence] = {}
     for manifest in manifests:
-        predictor.reset()
         record = session_records[manifest.session_id]
-        for frame in manifest.frames:
-            frame_id = f"{manifest.session_id}:{frame.session_frame_index}"
-            expected.append(ExpectedTick(manifest.session_id, frame_id))
-            ground = ground_truth_loader.load_frame(
-                frame, manifest.session_id, frame.session_frame_index
+        frame_records = manifest.frame_records
+        if tuple(item.frame_id for item in frame_records) != tuple(range(manifest.frame_count)):
+            raise ValueError("formal replay requires contiguous frame ids starting at zero")
+        if evaluation_plan is None:
+            windows = ((0, manifest.frame_count - 1),)
+            stride = 1
+        else:
+            if manifest.session_id not in evaluation_plan.sessions:
+                raise ValueError(f"session {manifest.session_id!r} is not registered in evaluation windows")
+            windows = validate_windows(
+                evaluation_plan.sessions[manifest.session_id], frame_count=manifest.frame_count
             )
-            if ground is None:
-                continue
-            predicted, latency_ms = _unpack_prediction_result(
-                predictor.predict_frame(
-                    frame, manifest.session_id, frame.session_frame_index
+            stride = evaluation_plan.stride
+        for window_index, (start, end) in enumerate(windows):
+            predictor.reset()
+            window_id = f"{manifest.session_id}:window:{window_index}"
+            for frame_record in frame_records:
+                frame_index = frame_record.frame_id
+                if not start <= frame_index <= end or (frame_index - start) % stride:
+                    continue
+                frame_id = f"{manifest.session_id}:{frame_index}"
+                expected.append(ExpectedTick(manifest.session_id, frame_id))
+                frame = CapturedFrame(
+                    load_frame_pixels(manifest.session_path, frame_record),
+                    frame_record.captured_monotonic_ns,
+                    frame_index,
+                    frame_record.client_rect_screen_px,
+                    frame_record.foreground,
+                    frame_record.target_profile_hash,
+                    frame_record.game_build_id,
                 )
-            )
-            annotation = annotation_evidence.get(
-                (manifest.session_id, frame.session_frame_index)
-            )
-            if annotation is None:
-                raise ValueError(f"annotation evidence missing for {frame_id}")
-            evidence, expected_ground_hash = annotation
-            if ground.frame_id != frame_id:
-                raise ValueError("annotation ground truth frame_id is not capture-bound")
-            if _ground_truth_semantic_hash(ground) != expected_ground_hash:
-                raise ValueError(
-                    "ground truth semantics do not match immutable annotation content"
+                ground = ground_truth_loader.load_frame(frame, manifest.session_id, frame_index)
+                if ground is None:
+                    continue
+                predicted, latency_ms = _unpack_prediction_result(
+                    predictor.predict_frame(frame, manifest.session_id, frame_index)
                 )
-            if predicted is not None and predicted.frame_id != frame_id:
-                raise ValueError("prediction frame_id is not capture-bound")
-            snapshots = (ground,) if predicted is None else (ground, predicted)
-            if any(
-                snapshot.ui_presentation.parser_artifact_hash != parser_hash
-                for snapshot in snapshots
-            ):
-                raise ValueError("snapshot parser hash is not bound to restored package")
-            if predicted is not None and predicted.detector_artifact_hash != detector_hash:
-                raise ValueError("prediction detector hash is not bound to restored package")
-            if predicted is not None:
-                predicted = _assign_foreground_entities(ground, predicted)
-            # annotation snapshot の detector field は評価対象ではない。record へ渡す
-            # identity は verified detector package へ統一する。
-            ground = replace(ground, detector_artifact_hash=detector_hash)
-            evidence_by_frame[frame_id] = evidence
-            ticks.append(SnapshotReplayTick(
-                manifest.session_id, record.kind, record.source_policy,
-                frame_id, ground, predicted, latency_ms,
-            ))
+                annotation = annotation_evidence.get((manifest.session_id, frame_index))
+                if annotation is None:
+                    raise ValueError(f"annotation evidence missing for {frame_id}")
+                evidence, expected_ground_hash = annotation
+                if ground.frame_id != frame_id:
+                    raise ValueError("annotation ground truth frame_id is not capture-bound")
+                if _ground_truth_semantic_hash(ground) != expected_ground_hash:
+                    raise ValueError("ground truth semantics do not match immutable annotation content")
+                if predicted is not None and predicted.frame_id != frame_id:
+                    raise ValueError("prediction frame_id is not capture-bound")
+                snapshots = (ground,) if predicted is None else (ground, predicted)
+                if any(snapshot.ui_presentation.parser_artifact_hash != parser_hash for snapshot in snapshots):
+                    raise ValueError("snapshot parser hash is not bound to restored package")
+                if predicted is not None and predicted.detector_artifact_hash != detector_hash:
+                    raise ValueError("prediction detector hash is not bound to restored package")
+                if predicted is not None:
+                    predicted = _assign_foreground_entities(ground, predicted)
+                ground = replace(ground, detector_artifact_hash=detector_hash)
+                evidence_by_frame[frame_id] = evidence
+                ticks.append(SnapshotReplayTick(
+                    manifest.session_id, record.kind, record.source_policy,
+                    frame_id, ground, predicted, latency_ms, window_id,
+                ))
     return ticks, expected, evidence_by_frame
+
+
+def _evaluation_window_coverage(
+    manifests: Sequence[SessionManifest], plan: EvaluationWindowPlan,
+) -> tuple[int, float]:
+    """stride 適用後の評価 frame 数と session 全 frame に対する割合を返す。
+    report coverage と calibration profile identity の算出元を揃える。
+    """
+    selected_count = 0
+    total_count = 0
+    for manifest in manifests:
+        if manifest.session_id not in plan.sessions:
+            raise ValueError(f"session {manifest.session_id!r} is not registered in evaluation windows")
+        windows = validate_windows(plan.sessions[manifest.session_id], frame_count=manifest.frame_count)
+        selected_count += sum(
+            1 for frame in manifest.frame_records
+            if any(
+                start <= frame.frame_id <= end
+                and (frame.frame_id - start) % plan.stride == 0
+                for start, end in windows
+            )
+        )
+        total_count += manifest.frame_count
+    return selected_count, selected_count / total_count if total_count else 0.0
 
 
 def _put_descriptor_file(
@@ -1598,6 +1796,9 @@ def _recover_committed_result(
         ref=verdict_ref,
         current_subject_hashes=current_subject_hashes,
     )
+    _validate_verdict_evaluation_identity(
+        verdict.metrics, request.dependency_descriptors["capture_dataset"],
+    )
     final_metadata = descriptors[2].identity_metadata
     if (
         descriptors[1].identity_hash != verdict.calibration_profile_hash
@@ -1749,10 +1950,19 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
             "formal pipeline requires prediction-only provider and reviewed annotation "
             "loader before opening any session"
         )
+    formal_gates, evaluation_plan = _capture_evaluation_inputs(restored["capture_dataset"])
     capture_bytes = _capture_manifest_bytes(restored)
     _, manifests, validated_split = _restore_split_and_sessions(
-        request, capture_bytes
+        request, capture_bytes, formal_gates
     )
+    for session in validated_split.sessions:
+        if session.kind in {"error_calibration", "final_e2e_test"}:
+            if session.session_id not in evaluation_plan.sessions:
+                raise ValueError(f"sealed session {session.session_id!r} is missing evaluation windows")
+            validate_windows(
+                evaluation_plan.sessions[session.session_id],
+                frame_count=manifests[session.session_id].frame_count,
+            )
     payloads = _package_payloads(restored)
     # threshold Artifact（target_config.threshold_hash）が実際の gate 定数と一致することを
     # 検証する。コード上の閾値と Artifact が乖離したまま pass/fail 判定できないようにする。
@@ -1784,8 +1994,8 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         raise ValueError("capture sessions are not bound to verified game build content")
 
     predictor = _CLI_PROVIDER_FACTORY(restored)
-    if not hasattr(predictor, "predict_frame"):
-        raise TypeError("formal provider must implement prediction-only predict_frame")
+    if not callable(getattr(predictor, "predict_frame", None)) or not callable(getattr(predictor, "reset", None)):
+        raise TypeError("formal provider must implement prediction-only predict_frame and reset")
 
     records_by_id = {session.session_id: session for session in validated_split.sessions}
     calibration_manifests = tuple(
@@ -1822,6 +2032,7 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         calibration_manifests, records_by_id, predictor,
         calibration_ground_truth_loader, calibration_evidence,
         parser_hash=parser_hash, detector_hash=detector_hash,
+        evaluation_plan=evaluation_plan,
     )
     benchmark_resolutions = {
         session.resolution_wh
@@ -1831,7 +2042,9 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
     if len(benchmark_resolutions) != 1:
         raise ValueError("benchmark sessions must share exactly one resolution")
     residuals = _derive_calibration_residuals(
-        calibration_ticks, resolution_wh=next(iter(benchmark_resolutions))
+        calibration_ticks,
+        resolution_wh=next(iter(benchmark_resolutions)),
+        evaluation_stride=evaluation_plan.stride,
     )
     calibration_hashes = {
         manifest.session_id: manifest.manifest_sha256
@@ -1842,6 +2055,9 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         [manifest.session_id for manifest in calibration_manifests],
         [manifest.session_id for manifest in final_metadata_manifests],
         calibration_session_hashes=calibration_hashes,
+        transition_interval_ticks=_capture_ticks_to_consumer_ticks(
+            1.0, evaluation_plan.stride,
+        ),
     )
     provisional_subjects = _subject_hashes(
         request, payloads,
@@ -1914,7 +2130,9 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
             manifest.session_path / "session_manifest.json",
         )
     final_manifests = tuple(
-        DatasetWriter.restore(request.capture_store_root, manifest.session_id)
+        DatasetWriter.restore(
+            request.capture_store_root, manifest.session_id, metadata_only=True
+        )
         for manifest in final_metadata_manifests
     )
     final_annotation_payloads = _verified_annotation_payloads(
@@ -1937,10 +2155,21 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         final_manifests, records_by_id, predictor,
         final_ground_truth_loader, final_evidence,
         parser_hash=parser_hash, detector_hash=detector_hash,
+        evaluation_plan=evaluation_plan,
     )
-    report = _formalize_benchmark_report(run_benchmark(
-        final_ticks, expected_ticks=expected_ticks, formal_evidence=evidence
-    ))
+    report = run_benchmark(
+        final_ticks, expected_ticks=expected_ticks, formal_evidence=evidence,
+        formal_gates=formal_gates,
+    )
+    report.evaluation_windows_hash = evaluation_plan.plan_canonical_hash
+    report.evaluation_window_frame_count, report.evaluation_window_coverage = _evaluation_window_coverage(
+        final_manifests, evaluation_plan
+    )
+    report.evaluation_window_stride = evaluation_plan.stride
+    report.formal_skipped_bands = list(formal_skipped_bands(report.metrics_wire()))
+    if report.evaluation_window_frame_count != len(expected_ticks):
+        raise ValueError("evaluation window coverage does not match expected tick count")
+    report = _formalize_benchmark_report(report)
     if not report.passed:
         # 失敗も同じ lineage に immutable outcome として追記する。seal は既に永続化済みで、
         # どの session が失敗 seal に対して開封されたか復元できる。
@@ -1959,6 +2188,9 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         report, seal_id=seal.seal_id,
         final_session_ids=[manifest.session_id for manifest in final_manifests],
         **subjects,
+    )
+    _validate_verdict_evaluation_identity(
+        verdict.metrics, request.dependency_descriptors["capture_dataset"],
     )
     descriptors = _descriptor_chain(
         calibration_descriptors, request, verdict, verdict_logical_id
@@ -2119,6 +2351,7 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({
         "verdict_id": result.verdict.verdict_id,
         "passed": result.verdict.passed,
+        "formal_skipped_bands": result.verdict.metrics["formal_skipped_bands"],
         "verdict_artifact": result.verdict_ref.store_uri,
     }, indent=2))
     return 0

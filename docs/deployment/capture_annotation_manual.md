@@ -320,6 +320,55 @@ sealed session の formal `annotations.jsonl` は 04-16 merge 後に `build_surv
 
 session log 雛形は [`templates/d04_session_log.md`](templates/d04_session_log.md) です。Git 外へ複製して session ごとに記録してください。
 
+### 3-4. sealed session の評価窓を annotation する（04-18）
+
+`error_calibration`／`final_e2e_test` に使う sealed session 全件を、annotation を始める前に一つの窓 plan にまとめ、Git 外の session log と artifact store に保存します。plan は時間帯の固定 offset、run tail、development parser の event、development detector の boss 検出から決まり、frame 内容を見て人が選びません。parser/checkpoint hash と閾値も plan の rule に固定します。
+
+```powershell
+python Tools/Deployment/plan_survivors_evaluation_windows.py `
+  --store-root "<RecordRoot>" `
+  --session-id "<SessionIdA>" `
+  --session-id "<SessionIdB>" `
+  --rule "<RuleYaml>" `
+  --output "<PlanJson>" `
+  --detector-manifest "<DetectorManifest>" `
+  --detector-weights "<DetectorWeights>" `
+  --detector-config "<DetectorConfig>" `
+  --class-map "<WorldClassMapV2>"
+```
+
+sealed session の数だけ `--session-id` を繰り返し、全 session を含む JSON を一度に生成します。複数の plan JSON を手で結合しないでください。plan を capture descriptor の `identity_metadata.evaluation_windows` と結び、formal gate YAML の `formal_gates.v1` binding と一緒に世代を publish します。annotation 用 frame は同じ plan の stride で抽出します。
+
+```powershell
+python Tools/Deployment/select_survivors_annotation_candidates.py `
+  --store-root "<RecordRoot>" `
+  --session-id "<SessionId>" `
+  --window-plan "<PlanJson>"
+```
+
+配置された frame だけを画面全体で label し、`labeled_region` は付けません。これは COCO export 時に frame が除外されるためです。通常の stride／k-means 選択は model_train／model_validation 用 session に引き続き使います。
+
+全 window frame の画面状態・HUD truth を 04-14 の手順で確定した後、session 単位で COCO を出力し、04-16 の `build_survivors_formal_annotations.py` で formal annotation を作ります。
+
+```powershell
+python Tools/Deployment/annotate_survivors_hud_truth.py `
+  --store-root "<RecordRoot>" --session-id "<SessionId>" `
+  --annotator-id "<AnnotatorId>" --work-root "<WorkRoot>" --from-labels
+python Tools/Deployment/export_survivors_annotations_coco.py `
+  --work-root "<WorkRoot>" --store-root "<RecordRoot>" `
+  --session-id "<SessionId>" --output-dir "<RecordRoot>/coco/<SessionId>"
+```
+
+収録後は coverage CLI で window 内の expected frame、HUD truth、COCO export、slice floor を確認します。GT が欠けた report は `provisional: true` となり formal coverage の確認には使えません。
+
+```powershell
+python Tools/Deployment/check_survivors_evaluation_coverage.py `
+  --store-root "<RecordRoot>" --plan "<PlanJson>" `
+  --coco-dir "<RecordRoot>/coco" `
+  --hud-truth "<RecordRoot>/capture_sessions" `
+  --class-map "<WorldClassMapV2>"
+```
+
 ## 参考
 
 - 録画の内部実装・アーキテクチャ・テスト: [`capture_dataset.md`](capture_dataset.md)、[`capture_core.md`](capture_core.md)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from pathlib import Path
 from survivors.perception_benchmark import (
     BenchmarkRecord,
     BenchmarkReport,
@@ -19,6 +20,7 @@ from survivors.perception_benchmark import (
     _is_usable_pred_target,
 )
 from survivors.perception_snapshot import NormalizedRoi, UiButtonTargetV1, UiCandidateTargetV1
+from survivors.formal_gates import formal_gates_from_metrics, load_formal_gates
 
 
 def _rec(
@@ -502,6 +504,23 @@ class TestThresholdGate:
         )
         report = run_benchmark(records)
         assert any("false-positive" in r for r in report.blocking_reasons), report.blocking_reasons
+
+
+def test_formal_gates_yaml_hashes_values_and_rejects_metric_tampering() -> None:
+    """minimal gates YAML は値と原文 hash を束縛し、metrics 改変を拒否する。
+    canonical 値の改変と YAML bytes hash の保持を別々に確かめる。
+    """
+    path = Path(__file__).parents[1] / "configs" / "formal_gates_minimal_v1.yaml"
+    gates = load_formal_gates(path)
+
+    wire = gates.metrics_wire()
+    assert wire["values"]["min_session_seconds"] == 300
+    assert wire["values"]["band_floor_mode"] == "reached_only"
+    assert len(wire["canonical_hash"]) == 64
+    assert wire["yaml_sha256"] == __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+    wire["values"]["min_session_seconds"] = 301
+    with pytest.raises(ValueError, match="canonical hash"):
+        formal_gates_from_metrics(wire)
 
     def test_blocking_reasons_and_passed_connected(self) -> None:
         """blocking_reasons が空のとき passed=True、非空のとき passed=False。"""

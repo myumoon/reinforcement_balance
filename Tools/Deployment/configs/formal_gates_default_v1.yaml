@@ -1,0 +1,43 @@
+# formal_gates.v1 の本番評価用既定 policy です。
+# bytes hash は capture descriptor に束縛され、sealed 後の変更を検出します。
+schema_version: formal_gates.v1
+min_session_seconds: 1800
+# 各 slice に必要な event/entity 数の下限です。
+slice_count_floors:
+  foreground_class:player_anchor: 200
+  foreground_class:enemy_normal: 200
+  foreground_class:enemy_elite: 200
+  foreground_class:enemy_boss: 200
+  foreground_class:gem_blue: 200
+  foreground_class:gem_green: 200
+  foreground_class:gem_red: 200
+  foreground_class:pickup_heal: 200
+  foreground_class:pickup_special: 200
+  foreground_class:hazard_projectile: 200
+  foreground_class:hazard_area: 200
+  foreground_class:weapon_projectile: 200
+  foreground_class:weapon_zone: 200
+  foreground_class:weapon_aura: 200
+  foreground_class:weapon_orbit: 50
+  event:boss: 100
+  event:hazard: 100
+  event:level_up: 100
+  event:chest: 30
+  event:death: 20
+  event:result: 20
+# 各 time band に必要な session 数の下限です。
+slice_session_floors:
+  time_band:early: 2
+  time_band:mid: 2
+  time_band:late: 2
+# count floor 未達を「該当なし」とできる slice の allowlist です。
+occurrence_dependent_slices:
+  - foreground_class:hazard_projectile
+  - foreground_class:hazard_area
+  - foreground_class:weapon_projectile
+  - foreground_class:weapon_zone
+  - foreground_class:weapon_aura
+  - foreground_class:weapon_orbit
+  - event:hazard
+# time band を全件判定するか、session floor に達した帯域だけ判定するかを選びます。
+band_floor_mode: all

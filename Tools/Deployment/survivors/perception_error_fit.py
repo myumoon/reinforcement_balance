@@ -1,4 +1,7 @@
-"""Perception error fit、formal lineage seal、stale-proof verdict 契約。"""
+"""Perception error fit、formal lineage seal、stale-proof verdict 契約。
+
+残差の集約と profile 出力に加え、formal session の開封と verdict の再検証を担う。
+"""
 
 from __future__ import annotations
 
@@ -188,6 +191,7 @@ def fit_error_profile(
     final_e2e_session_ids: Sequence[str],
     *,
     calibration_session_hashes: Mapping[str, str] | None = None,
+    transition_interval_ticks: float = 1.0,
     formal: bool = False,
     _factory_token: object | None = None,
 ) -> FittedPerceptionErrorProfile:
@@ -198,6 +202,12 @@ def fit_error_profile(
     公開 API は常に development_only=True を返します。formal profile は
     _fit_formal_error_profile() 経由でのみ生成できます。
     """
+    if (
+        type(transition_interval_ticks) not in (int, float)
+        or not math.isfinite(transition_interval_ticks)
+        or transition_interval_ticks <= 0.0
+    ):
+        raise ValueError("transition_interval_ticks must be a positive finite number")
     if not residuals:
         raise EmptyResidualError("at least one calibration residual is required")
     if not all(isinstance(residual, CalibrationResidual) for residual in residuals):
@@ -281,6 +291,12 @@ def fit_error_profile(
         values, weights = weighted_rows(name)
         return _weighted_mean(values, weights) if values else default
 
+    def transition_probability(name: str, default: float = 0.0) -> float:
+        sampled_probability = mean(name, default)
+        if not 0.0 <= sampled_probability <= 1.0:
+            raise InvalidResidualError(f"{name} residual mean must be a probability")
+        return 1.0 - (1.0 - sampled_probability) ** (1.0 / transition_interval_ticks)
+
     def std(name: str) -> float:
         values, weights = weighted_rows(name)
         return _weighted_std(values, weights) if values else 0.0
@@ -316,8 +332,8 @@ def fit_error_profile(
     return FittedPerceptionErrorProfile(
         latency_mean_frames=_weighted_mean(latency_values, latency_weights) if latency_values else 0.0,
         latency_std_frames=_weighted_std(latency_values, latency_weights) if latency_values else 0.0,
-        burst_enter_prob=mean("burst_enter"),
-        burst_exit_prob=mean("burst_exit", 1.0),
+        burst_enter_prob=transition_probability("burst_enter"),
+        burst_exit_prob=transition_probability("burst_exit", 1.0),
         burst_dropout_prob=mean("burst_dropout"),
         coord_noise_std=std("coord_noise"),
         coord_quantization_px=mean("coord_quantization_px"),
@@ -325,7 +341,7 @@ def fit_error_profile(
         hud_xp_stale_prob=probability("xp_ratio", 0.1),
         hud_timer_stale_prob=probability("timer_seconds", 1.0),
         hud_inventory_stale_prob=probability("inventory_hash", 0.5),
-        unknown_screen_collapse_prob=mean("unknown_screen_collapse"),
+        unknown_screen_collapse_prob=transition_probability("unknown_screen_collapse"),
         unknown_screen_collapse_duration_frames=mean("unknown_screen_collapse_duration"),
         item_confusion_matrix=_confusion_matrix(by_field.get("item_category", [])),
         enemy_confusion_matrix=_confusion_matrix(by_field.get("enemy_category", [])),
@@ -350,6 +366,7 @@ def _fit_formal_error_profile(
     final_e2e_session_ids: Sequence[str],
     *,
     calibration_session_hashes: Mapping[str, str] | None = None,
+    transition_interval_ticks: float = 1.0,
 ) -> FittedPerceptionErrorProfile:
     """Formal runner 専用 factory。development_only=False を生成できる唯一の経路。
 
@@ -359,6 +376,7 @@ def _fit_formal_error_profile(
     return fit_error_profile(
         residuals, calibration_session_ids, final_e2e_session_ids,
         calibration_session_hashes=calibration_session_hashes,
+        transition_interval_ticks=transition_interval_ticks,
         formal=True,
         _factory_token=_FORMAL_FACTORY_TOKEN,
     )

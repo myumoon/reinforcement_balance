@@ -45,6 +45,8 @@ Mad Forest の確認済みデータの hazard はほぼ全てプレイヤーの�
 - verdict の再計算（`recompute_gate_from_metrics`）は `absent_slices` を `slice_counts` から計算し直した値と比べ、
   食い違えば blocking にします。出現数依存でない slice 名を書き足した metrics は読み込み時に拒否します。
 
+`band_floor_mode: reached_only` では session floor 未達の time band を session floor 判定と cluster CI 判定の両方から外します。外した band は verdict metrics と formal CLI 成功時の stdout JSON の `formal_skipped_bands` に列挙されます。そのため `passed: true` だけで全 band が評価済みとは判断できません。
+
 ## DeployObs v2 の誤差指標と calibration 項目（04-13）
 
 `obs_v2_residuals(ground, predicted)` が正解・予測の DeployObs v2 から新 segment ごとの残差を作り、
@@ -67,13 +69,21 @@ calibration 残差（`_derive_calibration_residuals`）の両方に使います�
 
 ## Formal provider と ground truth loader
 
-`survivors.formal_perception_provider.build_formal_predictor` は formal parser／detector package だけを復元し、frame ごとに HUD parse、world detection、tracking、`RealObsAssembler` を実行します。予測 provider は annotation、HUD truth、COCO label を読みません。現行 runner は session 開始時に `reset()` を必須呼び出しします。評価窓の境界 reset は、04-18 の窓評価を導入する際に同じ API から呼びます。
+`survivors.formal_perception_provider.build_formal_predictor` は formal parser／detector package だけを復元し、frame ごとに HUD parse、world detection、tracking、`RealObsAssembler` を実行します。予測 provider は annotation、HUD truth、COCO label を読みません。runner は各評価窓の先頭で `reset()` を必須呼び出しし、窓をまたぐ temporal state を持ち越しません。
 
 `survivors.formal_annotation_loader.build_ground_truth_loader` は descriptor で検証した `hud_truth.jsonl`、`frames.jsonl`、session 単位の COCO bytes を index 化し、要求された frame だけを読みます。`formal_ground_truth.ground_truth_snapshot` が HUD truth と COCO box から状態を持たない 1 frame の snapshot を作り、provider と同じ ID 正規化・assembler 規則に通します。`build_survivors_formal_annotations.py` もこの関数を使うため、`annotations.jsonl` の semantic hash と loader の snapshot hash、inventory／candidate hash、foreground／slice diagnostics は一致します。annotation は formal dataset publish の前に生成します。
 
 GT `item_context` の level-up screen はその frame の label box から作ります。runtime provider は直前の gameplay world を level-up context に使うため、時間的な意味は異なります。gameplay の boss／hazard event は visible な label box の rising edge で数え、継続表示中は 1 occurrence、消失後の再出現は次の occurrence になります。foreground entity は frame-local box 単位なので、entity floor は box 出現数で満たされます。
 
-Benchmark の入力は stride 3（約 10 Hz）で評価され、runtime の 30 fps 推論とは時間条件が異なります。gameplay の `event:boss`／`event:hazard` は GT と prediction の存在一致を使い、位置精度は foreground class slice が評価します。
+Benchmark の入力は stride 3（約 10 Hz）で評価され、runtime の 30 fps 推論とは時間条件が異なります。遷移確率は calibration の標本平均を出してから一度だけ consumer tick 単位へ戻します（`p_consumer = 1 - (1 - p_sampled) ** (1 / (2 × stride))`）。係数2は capture 30 fps と consumer 60 Hz の換算です。gameplay の `event:boss`／`event:hazard` は GT と prediction の存在一致を使い、位置精度は foreground class slice が評価します。
+
+## 事前登録した評価窓（04-18）
+
+formal `error_calibration`／`final_e2e_test` の expected tick は、capture descriptor の `identity_metadata.evaluation_windows` に束縛された `evaluation_windows.v1` の窓内だけです。各窓では plan の `stride` で frame を間引き、窓外 frame は expected tick、invalid tick、遷移残差に含めません。窓内で HUD truth または COCO label が欠けた frame は従来どおり invalid tick になります。
+
+窓は時間帯ごとの固定 offset、run tail、development parser の state rising edge、development world detector の boss rising edge から規則で作ります。sealed session の内容を見て手動で窓を選びません。評価結果が示すのは session 全体ではなく事前登録窓内の性能です。formal runner は verdict 作成時と batch 復元時に、metrics の `formal_gates.yaml_sha256` と `evaluation_windows_hash` を capture descriptor の YAML／plan identity と照合し、不一致なら拒否します。`recompute_gate_from_metrics` は metrics 内 gate 値の canonical hash を再計算しますが、`verify_formal_runtime_release` は YAML bytes hash や窓 plan hash を descriptor と再照合しません。gate の既定 floor は変更せず、世代固有値は descriptor で指定された YAML を使います。
+
+annotation 前に `plan_survivors_evaluation_windows.py` で plan を生成して session log と artifact store に保管します。`check_survivors_evaluation_coverage.py` は同じ `ground_truth_snapshot`／`slice_counts_for_snapshot` helper で窓内 floor を集計し、不足 frame と slice を表示します。
 
 ## CLI
 
