@@ -545,13 +545,21 @@ def _install_public_formal_factories(monkeypatch, benchmark_module) -> None:
         manifest = json.loads(manifest_path.read_text("utf-8"))
         return SimpleNamespace(
             package_hash=manifest["parser_artifact_hash"],
-            meta=SimpleNamespace(parser_artifact_hash=manifest["parser_artifact_hash"]),
+            meta=SimpleNamespace(
+                parser_artifact_hash=manifest["parser_artifact_hash"],
+                atlas_content_hash="d" * 64,
+            ),
         )
 
     monkeypatch.setattr(
         provider.PackageLoader, "load_formal", staticmethod(_load_parser_package)
     )
-    monkeypatch.setattr(provider.IconMatcher, "load_formal", staticmethod(lambda _path: None))
+    monkeypatch.setattr(
+        provider.IconMatcher, "load_formal",
+        staticmethod(lambda _path: SimpleNamespace(
+            manifest=SimpleNamespace(atlas_content_hash="d" * 64),
+        )),
+    )
     monkeypatch.setattr(provider, "HudParser", _HudParser)
     monkeypatch.setattr(provider, "load_class_map", lambda _path: default_class_map())
     monkeypatch.setattr(
