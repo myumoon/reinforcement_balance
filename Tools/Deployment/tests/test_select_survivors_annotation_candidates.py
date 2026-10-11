@@ -1,4 +1,7 @@
-"""window plan 指定時の annotation 候補配置を検証するテスト。"""
+"""window plan 指定時の annotation 候補配置を検証するテスト。
+
+登録済み窓の stride に従い、窓外 frame を候補へ混ぜない動作を確かめる。
+"""
 
 from __future__ import annotations
 
