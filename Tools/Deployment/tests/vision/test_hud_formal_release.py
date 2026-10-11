@@ -611,7 +611,7 @@ synthetic capture から preflight と formal CLI release を通し、不正な�
     elif scenario == "development_session":
         original_restore = DatasetWriter.restore
 
-        def restore_development_session(store_root, session_id, *, metadata_only=False):
+        def restore_development_session(cls, store_root, session_id, *, metadata_only=False):
             """train session の formal eligibility だけを偽装する。
 
             split と全 file binding が正しくても development manifest は拒否されます。
@@ -646,7 +646,15 @@ synthetic capture から preflight と formal CLI release を通し、不正な�
         ).to_descriptor()
 
     if scenario != "success":
-        with pytest.raises(FormalPreflightError):
+        rejection_reasons = {
+            "unfrozen": "split manifest must be frozen",
+            "development_session": "session is not eligible",
+            "build_mismatch": "session is not eligible",
+            "zero_slice": r"screen_states\.unobserved=0 < 1",
+            "zero_roi_negative": "roi_negative=0",
+            "restore_verdict": "restore verdict must pass full verification",
+        }
+        with pytest.raises(FormalPreflightError, match=rejection_reasons[scenario]):
             run_formal_preflight(
                 capture_store_root=capture_root,
                 dataset_descriptor=dataset,
