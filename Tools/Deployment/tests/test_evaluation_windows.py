@@ -1,4 +1,7 @@
-"""evaluation_windows.v1 の規則生成と封印を検証するテスト。"""
+"""evaluation_windows.v1 の規則生成と封印を検証するテスト。
+
+session 区間や canonical hash の改変を拒否する plan の境界を固定する。
+"""
 
 from __future__ import annotations
 
