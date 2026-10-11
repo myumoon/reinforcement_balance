@@ -260,7 +260,7 @@ class TestSplitPreflight:
 # ---- Task 2: training smoke / checkpoint selection ----
 
 class TestCheckpointSelector:
-    """CheckpointSelector の選択規則を検証する。"""
+    """CheckpointSelector と resume state の規則を検証する。\n\nformal の scheduler と epoch metric が途中再開でも連続学習と一致することを確認する。"""
 
     def test_best_is_highest_metric(self):
         """複数記録のうち val_map50_95 最大のものが best になる。"""
@@ -445,6 +445,158 @@ class TestCheckpointSelector:
             _load_resume_state(
                 tmp_path, selector, model, optimizer,
                 expected_training_mode="smoke",
+            )
+
+    def test_formal_resume_restores_scheduler_lr_and_epoch_metrics(self, tmp_path):
+        """formal resume が scheduler の進みと過去の epoch metric を復元する。\n\n4 epoch の連続実行と 2 epoch 後の再開で学習率と metric 列が同じになる。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import (
+            CheckpointSelector,
+            _load_resume_state,
+            _save_resume_state,
+        )
+
+        config_hash = "a" * 64
+        dataset_hash = "b" * 64
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=4)
+        selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        full_lrs = []
+        full_metrics = []
+        for epoch in range(1, 5):
+            full_lrs.append(optimizer.param_groups[0]["lr"])
+            for parameter in model.parameters():
+                parameter.grad = torch.zeros_like(parameter)
+            optimizer.step()
+            scheduler.step()
+            full_metrics.append({"epoch": epoch, "val_map50_95": 1.0 / epoch})
+            if epoch == 2:
+                _save_resume_state(
+                    tmp_path,
+                    epoch,
+                    selector,
+                    model,
+                    optimizer,
+                    training_mode="formal",
+                    resolved_config_hash=config_hash,
+                    dataset_identity=dataset_hash,
+                    scheduler=scheduler,
+                    epoch_metrics=list(full_metrics),
+                )
+
+        resumed_model = torch.nn.Linear(2, 1)
+        resumed_optimizer = torch.optim.SGD(resumed_model.parameters(), lr=0.1, momentum=0.9)
+        resumed_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(resumed_optimizer, T_max=4)
+        resumed_selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        metric_owner = SimpleNamespace()
+        start_epoch = _load_resume_state(
+            tmp_path,
+            resumed_selector,
+            resumed_model,
+            resumed_optimizer,
+            expected_training_mode="formal",
+            expected_resolved_config_hash=config_hash,
+            expected_dataset_identity=dataset_hash,
+            scheduler=resumed_scheduler,
+            epoch_metrics_owner=metric_owner,
+        )
+        resumed_lrs = []
+        resumed_metrics = list(metric_owner._formal_epoch_metrics)
+        for epoch in range(start_epoch, 5):
+            resumed_lrs.append(resumed_optimizer.param_groups[0]["lr"])
+            for parameter in resumed_model.parameters():
+                parameter.grad = torch.zeros_like(parameter)
+            resumed_optimizer.step()
+            resumed_scheduler.step()
+            resumed_metrics.append({"epoch": epoch, "val_map50_95": 1.0 / epoch})
+
+        assert start_epoch == 3
+        assert full_lrs == pytest.approx([0.1, 0.0853553391, 0.05, 0.0146446609])
+        assert resumed_lrs == pytest.approx(full_lrs[2:])
+        assert resumed_metrics == full_metrics
+
+    @pytest.mark.parametrize(("expected_mode", "config_hash", "dataset_hash", "message"), [
+        ("formal", "f" * 64, "b" * 64, "resolved config/dataset"),
+        ("formal", "a" * 64, "f" * 64, "resolved config/dataset"),
+        ("development", "a" * 64, "b" * 64, "training_mode"),
+    ])
+    def test_formal_resume_rejects_identity_or_mode_mismatch(
+        self, tmp_path, expected_mode, config_hash, dataset_hash, message,
+    ):
+        """formal resume が config、dataset、training mode の不一致を拒否する。\n\n保存時の identity のどれか一つでも変われば optimizer state を適用しない。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import CheckpointSelector, _load_resume_state, _save_resume_state
+
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=2)
+        selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        _save_resume_state(
+            tmp_path,
+            1,
+            selector,
+            model,
+            optimizer,
+            training_mode="formal",
+            resolved_config_hash="a" * 64,
+            dataset_identity="b" * 64,
+            scheduler=scheduler,
+            epoch_metrics=[{"epoch": 1, "val_map50_95": 0.5}],
+        )
+        resumed_model = torch.nn.Linear(2, 1)
+        resumed_optimizer = torch.optim.SGD(resumed_model.parameters(), lr=0.1)
+        resumed_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(resumed_optimizer, T_max=2)
+        with pytest.raises(ValueError, match=message):
+            _load_resume_state(
+                tmp_path,
+                CheckpointSelector(metric="val_map50_95", keep_top_k=3),
+                resumed_model,
+                resumed_optimizer,
+                expected_training_mode=expected_mode,
+                expected_resolved_config_hash=config_hash,
+                expected_dataset_identity=dataset_hash,
+                scheduler=resumed_scheduler,
+                epoch_metrics_owner=SimpleNamespace(),
+            )
+
+    def test_formal_resume_rejects_missing_scheduler_state_and_metrics(self, tmp_path):
+        """旧 formal checkpoint で scheduler と epoch metrics が欠ける状態を拒否する。\n\nidentity は一致していても学習再現性を復元できない state を再開しない。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import (
+            CheckpointSelector,
+            _RESUME_STATE_NAME,
+            _load_resume_state,
+            _save_resume_state,
+        )
+
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        _save_resume_state(tmp_path, 1, selector, model, optimizer)
+        state_path = tmp_path / _RESUME_STATE_NAME
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state.update({
+            "training_mode": "formal",
+            "resolved_config_hash": "a" * 64,
+            "dataset_identity": "b" * 64,
+        })
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        resumed_model = torch.nn.Linear(2, 1)
+        resumed_optimizer = torch.optim.SGD(resumed_model.parameters(), lr=0.1)
+        resumed_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(resumed_optimizer, T_max=2)
+
+        with pytest.raises(ValueError, match="scheduler_state_dict|epoch_metrics"):
+            _load_resume_state(
+                tmp_path,
+                selector,
+                resumed_model,
+                resumed_optimizer,
+                expected_training_mode="formal",
+                expected_resolved_config_hash="a" * 64,
+                expected_dataset_identity="b" * 64,
+                scheduler=resumed_scheduler,
+                epoch_metrics_owner=SimpleNamespace(),
             )
 
 
@@ -924,7 +1076,7 @@ class TestPerformanceGateBoundary:
 # ---- Task 4: package writer ----
 
 class TestPackagePublish:
-    """package publish / restore / schema 検証を synthetic fixture で確認する。"""
+    """package publish / restore / schema 検証を fixture で確認する。\n\n開発 package の互換性と formal package の eligibility を別々に固定する。"""
 
     def test_publish_creates_manifest_json(self, tmp_path):
         """publish_development_package が manifest.json を作成する。"""
@@ -1100,7 +1252,7 @@ class TestPackagePublish:
             )
 
     def test_formal_publish_rejected_with_dev_manifest(self, tmp_path):
-        """development checkpoint でも formal publish は常に拒否される。"""
+        """development checkpoint の formal publish を拒否する。\n\nverdict が無い開発成果物から正式 package が作られないことを確認する。"""
         from survivors.vision.world_detector_package import publish_formal_package, FormalPackageRejectedError
 
         store = tmp_path / "store"
@@ -1581,7 +1733,7 @@ class TestImagePreflightBeforeOptimizer:
 
 
 class TestIter11Regressions:
-    """iter11 P1 修正 6 件の回帰テスト。"""
+    """iter11 の P1 回帰修正を検証する。\n\n画像 preflight、resume、package identity の境界が後続変更でも保たれることを確認する。"""
 
     # ---- Fix 1: dry-run でも画像 preflight が実行される ----
     def test_dry_run_returns_exit_code_1_on_missing_image(self, tmp_path):
