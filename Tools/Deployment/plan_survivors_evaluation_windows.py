@@ -29,7 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(description="Plan Survivors annotated evaluation windows.")
     parser.add_argument("--store-root", required=True)
-    parser.add_argument("--session-id", required=True)
+    parser.add_argument("--session-id", action="append", required=True)
     parser.add_argument("--rule", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--detector-manifest", required=True)
@@ -103,24 +103,28 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = _parser().parse_args(argv)
     try:
+        if len(args.session_id) != len(set(args.session_id)):
+            raise ValueError("--session-id values must be unique")
         rule_wire = yaml.safe_load(Path(args.rule).read_text(encoding="utf-8"))
         rule = validate_rule(rule_wire)
         parser_hash = hashlib.sha256(Path(hud_parser_module.__file__).read_bytes()).hexdigest()
         if rule["event_windows"]["parser_artifact_hash"] != parser_hash:
             raise ValueError("parser_artifact_hash does not match the development HudParser source")
-        manifest = DatasetWriter.restore(args.store_root, args.session_id, metadata_only=True)
         detector, class_map = _load_development_detector(args, rule)
-        parser = HudParser(parser_artifact_hash=parser_hash)
-        windows = generate_windows(
-            manifest,
-            rule,
-            frame_loader=_frame_loader(
-                manifest, parser, detector, class_map,
-                rule["boss_windows"]["score_threshold"],
-            ),
-        )
+        sessions = {}
+        for session_id in args.session_id:
+            manifest = DatasetWriter.restore(args.store_root, session_id, metadata_only=True)
+            parser = HudParser(parser_artifact_hash=parser_hash)
+            sessions[manifest.session_id] = generate_windows(
+                manifest,
+                rule,
+                frame_loader=_frame_loader(
+                    manifest, parser, detector, class_map,
+                    rule["boss_windows"]["score_threshold"],
+                ),
+            )
         plan = EvaluationWindowPlan.create(
-            {manifest.session_id: windows},
+            sessions,
             rule=rule,
             stride=3,
             generated_at_utc=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -136,8 +140,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"session: {manifest.session_id}")
-    print(f"windows: {len(windows)}")
+    for session_id, windows in sessions.items():
+        print(f"session: {session_id}")
+        print(f"windows: {len(windows)}")
     print(f"plan_canonical_hash: {plan.plan_canonical_hash}")
     return 0
 
