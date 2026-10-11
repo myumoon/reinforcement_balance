@@ -961,11 +961,15 @@ def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_p
     assert set(identity["hud_truth_bindings"]["model-session"]) == {
         "hud_truth_logical_id", "hud_truth_sha256"
     }
-    assert set(identity["frames_bindings"]["sealed-session"]) == {"frames_logical_id", "frames_sha256"}
-    assert set(identity["coco_bindings"]) == {"sealed-session"}
-    assert set(identity["coco_bindings"]["sealed-session"]) == {
-        "world_coco_logical_id", "world_coco_sha256", "ui_coco_logical_id", "ui_coco_sha256"
-    }
+    for session in sealed_sessions:
+        assert set(identity["frames_bindings"][session.session_id]) == {
+            "frames_logical_id", "frames_sha256"
+        }
+    assert set(identity["coco_bindings"]) == {session.session_id for session in sealed_sessions}
+    for session in sealed_sessions:
+        assert set(identity["coco_bindings"][session.session_id]) == {
+            "world_coco_logical_id", "world_coco_sha256", "ui_coco_logical_id", "ui_coco_sha256"
+        }
     assert identity["formal_gates"]["schema_version"] == "formal_gates.v1"
     assert identity["evaluation_windows"] == {
         "sessions": {session.session_id: [[0, 0]] for session in sealed_sessions},
