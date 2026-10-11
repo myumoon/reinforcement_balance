@@ -20,9 +20,10 @@
 ```powershell
 python Tools/Deployment/capture_survivors.py `
   --store-root "<RecordRoot>" `
-  --session-id auto --duration-sec 1800
+  --session-id auto --duration-sec 2700 --planned-split model_train
 ```
 
+- 標準の30分 run はステージ選択から死亡、または30:00到達後の result 画面までを1 session に収録します。収録時間は2700秒以上にし、用途は開始前に `--planned-split` で登録します（詳細は「3-1. session を収録し split を事前登録する」を参照）。
 - `--session-id auto` を指定すると `<RecordRoot>/capture_sessions/` 配下の既存セッション番号の次（`session-0001` から）が自動採番されます。毎回 ID を手入力する必要はありません。
 - 起動直後は対象ウィンドウが前面に来るまで自動でポーリング待機するため、事前の待ち時間は不要です。
 - 収録中に alt-tab などで対象ウィンドウが一時的に前面を失っても収録は中断されません。自動で一時停止し、ウィンドウが前面へ戻ると自動で再開します。一時停止・再開のたびに `capture paused: ...` / `capture resumed: ...` がコンソールに表示されます（解像度変更やプロセス差し替えなど、alt-tab 以外の状態変化は即座に終了します）。
@@ -313,7 +314,7 @@ sealed session の formal `annotations.jsonl` は 04-16 merge 後に `build_surv
 
 正式 annotation 用 CLI が利用できる時期と画面・HUD truth の運用:
 
-- `annotate_survivors_hud_truth.py` は 04-20 merge 後に model split の HUD truth に使えます。merge 前は `expected_items`／`expected_slot_levels` の下書きが入らず手入力です。
+- `annotate_survivors_hud_truth.py` は model split の HUD truth に使います。`expected_items`／`expected_slot_levels` の下書きを画像と照合し、必要なら修正して確定します。
 - level-up／宝箱の選択は通常どおり行い、固定ルールや選択ログは設けません。level-up 画面の段階マークから item level を読み、HUD truth の `expected_slot_levels` に記録します。
 - `expected_screen_state` は parser が使う状態語彙に合わせ、`death` と `result` を分けて記録します。両方の画面を収録・確認します。
 
