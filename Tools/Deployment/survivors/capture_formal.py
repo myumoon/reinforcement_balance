@@ -151,6 +151,7 @@ def promote_session(
             split_path = root / split_path
         if not _is_split_manifest_path(root, split_path.resolve()):
             raise PromotionError("split manifest path must match the root-level capture split manifest pattern")
+    frozen_session = False
     for split_path in _split_manifest_paths(root):
         if not split_path.is_file():
             continue
@@ -159,7 +160,7 @@ def promote_session(
         except (OSError, ValueError) as exc:
             raise PromotionError(f"invalid split manifest: {exc}") from exc
         if any(unit.session_id == manifest.session_id for units in split.splits.values() for unit in units):
-            raise PromotionError("frozen split contains this session")
+            frozen_session = True
 
     checkpoint = manifest.operator_checkpoint
     try:
@@ -171,6 +172,8 @@ def promote_session(
         raise PromotionError(str(exc)) from exc
     if manifest.formal_dataset_eligible and checkpoint == manifest.operator_checkpoint:
         return manifest
+    if frozen_session:
+        raise PromotionError("frozen split contains this session")
     if not manifest.formal_dataset_eligible:
         checkpoint = f"{checkpoint}|formal:{operator_id}:{_utc_now()}:{attestation_note}"
 
