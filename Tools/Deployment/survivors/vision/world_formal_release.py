@@ -1,4 +1,4 @@
-"""WorldDetector の formal preflight、verdict、release identity を束縛する。"""
+"""WorldDetector の formal release identity を検証する。\n\npreflight と verdict の結果を checkpoint、package、runtime 用設定へ束縛する。"""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from survivors.vision.session_cluster_ci import cluster_ci_bounds
 
 
 class FormalPreflightError(ValueError):
-    """formal dataset または descriptor の事前条件が満たされない。"""
+    """formal preflight の入力条件を満たさない。\n\n失敗理由を CLI と test が区別できるよう ValueError として伝える。"""
 
 
 def _sha256(data: bytes) -> str:
@@ -151,7 +151,7 @@ def _code_hashes() -> dict[str, str]:
 
 @dataclass(frozen=True)
 class FormalPreflightReport:
-    """formal dataset と resolved config/build を結んだ immutable report。"""
+    """formal dataset と resolved config/build を結んだ immutable report。\n\n後続の training と evaluation が同一の split、config、hardware identity を読む。"""
 
     dataset_identity: str
     annotations_sha256: str
@@ -389,7 +389,7 @@ def run_formal_preflight(
     }
     if model_sessions & sealed_sessions or set(model_bindings) != model_sessions:
         raise FormalPreflightError("model session bindings do not match frozen model split")
-    session_frame_hashes: dict[str, list[str]] = defaultdict(list)
+    session_frame_hashes: dict[str, set[str]] = {}
     session_manifest_hashes: dict[str, str] = {}
     root = pathlib.Path(capture_store_root).expanduser().resolve()
     for unit in model_units:
@@ -413,7 +413,7 @@ def run_formal_preflight(
         ):
             raise FormalPreflightError(f"session is not formal eligible: {unit.session_id}")
         session_manifest_hashes[unit.session_id] = unit.session_manifest_sha256
-        session_frame_hashes[unit.session_id] = sorted(record.object_sha256 for record in session.frame_records)
+        session_frame_hashes[unit.session_id] = {record.object_sha256 for record in session.frame_records}
 
     coco = json.loads(annotations_path.read_text(encoding="utf-8"))
     images = coco.get("images")
@@ -423,20 +423,26 @@ def run_formal_preflight(
     image_sessions: dict[int, str] = {}
     image_shas: dict[str, list[str]] = defaultdict(list)
     for image in images:
+        if not isinstance(image, Mapping):
+            raise FormalPreflightError("COCO image entry must be a mapping")
         image_id = image.get("id")
         session_id = image.get("session_id")
-        if type(image_id) is not int or not isinstance(session_id, str) or not session_id:
+        file_name = image.get("file_name")
+        if type(image_id) is not int or not isinstance(session_id, str) or not session_id or not isinstance(file_name, str) or not file_name:
             raise FormalPreflightError("COCO image lacks integer id or session_id")
         if session_id in sealed_sessions or session_id not in model_sessions:
             raise FormalPreflightError(f"COCO references sealed or unbound session: {session_id}")
         if image_id in image_sessions:
             raise FormalPreflightError(f"duplicate COCO image id: {image_id}")
         image_sessions[image_id] = session_id
-        image_path = pathlib.Path(image["file_name"])
+        image_path = pathlib.Path(file_name)
         if not image_path.is_absolute():
             image_path = annotations_path.parent / image_path
         digest = _hash_file(image_path)
-        session_frame_hashes[session_id].append(digest)
+        if digest not in session_frame_hashes[session_id] or (
+            "object_sha256" in image and image["object_sha256"] != digest
+        ):
+            raise FormalPreflightError(f"COCO image is not bound to its session frames: {session_id}")
         image_shas[session_id].append(digest)
     for annotation in annotations:
         session_id = annotation.get("session_id", image_sessions.get(annotation.get("image_id")))
@@ -542,7 +548,7 @@ def run_formal_preflight(
 
 @dataclass(frozen=True)
 class GpuLatencyMeasurement:
-    """latency measurement と target hardware の出典を保持する。"""
+    """latency measurement と target hardware の出典を保持する。\n\n未対応 hardware の数値が正式な latency gate に混ざらないよう由来も保存する。"""
 
     p95_ms: float | None
     sample_count: int
@@ -581,7 +587,7 @@ class GpuLatencyMeasurement:
         return cls(**dict(value))
 
     def to_dict(self) -> dict[str, Any]:
-        """latency measurement を schema 固定の JSON mapping にする。"""
+        """latency measurement を schema 固定の JSON mapping にする。\n\n保存する field を限定し、読込側の厳密な schema 検査と対にする。"""
         return {
             "p95_ms": self.p95_ms,
             "sample_count": self.sample_count,
@@ -718,7 +724,7 @@ def measure_gpu_latency(
 
 @dataclass(frozen=True)
 class ValidationVerdict:
-    """validation metric、gate と親 identity を結ぶ formal verdict。"""
+    """validation metric、gate と親 identity を結ぶ formal verdict。\n\nPASS は checkpoint weight、preflight report、dataset、build が同一の場合だけ発行する。"""
 
     status: str
     metrics: Mapping[str, Any]
@@ -817,7 +823,8 @@ DEFAULT_FORMAL_GATES = {
     "gem_recall_min": 0.92,
     "boss_recall_min": 0.98,
     "directional_density_correlation_min": 0.85,
-    "nearest_distance_median_max": 0.04,
+    "density_error_ci_upper_max": 0.20,
+    "nearest_distance_error_ci_upper_max": 0.04,
     "gpu_p95_latency_ms_max": 25.0,
     "heavy_effect_recall_min": 0.80,
     "late_game_recall_min": 0.80,
@@ -992,6 +999,7 @@ def _match_frame_records(frames: Sequence[Mapping[str, Any]], threshold: float) 
         for y in range(4):
             for x in range(4):
                 def in_cell(box):
+                    """box center が指定した 4x4 density cell に入るか返す。\n\nGT と予測を同じ grid index で数えて session density 比較に使う。"""
                     cx, cy = (box[0] + box[2]) / 2 / width, (box[1] + box[3]) / 2 / height
                     return min(3, int(cy * 4)) == y and min(3, int(cx * 4)) == x
                 gt_count = float(sum(in_cell(item["box"]) for item in gt))
@@ -1035,13 +1043,13 @@ def build_validation_verdict(
         raise ValueError("weight_hash must be lowercase sha256")
     if not isinstance(preflight, FormalPreflightReport):
         raise TypeError("preflight must be a verified FormalPreflightReport")
-    optional_error_gates = {"density_error_ci_upper_max", "nearest_distance_error_ci_upper_max"}
-    if not isinstance(gates, Mapping) or set(gates) - set(DEFAULT_FORMAL_GATES) - optional_error_gates:
+    error_ci_gates = {"density_error_ci_upper_max", "nearest_distance_error_ci_upper_max"}
+    if not isinstance(gates, Mapping) or set(gates) - set(DEFAULT_FORMAL_GATES):
         raise ValueError("formal gates contain unknown keys")
     fixed_gates = dict(DEFAULT_FORMAL_GATES)
     fixed_gates.update(gates)
     for key, value in fixed_gates.items():
-        if key in optional_error_gates:
+        if key in error_ci_gates:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"formal gate {key} must be a finite non-negative number")
         elif key.endswith("_instances") or key.endswith("_sessions") or key in {"min_applicable_sessions", "ci_resamples", "ci_seed"}:
@@ -1174,11 +1182,10 @@ def build_validation_verdict(
     latency_result = latency_gate(latency, hardware_id=preflight.hardware_id, max_ms=fixed_gates["gpu_p95_latency_ms_max"])
     directional_gate_value = directional_ci if directional_ci is not None else None
     gate_results["directional_density_correlation"] = {"value": directional_gate_value if directional_gate_value is not None else "missing", "pooled": directional if math.isfinite(directional) else "missing", "minimum": fixed_gates["directional_density_correlation_min"], "passed": directional_gate_value is not None and directional_gate_value >= fixed_gates["directional_density_correlation_min"]}
-    gate_results["nearest_distance_median"] = {"value": nearest_median if nearest_median is not None else "missing", "maximum": fixed_gates["nearest_distance_median_max"], "passed": nearest_median is not None and nearest_median <= fixed_gates["nearest_distance_median_max"]}
     density_error_max = fixed_gates.get("density_error_ci_upper_max")
     nearest_error_max = fixed_gates.get("nearest_distance_error_ci_upper_max")
-    gate_results["density_error_ci"] = {"upper": count_error_ci if count_error_ci is not None else "missing", "maximum": density_error_max if density_error_max is not None else "not_configured", "passed": count_error_ci is not None and (density_error_max is None or count_error_ci <= density_error_max)}
-    gate_results["nearest_distance_error_ci"] = {"upper": nearest_error_ci if nearest_error_ci is not None else "missing", "maximum": nearest_error_max if nearest_error_max is not None else "not_configured", "passed": nearest_error_ci is not None and (nearest_error_max is None or nearest_error_ci <= nearest_error_max)}
+    gate_results["density_error_ci"] = {"upper": count_error_ci if count_error_ci is not None else "missing", "maximum": density_error_max, "passed": count_error_ci is not None and count_error_ci <= density_error_max}
+    gate_results["nearest_distance_error_ci"] = {"upper": nearest_error_ci if nearest_error_ci is not None else "missing", "pooled_median": nearest_median if nearest_median is not None else "missing", "maximum": nearest_error_max, "passed": nearest_error_ci is not None and nearest_error_ci <= nearest_error_max}
     gate_results["gpu_p95_latency"] = latency_result
     gate_results.update({f"class:{name}": value for name, value in class_metrics.items()})
     gate_results.update({f"slice:{name}": value for name, value in slice_gates.items()})
@@ -1472,7 +1479,8 @@ def emit_resolved_detector_yaml(
         "content_key": identity["content_key"],
         "restore_verdict_logical_id": restore_verdict_descriptor.logical_id,
         "dataset_identity": preflight.dataset_identity,
-        "validation_verdict_hash": verdict.verdict_canonical_hash,
+        "verdict_canonical_hash": verdict.verdict_canonical_hash,
+        "ignore_regions": list(preflight.resolved_config.get("input", {}).get("ignore_regions", [])),
         "code_hashes": dict(preflight.code_hashes),
     }
     target = pathlib.Path(out_path)
