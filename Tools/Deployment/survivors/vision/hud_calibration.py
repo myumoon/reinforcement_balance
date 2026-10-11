@@ -19,6 +19,7 @@ from reinbalance_survivors_contracts.canonical_json import canonical_hash, canon
 FIT_SCHEMA_VERSION: Final[str] = "hud_calibration_fit.v1"
 REPORT_SCHEMA_VERSION: Final[str] = "hud_calibration_report.v1"
 PACKAGE_SCHEMA_VERSION: Final[str] = "hud_parser_package.v1"
+FORMAL_PACKAGE_SCHEMA_VERSION: Final[str] = "hud_parser_package.formal.v1"
 _MODEL_SPLITS: Final[frozenset[str]] = frozenset({"model_train", "model_validation"})
 
 class SplitViolationError(ValueError):
@@ -243,15 +244,54 @@ development package が formal eligible を同時に名乗る状態をデータ�
                 raise ValueError("package metadata hashes must be SHA-256 hex")
 
 @dataclass(frozen=True, slots=True)
+class FormalParserPackageMeta:
+    """正式 parser package の用途属性と全 release hash chain。
+
+    development metadata とは別 schema で formal lineage を保持する。
+    """
+
+    schema_version: str
+    development_only: bool
+    formal_parser_eligible: bool
+    fit_canonical_hash: str
+    report_canonical_hash: str
+    formal_report_canonical_hash: str
+    preflight_canonical_hash: str
+    atlas_content_hash: str
+    package_hash: str
+
+    def __post_init__(self) -> None:
+        """formal schema、用途 flag と全 hash を構築時に検証する。
+
+        条件不成立の metadata は package writer と loader の双方で拒否する。
+        """
+        if self.schema_version != FORMAL_PACKAGE_SCHEMA_VERSION:
+            raise ValueError(f"unsupported formal package schema: {self.schema_version!r}")
+        if self.development_only is not False or self.formal_parser_eligible is not True:
+            raise FormalPackageMixingError("formal package eligibility flags are invalid")
+        for value in (
+            self.fit_canonical_hash,
+            self.report_canonical_hash,
+            self.formal_report_canonical_hash,
+            self.preflight_canonical_hash,
+            self.atlas_content_hash,
+            self.package_hash,
+        ):
+            if not _is_sha256(value):
+                raise ValueError("formal package metadata hashes must be SHA-256 hex")
+
+@dataclass(frozen=True, slots=True)
 class ParserPackage:
     """復元済み metadata、fit、validation report の集合。
 
 HudParser へ渡す artifact identity は package_hash property から取得します。
     """
 
-    meta: ParserPackageMeta
+    meta: ParserPackageMeta | FormalParserPackageMeta
     fit_result: FitResult
     validation_report: ValidationReport
+    formal_validation_report: object | None = None
+    preflight_report: object | None = None
 
     @property
     def package_hash(self) -> str:
@@ -682,12 +722,98 @@ class PackageWriter:
         return meta
 
     @classmethod
-    def publish_formal(cls, *_args: object, **_kwargs: object) -> ParserPackageMeta:
-        """formal parser package の発行を明示的に拒否する。
+    def publish_formal(
+        cls,
+        package_path: str | os.PathLike[str],
+        fit_result: FitResult | None = None,
+        formal_report: object | None = None,
+        *,
+        preflight: object | None = None,
+        atlas_manifest: object | None = None,
+    ) -> FormalParserPackageMeta:
+        """formal validation の全 hash chain を検証して atomic publish する。
 
-正式 dataset と release gate を扱う04-05まで実装範囲を広げず、必ず停止します。
+development report、atlas、dataset profile/build が混在する package は書き込み前に拒否します。
         """
-        raise NotImplementedError("formal HUD parser publishing is deferred to 04-05")
+        from .hud_formal_release import FormalValidationReport, PreflightReport
+        from .icon_matcher import AtlasManifest
+
+        if fit_result is None or formal_report is None or preflight is None or atlas_manifest is None:
+            raise NotImplementedError("formal publishing requires fit, reports, preflight, and formal atlas")
+        if not isinstance(fit_result, FitResult):
+            raise TypeError("fit_result must be a FitResult")
+        if not isinstance(formal_report, FormalValidationReport) or not isinstance(preflight, PreflightReport):
+            raise TypeError("formal_report and preflight must use formal HUD report types")
+        if not isinstance(atlas_manifest, AtlasManifest):
+            raise TypeError("atlas_manifest must be an AtlasManifest")
+        fit_result = _fit_from_wire(fit_result.to_wire())
+        formal_report = FormalValidationReport.from_wire(formal_report.to_wire())
+        preflight = PreflightReport.from_wire(preflight.to_wire())
+        if not formal_report.all_passed or not formal_report.pooled_report.all_passed:
+            raise ValueError("cannot publish: formal validation did not pass all gates")
+        if atlas_manifest.development_only or not atlas_manifest.formal_parser_eligible:
+            raise FormalPackageMixingError("development atlas cannot be published as formal")
+        if (
+            formal_report.atlas_content_hash != atlas_manifest.atlas_content_hash
+            or atlas_manifest.profile_hash != preflight.target_profile_hash
+            or atlas_manifest.build_hash != preflight.game_build_id
+            or formal_report.preflight_canonical_hash != preflight.preflight_canonical_hash
+            or formal_report.validation_truth_canonical_hash != preflight.validation_truth_canonical_hash
+            or formal_report.fit_canonical_hash != fit_result.fit_canonical_hash
+            or dict(formal_report.code_hashes) != dict(preflight.code_hashes)
+        ):
+            raise FormalPackageMixingError("formal package inputs do not share one identity chain")
+        validation_report = formal_report.pooled_report
+        identity = {
+            "schema_version": FORMAL_PACKAGE_SCHEMA_VERSION,
+            "development_only": False,
+            "formal_parser_eligible": True,
+            "fit_result": fit_result.to_wire(),
+            "validation_report": validation_report.to_wire(),
+            "formal_validation_report": formal_report.to_wire(),
+            "preflight_report": preflight.to_wire(),
+        }
+        package_hash = canonical_hash(identity)
+        meta = FormalParserPackageMeta(
+            FORMAL_PACKAGE_SCHEMA_VERSION,
+            False,
+            True,
+            fit_result.fit_canonical_hash,
+            validation_report.report_canonical_hash,
+            formal_report.formal_report_canonical_hash,
+            preflight.preflight_canonical_hash,
+            atlas_manifest.atlas_content_hash,
+            package_hash,
+        )
+        wire = {
+            "metadata": {
+                "schema_version": meta.schema_version,
+                "development_only": meta.development_only,
+                "formal_parser_eligible": meta.formal_parser_eligible,
+                "fit_canonical_hash": meta.fit_canonical_hash,
+                "report_canonical_hash": meta.report_canonical_hash,
+                "formal_report_canonical_hash": meta.formal_report_canonical_hash,
+                "preflight_canonical_hash": meta.preflight_canonical_hash,
+                "atlas_content_hash": meta.atlas_content_hash,
+                "package_hash": meta.package_hash,
+            },
+            "fit_result": fit_result.to_wire(),
+            "validation_report": validation_report.to_wire(),
+            "formal_validation_report": formal_report.to_wire(),
+            "preflight_report": preflight.to_wire(),
+        }
+        path = Path(package_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.tmp")
+        try:
+            with temp_path.open("wb") as stream:
+                stream.write(canonical_json_bytes(wire))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_path, path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        return meta
 
 class PackageLoader:
     """HUD parser package を strict schema と内容 hash で復元する loader。
@@ -718,6 +844,59 @@ development_only=true かつ formal_parser_eligible=false の組だけを受け�
         return package
 
     @classmethod
+    def _load_formal_wire(cls, wire: object) -> ParserPackage:
+        """formal package の wire schema と全 lineage hash を検証する。
+
+Formal loader だけが追加 report 群を解釈し、development schema は旧検査へそのまま渡します。
+        """
+        from .hud_formal_release import FormalValidationReport, PreflightReport
+
+        expected = {
+            "metadata", "fit_result", "validation_report", "formal_validation_report", "preflight_report"
+        }
+        meta_fields = {
+            "schema_version", "development_only", "formal_parser_eligible", "fit_canonical_hash",
+            "report_canonical_hash", "formal_report_canonical_hash", "preflight_canonical_hash",
+            "atlas_content_hash", "package_hash",
+        }
+        if not isinstance(wire, dict) or set(wire) != expected:
+            raise ValueError("formal parser package fields do not match schema")
+        if not isinstance(wire["metadata"], dict) or set(wire["metadata"]) != meta_fields:
+            raise ValueError("formal parser package metadata fields do not match schema")
+        meta = FormalParserPackageMeta(**wire["metadata"])
+        fit_result = _fit_from_wire(wire["fit_result"])
+        report = _report_from_wire(wire["validation_report"])
+        formal_report = FormalValidationReport.from_wire(wire["formal_validation_report"])
+        preflight = PreflightReport.from_wire(wire["preflight_report"])
+        if (
+            meta.fit_canonical_hash != fit_result.fit_canonical_hash
+            or meta.report_canonical_hash != report.report_canonical_hash
+            or meta.formal_report_canonical_hash != formal_report.formal_report_canonical_hash
+            or meta.preflight_canonical_hash != preflight.preflight_canonical_hash
+            or meta.atlas_content_hash != formal_report.atlas_content_hash
+            or formal_report.pooled_report.report_canonical_hash != report.report_canonical_hash
+            or formal_report.fit_canonical_hash != fit_result.fit_canonical_hash
+            or formal_report.preflight_canonical_hash != preflight.preflight_canonical_hash
+            or formal_report.validation_truth_canonical_hash != preflight.validation_truth_canonical_hash
+            or dict(formal_report.code_hashes) != dict(preflight.code_hashes)
+            or not formal_report.all_passed
+            or not report.all_passed
+        ):
+            raise PackageHashMismatch("formal package internal hash chain mismatch")
+        identity = {
+            "schema_version": meta.schema_version,
+            "development_only": meta.development_only,
+            "formal_parser_eligible": meta.formal_parser_eligible,
+            "fit_result": fit_result.to_wire(),
+            "validation_report": report.to_wire(),
+            "formal_validation_report": formal_report.to_wire(),
+            "preflight_report": preflight.to_wire(),
+        }
+        if canonical_hash(identity) != meta.package_hash:
+            raise PackageHashMismatch("formal package hash mismatch")
+        return ParserPackage(meta, fit_result, report, formal_report, preflight)
+
+    @classmethod
     def _load(cls, package_path: str | os.PathLike[str]) -> ParserPackage:
         """package wire、内部 hash、外側 package hash を一括検証する。
 
@@ -728,6 +907,12 @@ development_only=true かつ formal_parser_eligible=false の組だけを受け�
             wire = json.loads(path.read_bytes())
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"invalid parser package: {path}") from exc
+        if isinstance(wire, dict) and isinstance(wire.get("metadata"), dict):
+            schema = wire["metadata"].get("schema_version")
+            if schema == FORMAL_PACKAGE_SCHEMA_VERSION:
+                return cls._load_formal_wire(wire)
+            if schema != PACKAGE_SCHEMA_VERSION:
+                raise ValueError(f"unsupported parser package schema: {schema!r}")
         if not isinstance(wire, dict) or set(wire) != {"metadata", "fit_result", "validation_report"}:
             raise ValueError("parser package fields do not match schema")
         meta_wire = wire["metadata"]
