@@ -620,6 +620,10 @@ def _mutating_test_predictor(restored, mutate):
     predict = predictor.predict_frame
 
     def predict_frame(frame, session_id: str, frame_index: int):
+        """予測 snapshot に変更を加えて runner へ返す。
+
+        元 predictor の出力に変異関数を適用し、runner の不変条件検査を試す。
+        """
         snapshot, latency = predict(frame, session_id, frame_index)
         return (mutate(snapshot) if snapshot is not None else None), latency
 
