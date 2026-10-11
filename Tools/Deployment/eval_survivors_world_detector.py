@@ -14,12 +14,14 @@ weight がなくても metric 計算パスを検証できる。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import pathlib
 import sys
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import yaml
@@ -88,6 +90,85 @@ def compute_iou_matrix(gt_boxes: np.ndarray, pred_boxes: np.ndarray) -> np.ndarr
     area_pred = (pred_boxes[:, 2] - pred_boxes[:, 0]) * (pred_boxes[:, 3] - pred_boxes[:, 1])
     union = area_gt[:, None] + area_pred[None, :] - inter
     return (inter / np.maximum(union, 1e-6)).astype(np.float32)
+
+
+def compute_ap_coco101(
+    gt_boxes: np.ndarray,
+    gt_classes: np.ndarray,
+    pred_boxes: np.ndarray,
+    pred_scores: np.ndarray,
+    pred_classes: np.ndarray,
+    *,
+    gt_image_ids: np.ndarray | None = None,
+    pred_image_ids: np.ndarray | None = None,
+) -> float:
+    """COCO の IoU 0.50..0.95 と recall 101 点で foreground AP を計算する。
+
+    image id ごとに GT を照合し、class 0 と GT のない class を集計から外す。
+    """
+    gt_boxes = np.asarray(gt_boxes, dtype=np.float64).reshape(-1, 4)
+    pred_boxes = np.asarray(pred_boxes, dtype=np.float64).reshape(-1, 4)
+    gt_classes = np.asarray(gt_classes, dtype=np.int64).reshape(-1)
+    pred_classes = np.asarray(pred_classes, dtype=np.int64).reshape(-1)
+    pred_scores = np.asarray(pred_scores, dtype=np.float64).reshape(-1)
+    gt_image_ids = np.zeros(len(gt_boxes), dtype=np.int64) if gt_image_ids is None else np.asarray(gt_image_ids).reshape(-1)
+    pred_image_ids = np.zeros(len(pred_boxes), dtype=np.int64) if pred_image_ids is None else np.asarray(pred_image_ids).reshape(-1)
+    if len(gt_classes) != len(gt_boxes) or len(pred_classes) != len(pred_boxes) or len(pred_scores) != len(pred_boxes):
+        raise ValueError("COCO AP 入力の box/class/score 件数が一致しません")
+    if len(gt_image_ids) != len(gt_boxes) or len(pred_image_ids) != len(pred_boxes):
+        raise ValueError("COCO AP 入力の image id 件数が一致しません")
+    if not np.isfinite(gt_boxes).all() or not np.isfinite(pred_boxes).all() or not np.isfinite(pred_scores).all():
+        raise ValueError("COCO AP 入力に NaN / Infinity があります")
+    if np.any(pred_scores < 0) or np.any(pred_scores > 1):
+        raise ValueError("COCO AP score は [0, 1] の範囲が必要です")
+    classes = sorted(set(gt_classes.tolist()) - {0})
+    if not classes:
+        raise ValueError("COCO AP に foreground GT がありません")
+    recall_points = np.linspace(0.0, 1.0, 101)
+    class_aps: list[float] = []
+    for class_id in classes:
+        class_gt = np.flatnonzero(gt_classes == class_id)
+        class_predictions = np.flatnonzero(pred_classes == class_id)
+        class_threshold_aps: list[float] = []
+        for iou_threshold in np.arange(0.50, 1.00, 0.05):
+            matched: dict[Any, set[int]] = {}
+            gt_by_image: dict[Any, np.ndarray] = {}
+            for image_id in dict.fromkeys(gt_image_ids[class_gt].tolist()):
+                indexes = class_gt[gt_image_ids[class_gt] == image_id]
+                gt_by_image[image_id] = indexes
+                matched[image_id] = set()
+            ordered = sorted(class_predictions.tolist(), key=lambda index: (-pred_scores[index], index))
+            tp = np.zeros(len(ordered), dtype=np.float64)
+            fp = np.zeros(len(ordered), dtype=np.float64)
+            for rank, prediction_index in enumerate(ordered):
+                image_id = pred_image_ids[prediction_index]
+                candidates = gt_by_image.get(image_id)
+                if candidates is None:
+                    fp[rank] = 1
+                    continue
+                available = np.asarray([index for index in candidates if index not in matched[image_id]], dtype=np.int64)
+                if not len(available):
+                    fp[rank] = 1
+                    continue
+                overlaps = compute_iou_matrix(gt_boxes[available], pred_boxes[prediction_index:prediction_index + 1])[:, 0]
+                best = int(np.argmax(overlaps))
+                if overlaps[best] >= iou_threshold:
+                    tp[rank] = 1
+                    matched[image_id].add(int(available[best]))
+                else:
+                    fp[rank] = 1
+            if not len(ordered):
+                class_threshold_aps.append(0.0)
+                continue
+            cumulative_tp = np.cumsum(tp)
+            recall = cumulative_tp / len(class_gt)
+            precision = cumulative_tp / np.maximum(cumulative_tp + np.cumsum(fp), 1.0)
+            precision = np.maximum.accumulate(precision[::-1])[::-1]
+            sampled = [float(np.max(precision[recall >= point])) if np.any(recall >= point) else 0.0
+                       for point in recall_points]
+            class_threshold_aps.append(float(np.mean(sampled)))
+        class_aps.append(float(np.mean(class_threshold_aps)))
+    return float(np.mean(class_aps))
 
 
 def compute_ap50_95(
@@ -745,11 +826,166 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", default="configs/world_detector_v2.yaml", help="detector config YAML")
     p.add_argument("--class-map", default="configs/world_class_map_v2.yaml", help="class map YAML")
     p.add_argument("--output", help="メトリクス JSON の出力先")
+    p.add_argument("--formal", action="store_true", help="checkpoint を in-process 推論して formal verdict を出す")
+    p.add_argument("--preflight-report", help="training が発行した canonical preflight report")
+    p.add_argument("--checkpoint-dir", help="formal checkpoint directory")
+    p.add_argument("--latency", help="target GPU latency measurement JSON")
+    p.add_argument("--gates", help="formal gate YAML")
+    p.add_argument("--verdict-out", help="formal validation verdict JSON")
     return p
 
 
+def _formal_eval(args: argparse.Namespace) -> int:
+    """checkpoint の実 weight で validation frame を推論して verdict を保存する。
+
+    predictions JSON を一切読まず、raw score から formal threshold を選ぶ。
+    """
+    import hashlib
+    from survivors.vision.world_dataset import WorldDataset, load_class_map
+    from survivors.vision.world_detector import CheckpointManifest, WorldDetector, drop_ignored_detections, load_detector_config
+    from survivors.vision.world_formal_release import (
+        DEFAULT_FORMAL_GATES,
+        GpuLatencyMeasurement,
+        build_validation_verdict,
+        read_preflight_report,
+        verify_validation_annotations,
+    )
+
+    preflight = read_preflight_report(args.preflight_report)
+    verify_validation_annotations(preflight, args.annotations)
+    checkpoint_dir = pathlib.Path(args.checkpoint_dir)
+    manifest_path = checkpoint_dir / "manifest.json"
+    weight_path = checkpoint_dir / "model.pt"
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = CheckpointManifest.load(manifest_path)
+    def file_hash(path: pathlib.Path) -> str:
+        """checkpoint file の content hash を計算する。
+
+        manifest と actual weight の identity を読み込み前に照合する。
+        """
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    weight_hash = file_hash(weight_path)
+    config_path = pathlib.Path(args.config)
+    class_map_path = pathlib.Path(args.class_map)
+    if (
+        manifest.training_mode != "formal"
+        or manifest.development_only is not False
+        or manifest.formal_detector_eligible is not False
+        or manifest.model_hash != weight_hash
+        or manifest.data_hash != preflight.dataset_identity
+        or manifest.build_hash != preflight.build_identity
+        or manifest.resolved_config_hash != preflight.config_identity
+        or manifest.split_hash != preflight.split_hash
+        or manifest.config_hash != file_hash(config_path)
+        or manifest.class_map_hash != file_hash(class_map_path)
+    ):
+        raise ValueError("checkpoint manifest/weight does not match preflight identity")
+    cfg = dict(preflight.resolved_config)
+    if load_detector_config(config_path)["model"]["architecture"] != cfg["model"]["architecture"]:
+        raise ValueError("eval config architecture differs from preflight")
+    cm = load_class_map(class_map_path)
+    detector = WorldDetector.from_config(cfg, class_map_path)
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        if exc.name != "torch":
+            raise
+        raise RuntimeError("formal eval requires torch") from exc
+    try:
+        state = torch.load(weight_path, map_location="cpu", weights_only=True)
+    except TypeError:
+        state = torch.load(weight_path, map_location="cpu")
+    detector._model.load_state_dict(state, strict=True)
+    detector._model.eval()
+    if hasattr(detector._model, "score_thresh"):
+        detector._model.score_thresh = 0.0
+    caps = {
+        "score_thresh": getattr(detector._model, "score_thresh", 0.0),
+        "topk_candidates": getattr(detector._model, "topk_candidates", "unknown"),
+        "detections_per_img": getattr(detector._model, "detections_per_img", "unknown"),
+    }
+    dataset = WorldDataset(args.annotations, class_map_path, validate_bounds=True)
+    validation_sessions = set(preflight.validation_sessions)
+    detections: dict[str, list[dict[str, Any]]] = {session: [] for session in validation_sessions}
+    annotations: dict[str, list[dict[str, Any]]] = {session: [] for session in validation_sessions}
+    import cv2
+    for sample in dataset:
+        if sample.session_id not in validation_sessions:
+            continue
+        frame = cv2.imread(sample.file_name)
+        if frame is None:
+            raise OSError(f"formal eval image decode failed: {sample.file_name}")
+        result = drop_ignored_detections(
+            detector.infer(frame, score_threshold=0.0),
+            cfg["input"].get("ignore_regions", []),
+        )
+        detections[sample.session_id].append({
+            "image_id": sample.image_id,
+            "image_width": sample.image_width,
+            "image_height": sample.image_height,
+            "boxes_xyxy": result.boxes_xyxy,
+            "scores": result.scores,
+            "class_ids": result.class_ids,
+        })
+        for annotation in sample.annotations:
+            annotations[sample.session_id].append({
+                "image_id": sample.image_id,
+                "category_id": annotation.category_id,
+                "bbox": list(annotation.bbox_xywh),
+                "image_width": sample.image_width,
+                "image_height": sample.image_height,
+                "track_id": annotation.track_id,
+                "late_game": annotation.late_game,
+                "time_band": annotation.time_band,
+            })
+    try:
+        with pathlib.Path(args.latency).open(encoding="utf-8") as stream:
+            latency = GpuLatencyMeasurement.from_dict(json.load(stream))
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"formal latency JSON is invalid: {exc}") from exc
+    with pathlib.Path(args.gates).open(encoding="utf-8") as stream:
+        gates = yaml.safe_load(stream) or {}
+    if not isinstance(gates, dict):
+        raise ValueError("formal gates YAML must be a mapping")
+    threshold_rule = {
+        "kind": "max_mean_recall_subject_to_precision",
+        "precision_floor": 0.80,
+        "candidates": [round(value, 2) for value in np.arange(0.05, 1.0, 0.05)],
+    }
+    verdict = build_validation_verdict(
+        detections_by_session=detections,
+        annotations_by_session=annotations,
+        class_map=cm,
+        gates=gates or {key: DEFAULT_FORMAL_GATES[key] for key in ()},
+        latency=latency,
+        preflight=preflight,
+        checkpoint_manifest=json.loads(manifest_bytes),
+        checkpoint_manifest_hash=hashlib.sha256(manifest_bytes).hexdigest(),
+        weight_hash=weight_hash,
+        threshold_rule=threshold_rule,
+        inference_caps=caps,
+    )
+    verdict.write(args.verdict_out)
+    print(json.dumps(verdict.to_dict(), ensure_ascii=False, indent=2))
+    return 0 if verdict.status == "PASS" else 1
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = _build_arg_parser().parse_args(argv)
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+    formal_arguments = (args.preflight_report, args.checkpoint_dir, args.latency, args.gates, args.verdict_out)
+    if args.formal:
+        if args.predictions:
+            parser.error("--formal は外部 --predictions を受け付けません")
+        if any(value is None for value in formal_arguments):
+            parser.error("--formal には --preflight-report --checkpoint-dir --latency --gates --verdict-out が必要です")
+        try:
+            return _formal_eval(args)
+        except (OSError, ValueError, TypeError, RuntimeError, json.JSONDecodeError) as exc:
+            print(f"[FORMAL EVAL FAIL] {exc}", file=sys.stderr)
+            return 1
+    if any(value is not None for value in formal_arguments):
+        parser.error("formal eval inputs require --formal")
 
     from survivors.vision.world_dataset import WorldDataset, load_class_map
     from survivors.vision.world_detector import load_detector_config

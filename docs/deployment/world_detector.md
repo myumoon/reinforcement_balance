@@ -48,14 +48,18 @@ Tools/Deployment/
 │   ├── world_dataset.py          # COCO dataset loader + preflight + session split
 │   ├── world_detector.py         # SSDLite320 adapter + DetectionResult + CheckpointManifest
 │   ├── entity_tracker.py         # greedy tracker + TrackedWorldStateV2
-│   └── world_detector_package.py # 開発 package writer / restore (04-07)
+│   ├── world_detector_package.py # development / formal package writer・restore
+│   ├── world_formal_sampling.py  # session sampler・weights・augmentation
+│   ├── world_formal_release.py   # formal preflight・verdict・artifact release
+│   └── session_cluster_ci.py     # session 単位の比率 bootstrap CI
 ├── configs/
 │   ├── world_class_map_v2.yaml   # 16 クラスの class map（既定）
 │   ├── world_class_map_v1.yaml   # 旧 12 クラスの class map（旧成果物の照合用に残す）
 │   ├── world_detector_v2.yaml    # 学習・推論設定（既定、formal_detector_eligible=false）
 │   └── world_detector_v1.yaml    # 旧 12 クラス用の設定
 ├── train_survivors_world_detector.py   # 学習 CLI（DataLoader / optimizer / checkpoint selection）
-├── eval_survivors_world_detector.py    # 評価 CLI（mAP50:95 / performance gate）
+├── eval_survivors_world_detector.py    # development / formal 評価 CLI
+├── publish_survivors_world_detector_formal.py # formal package / artifact publisher
 └── mine_survivors_active_learning.py   # active learning マイニング CLI
 docs/deployment/
 └── world_detector.md           # 本ドキュメント
@@ -183,25 +187,20 @@ weapon の track は `coarse_class == "weapon"` で出力され、大分類 `ene
 | `normalized_width` / `normalized_height` | **v2 追加。** 最新の検出矩形の幅・高さ（画像サイズで正規化、平滑化なし） |
 | `first_seen_timestamp_ns` | **v2 追加。** その track を生成したフレームの時刻。track が途切れて作り直されると新しい時刻になる |
 
-## 制約と非目標
+## 制約と境界
 
-- **formal_detector_eligible=false:** 本 PR の checkpoint / config はすべて開発用。
-  正式パッケージへの昇格は 04-08 が確定する。formal publish は常に `FormalPackageRejectedError` で拒否される。
-- **development-only:** 学習 CLI は DataLoader / optimizer / SGD を実装する（開発用）。
-  manifest に `development_only=true` と `training_mode: "smoke" | "development"` を記録する。
-- **新規 detection framework 依存なし:** torchvision だけを使用する。
-- **実動画の recall / latency 合格は本 PR の完了条件ではない。**
-- **formal 機能は 04-08 へ委譲:** formal preflight, 正式 augmentation, 性能合格,
-  threshold 選定, formal package, formal release はすべて 04-08 の責務。
-  04-07 (本 PR) は development-only tooling を提供する。
+- checkpoint は `formal_detector_eligible=false` のまま保存する。formal eligibility は PASS verdict と対応 hash を確認した publisher だけが package に設定する。
+- development / smoke の checkpoint と package は従来どおり formal runtime に拒否される。
+- formal package restore は verdict hash、threshold、weight、dataset、build、resolved config を再検証する。
+- この実装の合成データ検証は正式 dataset 上の訓練や target GPU latency 実測を代替しない。正式 release の運用実行は 04-08 で行う。
+- 新しい detection framework 依存は追加せず、torchvision と既存の OpenCV / NumPy を使用する。
 
-## 04-07 / 04-08 との境界
-
-| 責務 | 担当 PR |
-|------|---------|
+| 責務 | 担当 |
+|------|------|
 | class map / schema / tracker / dataset loader | 04-06 |
-| DataLoader / optimizer / development checkpoint / development package | **04-07 (本 PR)** |
-| 正式 augmentation / formal weight / threshold / formal_detector_eligible=true | 04-08 |
+| development sampler / checkpoint / package | 04-07 |
+| formal preflight / training / validation verdict / package / artifact / restore | **04-15** |
+| 正式 dataset での訓練、target GPU latency 実測、release config の確定 | 04-08 |
 | deploy obs への変換 | 04-09 |
 
 ## 04-07 tooling — session 拒否 / checkpoint selection / package writer
@@ -269,5 +268,50 @@ state = restore_package(pkg_path, frame_bgr)  # TrackedWorldStateV2 を返す
 
 - `formal_detector_eligible=false` の package は `assert_formal_eligible()` で拒否される。
 - `contract_hash` が TrackedWorldStateV2 フィールド定義と一致しない場合は `PackageSchemaError`。
-- `publish_formal_package()` は引数にかかわらず `FormalPackageRejectedError` を送出する（04-08 で実装）。
+- formal package は `validation_verdict_hash` が無ければ読み込みを拒否する。
 - manifest には `development_only=true` と `training_mode` が記録される。
+
+## 04-15 formal release
+
+formal 入口は COCO、04-17 dataset descriptor、split manifest、restore verdict、feasibility PASS、annotation agreement を照合する。split manifest の seal と session の `formal_dataset_eligible`、`lossless_png`、build / target identity を確認し、sealed session は学習と評価の COCO に入れない。preflight は code hash と dataset / resolved config / build identity を含む canonical report を出し、学習開始前に失敗した場合は checkpoint を作らない。
+
+formal training は descriptor が示す `model_train` / `model_validation` だけを使う。session-balanced sampler、class weights、near-duplicate 抑制、水平反転・scale・HSV augmentation、weighted SSD loss、identity 検査付き resume を有効にする。development の config 既定は sampler=`interleaved`、augmentation と duplicate suppression は disabled のため従来挙動を維持する。
+
+`input.ignore_regions` は normalized `[x1, y1, x2, y2]` で指定し、box center が領域内の検出を全 class で除外する。既定 item HUD 領域は `[0.050, 0.033, 0.203, 0.120]`（1920×1080 で `[96, 36, 390, 130]` px）。formal eval と package restore が同じ filter を tracker より前に適用し、formal GT も同じ中心規則で除外する。
+sim の DeployObs builder にはこの除外範囲を適用していないため、sim と実機の差は fidelity の未解消項目として扱う。
+
+formal eval は外部 `--predictions` を受け付けず、checkpoint の weight で `model_validation` を in-process 推論する。COCO 101 点 AP、session-cluster 比率 CI、class/slice recall、距離・密度指標、GPU latency gate を評価し、raw score に threshold rule を適用して選んだ threshold と各 gate を verdict に固定する。threshold 選定と gate は同じ validation split を使うため、verdict に selection bias の注記が残る。`error_calibration` と `final_e2e_test` は選定にも評価にも使用しない。
+
+04-08 での運用コマンド例（パスは正式 dataset と target 機の配置に合わせる）:
+
+```powershell
+python train_survivors_world_detector.py `
+  --annotations data/world_coco_model.json --formal `
+  --feasibility-verdict data/feasibility.json --capture-store data/capture-store `
+  --target-profile-hash <target-profile-sha256> --hardware-id <target-gpu-id> `
+  --dataset-descriptor data/world-dataset-descriptor.json `
+  --restore-verdict data/dataset-restore-verdict.json `
+  --annotation-agreement data/annotation-agreement.json `
+  --minimum-counts data/world-detector-minimum-counts.json `
+  --preflight-report-out runs/formal/preflight.json `
+  --config configs/world_detector_v2.yaml --class-map configs/world_class_map_v2.yaml `
+  --output runs/formal/checkpoint
+
+python eval_survivors_world_detector.py `
+  --annotations data/world_coco_model.json --formal `
+  --preflight-report runs/formal/preflight.json --checkpoint-dir runs/formal/checkpoint `
+  --latency data/target-gpu-latency.json --gates configs/world_detector_formal_gates.yaml `
+  --config configs/world_detector_v2.yaml --class-map configs/world_class_map_v2.yaml `
+  --verdict-out runs/formal/validation-verdict.json
+
+python publish_survivors_world_detector_formal.py `
+  --verdict runs/formal/validation-verdict.json --preflight-report runs/formal/preflight.json `
+  --checkpoint-dir runs/formal/checkpoint --out-root runs/formal/packages `
+  --artifact-store data/artifact-store --backup-root data/artifact-backup `
+  --restore-root data/artifact-restore --dataset-descriptor data/world-dataset-descriptor.json `
+  --logical-prefix survivors/world-detector --resolved-yaml-out configs/world_detector_mad_forest_1080p_ja_v1.yaml
+```
+
+publisher は package file と 04-10 `world_detector_package.v1` envelope を ArtifactStore に保存し、descriptor を発行する。`run_restore_test` が backup 経由で空 store への full restore を確認し、その verdict が PASS の場合だけ resolved YAML を出力する。sha256 形式の `game_build_id` を使う場合は、同一 hash になる build attestation を `--build-attestation` で publisher に渡す。resolved YAML、weight、正式 capture pixel はこの code-only 変更に含めず、04-08 の実行時に作る。
+
+package directory key は manifest 内容の SHA-256 であり、package 内 file 内容を単独で改ざん不能にする仕組みではない。restore が verdict / weight / config の hash を再照合し、ArtifactStore descriptor と restore verdict が release object 集合を固定する。

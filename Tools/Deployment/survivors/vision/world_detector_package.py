@@ -1,4 +1,4 @@
-"""WorldDetector development package writer / loader（PR#315 development-only）。
+"""WorldDetector development/formal package writer and restore loader。
 
 
 development weight、resolved config、class map、tracker config、
@@ -11,8 +11,8 @@ world_class_map_v2.yaml を格納するため、別環境でも restore でき�
 restore 後に 04-06 golden fixture と同じ TrackedWorldStateV2 schema を返し、
 schema 差を PackageSchemaError で拒否する。
 
-PR#315 では development package のみ提供する。formal publish は 04-08 に委譲する。
-publish_formal_package() は呼び出すと常に FormalPackageRejectedError を送出する。
+formal package は validation verdict と checkpoint identity が一致した場合だけ発行する。
+restore_package(require_formal=True) は verdict、weight、resolved config の hash を再検証する。
 
 使用例:
     from survivors.vision.world_detector_package import publish_development_package, restore_package
@@ -50,6 +50,7 @@ _MANIFEST_NAME = "manifest.json"
 _CONFIG_NAME = "world_detector_v2.yaml"
 _CLASS_MAP_NAME = "world_class_map_v2.yaml"
 _WEIGHT_NAME = "model.pt"
+_VALIDATION_VERDICT_NAME = "validation_verdict.json"
 
 
 @dataclass(frozen=True)
@@ -73,8 +74,9 @@ class PackageManifest:
     checkpoint_selection: dict  # CheckpointSelector.to_dict()
     weight_included: bool       # package 内に model.pt があるか
     score_threshold: float      # restore_package の推論スコア閾値（再現性保証）
-    development_only: bool = True   # 常に True。04-08 以外で False にはならない。
-    training_mode: str = "development"  # "smoke" | "development"
+    development_only: bool = True
+    training_mode: str = "development"  # "smoke" | "development" | "formal"
+    validation_verdict_hash: str = ""
 
     def to_dict(self) -> dict:
         """JSON シリアライズ用 dict。"""
@@ -93,13 +95,14 @@ class PackageManifest:
             "score_threshold": self.score_threshold,
             "development_only": self.development_only,
             "training_mode": self.training_mode,
+            "validation_verdict_hash": self.validation_verdict_hash,
         }
 
     @staticmethod
     def from_dict(d: dict) -> "PackageManifest":
         """dict から PackageManifest を復元する。
 
-        04-07 境界: formal_detector_eligible は必ず False へ上書き、development_only は True。
+        formal mode は verdict hash を必須にし、eligibility flags をそのまま検証する。
         disk 由来の manifest はすべて型・値・hash 形式を検証してから構築する。
         score_threshold は必須フィールドで暗黙の変換や default は使わない。
         """
@@ -112,9 +115,9 @@ class PackageManifest:
                 f"未知の package schema_version: {d.get('schema_version')!r}"
             )
         raw_mode = d.get("training_mode", "development")
-        if raw_mode not in ("smoke", "development"):
+        if raw_mode not in ("smoke", "development", "formal"):
             raise ValueError(
-                f"training_mode の許容値は 'smoke' | 'development' です。got: {raw_mode!r}"
+                f"training_mode の許容値は 'smoke' | 'development' | 'formal' です。got: {raw_mode!r}"
             )
 
         # metrics / checkpoint_selection は dict が必要
@@ -156,9 +159,23 @@ class PackageManifest:
                 f"PackageManifest: score_threshold は [0, 1] の範囲が必要。got: {st!r}"
             )
 
+        raw_verdict_hash = d.get("validation_verdict_hash", "")
+        if raw_mode == "formal":
+            if d.get("development_only") is not False or d.get("formal_detector_eligible") is not True:
+                raise ValueError("formal package は development_only=false / formal_detector_eligible=true が必要です")
+            if wi is not True:
+                raise ValueError("formal package は model weight を必須にします")
+            if not isinstance(raw_verdict_hash, str) or not _SHA256_RE.fullmatch(raw_verdict_hash):
+                raise ValueError("formal package は validation_verdict_hash に SHA-256 が必要です")
+            formal_eligible = True
+            development_only = False
+        else:
+            formal_eligible = False
+            development_only = True
+            raw_verdict_hash = ""
         pm = PackageManifest(
             schema_version=d["schema_version"],
-            formal_detector_eligible=False,    # 04-07 は常に False
+            formal_detector_eligible=formal_eligible,
             model_hash=d["model_hash"],
             data_hash=d["data_hash"],
             config_hash=d["config_hash"],
@@ -169,8 +186,9 @@ class PackageManifest:
             checkpoint_selection=ckpt_sel,
             weight_included=wi,
             score_threshold=float(st),
-            development_only=True,             # 04-07 は常に True
+            development_only=development_only,
             training_mode=raw_mode,
+            validation_verdict_hash=raw_verdict_hash,
         )
         for fname in ("model_hash", "data_hash", "config_hash", "build_hash", "class_map_hash", "contract_hash"):
             h = getattr(pm, fname)
@@ -181,15 +199,19 @@ class PackageManifest:
         return pm
 
     def assert_formal_eligible(self) -> None:
-        """04-07 の package は caller 指定フラグに関わらず常に formal 拒否する。
+        """formal identity が揃った package だけを formal runtime に許可する。
 
-        formal_detector_eligible の値に関係なく例外を送出する。
-        formal 昇格は 04-08 の validated verdict によってのみ可能。
+        development mode や欠けた verdict hash はすべて fail-closed で拒否する。
         """
-        raise FormalPackageRejectedError(
-            "04-07 package は formal detector として使用できません。"
-            " formal 昇格は 04-08 の検証済み verdict によってのみ行われます。"
-        )
+        if (
+            self.training_mode == "formal"
+            and self.development_only is False
+            and self.formal_detector_eligible is True
+            and isinstance(self.validation_verdict_hash, str)
+            and _SHA256_RE.fullmatch(self.validation_verdict_hash)
+        ):
+            return
+        raise FormalPackageRejectedError("formal package の eligibility または verdict hash が不正です。")
 
 
 class FormalPackageRejectedError(ValueError):
@@ -261,6 +283,7 @@ def _write_package(
     cfg_path: pathlib.Path,
     cm_path: pathlib.Path,
     weight_path: pathlib.Path | None,
+    validation_verdict_path: pathlib.Path | None = None,
 ) -> pathlib.Path:
     """package を content-addressed store へ atomic write する。
 
@@ -273,6 +296,11 @@ def _write_package(
         _verify_weight_hash(weight_path, pkg_manifest.model_hash)
     if pkg_manifest.weight_included != (weight_path is not None):
         raise ValueError("manifest の weight_included と weight_path が一致しません。")
+    if pkg_manifest.training_mode == "formal":
+        if validation_verdict_path is None or _sha256_file(validation_verdict_path) != pkg_manifest.validation_verdict_hash:
+            raise ValueError("formal validation verdict hash が manifest と一致しません。")
+    elif validation_verdict_path is not None:
+        raise ValueError("development package に validation verdict は格納できません。")
 
     content_key = _content_key(pkg_manifest)
     pkg_dir = store_dir / content_key
@@ -308,6 +336,10 @@ def _write_package(
             )
         if pkg_manifest.weight_included:
             _verify_weight_hash(pkg_dir / _WEIGHT_NAME, pkg_manifest.model_hash)
+        if pkg_manifest.training_mode == "formal":
+            _verdict_path = pkg_dir / _VALIDATION_VERDICT_NAME
+            if not _verdict_path.is_file() or _sha256_file(_verdict_path) != pkg_manifest.validation_verdict_hash:
+                raise PackageSchemaError("既存 package の validation verdict が欠落または改ざんされています。")
         return pkg_dir / _MANIFEST_NAME
 
     # atomic: tmp dir に書いてから rename
@@ -336,6 +368,10 @@ def _write_package(
             copied_weight = tmp_dir / _WEIGHT_NAME
             shutil.copy2(weight_path, copied_weight)
             _verify_weight_hash(copied_weight, pkg_manifest.model_hash)
+        if validation_verdict_path is not None:
+            shutil.copy2(validation_verdict_path, tmp_dir / _VALIDATION_VERDICT_NAME)
+            if _sha256_file(tmp_dir / _VALIDATION_VERDICT_NAME) != pkg_manifest.validation_verdict_hash:
+                raise ValueError("validation verdict の hash が manifest と一致しません。")
 
         shutil.move(str(tmp_dir), str(pkg_dir))
 
@@ -435,15 +471,103 @@ def publish_development_package(
     return _write_package(pkg_manifest, store_dir, cfg_path, cm_path, weight_path)
 
 
-def publish_formal_package(*_args: Any, **_kwargs: Any) -> pathlib.Path:
-    """formal package publish は PR#315 の責務外。常に FormalPackageRejectedError を送出する。
+def publish_formal_package(
+    *,
+    verdict_path: pathlib.Path,
+    checkpoint_dir: pathlib.Path,
+    out_root: pathlib.Path,
+    class_map_path: pathlib.Path,
+    config_path: pathlib.Path,
+    tracker_config: dict,
+) -> pathlib.Path:
+    """PASS verdict が checkpoint と一致する場合だけ formal package を保存する。
 
-    formal weight / threshold / gate の確定は 04-08 に委譲する。
+    package config は training run manifest の resolved config を再構成する。
     """
-    raise FormalPackageRejectedError(
-        "publish_formal_package() は PR#315 では無効です。"
-        " formal package の発行は 04-08 で実施してください。"
-    )
+    import yaml
+    from survivors.vision.world_detector import CheckpointManifest
+    from survivors.vision.world_formal_release import ValidationVerdict, resolved_config_hash
+
+    checkpoint_dir = pathlib.Path(checkpoint_dir)
+    manifest_path = checkpoint_dir / "manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+    checkpoint = CheckpointManifest.load(manifest_path)
+    if (
+        checkpoint.training_mode != "formal"
+        or checkpoint.development_only is not False
+        or checkpoint.formal_detector_eligible is not False
+    ):
+        raise FormalPackageRejectedError("development checkpoint は formal package に昇格できません。")
+    verdict_bytes = pathlib.Path(verdict_path).read_bytes()
+    verdict = ValidationVerdict.from_dict(json.loads(verdict_bytes))
+    if verdict.status != "PASS":
+        raise FormalPackageRejectedError("PASS 以外の validation verdict は publish できません。")
+    weight_path = checkpoint_dir / _WEIGHT_NAME
+    run_manifest = json.loads((checkpoint_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    if not isinstance(run_manifest, dict):
+        raise FormalPackageRejectedError("checkpoint run manifest が不正です。")
+    resolved_cfg = run_manifest.get("resolved_config")
+    actual_weight_hash = _sha256_file(weight_path)
+    checkpoint_hash = hashlib.sha256(manifest_bytes).hexdigest()
+    if (
+        verdict.weight_hash != actual_weight_hash
+        or checkpoint.model_hash != actual_weight_hash
+        or verdict.checkpoint_manifest_hash != checkpoint_hash
+        or verdict.dataset_identity != checkpoint.data_hash
+        or verdict.resolved_config_hash != checkpoint.resolved_config_hash
+        or verdict.build_identity != checkpoint.build_hash
+        or run_manifest.get("schema_version") != "world_detector_training_run.v1"
+        or run_manifest.get("preflight_canonical_hash") != verdict.preflight_canonical_hash
+        or run_manifest.get("dataset_identity") != verdict.dataset_identity
+        or run_manifest.get("build_identity") != verdict.build_identity
+        or run_manifest.get("code_hashes") != dict(verdict.code_hashes)
+        or not isinstance(resolved_cfg, dict)
+        or resolved_config_hash(resolved_cfg) != checkpoint.resolved_config_hash
+        or not isinstance(tracker_config, dict)
+        or resolved_cfg.get("tracker") != tracker_config
+    ):
+        raise FormalPackageRejectedError("checkpoint、resolved config、weight と verdict の identity が一致しません。")
+    if _sha256_file(config_path) != checkpoint.config_hash or _sha256_file(class_map_path) != checkpoint.class_map_hash:
+        raise FormalPackageRejectedError("checkpoint の config/class map hash と入力 file が一致しません。")
+    if not isinstance(resolved_cfg.get("model"), dict) or resolved_cfg["model"].get("architecture") != "ssdlite320":
+        raise FormalPackageRejectedError("formal package は ssdlite320 config のみ発行できます。")
+
+    serialized_cfg = yaml.safe_dump(resolved_cfg, sort_keys=True, allow_unicode=True).encode("utf-8")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_config = pathlib.Path(temp_dir) / _CONFIG_NAME
+        temp_config.write_bytes(serialized_cfg)
+        config_hash = hashlib.sha256(serialized_cfg).hexdigest()
+        raw_manifest = json.loads(manifest_bytes)
+        selection = raw_manifest.get("checkpoint_selection", run_manifest.get("selection_rule", {}))
+        if not isinstance(selection, dict):
+            raise FormalPackageRejectedError("checkpoint selection rule が不正です。")
+        manifest = PackageManifest(
+            schema_version=PACKAGE_SCHEMA_VERSION,
+            formal_detector_eligible=True,
+            model_hash=actual_weight_hash,
+            data_hash=checkpoint.data_hash,
+            config_hash=config_hash,
+            build_hash=checkpoint.build_hash,
+            class_map_hash=checkpoint.class_map_hash,
+            contract_hash=_compute_contract_hash(),
+            metrics=verdict.metrics,
+            checkpoint_selection=selection,
+            weight_included=True,
+            score_threshold=verdict.score_threshold,
+            development_only=False,
+            training_mode="formal",
+            validation_verdict_hash=hashlib.sha256(verdict_bytes).hexdigest(),
+        )
+        out_root = pathlib.Path(out_root)
+        out_root.mkdir(parents=True, exist_ok=True)
+        return _write_package(
+            manifest,
+            out_root,
+            temp_config,
+            pathlib.Path(class_map_path),
+            weight_path,
+            pathlib.Path(verdict_path),
+        )
 
 
 # ---- restore ----
@@ -488,6 +612,25 @@ def restore_package(
     if pkg_manifest.formal_detector_eligible and not pkg_manifest.weight_included:
         raise PackageSchemaError("formal package に必須の weight が含まれていません。")
 
+    formal_verdict = None
+    if pkg_manifest.training_mode == "formal":
+        verdict_path = pkg_dir / _VALIDATION_VERDICT_NAME
+        if not verdict_path.is_file() or _sha256_file(verdict_path) != pkg_manifest.validation_verdict_hash:
+            raise PackageSchemaError("validation verdict が manifest と一致しません。")
+        from survivors.vision.world_formal_release import ValidationVerdict
+        try:
+            formal_verdict = ValidationVerdict.from_dict(json.loads(verdict_path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            raise PackageSchemaError(f"validation verdict が不正です: {exc}") from exc
+        if (
+            formal_verdict.status != "PASS"
+            or formal_verdict.score_threshold != pkg_manifest.score_threshold
+            or formal_verdict.weight_hash != pkg_manifest.model_hash
+            or formal_verdict.dataset_identity != pkg_manifest.data_hash
+            or formal_verdict.build_identity != pkg_manifest.build_hash
+        ):
+            raise PackageSchemaError("validation verdict と package identity が一致しません。")
+
     # -- contract hash 検証
     current_contract_hash = _compute_contract_hash()
     if pkg_manifest.contract_hash != current_contract_hash:
@@ -517,6 +660,10 @@ def restore_package(
 
     # 共有 validator を明示的に呼ぶ（model / tracker 構築より前）
     validate_detector_config(cfg)
+    if formal_verdict is not None:
+        from survivors.vision.world_formal_release import resolved_config_hash
+        if resolved_config_hash(cfg) != formal_verdict.resolved_config_hash:
+            raise PackageSchemaError("resolved config が validation verdict と一致しません。")
 
     detector = WorldDetector.from_config(cfg, cm_path)
 
@@ -527,6 +674,8 @@ def restore_package(
             raise PackageSchemaError(f"package 内に weight が見つかりません: {weight_file}")
         if _sha256_file(weight_file) != pkg_manifest.model_hash:
             raise PackageSchemaError("weight の model_hash が manifest と一致しません。")
+        if formal_verdict is not None and _sha256_file(weight_file) != formal_verdict.weight_hash:
+            raise PackageSchemaError("weight hash が validation verdict と一致しません。")
         try:
             import torch
         except ModuleNotFoundError as e:
@@ -541,7 +690,12 @@ def restore_package(
             detector._model.load_state_dict(state_dict)
 
     # -- infer（manifest の score_threshold で再現性を保証）
+    if pkg_manifest.training_mode == "formal" and hasattr(detector._model, "score_thresh"):
+        detector._model.score_thresh = 0.0
     result = detector.infer(frame_bgr, score_threshold=pkg_manifest.score_threshold)
+    if pkg_manifest.training_mode == "formal":
+        from survivors.vision.world_detector import drop_ignored_detections
+        result = drop_ignored_detections(result, cfg["input"].get("ignore_regions", []))
 
     # -- tracker（config から構築）
     tracker_cfg = cfg.get("tracker", {})

@@ -316,7 +316,7 @@ class TestCheckpointManifest:
         assert loaded.development_only is True
 
     def test_load_rejects_invalid_training_mode(self, tmp_path):
-        """load() は training_mode が 'smoke'|'development' 以外なら ValueError を送出する。"""
+        """load() は未知の training_mode だけを拒否する。"""
         payload = {
             "model_hash": "a" * 64,
             "data_hash": "b" * 64,
@@ -324,12 +324,42 @@ class TestCheckpointManifest:
             "build_hash": "d" * 64,
             "class_map_hash": "e" * 64,
             "formal_detector_eligible": False,
-            "training_mode": "formal",
+            "training_mode": "foo",
         }
         path = tmp_path / "manifest_bad_mode.json"
         path.write_text(__import__("json").dumps(payload), encoding="utf-8")
         with pytest.raises(ValueError, match="training_mode"):
             CheckpointManifest.load(path)
+
+    def test_formal_checkpoint_save_load_preserves_noneligible_identity(self, tmp_path):
+        """formal training checkpoint は formal eligibility を得ずに往復する。
+
+        development_only=false は保持し、eligible=true は checkpoint 境界で拒否する。
+        """
+        manifest = CheckpointManifest(
+            model_hash="a" * 64,
+            data_hash="b" * 64,
+            config_hash="c" * 64,
+            build_hash="d" * 64,
+            class_map_hash="e" * 64,
+            formal_detector_eligible=False,
+            development_only=False,
+            training_mode="formal",
+        )
+        path = tmp_path / "formal_manifest.json"
+
+        manifest.save(path)
+        loaded = CheckpointManifest.load(path)
+
+        assert loaded.training_mode == "formal"
+        assert loaded.development_only is False
+        assert loaded.formal_detector_eligible is False
+        for invalid in (
+            CheckpointManifest(**{**manifest.__dict__, "development_only": True}),
+            CheckpointManifest(**{**manifest.__dict__, "formal_detector_eligible": True}),
+        ):
+            with pytest.raises(ValueError):
+                invalid.save(tmp_path / "invalid.json")
 
     def test_verify_identity_passes_on_match(self):
         """verify_identity() は期待 hash と一致すれば例外を送出しない。"""

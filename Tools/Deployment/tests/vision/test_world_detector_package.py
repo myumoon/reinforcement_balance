@@ -979,8 +979,11 @@ class TestPackagePublish:
         pm = PackageManifest.from_dict(raw)
         assert pm.formal_detector_eligible is False
 
-    def test_assert_formal_eligible_always_raises(self, tmp_path):
-        """PackageManifest は formal_detector_eligible の値に関わらず assert_formal_eligible() が常に拒否する。"""
+    def test_assert_formal_eligible_requires_formal_verdict_hash(self, tmp_path):
+        """formal package は validation verdict hash がある場合だけ許可する。
+
+        development manifest と hash のない formal manifest を引き続き拒否する。
+        """
         from survivors.vision.world_detector_package import (
             publish_development_package, PackageManifest, FormalPackageRejectedError
         )
@@ -996,21 +999,30 @@ class TestPackagePublish:
             cm_path=CLASS_MAP_PATH,
         )
         raw = json.loads(pkg_path.read_text(encoding="utf-8"))
-        # from_dict では False に上書きされるが、それでも raises
+        # development manifest は caller flag が True でも拒否する。
         pm = PackageManifest.from_dict(raw)
         with pytest.raises(FormalPackageRejectedError):
             pm.assert_formal_eligible()
 
-        # caller が直接 formal_detector_eligible=True を指定してもやはり拒否
-        raw_true = dict(raw)
-        raw_true["formal_detector_eligible"] = True
-        pm_true = PackageManifest.from_dict(raw_true)
-        assert pm_true.formal_detector_eligible is False  # 上書きされる
-        with pytest.raises(FormalPackageRejectedError):
-            pm_true.assert_formal_eligible()
+        raw_formal = dict(raw)
+        raw_formal.update({
+            "formal_detector_eligible": True,
+            "development_only": False,
+            "training_mode": "formal",
+            "weight_included": True,
+            "validation_verdict_hash": "1" * 64,
+        })
+        PackageManifest.from_dict(raw_formal).assert_formal_eligible()
 
-    def test_from_dict_rejects_invalid_training_mode(self):
-        """from_dict は training_mode が 'smoke'|'development' 以外を拒否する。"""
+        raw_formal.pop("validation_verdict_hash")
+        with pytest.raises(ValueError, match="validation_verdict_hash"):
+            PackageManifest.from_dict(raw_formal)
+
+    def test_from_dict_rejects_invalid_mode_and_accepts_formal(self):
+        """from_dict は未知 mode を拒否し、verdict hash 付き formal manifest を復元する。
+
+        development mode の強制上書きは同じテスト群で維持する。
+        """
         from survivors.vision.world_detector_package import PackageManifest, PACKAGE_SCHEMA_VERSION
         bad = {
             "schema_version": PACKAGE_SCHEMA_VERSION,
@@ -1021,10 +1033,30 @@ class TestPackagePublish:
             "build_hash": "d" * 64,
             "class_map_hash": "e" * 64,
             "contract_hash": "f" * 64,
-            "training_mode": "formal",
+            "training_mode": "foo",
         }
         with pytest.raises(ValueError, match="training_mode"):
             PackageManifest.from_dict(bad)
+
+        bad["training_mode"] = "formal"
+        bad.update({
+            "formal_detector_eligible": True,
+            "development_only": False,
+            "validation_verdict_hash": "1" * 64,
+            "model_hash": "a" * 64,
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "contract_hash": "f" * 64,
+            "metrics": {},
+            "checkpoint_selection": {},
+            "weight_included": True,
+            "score_threshold": 0.5,
+        })
+        formal = PackageManifest.from_dict(bad)
+        assert formal.training_mode == "formal"
+        assert formal.formal_detector_eligible is True
 
     def test_restore_package_require_formal_raises(self, tmp_path):
         """restore_package(require_formal=True) は development package を FormalPackageRejectedError で拒否する。"""
@@ -1044,22 +1076,27 @@ class TestPackagePublish:
         with pytest.raises(FormalPackageRejectedError):
             restore_package(pkg_path, frame, require_formal=True)
 
-    def test_formal_publish_always_rejected(self, tmp_path):
-        """PR#315 では publish_formal_package() は常に FormalPackageRejectedError を送出する。"""
+    def test_formal_publish_rejects_development_checkpoint(self, tmp_path):
+        """formal publisher は development checkpoint を verdict 前に拒否する。
+
+        caller から formal boolean を渡しても checkpoint の mode を昇格できない。
+        """
         from survivors.vision.world_detector_package import publish_formal_package, FormalPackageRejectedError
 
         store = tmp_path / "store"
         store.mkdir()
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+        _make_checkpoint_manifest().save(checkpoint / "manifest.json")
         # どんな引数を渡しても拒否されることを確認
         with pytest.raises(FormalPackageRejectedError):
             publish_formal_package(
-                _make_checkpoint_manifest(formal=True),
-                {}, {}, store,
-                cfg_path=DETECTOR_CONFIG_PATH,
-                cm_path=CLASS_MAP_PATH,
-                weight_path=tmp_path / "model.pt",
-                validation_passed=True,
-                score_threshold=0.5,
+                verdict_path=tmp_path / "verdict.json",
+                checkpoint_dir=checkpoint,
+                out_root=store,
+                class_map_path=CLASS_MAP_PATH,
+                config_path=DETECTOR_CONFIG_PATH,
+                tracker_config={},
             )
 
     def test_formal_publish_rejected_with_dev_manifest(self, tmp_path):
@@ -1068,12 +1105,17 @@ class TestPackagePublish:
 
         store = tmp_path / "store"
         store.mkdir()
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+        _make_checkpoint_manifest().save(checkpoint / "manifest.json")
         with pytest.raises(FormalPackageRejectedError):
             publish_formal_package(
-                _make_checkpoint_manifest(formal=False),
-                {}, {}, store,
-                cfg_path=DETECTOR_CONFIG_PATH,
-                cm_path=CLASS_MAP_PATH,
+                verdict_path=tmp_path / "verdict.json",
+                checkpoint_dir=checkpoint,
+                out_root=store,
+                class_map_path=CLASS_MAP_PATH,
+                config_path=DETECTOR_CONFIG_PATH,
+                tracker_config={},
             )
 
     def test_score_threshold_stored_in_manifest(self, tmp_path):
@@ -1595,17 +1637,25 @@ class TestIter11Regressions:
         with pytest.raises(ValueError, match="formal_detector_eligible"):
             m.save(tmp_path / "manifest.json")
 
-    def test_checkpoint_manifest_save_rejects_invalid_training_mode(self, tmp_path):
-        """CheckpointManifest.save() は training_mode='formal' を拒否する（P1 回帰テスト）。"""
+    def test_checkpoint_manifest_save_accepts_formal_training_mode(self, tmp_path):
+        """CheckpointManifest は formal training mode を identity を保って保存する。
+
+        checkpoint の formal_detector_eligible は引き続き false である。
+        """
         from survivors.vision.world_detector import CheckpointManifest
         m = CheckpointManifest(
             model_hash="a" * 64, data_hash="b" * 64, config_hash="c" * 64,
             build_hash="d" * 64, class_map_hash="e" * 64,
             formal_detector_eligible=False,
+            development_only=False,
             training_mode="formal",
         )
-        with pytest.raises(ValueError, match="training_mode"):
-            m.save(tmp_path / "manifest.json")
+        path = tmp_path / "manifest.json"
+        m.save(path)
+        restored = CheckpointManifest.load(path)
+        assert restored.training_mode == "formal"
+        assert restored.development_only is False
+        assert restored.formal_detector_eligible is False
 
     # ---- Fix 3: 書き込み境界 — publish_development_package() ----
     def test_publish_rejects_nan_score_threshold(self, tmp_path):
