@@ -3,7 +3,7 @@
 development parser で各 frame の下書きを作り、人が stdin の行コマンドで直して確定する。
 結果は session 配下の hud_truth.jsonl に保存し、既存の bbox annotation や label JSON は読むだけ。
 画像は開かないので、表示された PNG の path を X-AnyLabeling などの別窓で見ながら作業する。
-使い方は docs/deployment/capture_annotation_manual.md の「2-7. HUD の正解値を付ける」を参照。
+使い方は docs/deployment/capture_annotation_manual.md の「2-6. HUD の正解値を付ける」を参照。
 """
 
 from __future__ import annotations
