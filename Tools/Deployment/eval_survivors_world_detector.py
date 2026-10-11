@@ -58,6 +58,7 @@ class EvalMetrics:
     mean_latency_ms: float = 0.0
 
     def to_json(self) -> str:
+        """development metric を JSON 表現へ変換する。\n\n未対応指標は既定値と区別できる wire 値のまま出力する。"""
         return json.dumps(
             {
                 "proxy_ap50_95": self.proxy_ap50_95,
@@ -236,7 +237,7 @@ def compute_ap50_95(
 
 
 def _box_center(box_xyxy: np.ndarray) -> np.ndarray:
-    """(N,4) box → (N,2) 中心座標。"""
+    """xyxy box 群を中心座標へ変換する。\n\n距離 metric が各 box の中心だけを比較できる形に揃える。"""
     return np.stack([(box_xyxy[:, 0] + box_xyxy[:, 2]) / 2,
                      (box_xyxy[:, 1] + box_xyxy[:, 3]) / 2], axis=1)
 
@@ -343,6 +344,7 @@ def _directional_density_correlation(
         preds = pred_by_image.get(iid, [])
 
         def _centers(anns: list[dict]) -> np.ndarray:
+            """一枚の画像の xyxy annotation 群から中心座標を作る。\n\n空 annotation は 0x2 配列で返し concat の shape を保つ。"""
             if not anns:
                 return np.zeros((0, 2), np.float32)
             return np.array(
@@ -360,6 +362,7 @@ def _directional_density_correlation(
         cx, cy = float(np.mean(all_c[:, 0])), float(np.mean(all_c[:, 1]))
 
         def _bin_vec(pts: np.ndarray) -> np.ndarray:
+            """中心点を基準に角度 bin の個数を集計する。\n\nGT と prediction の双方へ同じ中心と bin 数を適用する。"""
             if len(pts) == 0:
                 return np.zeros(n_bins, dtype=float)
             angles = np.arctan2(pts[:, 1] - cy, pts[:, 0] - cx)
@@ -504,7 +507,7 @@ class SliceGateResult:
     passed: bool
 
     def to_dict(self) -> dict:
-        """JSON 出力用 dict。"""
+        """slice gate の metric と判定を JSON mapping にする。\n\n不足 session 数も数値と閾値を一緒に出して追跡できる。"""
         return {
             "slice": self.slice_name,
             "recall": self.recall,
@@ -541,7 +544,7 @@ class DevDiagnosticsResult:
     slice_results: list[SliceGateResult]
 
     def to_dict(self) -> dict:
-        """JSON 出力用 dict。"""
+        """development diagnostics の集計結果を JSON mapping にする。\n\n個別 slice の結果も同じ形で含めて CLI 出力に使う。"""
         return {
             "passed": self.passed,
             "map50_95": self.map50_95,
@@ -648,7 +651,7 @@ def compute_dev_diagnostics(
     # --- metric 有限値・有効範囲チェック（fail-closed）---
     # AP/recall は [0, 1]、correlation は [-1, 1]、distance は >= 0 を要求する。
     def _check_metric(name: str, val: float, lo: float, hi: float) -> bool:
-        """val が [lo, hi] かつ有限な実数なら True。bool は明示的に拒否する。"""
+        """metric が有限値かつ許容範囲内か判定する。\n\nbool は数値として通さず、壊れた metric を gate 集計から除く。"""
         if isinstance(val, bool) or not (math.isfinite(val) and lo <= val <= hi):
             return False
         return True
@@ -817,6 +820,7 @@ check_performance_gate = compute_dev_diagnostics
 # ---- CLI ----
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """development と formal evaluation の CLI 引数を定義する。\n\nformal mode では checkpoint、latency、gates、preflight report を必須にする。"""
     p = argparse.ArgumentParser(
         description="world detector 評価ハーネス",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -971,6 +975,7 @@ def _formal_eval(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI を解析し development metric または formal verdict を実行する。\n\nformal 入力の欠落や外部 prediction の指定は処理前に拒否する。"""
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
     formal_arguments = (args.preflight_report, args.checkpoint_dir, args.latency, args.gates, args.verdict_out)
