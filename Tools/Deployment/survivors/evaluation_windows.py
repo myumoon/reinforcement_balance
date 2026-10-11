@@ -1,4 +1,7 @@
-"""sealed perception 評価用の事前登録窓を生成・検証する。"""
+"""sealed perception 評価用の事前登録窓を生成・検証する。
+
+各 session の区間と生成規則を canonical hash で固定し、annotation と replay で共用する。
+"""
 
 from __future__ import annotations
 
