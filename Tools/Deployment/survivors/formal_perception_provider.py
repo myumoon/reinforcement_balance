@@ -250,8 +250,10 @@ def build_formal_predictor(
         parser_path, atlas_path, detector_manifest_path = _find_package_files(root)
         if hashlib.sha256(parser_path.read_bytes()).hexdigest() != parser_hash:
             raise ValueError("parser package file hash does not match artifact envelope")
-        PackageLoader.load_formal(parser_path)
+        parser_package = PackageLoader.load_formal(parser_path)
         icon_matcher = IconMatcher.load_formal(atlas_path)
+        if parser_package.meta.atlas_content_hash != icon_matcher.manifest.atlas_content_hash:
+            raise ValueError("parser package atlas_content_hash does not match loaded atlas")
         detector_manifest_bytes = detector_manifest_path.read_bytes()
         if hashlib.sha256(detector_manifest_bytes).hexdigest() != detector_hash:
             raise ValueError("detector manifest file hash does not match artifact envelope")
