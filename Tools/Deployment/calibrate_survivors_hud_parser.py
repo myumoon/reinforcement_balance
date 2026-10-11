@@ -170,6 +170,7 @@ def _run_formal(args: argparse.Namespace) -> int:
         train_frames_by_session=train_frames,
         train_truth=train_truth,
         vocabulary_path=args.vocabulary,
+        preflight=preflight,
         profile_hash=preflight.target_profile_hash,
         build_hash=preflight.game_build_id,
         output_path=atlas_path,
@@ -181,6 +182,7 @@ def _run_formal(args: argparse.Namespace) -> int:
         validation_frames_by_session=validation_frames,
         validation_truth=validation_truth,
         atlas=matcher,
+        preflight=preflight,
     )
     formal_report = validate_formal(
         predicted,
