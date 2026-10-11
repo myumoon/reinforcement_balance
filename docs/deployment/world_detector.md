@@ -314,4 +314,8 @@ python publish_survivors_world_detector_formal.py `
 
 publisher は package file と 04-10 `world_detector_package.v1` envelope を ArtifactStore に保存し、descriptor を発行する。`run_restore_test` が backup 経由で空 store への full restore を確認し、その verdict が PASS の場合だけ resolved YAML を出力する。sha256 形式の `game_build_id` を使う場合は、同一 hash になる build attestation を `--build-attestation` で publisher に渡す。resolved YAML、weight、正式 capture pixel はこの code-only 変更に含めず、04-08 の実行時に作る。
 
+resolved YAML の `verdict_canonical_hash` は verdict payload の canonical hash である。package manifest の `validation_verdict_hash` は package 内 `validation_verdict.json` の file SHA-256 を指すため、同じ `validation_verdict_hash` 名で混同しない。resolved YAML には verdict が使った `input.ignore_regions` も保存する。
+
 package directory key は manifest 内容の SHA-256 であり、package 内 file 内容を単独で改ざん不能にする仕組みではない。restore が verdict / weight / config の hash を再照合し、ArtifactStore descriptor と restore verdict が release object 集合を固定する。
+
+正式 verdict の `density_error_ci` は上限 0.20、`nearest_distance_error_ci` は上限 0.04 を既定値として session-cluster CI の上限で判定する。pooled nearest-distance median は診断値として併記し、合否には使わない。別の閾値を使う場合は gates YAML に明示する。
