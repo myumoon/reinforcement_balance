@@ -6,6 +6,7 @@ GT・annotation を入力せず、parser と detector の envelope identity を�
 from __future__ import annotations
 
 import json
+import hashlib
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,12 +14,19 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from reinbalance_survivors_contracts.canonical_json import canonical_hash
+from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 from survivors.capture.captured_frame import CapturedFrame
 from survivors.formal_perception_provider import build_formal_predictor
 from survivors.vision.entity_tracker import DEFAULT_CLASS_MAP_PATH, EntityTracker, default_class_map
-from survivors.vision.hud_calibration import FormalPackageMixingError
+from survivors.vision.hud_calibration import (
+    FormalPackageMixingError,
+    PackageLoader,
+    PackageWriter,
+    fit,
+)
+from survivors.vision.hud_formal_release import PreflightReport, validate_formal
 from survivors.vision.hud_parser import HUD_STATE_SCHEMA_VERSION, INV_SLOT_COUNT, HudStateV1, _compute_candidate_set_hash
+from survivors.vision.icon_matcher import AtlasManifest, TemplateEntry
 from survivors.vision.world_detector import DetectionResult
 from survivors.vision.world_detector_package import (
     PACKAGE_SCHEMA_VERSION,
@@ -27,8 +35,14 @@ from survivors.vision.world_detector_package import (
     load_formal_detector,
 )
 
-PARSER_HASH = "a" * 64
-DETECTOR_HASH = "b" * 64
+PARSER_BYTES = b"{}"
+PARSER_HASH = hashlib.sha256(PARSER_BYTES).hexdigest()
+MODEL_BYTES = b"fixture model"
+MODEL_HASH = hashlib.sha256(MODEL_BYTES).hexdigest()
+DETECTOR_MANIFEST_BYTES = canonical_json_bytes({
+    "schema_version": PACKAGE_SCHEMA_VERSION, "model_hash": MODEL_HASH,
+})
+DETECTOR_HASH = hashlib.sha256(DETECTOR_MANIFEST_BYTES).hexdigest()
 
 
 class _FixtureHudParser:
@@ -38,6 +52,10 @@ class _FixtureHudParser:
     """
 
     def __init__(self, *, parser_artifact_hash: str, icon_matcher) -> None:
+        """parser artifact identity と reset count を初期化する。
+
+        parse 結果へ provider の file hash を伝え、reset の回数を記録する。
+        """
         self.parser_artifact_hash = parser_artifact_hash
         self.resets = 0
 
@@ -72,6 +90,10 @@ class _FixtureDetector:
     """
 
     def __init__(self) -> None:
+        """formal class map に対応する固定 detection を構築する。
+
+        player anchor と boss を含め、world snapshot の正規化を試す。
+        """
         class_map = default_class_map()
         self.result = DetectionResult(
             np.asarray([[900, 500, 1020, 620], [1100, 500, 1200, 600]], dtype=np.float32),
@@ -92,7 +114,15 @@ class _FixtureDetector:
         return self.result
 
 
-def _restored_packages(class_map_bytes: bytes):
+def _restored_packages(
+    class_map_bytes: bytes,
+    *,
+    parser_bytes: bytes = PARSER_BYTES,
+    parser_artifact_hash: str | None = None,
+    detector_manifest_bytes: bytes = DETECTOR_MANIFEST_BYTES,
+    detector_artifact_hash: str | None = None,
+    model_hash: str = MODEL_HASH,
+):
     """provider が展開する相対 file path と envelope identity を作る。
 
     parser package、formal atlas、detector package を別 artifact に分ける。
@@ -100,20 +130,124 @@ def _restored_packages(class_map_bytes: bytes):
     return {
         "parser_package": SimpleNamespace(
             files={
-                "parser.json": b"{}",
+                "parser.json": parser_bytes,
                 "atlas.json": b'{"schema_version":"icon_atlas.v1"}',
             },
-            manifest={"parser_artifact_hash": PARSER_HASH},
+            manifest={
+                "parser_artifact_hash": parser_artifact_hash
+                or hashlib.sha256(parser_bytes).hexdigest(),
+            },
         ),
         "detector_package": SimpleNamespace(
             files={
-                "manifest.json": b'{"schema_version":"world_detector_package.v1"}',
+                "manifest.json": detector_manifest_bytes,
+                "model.pt": MODEL_BYTES,
                 "world_detector_v2.yaml": b"fixture: true\n",
                 "world_class_map_v2.yaml": class_map_bytes,
             },
-            manifest={"detector_artifact_hash": DETECTOR_HASH},
+            manifest={
+                "detector_artifact_hash": detector_artifact_hash
+                or hashlib.sha256(detector_manifest_bytes).hexdigest(),
+                "model_hash": model_hash,
+            },
         ),
     }
+
+
+def _formal_parser_package_bytes(tmp_path: Path) -> bytes:
+    """valid formal HUD reports から PackageWriter 形式の package を作る。
+
+    public PackageLoader が内部 hash chain を検証できる最小成果物を返す。
+    """
+    truth_wires = []
+    records = []
+    for session_index in range(3):
+        session_id = f"validation-{session_index}"
+        for frame_id, state in ((0, "gameplay"), (1, "unknown")):
+            positive = state == "gameplay"
+            truth = {
+                "schema_version": "hud_truth.v1",
+                "session_id": session_id,
+                "frame_id": frame_id,
+                "confirmed": True,
+                "expected_screen_state": state,
+                "expected_timer_seconds": 10.0 if positive else None,
+                "expected_level": 1 if positive else None,
+                "expected_hp_ratio": 0.5 if positive else None,
+                "expected_xp_ratio": 0.25 if positive else None,
+                "expected_items": ["whip"] * 12 if positive else None,
+                "expected_choice": ["whip"] if positive else None,
+                "roi_name": "hud",
+                "expected_roi": [0, 32, 1920, 75] if positive else None,
+                "confirmed_at": "2026-10-10T00:00:00Z",
+                "draft_source": {"parser_artifact_hash": "p", "atlas_content_hash": "a"},
+            }
+            truth_wires.append(truth)
+            records.append({
+                **truth,
+                "sample_id": f"{session_id}:{frame_id}",
+                "split": "model_validation",
+                "predicted_timer_seconds": 10.0 if positive else None,
+                "predicted_level": 1 if positive else None,
+                "predicted_hp_ratio": 0.5 if positive else None,
+                "predicted_xp_ratio": 0.25 if positive else None,
+                "predicted_items": ["whip"] * 12 if positive else None,
+                "predicted_choice": "whip" if positive else None,
+                "predicted_screen_state": state,
+                "predicted_roi": [0, 32, 1920, 75] if positive else None,
+                "latency_ms": 1.0,
+                "_hud_truth_wire": truth,
+            })
+    truth_hash = canonical_hash(truth_wires)
+    payload = {
+        "schema_version": "hud_formal_preflight.v1",
+        "dataset_logical_id": "dataset/source",
+        "dataset_identity_hash": "d" * 64,
+        "restore_verdict_logical_id": "dataset/restore",
+        "restore_verdict_identity_hash": "e" * 64,
+        "target_profile_hash": "a" * 64,
+        "game_build_id": "b" * 64,
+        "train_sessions": ["train-a", "train-b", "train-c"],
+        "validation_sessions": [f"validation-{index}" for index in range(3)],
+        "train_record_count": 3,
+        "validation_record_count": 6,
+        "train_truth_canonical_hash": "f" * 64,
+        "validation_truth_canonical_hash": truth_hash,
+        "slice_counts": {},
+        "code_hashes": {},
+    }
+    preflight = PreflightReport(
+        payload["dataset_logical_id"], payload["dataset_identity_hash"],
+        payload["restore_verdict_logical_id"], payload["restore_verdict_identity_hash"],
+        payload["target_profile_hash"], payload["game_build_id"],
+        tuple(payload["train_sessions"]), tuple(payload["validation_sessions"]),
+        payload["train_record_count"], payload["validation_record_count"],
+        payload["train_truth_canonical_hash"], truth_hash, {}, {}, canonical_hash(payload),
+    )
+    fit_result = fit([{
+        "sample_id": "train:0", "split": "model_train", "expected_roi": [0, 32, 1920, 75],
+    }])
+    feature = np.zeros(88, dtype=np.float32)
+    empty_feature = np.ones(88, dtype=np.float32)
+    atlas_hash = hashlib.sha256(np.concatenate([empty_feature, feature]).tobytes()).hexdigest()
+    atlas = AtlasManifest(
+        "icon_atlas.v1", "a" * 64, "b" * 64, False, True, atlas_hash,
+        (
+            TemplateEntry("empty_slot", "unknown", 1, 1, empty_feature),
+            TemplateEntry("whip", "weapon", 1, 1, feature),
+        ),
+    )
+    report = validate_formal(
+        records, preflight=preflight, atlas_content_hash=atlas_hash,
+        fit_canonical_hash=fit_result.fit_canonical_hash,
+    )
+    if not report.all_passed:
+        raise AssertionError("formal package fixture did not pass its release gates")
+    package_path = tmp_path / "formal-parser-package.json"
+    PackageWriter.publish_formal(
+        package_path, fit_result, report, preflight=preflight, atlas_manifest=atlas,
+    )
+    return package_path.read_bytes()
 
 
 def _frame(session_id_index: int = 0) -> CapturedFrame:
@@ -145,7 +279,10 @@ def test_formal_predictor_returns_normalized_prediction_and_package_hashes(monke
     )
     monkeypatch.setattr(
         provider, "load_formal_detector",
-        lambda _path: (detector, tracker, SimpleNamespace(score_threshold=0.2)),
+        lambda _path: (
+            detector, tracker,
+            SimpleNamespace(score_threshold=0.2, model_hash=MODEL_HASH),
+        ),
     )
     monkeypatch.setattr(provider, "HudParser", _FixtureHudParser)
     predictor = build_formal_predictor(package)
@@ -158,6 +295,95 @@ def test_formal_predictor_returns_normalized_prediction_and_package_hashes(monke
     assert snapshot.diagnostics["predicted_boxes"][1]["class"] == "enemy_boss"
     assert detector.threshold == 0.2
     predictor.reset()
+
+
+def test_formal_predictor_loads_actual_formal_parser_package(tmp_path: Path, monkeypatch) -> None:
+    """PackageWriter の formal package を public loader で復元する。
+
+    envelope は package 内部 hash と異なる parser file の SHA-256 に束縛する。
+    """
+    import survivors.formal_perception_provider as provider
+
+    parser_bytes = _formal_parser_package_bytes(tmp_path)
+    parser_path = tmp_path / "published-formal-parser.json"
+    parser_path.write_bytes(parser_bytes)
+    parser_hash = hashlib.sha256(parser_bytes).hexdigest()
+    assert PackageLoader.load_formal(parser_path).package_hash != parser_hash
+    package = _restored_packages(
+        DEFAULT_CLASS_MAP_PATH.read_bytes(), parser_bytes=parser_bytes,
+    )
+    monkeypatch.setattr(provider.IconMatcher, "load_formal", lambda _path: object())
+    detector = _FixtureDetector()
+    class_map = default_class_map()
+    tracker = EntityTracker(
+        {}, 0.7, 0.6, 0.9,
+        coarse_by_class_id=class_map.coarse_by_class_id(),
+    )
+    monkeypatch.setattr(
+        provider, "load_formal_detector",
+        lambda _path: (
+            detector, tracker,
+            SimpleNamespace(score_threshold=0.2, model_hash=MODEL_HASH),
+        ),
+    )
+    monkeypatch.setattr(provider, "HudParser", _FixtureHudParser)
+    predictor = build_formal_predictor(package)
+    snapshot, _latency = predictor.predict_frame(_frame(), "session-1", 0)
+    assert snapshot is not None and snapshot.parser_artifact_hash == parser_hash
+    predictor.reset()
+
+
+def test_formal_predictor_rejects_parser_file_hash_mismatch(monkeypatch) -> None:
+    """package JSON の file bytes が envelope hash と違えば拒否する。
+
+    JSON として有効な trailing byte でも parser package をすり替えられない。
+    """
+    package = _restored_packages(
+        DEFAULT_CLASS_MAP_PATH.read_bytes(),
+        parser_bytes=PARSER_BYTES + b" ",
+        parser_artifact_hash=PARSER_HASH,
+    )
+    with pytest.raises(ValueError, match="parser package file hash"):
+        build_formal_predictor(package)
+
+
+def test_formal_predictor_rejects_detector_manifest_file_hash_mismatch(monkeypatch) -> None:
+    """loaded detector manifest が envelope hash に束縛されない場合を拒否する。
+
+    package 内の別 manifest を読み替える経路を封じる。
+    """
+    package = _restored_packages(
+        DEFAULT_CLASS_MAP_PATH.read_bytes(), detector_artifact_hash="0" * 64,
+    )
+    import survivors.formal_perception_provider as provider
+    monkeypatch.setattr(
+        provider.PackageLoader, "load_formal",
+        lambda _path: SimpleNamespace(package_hash=PARSER_HASH),
+    )
+    monkeypatch.setattr(provider.IconMatcher, "load_formal", lambda _path: object())
+    with pytest.raises(ValueError, match="detector manifest file hash"):
+        build_formal_predictor(package)
+
+
+def test_formal_predictor_rejects_detector_model_hash_mismatch(monkeypatch) -> None:
+    """detector manifest の model hash が envelope と違えば拒否する。
+
+    package loader が検証する model.pt を別の model identity に差し替えさせない。
+    """
+    manifest = canonical_json_bytes({
+        "schema_version": PACKAGE_SCHEMA_VERSION, "model_hash": "c" * 64,
+    })
+    package = _restored_packages(
+        DEFAULT_CLASS_MAP_PATH.read_bytes(), detector_manifest_bytes=manifest,
+    )
+    import survivors.formal_perception_provider as provider
+    monkeypatch.setattr(
+        provider.PackageLoader, "load_formal",
+        lambda _path: SimpleNamespace(package_hash=PARSER_HASH),
+    )
+    monkeypatch.setattr(provider.IconMatcher, "load_formal", lambda _path: object())
+    with pytest.raises(ValueError, match="model_hash"):
+        build_formal_predictor(package)
 
 
 def test_formal_predictor_uses_formal_parser_loader(monkeypatch) -> None:

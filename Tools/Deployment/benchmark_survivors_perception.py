@@ -548,40 +548,50 @@ def _verified_capture_ground_truth_files(
     }
     if not session_ids <= set(session_hashes):
         raise ValueError("ground truth restore requested an unknown formal session")
-    binding_names = {
-        "hud_truth_bindings": "hud_truth",
-        "coco_bindings": "world_coco",
-        "frames_bindings": "frames_jsonl",
+    binding_fields = {
+        "hud_truth_bindings": (
+            ("hud_truth_logical_id", "hud_truth_sha256", "hud_truth"),
+        ),
+        "coco_bindings": (
+            ("world_coco_logical_id", "world_coco_sha256", "world_coco"),
+            ("ui_coco_logical_id", "ui_coco_sha256", None),
+        ),
+        "frames_bindings": (
+            ("frames_logical_id", "frames_sha256", "frames_jsonl"),
+        ),
     }
     all_bindings: dict[str, Mapping[str, Any]] = {}
-    for field_name in binding_names:
+    for field_name in binding_fields:
         bindings = metadata.get(field_name)
-        if not isinstance(bindings, Mapping) or set(bindings) != set(session_hashes):
-            raise ValueError(f"capture descriptor {field_name} must exactly cover formal sessions")
+        if not isinstance(bindings, Mapping) or not session_ids <= set(bindings):
+            raise ValueError(f"capture descriptor {field_name} must cover formal sessions")
         all_bindings[field_name] = bindings
     refs_by_id = {ref.logical_id: ref for ref in capture.descriptor.files}
     used_ids: set[str] = set()
     verified: dict[str, dict[str, bytes]] = {session_id: {} for session_id in session_ids}
     for session_id in sorted(session_ids):
-        for binding_name, data_name in binding_names.items():
+        for binding_name, fields in binding_fields.items():
             binding = all_bindings[binding_name][session_id]
-            if not isinstance(binding, Mapping) or set(binding) != {"logical_id", "sha256"}:
+            expected_keys = {key for logical_key, sha_key, _data_name in fields for key in (logical_key, sha_key)}
+            if not isinstance(binding, Mapping) or set(binding) != expected_keys:
                 raise ValueError(f"{binding_name} entry has an invalid schema")
-            logical_id, digest = binding["logical_id"], binding["sha256"]
-            if (
-                type(logical_id) is not str or not logical_id or logical_id in used_ids
-                or type(digest) is not str or len(digest) != 64
-                or any(character not in "0123456789abcdef" for character in digest)
-            ):
-                raise ValueError("capture ground truth bindings need unique ids and SHA-256 values")
-            used_ids.add(logical_id)
-            ref = refs_by_id.get(logical_id)
-            content = capture.files.get(logical_id)
-            if ref is None or ref.sha256 != digest or content is None:
-                raise ValueError("capture ground truth binding is not descriptor-backed")
-            if hashlib.sha256(content).hexdigest() != digest:
-                raise ValueError("capture ground truth bytes do not match binding hash")
-            verified[session_id][data_name] = content
+            for logical_key, sha_key, data_name in fields:
+                logical_id, digest = binding[logical_key], binding[sha_key]
+                if (
+                    type(logical_id) is not str or not logical_id or logical_id in used_ids
+                    or type(digest) is not str or len(digest) != 64
+                    or any(character not in "0123456789abcdef" for character in digest)
+                ):
+                    raise ValueError("capture ground truth bindings need unique ids and SHA-256 values")
+                used_ids.add(logical_id)
+                ref = refs_by_id.get(logical_id)
+                content = capture.files.get(logical_id)
+                if ref is None or ref.sha256 != digest or content is None:
+                    raise ValueError("capture ground truth binding is not descriptor-backed")
+                if hashlib.sha256(content).hexdigest() != digest:
+                    raise ValueError("capture ground truth bytes do not match binding hash")
+                if data_name is not None:
+                    verified[session_id][data_name] = content
     return {
         session_id: CaptureGroundTruthFiles(
             files["hud_truth"], files["world_coco"], files["frames_jsonl"]
@@ -1177,6 +1187,10 @@ def _assign_foreground_entities(
         raise ValueError("predicted_boxes must be a sequence")
 
     def valid_box(value: object) -> tuple[float, float, float, float]:
+        """box の座標列を有限な正面積 xyxy にする。
+
+        不正 geometry が IoU matching の計算へ入る前に拒否する。
+        """
         if not isinstance(value, (list, tuple)) or len(value) != 4:
             raise ValueError("entity box must contain four coordinates")
         if any(isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item) for item in value):

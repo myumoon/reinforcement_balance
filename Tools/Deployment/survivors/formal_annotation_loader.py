@@ -112,7 +112,7 @@ def _index_session(session_id: str, files: CaptureGroundTruthFiles) -> _SessionI
         session_id, files,
         _jsonl_offsets(files.hud_truth, "hud_truth", session_id),
         _jsonl_offsets(files.frames_jsonl, "frames", session_id),
-        coco_image_entries_from_wire(coco_wire),
+        coco_image_entries_from_wire(coco_wire, session_id=session_id),
     )
 
 

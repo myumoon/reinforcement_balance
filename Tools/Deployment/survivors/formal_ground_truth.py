@@ -62,6 +62,7 @@ class CocoImageEntry:
     """
 
     image_id: int
+    frame_id: int
     object_sha256: str
     boxes: tuple[LabeledBox, ...]
 
@@ -78,10 +79,12 @@ class CaptureGroundTruthFiles:
     frames_jsonl: bytes
 
 
-def coco_image_entries_from_wire(wire: object) -> dict[int, CocoImageEntry]:
-    """COCO JSON を image id ごとの box entry に変換する。
+def coco_image_entries_from_wire(
+    wire: object, *, session_id: str | None = None,
+) -> dict[int, CocoImageEntry]:
+    """COCO JSON を frame id ごとの box entry に変換する。
 
-    image・category・annotation の参照切れや重複は label の取り違えとして拒否する。
+    連番 image id を frame 番号と誤認せず、参照切れや重複を fail-closed で拒否する。
     """
     if not isinstance(wire, dict) or not all(key in wire for key in ("images", "annotations", "categories")):
         raise ValueError("COCO payload must contain images, annotations, and categories")
@@ -94,15 +97,29 @@ def coco_image_entries_from_wire(wire: object) -> dict[int, CocoImageEntry]:
         if row["id"] in categories:
             raise ValueError("duplicate COCO category id")
         categories[row["id"]] = row["name"]
-    images: dict[int, tuple[str, list[LabeledBox]]] = {}
+    images: dict[int, tuple[int, str, list[LabeledBox]]] = {}
+    frame_ids: set[int] = set()
     for row in wire["images"]:
-        if not isinstance(row, dict) or type(row.get("id")) is not int:
+        if (
+            not isinstance(row, dict) or type(row.get("id")) is not int
+            or type(row.get("frame_id")) is not int or row["frame_id"] < 0
+        ):
             raise ValueError("COCO image has an invalid schema")
         image_id = row["id"]
+        frame_id = row["frame_id"]
+        if "session_id" in row and (
+            type(row["session_id"]) is not str or not row["session_id"]
+            or session_id is not None and row["session_id"] != session_id
+        ):
+            raise ValueError("COCO image session_id does not match binding session")
         digest = row.get("object_sha256")
-        if image_id in images or type(digest) is not str or len(digest) != 64 or not set(digest) <= _SHA256:
-            raise ValueError("COCO image identity is invalid")
-        images[image_id] = (digest, [])
+        if (
+            image_id in images or frame_id in frame_ids
+            or type(digest) is not str or len(digest) != 64 or not set(digest) <= _SHA256
+        ):
+            raise ValueError("COCO image frame_id or identity is invalid")
+        frame_ids.add(frame_id)
+        images[image_id] = (frame_id, digest, [])
     for row in wire["annotations"]:
         if not isinstance(row, dict):
             raise ValueError("COCO annotation must be an object")
@@ -118,12 +135,12 @@ def coco_image_entries_from_wire(wire: object) -> dict[int, CocoImageEntry]:
         x, y, width, height = (float(value) for value in bbox)
         if width <= 0 or height <= 0:
             raise ValueError("COCO bbox must have positive area")
-        images[image_id][1].append(
+        images[image_id][2].append(
             LabeledBox(categories[category_id], (x, y, x + width, y + height), category_id)
         )
     return {
-        image_id: CocoImageEntry(image_id, digest, tuple(boxes))
-        for image_id, (digest, boxes) in images.items()
+        frame_id: CocoImageEntry(image_id, frame_id, digest, tuple(boxes))
+        for image_id, (frame_id, digest, boxes) in images.items()
     }
 
 

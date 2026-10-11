@@ -96,9 +96,9 @@ def _capture_fixture(
     tmp_path: Path, parser_artifact_hash: str = "9" * 64,
     include_formal_truth: bool = False,
 ) -> tuple[Path, object]:
-    """6 session の capture split を作成する。
+    """formal split session の capture data を作成する。
 
-    formal truth bytes は pipeline integration test が要求した場合だけ生成する。
+    formal truth bytes は pipeline integration test が要求した場合だけ追加する。
     """
     capture_root = tmp_path / "captures"
     calibration_ids = [f"cal-{index}" for index in range(3)]
@@ -152,8 +152,9 @@ def _truth_record(
 def _write_truth_fixture(
     session_path: Path, session_id: str, parser_artifact_hash: str
 ) -> None:
-    """fixture session に formal truth・frame・COCO を揃えて保存する。
-    writer と loader が同じ captured object hash を使う状態にする。
+    """fixture session に formal truth・frame・COCO を保存する。
+
+    image id と frame id を分け、writer と loader の frame 対応を確かめる。
     """
     frame_wires = [
         json.loads(line)
@@ -169,7 +170,10 @@ def _write_truth_fixture(
     )
     coco = {
         "images": [
-            {"id": i, "object_sha256": row["object_sha256"]}
+            {
+                "id": i + 1, "frame_id": i, "session_id": session_id,
+                "object_sha256": row["object_sha256"],
+            }
             for i, row in enumerate(frame_wires)
         ],
         "categories": [
@@ -181,11 +185,11 @@ def _write_truth_fixture(
             item
             for i in range(len(frame_wires))
             for item in (
-                {"id": 3 * i + 1, "image_id": i, "category_id": 1,
+                {"id": 3 * i + 1, "image_id": i + 1, "category_id": 1,
                  "bbox": [910, 490, 100, 100]},
-                {"id": 3 * i + 2, "image_id": i, "category_id": 2,
+                {"id": 3 * i + 2, "image_id": i + 1, "category_id": 2,
                  "bbox": [1152, 513, 384, 54]},
-                {"id": 3 * i + 3, "image_id": i, "category_id": 3,
+                {"id": 3 * i + 3, "image_id": i + 1, "category_id": 3,
                  "bbox": [1056, 513, 192, 54]},
             )
         ],
@@ -194,7 +198,9 @@ def _write_truth_fixture(
     coco_dir = capture_root / "fixture-coco"
     session_coco_dir = coco_dir / session_id
     session_coco_dir.mkdir(parents=True, exist_ok=True)
-    (session_coco_dir / "world_coco.json").write_bytes(canonical_json_bytes(coco))
+    coco_bytes = canonical_json_bytes(coco)
+    (session_coco_dir / "world_coco.json").write_bytes(coco_bytes)
+    (session_coco_dir / "ui_coco.json").write_bytes(coco_bytes)
     assert build_formal_annotations([
         "--store-root", str(capture_root), "--session-id", session_id,
         "--coco-dir", str(coco_dir), "--parser-artifact-hash", parser_artifact_hash,
@@ -380,18 +386,18 @@ class _SnapshotFixture:
 
 
 def _fixture_predictor_factory(restored):
-    """テスト用の FormalAssemblerFactory：runner に渡す mock assembler を返す。"""
-    # fixture も自己申告値でなく、restored package object の content hash を使用する。
-    # runner/verdict と同一 identity を snapshot の parser binding に設定する。
+    """runner に渡す fixture FormalPredictor を作成する。
+
+    snapshot の parser identity を restored package の hash に結び付ける。
+    """
     return _FixturePredictor(restored)
 
 
 def _test_provider_factory(restored):
     """runner unit test 用の FormalPredictor を返す。
 
-    production factory と同じ restored hash と reset 契約を保つ。
+    production factory と同じ restored hash と reset 契約を維持する。
     """
-    """テスト用の _CLI_PROVIDER_FACTORY：default calibration provider と mock assembler を返す。"""
     return _FixturePredictor(restored)
 
 
@@ -448,6 +454,7 @@ def _install_public_formal_factories(monkeypatch, benchmark_module) -> None:
 
     class _HudParser:
         """runner fixture と同じ HUD truth を detector から独立して parse する。
+
         class state は tracker fixture に frame の session context を伝える。
         """
 
@@ -481,8 +488,9 @@ def _install_public_formal_factories(monkeypatch, benchmark_module) -> None:
             type(self).last_session = ""
 
     class _WorldDetector:
-        """各 fixture frame に同一の三つの formal class box を返す。
-        semantic 一致を保ち、テスト対象の runner／factory 経路だけを通す。
+        """各 fixture frame に同じ formal class box を返す。
+
+        semantic 一致を保ち、runner／factory の実装経路を試す。
         """
 
         def infer(self, _frame, score_threshold=0.0):
@@ -498,8 +506,9 @@ def _install_public_formal_factories(monkeypatch, benchmark_module) -> None:
             )
 
     class _EntityTracker:
-        """fake detector output ではなく HUD parser の frame identity で world state を返す。
-        これにより予測 fixture は annotation loader の bytes を参照しない。
+        """HUD parser の frame identity で world state を返す tracker double。
+
+        prediction fixture が annotation loader の bytes を参照しないことを保つ。
         """
 
         def __init__(self):
@@ -547,7 +556,12 @@ def _install_public_formal_factories(monkeypatch, benchmark_module) -> None:
     monkeypatch.setattr(provider, "load_class_map", lambda _path: default_class_map())
     monkeypatch.setattr(
         provider, "load_formal_detector",
-        lambda _path: (_WorldDetector(), _EntityTracker(), SimpleNamespace(score_threshold=0.0)),
+        lambda path: (
+            _WorldDetector(), _EntityTracker(), SimpleNamespace(
+                score_threshold=0.0,
+                model_hash=json.loads((Path(path) / "manifest.json").read_bytes())["model_hash"],
+            ),
+        ),
     )
     monkeypatch.setattr(benchmark_module, "_CLI_PROVIDER_FACTORY", provider.build_formal_predictor)
     monkeypatch.setattr(benchmark_module, "_GROUND_TRUTH_FACTORY", build_ground_truth_loader)
@@ -560,10 +574,15 @@ def _install_public_formal_factories(monkeypatch, benchmark_module) -> None:
 
 class _FixturePredictor:
     """FormalPredictor protocol に沿う runner fixture。
-    restored manifest の hash を予測 snapshot に束縛する。
+
+    restored manifest の hash を予測 snapshot に結び付ける。
     """
 
     def __init__(self, restored):
+        """restored package identity と assembler fixture を保存する。
+
+        各予測で parser・detector hash を同じ値に保つ。
+        """
         self._parser_hash = restored["parser_package"].manifest["parser_artifact_hash"]
         self._detector_hash = restored["detector_package"].manifest["detector_artifact_hash"]
         self._fixture = _SnapshotFixture(self._parser_hash)
@@ -613,8 +632,15 @@ def _request(tmp_path: Path, *, formal_inputs: bool = False):
 
     direct unit test 用には artifact graph を省き、統合 test だけ exact restore を行う。
     """
-    parser_bytes = b"fixture formal parser payload"
+    parser_bytes = canonical_json_bytes({
+        "metadata": {}, "fit_result": {}, "validation_report": {},
+    })
     parser_hash = hashlib.sha256(parser_bytes).hexdigest()
+    model_bytes = b"fixture model"
+    model_hash = hashlib.sha256(model_bytes).hexdigest()
+    detector_manifest_bytes = canonical_json_bytes({
+        "schema_version": "world_detector_package.v1", "model_hash": model_hash,
+    })
     capture_root, split = _capture_fixture(
         tmp_path, parser_hash, include_formal_truth=formal_inputs
     )
@@ -624,8 +650,8 @@ def _request(tmp_path: Path, *, formal_inputs: bool = False):
     package_specs = {
         "parser_package": ("hud_parser_package.v1", {"parser_artifact_hash": parser_bytes}),
         "detector_package": ("world_detector_package.v1", {
-            "detector_artifact_hash": b"fixture formal detector payload",
-            "model_hash": b"fixture model",
+            "detector_artifact_hash": detector_manifest_bytes,
+            "model_hash": model_bytes,
             "build_hash": b"synthetic-build",
         }),
         "assembler_config": ("assembler_config.v1", {
@@ -646,20 +672,21 @@ def _request(tmp_path: Path, *, formal_inputs: bool = False):
         extras = {}
         if name == "parser_package":
             extras = {
-                "fixtures/parser_package/parser_package.json": canonical_json_bytes({
-                    "metadata": {}, "fit_result": {}, "validation_report": {},
-                }),
+                "fixtures/parser_package/parser_package.json": parser_bytes,
                 "fixtures/parser_package/icon_atlas.json": canonical_json_bytes({
                     "schema_version": "icon_atlas.v1", "icons": [],
                 }),
             }
         elif name == "detector_package":
             extras = {
+                "fixtures/detector_package/manifest.json": detector_manifest_bytes,
+                "fixtures/detector_package/model.pt": model_bytes,
                 "fixtures/detector_package/world_class_map_v2.yaml":
                     DEFAULT_CLASS_MAP_PATH.read_bytes(),
             }
         descriptors[name], restores[name] = _formal_dependency(
             store, name, schema, files, extras=extras,
+            descriptor_manifest_name=("artifact_descriptor.json" if name == "detector_package" else "manifest.json"),
         )
 
     capture_refs = [store.put(
@@ -688,17 +715,43 @@ def _request(tmp_path: Path, *, formal_inputs: bool = False):
             "session_manifest_logical_id": manifest_ref.logical_id,
             "session_manifest_sha256": manifest_ref.sha256,
         }
-        for name, source_path in (
-            ("hud_truth_bindings", session_path / "hud_truth.jsonl"),
-            ("coco_bindings", capture_root / "fixture-coco" / session_id / "world_coco.json"),
-            ("frames_bindings", session_path / "frames.jsonl"),
+        for name, source_path, logical_key, sha_key in (
+            ("hud_truth_bindings", session_path / "hud_truth.jsonl", "hud_truth_logical_id", "hud_truth_sha256"),
+            ("frames_bindings", session_path / "frames.jsonl", "frames_logical_id", "frames_sha256"),
         ):
             ref = store.put(
                 logical_id=f"fixtures/capture/{session_id}/{name}.jsonl",
                 source_path=source_path, media_type="application/x-ndjson",
             )
             capture_refs.append(ref)
-            bindings[name][session_id] = {"logical_id": ref.logical_id, "sha256": ref.sha256}
+            bindings[name][session_id] = {logical_key: ref.logical_id, sha_key: ref.sha256}
+        world_ref = store.put(
+            logical_id=f"fixtures/capture/{session_id}/world_coco.json",
+            source_path=capture_root / "fixture-coco" / session_id / "world_coco.json",
+            media_type="application/json",
+        )
+        ui_ref = store.put(
+            logical_id=f"fixtures/capture/{session_id}/ui_coco.json",
+            source_path=capture_root / "fixture-coco" / session_id / "ui_coco.json",
+            media_type="application/json",
+        )
+        capture_refs.extend((world_ref, ui_ref))
+        bindings["coco_bindings"][session_id] = {
+            "world_coco_logical_id": world_ref.logical_id,
+            "world_coco_sha256": world_ref.sha256,
+            "ui_coco_logical_id": ui_ref.logical_id,
+            "ui_coco_sha256": ui_ref.sha256,
+        }
+    model_frames = store.put(
+        logical_id="fixtures/capture/model-train/frames.jsonl",
+        source_path=capture_root / "capture_sessions" / "cal-0" / "frames.jsonl",
+        media_type="application/x-ndjson",
+    )
+    capture_refs.append(model_frames)
+    bindings["frames_bindings"]["model-train"] = {
+        "frames_logical_id": model_frames.logical_id,
+        "frames_sha256": model_frames.sha256,
+    }
     capture_manifest = capture_refs[0]
     capture_descriptor = ArtifactDescriptor(
         logical_id="fixtures/capture", node_kind="source_descriptor",
@@ -718,6 +771,37 @@ def _request(tmp_path: Path, *, formal_inputs: bool = False):
         store=store, capture_store_root=capture_root,
         dependency_descriptors=descriptors, restore_verdicts=restores,
     )
+
+
+def _request_with_capture_metadata(request, identity_metadata):
+    """capture descriptor の binding metadata を置き換える。
+
+    restore verdict を新しい descriptor identity に結び直して binding 検証へ進める。
+    """
+    descriptors = dict(request.dependency_descriptors)
+    capture = replace(
+        descriptors["capture_dataset"], identity_metadata=identity_metadata,
+    )
+    descriptors["capture_dataset"] = capture
+    restores = dict(request.restore_verdicts)
+    old_restore = restores["capture_dataset"]
+    metadata = old_restore.identity_metadata
+    non_identity = old_restore.non_identity_metadata
+    restores["capture_dataset"] = RestoreTestVerdict(
+        logical_id=old_restore.logical_id,
+        subject=capture.node_ref(),
+        manifest_hash=metadata["manifest_hash"],
+        primary_root=non_identity["primary_root"],
+        backup_root=non_identity["backup_root"],
+        verify_mode=metadata["verify_mode"],
+        checked_object_count=metadata["checked_object_count"],
+        passed=metadata["passed"],
+        blocking_reasons=metadata["blocking_reasons"],
+        producer_id=old_restore.producer_id,
+        producer_version=old_restore.producer_version,
+        schema_version=metadata["restore_test_schema_version"],
+    ).to_descriptor()
+    return replace(request, dependency_descriptors=descriptors, restore_verdicts=restores)
 
 
 def _formal_threshold_bytes() -> bytes:
@@ -767,6 +851,7 @@ def _formal_threshold_bytes() -> bytes:
 def _formal_dependency(
     store, name: str, schema: str, values: dict[str, bytes], *,
     extras: dict[str, bytes] | None = None,
+    descriptor_manifest_name: str = "manifest.json",
 ):
     """hash-bound package descriptor と full restore verdict を作る。
 
@@ -785,7 +870,7 @@ def _formal_dependency(
         **{field: ref.sha256 for field, ref in refs.items()},
     }
     manifest = store.put_bytes(
-        logical_id=f"fixtures/{name}/manifest.json",
+        logical_id=f"fixtures/{name}/{descriptor_manifest_name}",
         data=canonical_json_bytes(payload), media_type="application/json",
     )
     extra_refs = tuple(
@@ -892,10 +977,15 @@ def test_formal_predictor_cannot_return_ground_truth_residual_or_evidence(
 
 
 def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path, monkeypatch) -> None:
+    """仕様形の descriptor bindings から formal verdict まで実行する。
+
+    model session の frames binding を許容し、runner と writer の出力を確認する。
+    """
     import benchmark_survivors_perception as _bsp
     _install_public_formal_factories(monkeypatch, _bsp)
     _patch_minimal_test_gates(monkeypatch)
     request = _request(tmp_path, formal_inputs=True)
+    assert "model-train" in request.dependency_descriptors["capture_dataset"].identity_metadata["frames_bindings"]
     result = run_formal_pipeline(request)
 
     # 3 cal sessions × 3 samples/session × 7 required fields
@@ -932,6 +1022,54 @@ def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path, mo
         "foreground_class:enemy_boss" in reason and "1 records" in reason
         for reason in reasons
     )
+
+
+def test_formal_runner_rejects_missing_formal_capture_binding(tmp_path: Path, monkeypatch) -> None:
+    """formal session の必須 binding が欠けた descriptor を拒否する。
+
+    restore verdict を再束縛して、capture binding の fail-closed 検査を通す。
+    """
+    import benchmark_survivors_perception as _bsp
+
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _test_provider_factory)
+    request = _request(tmp_path, formal_inputs=True)
+    metadata = dict(request.dependency_descriptors["capture_dataset"].identity_metadata)
+    frames = dict(metadata["frames_bindings"])
+    del frames["cal-0"]
+    metadata["frames_bindings"] = frames
+    request = _request_with_capture_metadata(request, metadata)
+
+    with pytest.raises(ValueError, match="must cover formal sessions"):
+        run_formal_pipeline(request)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("ui_coco_sha256", "0" * 64), ("ui_coco_logical_id", None)),
+)
+def test_formal_runner_rejects_invalid_ui_coco_binding(
+    tmp_path: Path, monkeypatch, field: str, value: str | None,
+) -> None:
+    """UI COCO binding の欠損 key と hash 不一致を拒否する。
+
+    world file だけを検証して ui_coco を取り違える経路を閉じる。
+    """
+    import benchmark_survivors_perception as _bsp
+
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _test_provider_factory)
+    request = _request(tmp_path, formal_inputs=True)
+    metadata = dict(request.dependency_descriptors["capture_dataset"].identity_metadata)
+    coco = {session: dict(entry) for session, entry in metadata["coco_bindings"].items()}
+    if value is None:
+        del coco["cal-0"][field]
+    else:
+        coco["cal-0"][field] = value
+    metadata["coco_bindings"] = coco
+    request = _request_with_capture_metadata(request, metadata)
+
+    expected_error = "invalid schema" if value is None else "not descriptor-backed"
+    with pytest.raises(ValueError, match=expected_error):
+        run_formal_pipeline(request)
 
 
 def test_published_calibration_profile_is_consumer_compatible(tmp_path: Path, monkeypatch) -> None:
@@ -1457,9 +1595,16 @@ def test_loader_cannot_self_authenticate_different_ground_truth(tmp_path: Path) 
 
     class Predictor:
         def reset(self) -> None:
-            """fake predictor は session state を持たないため何もしない。"""
+            """fake predictor の reset 要求を no-op で受ける。
+
+            fixture に session state がなく、予測値へ影響しない。
+            """
 
         def predict_frame(self, _frame, _session_id, _frame_index):
+            """固定した tampered prediction を返す。
+
+            detector hash の改変が runner の immutable annotation 検査を通らないことを試す。
+            """
             return replace(predicted, detector_artifact_hash="2" * 64), 1.0
 
     annotation = {
@@ -1712,6 +1857,10 @@ def test_final_sessions_are_reserved_before_provider_and_remain_consumed(tmp_pat
         predict = predictor.predict_frame
 
         def fail_during_final(frame, session_id: str, frame_index: int):
+            """予約済み final session の prediction を失敗させる。
+
+            provider 失敗後も session lease が消費済みであることを確認する。
+            """
             if session_id.startswith("final-"):
                 for index in range(3):
                     assert request.store._logical_index_path(

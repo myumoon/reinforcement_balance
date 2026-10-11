@@ -49,16 +49,19 @@ def _fixture(tmp_path: Path, *, coco_hash: str | None = None):
     (session_root / "hud_truth.jsonl").write_bytes(truth_bytes)
     (session_root / "frames.jsonl").write_bytes(frames_bytes)
     coco_wire = {
-        "images": [{"id": 0, "object_sha256": coco_hash or object_hash}],
+        "images": [{
+            "id": 1, "frame_id": 0, "session_id": session_id,
+            "object_sha256": coco_hash or object_hash,
+        }],
         "categories": [
             {"id": 1, "name": "player_anchor"},
             {"id": 2, "name": "enemy_boss"},
             {"id": 3, "name": "hazard_area"},
         ],
         "annotations": [
-            {"id": 1, "image_id": 0, "category_id": 1, "bbox": [900, 500, 100, 100]},
-            {"id": 2, "image_id": 0, "category_id": 2, "bbox": [1100, 500, 100, 100]},
-            {"id": 3, "image_id": 0, "category_id": 3, "bbox": [200, 200, 40, 40]},
+            {"id": 1, "image_id": 1, "category_id": 1, "bbox": [900, 500, 100, 100]},
+            {"id": 2, "image_id": 1, "category_id": 2, "bbox": [1100, 500, 100, 100]},
+            {"id": 3, "image_id": 1, "category_id": 3, "bbox": [200, 200, 40, 40]},
         ],
     }
     coco_bytes = canonical_json_bytes(coco_wire)
@@ -116,3 +119,39 @@ def test_loader_rejects_coco_object_hash_mismatch(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="object_sha256"):
         loader.load_frame(frame, session_id, 0)
+
+
+def test_loader_rejects_duplicate_coco_frame_ids(tmp_path: Path) -> None:
+    """同じ frame_id を指す COCO image を拒否する。
+
+    連番 image id から frame への対応が曖昧にならないよう index 時に検査する。
+    """
+    session_id, _store_root, _coco_root, _truth, _frame, files = _fixture(tmp_path)
+    coco = json.loads(files.world_coco)
+    coco["images"].append({**coco["images"][0], "id": 2})
+    duplicate_files = CaptureGroundTruthFiles(
+        files.hud_truth, canonical_json_bytes(coco), files.frames_jsonl,
+    )
+    with pytest.raises(ValueError, match="frame_id"):
+        build_ground_truth_loader(
+            {}, {"parser_package": {"parser_artifact_hash": "b" * 64}},
+            {session_id: duplicate_files},
+        )
+
+
+def test_loader_rejects_coco_session_id_mismatch(tmp_path: Path) -> None:
+    """別 session に結び付いた COCO image を拒否する。
+
+    capture binding と同じ session_id の label だけを formal ground truth に使う。
+    """
+    session_id, _store_root, _coco_root, _truth, _frame, files = _fixture(tmp_path)
+    coco = json.loads(files.world_coco)
+    coco["images"][0]["session_id"] = "another-session"
+    mismatched_files = CaptureGroundTruthFiles(
+        files.hud_truth, canonical_json_bytes(coco), files.frames_jsonl,
+    )
+    with pytest.raises(ValueError, match="session_id"):
+        build_ground_truth_loader(
+            {}, {"parser_package": {"parser_artifact_hash": "b" * 64}},
+            {session_id: mismatched_files},
+        )

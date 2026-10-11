@@ -44,7 +44,8 @@ def _snapshot(screen_state: str):
     object_sha = hashlib.sha256(b"frame").hexdigest()
     frame = FrameRecord(0, 2_000_000_000, "frame.png", object_sha, (0, 0, 1920, 1080), True, "a" * 64, "build")
     image = CocoImageEntry(
-        image_id=0,
+        image_id=1,
+        frame_id=0,
         object_sha256=object_sha,
         boxes=(
             LabeledBox("player_anchor", (900, 500, 1020, 620)),
@@ -101,7 +102,7 @@ def test_ground_truth_snapshot_rejects_frame_object_hash_mismatch() -> None:
     """
     object_sha = hashlib.sha256(b"frame").hexdigest()
     frame = FrameRecord(0, 2_000_000_000, "frame.png", object_sha, (0, 0, 1920, 1080), True, "a" * 64, "build")
-    image = CocoImageEntry(0, "0" * 64, ())
+    image = CocoImageEntry(0, 0, "0" * 64, ())
     with pytest.raises(ValueError, match="object_sha256"):
         ground_truth_snapshot(
             _truth("gameplay"), image, frame,
@@ -117,7 +118,7 @@ def _snapshot_with_truth(truth: HudTruthRecord):
     """
     object_sha = hashlib.sha256(b"frame").hexdigest()
     frame = FrameRecord(0, 2_000_000_000, "frame.png", object_sha, (0, 0, 1920, 1080), True, "a" * 64, "build")
-    image = CocoImageEntry(0, object_sha, ())
+    image = CocoImageEntry(0, 0, object_sha, ())
     return ground_truth_snapshot(
         truth, image, frame,
         parser_artifact_hash="b" * 64, session_id="session-formal",

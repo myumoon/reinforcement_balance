@@ -6,6 +6,7 @@ GT annotation を受け取らず、parser・detector・tracker・assembler の�
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import tempfile
 import time
@@ -232,7 +233,12 @@ def build_formal_predictor(
     detector_artifact = restored["detector_package"]
     parser_hash = parser_artifact.manifest.get("parser_artifact_hash")
     detector_hash = detector_artifact.manifest.get("detector_artifact_hash")
-    for name, digest in (("parser_artifact_hash", parser_hash), ("detector_artifact_hash", detector_hash)):
+    model_hash = detector_artifact.manifest.get("model_hash")
+    for name, digest in (
+        ("parser_artifact_hash", parser_hash),
+        ("detector_artifact_hash", detector_hash),
+        ("model_hash", model_hash),
+    ):
         if type(digest) is not str or len(digest) != 64 or not set(digest) <= _SHA256:
             raise ValueError(f"{name} envelope is not a SHA-256")
     temp_directory = tempfile.TemporaryDirectory(prefix="survivors-formal-")
@@ -242,11 +248,19 @@ def build_formal_predictor(
         _materialize_files(parser_root, parser_artifact.files)
         _materialize_files(detector_root, detector_artifact.files)
         parser_path, atlas_path, detector_manifest_path = _find_package_files(root)
-        parser_package = PackageLoader.load_formal(parser_path)
-        if parser_package.package_hash != parser_hash:
-            raise ValueError("parser package hash does not match artifact envelope")
+        if hashlib.sha256(parser_path.read_bytes()).hexdigest() != parser_hash:
+            raise ValueError("parser package file hash does not match artifact envelope")
+        PackageLoader.load_formal(parser_path)
         icon_matcher = IconMatcher.load_formal(atlas_path)
+        detector_manifest_bytes = detector_manifest_path.read_bytes()
+        if hashlib.sha256(detector_manifest_bytes).hexdigest() != detector_hash:
+            raise ValueError("detector manifest file hash does not match artifact envelope")
+        detector_manifest_wire = json.loads(detector_manifest_bytes)
+        if detector_manifest_wire.get("model_hash") != model_hash:
+            raise ValueError("detector manifest model_hash does not match artifact envelope")
         detector, tracker, detector_manifest = load_formal_detector(detector_manifest_path.parent)
+        if detector_manifest.model_hash != model_hash:
+            raise ValueError("loaded detector model_hash does not match artifact envelope")
         parser = HudParser(parser_artifact_hash=parser_hash, icon_matcher=icon_matcher)
         return _FormalPredictor(
             temp_directory=temp_directory,
