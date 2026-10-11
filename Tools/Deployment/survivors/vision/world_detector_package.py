@@ -12,7 +12,7 @@ restore 後に 04-06 golden fixture と同じ TrackedWorldStateV2 schema を返�
 schema 差を PackageSchemaError で拒否する。
 
 formal package は validation verdict と checkpoint identity が一致した場合だけ発行する。
-restore_package(require_formal=True) は verdict、weight、resolved config の hash を再検証する。
+formal restore と provider は共通 loader で verdict、weight、resolved config を照合する。
 
 使用例:
     from survivors.vision.world_detector_package import publish_development_package, restore_package
@@ -598,6 +598,15 @@ def restore_package(
 
     pkg_dir = manifest_path.parent
 
+    if require_formal:
+        detector, tracker, pkg_manifest = load_formal_detector(pkg_dir)
+        result = _infer_formal_detections(detector, frame_bgr, pkg_manifest.score_threshold)
+        state = tracker.update(result, frame_index=0, timestamp_ns=0)
+        return TrackedWorldStateV2.from_state(
+            state, frame_index=0, timestamp_ns=0,
+            class_map_path=pkg_dir / _CLASS_MAP_NAME,
+        )
+
     # -- manifest load
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     pkg_manifest = PackageManifest.from_dict(raw)
@@ -617,23 +626,9 @@ def restore_package(
         raise PackageSchemaError("formal package に必須の weight が含まれていません。")
 
     formal_verdict = None
+    formal_verdict_bytes = None
     if pkg_manifest.training_mode == "formal":
-        verdict_path = pkg_dir / _VALIDATION_VERDICT_NAME
-        if not verdict_path.is_file() or _sha256_file(verdict_path) != pkg_manifest.validation_verdict_hash:
-            raise PackageSchemaError("validation verdict が manifest と一致しません。")
-        from survivors.vision.world_formal_release import ValidationVerdict
-        try:
-            formal_verdict = ValidationVerdict.from_dict(json.loads(verdict_path.read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
-            raise PackageSchemaError(f"validation verdict が不正です: {exc}") from exc
-        if (
-            formal_verdict.status != "PASS"
-            or formal_verdict.score_threshold != pkg_manifest.score_threshold
-            or formal_verdict.weight_hash != pkg_manifest.model_hash
-            or formal_verdict.dataset_identity != pkg_manifest.data_hash
-            or formal_verdict.build_identity != pkg_manifest.build_hash
-        ):
-            raise PackageSchemaError("validation verdict と package identity が一致しません。")
+        formal_verdict_bytes = _read_formal_verdict_bytes(pkg_dir, pkg_manifest)
 
     # -- contract hash 検証
     current_contract_hash = _compute_contract_hash()
@@ -664,10 +659,10 @@ def restore_package(
 
     # 共有 validator を明示的に呼ぶ（model / tracker 構築より前）
     validate_detector_config(cfg)
-    if formal_verdict is not None:
-        from survivors.vision.world_formal_release import resolved_config_hash
-        if resolved_config_hash(cfg) != formal_verdict.resolved_config_hash:
-            raise PackageSchemaError("resolved config が validation verdict と一致しません。")
+    if formal_verdict_bytes is not None:
+        formal_verdict = _validate_formal_verdict(
+            pkg_dir, pkg_manifest, cfg, formal_verdict_bytes,
+        )
 
     detector = WorldDetector.from_config(cfg, cm_path)
 
@@ -676,10 +671,8 @@ def restore_package(
     if pkg_manifest.weight_included:
         if not weight_file.is_file():
             raise PackageSchemaError(f"package 内に weight が見つかりません: {weight_file}")
-        if _sha256_file(weight_file) != pkg_manifest.model_hash:
+        if formal_verdict is None and _sha256_file(weight_file) != pkg_manifest.model_hash:
             raise PackageSchemaError("weight の model_hash が manifest と一致しません。")
-        if formal_verdict is not None and _sha256_file(weight_file) != formal_verdict.weight_hash:
-            raise PackageSchemaError("weight hash が validation verdict と一致しません。")
         try:
             import torch
         except ModuleNotFoundError as e:
@@ -723,3 +716,150 @@ def restore_package(
 
     # -- schema 検証は上の contract_hash 比較で実施済み（_compute_contract_hash が3クラス全体をカバー）
     return v2
+
+
+def _infer_formal_detections(
+    detector: Any,
+    frame_bgr: np.ndarray,
+    score_threshold: float,
+) -> Any:
+    """formal detector を verdict threshold と ignore region で推論する。
+
+    model 内 threshold を無効化した後に明示 threshold を適用し、検証済み region を除外する。
+    """
+    model = getattr(detector, "_model", None)
+    if model is not None and hasattr(model, "score_thresh"):
+        model.score_thresh = 0.0
+    result = detector.infer(frame_bgr, score_threshold=score_threshold)
+    from survivors.vision.world_detector import drop_ignored_detections
+
+    return drop_ignored_detections(result, getattr(detector, "_formal_ignore_regions", []))
+
+
+def _formal_manifest_from_dict(wire: object) -> PackageManifest:
+    """formal detector manifest を共通 schema 検証で復元する。
+
+    formal 必須項目と eligibility は PackageManifest の既存検証に委ねる。
+    """
+    manifest = PackageManifest.from_dict(wire)
+    manifest.assert_formal_eligible()
+    return manifest
+
+
+def _read_formal_verdict_bytes(
+    package_dir: pathlib.Path,
+    manifest: PackageManifest,
+) -> bytes:
+    """manifest に結び付いた verdict bytes を取得する。
+
+    後段の config 検証より前に、verdict の欠落や file hash 不一致を拒否する。
+    """
+    verdict_path = package_dir / _VALIDATION_VERDICT_NAME
+    if not verdict_path.is_file():
+        raise PackageSchemaError("formal detector validation verdict is missing")
+    try:
+        verdict_bytes = verdict_path.read_bytes()
+    except OSError as exc:
+        raise PackageSchemaError("formal detector validation verdict is unreadable") from exc
+    if hashlib.sha256(verdict_bytes).hexdigest() != manifest.validation_verdict_hash:
+        raise PackageSchemaError("formal detector validation verdict does not match its hash")
+    return verdict_bytes
+
+
+def _validate_formal_verdict(
+    package_dir: pathlib.Path,
+    manifest: PackageManifest,
+    cfg: dict,
+    verdict_bytes: bytes,
+) -> Any:
+    """formal package の verdict、config、weight identity を照合する。
+
+    復元経路が異なっても同じ verdict 内容検証を適用する。
+    """
+    from survivors.vision.world_formal_release import ValidationVerdict, resolved_config_hash
+
+    try:
+        verdict = ValidationVerdict.from_dict(json.loads(verdict_bytes))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        raise PackageSchemaError(f"formal detector validation verdict is invalid: {exc}") from exc
+
+    weight_path = package_dir / _WEIGHT_NAME
+    if not manifest.weight_included or not weight_path.is_file():
+        raise PackageSchemaError("formal detector weight is missing or does not match its hash")
+    try:
+        actual_weight_hash = _sha256_file(weight_path)
+    except OSError as exc:
+        raise PackageSchemaError("formal detector weight is unreadable") from exc
+    if (
+        verdict.status != "PASS"
+        or verdict.score_threshold != manifest.score_threshold
+        or verdict.weight_hash != manifest.model_hash
+        or actual_weight_hash != verdict.weight_hash
+        or verdict.dataset_identity != manifest.data_hash
+        or verdict.build_identity != manifest.build_hash
+        or resolved_config_hash(cfg) != verdict.resolved_config_hash
+    ):
+        raise PackageSchemaError("formal detector validation verdict and package identity do not match")
+    return verdict
+
+
+def load_formal_detector(
+    package_dir: pathlib.Path | str,
+) -> tuple["WorldDetector", "EntityTracker", PackageManifest]:
+    """検証済み formal detector package から model と tracker を復元する。
+
+    content key、verdict、schema、config/class map/weight/contract hash を照合してから返す。
+    """
+    import yaml
+
+    from survivors.vision.entity_tracker import EntityTracker
+    from survivors.vision.world_dataset import load_class_map
+    from survivors.vision.world_detector import WorldDetector
+
+    pkg_dir = pathlib.Path(package_dir)
+    manifest_path = pkg_dir / _MANIFEST_NAME
+    raw = json.loads(manifest_path.read_bytes())
+    manifest = _formal_manifest_from_dict(raw)
+    if pkg_dir.name != _content_key(manifest):
+        raise PackageSchemaError("formal detector directory does not match its content key")
+    if manifest.contract_hash != _compute_contract_hash():
+        raise PackageSchemaError("formal detector contract hash does not match current schema")
+    verdict_bytes = _read_formal_verdict_bytes(pkg_dir, manifest)
+    cfg_path, class_map_path = pkg_dir / _CONFIG_NAME, pkg_dir / _CLASS_MAP_NAME
+    if not cfg_path.is_file() or not class_map_path.is_file():
+        raise FileNotFoundError("formal detector config or class map is missing")
+    if _sha256_file(cfg_path) != manifest.config_hash or _sha256_file(class_map_path) != manifest.class_map_hash:
+        raise PackageSchemaError("formal detector config/class-map hash mismatch")
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    validate_detector_config(cfg)
+    _validate_formal_verdict(pkg_dir, manifest, cfg, verdict_bytes)
+    detector = WorldDetector.from_config(cfg, class_map_path)
+    detector._formal_ignore_regions = cfg["input"].get("ignore_regions", [])
+    weight_path = pkg_dir / _WEIGHT_NAME
+    if not manifest.weight_included or not weight_path.is_file():
+        raise PackageSchemaError("formal detector weight is missing or does not match its hash")
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        if exc.name != "torch":
+            raise
+        raise FormalPackageRejectedError("torch is required for formal detector inference") from exc
+    try:
+        state_dict = torch.load(weight_path, map_location="cpu", weights_only=True)
+    except TypeError:
+        state_dict = torch.load(weight_path, map_location="cpu")
+    detector._model.load_state_dict(state_dict)
+    class_map = load_class_map(class_map_path)
+    tracker_cfg = cfg.get("tracker", {})
+    max_age_by_class = {
+        class_map.name_to_id(name): age
+        for name, age in tracker_cfg.get("max_age_by_class", {}).items()
+    }
+    tracker = EntityTracker(
+        max_age_by_class=max_age_by_class,
+        max_match_cost=tracker_cfg.get("max_match_cost", 0.7),
+        velocity_ema_alpha=tracker_cfg.get("velocity_ema_alpha", 0.6),
+        confidence_decay_per_frame=tracker_cfg.get("confidence_decay_per_frame", 0.9),
+        coarse_by_class_id=class_map.coarse_by_class_id(),
+    )
+    return detector, tracker, manifest

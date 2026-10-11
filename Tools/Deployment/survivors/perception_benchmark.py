@@ -542,8 +542,11 @@ def _is_usable_pred_target(target: UiCandidateTargetV1 | UiButtonTargetV1) -> bo
     return True
 
 
-def _named_slice_counts(snapshot: PerceptionSnapshot) -> dict[str, int]:
-    """ground-truth snapshot/annotation から slice ごとの実 entity/event 数を得る。"""
+def slice_counts_for_snapshot(snapshot: PerceptionSnapshot) -> dict[str, int]:
+    """ground-truth snapshot から slice ごとの entity/event 数を得る。
+
+    item context がない gameplay frame は annotation diagnostics の timer と event flag を使う。
+    """
     counts = {f"screen_state:{snapshot.screen_state}": 1}
     context = snapshot.item_context
     if context is not None:
@@ -557,6 +560,24 @@ def _named_slice_counts(snapshot: PerceptionSnapshot) -> dict[str, int]:
             counts["event:boss"] = 1
         if context.hazard_flag:
             counts["event:hazard"] = 1
+    else:
+        elapsed = snapshot.diagnostics.get("slice_elapsed_time")
+        if elapsed is not None:
+            if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed) or elapsed < 0:
+                raise ValueError("slice_elapsed_time must be a finite non-negative number")
+            if elapsed < 600.0:
+                counts["time_band:early"] = 1
+            elif elapsed < 1200.0:
+                counts["time_band:mid"] = 1
+            else:
+                counts["time_band:late"] = 1
+        for label in ("boss", "hazard"):
+            key = f"slice_{label}_present"
+            present = snapshot.diagnostics.get(key)
+            if present is not None and type(present) is not bool:
+                raise ValueError(f"{key} must be a bool")
+            if present is True:
+                counts[f"event:{label}"] = 1
     # annotation loader は一 frame 内の正確な entity 数と immutable entity ID/class
     # 対応を diagnostics へ格納する。両方がある場合は count inflation を拒否する。
     entity_classes = snapshot.diagnostics.get("foreground_entity_classes")
@@ -605,6 +626,58 @@ def _named_slice_counts(snapshot: PerceptionSnapshot) -> dict[str, int]:
     elif snapshot.screen_state in {"result", "target_reached_transition"}:
         counts["event:result"] = 1
     return counts
+
+
+def event_flag_correct(
+    ground: PerceptionSnapshot,
+    predicted: PerceptionSnapshot | None,
+    label: str,
+) -> float:
+    """boss/hazard event の rising-edge に記録する正誤値を返す。
+
+    gameplay は visible prediction box の存在を比べ、item context がある画面は従来の flag を使う。
+    """
+    if label not in {"event:boss", "event:hazard"}:
+        raise ValueError("event label must be event:boss or event:hazard")
+    class_name = "enemy_boss" if label == "event:boss" else None
+    ground_context = ground.item_context
+    if ground_context is not None:
+        field_name = "boss_flag" if class_name else "hazard_flag"
+        predicted_context = predicted.item_context if predicted is not None else None
+        return float(
+            getattr(ground_context, field_name) is True
+            and predicted_context is not None
+            and getattr(predicted_context, field_name) is True
+        )
+    ground_present = ground.diagnostics.get(
+        "slice_boss_present" if class_name else "slice_hazard_present"
+    )
+    if type(ground_present) is not bool:
+        raise ValueError("ground truth event diagnostics must contain a bool presence value")
+    if not ground_present or predicted is None:
+        return 0.0
+    predicted_boxes = predicted.diagnostics.get("predicted_boxes", ())
+    if not isinstance(predicted_boxes, (list, tuple)):
+        raise ValueError("predicted_boxes must be a sequence")
+    for box in predicted_boxes:
+        if not isinstance(box, Mapping):
+            raise ValueError("predicted box must be a mapping")
+        name, xyxy, score = box.get("class"), box.get("xyxy"), box.get("score")
+        if type(name) is not str or not isinstance(xyxy, (list, tuple)) or len(xyxy) != 4:
+            raise ValueError("predicted box identity or coordinates are invalid")
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= 1:
+            raise ValueError("predicted box score is invalid")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in xyxy):
+            raise ValueError("predicted box coordinates are invalid")
+        x1, y1, x2, y2 = xyxy
+        if x1 >= x2 or y1 >= y2 or score < 0.35:
+            continue
+        visible = x2 > 0 and y2 > 0 and x1 < 1920 and y1 < 1080 and x1 > 0 and y1 > 0 and x2 < 1920 and y2 < 1080
+        if visible and (
+            name == class_name if class_name else name in {"hazard_projectile", "hazard_area"}
+        ):
+            return 1.0
+    return 0.0
 
 
 def _foreground_classification_values(
@@ -1152,7 +1225,7 @@ def _run_benchmark_common(
         # 同じ tick 内の複数 metric record ではなく slice ごとに一度だけ数える。
         for tick in raw_values:
             assert isinstance(tick, SnapshotReplayTick)
-            slice_counts_for_tick = _named_slice_counts(tick.ground_truth)
+            slice_counts_for_tick = slice_counts_for_snapshot(tick.ground_truth)
             correctness = float(
                 tick.predicted is not None
                 and tick.ground_truth.screen_state == tick.predicted.screen_state
@@ -1194,30 +1267,10 @@ def _run_benchmark_common(
                         event_occurrence_counts[label] += 1
                         # rising-edge のみ metric を記録する。不在 → 不在 や present → present
                         # は重複計上となるためスキップし、1 occurrence = 1 sample を保証する。
-                        if label == "event:boss":
-                            ground_context = tick.ground_truth.item_context
-                            predicted_context = (
-                                tick.predicted.item_context
-                                if tick.predicted is not None else None
+                        if label in {"event:boss", "event:hazard"}:
+                            named_slice_values[label][tick.session_id].append(
+                                event_flag_correct(tick.ground_truth, tick.predicted, label)
                             )
-                            named_slice_values[label][tick.session_id].append(float(
-                                ground_context is not None
-                                and ground_context.boss_flag is True
-                                and predicted_context is not None
-                                and predicted_context.boss_flag is True
-                            ))
-                        elif label == "event:hazard":
-                            ground_context = tick.ground_truth.item_context
-                            predicted_context = (
-                                tick.predicted.item_context
-                                if tick.predicted is not None else None
-                            )
-                            named_slice_values[label][tick.session_id].append(float(
-                                ground_context is not None
-                                and ground_context.hazard_flag is True
-                                and predicted_context is not None
-                                and predicted_context.hazard_flag is True
-                            ))
                         else:
                             named_slice_values[label][tick.session_id].append(correctness)
                     event_prev_present[key] = present

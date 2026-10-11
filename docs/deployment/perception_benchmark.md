@@ -65,6 +65,16 @@ calibration 残差（`_derive_calibration_residuals`）の両方に使います�
   （Peachone の照準も同様）、初観測が遅れると残り時間は過大評価（正の値）になります。
 - `obs_v2_errors` には実データでの基準が無いので、現時点では gate に使わず記録だけします。
 
+## Formal provider と ground truth loader
+
+`survivors.formal_perception_provider.build_formal_predictor` は formal parser／detector package だけを復元し、frame ごとに HUD parse、world detection、tracking、`RealObsAssembler` を実行します。予測 provider は annotation、HUD truth、COCO label を読みません。現行 runner は session 開始時に `reset()` を必須呼び出しします。評価窓の境界 reset は、04-18 の窓評価を導入する際に同じ API から呼びます。
+
+`survivors.formal_annotation_loader.build_ground_truth_loader` は descriptor で検証した `hud_truth.jsonl`、`frames.jsonl`、session 単位の COCO bytes を index 化し、要求された frame だけを読みます。`formal_ground_truth.ground_truth_snapshot` が HUD truth と COCO box から状態を持たない 1 frame の snapshot を作り、provider と同じ ID 正規化・assembler 規則に通します。`build_survivors_formal_annotations.py` もこの関数を使うため、`annotations.jsonl` の semantic hash と loader の snapshot hash、inventory／candidate hash、foreground／slice diagnostics は一致します。annotation は formal dataset publish の前に生成します。
+
+GT `item_context` の level-up screen はその frame の label box から作ります。runtime provider は直前の gameplay world を level-up context に使うため、時間的な意味は異なります。gameplay の boss／hazard event は visible な label box の rising edge で数え、継続表示中は 1 occurrence、消失後の再出現は次の occurrence になります。foreground entity は frame-local box 単位なので、entity floor は box 出現数で満たされます。
+
+Benchmark の入力は stride 3（約 10 Hz）で評価され、runtime の 30 fps 推論とは時間条件が異なります。gameplay の `event:boss`／`event:hazard` は GT と prediction の存在一致を使い、位置精度は foreground class slice が評価します。
+
 ## CLI
 
 ```bash

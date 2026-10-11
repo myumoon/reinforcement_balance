@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import hashlib
 import json
+import shutil
 from dataclasses import replace
 import numpy as np
 import pytest
@@ -706,6 +707,114 @@ def _formal_package_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, dict
     verdict_path = tmp_path / "verdict.json"
     verdict_path.write_text(json.dumps(verdict_value.to_dict()), encoding="utf-8")
     return checkpoint_dir, verdict_path, config, class_map, cfg["tracker"], preflight
+
+
+def _formal_package_with_verdict_change(tmp_path: Path, field: str, value: object) -> Path:
+    """指定した verdict 内容を保った package fixture を用意する。
+
+    verdict と manifest の file hash、content key を更新し、内容検証だけを試せる状態にする。
+    """
+    from survivors.vision.world_detector_package import PackageManifest, _content_key, publish_formal_package
+
+    checkpoint, verdict_path, config, class_map, tracker, _preflight = _formal_package_inputs(tmp_path)
+    manifest_path = publish_formal_package(
+        verdict_path=verdict_path,
+        checkpoint_dir=checkpoint,
+        out_root=tmp_path / "packages",
+        class_map_path=class_map,
+        config_path=config,
+        tracker_config=tracker,
+    )
+    bad_verdict = json.loads(verdict_path.read_bytes())
+    bad_verdict[field] = value
+    bad_verdict.pop("verdict_canonical_hash")
+    bad_verdict["verdict_canonical_hash"] = canonical_hash(bad_verdict)
+    verdict_bytes = json.dumps(bad_verdict, sort_keys=True).encode("utf-8")
+    manifest = PackageManifest.from_dict(json.loads(manifest_path.read_bytes()))
+    bad_manifest = replace(
+        manifest,
+        validation_verdict_hash=hashlib.sha256(verdict_bytes).hexdigest(),
+    )
+    package_dir = manifest_path.parent.parent / _content_key(bad_manifest)
+    shutil.copytree(manifest_path.parent, package_dir)
+    (package_dir / "validation_verdict.json").write_bytes(verdict_bytes)
+    (package_dir / "manifest.json").write_text(
+        json.dumps(bad_manifest.to_dict(), sort_keys=True), encoding="utf-8",
+    )
+    return package_dir
+
+
+@pytest.mark.parametrize(("field", "value"), [("status", "FAIL"), ("score_threshold", 0.01)])
+def test_formal_loaders_reject_verdict_content_mismatch(
+    tmp_path: Path, field: str, value: object,
+) -> None:
+    """formal loader と runtime restore は verdict 内容の不一致を拒否する。
+
+    file hash を manifest に結び直しても PASS と package identity の条件を維持させる。
+    """
+    from survivors.vision.world_detector_package import (
+        PackageSchemaError,
+        load_formal_detector,
+        restore_package,
+    )
+
+    package_dir = _formal_package_with_verdict_change(tmp_path, field, value)
+    with pytest.raises(PackageSchemaError):
+        load_formal_detector(package_dir)
+    with pytest.raises(PackageSchemaError):
+        restore_package(
+            package_dir / "manifest.json",
+            np.zeros((1080, 1920, 3), dtype=np.uint8),
+            require_formal=True,
+        )
+
+
+def test_formal_predictor_rejects_detector_verdict_content_mismatch(tmp_path: Path, monkeypatch) -> None:
+    """formal predictor は detector verdict が FAIL の artifact を復元しない。
+
+    parser の検証を固定して detector artifact を実際の formal loader まで渡す。
+    """
+    from types import SimpleNamespace
+    import survivors.formal_perception_provider as provider
+    from survivors.vision.world_detector_package import PackageSchemaError
+
+    package_dir = _formal_package_with_verdict_change(tmp_path, "status", "FAIL")
+    manifest_bytes = (package_dir / "manifest.json").read_bytes()
+    detector_manifest = json.loads(manifest_bytes)
+    atlas_hash = "a" * 64
+    parser_bytes = b"{}"
+    atlas_bytes = b'{"schema_version":"icon_atlas.v1"}'
+    restored = {
+        "parser_package": SimpleNamespace(
+            files={"parser.json": parser_bytes, "atlas.json": atlas_bytes},
+            manifest={"parser_artifact_hash": hashlib.sha256(parser_bytes).hexdigest()},
+        ),
+        "detector_package": SimpleNamespace(
+            files={
+                f"{package_dir.name}/{path.name}": path.read_bytes()
+                for path in package_dir.iterdir()
+            },
+            manifest={
+                "detector_artifact_hash": hashlib.sha256(manifest_bytes).hexdigest(),
+                "model_hash": detector_manifest["model_hash"],
+            },
+        ),
+    }
+    monkeypatch.setattr(
+        provider, "PackageLoader",
+        SimpleNamespace(load_formal=lambda _path: SimpleNamespace(
+            meta=SimpleNamespace(atlas_content_hash=atlas_hash),
+        )),
+    )
+    monkeypatch.setattr(
+        provider, "IconMatcher",
+        SimpleNamespace(load_formal=lambda _path: SimpleNamespace(
+            manifest=SimpleNamespace(atlas_content_hash=atlas_hash),
+        )),
+    )
+
+    with pytest.raises(PackageSchemaError):
+        provider.build_formal_predictor(restored)
 
 
 def test_formal_package_publish_and_restore_bind_verdict_weight_and_ignore_region(tmp_path, monkeypatch) -> None:
