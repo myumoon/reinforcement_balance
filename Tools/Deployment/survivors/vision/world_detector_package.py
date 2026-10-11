@@ -79,8 +79,8 @@ class PackageManifest:
     validation_verdict_hash: str = ""
 
     def to_dict(self) -> dict:
-        """JSON シリアライズ用 dict。"""
-        return {
+        """package manifest を JSON wire mapping に変換する。\n\n未設定の verdict hash は省き、既存 development package の content key を保つ。"""
+        result = {
             "schema_version": self.schema_version,
             "formal_detector_eligible": self.formal_detector_eligible,
             "model_hash": self.model_hash,
@@ -95,8 +95,10 @@ class PackageManifest:
             "score_threshold": self.score_threshold,
             "development_only": self.development_only,
             "training_mode": self.training_mode,
-            "validation_verdict_hash": self.validation_verdict_hash,
         }
+        if self.validation_verdict_hash:
+            result["validation_verdict_hash"] = self.validation_verdict_hash
+        return result
 
     @staticmethod
     def from_dict(d: dict) -> "PackageManifest":
@@ -215,11 +217,11 @@ class PackageManifest:
 
 
 class FormalPackageRejectedError(ValueError):
-    """development package を formal がロードしようとしたときに送出される。"""
+    """formal loader が不適格 package を拒否したことを示す。\n\n不足した formal verdict や eligibility の理由を呼出側へ伝える。"""
 
 
 class PackageSchemaError(ValueError):
-    """restore 後の schema が TrackedWorldStateV2 と一致しないときに送出される。"""
+    """package schema が runtime contract と一致しないことを示す。\n\nrestore 前に model や config を不整合な wire format から守る。"""
 
 
 # ---- contract hash ----
@@ -238,6 +240,7 @@ def _compute_contract_hash() -> str:
     )
 
     def _descriptor(cls: type) -> dict:
+        """dataclass の field 名と型注釈を辞書へまとめる。\n\ncontract hash に型の変更も反映できるよう string 表現を保存する。"""
         return {f.name: str(f.type) for f in _dc.fields(cls)}
 
     descriptor = {
@@ -252,19 +255,20 @@ def _compute_contract_hash() -> str:
 # ---- content-addressed store ----
 
 def _content_key(manifest: PackageManifest) -> str:
-    """manifest 内容の SHA-256 をストアキーとして返す。"""
+    """manifest 内容の SHA-256 を store directory key として返す。\n\nwire mapping のみを hash し、package path と manifest identity を一致させる。"""
     payload = json.dumps(manifest.to_dict(), sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _sha256_file(path: pathlib.Path) -> str:
+    """file の全 byte から SHA-256 を計算する。\n\npackage weight と verdict が manifest に束縛された内容か照合する。"""
     h = hashlib.sha256()
     h.update(path.read_bytes())
     return h.hexdigest()
 
 
 def _verify_weight_hash(weight_path: pathlib.Path, expected_hash: str) -> None:
-    """weight の存在と model_hash 一致を fail-closed で検証する。"""
+    """weight file の存在と manifest hash の一致を検証する。\n\n欠落または差し替えを publish と restore の境界で拒否する。"""
     if not weight_path.is_file():
         raise ValueError(f"weight ファイルが見つかりません: {weight_path}")
     actual_hash = _sha256_file(weight_path)
