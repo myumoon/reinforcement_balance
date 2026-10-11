@@ -1,4 +1,4 @@
-"""正式 detector 学習で共有する sampler、重み、augmentation。"""
+"""正式 detector 学習で共有する sampling と loss 補助を定義する。\n\nsession balance、class weight、augmentation の deterministic な入力規則を提供する。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import numpy as np
 
 
 class SessionBalancedSampler:
-    """session ごとの最小 quota を round-robin で返す。"""
+    """session ごとの最小 quota を round-robin で返す。\n\n少数 session の sample も epoch ごとに学習列へ含める。"""
 
     def __init__(self, ds: Any, *, seed: int, epoch: int, min_quota: str = "median") -> None:
         """データ件数と seed から epoch 固定の順序を準備する。
