@@ -22,7 +22,11 @@ from survivors.vision.hud_calibration import PackageLoader
 from survivors.vision.hud_parser import HudParser
 from survivors.vision.icon_matcher import IconMatcher
 from survivors.vision.world_dataset import load_class_map
-from survivors.vision.world_detector_package import PackageManifest, load_formal_detector
+from survivors.vision.world_detector_package import (
+    PackageManifest,
+    _infer_formal_detections,
+    load_formal_detector,
+)
 from survivors.formal_ground_truth import normalize_snapshot_ids
 
 _SHA256 = frozenset("0123456789abcdef")
@@ -160,9 +164,10 @@ class _FormalPredictor:
             frame_index=frame_index,
             captured_monotonic_ns=frame.captured_monotonic_ns,
         )
-        detections = self._detector.infer(
+        detections = _infer_formal_detections(
+            self._detector,
             frame.frame_bgra[:, :, :3],
-            score_threshold=self._detector_manifest.score_threshold,
+            self._detector_manifest.score_threshold,
         )
         tracked = self._tracker.update(
             detections, frame_index=frame_index,

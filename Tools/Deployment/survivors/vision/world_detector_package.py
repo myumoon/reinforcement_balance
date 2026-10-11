@@ -31,7 +31,7 @@ import pathlib
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 from survivors.vision.world_detector import validate_detector_config
@@ -600,7 +600,7 @@ def restore_package(
 
     if require_formal:
         detector, tracker, pkg_manifest = load_formal_detector(pkg_dir)
-        result = detector.infer(frame_bgr, score_threshold=pkg_manifest.score_threshold)
+        result = _infer_formal_detections(detector, frame_bgr, pkg_manifest.score_threshold)
         state = tracker.update(result, frame_index=0, timestamp_ns=0)
         return TrackedWorldStateV2.from_state(
             state, frame_index=0, timestamp_ns=0,
@@ -734,39 +734,40 @@ def restore_package(
     return v2
 
 
-def _formal_manifest_from_dict(wire: object) -> PackageManifest:
-    """formal eligible manifest を strict な PackageManifest に復元する。
+def _infer_formal_detections(
+    detector: Any,
+    frame_bgr: np.ndarray,
+    score_threshold: float,
+) -> Any:
+    """formal detector を verdict threshold と ignore region で推論する。
 
-    development loader の forced flags を迂回せず、正式入口で両 eligibility を照合する。
+    model 内 threshold を無効化した後に明示 threshold を適用し、検証済み region を除外する。
     """
-    if not isinstance(wire, dict):
-        raise ValueError("formal detector manifest must be an object")
-    expected = {
-        "schema_version", "formal_detector_eligible", "model_hash", "data_hash",
-        "config_hash", "build_hash", "class_map_hash", "contract_hash", "metrics",
-        "checkpoint_selection", "weight_included", "score_threshold", "development_only",
-        "training_mode",
-    }
-    if set(wire) != expected:
-        raise ValueError("formal detector manifest fields do not match schema")
-    if wire["formal_detector_eligible"] is not True or wire["development_only"] is not False:
-        raise FormalPackageRejectedError("development detector package cannot be loaded as formal")
-    development_wire = dict(wire)
-    development_wire["formal_detector_eligible"] = False
-    development_wire["development_only"] = True
-    return replace(
-        PackageManifest.from_dict(development_wire),
-        formal_detector_eligible=True,
-        development_only=False,
-    )
+    model = getattr(detector, "_model", None)
+    if model is not None and hasattr(model, "score_thresh"):
+        model.score_thresh = 0.0
+    result = detector.infer(frame_bgr, score_threshold=score_threshold)
+    from survivors.vision.world_detector import drop_ignored_detections
+
+    return drop_ignored_detections(result, getattr(detector, "_formal_ignore_regions", []))
+
+
+def _formal_manifest_from_dict(wire: object) -> PackageManifest:
+    """formal detector manifest を共通 schema 検証で復元する。
+
+    formal 必須項目と eligibility は PackageManifest の既存検証に委ねる。
+    """
+    manifest = PackageManifest.from_dict(wire)
+    manifest.assert_formal_eligible()
+    return manifest
 
 
 def load_formal_detector(
     package_dir: pathlib.Path | str,
 ) -> tuple["WorldDetector", "EntityTracker", PackageManifest]:
-    """verified formal detector package から model と tracker を復元する。
+    """検証済み formal detector package から model と tracker を復元する。
 
-    content key、schema、config/class map/weight/contract hash を照合してから返す。
+    content key、verdict、schema、config/class map/weight/contract hash を照合してから返す。
     """
     import yaml
 
@@ -782,6 +783,9 @@ def load_formal_detector(
         raise PackageSchemaError("formal detector directory does not match its content key")
     if manifest.contract_hash != _compute_contract_hash():
         raise PackageSchemaError("formal detector contract hash does not match current schema")
+    verdict_path = pkg_dir / _VALIDATION_VERDICT_NAME
+    if not verdict_path.is_file() or _sha256_file(verdict_path) != manifest.validation_verdict_hash:
+        raise PackageSchemaError("formal detector validation verdict is missing or does not match its hash")
     cfg_path, class_map_path = pkg_dir / _CONFIG_NAME, pkg_dir / _CLASS_MAP_NAME
     if not cfg_path.is_file() or not class_map_path.is_file():
         raise FileNotFoundError("formal detector config or class map is missing")
@@ -790,6 +794,7 @@ def load_formal_detector(
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     validate_detector_config(cfg)
     detector = WorldDetector.from_config(cfg, class_map_path)
+    detector._formal_ignore_regions = cfg["input"].get("ignore_regions", [])
     weight_path = pkg_dir / _WEIGHT_NAME
     if not manifest.weight_included or not weight_path.is_file() or _sha256_file(weight_path) != manifest.model_hash:
         raise PackageSchemaError("formal detector weight is missing or does not match its hash")

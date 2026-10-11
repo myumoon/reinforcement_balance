@@ -31,7 +31,9 @@ from survivors.vision.world_detector import DetectionResult
 from survivors.vision.world_detector_package import (
     PACKAGE_SCHEMA_VERSION,
     FormalPackageRejectedError,
+    PackageSchemaError,
     PackageManifest,
+    _formal_manifest_from_dict,
     load_formal_detector,
 )
 
@@ -301,6 +303,40 @@ def test_formal_predictor_returns_normalized_prediction_and_package_hashes(monke
     predictor.reset()
 
 
+def test_formal_predictor_drops_detections_in_ignore_regions() -> None:
+    """formal predictor は threshold と ignore region を適用する。
+
+    明示 threshold を渡し、検証済み region 内の検出を snapshot の診断 box に残さない。
+    """
+    import survivors.formal_perception_provider as provider
+
+    detector = _FixtureDetector()
+    detector._model = SimpleNamespace(score_thresh=0.7)
+    detector._formal_ignore_regions = [[0.57, 0.46, 0.67, 0.6]]
+    class_map = default_class_map()
+    tracker = EntityTracker(
+        {}, 0.7, 0.6, 0.9,
+        coarse_by_class_id=class_map.coarse_by_class_id(),
+    )
+    predictor = provider._FormalPredictor(
+        temp_directory=SimpleNamespace(),
+        detector_dir=DEFAULT_CLASS_MAP_PATH.parent,
+        parser=_FixtureHudParser(parser_artifact_hash=PARSER_HASH, icon_matcher=None),
+        detector=detector,
+        tracker=tracker,
+        detector_manifest=SimpleNamespace(score_threshold=0.2, model_hash=MODEL_HASH),
+        parser_artifact_hash=PARSER_HASH,
+        detector_artifact_hash=DETECTOR_HASH,
+    )
+    snapshot, _latency = predictor.predict_frame(_frame(), "session-1", 0)
+
+    assert snapshot is not None
+    assert [box["class"] for box in snapshot.diagnostics["predicted_boxes"]] == ["player_anchor"]
+    assert detector.threshold == 0.2
+    assert detector._model.score_thresh == 0.0
+    predictor.reset()
+
+
 def test_formal_predictor_loads_actual_formal_parser_package(tmp_path: Path, monkeypatch) -> None:
     """PackageWriter の formal package を public loader で復元する。
 
@@ -476,3 +512,45 @@ def test_formal_detector_loader_rejects_development_manifest() -> None:
         (package_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         with pytest.raises(FormalPackageRejectedError):
             load_formal_detector(package_dir)
+
+
+def test_formal_manifest_loader_accepts_verdict_hash() -> None:
+    """formal manifest の verdict hash を共通 parser で受け入れる。
+
+    04-15 が追加した wire field を正式 detector loader でも認識する。
+    """
+    manifest = PackageManifest(
+        PACKAGE_SCHEMA_VERSION, True, "c" * 64, "d" * 64,
+        "e" * 64, "f" * 64, "1" * 64, "2" * 64,
+        {}, {}, True, 0.5, False, "formal", "3" * 64,
+    )
+
+    assert _formal_manifest_from_dict(manifest.to_dict()) == manifest
+
+
+@pytest.mark.parametrize("verdict_bytes", [None, b"tampered verdict"])
+def test_formal_detector_loader_rejects_missing_or_mismatched_verdict_hash(
+    monkeypatch, tmp_path: Path, verdict_bytes: bytes | None,
+) -> None:
+    """formal loader は manifest に結び付かない verdict を拒否する。
+
+    verdict の欠落と実ファイル hash の不一致を detector 構築前に検知する。
+    """
+    from survivors.vision import world_detector_package
+
+    manifest = PackageManifest(
+        PACKAGE_SCHEMA_VERSION, True, "c" * 64, "d" * 64,
+        "e" * 64, "f" * 64, "1" * 64, "2" * 64,
+        {}, {}, True, 0.5, False, "formal", "3" * 64,
+    )
+    package_dir = tmp_path / "formal"
+    package_dir.mkdir()
+    (package_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    if verdict_bytes is not None:
+        (package_dir / "validation_verdict.json").write_bytes(verdict_bytes)
+    monkeypatch.setattr(world_detector_package, "_formal_manifest_from_dict", lambda _wire: manifest)
+    monkeypatch.setattr(world_detector_package, "_content_key", lambda _manifest: package_dir.name)
+    monkeypatch.setattr(world_detector_package, "_compute_contract_hash", lambda: manifest.contract_hash)
+
+    with pytest.raises(PackageSchemaError, match="validation verdict"):
+        load_formal_detector(package_dir)
