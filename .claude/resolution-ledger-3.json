@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "resolutions": [
+    {
+      "fingerprint": "coverage/M7/preflight-rejection-scenario-passes-for-wrong-reason",
+      "changed_paths": ["Tools/Deployment/tests/vision/test_hud_formal_release.py"],
+      "regression_tests": ["test_formal_preflight_accepts_bound_frozen_model_sessions[development_session]"],
+      "siblings_swept": ["unfrozen", "development_session", "build_mismatch", "zero_slice", "zero_roi_negative", "restore_verdict"],
+      "reproduction_result": "restore_development_session が cls を受け、formal_dataset_eligible 検査を一時的に外した実行で development_session が DID NOT RAISE となり失敗。検査を復元後は対象ファイルの21件が通過。",
+      "test_commands": [
+        "$env:PYTHONUTF8='1'; $env:PYTHONPATH=\"$PWD\\Tools\\Deployment;$PWD\\Tools\\Common\\src\"; & 'C:\\Users\\neko\\Anaconda3\\envs\\reinbalance\\python.exe' -m pytest 'Tools/Deployment/tests/vision/test_hud_formal_release.py' -q -p no:cacheprovider --basetemp \"$PWD\\.claude\\pytest-tmp-$(Get-Random)\" 2>&1 | Select-Object -Last 15",
+        "$env:PYTHONUTF8='1'; $env:PYTHONPATH=\"$PWD\\Tools\\Deployment;$PWD\\Tools\\Common\\src\"; & 'C:\\Users\\neko\\Anaconda3\\envs\\reinbalance\\python.exe' -m pytest 'Tools/Deployment/tests/vision/test_hud_formal_release.py' -k development_session -q -p no:cacheprovider --basetemp \"$PWD\\.claude\\pytest-tmp-$(Get-Random)\" 2>&1 | Select-Object -Last 15"
+      ]
+    }
+  ]
+}
