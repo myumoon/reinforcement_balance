@@ -122,7 +122,7 @@ death／result の `confirm` は観測のみです。`perception_snapshot._UI_SC
 - `formal_parser_eligible=False`
 
 `IconMatcher.load_formal()` はこの atlas を `FormalLoaderRejectedError` で拒否します。
-正式 atlas は 04-05 で実ゲーム画像から生成します。
+formal atlas の生成 tooling は 04-14 で実装し、実 dataset を使った atlas 発行は 04-05 で行います。
 
 `TemplateEntry.surface` は `inventory`（省略時の既定）か `card` です。所持 icon とカード icon は描画が違うため、同じ manifest に両方の crop を別 entry として入れます。`match(..., surface="card")` は card entry のみを照合し、なければ `no_surface_entries` です。開発 builder は各 item/level に同じ合成 feature の二 entry を作り、item_id・surface・level 順に並べます。
 
@@ -167,7 +167,7 @@ bash <project_root>/Tools/run-pytest.sh Tools/Deployment/tests/vision -q -rs
 
 - カード・ウィンドウ・ボタンは1920×1080日本語 UI の実測値です。他解像度・言語・UI scale は未対応で、定数の再計測が必要です。
 - digit templates は開発用の合成パターン。実データには 04-04 の calibration を要する。
-- icon matching は color/edge 特徴のみ。04-05 で実画像 atlas に差し替える。
+- icon matching は color/edge 特徴のみ。04-14 が実画像 atlas の tooling を提供し、04-05 で正式 atlas を発行する。
 - 画面状態は実測の枠と色で判定します。一時停止のオプション画面、target_reached_transition、level_up_fallback の実画面は未確認です。
 - skip／banish の ROI は未計測で、所持カード選択の +1 は発火しません。カードの名前・レベルの文字も読みません。
 - 開発 CLI の `parser_artifact_hash` は hud_parser.py 一ファイルの sha256 です。screen_layout.py・choice_parser.py・roi_layout.py の変更はこの hash だけでは識別できません。formal 側の全 vision `code_hashes` は04-14の対象です。
