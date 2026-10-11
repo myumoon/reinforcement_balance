@@ -1,4 +1,7 @@
-"""Perception error fit、formal lineage seal、stale-proof verdict 契約。"""
+"""Perception error fit、formal lineage seal、stale-proof verdict 契約。
+
+残差の集約と profile 出力に加え、formal session の開封と verdict の再検証を担う。
+"""
 
 from __future__ import annotations
 
