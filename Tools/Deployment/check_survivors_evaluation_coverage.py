@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""事前登録窓の annotation coverage と formal slice floor を照合する。"""
+"""事前登録窓の annotation coverage と formal slice floor を照合する。
+
+窓内 frame だけを集計し、HUD truth・COCO と必要件数の不足を確認する。
+"""
 
 from __future__ import annotations
 
