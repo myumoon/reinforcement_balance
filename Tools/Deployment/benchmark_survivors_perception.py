@@ -474,6 +474,25 @@ def _capture_evaluation_inputs(
     return gates, plan
 
 
+def _validate_verdict_evaluation_identity(
+    metrics: Mapping[str, Any], capture_descriptor: ArtifactDescriptor,
+) -> None:
+    """verdict の gate/window hash が capture descriptor と一致することを確かめる。"""
+    identity = capture_descriptor.identity_metadata
+    gates_binding = identity.get("formal_gates")
+    windows_binding = identity.get("evaluation_windows")
+    gates_metrics = metrics.get("formal_gates")
+    if not isinstance(gates_binding, Mapping) or not isinstance(gates_metrics, Mapping):
+        raise ValueError("formal verdict is missing its formal_gates identity")
+    if gates_metrics.get("yaml_sha256") != gates_binding.get("sha256"):
+        raise ValueError("formal_gates YAML hash does not match capture descriptor")
+    if (
+        not isinstance(windows_binding, Mapping)
+        or metrics.get("evaluation_windows_hash") != windows_binding.get("plan_canonical_hash")
+    ):
+        raise ValueError("evaluation windows hash does not match capture descriptor")
+
+
 def _restore_split_and_sessions(
     request: FormalBenchmarkRequest, capture_bytes: bytes,
     formal_gates: FormalGates | None = None,
@@ -1101,16 +1120,6 @@ def _capture_ticks_to_consumer_ticks(capture_ticks: float, stride: int) -> float
     return float(capture_ticks) * stride * _CAPTURE_FRAME_PERIOD_MS / _CONSUMER_FRAME_PERIOD_MS
 
 
-def _consumer_tick_probability(sampled_probability: float, stride: int) -> float:
-    """stride 間隔で観測した遷移確率を 1 consumer tick の確率へ戻す。
-    capture 30 fps と consumer 60 Hz の実時間比を用いる。
-    """
-    if not math.isfinite(sampled_probability) or not 0.0 <= sampled_probability <= 1.0:
-        raise ValueError("sampled_probability must be in [0, 1]")
-    intervals = _capture_ticks_to_consumer_ticks(1.0, stride)
-    return 1.0 - (1.0 - sampled_probability) ** (1.0 / intervals)
-
-
 def _derive_calibration_residuals(
     ticks: list[SnapshotReplayTick],
     *,
@@ -1299,15 +1308,15 @@ def _derive_calibration_residuals(
                 if not missing[index]:
                     # present→missing の enter 条件付き確率
                     append(session_id, frame_id, "burst_enter",
-                           _consumer_tick_probability(float(missing[index + 1]), evaluation_stride), 1.0, 0.0)
+                           float(missing[index + 1]), 1.0, 0.0)
                 else:
                     # missing→present の exit 条件付き確率
                     append(session_id, frame_id, "burst_exit",
-                           _consumer_tick_probability(float(not missing[index + 1]), evaluation_stride), 1.0, 0.0)
+                           float(not missing[index + 1]), 1.0, 0.0)
                 if not collapsed[index]:
                     # non-collapse→collapse の開始確率
                     append(session_id, frame_id, "unknown_screen_collapse",
-                           _consumer_tick_probability(float(collapsed[index + 1]), evaluation_stride), 1.0, 0.0)
+                           float(collapsed[index + 1]), 1.0, 0.0)
         for run_index, run_length in enumerate(_collapse_run_lengths(collapsed)):
             append(
                 session_id, f"{session_id}:{window_id}:collapse_run:{run_index}",
@@ -1784,6 +1793,9 @@ def _recover_committed_result(
         ref=verdict_ref,
         current_subject_hashes=current_subject_hashes,
     )
+    _validate_verdict_evaluation_identity(
+        verdict.metrics, request.dependency_descriptors["capture_dataset"],
+    )
     final_metadata = descriptors[2].identity_metadata
     if (
         descriptors[1].identity_hash != verdict.calibration_profile_hash
@@ -2040,6 +2052,9 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         [manifest.session_id for manifest in calibration_manifests],
         [manifest.session_id for manifest in final_metadata_manifests],
         calibration_session_hashes=calibration_hashes,
+        transition_interval_ticks=_capture_ticks_to_consumer_ticks(
+            1.0, evaluation_plan.stride,
+        ),
     )
     provisional_subjects = _subject_hashes(
         request, payloads,
@@ -2170,6 +2185,9 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         report, seal_id=seal.seal_id,
         final_session_ids=[manifest.session_id for manifest in final_manifests],
         **subjects,
+    )
+    _validate_verdict_evaluation_identity(
+        verdict.metrics, request.dependency_descriptors["capture_dataset"],
     )
     descriptors = _descriptor_chain(
         calibration_descriptors, request, verdict, verdict_logical_id
@@ -2330,6 +2348,7 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({
         "verdict_id": result.verdict.verdict_id,
         "passed": result.verdict.passed,
+        "formal_skipped_bands": result.verdict.metrics["formal_skipped_bands"],
         "verdict_artifact": result.verdict_ref.store_uri,
     }, indent=2))
     return 0
