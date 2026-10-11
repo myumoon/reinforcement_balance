@@ -26,34 +26,41 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import pathlib
+import shutil
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+import numpy as np
 import yaml
+from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
 
 
 def _sha256_file(path: pathlib.Path) -> str:
+    """file 内容の SHA-256 を返す。\n\ncheckpoint と resume metadata の組が差し替わっていないか検証する。"""
     h = hashlib.sha256()
     h.update(path.read_bytes())
     return h.hexdigest()
 
 
 def _sha256_str(s: str) -> str:
+    """文字列を UTF-8 として hash 化する。\n\n開発用 manifest に保存する config identity を安定させる。"""
     return hashlib.sha256(s.encode()).hexdigest()
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """development と formal 学習の CLI 引数を定義する。\n\nformal mode では descriptor と preflight の入力も必須にする。"""
     p = argparse.ArgumentParser(
         description="world detector 学習ハーネス（開発用）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--annotations", required=True, help="COCO JSON アノテーションファイル")
-    p.add_argument(
+    split_mode = p.add_mutually_exclusive_group(required=True)
+    split_mode.add_argument(
         "--split",
-        required=True,
         help=(
             "SessionSplit JSON ファイル。train/validation/error_calibration/final_e2e_test"
             " の session ID を列挙する。error_calibration / final_e2e_test は自動除外され、"
@@ -74,6 +81,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             " 通常学習では使用しないこと。smoke 成果物は development/smoke であることを manifest に記録する。"
         ),
     )
+    split_mode.add_argument("--formal", action="store_true", help="descriptor と preflight を必須にした正式学習")
+    p.add_argument("--feasibility-verdict", help="perception feasibility PASS verdict JSON")
+    p.add_argument("--capture-store", help="sealed capture store root")
+    p.add_argument("--target-profile-hash", help="formal target profile SHA-256")
+    p.add_argument("--hardware-id", help="latency gate 対象 GPU identifier")
+    p.add_argument("--dataset-descriptor", help="04-17 source descriptor JSON")
+    p.add_argument("--restore-verdict", help="dataset restore test descriptor JSON")
+    p.add_argument("--annotation-agreement", help="04-17 agreement JSON")
+    p.add_argument("--minimum-counts", help="formal minimum counts JSON")
+    p.add_argument("--preflight-report-out", help="検証済み preflight report の出力先")
     return p
 
 
@@ -103,7 +120,7 @@ class CheckpointSelector:
     _records: list[CheckpointRecord] = field(default_factory=list, repr=False)
 
     def record(self, rec: CheckpointRecord) -> None:
-        """チェックポイントを記録し keep_top_k を超えた分を削除する。"""
+        """validation score の高い checkpoint を候補へ加える。\n\n上位 keep_top_k 件だけを保持して古い候補を除く。"""
         self._records.append(rec)
         self._records.sort(key=lambda r: r.val_map50_95, reverse=True)
         if len(self._records) > self.keep_top_k:
@@ -111,11 +128,11 @@ class CheckpointSelector:
 
     @property
     def best(self) -> CheckpointRecord | None:
-        """val_map50_95 が最大の checkpoint を返す（未選択なら None）。"""
+        """val_map50_95 が最大の checkpoint を返す。\n\n未選択時は None とし、呼出側に不足状態を伝える。"""
         return self._records[0] if self._records else None
 
     def to_dict(self) -> dict:
-        """manifest に保存できる dict 形式にシリアライズする。"""
+        """selector の記録と選択規則を dict に変換する。\n\n学習後の manifest と resume checkpoint の両方で同じ形を使う。"""
         return {
             "metric": self.metric,
             "keep_top_k": self.keep_top_k,
@@ -126,7 +143,7 @@ class CheckpointSelector:
 
     @staticmethod
     def from_dict(d: dict) -> "CheckpointSelector":
-        """dict から CheckpointSelector を復元する（resume 用）。"""
+        """dict から CheckpointSelector を復元する。\n\n保存済み候補を再読込して resume 後も best 選択を継続する。"""
         sel = CheckpointSelector(
             metric=d.get("metric", "val_map50_95"),
             keep_top_k=d.get("keep_top_k", 3),
@@ -150,14 +167,28 @@ def _save_resume_state(
     optimizer: Any,
     *,
     training_mode: str = "development",
+    resolved_config_hash: str = "",
+    dataset_identity: str = "",
+    scheduler: Any = None,
+    epoch_metrics: list[dict[str, Any]] | None = None,
 ) -> None:
     """model / optimizer / epoch / selector / training_mode を single last checkpoint に保存する。
 
     best checkpoint は選択・publish 専用であり、resume には使用しない。
     last checkpoint の SHA-256 は metadata に保存し、復元前に検証する。
-    training_mode は resume 時の smoke/development 混在を防ぐために保存する。
+    training_mode は resume 時の開発/formal 混在を防ぐために保存する。
     """
     import torch
+
+    import numpy as np
+
+    if training_mode not in ("smoke", "development", "formal"):
+        raise ValueError(f"unsupported training_mode: {training_mode!r}")
+    if training_mode == "formal" and (
+        len(resolved_config_hash) != 64 or len(dataset_identity) != 64
+        or scheduler is None or not isinstance(epoch_metrics, list) or len(epoch_metrics) != epoch
+    ):
+        raise ValueError("formal resume state needs identities, scheduler, and complete epoch metrics")
 
     out_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = {
@@ -165,7 +196,13 @@ def _save_resume_state(
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "selector": selector.to_dict(),
+        "numpy_rng_state": np.random.get_state(),
+        "torch_rng_state": torch.get_rng_state(),
+        "torch_cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
     }
+    if training_mode == "formal":
+        checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+        checkpoint["epoch_metrics"] = list(epoch_metrics)
 
     checkpoint_path = out_dir / _LAST_CHECKPOINT_NAME
     tmp_checkpoint: pathlib.Path | None = None
@@ -186,6 +223,8 @@ def _save_resume_state(
         "last_checkpoint": _LAST_CHECKPOINT_NAME,
         "last_checkpoint_hash": _sha256_file(checkpoint_path),
         "training_mode": training_mode,
+        "resolved_config_hash": resolved_config_hash,
+        "dataset_identity": dataset_identity,
     }
     metadata_path = out_dir / _RESUME_STATE_NAME
     tmp_metadata = metadata_path.with_suffix(".json.tmp")
@@ -202,12 +241,16 @@ def _load_resume_state(
     optimizer: Any,
     *,
     expected_training_mode: str = "development",
+    expected_resolved_config_hash: str = "",
+    expected_dataset_identity: str = "",
+    scheduler: Any = None,
+    epoch_metrics_owner: Any = None,
 ) -> int:
     """resume_dir から training state を復元し、次の epoch 番号を返す。
 
     metadata / last checkpoint の欠落・hash 不一致・state 欠落は ValueError。
     best checkpoint は参照せず、単一 last checkpoint だけを復元する。
-    training_mode の smoke/development 混在（例: smoke checkpoint を development で resume）は拒否する。
+    training mode と formal identity の違う checkpoint は復元しない。
     """
     state_path = resume_dir / _RESUME_STATE_NAME
     if not state_path.exists():
@@ -234,7 +277,7 @@ def _load_resume_state(
         )
 
     saved_mode = state.get("training_mode")
-    if saved_mode not in ("smoke", "development"):
+    if saved_mode not in ("smoke", "development", "formal"):
         raise ValueError(
             f"[RESUME] training_state.json の training_mode が不正または欠落しています: {saved_mode!r}。"
             " 旧 schema の checkpoint は resume できません。新規学習してください。"
@@ -244,6 +287,14 @@ def _load_resume_state(
             f"[RESUME] training_mode の不一致: 保存済み={saved_mode!r}, "
             f"現在={expected_training_mode!r}。smoke と development の間で resume はできません。"
         )
+    if saved_mode == "formal":
+        if (
+            not expected_resolved_config_hash
+            or not expected_dataset_identity
+            or state.get("resolved_config_hash") != expected_resolved_config_hash
+            or state.get("dataset_identity") != expected_dataset_identity
+        ):
+            raise ValueError("[RESUME] formal resolved config/dataset identity mismatch")
     if state.get("last_checkpoint") != _LAST_CHECKPOINT_NAME:
         raise ValueError("[RESUME] last checkpoint path が不正です。")
     expected_hash = state.get("last_checkpoint_hash")
@@ -272,9 +323,30 @@ def _load_resume_state(
     if not isinstance(checkpoint, dict):
         raise ValueError("[RESUME] last checkpoint state が dict ではありません。")
     required_keys = {"epoch", "model_state_dict", "optimizer_state_dict", "selector"}
+    if saved_mode == "formal":
+        required_keys |= {"numpy_rng_state", "torch_rng_state", "torch_cuda_rng_state"}
+        required_keys |= {"scheduler_state_dict", "epoch_metrics"}
+        if scheduler is None or epoch_metrics_owner is None:
+            raise ValueError("[RESUME] formal mode requires scheduler and epoch metrics receivers")
     missing = sorted(required_keys - checkpoint.keys())
     if missing:
         raise ValueError(f"[RESUME] last checkpoint state に {', '.join(missing)} がありません。")
+    if saved_mode == "formal":
+        metrics = checkpoint["epoch_metrics"]
+        if (
+            not isinstance(checkpoint["scheduler_state_dict"], dict)
+            or not isinstance(metrics, list)
+            or len(metrics) != last_epoch
+            or any(
+                not isinstance(item, dict)
+                or item.get("epoch") != index
+                or isinstance(item.get("val_map50_95"), bool)
+                or not isinstance(item.get("val_map50_95"), (int, float))
+                or not math.isfinite(item["val_map50_95"])
+                for index, item in enumerate(metrics, start=1)
+            )
+        ):
+            raise ValueError("[RESUME] formal scheduler state or epoch metrics are invalid")
     if checkpoint["epoch"] != last_epoch:
         raise ValueError(
             f"[RESUME] metadata/checkpoint epoch が一致しません: "
@@ -288,9 +360,20 @@ def _load_resume_state(
     try:
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if saved_mode == "formal":
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
     except Exception as e:
         raise ValueError(f"[RESUME] model/optimizer state の復元に失敗しました: {e}") from e
     selector._records = list(saved_selector._records)
+    if saved_mode == "formal":
+        epoch_metrics_owner._formal_epoch_metrics = list(checkpoint["epoch_metrics"])
+    if "numpy_rng_state" in checkpoint:
+        import numpy as np
+        np.random.set_state(checkpoint["numpy_rng_state"])
+    if "torch_rng_state" in checkpoint:
+        torch.set_rng_state(checkpoint["torch_rng_state"])
+    if checkpoint.get("torch_cuda_rng_state") is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(checkpoint["torch_cuda_rng_state"])
     print(f"[RESUME] model/optimizer state を {checkpoint_path} から復元しました。")
 
     return last_epoch + 1
@@ -299,19 +382,23 @@ def _load_resume_state(
 # ---- dataset split views ----
 
 class _DatasetView:
-    """WorldDataset の sample index を固定した読み取り専用 view。"""
+    """WorldDataset の sample index を固定した読み取り専用 view。\n\ntrain と validation の session 別分離を元 dataset の複製なしで保つ。"""
 
     def __init__(self, dataset: Any, indices: list[int]) -> None:
+        """元 dataset と採用 index を保持する。\n\n外部から index 列が変更されても view の分割を変えない。"""
         self._dataset = dataset
         self._indices = tuple(indices)
 
     def __len__(self) -> int:
+        """view に含まれる sample 数を返す。\n\nDataLoader が epoch の長さを決めるときに参照する。"""
         return len(self._indices)
 
     def __getitem__(self, index: int) -> Any:
+        """view index に対応する元 sample を返す。\n\n元 dataset の session metadata と画像 path をそのまま維持する。"""
         return self._dataset[self._indices[index]]
 
     def __iter__(self):
+        """採用済み sample を元の順序で順次返す。\n\ntrain sampler が指定する index 順序を変換せず保つ。"""
         for index in self._indices:
             yield self._dataset[index]
 
@@ -409,6 +496,9 @@ def _run_training(
     resume_dir: pathlib.Path | None = None,
     *,
     smoke: bool = False,
+    training_mode: str | None = None,
+    resolved_config_hash: str = "",
+    dataset_identity: str = "",
 ) -> None:
     """学習ループ。
 
@@ -442,11 +532,31 @@ def _run_training(
     )
 
     start_epoch = 1
-    current_mode = "smoke" if smoke else "development"
+    current_mode = training_mode or ("smoke" if smoke else "development")
+    scheduler = None
+    if current_mode == "formal":
+        import torch.optim.lr_scheduler as lr_scheduler
+        scheduler_cfg = cfg["training"].get("lr_scheduler", {"kind": "cosine"})
+        if scheduler_cfg.get("kind", "cosine") == "step":
+            scheduler = lr_scheduler.StepLR(
+                optimizer,
+                step_size=scheduler_cfg.get("step_size", max(1, max_epochs // 3)),
+                gamma=scheduler_cfg.get("gamma", 0.1),
+            )
+        else:
+            scheduler = lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=scheduler_cfg.get("t_max", max_epochs),
+                eta_min=scheduler_cfg.get("eta_min", 0.0),
+            )
     if resume_dir is not None:
         start_epoch = _load_resume_state(
             resume_dir, selector, detector._model, optimizer,
             expected_training_mode=current_mode,
+            expected_resolved_config_hash=resolved_config_hash,
+            expected_dataset_identity=dataset_identity,
+            scheduler=scheduler,
+            epoch_metrics_owner=detector,
         )
         print(f"[RESUME] epoch {start_epoch} から再開します。")
 
@@ -461,6 +571,10 @@ def _run_training(
         optimizer,
         start_epoch,
         smoke=smoke,
+        training_mode=current_mode,
+        resolved_config_hash=resolved_config_hash,
+        dataset_identity=dataset_identity,
+        scheduler=scheduler,
     )
 
 
@@ -476,6 +590,10 @@ def _run_training_torch(
     start_epoch: int,
     *,
     smoke: bool = False,
+    training_mode: str | None = None,
+    resolved_config_hash: str = "",
+    dataset_identity: str = "",
+    scheduler: Any = None,
 ) -> None:
     """torch DataLoader + SGD optimizer の実学習ループ。
 
@@ -484,14 +602,23 @@ def _run_training_torch(
     """
     import torch
 
+    training_mode = training_mode or ("smoke" if smoke else "development")
+    if training_mode == "formal" and scheduler is None:
+        raise ValueError("formal training requires a learning rate scheduler")
     save_every = cfg.get("checkpoint_selection", {}).get("save_every_n_epochs", 5)
+    if training_mode == "formal" and not hasattr(detector, "_formal_epoch_metrics"):
+        detector._formal_epoch_metrics = []
 
     for epoch in range(start_epoch, max_epochs + 1):
         # session-interleaved sampler: train view の実サンプルだけで optimizer step
-        _train_epoch(detector, train_ds, optimizer, cfg, smoke=smoke)
+        _train_epoch(detector, train_ds, optimizer, cfg, smoke=smoke, training_mode=training_mode, epoch=epoch)
 
         # selector の score は独立した validation view だけから得る
         val_score = _evaluate_validation(detector, validation_ds, cfg, smoke=smoke)
+        if training_mode == "formal":
+            detector._formal_epoch_metrics.append({"epoch": epoch, "val_map50_95": float(val_score)})
+        if scheduler is not None:
+            scheduler.step()
 
         if epoch % save_every == 0 or epoch == max_epochs:
             ckpt_path = out_dir / f"epoch_{epoch:04d}.pt"
@@ -501,13 +628,23 @@ def _run_training_torch(
         # resume 用 last は best 候補の保存間隔に関係なく毎 epoch 更新する
         _save_resume_state(
             out_dir, epoch, selector, detector._model, optimizer,
-            training_mode="smoke" if smoke else "development",
+            training_mode=training_mode,
+            resolved_config_hash=resolved_config_hash,
+            dataset_identity=dataset_identity,
+            scheduler=scheduler,
+            epoch_metrics=getattr(detector, "_formal_epoch_metrics", None) if training_mode == "formal" else None,
         )
 
     print(f"[INFO] best checkpoint: epoch={selector.best.epoch if selector.best else None}")
 
 
-def _load_training_sample(sample: Any, *, smoke: bool = False) -> tuple[Any, dict[str, Any]]:
+def _load_training_sample(
+    sample: Any,
+    *,
+    smoke: bool = False,
+    augmentation_cfg: dict[str, Any] | None = None,
+    rng: Any = None,
+) -> tuple[Any, dict[str, Any]]:
     """DatasetSample を torchvision detection model の image/target へ変換する。
 
     通常モード（smoke=False）: 画像ファイルが存在しない場合は FileNotFoundError。
@@ -518,6 +655,7 @@ def _load_training_sample(sample: Any, *, smoke: bool = False) -> tuple[Any, dic
 
     img_path = pathlib.Path(sample.file_name)
     frame: Any = None
+    bgr: Any = None
     if img_path.exists():
         import cv2
         import torchvision.transforms.functional as TF
@@ -550,6 +688,23 @@ def _load_training_sample(sample: Any, *, smoke: bool = False) -> tuple[Any, dic
             "boxes": torch.zeros(0, 4),
             "labels": torch.zeros(0, dtype=torch.long),
         }
+    if augmentation_cfg and augmentation_cfg.get("enabled"):
+        from survivors.vision.world_formal_sampling import augment
+        import torchvision.transforms.functional as TF
+        if bgr is None:
+            bgr = np.zeros((sample.image_height, sample.image_width, 3), dtype=np.uint8)
+        frame_bgr, boxes, labels = augment(
+            bgr,
+            target["boxes"].cpu().numpy(),
+            cfg=augmentation_cfg,
+            rng=rng if rng is not None else np.random.default_rng(),
+            labels=target["labels"].cpu().numpy(),
+        )
+        frame = TF.to_tensor(frame_bgr[..., ::-1].copy())
+        target = {
+            "boxes": torch.as_tensor(boxes, dtype=torch.float32),
+            "labels": torch.as_tensor(labels, dtype=torch.long),
+        }
     return frame, target
 
 
@@ -577,7 +732,14 @@ def _session_interleaved_indices(ds: Any) -> list[int]:
 
 
 def _train_epoch(
-    detector: Any, ds: Any, optimizer: Any, cfg: dict, *, smoke: bool = False
+    detector: Any,
+    ds: Any,
+    optimizer: Any,
+    cfg: dict,
+    *,
+    smoke: bool = False,
+    training_mode: str = "development",
+    epoch: int = 1,
 ) -> None:
     """session-interleaved sampler で config batch_size 単位の 1 epoch を学習する。
 
@@ -595,7 +757,15 @@ def _train_epoch(
             " 2 以下では奇数件 dataset でのsingleton batch 防止のため学習できません。"
         )
 
-    ordered_indices = _session_interleaved_indices(ds)
+    if training_mode == "formal" and cfg["training"].get("sampler", {}).get("kind") == "session_balanced":
+        from survivors.vision.world_formal_sampling import SessionBalancedSampler
+        sampler_cfg = cfg["training"]["sampler"]
+        ordered_indices = list(SessionBalancedSampler(
+            ds, seed=sampler_cfg.get("seed", 0), epoch=epoch
+        ))
+    else:
+        ordered_indices = _session_interleaved_indices(ds)
+    rng = np.random.default_rng(cfg.get("training", {}).get("sampler", {}).get("seed", 0) + epoch)
     batches = [ordered_indices[i:i + batch_size] for i in range(0, len(ordered_indices), batch_size)]
     # 末尾が singleton のとき、直前 batch と合わせて均等に 2 つへ再配分する。
     # 例: batch_size=3, 4 サンプル → [3,1] → [2,2]（batch_size 以下かつ全件処理を保証）
@@ -610,7 +780,12 @@ def _train_epoch(
         images = []
         targets = []
         for sample_index in batch_indices:
-            image, target = _load_training_sample(ds[sample_index], smoke=smoke)
+            image, target = _load_training_sample(
+                ds[sample_index],
+                smoke=smoke,
+                augmentation_cfg=cfg.get("input", {}).get("augmentation") if training_mode == "formal" else None,
+                rng=rng,
+            )
             images.append(image)
             targets.append(target)
 
@@ -678,7 +853,7 @@ def _run_training_stub(
     out_dir: pathlib.Path,
     start_epoch: int,
 ) -> None:
-    """torch 不在環境用のスタブ学習ループ。"""
+    """torch 不在環境で smoke epoch の選択記録を作る。\n\nweight は更新せず、正式な training mode では呼び出されない。"""
     for epoch in range(start_epoch, max_epochs + 1):
         val_score = 0.0
         ckpt_path = out_dir / f"epoch_{epoch:04d}.ckpt"
@@ -693,7 +868,25 @@ def main(argv: list[str] | None = None) -> int:
 
     preflight 失敗時は exit code 1、成功時は 0。
     """
-    args = _build_arg_parser().parse_args(argv)
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+    formal_arguments = (
+        "feasibility_verdict", "capture_store", "target_profile_hash", "hardware_id",
+        "dataset_descriptor", "restore_verdict", "annotation_agreement", "minimum_counts",
+        "preflight_report_out",
+    )
+    supplied = [name for name in formal_arguments if getattr(args, name) is not None]
+    if args.formal:
+        missing = [name for name in formal_arguments if getattr(args, name) is None]
+        if missing:
+            parser.error("--formal に必須の引数がありません: " + ", ".join("--" + name.replace("_", "-") for name in missing))
+        if args.split is not None or args.smoke:
+            parser.error("--formal は --split / --smoke と併用できません")
+    else:
+        if supplied:
+            parser.error("formal preflight 引数は --formal と併用してください")
+        if args.split is None:
+            parser.error("development training には --split が必要です")
 
     from survivors.vision.world_dataset import WorldDataset, DatasetPreflightError, SessionSplit
     from survivors.vision.world_detector import (
@@ -727,15 +920,53 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[CONFIG ERROR] resolved config: {_ve}", file=sys.stderr)
             return 1
 
-    # -- 必須 split manifest 読み込み（error_calibration / final_e2e_test を自動除外）
-    split_data = json.loads(pathlib.Path(args.split).read_text(encoding="utf-8"))
-    split = SessionSplit(
-        train=split_data.get("train", []),
-        validation=split_data.get("validation", []),
-        error_calibration=split_data.get("error_calibration", []),
-        final_e2e_test=split_data.get("final_e2e_test", []),
-    )
-    rejected = set(split.error_calibration) | set(split.final_e2e_test)
+    preflight_report = None
+    if args.formal:
+        try:
+            from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
+            from survivors.vision.world_formal_release import run_formal_preflight
+            dataset_descriptor = ArtifactDescriptor.from_wire(json.loads(pathlib.Path(args.dataset_descriptor).read_text(encoding="utf-8")))
+            restore_descriptor = ArtifactDescriptor.from_wire(json.loads(pathlib.Path(args.restore_verdict).read_text(encoding="utf-8")))
+            minimum_counts = json.loads(pathlib.Path(args.minimum_counts).read_text(encoding="utf-8"))
+            overrides = {"training": {"max_epochs": args.epochs}} if args.epochs is not None else {}
+            preflight_report = run_formal_preflight(
+                feasibility_verdict_path=args.feasibility_verdict,
+                capture_store_root=args.capture_store,
+                dataset_descriptor=dataset_descriptor,
+                restore_verdict_descriptor=restore_descriptor,
+                annotations_path=ann_path,
+                class_map_path=cm_path,
+                config_path=cfg_path,
+                cli_overrides=overrides,
+                target_profile_hash=args.target_profile_hash,
+                hardware_id=args.hardware_id,
+                annotation_agreement_path=args.annotation_agreement,
+                minimum_counts=minimum_counts,
+            )
+            _resolved_cfg = dict(preflight_report.resolved_config)
+            cfg = _resolved_cfg
+            preflight_report.write(args.preflight_report_out)
+            split = SessionSplit(
+                train=list(preflight_report.train_sessions),
+                validation=list(preflight_report.validation_sessions),
+                error_calibration=[],
+                final_e2e_test=[],
+            )
+            rejected: set[str] = set()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            print(f"[PREFLIGHT FAIL] {exc}", file=sys.stderr)
+            print("[INFO] training step 0 のまま停止します。", file=sys.stderr)
+            return 1
+    else:
+        # development split JSON は既存経路で session 単位に分離する。
+        split_data = json.loads(pathlib.Path(args.split).read_text(encoding="utf-8"))
+        split = SessionSplit(
+            train=split_data.get("train", []),
+            validation=split_data.get("validation", []),
+            error_calibration=split_data.get("error_calibration", []),
+            final_e2e_test=split_data.get("final_e2e_test", []),
+        )
+        rejected = set(split.error_calibration) | set(split.final_e2e_test)
     print(f"[INFO] split: train={len(split.train)}, val={len(split.validation)}"
           f", rejected={len(rejected)} session")
 
@@ -766,6 +997,21 @@ def main(argv: list[str] | None = None) -> int:
         print("[INFO] training step 0 のまま停止します。", file=sys.stderr)
         return 1
 
+    excluded_duplicates: dict[int, str] = {}
+    if args.formal:
+        from survivors.vision.world_formal_sampling import near_duplicate_filter
+        duplicate_cfg = _resolved_cfg["training"].get("near_duplicate_suppression", {})
+        if duplicate_cfg.get("enabled", False):
+            excluded_duplicates = near_duplicate_filter(
+                train_ds, hamming_threshold=duplicate_cfg.get("hamming_threshold", 4)
+            )
+            train_ds = _DatasetView(
+                train_ds, [index for index in range(len(train_ds)) if index not in excluded_duplicates]
+            )
+            if not len(train_ds):
+                print("[PREFLIGHT FAIL] near-duplicate 除外後の train が空です。", file=sys.stderr)
+                return 1
+
     print(
         f"[PREFLIGHT OK] train={len(train_ds)}, validation={len(validation_ds)} "
         "フレームへ分離しました。"
@@ -794,6 +1040,25 @@ def main(argv: list[str] | None = None) -> int:
     except UnknownArchitectureError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         return 1
+    if args.formal:
+        from survivors.vision import world_detector as _world_detector_module
+        if not _world_detector_module._TORCH_AVAILABLE:
+            print("[ERROR] formal training には torch/torchvision が必要です。", file=sys.stderr)
+            return 1
+        import torch
+        from survivors.vision.world_dataset import load_class_map
+        from survivors.vision.world_formal_sampling import attach_weighted_loss, class_weights
+        sampler_cfg = _resolved_cfg["training"].get("sampler", {})
+        torch.manual_seed(sampler_cfg.get("seed", 0))
+        weight_cfg = _resolved_cfg["training"].get("class_weights", {})
+        weights = class_weights(
+            train_ds,
+            load_class_map(cm_path),
+            mode=weight_cfg.get("mode", "inverse_frequency"),
+            clip_max=weight_cfg.get("clip_max", 10.0),
+            explicit=weight_cfg.get("explicit"),
+        )
+        attach_weighted_loss(detector._model, weights)
 
     # -- checkpoint selection rules を学習開始前に固定する
     sel_cfg = cfg.get("checkpoint_selection", {})
@@ -813,6 +1078,11 @@ def main(argv: list[str] | None = None) -> int:
     smoke: bool = args.smoke
     if smoke:
         print("[WARN] --smoke モード: 画像欠損をゼロ画像で代替します。smoke 成果物は実 weight ではありません。")
+    _resolved_config_hash = (
+        preflight_report.config_identity if preflight_report is not None
+        else _sha256_str(json.dumps(_resolved_cfg, sort_keys=True, ensure_ascii=False))
+    )
+    dataset_identity = preflight_report.dataset_identity if preflight_report is not None else ""
     _run_training(
         detector, train_ds, validation_ds, cfg,
         max_epochs=max_epochs,
@@ -820,21 +1090,50 @@ def main(argv: list[str] | None = None) -> int:
         out_dir=out_dir,
         resume_dir=resume_dir,
         smoke=smoke,
+        training_mode="formal" if args.formal else ("smoke" if smoke else "development"),
+        resolved_config_hash=_resolved_config_hash,
+        dataset_identity=dataset_identity,
     )
 
     # -- build hash
-    _build_hash = _sha256_str(f"dev-python:{sys.version}")
+    _build_hash = preflight_report.build_identity if preflight_report is not None else _sha256_str(f"dev-python:{sys.version}")
 
     # split hash: split JSON ファイルの内容 SHA-256
-    _split_hash = _sha256_file(pathlib.Path(args.split))
+    _split_hash = preflight_report.split_hash if preflight_report is not None else _sha256_file(pathlib.Path(args.split))
 
     # resolved config hash: config 読み込み直後に構築済みの _resolved_cfg を使用
-    _resolved_config_hash = _sha256_str(json.dumps(_resolved_cfg, sort_keys=True, ensure_ascii=False))
+    if args.formal:
+        best = selector.best
+        if best is None or not pathlib.Path(best.checkpoint_path).is_file():
+            print("[ERROR] formal training が best model.pt を生成しませんでした。", file=sys.stderr)
+            return 1
+        weight_path = out_dir / "model.pt"
+        shutil.copy2(best.checkpoint_path, weight_path)
+        run_manifest = {
+            "schema_version": "world_detector_training_run.v1",
+            "resolved_config": _resolved_cfg,
+            "excluded_duplicate_indices": [
+                {"index": index, "reason": reason} for index, reason in sorted(excluded_duplicates.items())
+            ],
+            "seed": _resolved_cfg["training"].get("sampler", {}).get("seed", 0),
+            "epoch_metrics": getattr(detector, "_formal_epoch_metrics", []),
+            "selection_rule": selector.to_dict(),
+            "preflight_canonical_hash": preflight_report.preflight_canonical_hash,
+            "dataset_identity": preflight_report.dataset_identity,
+            "build_identity": preflight_report.build_identity,
+            "code_hashes": dict(preflight_report.code_hashes),
+        }
+        (out_dir / "run_manifest.json").write_bytes(canonical_json_bytes(run_manifest))
 
     # best checkpoint hash: 実ファイルがあれば hash、なければ config hash で代用
     best = selector.best
-    weight_path: pathlib.Path | None = None
-    if best and pathlib.Path(best.checkpoint_path).exists():
+    weight_path: pathlib.Path | None = out_dir / "model.pt" if args.formal else None
+    if args.formal:
+        if weight_path is None or not weight_path.is_file():
+            print("[ERROR] formal checkpoint model.pt がありません。", file=sys.stderr)
+            return 1
+        model_hash = _sha256_file(weight_path)
+    elif best and pathlib.Path(best.checkpoint_path).exists():
         weight_path = pathlib.Path(best.checkpoint_path)
         model_hash = _sha256_file(weight_path)
     else:
@@ -842,15 +1141,15 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest = CheckpointManifest(
         model_hash=model_hash,
-        data_hash=_sha256_file(ann_path),
+        data_hash=preflight_report.dataset_identity if preflight_report is not None else _sha256_file(ann_path),
         config_hash=_sha256_file(cfg_path),
         build_hash=_build_hash,
         class_map_hash=_sha256_file(cm_path),
         formal_detector_eligible=False,
         split_hash=_split_hash,
         resolved_config_hash=_resolved_config_hash,
-        development_only=True,
-        training_mode="smoke" if smoke else "development",
+        development_only=not args.formal,
+        training_mode="formal" if args.formal else ("smoke" if smoke else "development"),
     )
     manifest.save(out_dir / "manifest.json")
 

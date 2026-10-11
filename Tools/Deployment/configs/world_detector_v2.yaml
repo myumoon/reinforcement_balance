@@ -23,12 +23,18 @@ model:
   pretrained_backbone: false
 
 # --- 入力・前処理 ---
-# augmentation / lr_scheduler は未実装のため記載しない。
-# _reject_unimplemented_config() がこれらのキーを検出するとエラーになる。
 input:
   normalize:
     mean: [0.485, 0.456, 0.406]
     std: [0.229, 0.224, 0.225]
+  augmentation:
+    enabled: false
+    hflip_p: 0.5
+    scale_jitter: 0.1
+    hsv_jitter: {hue: 0.02, saturation: 0.2, value: 0.2}
+  # Formal eval/runtime が tracker 前に除外する item HUD (1920x1080 normalized xyxy)。
+  ignore_regions:
+    - [0.05, 0.033, 0.203, 0.120]
 
 # --- 学習・オプティマイザー ---
 training:
@@ -39,6 +45,10 @@ training:
       momentum: 0.9
       weight_decay: 0.0005
   max_epochs: 50
+  sampler: {kind: interleaved, seed: 0}
+  class_weights: {mode: inverse_frequency, clip_max: 10.0, explicit: {}}
+  near_duplicate_suppression: {enabled: false, hamming_threshold: 4}
+  lr_scheduler: {kind: cosine}
   # preflight チェックの最小要件。満たさなければ training step 0 のまま停止する。
   preflight:
     min_frames: 300

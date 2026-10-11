@@ -260,7 +260,7 @@ class TestSplitPreflight:
 # ---- Task 2: training smoke / checkpoint selection ----
 
 class TestCheckpointSelector:
-    """CheckpointSelector の選択規則を検証する。"""
+    """CheckpointSelector と resume state の規則を検証する。\n\nformal の scheduler と epoch metric が途中再開でも連続学習と一致することを確認する。"""
 
     def test_best_is_highest_metric(self):
         """複数記録のうち val_map50_95 最大のものが best になる。"""
@@ -445,6 +445,158 @@ class TestCheckpointSelector:
             _load_resume_state(
                 tmp_path, selector, model, optimizer,
                 expected_training_mode="smoke",
+            )
+
+    def test_formal_resume_restores_scheduler_lr_and_epoch_metrics(self, tmp_path):
+        """formal resume が scheduler の進みと過去の epoch metric を復元する。\n\n4 epoch の連続実行と 2 epoch 後の再開で学習率と metric 列が同じになる。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import (
+            CheckpointSelector,
+            _load_resume_state,
+            _save_resume_state,
+        )
+
+        config_hash = "a" * 64
+        dataset_hash = "b" * 64
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=4)
+        selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        full_lrs = []
+        full_metrics = []
+        for epoch in range(1, 5):
+            full_lrs.append(optimizer.param_groups[0]["lr"])
+            for parameter in model.parameters():
+                parameter.grad = torch.zeros_like(parameter)
+            optimizer.step()
+            scheduler.step()
+            full_metrics.append({"epoch": epoch, "val_map50_95": 1.0 / epoch})
+            if epoch == 2:
+                _save_resume_state(
+                    tmp_path,
+                    epoch,
+                    selector,
+                    model,
+                    optimizer,
+                    training_mode="formal",
+                    resolved_config_hash=config_hash,
+                    dataset_identity=dataset_hash,
+                    scheduler=scheduler,
+                    epoch_metrics=list(full_metrics),
+                )
+
+        resumed_model = torch.nn.Linear(2, 1)
+        resumed_optimizer = torch.optim.SGD(resumed_model.parameters(), lr=0.1, momentum=0.9)
+        resumed_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(resumed_optimizer, T_max=4)
+        resumed_selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        metric_owner = SimpleNamespace()
+        start_epoch = _load_resume_state(
+            tmp_path,
+            resumed_selector,
+            resumed_model,
+            resumed_optimizer,
+            expected_training_mode="formal",
+            expected_resolved_config_hash=config_hash,
+            expected_dataset_identity=dataset_hash,
+            scheduler=resumed_scheduler,
+            epoch_metrics_owner=metric_owner,
+        )
+        resumed_lrs = []
+        resumed_metrics = list(metric_owner._formal_epoch_metrics)
+        for epoch in range(start_epoch, 5):
+            resumed_lrs.append(resumed_optimizer.param_groups[0]["lr"])
+            for parameter in resumed_model.parameters():
+                parameter.grad = torch.zeros_like(parameter)
+            resumed_optimizer.step()
+            resumed_scheduler.step()
+            resumed_metrics.append({"epoch": epoch, "val_map50_95": 1.0 / epoch})
+
+        assert start_epoch == 3
+        assert full_lrs == pytest.approx([0.1, 0.0853553391, 0.05, 0.0146446609])
+        assert resumed_lrs == pytest.approx(full_lrs[2:])
+        assert resumed_metrics == full_metrics
+
+    @pytest.mark.parametrize(("expected_mode", "config_hash", "dataset_hash", "message"), [
+        ("formal", "f" * 64, "b" * 64, "resolved config/dataset"),
+        ("formal", "a" * 64, "f" * 64, "resolved config/dataset"),
+        ("development", "a" * 64, "b" * 64, "training_mode"),
+    ])
+    def test_formal_resume_rejects_identity_or_mode_mismatch(
+        self, tmp_path, expected_mode, config_hash, dataset_hash, message,
+    ):
+        """formal resume が config、dataset、training mode の不一致を拒否する。\n\n保存時の identity のどれか一つでも変われば optimizer state を適用しない。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import CheckpointSelector, _load_resume_state, _save_resume_state
+
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=2)
+        selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        _save_resume_state(
+            tmp_path,
+            1,
+            selector,
+            model,
+            optimizer,
+            training_mode="formal",
+            resolved_config_hash="a" * 64,
+            dataset_identity="b" * 64,
+            scheduler=scheduler,
+            epoch_metrics=[{"epoch": 1, "val_map50_95": 0.5}],
+        )
+        resumed_model = torch.nn.Linear(2, 1)
+        resumed_optimizer = torch.optim.SGD(resumed_model.parameters(), lr=0.1)
+        resumed_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(resumed_optimizer, T_max=2)
+        with pytest.raises(ValueError, match=message):
+            _load_resume_state(
+                tmp_path,
+                CheckpointSelector(metric="val_map50_95", keep_top_k=3),
+                resumed_model,
+                resumed_optimizer,
+                expected_training_mode=expected_mode,
+                expected_resolved_config_hash=config_hash,
+                expected_dataset_identity=dataset_hash,
+                scheduler=resumed_scheduler,
+                epoch_metrics_owner=SimpleNamespace(),
+            )
+
+    def test_formal_resume_rejects_missing_scheduler_state_and_metrics(self, tmp_path):
+        """旧 formal checkpoint で scheduler と epoch metrics が欠ける状態を拒否する。\n\nidentity は一致していても学習再現性を復元できない state を再開しない。"""
+        torch = pytest.importorskip("torch")
+        from train_survivors_world_detector import (
+            CheckpointSelector,
+            _RESUME_STATE_NAME,
+            _load_resume_state,
+            _save_resume_state,
+        )
+
+        model = torch.nn.Linear(2, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        selector = CheckpointSelector(metric="val_map50_95", keep_top_k=3)
+        _save_resume_state(tmp_path, 1, selector, model, optimizer)
+        state_path = tmp_path / _RESUME_STATE_NAME
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state.update({
+            "training_mode": "formal",
+            "resolved_config_hash": "a" * 64,
+            "dataset_identity": "b" * 64,
+        })
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        resumed_model = torch.nn.Linear(2, 1)
+        resumed_optimizer = torch.optim.SGD(resumed_model.parameters(), lr=0.1)
+        resumed_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(resumed_optimizer, T_max=2)
+
+        with pytest.raises(ValueError, match="scheduler_state_dict|epoch_metrics"):
+            _load_resume_state(
+                tmp_path,
+                selector,
+                resumed_model,
+                resumed_optimizer,
+                expected_training_mode="formal",
+                expected_resolved_config_hash="a" * 64,
+                expected_dataset_identity="b" * 64,
+                scheduler=resumed_scheduler,
+                epoch_metrics_owner=SimpleNamespace(),
             )
 
 
@@ -924,7 +1076,7 @@ class TestPerformanceGateBoundary:
 # ---- Task 4: package writer ----
 
 class TestPackagePublish:
-    """package publish / restore / schema 検証を synthetic fixture で確認する。"""
+    """package publish / restore / schema 検証を fixture で確認する。\n\n開発 package の互換性と formal package の eligibility を別々に固定する。"""
 
     def test_publish_creates_manifest_json(self, tmp_path):
         """publish_development_package が manifest.json を作成する。"""
@@ -979,8 +1131,11 @@ class TestPackagePublish:
         pm = PackageManifest.from_dict(raw)
         assert pm.formal_detector_eligible is False
 
-    def test_assert_formal_eligible_always_raises(self, tmp_path):
-        """PackageManifest は formal_detector_eligible の値に関わらず assert_formal_eligible() が常に拒否する。"""
+    def test_assert_formal_eligible_requires_formal_verdict_hash(self, tmp_path):
+        """formal package は validation verdict hash がある場合だけ許可する。
+
+        development manifest と hash のない formal manifest を引き続き拒否する。
+        """
         from survivors.vision.world_detector_package import (
             publish_development_package, PackageManifest, FormalPackageRejectedError
         )
@@ -996,21 +1151,30 @@ class TestPackagePublish:
             cm_path=CLASS_MAP_PATH,
         )
         raw = json.loads(pkg_path.read_text(encoding="utf-8"))
-        # from_dict では False に上書きされるが、それでも raises
+        # development manifest は caller flag が True でも拒否する。
         pm = PackageManifest.from_dict(raw)
         with pytest.raises(FormalPackageRejectedError):
             pm.assert_formal_eligible()
 
-        # caller が直接 formal_detector_eligible=True を指定してもやはり拒否
-        raw_true = dict(raw)
-        raw_true["formal_detector_eligible"] = True
-        pm_true = PackageManifest.from_dict(raw_true)
-        assert pm_true.formal_detector_eligible is False  # 上書きされる
-        with pytest.raises(FormalPackageRejectedError):
-            pm_true.assert_formal_eligible()
+        raw_formal = dict(raw)
+        raw_formal.update({
+            "formal_detector_eligible": True,
+            "development_only": False,
+            "training_mode": "formal",
+            "weight_included": True,
+            "validation_verdict_hash": "1" * 64,
+        })
+        PackageManifest.from_dict(raw_formal).assert_formal_eligible()
 
-    def test_from_dict_rejects_invalid_training_mode(self):
-        """from_dict は training_mode が 'smoke'|'development' 以外を拒否する。"""
+        raw_formal.pop("validation_verdict_hash")
+        with pytest.raises(ValueError, match="validation_verdict_hash"):
+            PackageManifest.from_dict(raw_formal)
+
+    def test_from_dict_rejects_invalid_mode_and_accepts_formal(self):
+        """from_dict は未知 mode を拒否し、verdict hash 付き formal manifest を復元する。
+
+        development mode の強制上書きは同じテスト群で維持する。
+        """
         from survivors.vision.world_detector_package import PackageManifest, PACKAGE_SCHEMA_VERSION
         bad = {
             "schema_version": PACKAGE_SCHEMA_VERSION,
@@ -1021,10 +1185,30 @@ class TestPackagePublish:
             "build_hash": "d" * 64,
             "class_map_hash": "e" * 64,
             "contract_hash": "f" * 64,
-            "training_mode": "formal",
+            "training_mode": "foo",
         }
         with pytest.raises(ValueError, match="training_mode"):
             PackageManifest.from_dict(bad)
+
+        bad["training_mode"] = "formal"
+        bad.update({
+            "formal_detector_eligible": True,
+            "development_only": False,
+            "validation_verdict_hash": "1" * 64,
+            "model_hash": "a" * 64,
+            "data_hash": "b" * 64,
+            "config_hash": "c" * 64,
+            "build_hash": "d" * 64,
+            "class_map_hash": "e" * 64,
+            "contract_hash": "f" * 64,
+            "metrics": {},
+            "checkpoint_selection": {},
+            "weight_included": True,
+            "score_threshold": 0.5,
+        })
+        formal = PackageManifest.from_dict(bad)
+        assert formal.training_mode == "formal"
+        assert formal.formal_detector_eligible is True
 
     def test_restore_package_require_formal_raises(self, tmp_path):
         """restore_package(require_formal=True) は development package を FormalPackageRejectedError で拒否する。"""
@@ -1044,36 +1228,46 @@ class TestPackagePublish:
         with pytest.raises(FormalPackageRejectedError):
             restore_package(pkg_path, frame, require_formal=True)
 
-    def test_formal_publish_always_rejected(self, tmp_path):
-        """PR#315 では publish_formal_package() は常に FormalPackageRejectedError を送出する。"""
+    def test_formal_publish_rejects_development_checkpoint(self, tmp_path):
+        """formal publisher は development checkpoint を verdict 前に拒否する。
+
+        caller から formal boolean を渡しても checkpoint の mode を昇格できない。
+        """
         from survivors.vision.world_detector_package import publish_formal_package, FormalPackageRejectedError
 
         store = tmp_path / "store"
         store.mkdir()
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+        _make_checkpoint_manifest().save(checkpoint / "manifest.json")
         # どんな引数を渡しても拒否されることを確認
         with pytest.raises(FormalPackageRejectedError):
             publish_formal_package(
-                _make_checkpoint_manifest(formal=True),
-                {}, {}, store,
-                cfg_path=DETECTOR_CONFIG_PATH,
-                cm_path=CLASS_MAP_PATH,
-                weight_path=tmp_path / "model.pt",
-                validation_passed=True,
-                score_threshold=0.5,
+                verdict_path=tmp_path / "verdict.json",
+                checkpoint_dir=checkpoint,
+                out_root=store,
+                class_map_path=CLASS_MAP_PATH,
+                config_path=DETECTOR_CONFIG_PATH,
+                tracker_config={},
             )
 
     def test_formal_publish_rejected_with_dev_manifest(self, tmp_path):
-        """development checkpoint でも formal publish は常に拒否される。"""
+        """development checkpoint の formal publish を拒否する。\n\nverdict が無い開発成果物から正式 package が作られないことを確認する。"""
         from survivors.vision.world_detector_package import publish_formal_package, FormalPackageRejectedError
 
         store = tmp_path / "store"
         store.mkdir()
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+        _make_checkpoint_manifest().save(checkpoint / "manifest.json")
         with pytest.raises(FormalPackageRejectedError):
             publish_formal_package(
-                _make_checkpoint_manifest(formal=False),
-                {}, {}, store,
-                cfg_path=DETECTOR_CONFIG_PATH,
-                cm_path=CLASS_MAP_PATH,
+                verdict_path=tmp_path / "verdict.json",
+                checkpoint_dir=checkpoint,
+                out_root=store,
+                class_map_path=CLASS_MAP_PATH,
+                config_path=DETECTOR_CONFIG_PATH,
+                tracker_config={},
             )
 
     def test_score_threshold_stored_in_manifest(self, tmp_path):
@@ -1539,7 +1733,7 @@ class TestImagePreflightBeforeOptimizer:
 
 
 class TestIter11Regressions:
-    """iter11 P1 修正 6 件の回帰テスト。"""
+    """iter11 の P1 回帰修正を検証する。\n\n画像 preflight、resume、package identity の境界が後続変更でも保たれることを確認する。"""
 
     # ---- Fix 1: dry-run でも画像 preflight が実行される ----
     def test_dry_run_returns_exit_code_1_on_missing_image(self, tmp_path):
@@ -1595,17 +1789,25 @@ class TestIter11Regressions:
         with pytest.raises(ValueError, match="formal_detector_eligible"):
             m.save(tmp_path / "manifest.json")
 
-    def test_checkpoint_manifest_save_rejects_invalid_training_mode(self, tmp_path):
-        """CheckpointManifest.save() は training_mode='formal' を拒否する（P1 回帰テスト）。"""
+    def test_checkpoint_manifest_save_accepts_formal_training_mode(self, tmp_path):
+        """CheckpointManifest は formal training mode を identity を保って保存する。
+
+        checkpoint の formal_detector_eligible は引き続き false である。
+        """
         from survivors.vision.world_detector import CheckpointManifest
         m = CheckpointManifest(
             model_hash="a" * 64, data_hash="b" * 64, config_hash="c" * 64,
             build_hash="d" * 64, class_map_hash="e" * 64,
             formal_detector_eligible=False,
+            development_only=False,
             training_mode="formal",
         )
-        with pytest.raises(ValueError, match="training_mode"):
-            m.save(tmp_path / "manifest.json")
+        path = tmp_path / "manifest.json"
+        m.save(path)
+        restored = CheckpointManifest.load(path)
+        assert restored.training_mode == "formal"
+        assert restored.development_only is False
+        assert restored.formal_detector_eligible is False
 
     # ---- Fix 3: 書き込み境界 — publish_development_package() ----
     def test_publish_rejects_nan_score_threshold(self, tmp_path):
@@ -2378,6 +2580,7 @@ class TestPublishMappingValidation:
 
     def test_valid_publish_is_restorable(self, tmp_path):
         """valid な publish は PackageManifest.from_dict() で復元できる。"""
+        import hashlib
         import json
         from survivors.vision.world_detector_package import publish_development_package, PackageManifest
         store = tmp_path / "store"
@@ -2393,6 +2596,12 @@ class TestPublishMappingValidation:
         manifest = PackageManifest.from_dict(json.loads(pkg_path.read_text(encoding="utf-8")))
         assert manifest.metrics == {"val_map50_95": 0.42}
         assert manifest.checkpoint_selection == {"metric": "val_map50_95"}
+        legacy_wire = manifest.to_dict()
+        assert "validation_verdict_hash" not in legacy_wire
+        legacy_key = hashlib.sha256(
+            json.dumps(legacy_wire, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        assert pkg_path.parent.name == legacy_key
 
 
 class TestEpochsOverride:

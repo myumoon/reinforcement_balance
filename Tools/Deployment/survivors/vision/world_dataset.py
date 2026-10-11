@@ -123,7 +123,7 @@ def load_class_map(path: pathlib.Path | str) -> WorldClassMap:
 class COCOAnnotation:
     """1 エンティティのアノテーション。COCO bbox [x, y, w, h] 形式。
 
-    category_id は WorldClassMap の foreground ID (1..11)。
+    category_id は WorldClassMap の foreground ID (1..15) で、formal metadata を保持する。
     """
 
     annotation_id: int
@@ -131,6 +131,9 @@ class COCOAnnotation:
     category_id: int
     bbox_xywh: tuple[float, float, float, float]
     session_id: str
+    track_id: str | int | None = None
+    late_game: bool | None = None
+    time_band: str | None = None
 
 
 @dataclass
@@ -334,6 +337,7 @@ class WorldDataset:
     def _load(
         self, path: pathlib.Path, *, validate_bounds: bool
     ) -> list[DatasetSample]:
+        """COCO file を DatasetSample と annotation へ変換する。\n\n画像単位の session metadata と geometry validation を各 sample に保つ。"""
         data = json.loads(path.read_text(encoding="utf-8"))
 
         # image index
@@ -391,6 +395,9 @@ class WorldDataset:
                 category_id=cat_id,
                 bbox_xywh=bbox,  # type: ignore[arg-type]
                 session_id=ann_session_id,
+                track_id=raw.get("track_id"),
+                late_game=raw.get("late_game", images[raw["image_id"]].get("late_game")),
+                time_band=raw.get("time_band", images[raw["image_id"]].get("time_band")),
             )
             if ann.image_id in ann_by_image:
                 ann_by_image[ann.image_id].append(ann)

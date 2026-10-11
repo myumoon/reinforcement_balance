@@ -184,7 +184,7 @@ def validate_detector_config(config: Mapping[str, Any]) -> None:
     inp = config["input"]
     if not isinstance(inp, dict):
         raise ValueError("config 'input' は dict が必要。")
-    unknown_input = set(inp.keys()) - frozenset(["normalize"])
+    unknown_input = set(inp.keys()) - frozenset(["normalize", "augmentation", "ignore_regions"])
     if unknown_input:
         raise ValueError(
             f"input に未知/未実装の key があります (augmentation 等は未実装): {sorted(unknown_input)}"
@@ -205,17 +205,41 @@ def validate_detector_config(config: Mapping[str, Any]) -> None:
         raise ValueError(
             f"input.normalize.std は {_IMAGENET_STD} のみ。got: {normalize.get('std')!r}"
         )
+    augmentation = inp.get("augmentation", {"enabled": False})
+    if not isinstance(augmentation, dict) or set(augmentation) - {"enabled", "hflip_p", "scale_jitter", "hsv_jitter"}:
+        raise ValueError("input.augmentation の key または型が不正です")
+    if not isinstance(augmentation.get("enabled", False), bool):
+        raise ValueError("input.augmentation.enabled は bool が必要です")
+    _vnum(augmentation.get("hflip_p", 0.0), "input.augmentation.hflip_p", lo=0, hi=1)
+    _vnum(augmentation.get("scale_jitter", 0.0), "input.augmentation.scale_jitter", lo=0, hi=0.99)
+    hsv_jitter = augmentation.get("hsv_jitter", {})
+    if not isinstance(hsv_jitter, dict) or set(hsv_jitter) - {"hue", "saturation", "value"}:
+        raise ValueError("input.augmentation.hsv_jitter の key または型が不正です")
+    for key, value in hsv_jitter.items():
+        _vnum(value, f"input.augmentation.hsv_jitter.{key}", lo=0, hi=1)
+    ignore_regions = inp.get("ignore_regions", [])
+    if not isinstance(ignore_regions, list):
+        raise ValueError("input.ignore_regions は normalized xyxy list が必要です")
+    for index, region in enumerate(ignore_regions):
+        if not isinstance(region, list) or len(region) != 4:
+            raise ValueError(f"input.ignore_regions[{index}] は 4 要素 list が必要です")
+        for bound in region:
+            _vnum(bound, f"input.ignore_regions[{index}]", lo=0, hi=1)
+        if region[0] >= region[2] or region[1] >= region[3]:
+            raise ValueError(f"input.ignore_regions[{index}] の範囲が空です")
 
     # --- training ---
     training = config["training"]
     if not isinstance(training, dict):
         raise ValueError("config 'training' は dict が必要。")
-    _allowed_training = frozenset(["batch_size", "optimizer", "max_epochs", "preflight"])
+    _allowed_training = frozenset([
+        "batch_size", "optimizer", "max_epochs", "preflight", "sampler",
+        "class_weights", "near_duplicate_suppression", "lr_scheduler",
+    ])
     unknown_training = set(training.keys()) - _allowed_training
     if unknown_training:
         raise ValueError(
             f"training に未知/未実装の key があります"
-            f" (lr_scheduler, class_weights, near_duplicate_suppression は未実装):"
             f" {sorted(unknown_training)}"
         )
 
@@ -263,6 +287,54 @@ def validate_detector_config(config: Mapping[str, Any]) -> None:
         raise ValueError(f"training.preflight に必須 key がありません: {sorted(missing_preflight)}")
     for _pk in _allowed_preflight:
         _vnum(preflight[_pk], f"training.preflight.{_pk}", lo=1, require_int=True)
+
+    sampler = training.get("sampler", {"kind": "interleaved", "seed": 0})
+    if not isinstance(sampler, dict) or set(sampler) - {"kind", "seed"}:
+        raise ValueError("training.sampler の key または型が不正です")
+    if sampler.get("kind", "interleaved") not in {"session_balanced", "interleaved"}:
+        raise ValueError("training.sampler.kind は session_balanced / interleaved が必要です")
+    _vnum(sampler.get("seed", 0), "training.sampler.seed", require_int=True)
+
+    weights = training.get("class_weights", {"mode": "inverse_frequency", "clip_max": 10.0, "explicit": {}})
+    if not isinstance(weights, dict) or set(weights) - {"mode", "clip_max", "explicit"}:
+        raise ValueError("training.class_weights の key または型が不正です")
+    if weights.get("mode", "inverse_frequency") not in {"inverse_frequency", "explicit"}:
+        raise ValueError("training.class_weights.mode が不正です")
+    _vnum(weights.get("clip_max", 10.0), "training.class_weights.clip_max", lo=0)
+    if weights.get("clip_max", 10.0) == 0:
+        raise ValueError("training.class_weights.clip_max は 0 より大きい値が必要です")
+    explicit_weights = weights.get("explicit", {})
+    if not isinstance(explicit_weights, dict):
+        raise ValueError("training.class_weights.explicit は mapping が必要です")
+    for key, value in explicit_weights.items():
+        try:
+            class_id = int(key)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"explicit class id が不正です: {key!r}") from exc
+        if class_id not in range(1, expected_nc):
+            raise ValueError(f"explicit class id が class map 外です: {key!r}")
+        _vnum(value, f"training.class_weights.explicit.{key}", lo=0)
+        if value == 0:
+            raise ValueError("explicit class weight は 0 より大きい値が必要です")
+
+    duplicate = training.get("near_duplicate_suppression", {"enabled": False, "hamming_threshold": 4})
+    if not isinstance(duplicate, dict) or set(duplicate) - {"enabled", "hamming_threshold"}:
+        raise ValueError("training.near_duplicate_suppression の key または型が不正です")
+    if not isinstance(duplicate.get("enabled", False), bool):
+        raise ValueError("training.near_duplicate_suppression.enabled は bool が必要です")
+    _vnum(duplicate.get("hamming_threshold", 4), "training.near_duplicate_suppression.hamming_threshold", lo=0, hi=64, require_int=True)
+
+    scheduler = training.get("lr_scheduler", {"kind": "cosine"})
+    if not isinstance(scheduler, dict) or set(scheduler) - {"kind", "step_size", "gamma", "t_max", "eta_min"}:
+        raise ValueError("training.lr_scheduler の key または型が不正です")
+    if scheduler.get("kind", "cosine") not in {"cosine", "step"}:
+        raise ValueError("training.lr_scheduler.kind は cosine / step が必要です")
+    for key in ("step_size", "t_max"):
+        if key in scheduler:
+            _vnum(scheduler[key], f"training.lr_scheduler.{key}", lo=1, require_int=True)
+    for key in ("gamma", "eta_min"):
+        if key in scheduler:
+            _vnum(scheduler[key], f"training.lr_scheduler.{key}", lo=0)
 
     # --- checkpoint_selection ---
     ckpt = config["checkpoint_selection"]
@@ -391,6 +463,40 @@ class DetectionResult:
         return np.stack([cx, cy], axis=1).astype(np.float32)
 
 
+def drop_ignored_detections(
+    result: DetectionResult, ignore_regions: list[list[float]]
+) -> DetectionResult:
+    """normalized xyxy region 内に center がある検出を全 class から除く。
+
+    評価と formal runtime の両方で同じ中心包含規則を使う。
+    """
+    if not isinstance(result, DetectionResult) or not isinstance(ignore_regions, list):
+        raise TypeError("DetectionResult と ignore region list が必要です")
+    centers = result.normalized_centers
+    keep = np.ones(len(result), dtype=bool)
+    for index, region in enumerate(ignore_regions):
+        if not isinstance(region, (list, tuple)) or len(region) != 4:
+            raise ValueError(f"ignore region {index} は normalized xyxy が必要です")
+        bounds = np.asarray(region, dtype=np.float64)
+        if not np.isfinite(bounds).all() or np.any(bounds < 0) or np.any(bounds > 1):
+            raise ValueError(f"ignore region {index} は有限の [0, 1] 座標が必要です")
+        left, top, right, bottom = bounds
+        if left >= right or top >= bottom:
+            raise ValueError(f"ignore region {index} の面積がありません")
+        inside = (
+            (centers[:, 0] >= left) & (centers[:, 0] <= right)
+            & (centers[:, 1] >= top) & (centers[:, 1] <= bottom)
+        )
+        keep &= ~inside
+    return DetectionResult(
+        boxes_xyxy=result.boxes_xyxy[keep],
+        scores=result.scores[keep],
+        class_ids=result.class_ids[keep],
+        image_width=result.image_width,
+        image_height=result.image_height,
+    )
+
+
 # ---- checkpoint manifest ----
 
 @dataclass
@@ -410,8 +516,8 @@ class CheckpointManifest:
     formal_detector_eligible: bool
     split_hash: str = ""           # split JSON の SHA-256。空文字は旧 manifest との互換用。
     resolved_config_hash: str = "" # CLI override 適用後の config dict SHA-256。
-    development_only: bool = True  # 常に True。04-08 以外で False にはならない。
-    training_mode: str = "development"  # "smoke" | "development"
+    development_only: bool = True  # checkpoint は formal detector 適格にはならない。
+    training_mode: str = "development"  # "smoke" | "development" | "formal"
 
     _HASH_FIELDS = ("model_hash", "data_hash", "config_hash", "build_hash", "class_map_hash")
 
@@ -476,11 +582,14 @@ class CheckpointManifest:
         """
         if self.formal_detector_eligible is not False:
             raise ValueError("CheckpointManifest.save(): formal_detector_eligible は False でなければなりません。")
-        if self.development_only is not True:
-            raise ValueError("CheckpointManifest.save(): development_only は True でなければなりません。")
-        if self.training_mode not in ("smoke", "development"):
+        if self.training_mode == "formal":
+            if self.development_only is not False:
+                raise ValueError("CheckpointManifest.save(): formal checkpoint の development_only は False が必要です。")
+        elif self.development_only is not True:
+            raise ValueError("CheckpointManifest.save(): development checkpoint の development_only は True が必要です。")
+        if self.training_mode not in ("smoke", "development", "formal"):
             raise ValueError(
-                f"CheckpointManifest.save(): training_mode の許容値は 'smoke' | 'development' です。"
+                f"CheckpointManifest.save(): training_mode の許容値は 'smoke' | 'development' | 'formal' です。"
                 f" got: {self.training_mode!r}"
             )
         self._validate_hash_format()
@@ -516,20 +625,26 @@ class CheckpointManifest:
                 f"formal_detector_eligible は bool 型が必要です。got: {type(elig).__name__!r}"
             )
         raw_mode = payload.get("training_mode", "development")
-        if raw_mode not in ("smoke", "development"):
+        if raw_mode not in ("smoke", "development", "formal"):
             raise ValueError(
-                f"training_mode の許容値は 'smoke' | 'development' です。got: {raw_mode!r}"
+                f"training_mode の許容値は 'smoke' | 'development' | 'formal' です。got: {raw_mode!r}"
             )
+        if raw_mode == "formal":
+            if elig is not False or payload.get("development_only") is not False:
+                raise ValueError("formal checkpoint は formal flag=false / development_only=false が必要です")
+            development_only = False
+        else:
+            development_only = True
         manifest = cls(
             model_hash=payload["model_hash"],
             data_hash=payload["data_hash"],
             config_hash=payload["config_hash"],
             build_hash=payload["build_hash"],
             class_map_hash=payload["class_map_hash"],
-            formal_detector_eligible=False,   # 04-07 は常に False
+            formal_detector_eligible=False,
             split_hash=payload.get("split_hash", ""),
             resolved_config_hash=payload.get("resolved_config_hash", ""),
-            development_only=True,             # 04-07 は常に True
+            development_only=development_only,
             training_mode=raw_mode,
         )
         manifest._validate_hash_format()
