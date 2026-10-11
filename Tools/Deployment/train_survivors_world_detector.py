@@ -26,6 +26,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import pathlib
 import shutil
 import sys
@@ -39,16 +40,19 @@ from reinbalance_survivors_contracts.canonical_json import canonical_json_bytes
 
 
 def _sha256_file(path: pathlib.Path) -> str:
+    """file 内容の SHA-256 を返す。\n\ncheckpoint と resume metadata の組が差し替わっていないか検証する。"""
     h = hashlib.sha256()
     h.update(path.read_bytes())
     return h.hexdigest()
 
 
 def _sha256_str(s: str) -> str:
+    """文字列を UTF-8 として hash 化する。\n\n開発用 manifest に保存する config identity を安定させる。"""
     return hashlib.sha256(s.encode()).hexdigest()
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """development と formal 学習の CLI 引数を定義する。\n\nformal mode では descriptor と preflight の入力も必須にする。"""
     p = argparse.ArgumentParser(
         description="world detector 学習ハーネス（開発用）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -116,7 +120,7 @@ class CheckpointSelector:
     _records: list[CheckpointRecord] = field(default_factory=list, repr=False)
 
     def record(self, rec: CheckpointRecord) -> None:
-        """チェックポイントを記録し keep_top_k を超えた分を削除する。"""
+        """validation score の高い checkpoint を候補へ加える。\n\n上位 keep_top_k 件だけを保持して古い候補を除く。"""
         self._records.append(rec)
         self._records.sort(key=lambda r: r.val_map50_95, reverse=True)
         if len(self._records) > self.keep_top_k:
@@ -124,11 +128,11 @@ class CheckpointSelector:
 
     @property
     def best(self) -> CheckpointRecord | None:
-        """val_map50_95 が最大の checkpoint を返す（未選択なら None）。"""
+        """val_map50_95 が最大の checkpoint を返す。\n\n未選択時は None とし、呼出側に不足状態を伝える。"""
         return self._records[0] if self._records else None
 
     def to_dict(self) -> dict:
-        """manifest に保存できる dict 形式にシリアライズする。"""
+        """selector の記録と選択規則を dict に変換する。\n\n学習後の manifest と resume checkpoint の両方で同じ形を使う。"""
         return {
             "metric": self.metric,
             "keep_top_k": self.keep_top_k,
@@ -139,7 +143,7 @@ class CheckpointSelector:
 
     @staticmethod
     def from_dict(d: dict) -> "CheckpointSelector":
-        """dict から CheckpointSelector を復元する（resume 用）。"""
+        """dict から CheckpointSelector を復元する。\n\n保存済み候補を再読込して resume 後も best 選択を継続する。"""
         sel = CheckpointSelector(
             metric=d.get("metric", "val_map50_95"),
             keep_top_k=d.get("keep_top_k", 3),
@@ -165,6 +169,8 @@ def _save_resume_state(
     training_mode: str = "development",
     resolved_config_hash: str = "",
     dataset_identity: str = "",
+    scheduler: Any = None,
+    epoch_metrics: list[dict[str, Any]] | None = None,
 ) -> None:
     """model / optimizer / epoch / selector / training_mode を single last checkpoint に保存する。
 
@@ -178,8 +184,11 @@ def _save_resume_state(
 
     if training_mode not in ("smoke", "development", "formal"):
         raise ValueError(f"unsupported training_mode: {training_mode!r}")
-    if training_mode == "formal" and (len(resolved_config_hash) != 64 or len(dataset_identity) != 64):
-        raise ValueError("formal resume state needs resolved config and dataset identities")
+    if training_mode == "formal" and (
+        len(resolved_config_hash) != 64 or len(dataset_identity) != 64
+        or scheduler is None or not isinstance(epoch_metrics, list) or len(epoch_metrics) != epoch
+    ):
+        raise ValueError("formal resume state needs identities, scheduler, and complete epoch metrics")
 
     out_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = {
@@ -191,6 +200,9 @@ def _save_resume_state(
         "torch_rng_state": torch.get_rng_state(),
         "torch_cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
     }
+    if training_mode == "formal":
+        checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+        checkpoint["epoch_metrics"] = list(epoch_metrics)
 
     checkpoint_path = out_dir / _LAST_CHECKPOINT_NAME
     tmp_checkpoint: pathlib.Path | None = None
@@ -231,6 +243,8 @@ def _load_resume_state(
     expected_training_mode: str = "development",
     expected_resolved_config_hash: str = "",
     expected_dataset_identity: str = "",
+    scheduler: Any = None,
+    epoch_metrics_owner: Any = None,
 ) -> int:
     """resume_dir から training state を復元し、次の epoch 番号を返す。
 
@@ -311,9 +325,28 @@ def _load_resume_state(
     required_keys = {"epoch", "model_state_dict", "optimizer_state_dict", "selector"}
     if saved_mode == "formal":
         required_keys |= {"numpy_rng_state", "torch_rng_state", "torch_cuda_rng_state"}
+        required_keys |= {"scheduler_state_dict", "epoch_metrics"}
+        if scheduler is None or epoch_metrics_owner is None:
+            raise ValueError("[RESUME] formal mode requires scheduler and epoch metrics receivers")
     missing = sorted(required_keys - checkpoint.keys())
     if missing:
         raise ValueError(f"[RESUME] last checkpoint state に {', '.join(missing)} がありません。")
+    if saved_mode == "formal":
+        metrics = checkpoint["epoch_metrics"]
+        if (
+            not isinstance(checkpoint["scheduler_state_dict"], dict)
+            or not isinstance(metrics, list)
+            or len(metrics) != last_epoch
+            or any(
+                not isinstance(item, dict)
+                or item.get("epoch") != index
+                or isinstance(item.get("val_map50_95"), bool)
+                or not isinstance(item.get("val_map50_95"), (int, float))
+                or not math.isfinite(item["val_map50_95"])
+                for index, item in enumerate(metrics, start=1)
+            )
+        ):
+            raise ValueError("[RESUME] formal scheduler state or epoch metrics are invalid")
     if checkpoint["epoch"] != last_epoch:
         raise ValueError(
             f"[RESUME] metadata/checkpoint epoch が一致しません: "
@@ -327,9 +360,13 @@ def _load_resume_state(
     try:
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if saved_mode == "formal":
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
     except Exception as e:
         raise ValueError(f"[RESUME] model/optimizer state の復元に失敗しました: {e}") from e
     selector._records = list(saved_selector._records)
+    if saved_mode == "formal":
+        epoch_metrics_owner._formal_epoch_metrics = list(checkpoint["epoch_metrics"])
     if "numpy_rng_state" in checkpoint:
         import numpy as np
         np.random.set_state(checkpoint["numpy_rng_state"])
@@ -345,19 +382,23 @@ def _load_resume_state(
 # ---- dataset split views ----
 
 class _DatasetView:
-    """WorldDataset の sample index を固定した読み取り専用 view。"""
+    """WorldDataset の sample index を固定した読み取り専用 view。\n\ntrain と validation の session 別分離を元 dataset の複製なしで保つ。"""
 
     def __init__(self, dataset: Any, indices: list[int]) -> None:
+        """元 dataset と採用 index を保持する。\n\n外部から index 列が変更されても view の分割を変えない。"""
         self._dataset = dataset
         self._indices = tuple(indices)
 
     def __len__(self) -> int:
+        """view に含まれる sample 数を返す。\n\nDataLoader が epoch の長さを決めるときに参照する。"""
         return len(self._indices)
 
     def __getitem__(self, index: int) -> Any:
+        """view index に対応する元 sample を返す。\n\n元 dataset の session metadata と画像 path をそのまま維持する。"""
         return self._dataset[self._indices[index]]
 
     def __iter__(self):
+        """採用済み sample を元の順序で順次返す。\n\ntrain sampler が指定する index 順序を変換せず保つ。"""
         for index in self._indices:
             yield self._dataset[index]
 
@@ -492,12 +533,30 @@ def _run_training(
 
     start_epoch = 1
     current_mode = training_mode or ("smoke" if smoke else "development")
+    scheduler = None
+    if current_mode == "formal":
+        import torch.optim.lr_scheduler as lr_scheduler
+        scheduler_cfg = cfg["training"].get("lr_scheduler", {"kind": "cosine"})
+        if scheduler_cfg.get("kind", "cosine") == "step":
+            scheduler = lr_scheduler.StepLR(
+                optimizer,
+                step_size=scheduler_cfg.get("step_size", max(1, max_epochs // 3)),
+                gamma=scheduler_cfg.get("gamma", 0.1),
+            )
+        else:
+            scheduler = lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=scheduler_cfg.get("t_max", max_epochs),
+                eta_min=scheduler_cfg.get("eta_min", 0.0),
+            )
     if resume_dir is not None:
         start_epoch = _load_resume_state(
             resume_dir, selector, detector._model, optimizer,
             expected_training_mode=current_mode,
             expected_resolved_config_hash=resolved_config_hash,
             expected_dataset_identity=dataset_identity,
+            scheduler=scheduler,
+            epoch_metrics_owner=detector,
         )
         print(f"[RESUME] epoch {start_epoch} から再開します。")
 
@@ -515,6 +574,7 @@ def _run_training(
         training_mode=current_mode,
         resolved_config_hash=resolved_config_hash,
         dataset_identity=dataset_identity,
+        scheduler=scheduler,
     )
 
 
@@ -533,6 +593,7 @@ def _run_training_torch(
     training_mode: str | None = None,
     resolved_config_hash: str = "",
     dataset_identity: str = "",
+    scheduler: Any = None,
 ) -> None:
     """torch DataLoader + SGD optimizer の実学習ループ。
 
@@ -542,23 +603,9 @@ def _run_training_torch(
     import torch
 
     training_mode = training_mode or ("smoke" if smoke else "development")
+    if training_mode == "formal" and scheduler is None:
+        raise ValueError("formal training requires a learning rate scheduler")
     save_every = cfg.get("checkpoint_selection", {}).get("save_every_n_epochs", 5)
-    scheduler = None
-    if training_mode == "formal":
-        import torch.optim.lr_scheduler as lr_scheduler
-        scheduler_cfg = cfg["training"].get("lr_scheduler", {"kind": "cosine"})
-        if scheduler_cfg.get("kind", "cosine") == "step":
-            scheduler = lr_scheduler.StepLR(
-                optimizer,
-                step_size=scheduler_cfg.get("step_size", max(1, max_epochs // 3)),
-                gamma=scheduler_cfg.get("gamma", 0.1),
-            )
-        else:
-            scheduler = lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=scheduler_cfg.get("t_max", max_epochs),
-                eta_min=scheduler_cfg.get("eta_min", 0.0),
-            )
     if training_mode == "formal" and not hasattr(detector, "_formal_epoch_metrics"):
         detector._formal_epoch_metrics = []
 
@@ -584,6 +631,8 @@ def _run_training_torch(
             training_mode=training_mode,
             resolved_config_hash=resolved_config_hash,
             dataset_identity=dataset_identity,
+            scheduler=scheduler,
+            epoch_metrics=getattr(detector, "_formal_epoch_metrics", None) if training_mode == "formal" else None,
         )
 
     print(f"[INFO] best checkpoint: epoch={selector.best.epoch if selector.best else None}")
@@ -804,7 +853,7 @@ def _run_training_stub(
     out_dir: pathlib.Path,
     start_epoch: int,
 ) -> None:
-    """torch 不在環境用のスタブ学習ループ。"""
+    """torch 不在環境で smoke epoch の選択記録を作る。\n\nweight は更新せず、正式な training mode では呼び出されない。"""
     for epoch in range(start_epoch, max_epochs + 1):
         val_score = 0.0
         ckpt_path = out_dir / f"epoch_{epoch:04d}.ckpt"
