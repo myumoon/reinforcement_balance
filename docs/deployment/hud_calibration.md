@@ -32,7 +32,8 @@ formal 実行には `--capture-store`、`--dataset-descriptor`、`--restore-verd
 `--vocabulary`、`--minimum-counts`、`--artifact-store`、`--backup-root`、`--restore-root`、
 `--logical-prefix`、`--out-dir` が必要です。minimum counts は `time_bands`（秒の `開始-終了`）、
 `screen_states`、`card_counts`、`item_classes`、`buttons`、`fallback`、`roi_negative` を指定します。
-`buttons` の観測値は `hud_truth.v1` の拡張 `expected_buttons` がある場合だけ集計し、存在しない正解値を補いません。
+`buttons` は任意 slice で、空 mapping にできます。`hud_truth.v1` に button 正解 field がないため既定では対象外です。
+下限を設定した場合は、対応する正解件数が不足すると preflight が拒否します。
 gate が落ちたら exit 2、preflight／入力不正なら exit 1 です。
 
 package schema は `hud_parser_package.formal.v1` で development schema と分離しています。publisher は
