@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""事前登録ルールから sealed Survivors session の評価窓 plan を作る。"""
+"""事前登録ルールから sealed Survivors session の評価窓 plan を作る。
+
+development parser と detector の出力を使い、複数 session の窓を一つの hash-bound plan にまとめる。
+"""
 
 from __future__ import annotations
 
