@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from Tools.Artifacts.artifact_store import ArtifactStore
+from build_survivors_formal_annotations import main as build_formal_annotations
 from benchmark_survivors_perception import (
     FormalBenchmarkRequest,
     RestoredFormalArtifact,
@@ -28,11 +29,12 @@ from benchmark_survivors_perception import (
     _verified_annotation_payloads,
     run_formal_pipeline,
 )
-from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
+from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor, RestoreTestVerdict
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from survivors.capture.captured_frame import CapturedFrame
 from survivors.capture_dataset import DatasetWriter, SplitFreezer
+from survivors.formal_ground_truth import hud_state_from_truth, normalize_snapshot_ids
 from survivors.perception_benchmark import (
     SnapshotReplayTick,
     _foreground_classification_values,
@@ -54,7 +56,10 @@ from survivors.perception_session_split import SessionRecord, SessionSplit, vali
 from survivors.perception_snapshot import FormalReplayEvidence
 from survivors.real_obs_assembler import RealObsAssembler
 from survivors.vision.entity_tracker import (
+    DEFAULT_CLASS_MAP_PATH,
     PlayerAnchorState,
+    Track,
+    TrackedWorldState,
     TrackedEntityV2,
     TrackedWorldStateV2,
 )
@@ -64,6 +69,7 @@ from survivors.vision.hud_parser import (
     _compute_candidate_set_hash,
     _compute_inventory_hash,
 )
+from survivors.vision.hud_truth import HUD_TRUTH_SCHEMA_VERSION, HudTruthRecord
 
 
 PROFILE_HASH = "a" * 64
@@ -86,7 +92,14 @@ def _captured_frame(session_index: int, frame_index: int, timestamp_ns: int) -> 
     )
 
 
-def _capture_fixture(tmp_path: Path) -> tuple[Path, object]:
+def _capture_fixture(
+    tmp_path: Path, parser_artifact_hash: str = "9" * 64,
+    include_formal_truth: bool = False,
+) -> tuple[Path, object]:
+    """6 session の capture split を作成する。
+
+    formal truth bytes は pipeline integration test が要求した場合だけ生成する。
+    """
     capture_root = tmp_path / "captures"
     calibration_ids = [f"cal-{index}" for index in range(3)]
     final_ids = [f"final-{index}" for index in range(3)]
@@ -103,10 +116,90 @@ def _capture_fixture(tmp_path: Path) -> tuple[Path, object]:
             json.dumps(wire, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
+    if include_formal_truth:
+        for session_id in (*calibration_ids, *final_ids):
+            _write_truth_fixture(
+                capture_root / "capture_sessions" / session_id,
+                session_id,
+                parser_artifact_hash,
+            )
     freezer = SplitFreezer(capture_root)
     freezer.assign("error_calibration", calibration_ids)
     freezer.assign("final_e2e_test", final_ids)
     return capture_root, freezer.freeze()
+
+
+def _truth_record(
+    session_id: str, frame_index: int, screen_state: str,
+    parser_artifact_hash: str = "9" * 64,
+) -> HudTruthRecord:
+    """frame index に対応する確定 HUD truth を作成する。
+
+    detector world label と独立した parser artifact hash を保存する。
+    """
+    return HudTruthRecord(
+        HUD_TRUTH_SCHEMA_VERSION, session_id, frame_index, "fixture", True,
+        screen_state,
+        _ELAPSED_TIMES[frame_index] if frame_index < len(_ELAPSED_TIMES) else 20.0,
+        4, 0.75, 0.5,
+        ("whip",) + ("empty_slot",) * 11, None,
+        ("whip",) if screen_state.startswith("level_up") else None,
+        "hud", (0, 32, 1920, 75), "2026-10-11T00:00:00Z",
+        {"parser_artifact_hash": parser_artifact_hash, "atlas_content_hash": "d" * 64},
+    )
+
+
+def _write_truth_fixture(
+    session_path: Path, session_id: str, parser_artifact_hash: str
+) -> None:
+    """fixture session に formal truth・frame・COCO を揃えて保存する。
+    writer と loader が同じ captured object hash を使う状態にする。
+    """
+    frame_wires = [
+        json.loads(line)
+        for line in (session_path / "frames.jsonl").read_text("utf-8").splitlines()
+    ]
+    truth_rows = [
+        _truth_record(session_id, i, _STATES[i], parser_artifact_hash).to_wire()
+        for i in range(len(frame_wires))
+    ]
+    (session_path / "hud_truth.jsonl").write_text(
+        "".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in truth_rows),
+        encoding="utf-8",
+    )
+    coco = {
+        "images": [
+            {"id": i, "object_sha256": row["object_sha256"]}
+            for i, row in enumerate(frame_wires)
+        ],
+        "categories": [
+            {"id": 1, "name": "player_anchor"},
+            {"id": 2, "name": "enemy_boss"},
+            {"id": 3, "name": "hazard_area"},
+        ],
+        "annotations": [
+            item
+            for i in range(len(frame_wires))
+            for item in (
+                {"id": 3 * i + 1, "image_id": i, "category_id": 1,
+                 "bbox": [910, 490, 100, 100]},
+                {"id": 3 * i + 2, "image_id": i, "category_id": 2,
+                 "bbox": [1152, 513, 384, 54]},
+                {"id": 3 * i + 3, "image_id": i, "category_id": 3,
+                 "bbox": [1056, 513, 192, 54]},
+            )
+        ],
+    }
+    capture_root = session_path.parent.parent
+    coco_dir = capture_root / "fixture-coco"
+    session_coco_dir = coco_dir / session_id
+    session_coco_dir.mkdir(parents=True, exist_ok=True)
+    (session_coco_dir / "world_coco.json").write_bytes(canonical_json_bytes(coco))
+    assert build_formal_annotations([
+        "--store-root", str(capture_root), "--session-id", session_id,
+        "--coco-dir", str(coco_dir), "--parser-artifact-hash", parser_artifact_hash,
+        "--class-map", str(DEFAULT_CLASS_MAP_PATH),
+    ]) == 0
 
 
 def _package_ref(store: ArtifactStore, logical_id: str, payload: dict[str, object]):
@@ -168,6 +261,17 @@ def _hud_world(
         inventory, 1.0, real_inventory_hash, (card,), real_candidate_set_hash,
         (), False, False, False, 1.0, "fixture",
     )
+    hud = hud_state_from_truth(
+        _truth_record(session_id, frame_index, screen_state, parser_artifact_hash),
+        session_id=session_id, frame_index=frame_index, captured_ns=timestamp_ns,
+        parser_artifact_hash=parser_artifact_hash,
+    )
+    if hud.cards and card_roi != hud.cards[0].roi_xyxy:
+        cards = tuple(replace(card, roi_xyxy=card_roi) for card in hud.cards)
+        hud = replace(
+            hud, cards=cards,
+            candidate_set_hash=_compute_candidate_set_hash(screen_state, cards),
+        )
     boss = TrackedEntityV2(
         1, 2, "enemy_boss", "enemy", 1.0, 1, frame_index,
         0.7, 0.5, 0.2, 0.0, 0.0, 0.0, True, False, 0.05, 0.05, 0,
@@ -220,7 +324,7 @@ _STATES = ["gameplay", "level_up_items", "gameplay", "level_up_fallback"]
 _ELAPSED_TIMES = [20.0, 20.0, 1300.0, 1300.0]
 
 
-class _MockAssembler:
+class _SnapshotFixture:
     """テスト用の FormalAssembler：CapturedFrame の session_frame_index を使って合成観測を生成する。
 
     セッション間でタイムスタンプが逆転するため、セッションごとに独立した RealObsAssembler を保持する。
@@ -228,21 +332,44 @@ class _MockAssembler:
     """
 
     def __init__(self, parser_artifact_hash: str = "9" * 64) -> None:
+        """test sequence ごとに assembler を分離する。
+
+        frame snapshot は複数 session 間で temporal state を共有しない。
+        """
         self._assemblers: dict[str, RealObsAssembler] = {}
+        self._screen_overrides: dict[tuple[str, int], str] = {}
         self._schema = DeployObsSchema.default_v2()
         self._parser_artifact_hash = parser_artifact_hash
 
     def assemble_frame(self, frame, session_id: str, frame_index: int):
+        """fixture frame から normalized snapshot と raw UI evidence を返す。
+
+        `predictor` adapter が同じ snapshot を予測専用 API に投影する。
+        """
         if frame_index >= len(_TIMESTAMPS):
             return None, None, 0.0, None
         if session_id not in self._assemblers:
             self._assemblers[session_id] = RealObsAssembler()
         hud, world = _hud_world(
-            session_id, frame_index, _TIMESTAMPS[frame_index], _STATES[frame_index],
+            session_id, frame_index, _TIMESTAMPS[frame_index],
+            self._screen_overrides.get((session_id, frame_index), _STATES[frame_index]),
             self._parser_artifact_hash,
         )
         snapshot = self._assemblers[session_id].assemble(hud, world, self._schema, (1920, 1080))
         assert snapshot is not None
+        filtered_hud = self._assemblers[session_id].temporal.last_hud
+        assert filtered_hud is not None
+        snapshot = normalize_snapshot_ids(
+            snapshot, session_id=session_id, frame_index=frame_index,
+            viewport=(1920, 1080), hud=filtered_hud,
+        )
+        diagnostics = dict(snapshot.diagnostics)
+        diagnostics["predicted_boxes"] = [
+            {"class": "player_anchor", "xyxy": [910, 490, 1010, 590], "score": 1.0},
+            {"class": "enemy_boss", "xyxy": [1152, 513, 1536, 567], "score": 1.0},
+            {"class": "hazard_area", "xyxy": [1056, 513, 1248, 567], "score": 1.0},
+        ]
+        snapshot = replace(snapshot, diagnostics=diagnostics)
         evidence = FormalReplayEvidence(
             raw_card_ids=tuple(c.item_id for c in sorted(hud.cards, key=lambda c: c.slot_index)),
             raw_inventory=hud.inventory,
@@ -252,26 +379,470 @@ class _MockAssembler:
         return snapshot, snapshot, 1.0, evidence
 
 
-def _assembler_factory(restored):
+def _fixture_predictor_factory(restored):
     """テスト用の FormalAssemblerFactory：runner に渡す mock assembler を返す。"""
     # fixture も自己申告値でなく、restored package object の content hash を使用する。
     # runner/verdict と同一 identity を snapshot の parser binding に設定する。
-    parser_content_hash = hashlib.sha256(restored["parser_package"]).hexdigest()
-    return _MockAssembler(parser_content_hash)
+    return _FixturePredictor(restored)
 
 
-def _default_cli_factory(restored):
+def _test_provider_factory(restored):
+    """runner unit test 用の FormalPredictor を返す。
+
+    production factory と同じ restored hash と reset 契約を保つ。
+    """
     """テスト用の _CLI_PROVIDER_FACTORY：default calibration provider と mock assembler を返す。"""
-    return _calibration_provider, _assembler_factory
+    return _FixturePredictor(restored)
 
 
-def _request(tmp_path: Path):
-    capture_root, split = _capture_fixture(tmp_path)
-    store = ArtifactStore(tmp_path / "artifacts")
-    return FormalBenchmarkRequest(
-        store=store,
-        capture_store_root=capture_root,
+def _patch_minimal_test_gates(monkeypatch) -> None:
+    """小さな synthetic dataset が持つ slice だけを test gate に残す。
+
+    production threshold は変更せず package hash と test 内定数を同期する。
+    """
+    import survivors.perception_benchmark as benchmark
+
+    floors = dict.fromkeys(benchmark._FORMAL_SLICE_COUNT_FLOORS, 0)
+    floors.update({
+        "foreground_class:player_anchor": 2,
+        "foreground_class:enemy_boss": 2,
+        "foreground_class:hazard_area": 2,
+        "event:boss": 2,
+        "event:hazard": 2,
+        "time_band:early": 2,
+        "time_band:late": 2,
+    })
+    monkeypatch.setattr(benchmark, "_FORMAL_SLICE_COUNT_FLOORS", floors)
+    active = {
+        "foreground_class:player_anchor", "foreground_class:enemy_boss",
+        "foreground_class:hazard_area", "event:boss", "event:hazard",
+        "time_band:early", "time_band:late",
+    }
+    monkeypatch.setattr(benchmark, "_FORMAL_REQUIRED_SLICES", frozenset(active))
+    monkeypatch.setattr(
+        benchmark, "_FORMAL_SLICE_THRESHOLDS",
+        {name: value for name, value in benchmark._FORMAL_SLICE_THRESHOLDS.items()
+         if name in active},
     )
+    monkeypatch.setattr(
+        benchmark, "_FORMAL_SLICE_SESSION_FLOORS",
+        {"time_band:early": 1, "time_band:late": 1},
+    )
+    for name, value in (
+        ("THRESHOLD_INVALID_TICK", 1.0),
+        ("THRESHOLD_ROI_CENTER_P99", 1.0),
+        ("THRESHOLD_ROI_INSIDE", 0.0),
+    ):
+        monkeypatch.setattr(benchmark, name, value)
+
+
+def _install_public_formal_factories(monkeypatch, benchmark_module) -> None:
+    """public provider と ground-truth loader を pipeline に接続する。
+
+    package IO と detector のみ固定し、assembler・runner・GT loader は実装を使う。
+    """
+    import survivors.formal_perception_provider as provider
+    from survivors.formal_annotation_loader import build_ground_truth_loader
+    from survivors.vision.entity_tracker import default_class_map
+    from survivors.vision.world_detector import DetectionResult
+
+    class _HudParser:
+        """runner fixture と同じ HUD truth を detector から独立して parse する。
+        class state は tracker fixture に frame の session context を伝える。
+        """
+
+        last_session = ""
+        last_frame_index = 0
+
+        def __init__(self, *, parser_artifact_hash: str, icon_matcher=None):
+            """package artifact hash を予測 HUD parser に渡す。
+
+            icon matching 自体はこの synthetic runner fixture の対象外にする。
+            """
+            self._parser_hash = parser_artifact_hash
+
+        def parse(self, _frame_bgra, session_id, frame_index, captured_monotonic_ns):
+            """fixture に固定した HUD state を生成する。
+
+            session/frame identity は tracker test double と共有する。
+            """
+            type(self).last_session = session_id
+            type(self).last_frame_index = frame_index
+            return _hud_world(
+                session_id, frame_index, captured_monotonic_ns,
+                _STATES[frame_index], self._parser_hash,
+            )[0]
+
+        def reset_temporal_state(self) -> None:
+            """frame identity を消去する。
+
+            次 session の detector output に前 session の値を持ち越さない。
+            """
+            type(self).last_session = ""
+
+    class _WorldDetector:
+        """各 fixture frame に同一の三つの formal class box を返す。
+        semantic 一致を保ち、テスト対象の runner／factory 経路だけを通す。
+        """
+
+        def infer(self, _frame, score_threshold=0.0):
+            """synthetic label と同じ位置に detector boxes を返す。
+
+            prediction-only runner が IoU matching を実行できるようにする。
+            """
+            return DetectionResult(
+                np.asarray([[910, 490, 1010, 590], [1152, 513, 1536, 567],
+                            [1056, 513, 1248, 567]], dtype=np.float32),
+                np.ones(3, dtype=np.float32), np.asarray([1, 4, 11], dtype=np.int64),
+                1920, 1080,
+            )
+
+    class _EntityTracker:
+        """fake detector output ではなく HUD parser の frame identity で world state を返す。
+        これにより予測 fixture は annotation loader の bytes を参照しない。
+        """
+
+        def __init__(self):
+            """formal provider reset が消去する tracker state を初期化する。
+
+            test double も production tracker と同じ `_tracks` field を持つ。
+            """
+            self._tracks = {}
+
+        def update(self, _detection, frame_index, timestamp_ns):
+            """detector tick を canonical low-level world state へ変換する。
+
+            provider 自身が `TrackedWorldStateV2` へ変換する経路を通す。
+            """
+            session_id = _HudParser.last_session
+            return TrackedWorldState(
+                frame_index, timestamp_ns,
+                [
+                    Track(1, 4, np.asarray([1152, 513, 1536, 567]), 1.0,
+                          timestamp_ns, age=frame_index, last_seen_frame_index=frame_index),
+                    Track(2, 11, np.asarray([1056, 513, 1248, 567]), 1.0,
+                          timestamp_ns, age=frame_index, last_seen_frame_index=frame_index),
+                ],
+                PlayerAnchorState(0.5, 0.5, 1.0, False), 1920, 1080,
+            )
+
+    def _load_parser_package(path):
+        """envelope hash を package loader の返却型に写す。
+
+        test 用 package payload を通し、provider の hash binding を維持する。
+        """
+        path = Path(path)
+        manifest_path = path / "manifest.json" if path.is_dir() else path.parent / "manifest.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        return SimpleNamespace(
+            package_hash=manifest["parser_artifact_hash"],
+            meta=SimpleNamespace(parser_artifact_hash=manifest["parser_artifact_hash"]),
+        )
+
+    monkeypatch.setattr(
+        provider.PackageLoader, "load_formal", staticmethod(_load_parser_package)
+    )
+    monkeypatch.setattr(provider.IconMatcher, "load_formal", staticmethod(lambda _path: None))
+    monkeypatch.setattr(provider, "HudParser", _HudParser)
+    monkeypatch.setattr(provider, "load_class_map", lambda _path: default_class_map())
+    monkeypatch.setattr(
+        provider, "load_formal_detector",
+        lambda _path: (_WorldDetector(), _EntityTracker(), SimpleNamespace(score_threshold=0.0)),
+    )
+    monkeypatch.setattr(benchmark_module, "_CLI_PROVIDER_FACTORY", provider.build_formal_predictor)
+    monkeypatch.setattr(benchmark_module, "_GROUND_TRUTH_FACTORY", build_ground_truth_loader)
+    calibration_manifests = [SimpleNamespace(session_id=f"cal-{i}") for i in range(3)]
+    monkeypatch.setattr(
+        benchmark_module, "_derive_calibration_residuals",
+        lambda _ticks, **_kwargs: _calibration_provider(calibration_manifests, None),
+    )
+
+
+class _FixturePredictor:
+    """FormalPredictor protocol に沿う runner fixture。
+    restored manifest の hash を予測 snapshot に束縛する。
+    """
+
+    def __init__(self, restored):
+        self._parser_hash = restored["parser_package"].manifest["parser_artifact_hash"]
+        self._detector_hash = restored["detector_package"].manifest["detector_artifact_hash"]
+        self._fixture = _SnapshotFixture(self._parser_hash)
+
+    def predict_frame(self, frame, session_id: str, frame_index: int):
+        """unit test の deterministic snapshot を prediction として返す。
+
+        GT loader から値を受け取らず artifact hash だけ restored package に束縛する。
+        """
+        if session_id.startswith("cal-") and frame_index == 1:
+            return None, 1.0
+        if session_id.startswith("cal-") and frame_index == 0:
+            self._fixture._screen_overrides[(session_id, frame_index)] = "unknown"
+        _unused, predicted, latency, _evidence = self._fixture.assemble_frame(
+            frame, session_id, frame_index
+        )
+        if predicted is None:
+            return None, latency
+        return replace(predicted, detector_artifact_hash=self._detector_hash), latency
+
+    def reset(self) -> None:
+        """前 session の fixture assembler を破棄する。
+
+        runner reset 呼び出しが provider interface に届いたことを保証する。
+        """
+        self._fixture._assemblers.clear()
+
+
+def _mutating_test_predictor(restored, mutate):
+    """snapshot を故意に変える runner regression 用 predictor を作る。
+
+    ground-truth loader には触れず prediction API の挙動だけを変える。
+    """
+    predictor = _FixturePredictor(restored)
+    predict = predictor.predict_frame
+
+    def predict_frame(frame, session_id: str, frame_index: int):
+        snapshot, latency = predict(frame, session_id, frame_index)
+        return (mutate(snapshot) if snapshot is not None else None), latency
+
+    predictor.predict_frame = predict_frame
+    return predictor
+
+
+def _request(tmp_path: Path, *, formal_inputs: bool = False):
+    """formal pipeline request を package と capture descriptor で構成する。
+
+    direct unit test 用には artifact graph を省き、統合 test だけ exact restore を行う。
+    """
+    parser_bytes = b"fixture formal parser payload"
+    parser_hash = hashlib.sha256(parser_bytes).hexdigest()
+    capture_root, split = _capture_fixture(
+        tmp_path, parser_hash, include_formal_truth=formal_inputs
+    )
+    store = ArtifactStore(tmp_path / "artifacts")
+    if not formal_inputs:
+        return FormalBenchmarkRequest(store=store, capture_store_root=capture_root)
+    package_specs = {
+        "parser_package": ("hud_parser_package.v1", {"parser_artifact_hash": parser_bytes}),
+        "detector_package": ("world_detector_package.v1", {
+            "detector_artifact_hash": b"fixture formal detector payload",
+            "model_hash": b"fixture model",
+            "build_hash": b"synthetic-build",
+        }),
+        "assembler_config": ("assembler_config.v1", {
+            "assembler_schema_hash": b"fixture assembler schema",
+            "ui_presentation_schema_hash": b"fixture ui schema",
+            "ui_presentation_golden_fixture_hash": b"fixture ui golden",
+            "atlas_vocabulary_hash": b"fixture atlas",
+            "assembler_impl_hash": b"fixture assembler",
+            "roi_resolver_input_hash": b"fixture roi",
+        }),
+        "target_config": ("perception_thresholds.v1", {
+            "threshold_hash": _formal_threshold_bytes(),
+        }),
+    }
+    descriptors = {}
+    restores = {}
+    for name, (schema, files) in package_specs.items():
+        extras = {}
+        if name == "parser_package":
+            extras = {
+                "fixtures/parser_package/parser_package.json": canonical_json_bytes({
+                    "metadata": {}, "fit_result": {}, "validation_report": {},
+                }),
+                "fixtures/parser_package/icon_atlas.json": canonical_json_bytes({
+                    "schema_version": "icon_atlas.v1", "icons": [],
+                }),
+            }
+        elif name == "detector_package":
+            extras = {
+                "fixtures/detector_package/world_class_map_v2.yaml":
+                    DEFAULT_CLASS_MAP_PATH.read_bytes(),
+            }
+        descriptors[name], restores[name] = _formal_dependency(
+            store, name, schema, files, extras=extras,
+        )
+
+    capture_refs = [store.put(
+        logical_id="fixtures/capture/split.json", source_path=split.manifest_path,
+        media_type="application/json",
+    )]
+    bindings = {
+        "annotation_bindings": {}, "hud_truth_bindings": {},
+        "coco_bindings": {}, "frames_bindings": {},
+    }
+    session_ids = ("cal-0", "cal-1", "cal-2", "final-0", "final-1", "final-2")
+    for session_id in session_ids:
+        session_path = capture_root / "capture_sessions" / session_id
+        manifest_ref = store.put(
+            logical_id=f"fixtures/capture/{session_id}/session_manifest.json",
+            source_path=session_path / "session_manifest.json", media_type="application/json",
+        )
+        annotation_ref = store.put(
+            logical_id=f"fixtures/capture/{session_id}/annotations.jsonl",
+            source_path=session_path / "annotations.jsonl", media_type="application/x-ndjson",
+        )
+        capture_refs.extend((manifest_ref, annotation_ref))
+        bindings["annotation_bindings"][session_id] = {
+            "annotation_logical_id": annotation_ref.logical_id,
+            "annotation_sha256": annotation_ref.sha256,
+            "session_manifest_logical_id": manifest_ref.logical_id,
+            "session_manifest_sha256": manifest_ref.sha256,
+        }
+        for name, source_path in (
+            ("hud_truth_bindings", session_path / "hud_truth.jsonl"),
+            ("coco_bindings", capture_root / "fixture-coco" / session_id / "world_coco.json"),
+            ("frames_bindings", session_path / "frames.jsonl"),
+        ):
+            ref = store.put(
+                logical_id=f"fixtures/capture/{session_id}/{name}.jsonl",
+                source_path=source_path, media_type="application/x-ndjson",
+            )
+            capture_refs.append(ref)
+            bindings[name][session_id] = {"logical_id": ref.logical_id, "sha256": ref.sha256}
+    capture_manifest = capture_refs[0]
+    capture_descriptor = ArtifactDescriptor(
+        logical_id="fixtures/capture", node_kind="source_descriptor",
+        producer_id="pytest", producer_version="v1",
+        identity_metadata={
+            "manifest_logical_id": capture_manifest.logical_id, **bindings,
+        }, files=tuple(capture_refs),
+    )
+    descriptors["capture_dataset"] = capture_descriptor
+    restores["capture_dataset"] = RestoreTestVerdict(
+        logical_id="fixtures/capture.restore", subject=capture_descriptor.node_ref(),
+        manifest_hash=capture_manifest.sha256, primary_root="fixture-primary",
+        backup_root="fixture-backup", verify_mode="full",
+        checked_object_count=len(capture_refs), passed=True, blocking_reasons=(),
+    ).to_descriptor()
+    return FormalBenchmarkRequest(
+        store=store, capture_store_root=capture_root,
+        dependency_descriptors=descriptors, restore_verdicts=restores,
+    )
+
+
+def _formal_threshold_bytes() -> bytes:
+    """test threshold 定数の canonical payload を作成する。
+
+    runner の ArtifactStore hash preflight を test gate と一致させる。
+    """
+    import survivors.perception_benchmark as benchmark
+    values = {
+            field: getattr(benchmark, constant)
+            for field, constant in {
+                "screen_state_f1": "THRESHOLD_SCREEN_F1",
+                "timer_exact": "THRESHOLD_TIMER_EXACT",
+                "level_exact": "THRESHOLD_LEVEL_EXACT",
+                "inventory_top1": "THRESHOLD_INVENTORY_TOP1",
+                "choice_top1": "THRESHOLD_CHOICE_TOP1",
+                "hp_mae": "THRESHOLD_HP_MAE",
+                "xp_mae": "THRESHOLD_XP_MAE",
+                "density_corr": "THRESHOLD_DENSITY_CORR",
+                "nearest_med": "THRESHOLD_NEAREST_MED",
+                "lat_p95_ms": "THRESHOLD_LAT_P95_MS",
+                "lat_p99_ms": "THRESHOLD_LAT_P99_MS",
+                "invalid_tick": "THRESHOLD_INVALID_TICK",
+                "levelup_invalid": "THRESHOLD_LEVELUP_INVALID",
+                "roi_center_p99": "THRESHOLD_ROI_CENTER_P99",
+                "roi_inside": "THRESHOLD_ROI_INSIDE",
+                "confidence": "THRESHOLD_CONFIDENCE",
+                "cross_frame_equivalence": "THRESHOLD_CROSS_FRAME_EQUIVALENCE",
+                "min_screen_state_count": "FORMAL_MIN_SCREEN_STATE_COUNT",
+                "min_screen_state_records": "FORMAL_MIN_SCREEN_STATE_RECORDS",
+                "foreground_classes": "_FORMAL_FOREGROUND_CLASSES",
+                "slice_count_floors": "_FORMAL_SLICE_COUNT_FLOORS",
+                "slice_session_floors": "_FORMAL_SLICE_SESSION_FLOORS",
+                "slice_thresholds": "_FORMAL_SLICE_THRESHOLDS",
+                "time_bands": "_FORMAL_TIME_BANDS",
+                "occurrence_dependent_slices": "_FORMAL_OCCURRENCE_DEPENDENT_SLICES",
+            }.items()
+    }
+    values["foreground_classes"] = list(values["foreground_classes"])
+    for field in ("slice_count_floors", "slice_session_floors", "slice_thresholds"):
+        values[field] = dict(sorted(values[field].items()))
+    for field in ("time_bands", "occurrence_dependent_slices"):
+        values[field] = sorted(values[field])
+    return canonical_json_bytes({"schema_version": "perception_formal_thresholds.v1", **values})
+
+
+def _formal_dependency(
+    store, name: str, schema: str, values: dict[str, bytes], *,
+    extras: dict[str, bytes] | None = None,
+):
+    """hash-bound package descriptor と full restore verdict を作る。
+
+    role payload と追加 package files を別々に descriptor refs へ登録する。
+    """
+    refs = {
+        field: store.put_bytes(
+            logical_id=f"fixtures/{name}/{field}.bin", data=data,
+            media_type="application/octet-stream",
+        )
+        for field, data in values.items()
+    }
+    payload = {
+        "schema_version": schema, "development_only": False, "formal_eligible": True,
+        "files": {field: ref.logical_id for field, ref in refs.items()},
+        **{field: ref.sha256 for field, ref in refs.items()},
+    }
+    manifest = store.put_bytes(
+        logical_id=f"fixtures/{name}/manifest.json",
+        data=canonical_json_bytes(payload), media_type="application/json",
+    )
+    extra_refs = tuple(
+        store.put_bytes(logical_id=logical_id, data=data, media_type="application/json")
+        for logical_id, data in (extras or {}).items()
+    )
+    files = (manifest, *refs.values(), *extra_refs)
+    descriptor = ArtifactDescriptor(
+        logical_id=f"fixtures/{name}", node_kind="source_descriptor",
+        producer_id="pytest", producer_version="v1",
+        identity_metadata={"manifest_logical_id": manifest.logical_id}, files=files,
+    )
+    restore = RestoreTestVerdict(
+        logical_id=f"fixtures/{name}.restore", subject=descriptor.node_ref(),
+        manifest_hash=manifest.sha256, primary_root="fixture-primary",
+        backup_root="fixture-backup", verify_mode="full",
+        checked_object_count=len(files), passed=True, blocking_reasons=(),
+    ).to_descriptor()
+    return descriptor, restore
+
+
+def _package_value(request: FormalBenchmarkRequest, package: str, field: str) -> str:
+    """restored package manifest が宣言する field の content hash を返す。
+
+    assertion を descriptor の任意 file 順に依存させない。
+    """
+    return _package_file_ref(request, package, field).sha256
+
+
+def _package_file_ref(request: FormalBenchmarkRequest, package: str, field: str):
+    """role field に結び付いた ArtifactRef を取得する。
+
+    tamper test は manifest が指す ref だけを書き換える。
+    """
+    descriptor = request.dependency_descriptors[package]
+    manifest_ref = next(
+        ref for ref in descriptor.files
+        if ref.logical_id == descriptor.identity_metadata["manifest_logical_id"]
+    )
+    manifest = json.loads(request.store.object_path(manifest_ref.store_uri).read_bytes())
+    return next(
+        ref for ref in descriptor.files
+        if ref.logical_id == manifest["files"][field]
+    )
+
+
+def _store_logical_ids(store: ArtifactStore) -> set[str]:
+    """ArtifactStore index に commit 済みの logical ID を集める。
+
+    commit 失敗 test で canonical alias が残らないことを確認する。
+    """
+    return {
+        payload["logical_id"]
+        for path in store.logical_root.glob("*.json")
+        if isinstance((payload := json.loads(path.read_text("utf-8"))), dict)
+        and isinstance(payload.get("logical_id"), str)
+    }
 
 
 def test_formal_entry_rejects_ref_only_synthetic_fixture_before_provider(
@@ -288,7 +859,7 @@ def test_formal_entry_rejects_ref_only_synthetic_fixture_before_provider(
         raise AssertionError("provider must not run")
 
     monkeypatch.setattr(module, "_CLI_PROVIDER_FACTORY", forbidden_factory)
-    request = _request(tmp_path)
+    request = replace(_request(tmp_path), dependency_descriptors={}, restore_verdicts={})
     before = set(request.store.logical_root.glob("*.json"))
     with pytest.raises(ValueError, match="descriptors/restore verdicts"):
         run_formal_pipeline(request)
@@ -320,15 +891,17 @@ def test_formal_predictor_cannot_return_ground_truth_residual_or_evidence(
         module._unpack_prediction_result((None, None, 1.0, FormalReplayEvidence((), ())))
 
 
-@pytest.mark.skip(reason="formal release descriptors/sessions are intentionally unavailable")
 def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path, monkeypatch) -> None:
     import benchmark_survivors_perception as _bsp
-    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
-    result = run_formal_pipeline(_request(tmp_path))
+    _install_public_formal_factories(monkeypatch, _bsp)
+    _patch_minimal_test_gates(monkeypatch)
+    request = _request(tmp_path, formal_inputs=True)
+    result = run_formal_pipeline(request)
 
     # 3 cal sessions × 3 samples/session × 7 required fields
-    expected_counts = {field: 9 for field in _CALIBRATION_REQUIRED_FIELDS}
-    assert result.profile.field_sample_counts == expected_counts
+    assert result.profile.field_sample_counts == {
+        field: 9 for field in _CALIBRATION_REQUIRED_FIELDS
+    }
     assert result.verdict.development_only is False
     assert result.verdict.formal_perception_verdict_eligible is True
     assert result.verdict.passed is True, result.verdict.blocking_reasons
@@ -336,26 +909,31 @@ def test_formal_runner_calls_real_pipeline_and_atomic_writers(tmp_path: Path, mo
     assert result.verdict_ref.sha256 == result.descriptors[2].files[0].sha256
     assert result.descriptors[1].node_kind == "perception_calibration_profile"
     assert result.descriptors[2].node_kind == "perception_final_verdict"
-    assert result.verdict.metrics["slice_counts"]["time_band:early"] == 3
-    assert result.verdict.metrics["slice_counts"]["event:hazard"] == 6
+    assert result.verdict.metrics["slice_counts"]["time_band:early"] == 6
+    assert result.verdict.metrics["slice_counts"]["event:hazard"] == 3
 
     # 必須 named slice の欠落と rare slice の最低件数未満を再計算 gate が拒否する。
     # persisted metrics 改変でも同じ blocking 判定になることを確認する。
     missing = dict(result.verdict.metrics)
     missing["slice_counts"] = dict(missing["slice_counts"])
-    del missing["slice_counts"]["event:boss"]
-    passed, reasons = recompute_gate_from_metrics(missing)
+    del missing["slice_counts"]["foreground_class:enemy_boss"]
+    passed, reasons = recompute_gate_from_metrics(missing, formal=True)
     assert passed is False
-    assert any("event:boss" in reason and "0 records" in reason for reason in reasons)
+    assert any(
+        "foreground_class:enemy_boss" in reason and "0 records" in reason
+        for reason in reasons
+    )
     underpowered = dict(result.verdict.metrics)
     underpowered["slice_counts"] = dict(underpowered["slice_counts"])
-    underpowered["slice_counts"]["event:boss"] = 1
-    passed, reasons = recompute_gate_from_metrics(underpowered)
+    underpowered["slice_counts"]["foreground_class:enemy_boss"] = 1
+    passed, reasons = recompute_gate_from_metrics(underpowered, formal=True)
     assert passed is False
-    assert any("event:boss" in reason and "1 records" in reason for reason in reasons)
+    assert any(
+        "foreground_class:enemy_boss" in reason and "1 records" in reason
+        for reason in reasons
+    )
 
 
-@pytest.mark.skip(reason="formal release descriptors/sessions are intentionally unavailable")
 def test_published_calibration_profile_is_consumer_compatible(tmp_path: Path, monkeypatch) -> None:
     """canonical logical_id に保存した profile が PerceptionErrorProfile.from_wire() で読み込める。
 
@@ -364,11 +942,12 @@ def test_published_calibration_profile_is_consumer_compatible(tmp_path: Path, mo
     from reinbalance_survivors_contracts.perception_error import PerceptionErrorProfile
 
     import benchmark_survivors_perception as _bsp
-    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
-    request = _request(tmp_path)
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _test_provider_factory)
+    _patch_minimal_test_gates(monkeypatch)
+    request = _request(tmp_path, formal_inputs=True)
     result = run_formal_pipeline(request)
 
-    cal_index = request.store._logical_index_path(request.calibration_logical_id)
+    cal_index = request.store._logical_index_path(result.calibration_ref.logical_id)
     from Tools.Artifacts.artifact_store import ArtifactRef
     import json
     cal_ref_wire = json.loads(cal_index.read_text("utf-8"))
@@ -577,7 +1156,6 @@ def test_committed_batch_second_recovery_uses_profile_artifact_envelope(
     ) == profile.to_artifact_wire()
 
 
-@pytest.mark.skip(reason="formal release descriptors/sessions are intentionally unavailable")
 def test_formal_runner_blocks_when_prediction_differs_from_ground_truth(tmp_path: Path, monkeypatch) -> None:
     """予測 HP を大きく外すと自己比較せず formal gate が公開を拒否する。
 
@@ -588,7 +1166,7 @@ def test_formal_runner_blocks_when_prediction_differs_from_ground_truth(tmp_path
         """正解 snapshot を維持し、予測側の HP だけを誤らせる wrapper。"""
 
         def __init__(self, parser_artifact_hash: str) -> None:
-            self._inner = _MockAssembler(parser_artifact_hash)
+            self._inner = _SnapshotFixture(parser_artifact_hash)
 
         def assemble_frame(self, frame, session_id: str, frame_index: int):
             ground_truth, predicted, latency, evidence = self._inner.assemble_frame(
@@ -602,19 +1180,28 @@ def test_formal_runner_blocks_when_prediction_differs_from_ground_truth(tmp_path
             return ground_truth, predicted, latency, evidence
 
     def _wrong_hp_factory(restored):
-        return _calibration_provider, lambda r: _WrongHpAssembler(
-            hashlib.sha256(r["parser_package"]).hexdigest()
+        return _mutating_test_predictor(
+            restored,
+            lambda snapshot: replace(
+                snapshot,
+                item_context=replace(snapshot.item_context, hp_ratio=0.0),
+            ) if snapshot.item_context is not None else snapshot,
         )
 
     import benchmark_survivors_perception as _bsp
     monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _wrong_hp_factory)
-    request = _request(tmp_path)
+    _patch_minimal_test_gates(monkeypatch)
+    request = _request(tmp_path, formal_inputs=True)
     with pytest.raises(ValueError, match="HP MAE outside formal threshold"):
         run_formal_pipeline(request)
 
     # gate 不合格時は canonical verdict を公開しない。
     # 自己比較で pass していた旧 runner への直接的な回帰防止です。
-    assert not request.store._logical_index_path(request.verdict_logical_id).exists()
+    assert not any(
+        logical_id.startswith(request.verdict_namespace + "/")
+        and logical_id.endswith("/verdict.json")
+        for logical_id in _store_logical_ids(request.store)
+    )
 
 
 def test_replay_excludes_zero_area_ground_rois_from_geometry_records() -> None:
@@ -633,6 +1220,8 @@ def test_replay_excludes_zero_area_ground_rois_from_geometry_records() -> None:
         predicted_hud, _ = _hud_world(
             session_id, 0, 1_000_000_000, "level_up_items"
         )
+        ground_hud = replace(ground_hud, buttons=())
+        predicted_hud = replace(predicted_hud, buttons=())
         ground_truth = RealObsAssembler().assemble(
             ground_hud, world, schema, (1920, 1080)
         )
@@ -658,13 +1247,12 @@ def test_replay_excludes_zero_area_ground_rois_from_geometry_records() -> None:
     assert all(record.predicted is True for record in false_positives)
 
 
-@pytest.mark.skip(reason="formal release descriptors/sessions are intentionally unavailable")
 def test_dependency_tamper_fails_before_any_runner_output(tmp_path: Path, monkeypatch) -> None:
     import benchmark_survivors_perception as _bsp
-    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
-    request = _request(tmp_path)
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _test_provider_factory)
+    request = _request(tmp_path, formal_inputs=True)
     before_indexes = set(request.store.logical_root.glob("*.json"))
-    parser_ref = request.dependency_refs["parser_package"]
+    parser_ref = _package_file_ref(request, "parser_package", "parser_artifact_hash")
     request.store.object_path(parser_ref.store_uri).write_bytes(b"tampered")
 
     with pytest.raises(ValueError, match="verification failed"):
@@ -698,7 +1286,7 @@ def _run_assembler_for_test(
 
     run_formal_pipeline が内部で行うのと同等の tick 生成を再現します。
     """
-    assembler = _MockAssembler()
+    assembler = _SnapshotFixture()
     ticks = []
     evidence: dict[str, FormalReplayEvidence] = {}
     for manifest in manifests:
@@ -722,7 +1310,6 @@ def _run_assembler_for_test(
     return ticks, evidence
 
 
-@pytest.mark.skip(reason="formal release descriptors/sessions are intentionally unavailable")
 def test_formal_runner_assembler_cannot_override_detector_hash(tmp_path: Path, monkeypatch) -> None:
     """assembler が任意 detector hash を設定しても runner が restored package hash で上書きする。
 
@@ -730,11 +1317,12 @@ def test_formal_runner_assembler_cannot_override_detector_hash(tmp_path: Path, m
     SHA-256（_subject_hashes 経由）であり、assembler の自己申告とは無関係です。
     """
     import benchmark_survivors_perception as _bsp
-    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
-    request = _request(tmp_path)
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _test_provider_factory)
+    _patch_minimal_test_gates(monkeypatch)
+    request = _request(tmp_path, formal_inputs=True)
     result = run_formal_pipeline(request)
     # verdict.detector_artifact_hash = ArtifactStore 内 detector_package JSON の sha256
-    expected = request.dependency_refs["detector_package"].sha256
+    expected = _package_value(request, "detector_package", "detector_artifact_hash")
     assert result.verdict.detector_artifact_hash == expected
 
 
@@ -806,7 +1394,7 @@ def test_all_foreground_classes_use_entity_semantic_correctness(tmp_path: Path) 
     request = _request(tmp_path)
     manifest = DatasetWriter.restore(request.capture_store_root, "final-0")
     frame = manifest.frames[0]
-    ground, predicted, _latency, _evidence = _MockAssembler().assemble_frame(
+    ground, predicted, _latency, _evidence = _SnapshotFixture().assemble_frame(
         frame, manifest.session_id, frame.session_frame_index
     )
     assert ground is not None and predicted is not None
@@ -837,7 +1425,7 @@ def test_loader_cannot_self_authenticate_different_ground_truth(tmp_path: Path) 
     request = _request(tmp_path)
     manifest = DatasetWriter.restore(request.capture_store_root, "final-0")
     frame = manifest.frames[0]
-    original_ground, predicted, _latency, evidence = _MockAssembler().assemble_frame(
+    original_ground, predicted, _latency, evidence = _SnapshotFixture().assemble_frame(
         frame, manifest.session_id, frame.session_frame_index
     )
     assert original_ground is not None and predicted is not None and evidence is not None
@@ -868,6 +1456,9 @@ def test_loader_cannot_self_authenticate_different_ground_truth(tmp_path: Path) 
             return forged_ground
 
     class Predictor:
+        def reset(self) -> None:
+            """fake predictor は session state を持たないため何もしない。"""
+
         def predict_frame(self, _frame, _session_id, _frame_index):
             return replace(predicted, detector_artifact_hash="2" * 64), 1.0
 
@@ -1045,103 +1636,102 @@ def test_subject_hashes_use_current_fit_file_hash(monkeypatch, tmp_path: Path) -
     }
 
 
-@pytest.mark.skip(reason="formal release descriptors/sessions are intentionally unavailable")
-def test_runner_pins_detector_artifact_hash_from_restored_package(tmp_path: Path, monkeypatch) -> None:
-    """runner は assembler output に依らず detector_artifact_hash を restored package から固定する。
+def test_runner_rejects_prediction_with_unbound_detector_hash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """restored detector package と不一致の prediction hash を拒否する。
 
-    外部 provider（assembler）が任意の detector hash を返しても、runner が
-    restored package の content hash で上書きするため、verdict には常に
-    ArtifactStore object と同一の detector hash が記録されます。
+    formal provider が返す hash を package envelope と照合し、別 artifact の値が
+    prediction snapshot へ混入したときに benchmark の replay 前に fail-closed にする。
     """
-    class _MaliciousAssembler:
-        """悪意ある assembler：detector_artifact_hash を "b" * 64 に偽装しようとする。"""
-
-        def __init__(self, parser_artifact_hash: str) -> None:
-            self._inner = _MockAssembler(parser_artifact_hash)
-
-        def assemble_frame(self, frame, session_id: str, frame_index: int):
-            ground_truth, predicted, latency, evidence = self._inner.assemble_frame(
-                frame, session_id, frame_index
-            )
-            if ground_truth is not None:
-                ground_truth = replace(ground_truth, detector_artifact_hash="b" * 64)
-            if predicted is not None:
-                predicted = replace(predicted, detector_artifact_hash="b" * 64)
-            return ground_truth, predicted, latency, evidence
-
     def _malicious_factory(restored):
-        return _calibration_provider, lambda r: _MaliciousAssembler(
-            hashlib.sha256(r["parser_package"]).hexdigest()
+        return _mutating_test_predictor(
+            restored,
+            lambda snapshot: replace(snapshot, detector_artifact_hash="b" * 64),
         )
 
     import benchmark_survivors_perception as _bsp
     monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _malicious_factory)
-    request = _request(tmp_path)
-    result = run_formal_pipeline(request)
-    # verdict.detector_artifact_hash は ArtifactStore 内 package の sha256（assembler 出力ではない）
-    assert result.verdict.detector_artifact_hash == request.dependency_refs["detector_package"].sha256
+    _patch_minimal_test_gates(monkeypatch)
+    request = _request(tmp_path, formal_inputs=True)
+    with pytest.raises(ValueError, match="prediction detector hash is not bound"):
+        run_formal_pipeline(request)
 
 
-@pytest.mark.skip(reason="formal release descriptors/sessions are intentionally unavailable")
-def test_canonical_logical_ids_not_set_when_batch_commit_fails(tmp_path: Path, monkeypatch) -> None:
-    """batch commit（commit marker）失敗時に canonical logical_id が設定されないことを確認する。
+def test_canonical_logical_ids_not_set_when_calibration_commit_fails(tmp_path: Path, monkeypatch) -> None:
+    """calibration batch commit 失敗時に canonical logical_id が設定されないことを確認する。
 
     staging → batch commit → seal → canonical の順序で publish するため、
     batch commit が失敗しても consumer から見える canonical logical_id が残りません。
-    batch commit は単一の put_bytes であり、これが唯一の commit 点です。
+    calibration alias は calibration commit marker を永続化した後だけ公開されます。
     """
     from unittest.mock import patch
 
     from Tools.Artifacts.artifact_store import ArtifactStoreError
 
     import benchmark_survivors_perception as _bsp
-    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
-    request = _request(tmp_path)
-    canonical_cal = request.calibration_logical_id
-    canonical_ver = request.verdict_logical_id
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _test_provider_factory)
+    _patch_minimal_test_gates(monkeypatch)
+    request = _request(tmp_path, formal_inputs=True)
+    canonical_cal_prefix = request.calibration_namespace + "/"
+    canonical_ver_prefix = request.verdict_namespace + "/"
 
     original_put_bytes = request.store.put_bytes
 
     def _fail_on_batch_commit(*, logical_id, data, media_type):
-        if logical_id.startswith("perception/batch_commit/"):
-            raise ArtifactStoreError("simulated batch commit failure")
+        if logical_id.startswith("perception/calibration_commit/"):
+            raise ArtifactStoreError("simulated calibration commit failure")
         return original_put_bytes(logical_id=logical_id, data=data, media_type=media_type)
 
     with patch.object(request.store, "put_bytes", side_effect=_fail_on_batch_commit):
-        with pytest.raises(ArtifactStoreError, match="simulated batch commit failure"):
+        with pytest.raises(ArtifactStoreError, match="simulated calibration commit failure"):
             run_formal_pipeline(request)
 
     # canonical logical_id の index が存在しないことを確認する。
     # ArtifactStore は logical_id を logical_root 以下のパスへ記録する。
-    cal_index = request.store._logical_index_path(canonical_cal)
-    ver_index = request.store._logical_index_path(canonical_ver)
-    assert not cal_index.exists(), "calibration canonical logical_id must not be set before batch commit"
-    assert not ver_index.exists(), "verdict canonical logical_id must not be set before batch commit"
+    committed_ids = _store_logical_ids(request.store)
+    assert not any(
+        item.startswith(canonical_cal_prefix) and item.endswith("/profile.json")
+        for item in committed_ids
+    ), "calibration canonical logical_id must not be set before batch commit"
+    assert not any(
+        item.startswith(canonical_ver_prefix) and item.endswith("/verdict.json")
+        for item in committed_ids
+    ), "verdict canonical logical_id must not be set before batch commit"
 
 
-@pytest.mark.skip(reason="formal release descriptors/sessions are intentionally unavailable")
 def test_final_sessions_are_reserved_before_provider_and_remain_consumed(tmp_path: Path, monkeypatch) -> None:
     """final 集合を provider/publish 前に予約し、後続失敗でも消費済みにする。"""
     import benchmark_survivors_perception as _bsp
 
-    request = _request(tmp_path)
-
-    def _failing_provider(manifests, restored):
-        for index in range(3):
-            marker = request.store._logical_index_path(
-                f"perception/lineage/opened/final-{index}.json"
-            )
-            assert marker.exists()
-        assert not request.store._logical_index_path(request.verdict_logical_id).exists()
-        raise RuntimeError("provider failed after reservation")
+    _patch_minimal_test_gates(monkeypatch)
+    request = _request(tmp_path, formal_inputs=True)
 
     def _failing_factory(restored):
-        return _failing_provider, _assembler_factory
+        predictor = _FixturePredictor(restored)
+        predict = predictor.predict_frame
+
+        def fail_during_final(frame, session_id: str, frame_index: int):
+            if session_id.startswith("final-"):
+                for index in range(3):
+                    assert request.store._logical_index_path(
+                        f"perception/lineage/opened/final-{index}.json"
+                    ).exists()
+                assert not any(
+                    item.startswith(request.verdict_namespace + "/")
+                    and item.endswith("/verdict.json")
+                    for item in _store_logical_ids(request.store)
+                )
+                raise RuntimeError("provider failed after reservation")
+            return predict(frame, session_id, frame_index)
+
+        predictor.predict_frame = fail_during_final
+        return predictor
 
     monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _failing_factory)
     with pytest.raises(RuntimeError, match="provider failed after reservation"):
         run_formal_pipeline(request)
-    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _default_cli_factory)
+    monkeypatch.setattr(_bsp, "_CLI_PROVIDER_FACTORY", _test_provider_factory)
     with pytest.raises(FinalSessionAlreadyOpenedError):
         run_formal_pipeline(request)
 

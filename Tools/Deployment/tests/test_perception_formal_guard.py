@@ -821,3 +821,16 @@ def test_verify_formal_runtime_release_rejects_missing_file(tmp_path: Any) -> No
     dag = _build_runtime_dag(verdict_desc, subjects, profile)
     with pytest.raises(ValueError):
         verify_formal_runtime_release(dag, store)
+
+
+def test_ground_truth_factory_accepts_capture_ground_truth_files() -> None:
+    """formal GT factory は verified capture bytes を3番目の引数で受ける。
+
+    runner が annotation payload と package payload を混同せず渡せるようにする。
+    """
+    import inspect
+
+    from benchmark_survivors_perception import _GROUND_TRUTH_FACTORY
+
+    assert _GROUND_TRUTH_FACTORY is not None
+    assert len(inspect.signature(_GROUND_TRUTH_FACTORY).parameters) == 3

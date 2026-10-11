@@ -31,7 +31,7 @@ import pathlib
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from survivors.vision.world_detector import validate_detector_config
@@ -598,6 +598,15 @@ def restore_package(
 
     pkg_dir = manifest_path.parent
 
+    if require_formal:
+        detector, tracker, pkg_manifest = load_formal_detector(pkg_dir)
+        result = detector.infer(frame_bgr, score_threshold=pkg_manifest.score_threshold)
+        state = tracker.update(result, frame_index=0, timestamp_ns=0)
+        return TrackedWorldStateV2.from_state(
+            state, frame_index=0, timestamp_ns=0,
+            class_map_path=pkg_dir / _CLASS_MAP_NAME,
+        )
+
     # -- manifest load
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     pkg_manifest = PackageManifest.from_dict(raw)
@@ -723,3 +732,89 @@ def restore_package(
 
     # -- schema 検証は上の contract_hash 比較で実施済み（_compute_contract_hash が3クラス全体をカバー）
     return v2
+
+
+def _formal_manifest_from_dict(wire: object) -> PackageManifest:
+    """formal eligible manifest を strict な PackageManifest に復元する。
+
+    development loader の forced flags を迂回せず、正式入口で両 eligibility を照合する。
+    """
+    if not isinstance(wire, dict):
+        raise ValueError("formal detector manifest must be an object")
+    expected = {
+        "schema_version", "formal_detector_eligible", "model_hash", "data_hash",
+        "config_hash", "build_hash", "class_map_hash", "contract_hash", "metrics",
+        "checkpoint_selection", "weight_included", "score_threshold", "development_only",
+        "training_mode",
+    }
+    if set(wire) != expected:
+        raise ValueError("formal detector manifest fields do not match schema")
+    if wire["formal_detector_eligible"] is not True or wire["development_only"] is not False:
+        raise FormalPackageRejectedError("development detector package cannot be loaded as formal")
+    development_wire = dict(wire)
+    development_wire["formal_detector_eligible"] = False
+    development_wire["development_only"] = True
+    return replace(
+        PackageManifest.from_dict(development_wire),
+        formal_detector_eligible=True,
+        development_only=False,
+    )
+
+
+def load_formal_detector(
+    package_dir: pathlib.Path | str,
+) -> tuple["WorldDetector", "EntityTracker", PackageManifest]:
+    """verified formal detector package から model と tracker を復元する。
+
+    content key、schema、config/class map/weight/contract hash を照合してから返す。
+    """
+    import yaml
+
+    from survivors.vision.entity_tracker import EntityTracker
+    from survivors.vision.world_dataset import load_class_map
+    from survivors.vision.world_detector import WorldDetector
+
+    pkg_dir = pathlib.Path(package_dir)
+    manifest_path = pkg_dir / _MANIFEST_NAME
+    raw = json.loads(manifest_path.read_bytes())
+    manifest = _formal_manifest_from_dict(raw)
+    if pkg_dir.name != _content_key(manifest):
+        raise PackageSchemaError("formal detector directory does not match its content key")
+    if manifest.contract_hash != _compute_contract_hash():
+        raise PackageSchemaError("formal detector contract hash does not match current schema")
+    cfg_path, class_map_path = pkg_dir / _CONFIG_NAME, pkg_dir / _CLASS_MAP_NAME
+    if not cfg_path.is_file() or not class_map_path.is_file():
+        raise FileNotFoundError("formal detector config or class map is missing")
+    if _sha256_file(cfg_path) != manifest.config_hash or _sha256_file(class_map_path) != manifest.class_map_hash:
+        raise PackageSchemaError("formal detector config/class-map hash mismatch")
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    validate_detector_config(cfg)
+    detector = WorldDetector.from_config(cfg, class_map_path)
+    weight_path = pkg_dir / _WEIGHT_NAME
+    if not manifest.weight_included or not weight_path.is_file() or _sha256_file(weight_path) != manifest.model_hash:
+        raise PackageSchemaError("formal detector weight is missing or does not match its hash")
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        if exc.name != "torch":
+            raise
+        raise FormalPackageRejectedError("torch is required for formal detector inference") from exc
+    try:
+        state_dict = torch.load(weight_path, map_location="cpu", weights_only=True)
+    except TypeError:
+        state_dict = torch.load(weight_path, map_location="cpu")
+    detector._model.load_state_dict(state_dict)
+    class_map = load_class_map(class_map_path)
+    tracker_cfg = cfg.get("tracker", {})
+    max_age_by_class = {
+        class_map.name_to_id(name): age
+        for name, age in tracker_cfg.get("max_age_by_class", {}).items()
+    }
+    tracker = EntityTracker(
+        max_age_by_class=max_age_by_class,
+        max_match_cost=tracker_cfg.get("max_match_cost", 0.7),
+        velocity_ema_alpha=tracker_cfg.get("velocity_ema_alpha", 0.6),
+        confidence_decay_per_frame=tracker_cfg.get("confidence_decay_per_frame", 0.9),
+        coarse_by_class_id=class_map.coarse_by_class_id(),
+    )
+    return detector, tracker, manifest

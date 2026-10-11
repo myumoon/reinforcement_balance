@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -41,11 +42,13 @@ from survivors.perception_snapshot import PerceptionSnapshot
 from survivors.perception_benchmark import (
     ExpectedTick,
     SnapshotReplayTick,
+    _FORMAL_FOREGROUND_CLASSES,
     _formalize_benchmark_report,
     formal_threshold_content_hash,
     obs_v2_residuals,
     run_benchmark,
 )
+from survivors.formal_ground_truth import CaptureGroundTruthFiles
 from reinbalance_survivors_contracts.deploy_obs import DeployObsSchema
 from survivors.perception_error_fit import (
     _HASH_FIELDS,
@@ -88,6 +91,13 @@ class FormalPredictor(Protocol):
         """自身の package に束縛した prediction と latency だけを返す。"""
         ...
 
+    def reset(self) -> None:
+        """session 境界で parser・tracker・assembler の時間状態を破棄する。
+
+        次 session の結果へ前 session の履歴を混ぜないため runner が毎回呼ぶ。
+        """
+        ...
+
 
 class FormalGroundTruthLoader(Protocol):
     """runner-owned annotation loader。provider から分離した真正性境界。"""
@@ -103,7 +113,10 @@ FormalPredictorFactory = Callable[
     [Mapping[str, RestoredFormalArtifact]], FormalPredictor
 ]
 FormalGroundTruthFactory = Callable[
-    [Mapping[str, bytes], Mapping[str, Mapping[str, Any]]], FormalGroundTruthLoader
+    [
+        Mapping[str, bytes], Mapping[str, Mapping[str, Any]],
+        Mapping[str, CaptureGroundTruthFiles],
+    ], FormalGroundTruthLoader
 ]
 
 
@@ -513,6 +526,68 @@ def _verified_annotation_payloads(
             raise ValueError("local session manifest is not independently descriptor-bound")
         payloads[session_id] = annotation_bytes
     return payloads
+
+
+def _verified_capture_ground_truth_files(
+    request: FormalBenchmarkRequest,
+    restored: Mapping[str, RestoredFormalArtifact],
+    validated_split: SessionSplit,
+    session_ids: set[str],
+) -> dict[str, CaptureGroundTruthFiles]:
+    """capture descriptor の GT binding を参照 bytes と SHA-256 で照合する。
+
+    untrusted identity metadata から未束縛の label・frame JSONL を loader へ渡さない。
+    """
+    del request  # descriptor bytes は restore 済み artifact が唯一の入力元。
+    capture = restored["capture_dataset"]
+    metadata = capture.descriptor.identity_metadata
+    session_hashes = {
+        session.session_id: session.session_hash
+        for session in validated_split.sessions
+        if session.kind in {"error_calibration", "final_e2e_test"}
+    }
+    if not session_ids <= set(session_hashes):
+        raise ValueError("ground truth restore requested an unknown formal session")
+    binding_names = {
+        "hud_truth_bindings": "hud_truth",
+        "coco_bindings": "world_coco",
+        "frames_bindings": "frames_jsonl",
+    }
+    all_bindings: dict[str, Mapping[str, Any]] = {}
+    for field_name in binding_names:
+        bindings = metadata.get(field_name)
+        if not isinstance(bindings, Mapping) or set(bindings) != set(session_hashes):
+            raise ValueError(f"capture descriptor {field_name} must exactly cover formal sessions")
+        all_bindings[field_name] = bindings
+    refs_by_id = {ref.logical_id: ref for ref in capture.descriptor.files}
+    used_ids: set[str] = set()
+    verified: dict[str, dict[str, bytes]] = {session_id: {} for session_id in session_ids}
+    for session_id in sorted(session_ids):
+        for binding_name, data_name in binding_names.items():
+            binding = all_bindings[binding_name][session_id]
+            if not isinstance(binding, Mapping) or set(binding) != {"logical_id", "sha256"}:
+                raise ValueError(f"{binding_name} entry has an invalid schema")
+            logical_id, digest = binding["logical_id"], binding["sha256"]
+            if (
+                type(logical_id) is not str or not logical_id or logical_id in used_ids
+                or type(digest) is not str or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError("capture ground truth bindings need unique ids and SHA-256 values")
+            used_ids.add(logical_id)
+            ref = refs_by_id.get(logical_id)
+            content = capture.files.get(logical_id)
+            if ref is None or ref.sha256 != digest or content is None:
+                raise ValueError("capture ground truth binding is not descriptor-backed")
+            if hashlib.sha256(content).hexdigest() != digest:
+                raise ValueError("capture ground truth bytes do not match binding hash")
+            verified[session_id][data_name] = content
+    return {
+        session_id: CaptureGroundTruthFiles(
+            files["hud_truth"], files["world_coco"], files["frames_jsonl"]
+        )
+        for session_id, files in verified.items()
+    }
 
 
 def _annotation_evidence_index(
@@ -1085,6 +1160,78 @@ def _derive_calibration_residuals(
     return residuals
 
 
+def _assign_foreground_entities(
+    ground: PerceptionSnapshot,
+    predicted: PerceptionSnapshot,
+) -> PerceptionSnapshot:
+    """predicted boxes を IoU で GT frame-local entity ID へ割り当てる。
+
+    score 降順の greedy matching を使い、閾値未満の formal class box は FP として残す。
+    """
+    ground_boxes = ground.diagnostics.get("foreground_entity_boxes")
+    ground_classes = ground.diagnostics.get("foreground_entity_classes")
+    predicted_boxes = predicted.diagnostics.get("predicted_boxes", ())
+    if not isinstance(ground_boxes, Mapping) or not isinstance(ground_classes, Mapping):
+        raise ValueError("ground truth entity diagnostics are missing")
+    if not isinstance(predicted_boxes, (list, tuple)):
+        raise ValueError("predicted_boxes must be a sequence")
+
+    def valid_box(value: object) -> tuple[float, float, float, float]:
+        if not isinstance(value, (list, tuple)) or len(value) != 4:
+            raise ValueError("entity box must contain four coordinates")
+        if any(isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item) for item in value):
+            raise ValueError("entity box coordinates must be finite numbers")
+        x1, y1, x2, y2 = (float(item) for item in value)
+        if x1 >= x2 or y1 >= y2:
+            raise ValueError("entity box must have positive area")
+        return x1, y1, x2, y2
+
+    gt = {
+        entity_id: valid_box(box)
+        for entity_id, box in ground_boxes.items()
+        if type(entity_id) is str and entity_id and ground_classes.get(entity_id) in _FORMAL_FOREGROUND_CLASSES
+    }
+    unused_gt = set(gt)
+    candidates: list[tuple[float, int, str, tuple[float, float, float, float]]] = []
+    for index, raw in enumerate(predicted_boxes):
+        if not isinstance(raw, Mapping):
+            raise ValueError("predicted box must be a mapping")
+        class_name, score = raw.get("class"), raw.get("score")
+        if type(class_name) is not str:
+            raise ValueError("predicted box class must be a string")
+        if class_name not in _FORMAL_FOREGROUND_CLASSES:
+            continue
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= 1:
+            raise ValueError("predicted box score must be in [0, 1]")
+        candidates.append((float(score), index, class_name, valid_box(raw.get("xyxy"))))
+    assigned: dict[str, str] = {}
+    for _score, index, class_name, box in sorted(candidates, key=lambda value: (-value[0], value[1])):
+        best_id, best_iou = None, 0.5
+        for entity_id in gt:
+            if entity_id not in unused_gt:
+                continue
+            other = gt[entity_id]
+            intersection = max(0.0, min(box[2], other[2]) - max(box[0], other[0])) * max(
+                0.0, min(box[3], other[3]) - max(box[1], other[1])
+            )
+            union = (box[2] - box[0]) * (box[3] - box[1]) + (other[2] - other[0]) * (other[3] - other[1]) - intersection
+            iou = intersection / union if union > 0 else 0.0
+            if iou >= best_iou:
+                best_id, best_iou = entity_id, iou
+        if best_id is None:
+            assigned[f"pred:{index}"] = class_name
+        else:
+            assigned[best_id] = class_name
+            unused_gt.remove(best_id)
+    counts: dict[str, int] = {}
+    for class_name in assigned.values():
+        counts[class_name] = counts.get(class_name, 0) + 1
+    diagnostics = dict(predicted.diagnostics)
+    diagnostics["foreground_entity_classes"] = assigned
+    diagnostics["foreground_entity_counts"] = counts
+    return replace(predicted, diagnostics=diagnostics)
+
+
 def _replay_sessions(
     manifests: tuple[SessionManifest, ...],
     session_records: Mapping[str, Any],
@@ -1101,6 +1248,7 @@ def _replay_sessions(
     expected: list[ExpectedTick] = []
     evidence_by_frame: dict[str, FormalReplayEvidence] = {}
     for manifest in manifests:
+        predictor.reset()
         record = session_records[manifest.session_id]
         for frame in manifest.frames:
             frame_id = f"{manifest.session_id}:{frame.session_frame_index}"
@@ -1137,6 +1285,8 @@ def _replay_sessions(
                 raise ValueError("snapshot parser hash is not bound to restored package")
             if predicted is not None and predicted.detector_artifact_hash != detector_hash:
                 raise ValueError("prediction detector hash is not bound to restored package")
+            if predicted is not None:
+                predicted = _assign_foreground_entities(ground, predicted)
             # annotation snapshot の detector field は評価対象ではない。record へ渡す
             # identity は verified detector package へ統一する。
             ground = replace(ground, detector_artifact_hash=detector_hash)
@@ -1640,11 +1790,15 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         validated_split,
         {manifest.session_id for manifest in calibration_manifests},
     )
+    calibration_capture_files = _verified_capture_ground_truth_files(
+        request, restored, validated_split,
+        {manifest.session_id for manifest in calibration_manifests},
+    )
     calibration_evidence = _annotation_evidence_index(
         calibration_annotation_payloads
     )
     calibration_ground_truth_loader = _GROUND_TRUTH_FACTORY(
-        calibration_annotation_payloads, payloads
+        calibration_annotation_payloads, payloads, calibration_capture_files
     )
     if not hasattr(calibration_ground_truth_loader, "load_frame"):
         raise TypeError("formal annotation loader must implement load_frame")
@@ -1755,9 +1909,13 @@ def run_formal_pipeline(request: FormalBenchmarkRequest) -> FormalBenchmarkResul
         validated_split,
         {manifest.session_id for manifest in final_manifests},
     )
+    final_capture_files = _verified_capture_ground_truth_files(
+        request, restored, validated_split,
+        {manifest.session_id for manifest in final_manifests},
+    )
     final_evidence = _annotation_evidence_index(final_annotation_payloads)
     final_ground_truth_loader = _GROUND_TRUTH_FACTORY(
-        final_annotation_payloads, payloads
+        final_annotation_payloads, payloads, final_capture_files
     )
     if not hasattr(final_ground_truth_loader, "load_frame"):
         raise TypeError("formal annotation loader must implement load_frame")

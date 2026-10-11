@@ -49,6 +49,14 @@ class TemporalAssembler:
         self._session_id: str | None = None
         self._session_start_ns: int | None = None  # 現在sessionの最初のHUD timestamp
 
+    @property
+    def last_hud(self) -> HudStateV1 | None:
+        """時系列 filter が最後に採用した HUD を返す。
+
+        provider が assembler と同じ HUD identity を snapshot へ束縛できるようにする。
+        """
+        return self._hud
+
     def observe_hud(self, hud: HudStateV1) -> None:
         """最新 HUD を monotonic・bounded filter へ取り込む。
 
