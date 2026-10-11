@@ -322,12 +322,13 @@ session log 雛形は [`templates/d04_session_log.md`](templates/d04_session_log
 
 ### 3-4. sealed session の評価窓を annotation する（04-18）
 
-`error_calibration`／`final_e2e_test` に使う session は、annotation を始める前に窓 plan を作り、Git 外の session log と artifact store に保存します。plan は時間帯の固定 offset、run tail、development parser の event、development detector の boss 検出から決まり、frame 内容を見て人が選びません。parser/checkpoint hash と閾値も plan の rule に固定します。
+`error_calibration`／`final_e2e_test` に使う sealed session 全件を、annotation を始める前に一つの窓 plan にまとめ、Git 外の session log と artifact store に保存します。plan は時間帯の固定 offset、run tail、development parser の event、development detector の boss 検出から決まり、frame 内容を見て人が選びません。parser/checkpoint hash と閾値も plan の rule に固定します。
 
 ```powershell
 python Tools/Deployment/plan_survivors_evaluation_windows.py `
   --store-root "<RecordRoot>" `
-  --session-id "<SessionId>" `
+  --session-id "<SessionIdA>" `
+  --session-id "<SessionIdB>" `
   --rule "<RuleYaml>" `
   --output "<PlanJson>" `
   --detector-manifest "<DetectorManifest>" `
@@ -336,7 +337,7 @@ python Tools/Deployment/plan_survivors_evaluation_windows.py `
   --class-map "<WorldClassMapV2>"
 ```
 
-plan を capture descriptor の `identity_metadata.evaluation_windows` と結び、formal gate YAML の `formal_gates.v1` binding と一緒に世代を publish します。annotation 用 frame は同じ plan の stride で抽出します。
+sealed session の数だけ `--session-id` を繰り返し、全 session を含む JSON を一度に生成します。複数の plan JSON を手で結合しないでください。plan を capture descriptor の `identity_metadata.evaluation_windows` と結び、formal gate YAML の `formal_gates.v1` binding と一緒に世代を publish します。annotation 用 frame は同じ plan の stride で抽出します。
 
 ```powershell
 python Tools/Deployment/select_survivors_annotation_candidates.py `
