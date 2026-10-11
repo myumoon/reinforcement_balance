@@ -1,7 +1,0 @@
-{
-  "status": "DONE",
-  "branch": "feature/real-vs-hud-parser-formal-tooling",
-  "summary": "formal preflight の全 rejection scenario で期待する拒否理由を検証し、development session の restore 差し替えに cls 引数を追加した。",
-  "intent": "例外型だけでなく理由まで固定し、eligibility 検査が失われた場合に regression test が失敗するようにした。",
-  "notes": "hud_formal_release.py の実装変更は残していない。対象テストは 21 passed。formal_dataset_eligible 検査を一時的に外した実験では development_session が DID NOT RAISE で失敗し、検査を戻した。sandbox 内の pytest は WinError 5 のため指定コマンドを require_escalated で実行。M1〜M6 と I1〜I4 の未再検証項目は evidence に NOT_VERIFIED と記録した。"
-}
