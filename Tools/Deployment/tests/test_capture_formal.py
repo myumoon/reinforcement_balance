@@ -157,6 +157,116 @@ def test_promotion_rejects_every_frozen_generation_and_invalid_freezer_path(tmp_
         SplitFreezer(tmp_path, manifest_path=tmp_path / "splits" / "gen2.json")
 
 
+def test_all_planned_promotes_new_session_after_dated_freeze_without_changing_frozen_sessions(
+    tmp_path, monkeypatch, capsys
+):
+    """日付付き freeze 済み session を no-op にして新規 planned session を昇格する。
+
+    all-planned が既存の frozen manifest を変更せず処理を完了することを確認する。
+    """
+    from types import SimpleNamespace
+
+    import promote_survivors_capture_session as promote_cli
+
+    monkeypatch.setattr(
+        promote_cli,
+        "load_runtime_profile",
+        lambda _: SimpleNamespace(target_hash=PROFILE_HASH, sections={"build": {"build_id": BUILD_ID}}),
+    )
+    frozen_ids = ("a-model", "b-model")
+    frozen_paths = []
+    for session_id in frozen_ids:
+        published = _publish_session(
+            tmp_path,
+            session_id,
+            checkpoint="planned_split:model_train|planned_at:2026-10-11T00:00:00Z|capture",
+        )
+        promote_session(
+            tmp_path,
+            session_id,
+            operator_id="operator-01",
+            attestation_note="reviewed build",
+            expected_target_profile_hash=PROFILE_HASH,
+            expected_game_build_id=BUILD_ID,
+        )
+        frozen_paths.append(published.session_path / "session_manifest.json")
+    frozen_bytes = [path.read_bytes() for path in frozen_paths]
+
+    split_path = tmp_path / "capture_split_manifest.20261011.json"
+    freezer = SplitFreezer(tmp_path, manifest_path=split_path)
+    freezer.assign("model_train", frozen_ids)
+    freezer.freeze()
+    _publish_session(
+        tmp_path,
+        "c-sealed",
+        checkpoint="planned_split:final_e2e_test|planned_at:2026-10-11T00:00:00Z|capture",
+    )
+
+    assert promote_cli.main([
+        "--store-root", str(tmp_path), "--all-planned",
+        "--operator-id", "operator-01", "--note", "reviewed build",
+        "--target-profile", str(tmp_path / "target-profile.yaml"),
+    ]) == 0
+    promoted = json.loads(capsys.readouterr().out)["promoted"]
+
+    assert {item["session_id"] for item in promoted} == {*frozen_ids, "c-sealed"}
+    assert DatasetWriter.restore(tmp_path, "c-sealed", metadata_only=True).formal_dataset_eligible
+    assert [path.read_bytes() for path in frozen_paths] == frozen_bytes
+
+
+def test_frozen_eligible_noop_matches_direct_and_session_id_calls(tmp_path, monkeypatch, capsys):
+    """frozen eligible session への direct と session-id の no-op が一致する。
+
+    同じ planned split の再指定を含め、session manifest bytes が固定されることを確認する。
+    """
+    from types import SimpleNamespace
+
+    import promote_survivors_capture_session as promote_cli
+
+    monkeypatch.setattr(
+        promote_cli,
+        "load_runtime_profile",
+        lambda _: SimpleNamespace(target_hash=PROFILE_HASH, sections={"build": {"build_id": BUILD_ID}}),
+    )
+    published = _publish_session(
+        tmp_path,
+        checkpoint="planned_split:model_train|planned_at:2026-10-11T00:00:00Z|capture",
+    )
+    eligible = promote_session(
+        tmp_path,
+        published.session_id,
+        operator_id="operator-01",
+        attestation_note="reviewed build",
+        expected_target_profile_hash=PROFILE_HASH,
+        expected_game_build_id=BUILD_ID,
+    )
+    freezer = SplitFreezer(tmp_path, manifest_path=tmp_path / "capture_split_manifest.20261011.json")
+    freezer.assign("model_train", [published.session_id])
+    freezer.freeze()
+    manifest_path = published.session_path / "session_manifest.json"
+    frozen_bytes = manifest_path.read_bytes()
+
+    direct = promote_session(
+        tmp_path,
+        published.session_id,
+        operator_id="operator-01",
+        attestation_note="reviewed build",
+        expected_target_profile_hash=PROFILE_HASH,
+        expected_game_build_id=BUILD_ID,
+    )
+    assert direct.manifest_sha256 == eligible.manifest_sha256
+    assert manifest_path.read_bytes() == frozen_bytes
+
+    assert promote_cli.main([
+        "--store-root", str(tmp_path), "--session-id", published.session_id,
+        "--operator-id", "operator-01", "--note", "reviewed build",
+        "--target-profile", str(tmp_path / "target-profile.yaml"),
+        "--planned-split", "model_train",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["promoted"][0]["manifest_sha256"] == eligible.manifest_sha256
+    assert manifest_path.read_bytes() == frozen_bytes
+
+
 def test_promotion_rejects_fixture_build_id(tmp_path):
     """fixture 専用 build id を formal 昇格の trust boundary で拒否する。
 
