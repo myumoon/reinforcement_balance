@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shutil
 import struct
+import tempfile
 from threading import Lock
 from typing import Any, Iterable
 import uuid
@@ -1205,6 +1206,10 @@ class AnnotationWriter:
     def read_annotations(
         cls, store_root: os.PathLike[str] | str | None, session_id: str
     ) -> tuple[AnnotationRecord, ...]:
+        """旧 AnnotationRecord schema の JSONL だけを session から読む。
+
+        formal annotation は別 semantic contract の loader に委ねる。
+        """
         root = _validated_store_root(store_root)
         safe_session_id = _validated_component(session_id, "session_id")
         session_path = _resolve_relative(
@@ -1221,8 +1226,14 @@ class AnnotationWriter:
                 if not line:
                     continue
                 try:
-                    record = _annotation_from_wire(json.loads(line))
-                except (json.JSONDecodeError, TypeError, KeyError) as exc:
+                    wire = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"invalid annotation at line {line_number}") from exc
+                if isinstance(wire, dict) and wire.get("schema_version") == "perception_formal_annotation.v1":
+                    raise ValueError("formal annotation schema; use formal loader")
+                try:
+                    record = _annotation_from_wire(wire)
+                except (TypeError, KeyError) as exc:
                     raise ValueError(f"invalid annotation at line {line_number}") from exc
                 key = record.frame_id, record.class_name
                 if key in seen and not record.second_review:
@@ -1302,12 +1313,77 @@ def _split_manifest_from_bytes(path: Path, encoded: bytes) -> SplitManifest:
     return SplitManifest(1, True, splits, path, _sha256_bytes(encoded))
 
 
+def load_split_manifest_by_hash(
+    store_root: os.PathLike[str] | str | None, expected_sha256: str
+) -> SplitManifest:
+    """frozen split generation を内容 hash で store root から一意に選ぶ。
+
+    default と日付付き manifest が共存しても consumer が異なる世代を読まない。
+    """
+    root = _validated_store_root(store_root)
+    expected = _validated_sha256(expected_sha256, "expected split manifest sha256")
+    matches: list[tuple[Path, bytes]] = []
+    for path in _split_manifest_paths(root):
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if root not in resolved.parents:
+            raise ValueError("split manifest path escapes store_root")
+        try:
+            encoded = resolved.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"cannot read split manifest: {path.name}") from exc
+        if _sha256_bytes(encoded) == expected:
+            matches.append((resolved, encoded))
+    if len(matches) != 1:
+        raise ValueError("expected exactly one frozen split manifest with descriptor hash")
+    path, encoded = matches[0]
+    return _split_manifest_from_bytes(path, encoded)
+
+
+def _split_manifest_paths(root: Path) -> list[Path]:
+    """store root が管理する default と全 frozen generation を列挙する。
+
+    producer と consumer が同じ名前規則で split を確認できるようにする。
+    """
+    return [root / "capture_split_manifest.json", *sorted(root.glob("capture_split_manifest.*.json"))]
+
+
+def _is_split_manifest_path(root: Path, path: Path) -> bool:
+    """指定 path が consumer の split generation 規則に一致するか返す。
+
+    任意の nested path を freeze して consumer から見えなくなる状態を防ぐ。
+    """
+    return path.parent == root and (
+        path.name == "capture_split_manifest.json"
+        or (path.name.startswith("capture_split_manifest.") and path.name.endswith(".json"))
+    )
+
+
 class SplitFreezer:
     """Freeze disjoint session/build assignments into a hash-addressed manifest."""
 
-    def __init__(self, store_root: os.PathLike[str] | str | None) -> None:
+    def __init__(
+        self,
+        store_root: os.PathLike[str] | str | None,
+        *,
+        manifest_path: os.PathLike[str] | str | None = None,
+    ) -> None:
+        """split manifest の世代 path と既存 freeze 状態を読み込む。
+
+        明示 path も store root 内に限定して別世代の上書きを防ぐ。
+        """
         self.store_root = _validated_store_root(store_root)
-        self.manifest_path = self.store_root / "capture_split_manifest.json"
+        self.manifest_path = (
+            self.store_root / "capture_split_manifest.json"
+            if manifest_path is None
+            else Path(manifest_path).expanduser()
+        )
+        if not self.manifest_path.is_absolute():
+            self.manifest_path = self.store_root / self.manifest_path
+        self.manifest_path = self.manifest_path.resolve()
+        if not _is_split_manifest_path(self.store_root, self.manifest_path):
+            raise ValueError("manifest_path must match the root-level capture split manifest pattern")
         self._splits: dict[str, list[SplitUnit]] = {name: [] for name in SPLIT_NAMES}
         self._session_ids: set[str] = set()
         self._manifest: SplitManifest | None = None
@@ -1356,6 +1432,10 @@ class SplitFreezer:
         self._session_ids.update(pending_ids)
 
     def freeze(self) -> SplitManifest:
+        """assignment 集合を create-once の frozen manifest として公開する。
+
+        temp object を fsync してから hardlink で未作成 destination に確定する。
+        """
         if self._manifest is not None:
             raise SplitFrozenError("split manifest is frozen")
         wire = {
@@ -1367,9 +1447,25 @@ class SplitFreezer:
             },
         }
         encoded = _canonical_json(wire)
-        temp_path = self.store_root / ".capture_split_manifest.json.tmp"
-        temp_path.write_bytes(encoded)
-        os.replace(temp_path, self.manifest_path)
+        if self.manifest_path.exists():
+            raise SplitFrozenError("split manifest path already exists")
+        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{self.manifest_path.name}.", suffix=".tmp", dir=self.manifest_path.parent
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temp_path, self.manifest_path)
+            except FileExistsError as exc:
+                raise SplitFrozenError("split manifest path already exists") from exc
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
         self._manifest = _split_manifest_from_bytes(self.manifest_path, encoded)
         return self._manifest
 

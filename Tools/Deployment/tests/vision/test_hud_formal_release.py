@@ -605,8 +605,8 @@ synthetic capture から preflight と formal CLI release を通し、不正な�
     if scenario == "unfrozen":
         monkeypatch.setattr(
             formal_release,
-            "_split_manifest_from_bytes",
-            lambda _path, _encoded: SimpleNamespace(frozen=False),
+            "load_split_manifest_by_hash",
+            lambda _root, _sha256: SimpleNamespace(frozen=False),
         )
     elif scenario == "development_session":
         original_restore = DatasetWriter.restore
