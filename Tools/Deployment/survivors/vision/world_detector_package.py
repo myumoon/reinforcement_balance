@@ -626,6 +626,9 @@ def restore_package(
         raise PackageSchemaError("formal package に必須の weight が含まれていません。")
 
     formal_verdict = None
+    formal_verdict_bytes = None
+    if pkg_manifest.training_mode == "formal":
+        formal_verdict_bytes = _read_formal_verdict_bytes(pkg_dir, pkg_manifest)
 
     # -- contract hash 検証
     current_contract_hash = _compute_contract_hash()
@@ -656,8 +659,10 @@ def restore_package(
 
     # 共有 validator を明示的に呼ぶ（model / tracker 構築より前）
     validate_detector_config(cfg)
-    if pkg_manifest.training_mode == "formal":
-        formal_verdict = _validate_formal_verdict(pkg_dir, pkg_manifest, cfg)
+    if formal_verdict_bytes is not None:
+        formal_verdict = _validate_formal_verdict(
+            pkg_dir, pkg_manifest, cfg, formal_verdict_bytes,
+        )
 
     detector = WorldDetector.from_config(cfg, cm_path)
 
@@ -741,17 +746,14 @@ def _formal_manifest_from_dict(wire: object) -> PackageManifest:
     return manifest
 
 
-def _validate_formal_verdict(
+def _read_formal_verdict_bytes(
     package_dir: pathlib.Path,
     manifest: PackageManifest,
-    cfg: dict,
-) -> Any:
-    """formal package の verdict、config、weight identity を照合する。
+) -> bytes:
+    """manifest に結び付いた verdict bytes を取得する。
 
-    復元経路が異なっても同じ verdict 内容検証を適用する。
+    後段の config 検証より前に、verdict の欠落や file hash 不一致を拒否する。
     """
-    from survivors.vision.world_formal_release import ValidationVerdict, resolved_config_hash
-
     verdict_path = package_dir / _VALIDATION_VERDICT_NAME
     if not verdict_path.is_file():
         raise PackageSchemaError("formal detector validation verdict is missing")
@@ -761,6 +763,21 @@ def _validate_formal_verdict(
         raise PackageSchemaError("formal detector validation verdict is unreadable") from exc
     if hashlib.sha256(verdict_bytes).hexdigest() != manifest.validation_verdict_hash:
         raise PackageSchemaError("formal detector validation verdict does not match its hash")
+    return verdict_bytes
+
+
+def _validate_formal_verdict(
+    package_dir: pathlib.Path,
+    manifest: PackageManifest,
+    cfg: dict,
+    verdict_bytes: bytes,
+) -> Any:
+    """formal package の verdict、config、weight identity を照合する。
+
+    復元経路が異なっても同じ verdict 内容検証を適用する。
+    """
+    from survivors.vision.world_formal_release import ValidationVerdict, resolved_config_hash
+
     try:
         verdict = ValidationVerdict.from_dict(json.loads(verdict_bytes))
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
@@ -807,6 +824,7 @@ def load_formal_detector(
         raise PackageSchemaError("formal detector directory does not match its content key")
     if manifest.contract_hash != _compute_contract_hash():
         raise PackageSchemaError("formal detector contract hash does not match current schema")
+    verdict_bytes = _read_formal_verdict_bytes(pkg_dir, manifest)
     cfg_path, class_map_path = pkg_dir / _CONFIG_NAME, pkg_dir / _CLASS_MAP_NAME
     if not cfg_path.is_file() or not class_map_path.is_file():
         raise FileNotFoundError("formal detector config or class map is missing")
@@ -814,7 +832,7 @@ def load_formal_detector(
         raise PackageSchemaError("formal detector config/class-map hash mismatch")
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     validate_detector_config(cfg)
-    _validate_formal_verdict(pkg_dir, manifest, cfg)
+    _validate_formal_verdict(pkg_dir, manifest, cfg, verdict_bytes)
     detector = WorldDetector.from_config(cfg, class_map_path)
     detector._formal_ignore_regions = cfg["input"].get("ignore_regions", [])
     weight_path = pkg_dir / _WEIGHT_NAME
