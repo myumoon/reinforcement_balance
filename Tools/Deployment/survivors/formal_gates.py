@@ -1,4 +1,7 @@
-"""formal_gates.v1 YAML の schema・identity・metrics 再計算を担う。"""
+"""formal_gates.v1 YAML の schema・identity・metrics 再計算を担う。
+
+世代固有の gate 値を原文 hash に結び、保存 verdict の判定を同じ値から再計算する。
+"""
 
 from __future__ import annotations
 
