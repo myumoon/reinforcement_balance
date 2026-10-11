@@ -257,6 +257,48 @@ set levels 3 1 - - - - 2 - - - - -
 - level-up の `expected_items` は、訪問直前の gameplay 在庫を slot ごとに三枚一致で保存し、位置で結び付けた値です。訪問前に gameplay が三枚無い session 先頭や、identity が読めない枠がある場合は全体が null になりえます。パネルの空枠と種別が食い違う枠は結合しません。
 - 正式 atlas が無い場合や `--atlas` を指定しない場合、所持 identity は読めません。段階マーク自体が読めても、items と levels の下書きは null になる場合があります。
 
+## 3. 正式 dataset にする
+
+この操作は manifest の eligibility flag と operator attestation だけを更新します。**今 annotation 中の session には影響しません。** frame PNG、`frames.jsonl`、`annotations.jsonl`、`game_build_id` は変更しません。freeze 後は session manifest hash が固定されるため、順序を **「昇格 → 割当 → freeze」** にしてください。
+
+用途は次の4種類から選びます。
+
+| `--planned-split` | 用途 |
+|---|---|
+| `model_train` | 練習用の学習 |
+| `model_validation` | 練習用の確認 |
+| `error_calibration` | 本番テスト用の誤差統計 |
+| `final_e2e_test` | 本番テスト用の最終判定 |
+
+収録時に用途を記録するには `capture_survivors.py` に `--planned-split` を指定します。収録済み session は resolved profile で build と target hash を照合し、operator の確認内容を記録して昇格します。
+
+```powershell
+python Tools/Deployment/promote_survivors_capture_session.py `
+  --store-root "<RecordRoot>" --session-id "<SessionId>" `
+  --operator-id "<OperatorId>" --note "実機 build と収録内容を確認" `
+  --target-profile "Tools/Deployment/.env/target_profile.resolved.yaml"
+```
+
+用途を後から直す場合は freeze 前に `--planned-split <用途>` を同じコマンドへ追加します。複数 session は `--all-planned` で一括昇格できます。昇格済み session の用途変更も frozen split が存在しない場合だけ許可されます。
+
+昇格が終わったら、次の CLI を一続きで使い、同じ manifest path の中で割当と freeze を行います。sealed session を後日加えるときは既存 manifest を上書きせず、日付付きの新しい path を指定してください。
+
+```powershell
+python Tools/Deployment/freeze_survivors_capture_split.py `
+  --store-root "<RecordRoot>" `
+  --manifest-path "<RecordRoot>/capture_split_manifest.<YYYYMMDD>.json"
+```
+
+model split の COCO は `export_survivors_annotations_coco.py --store-root <RecordRoot> --split-manifest <SplitManifest> --split model_train|model_validation` で出します。各 image に `session_id`、`frame_id`、`object_sha256` が含まれます。model train と validation の world/UI 出力を `merge_survivors_coco.py` でそれぞれ結合し、二人の独立した work-root に対して `build_survivors_annotation_agreement.py` を実行してから descriptor を発行します。
+
+sealed session の formal `annotations.jsonl` は 04-16 の `build_survivors_formal_annotations.py` が作ります。`AnnotationWriter.read_annotations()` は旧 schema 専用なので formal annotation の読み込みに使わないでください。sealed session の COCO は `<RecordRoot>/coco/<SessionId>/` に置き、evaluation windows と `formal_gates.v1` を用意して `publish_survivors_capture_dataset.py` を実行します。publish は descriptor と restore test verdict を出力します。backup と restore の root には、別々の空 directory を指定してください。
+
+```powershell
+python Tools/Deployment/export_survivors_annotations_coco.py `
+  --work-root "<WorkRoot>" --store-root "<RecordRoot>" `
+  --session-id "<SessionId>" --output-dir "<RecordRoot>/coco/<SessionId>"
+```
+
 ## 参考
 
 - 録画の内部実装・アーキテクチャ・テスト: [`capture_dataset.md`](capture_dataset.md)、[`capture_core.md`](capture_core.md)

@@ -20,7 +20,7 @@ from reinbalance_survivors_contracts.artifact_identity import (
     is_sha256_hex,
 )
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
-from survivors.capture_dataset import DatasetWriter, SPLIT_NAMES, _split_manifest_from_bytes
+from survivors.capture_dataset import DatasetWriter, SPLIT_NAMES, load_split_manifest_by_hash
 from survivors.vision.world_dataset import SessionSplit, WorldDataset, load_class_map
 from survivors.vision.session_cluster_ci import cluster_ci_bounds
 
@@ -322,19 +322,16 @@ def run_formal_preflight(
     manifest_refs = [ref for ref in dataset_descriptor.files if ref.logical_id == manifest_id]
     if len(manifest_refs) != 1:
         raise FormalPreflightError("dataset split manifest reference is missing or ambiguous")
-    split_path = pathlib.Path(capture_store_root).expanduser().resolve() / "capture_split_manifest.json"
+    root = pathlib.Path(capture_store_root).expanduser().resolve()
     try:
-        split_bytes = split_path.read_bytes()
-        split_hash = _sha256(split_bytes)
-        if split_hash != manifest_refs[0].sha256:
-            raise FormalPreflightError("split manifest sha256 mismatch")
-        split_manifest = _split_manifest_from_bytes(split_path, split_bytes)
+        split_manifest = load_split_manifest_by_hash(root, manifest_refs[0].sha256)
     except (OSError, ValueError) as exc:
         if isinstance(exc, FormalPreflightError):
             raise
         raise FormalPreflightError(f"invalid frozen split manifest: {exc}") from exc
     if split_manifest.frozen is not True:
         raise FormalPreflightError("split manifest must be frozen")
+    split_hash = split_manifest.manifest_sha256
     _validate_restore_verdict(dataset_descriptor, restore_verdict_descriptor, split_hash)
 
     try:
@@ -391,7 +388,6 @@ def run_formal_preflight(
         raise FormalPreflightError("model session bindings do not match frozen model split")
     session_frame_hashes: dict[str, set[str]] = {}
     session_manifest_hashes: dict[str, str] = {}
-    root = pathlib.Path(capture_store_root).expanduser().resolve()
     for unit in model_units:
         binding = model_bindings.get(unit.session_id)
         if not isinstance(binding, Mapping) or binding.get("session_manifest_sha256") != unit.session_manifest_sha256:

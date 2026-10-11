@@ -1,0 +1,543 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+
+import cv2
+import numpy as np
+import pytest
+
+from survivors.capture.captured_frame import CapturedFrame
+from survivors.capture_dataset import (
+    AnnotationWriter,
+    DatasetWriter,
+    SplitFreezer,
+    load_split_manifest_by_hash,
+)
+from reinbalance_survivors_contracts.artifact_store import ArtifactStore
+from survivors.capture_formal import (
+    ModelExportPaths,
+    PromotionError,
+    PublishError,
+    assign_from_manifests,
+    build_annotation_agreement,
+    promote_session,
+    publish_capture_dataset,
+)
+from survivors.artifact_restore_test import run_restore_test
+
+
+PROFILE_HASH = "a" * 64
+BUILD_ID = "survivors-live-build-001"
+
+
+def _publish_session(root, session_id="session-001", *, build_id=BUILD_ID, checkpoint="operator checkpoint"):
+    """小さな lossless capture session を作成する。
+
+    昇格前の frame metadata と PNG を実装依存の mock なしで用意する。
+    """
+    writer = DatasetWriter(root, session_id, PROFILE_HASH, build_id)
+    frame = CapturedFrame(
+        frame_bgra=np.zeros((1080, 1920, 4), dtype=np.uint8),
+        captured_monotonic_ns=100,
+        session_frame_index=0,
+        client_rect_screen_px=(0, 0, 1920, 1080),
+        foreground=True,
+        target_profile_hash=PROFILE_HASH,
+        game_build_id=build_id,
+    )
+    writer.write_frame(frame)
+    manifest = writer.publish(operator_checkpoint=checkpoint)
+    return manifest
+
+
+def test_promotion_changes_only_manifest_and_is_idempotent(tmp_path):
+    """昇格が manifest だけを変え、再実行で同じ結果になることを確認する。
+
+    pixel と annotation の hash／bytes が昇格処理から保護される契約を固定する。
+    """
+    published = _publish_session(tmp_path)
+    session_dir = published.session_path
+    frames_before = (session_dir / "frames.jsonl").read_bytes()
+    png_path = session_dir / published.frame_records[0].object_path
+    png_before = hashlib.sha256(png_path.read_bytes()).hexdigest()
+    annotations = session_dir / "annotations.jsonl"
+    annotations.write_bytes(b'{"old":"annotation"}\n')
+
+    promoted = promote_session(
+        tmp_path,
+        published.session_id,
+        operator_id="operator-01",
+        attestation_note="reviewed build",
+        expected_target_profile_hash=PROFILE_HASH,
+        expected_game_build_id=BUILD_ID,
+    )
+    again = promote_session(
+        tmp_path,
+        published.session_id,
+        operator_id="operator-01",
+        attestation_note="reviewed build",
+        expected_target_profile_hash=PROFILE_HASH,
+        expected_game_build_id=BUILD_ID,
+    )
+
+    assert promoted.formal_dataset_eligible is True
+    assert promoted.manifest_sha256 == again.manifest_sha256
+    assert promoted.operator_checkpoint.startswith("operator checkpoint|formal:operator-01:")
+    assert (session_dir / "frames.jsonl").read_bytes() == frames_before
+    assert hashlib.sha256(png_path.read_bytes()).hexdigest() == png_before
+    assert annotations.read_bytes() == b'{"old":"annotation"}\n'
+
+
+def test_promotion_rejects_session_already_in_frozen_split(tmp_path):
+    """freeze 済み split に含まれる session の昇格を拒否する。
+
+    session manifest hash の固定後に split の参照を壊す回帰を捕まえる。
+    """
+    published = _publish_session(tmp_path)
+    freezer = SplitFreezer(tmp_path)
+    freezer.assign("model_train", [published.session_id])
+    freezer.freeze()
+
+    with pytest.raises(PromotionError, match="frozen split contains this session"):
+        promote_session(
+            tmp_path,
+            published.session_id,
+            operator_id="operator-01",
+            attestation_note="reviewed build",
+            expected_target_profile_hash=PROFILE_HASH,
+            expected_game_build_id=BUILD_ID,
+        )
+
+
+def test_promotion_rejects_fixture_build_id(tmp_path):
+    """fixture 専用 build id を formal 昇格の trust boundary で拒否する。
+
+    fixture artifact が実 build と同じ形式で release 経路へ入る誤りを検出する。
+    """
+    published = _publish_session(tmp_path, build_id="TEST_FIXTURE_ONLY")
+
+    with pytest.raises(PromotionError, match="build id"):
+        promote_session(
+            tmp_path,
+            published.session_id,
+            operator_id="operator-01",
+            attestation_note="reviewed build",
+            expected_target_profile_hash=PROFILE_HASH,
+            expected_game_build_id="TEST_FIXTURE_ONLY",
+        )
+
+
+def test_planned_split_can_be_corrected_before_freeze_without_losing_attestation(tmp_path):
+    """昇格済み checkpoint の split prefix を差し替えて後続を保持する。
+
+    planned split の修正で operator attestation が消えたり二重化したりしない。
+    """
+    published = _publish_session(tmp_path)
+    first = promote_session(
+        tmp_path,
+        published.session_id,
+        operator_id="operator-01",
+        attestation_note="reviewed",
+        expected_target_profile_hash=PROFILE_HASH,
+        expected_game_build_id=BUILD_ID,
+        planned_split="model_validation",
+    )
+    corrected = promote_session(
+        tmp_path,
+        published.session_id,
+        operator_id="operator-01",
+        attestation_note="reviewed",
+        expected_target_profile_hash=PROFILE_HASH,
+        expected_game_build_id=BUILD_ID,
+        planned_split="model_train",
+    )
+
+    assert corrected.operator_checkpoint.startswith("planned_split:model_train|planned_at:")
+    assert corrected.operator_checkpoint.count("|formal:operator-01:") == 1
+    assert corrected.operator_checkpoint.endswith("reviewed")
+    assert corrected.manifest_sha256 != first.manifest_sha256
+
+
+def test_capture_cli_persists_planned_split_and_rejects_unknown_choice(tmp_path, capsys):
+    """capture CLI が split 用途を先頭 segment に書き、未知値を parser error にする。
+
+    command line の choices と manifest checkpoint の結線を実動作で検査する。
+    """
+    from capture_survivors import _parser, main as capture_main
+
+    assert capture_main([
+        "--store-root", str(tmp_path), "--session-id", "planned-session",
+        "--duration-sec", "0.1", "--synthetic", "--planned-split", "model_train",
+    ]) == 0
+    manifest = DatasetWriter.restore(tmp_path, "planned-session", metadata_only=True)
+    assert manifest.operator_checkpoint.startswith("planned_split:model_train|planned_at:")
+    with pytest.raises(SystemExit):
+        _parser().parse_args(["--planned-split", "unknown"])
+
+
+def test_assign_from_manifests_includes_only_formal_sessions_and_keeps_generation(tmp_path):
+    """manifest に保存した用途だけで昇格済み session を再構成する。
+
+    明示 path に作る split 世代と昇格後 session hash の対応を検査する。
+    """
+    for session_id, split_name in (
+        ("train-session", "model_train"),
+        ("validation-session", "model_validation"),
+        ("draft-session", "model_train"),
+    ):
+        checkpoint = f"planned_split:{split_name}|planned_at:2026-10-11T00:00:00Z|capture"
+        published = _publish_session(tmp_path, session_id)
+        if session_id != "draft-session":
+            wire = json.loads((published.session_path / "session_manifest.json").read_text())
+            wire["operator_checkpoint"] = checkpoint
+            (published.session_path / "session_manifest.json").write_text(
+                json.dumps(wire, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            promote_session(
+                tmp_path,
+                session_id,
+                operator_id="operator-01",
+                attestation_note="reviewed",
+                expected_target_profile_hash=PROFILE_HASH,
+                expected_game_build_id=BUILD_ID,
+            )
+
+    manifest_path = tmp_path / "capture_split_manifest.20261011.json"
+    freezer = assign_from_manifests(tmp_path, manifest_path=manifest_path)
+    manifest = freezer.freeze()
+
+    assert manifest.manifest_path == manifest_path
+    assert [unit.session_id for unit in manifest.splits["model_train"]] == ["train-session"]
+    assert [unit.session_id for unit in manifest.splits["model_validation"]] == ["validation-session"]
+    assert all("draft-session" != unit.session_id for units in manifest.splits.values() for unit in units)
+    assert manifest.splits["model_train"][0].session_manifest_sha256 == hashlib.sha256(
+        (tmp_path / "capture_sessions/train-session/session_manifest.json").read_bytes()
+    ).hexdigest()
+
+
+def test_legacy_annotation_reader_rejects_formal_schema(tmp_path):
+    """旧 AnnotationRecord reader は formal annotation schema を扱わない。
+
+    別 semantic contract の行を誤って legacy record に変換する回帰を拒む。
+    """
+    published = _publish_session(tmp_path)
+    (published.session_path / "annotations.jsonl").write_text(
+        '{"schema_version":"perception_formal_annotation.v1"}\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="formal annotation schema; use formal loader"):
+        AnnotationWriter.read_annotations(tmp_path, published.session_id)
+
+
+def test_split_manifest_hash_selects_the_requested_frozen_generation(tmp_path):
+    """preflight 用 manifest lookup は hash に一致する日付付き世代を選ぶ。
+
+    default model split と sealed generation が共存する store で誤選択しない。
+    """
+    splits = {name: [] for name in ("model_train", "model_validation", "error_calibration", "final_e2e_test")}
+    default_wire = {"schema_version": 1, "frozen": True, "splits": splits}
+    dated_splits = {name: [] for name in splits}
+    dated_splits["final_e2e_test"] = [{
+        "session_id": "sealed-session",
+        "game_build_id": BUILD_ID,
+        "session_manifest_sha256": "d" * 64,
+    }]
+    dated_wire = {"schema_version": 1, "frozen": True, "splits": dated_splits}
+    default_bytes = (json.dumps(default_wire, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    dated_bytes = (json.dumps(dated_wire, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    root = tmp_path / "store"
+    root.mkdir()
+    (root / "capture_split_manifest.json").write_bytes(default_bytes)
+    dated_path = root / "capture_split_manifest.20261011.json"
+    dated_path.write_bytes(dated_bytes)
+
+    selected = load_split_manifest_by_hash(root, hashlib.sha256(dated_bytes).hexdigest())
+
+    assert selected.manifest_path == dated_path
+    assert [unit.session_id for unit in selected.splits["final_e2e_test"]] == ["sealed-session"]
+
+
+def _write_label(path, labels, *, checked=True):
+    """fixture 用 LabelMe JSON を保存する。
+
+    box 座標と class を固定値にし、agreement の期待値を手で確定できるようにする。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shapes = [
+        {"label": label, "shape_type": "rectangle", "points": [[left, top], [right, bottom]]}
+        for label, left, top, right, bottom in labels
+    ]
+    path.write_text(
+        json.dumps({"shapes": shapes, "imagePath": "", "imageData": None, "checked": checked}),
+        encoding="utf-8",
+    )
+
+
+def test_annotation_agreement_matches_boxes_and_ignores_unshared_frames(tmp_path):
+    """agreement は共有 checked frame だけを IoU で対応付ける。
+
+    class mismatch と class match を別々に数え、片側だけの frame を母集団から外す。
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    _write_label(first / "session-a" / "00000001.json", [
+        ("enemy_normal", 0, 0, 10, 10),
+        ("enemy_normal", 20, 20, 30, 30),
+        ("weapon_target", 40, 40, 50, 50),
+    ])
+    _write_label(first / "session-a" / "00000002.json", [("enemy_normal", 0, 0, 10, 10)], checked=False)
+    _write_label(first / "session-a" / "00000004.json", [
+        ("enemy_normal", 0, 0, 10, 10),
+        ("labeled_region", 0, 0, 10, 10),
+    ])
+    _write_label(second / "session-a" / "00000001.json", [
+        ("enemy_boss", 0, 0, 10, 10),
+        ("enemy_normal", 20, 20, 30, 30),
+    ])
+    _write_label(second / "session-a" / "00000003.json", [("enemy_normal", 0, 0, 10, 10)])
+    _write_label(second / "session-a" / "00000004.json", [("enemy_normal", 0, 0, 10, 10)])
+
+    report = build_annotation_agreement(first, second, ["session-a"])
+
+    assert report["schema_version"] == "annotation_agreement.v1"
+    assert report["pair_count"] == 2
+    assert report["iou_mean"] == 1.0
+    assert report["class_agreement"] == 0.5
+    assert report["unmatched_first"] == report["unmatched_second"] == 0
+    assert report["per_class"]["enemy_normal"]["pair_count"] == 2
+
+
+def test_annotation_agreement_empty_second_work_root_returns_zero_pairs(tmp_path):
+    """second annotator に共有 checked frame が無い場合は zero pair を出す。
+
+    preflight が空の double-review を数値で fail できる形を保つ。
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    _write_label(first / "session-a" / "00000001.json", [("enemy_normal", 0, 0, 10, 10)])
+    (second / "session-a").mkdir(parents=True)
+
+    report = build_annotation_agreement(first, second, ["session-a"])
+
+    assert report["pair_count"] == 0
+    assert report["iou_mean"] == 0.0
+    assert report["class_agreement"] == 0.0
+
+
+def test_coco_export_binds_capture_frame_hash(tmp_path):
+    """store root 指定時 COCO image は frames.jsonl の object hash を持つ。
+
+    export 済み image と artifact session の pixel identity が分離しないことを確認する。
+    """
+    from export_survivors_annotations_coco import main as export_main
+
+    published = _publish_session(tmp_path / "store", "session-a")
+    work_root = tmp_path / "work"
+    label_dir = work_root / "session-a"
+    label_dir.mkdir(parents=True)
+    image_path = published.session_path / published.frame_records[0].object_path
+    shutil.copyfile(image_path, label_dir / "00000000.png")
+    _write_label(label_dir / "00000000.json", [("enemy_normal", 0, 0, 20, 20)])
+    output = tmp_path / "output"
+
+    assert export_main([
+        "--work-root", str(work_root), "--output-dir", str(output),
+        "--store-root", str(tmp_path / "store"),
+    ]) == 0
+    image = json.loads((output / "world_coco.json").read_text(encoding="utf-8"))["images"][0]
+
+    assert image["session_id"] == "session-a"
+    assert image["frame_id"] == 0
+    assert image["object_sha256"] == published.frame_records[0].object_sha256
+
+
+def test_publish_emits_consumer_bindings_and_passed_restore_verdict(tmp_path):
+    """formal model dataset を artifact descriptor へ束縛し全 object を復元する。
+
+    model binding shape、split manifest ref、export links が producer/consumer 契約に沿う。
+    """
+    root = tmp_path / "capture"
+    train = _publish_session(root, "train-session", checkpoint="planned_split:model_train|planned_at:2026-10-11T00:00:00Z|capture")
+    validation = _publish_session(root, "validation-session", checkpoint="planned_split:model_validation|planned_at:2026-10-11T00:00:00Z|capture")
+    for session in (train, validation):
+        (session.session_path / "annotations.jsonl").write_bytes(b"")
+        promote_session(
+            root,
+            session.session_id,
+            operator_id="operator-01",
+            attestation_note="reviewed",
+            expected_target_profile_hash=PROFILE_HASH,
+            expected_game_build_id=BUILD_ID,
+        )
+    split_path = root / "capture_split_manifest.20261011.json"
+    freezer = SplitFreezer(root, manifest_path=split_path)
+    freezer.assign("model_train", ["train-session"])
+    freezer.assign("model_validation", ["validation-session"])
+    freezer.freeze()
+    from export_survivors_annotations_coco import main as export_main
+    from merge_survivors_coco import main as merge_main
+    from benchmark_survivors_perception import _manifest_ref, _validate_restore_verdict
+
+    work_a, work_b = tmp_path / "work-a", tmp_path / "work-b"
+    for session in (train, validation):
+        for work in (work_a, work_b):
+            label_dir = work / session.session_id
+            _write_label(label_dir / "00000000.json", [("enemy_normal", 0, 0, 20, 20)])
+        shutil.copyfile(
+            session.session_path / session.frame_records[0].object_path,
+            work_a / session.session_id / "00000000.png",
+        )
+    train_export, validation_export = tmp_path / "train-export", tmp_path / "validation-export"
+    for split_name, output_dir in (("model_train", train_export), ("model_validation", validation_export)):
+        assert export_main([
+            "--work-root", str(work_a), "--output-dir", str(output_dir),
+            "--store-root", str(root), "--split-manifest", str(split_path), "--split", split_name,
+        ]) == 0
+    model_dir = tmp_path / "model-export"
+    assert merge_main([
+        "--world-train", str(train_export / "world_coco.json"),
+        "--world-validation", str(validation_export / "world_coco.json"),
+        "--ui-train", str(train_export / "ui_coco.json"),
+        "--ui-validation", str(validation_export / "ui_coco.json"),
+        "--output-dir", str(model_dir),
+    ]) == 0
+    agreement = tmp_path / "agreement.json"
+    agreement.write_text(
+        json.dumps(build_annotation_agreement(work_a, work_b, ["train-session", "validation-session"])),
+        encoding="utf-8",
+    )
+    artifact_store = ArtifactStore(tmp_path / "artifact-store")
+
+    descriptor = publish_capture_dataset(
+        artifact_store,
+        store_root=root,
+        split_manifest_path=split_path,
+        logical_prefix="survivors/capture/model-v1",
+        model_exports=ModelExportPaths(model_dir / "world_coco_model.json", model_dir / "ui_coco_model.json"),
+        agreement_path=agreement,
+    )
+    verdict, verdict_descriptor = run_restore_test(
+        artifact_store,
+        descriptor,
+        backup_root=tmp_path / "backup",
+        restore_root=tmp_path / "restore",
+        verdict_logical_id="survivors/capture/model-v1/restore_test.json",
+    )
+    identity = descriptor.identity_metadata
+
+    assert _manifest_ref(descriptor).logical_id == identity["manifest_logical_id"]
+    _validate_restore_verdict(descriptor, verdict_descriptor)
+    assert identity["manifest_logical_id"] == next(
+        ref.logical_id for ref in descriptor.files if ref.logical_id.endswith("/capture_split_manifest.json")
+    )
+    assert identity["annotation_bindings"] == {}
+    assert set(identity["model_session_bindings"]) == {"train-session", "validation-session"}
+    assert set(identity["dataset_exports"]) == {"world_coco_model", "ui_coco_model", "annotation_agreement"}
+    assert verdict.passed is True
+    assert verdict_descriptor.identity_metadata["subject_identity_hash"] == descriptor.identity_hash
+
+    (model_dir / "world_coco_model.json").write_text(
+        '{"images":[],"annotations":[],"categories":[],"revision":2}\n', encoding="utf-8"
+    )
+    next_generation = publish_capture_dataset(
+        artifact_store,
+        store_root=root,
+        split_manifest_path=split_path,
+        logical_prefix="survivors/capture/model-v1",
+        model_exports=ModelExportPaths(model_dir / "world_coco_model.json", model_dir / "ui_coco_model.json"),
+        agreement_path=agreement,
+    )
+    assert next_generation.logical_id != descriptor.logical_id
+    assert next_generation.identity_metadata["dataset_identity_hash"] != identity["dataset_identity_hash"]
+
+
+def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_path):
+    """sealed session は formal annotation、COCO、gates、window をすべて束縛する。
+
+    sealed split の一部だけを開封した descriptor が生成される経路を塞ぐ。
+    """
+    root = tmp_path / "capture"
+    model = _publish_session(root, "model-session")
+    sealed = _publish_session(root, "sealed-session")
+    (model.session_path / "annotations.jsonl").write_bytes(b"")
+    (model.session_path / "hud_truth.jsonl").write_text('{"fixture":true}\n', encoding="utf-8")
+    for session in (model, sealed):
+        promote_session(
+            root,
+            session.session_id,
+            operator_id="operator-01",
+            attestation_note="reviewed",
+            expected_target_profile_hash=PROFILE_HASH,
+            expected_game_build_id=BUILD_ID,
+        )
+    freezer = SplitFreezer(root)
+    freezer.assign("model_train", ["model-session"])
+    freezer.assign("final_e2e_test", ["sealed-session"])
+    split = freezer.freeze()
+    gates = tmp_path / "formal_gates.yaml"
+    gates.write_text("schema_version: formal_gates.v1\n", encoding="utf-8")
+    store = ArtifactStore(tmp_path / "artifact-store")
+    with pytest.warns(RuntimeWarning, match="evaluation windows are absent"), pytest.raises(
+        PublishError, match="formal annotations"
+    ):
+        publish_capture_dataset(
+            store,
+            store_root=root,
+            split_manifest_path=split.manifest_path,
+            logical_prefix="survivors/capture/sealed-v1",
+            formal_gates_path=gates,
+        )
+    with pytest.raises(PublishError, match="only valid when sealed splits are empty"):
+        publish_capture_dataset(
+            store,
+            store_root=root,
+            split_manifest_path=split.manifest_path,
+            logical_prefix="survivors/capture/sealed-v1",
+            formal_gates_path=gates,
+            allow_missing_formal_annotations=True,
+        )
+    formal_row = {
+        "schema_version": "perception_formal_annotation.v1",
+        "session_id": "sealed-session",
+        "frame_index": 0,
+        "raw_card_ids": [],
+        "raw_inventory": [],
+        "ground_truth_semantic_hash": "b" * 64,
+    }
+    (sealed.session_path / "annotations.jsonl").write_text(json.dumps(formal_row) + "\n", encoding="utf-8")
+    coco_dir = root / "coco" / "sealed-session"
+    coco_dir.mkdir(parents=True)
+    (coco_dir / "world_coco.json").write_text('{"images":[],"annotations":[],"categories":[]}\n', encoding="utf-8")
+    (coco_dir / "ui_coco.json").write_text('{"images":[],"annotations":[],"categories":[]}\n', encoding="utf-8")
+    windows = tmp_path / "evaluation_windows.json"
+    windows.write_text(json.dumps({
+        "schema_version": "evaluation_windows.v1",
+        "sessions": {"sealed-session": {"start_frame": 0, "end_frame": 0}},
+        "plan_canonical_hash": "c" * 64,
+    }), encoding="utf-8")
+    descriptor = publish_capture_dataset(
+        store,
+        store_root=root,
+        split_manifest_path=split.manifest_path,
+        logical_prefix="survivors/capture/sealed-v1",
+        evaluation_windows_path=windows,
+        formal_gates_path=gates,
+    )
+
+    identity = descriptor.identity_metadata
+    assert set(identity["annotation_bindings"]) == {"sealed-session"}
+    assert set(identity["model_session_bindings"]) == {"model-session"}
+    assert set(identity["annotation_bindings"]["sealed-session"]) == {
+        "annotation_logical_id", "annotation_sha256", "session_manifest_logical_id", "session_manifest_sha256"
+    }
+    assert set(identity["hud_truth_bindings"]["model-session"]) == {
+        "hud_truth_logical_id", "hud_truth_sha256"
+    }
+    assert set(identity["frames_bindings"]["sealed-session"]) == {"frames_logical_id", "frames_sha256"}
+    assert set(identity["coco_bindings"]) == {"sealed-session"}
+    assert set(identity["coco_bindings"]["sealed-session"]) == {
+        "world_coco_logical_id", "world_coco_sha256", "ui_coco_logical_id", "ui_coco_sha256"
+    }
+    assert identity["formal_gates"]["schema_version"] == "formal_gates.v1"
+    assert identity["evaluation_windows"]["sessions"]["sealed-session"] == {"start_frame": 0, "end_frame": 0}

@@ -32,7 +32,7 @@ from survivors.capture import (
     TargetWindowPolicy,
     WindowLocator,
 )
-from survivors.capture_dataset import DatasetWriter, ThreadedFrameWriter
+from survivors.capture_dataset import SPLIT_NAMES, DatasetWriter, ThreadedFrameWriter
 from survivors.target_profile import load_runtime_profile
 
 
@@ -65,6 +65,10 @@ class FakeCaptureBackend:
 
 
 def _parser() -> argparse.ArgumentParser:
+    """capture CLI の options と用途付き split choices を定義する。
+
+    planned split の表示は operator が割当先を収録時に選べる説明になる。
+    """
     parser = argparse.ArgumentParser(
         usage=(
             "capture_survivors.py [--store-root STORE_ROOT] [--session-id SESSION_ID|auto] "
@@ -79,6 +83,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration-sec", type=float, default=1.0, metavar="N")
     parser.add_argument("--synthetic", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--planned-split",
+        choices=SPLIT_NAMES,
+        help=(
+            "用途:\n"
+            "  model_train: 練習用の学習\n"
+            "  model_validation: 練習用の確認\n"
+            "  error_calibration: 本番テスト用の誤差統計\n"
+            "  final_e2e_test: 本番テスト用の最終判定"
+        ),
+    )
     return parser
 
 
@@ -324,6 +339,9 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     )
                     return 0
+                if args.planned_split is not None:
+                    planned_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                    checkpoint = f"planned_split:{args.planned_split}|planned_at:{planned_at}|{checkpoint}"
                 manifest = active_writer.publish(operator_checkpoint=checkpoint)
         print(
             json.dumps(

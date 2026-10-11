@@ -27,7 +27,7 @@ from reinbalance_survivors_contracts.artifact_identity import (
 )
 from reinbalance_survivors_contracts.artifact_store import ArtifactStore
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
-from survivors.capture_dataset import DatasetWriter, SPLIT_NAMES, _split_manifest_from_bytes
+from survivors.capture_dataset import DatasetWriter, SPLIT_NAMES, load_split_manifest_by_hash
 from survivors.vision.hud_calibration import (
     CalibrationConfig,
     FitResult,
@@ -509,12 +509,8 @@ def run_formal_preflight(
     if len(manifest_refs) != 1:
         raise FormalPreflightError("dataset split manifest reference is missing or ambiguous")
     root = Path(capture_store_root).expanduser().resolve()
-    split_path = root / "capture_split_manifest.json"
     try:
-        split_bytes = split_path.read_bytes()
-        if _sha256(split_bytes) != manifest_refs[0].sha256:
-            raise FormalPreflightError("split manifest sha256 mismatch")
-        split = _split_manifest_from_bytes(split_path, split_bytes)
+        split = load_split_manifest_by_hash(root, manifest_refs[0].sha256)
     except (OSError, ValueError) as exc:
         if isinstance(exc, FormalPreflightError):
             raise

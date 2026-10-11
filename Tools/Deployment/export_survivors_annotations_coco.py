@@ -24,6 +24,7 @@ from survivors.annotation_labels import (
     read_label_file,
 )
 from survivors.vision.world_dataset import load_class_map
+from survivors.capture_dataset import SPLIT_NAMES, DatasetWriter, _split_manifest_from_bytes
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -36,6 +37,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--session-id", action="append", default=None)
     parser.add_argument("--class-map", type=Path, default=DEFAULT_CLASS_MAP_PATH)
+    parser.add_argument("--store-root", type=Path)
+    parser.add_argument("--split-manifest", type=Path)
+    parser.add_argument("--split", choices=SPLIT_NAMES)
     return parser
 
 
@@ -58,12 +62,31 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         class_map = load_class_map(args.class_map)
+        if (args.split_manifest is None) != (args.split is None):
+            raise ValueError("--split-manifest and --split must be specified together")
+        split_sessions = None
+        if args.split_manifest is not None:
+            split_bytes = args.split_manifest.read_bytes()
+            split = _split_manifest_from_bytes(args.split_manifest, split_bytes)
+            split_sessions = {unit.session_id for unit in split.splits[args.split]}
         if args.session_id is None:
             session_ids = sorted(
                 path.name for path in args.work_root.iterdir() if path.is_dir()
             )
         else:
             session_ids = sorted(set(args.session_id))
+        if split_sessions is not None:
+            if args.session_id is not None and not set(session_ids).issubset(split_sessions):
+                raise ValueError("--session-id includes a session outside the requested split")
+            session_ids = sorted(split_sessions if args.session_id is None else set(session_ids))
+
+        frame_hashes: dict[str, dict[int, str]] = {}
+        if args.store_root is not None:
+            for session_id in session_ids:
+                manifest = DatasetWriter.restore(args.store_root, session_id, metadata_only=True)
+                frame_hashes[session_id] = {
+                    record.frame_id: record.object_sha256 for record in manifest.frame_records
+                }
 
         world_categories = [
             {
@@ -115,6 +138,13 @@ def main(argv: list[str] | None = None) -> int:
                     "session_id": session_id,
                     "frame_id": frame_id,
                 }
+                if args.store_root is not None:
+                    try:
+                        image_entry["object_sha256"] = frame_hashes[session_id][frame_id]
+                    except KeyError as exc:
+                        raise ValueError(
+                            f"label references a frame absent from capture store: {session_id}/{frame_id}"
+                        ) from exc
                 world_images.append(image_entry)
                 ui_images.append(image_entry.copy())
 
