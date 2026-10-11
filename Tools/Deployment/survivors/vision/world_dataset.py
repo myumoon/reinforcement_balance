@@ -337,6 +337,7 @@ class WorldDataset:
     def _load(
         self, path: pathlib.Path, *, validate_bounds: bool
     ) -> list[DatasetSample]:
+        """COCO file を DatasetSample と annotation へ変換する。\n\n画像単位の session metadata と geometry validation を各 sample に保つ。"""
         data = json.loads(path.read_text(encoding="utf-8"))
 
         # image index
