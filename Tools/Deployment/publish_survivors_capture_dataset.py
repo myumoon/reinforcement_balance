@@ -7,6 +7,7 @@ formal publisher を一度実行し、共有 restore helper の結果を表示�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -63,7 +64,10 @@ def main(argv: list[str] | None = None) -> int:
             allow_missing_formal_annotations=args.allow_missing_formal_annotations,
         )
         generation_root = descriptor.logical_id.rsplit("/", 1)[0]
-        verdict_id = f"{generation_root}/restore_test_verdict.json"
+        restore_roots_hash = hashlib.sha256(
+            f"{Path(args.backup_root).expanduser().resolve()}\0{Path(args.restore_root).expanduser().resolve()}".encode("utf-8")
+        ).hexdigest()[:16]
+        verdict_id = f"{generation_root}/{restore_roots_hash}/restore_test_verdict.json"
         verdict, verdict_descriptor = run_restore_test(
             store,
             descriptor,
@@ -78,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
             "passed": verdict.passed,
         }))
         return 0 if verdict.passed else 1
-    except (OSError, ValueError, TypeError) as exc:
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

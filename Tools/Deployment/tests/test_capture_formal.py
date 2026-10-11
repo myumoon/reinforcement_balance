@@ -1,3 +1,8 @@
+"""capture session の formal 昇格と dataset descriptor の契約を検証する。
+
+synthetic store だけを使い、producer から release preflight までの hash binding を固定する。
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -24,6 +29,7 @@ from survivors.capture_formal import (
     build_annotation_agreement,
     promote_session,
     publish_capture_dataset,
+    verify_capture_dataset_descriptor,
 )
 from survivors.artifact_restore_test import run_restore_test
 
@@ -109,6 +115,46 @@ def test_promotion_rejects_session_already_in_frozen_split(tmp_path):
             expected_target_profile_hash=PROFILE_HASH,
             expected_game_build_id=BUILD_ID,
         )
+
+
+def test_promotion_rejects_every_frozen_generation_and_invalid_freezer_path(tmp_path):
+    """日付付き freeze 後の用途変更と consumer 非対応 path を拒否する。
+
+    root 直下に複数 generation があっても session manifest hash を保持する。
+    """
+    published = _publish_session(tmp_path)
+    promote_session(
+        tmp_path,
+        published.session_id,
+        operator_id="operator-01",
+        attestation_note="reviewed build",
+        expected_target_profile_hash=PROFILE_HASH,
+        expected_game_build_id=BUILD_ID,
+        planned_split="model_train",
+    )
+    session_manifest_path = published.session_path / "session_manifest.json"
+    session_bytes = session_manifest_path.read_bytes()
+    split_path = tmp_path / "capture_split_manifest.20261011.json"
+    freezer = SplitFreezer(tmp_path, manifest_path=split_path)
+    freezer.assign("model_train", [published.session_id])
+    freezer.freeze()
+    split_bytes = split_path.read_bytes()
+
+    with pytest.raises(PromotionError, match="frozen split contains this session"):
+        promote_session(
+            tmp_path,
+            published.session_id,
+            operator_id="operator-01",
+            attestation_note="reviewed build",
+            expected_target_profile_hash=PROFILE_HASH,
+            expected_game_build_id=BUILD_ID,
+            planned_split="model_validation",
+        )
+
+    assert session_manifest_path.read_bytes() == session_bytes
+    assert split_path.read_bytes() == split_bytes
+    with pytest.raises(ValueError, match="root-level capture split manifest pattern"):
+        SplitFreezer(tmp_path, manifest_path=tmp_path / "splits" / "gen2.json")
 
 
 def test_promotion_rejects_fixture_build_id(tmp_path):
@@ -360,8 +406,34 @@ def test_publish_emits_consumer_bindings_and_passed_restore_verdict(tmp_path):
     root = tmp_path / "capture"
     train = _publish_session(root, "train-session", checkpoint="planned_split:model_train|planned_at:2026-10-11T00:00:00Z|capture")
     validation = _publish_session(root, "validation-session", checkpoint="planned_split:model_validation|planned_at:2026-10-11T00:00:00Z|capture")
-    for session in (train, validation):
+    validation_unknown = _publish_session(root, "validation-unknown", checkpoint="planned_split:model_validation|planned_at:2026-10-11T00:00:00Z|capture")
+    from survivors.vision.hud_truth import expected_roi_for_state
+
+    for session, screen_state in (
+        (train, "gameplay"),
+        (validation, "level_up_fallback"),
+        (validation_unknown, "unknown"),
+    ):
         (session.session_path / "annotations.jsonl").write_bytes(b"")
+        (session.session_path / "hud_truth.jsonl").write_text(json.dumps({
+            "schema_version": "hud_truth.v1",
+            "session_id": session.session_id,
+            "frame_id": 0,
+            "annotator_id": "test-annotator",
+            "confirmed": True,
+            "expected_screen_state": screen_state,
+            "expected_timer_seconds": 10.0,
+            "expected_level": 1,
+            "expected_hp_ratio": 0.5,
+            "expected_xp_ratio": 0.25,
+            "expected_items": ["empty_slot"] * 12,
+            "expected_slot_levels": [None] * 12,
+            "expected_choice": ["whip"] if screen_state == "level_up_fallback" else None,
+            "roi_name": "hud",
+            "expected_roi": expected_roi_for_state(screen_state),
+            "confirmed_at": "2026-10-10T00:00:00Z",
+            "draft_source": {"parser_artifact_hash": "parser", "atlas_content_hash": "atlas"},
+        }) + "\n", encoding="utf-8")
         promote_session(
             root,
             session.session_id,
@@ -373,17 +445,20 @@ def test_publish_emits_consumer_bindings_and_passed_restore_verdict(tmp_path):
     split_path = root / "capture_split_manifest.20261011.json"
     freezer = SplitFreezer(root, manifest_path=split_path)
     freezer.assign("model_train", ["train-session"])
-    freezer.assign("model_validation", ["validation-session"])
+    freezer.assign("model_validation", ["validation-session", "validation-unknown"])
     freezer.freeze()
     from export_survivors_annotations_coco import main as export_main
     from merge_survivors_coco import main as merge_main
     from benchmark_survivors_perception import _manifest_ref, _validate_restore_verdict
 
     work_a, work_b = tmp_path / "work-a", tmp_path / "work-b"
-    for session in (train, validation):
+    for session in (train, validation, validation_unknown):
         for work in (work_a, work_b):
             label_dir = work / session.session_id
-            _write_label(label_dir / "00000000.json", [("enemy_normal", 0, 0, 20, 20)])
+            _write_label(label_dir / "00000000.json", [
+                ("enemy_normal", 0, 0, 20, 20),
+                ("weapon_aura", 30, 30, 50, 50),
+            ])
         shutil.copyfile(
             session.session_path / session.frame_records[0].object_path,
             work_a / session.session_id / "00000000.png",
@@ -404,7 +479,9 @@ def test_publish_emits_consumer_bindings_and_passed_restore_verdict(tmp_path):
     ]) == 0
     agreement = tmp_path / "agreement.json"
     agreement.write_text(
-        json.dumps(build_annotation_agreement(work_a, work_b, ["train-session", "validation-session"])),
+        json.dumps(build_annotation_agreement(
+            work_a, work_b, ["train-session", "validation-session", "validation-unknown"]
+        )),
         encoding="utf-8",
     )
     artifact_store = ArtifactStore(tmp_path / "artifact-store")
@@ -432,10 +509,80 @@ def test_publish_emits_consumer_bindings_and_passed_restore_verdict(tmp_path):
         ref.logical_id for ref in descriptor.files if ref.logical_id.endswith("/capture_split_manifest.json")
     )
     assert identity["annotation_bindings"] == {}
-    assert set(identity["model_session_bindings"]) == {"train-session", "validation-session"}
+    assert set(identity["model_session_bindings"]) == {
+        "train-session", "validation-session", "validation-unknown"
+    }
     assert set(identity["dataset_exports"]) == {"world_coco_model", "ui_coco_model", "annotation_agreement"}
     assert verdict.passed is True
     assert verdict_descriptor.identity_metadata["subject_identity_hash"] == descriptor.identity_hash
+
+    from pathlib import Path
+    import yaml
+    from survivors.vision.hud_formal_release import run_formal_preflight as run_hud_preflight
+    from survivors.vision.world_formal_release import run_formal_preflight as run_world_preflight
+
+    hud_report = run_hud_preflight(
+        capture_store_root=root,
+        dataset_descriptor=descriptor,
+        restore_verdict_descriptor=verdict_descriptor,
+        target_profile_hash=PROFILE_HASH,
+        minimum_counts={
+            "time_bands": {"0-20": 1},
+            "screen_states": {"level_up_fallback": 1, "unknown": 1},
+            "card_counts": {"1": 1},
+            "item_classes": {"empty_slot": 1},
+            "buttons": {},
+            "fallback": 1,
+            "roi_negative": 1,
+        },
+    )
+    assert hud_report.validation_record_count == 2
+
+    deployment_root = Path(__file__).resolve().parents[1]
+    config = yaml.safe_load((deployment_root / "configs" / "world_detector_v2.yaml").read_text(encoding="utf-8"))
+    config["training"]["preflight"] = {
+        "min_frames": 1,
+        "min_entities": 1,
+        "min_classes": 1,
+        "min_time_bands": 1,
+        "min_frames_per_split": 1,
+        "min_entities_per_split": 1,
+        "min_classes_per_split": 1,
+    }
+    config_path = tmp_path / "world_detector.yaml"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    feasibility_path = tmp_path / "feasibility.json"
+    feasibility_path.write_text(json.dumps({
+        "schema_version": "perception_feasibility_verdict.v1",
+        "status": "PASS",
+        "selected_architecture": "ssdlite320",
+    }), encoding="utf-8")
+    world_report = run_world_preflight(
+        feasibility_verdict_path=feasibility_path,
+        capture_store_root=root,
+        dataset_descriptor=descriptor,
+        restore_verdict_descriptor=verdict_descriptor,
+        annotations_path=model_dir / "world_coco_model.json",
+        class_map_path=deployment_root / "configs" / "world_class_map_v2.yaml",
+        config_path=config_path,
+        cli_overrides={},
+        target_profile_hash=PROFILE_HASH,
+        hardware_id="synthetic-test",
+        annotation_agreement_path=agreement,
+        minimum_counts={
+            "min_frames": 1,
+            "min_entities": 1,
+            "min_classes": 1,
+            "min_time_bands": 1,
+            "min_frames_per_split": 1,
+            "min_entities_per_split": 1,
+            "min_classes_per_split": 1,
+            "heavy_effect_slice": 1,
+            "agreement": {"pair_count": 1, "iou_mean": 0.9, "class_agreement": 0.9},
+        },
+    )
+    assert world_report.train_sessions == ["train-session"]
+    assert world_report.validation_sessions == ["validation-session", "validation-unknown"]
 
     (model_dir / "world_coco_model.json").write_text(
         '{"images":[],"annotations":[],"categories":[],"revision":2}\n', encoding="utf-8"
@@ -450,6 +597,104 @@ def test_publish_emits_consumer_bindings_and_passed_restore_verdict(tmp_path):
     )
     assert next_generation.logical_id != descriptor.logical_id
     assert next_generation.identity_metadata["dataset_identity_hash"] != identity["dataset_identity_hash"]
+
+
+def test_capture_publish_cli_retries_restore_with_fresh_roots(tmp_path, monkeypatch, capsys):
+    """failed restore verdict の後に別 root で CLI を再実行する。
+
+    logical id の root binding と ArtifactStoreError の CLI boundary を確認する。
+    """
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import publish_survivors_capture_dataset as publisher_module
+    from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
+    from reinbalance_survivors_contracts.artifact_store import ArtifactStoreError
+
+    root = tmp_path / "capture"
+    sessions = [
+        _publish_session(root, "train-session"),
+        _publish_session(root, "validation-session"),
+    ]
+    for session in sessions:
+        (session.session_path / "annotations.jsonl").write_bytes(b"")
+        promote_session(
+            root,
+            session.session_id,
+            operator_id="operator-01",
+            attestation_note="reviewed",
+            expected_target_profile_hash=PROFILE_HASH,
+            expected_game_build_id=BUILD_ID,
+        )
+    freezer = SplitFreezer(root)
+    freezer.assign("model_train", ["train-session"])
+    freezer.assign("model_validation", ["validation-session"])
+    split = freezer.freeze()
+    artifact_root = tmp_path / "artifact-store"
+
+    def arguments(name):
+        """各試行に分離した空 restore root を指定する。
+
+        同一 capture generation の publish 入力はそのまま再利用する。
+        """
+        return [
+            "--store-root", str(root),
+            "--split-manifest", str(split.manifest_path),
+            "--artifact-store", str(artifact_root),
+            "--backup-root", str(tmp_path / f"backup-{name}"),
+            "--restore-root", str(tmp_path / f"restore-{name}"),
+            "--logical-prefix", "survivors/capture/retry-v1",
+        ]
+
+    original_verify = ArtifactStore.verify
+
+    def fail_restore_after_publish(store, descriptor, **kwargs):
+        """restore helper が失敗 verdict を発行する状態を作る。
+
+        publish 側の descriptor verification を終えた後だけ object verify を落とす。
+        """
+        with monkeypatch.context() as restore_patch:
+            restore_patch.setattr(
+                ArtifactStore,
+                "verify",
+                lambda _store, _ref: (
+                    original_verify(_store, _ref)
+                    if _ref.logical_id == kwargs["verdict_logical_id"]
+                    else SimpleNamespace(ok=False, reason="fixture failure")
+                ),
+            )
+            return run_restore_test(store, descriptor, **kwargs)
+
+    monkeypatch.setattr(publisher_module, "run_restore_test", fail_restore_after_publish)
+    assert publisher_module.main(arguments("failed")) == 1
+    failed_output = capsys.readouterr()
+    assert not failed_output.err, failed_output.err
+    failed = json.loads(failed_output.out)
+    assert failed["passed"] is False
+
+    monkeypatch.setattr(publisher_module, "run_restore_test", run_restore_test)
+    assert publisher_module.main(arguments("retry")) == 0
+    retried = json.loads(capsys.readouterr().out)
+    assert retried["passed"] is True
+    assert retried["restore_verdict_logical_id"] != failed["restore_verdict_logical_id"]
+
+    store = ArtifactStore(artifact_root)
+    dataset_ref = store.resolve(retried["descriptor_logical_id"])
+    verdict_ref = store.resolve(retried["restore_verdict_logical_id"])
+    dataset = ArtifactDescriptor.from_wire(json.loads(store.object_path(dataset_ref.store_uri).read_bytes()))
+    verdict = ArtifactDescriptor.from_wire(json.loads(store.object_path(verdict_ref.store_uri).read_bytes()))
+    from benchmark_survivors_perception import _validate_restore_verdict
+
+    _validate_restore_verdict(dataset, verdict)
+
+    monkeypatch.setattr(
+        publisher_module,
+        "run_restore_test",
+        Mock(side_effect=ArtifactStoreError("fixture store failure")),
+    )
+    assert publisher_module.main(arguments("store-error")) == 1
+    assert "fixture store failure" in capsys.readouterr().err
+    assert ArtifactStore.verify is original_verify
 
 
 def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_path):
@@ -513,7 +758,9 @@ def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_p
     windows = tmp_path / "evaluation_windows.json"
     windows.write_text(json.dumps({
         "schema_version": "evaluation_windows.v1",
-        "sessions": {"sealed-session": {"start_frame": 0, "end_frame": 0}},
+        "rule": {},
+        "sessions": {"sealed-session": [[0, 0]]},
+        "stride": 1,
         "plan_canonical_hash": "c" * 64,
     }), encoding="utf-8")
     descriptor = publish_capture_dataset(
@@ -524,6 +771,28 @@ def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_p
         evaluation_windows_path=windows,
         formal_gates_path=gates,
     )
+    verify_capture_dataset_descriptor(store, descriptor, root)
+    from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
+
+    invalid_identity = dict(descriptor.identity_metadata)
+    invalid_evaluation_windows = dict(invalid_identity["evaluation_windows"])
+    invalid_sessions = dict(invalid_evaluation_windows["sessions"])
+    invalid_sessions["sealed-session"] = {"start_frame": 0, "end_frame": 0}
+    invalid_evaluation_windows["sessions"] = invalid_sessions
+    invalid_identity["evaluation_windows"] = invalid_evaluation_windows
+    invalid_window_descriptor = ArtifactDescriptor(
+        logical_id=descriptor.logical_id,
+        node_kind=descriptor.node_kind,
+        producer_id=descriptor.producer_id,
+        producer_version=descriptor.producer_version,
+        identity_metadata=invalid_identity,
+        parents=descriptor.parents,
+        files=descriptor.files,
+        non_identity_metadata=descriptor.non_identity_metadata,
+        schema_version=descriptor.schema_version,
+    )
+    with pytest.raises(PublishError, match="invalid evaluation window: sealed-session"):
+        verify_capture_dataset_descriptor(store, invalid_window_descriptor, root)
 
     identity = descriptor.identity_metadata
     assert set(identity["annotation_bindings"]) == {"sealed-session"}
@@ -540,4 +809,25 @@ def test_publish_binds_formal_annotation_gates_coco_and_evaluation_windows(tmp_p
         "world_coco_logical_id", "world_coco_sha256", "ui_coco_logical_id", "ui_coco_sha256"
     }
     assert identity["formal_gates"]["schema_version"] == "formal_gates.v1"
-    assert identity["evaluation_windows"]["sessions"]["sealed-session"] == {"start_frame": 0, "end_frame": 0}
+    assert identity["evaluation_windows"] == {
+        "sessions": {"sealed-session": [[0, 0]]},
+        "stride": 1,
+        "plan_canonical_hash": "c" * 64,
+    }
+
+    windows.write_text(json.dumps({
+        "schema_version": "evaluation_windows.v1",
+        "rule": {},
+        "sessions": {"sealed-session": {"start_frame": 0, "end_frame": 0}},
+        "stride": 1,
+        "plan_canonical_hash": "c" * 64,
+    }), encoding="utf-8")
+    with pytest.raises(PublishError, match="invalid evaluation window: sealed-session"):
+        publish_capture_dataset(
+            store,
+            store_root=root,
+            split_manifest_path=split.manifest_path,
+            logical_prefix="survivors/capture/sealed-v1",
+            evaluation_windows_path=windows,
+            formal_gates_path=gates,
+        )

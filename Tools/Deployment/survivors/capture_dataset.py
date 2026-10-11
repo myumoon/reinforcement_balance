@@ -1322,10 +1322,8 @@ def load_split_manifest_by_hash(
     """
     root = _validated_store_root(store_root)
     expected = _validated_sha256(expected_sha256, "expected split manifest sha256")
-    paths = [root / "capture_split_manifest.json"]
-    paths.extend(sorted(root.glob("capture_split_manifest.*.json")))
     matches: list[tuple[Path, bytes]] = []
-    for path in paths:
+    for path in _split_manifest_paths(root):
         if not path.is_file():
             continue
         resolved = path.resolve()
@@ -1341,6 +1339,25 @@ def load_split_manifest_by_hash(
         raise ValueError("expected exactly one frozen split manifest with descriptor hash")
     path, encoded = matches[0]
     return _split_manifest_from_bytes(path, encoded)
+
+
+def _split_manifest_paths(root: Path) -> list[Path]:
+    """store root が管理する default と全 frozen generation を列挙する。
+
+    producer と consumer が同じ名前規則で split を確認できるようにする。
+    """
+    return [root / "capture_split_manifest.json", *sorted(root.glob("capture_split_manifest.*.json"))]
+
+
+def _is_split_manifest_path(root: Path, path: Path) -> bool:
+    """指定 path が consumer の split generation 規則に一致するか返す。
+
+    任意の nested path を freeze して consumer から見えなくなる状態を防ぐ。
+    """
+    return path.parent == root and (
+        path.name == "capture_split_manifest.json"
+        or (path.name.startswith("capture_split_manifest.") and path.name.endswith(".json"))
+    )
 
 
 class SplitFreezer:
@@ -1365,8 +1382,8 @@ class SplitFreezer:
         if not self.manifest_path.is_absolute():
             self.manifest_path = self.store_root / self.manifest_path
         self.manifest_path = self.manifest_path.resolve()
-        if self.manifest_path == self.store_root or self.store_root not in self.manifest_path.parents:
-            raise ValueError("manifest_path must be inside store_root")
+        if not _is_split_manifest_path(self.store_root, self.manifest_path):
+            raise ValueError("manifest_path must match the root-level capture split manifest pattern")
         self._splits: dict[str, list[SplitUnit]] = {name: [] for name in SPLIT_NAMES}
         self._session_ids: set[str] = set()
         self._manifest: SplitManifest | None = None

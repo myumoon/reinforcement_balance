@@ -32,16 +32,24 @@ from survivors.capture_dataset import (
     _canonical_json,
     _sha256_file,
     _split_manifest_from_bytes,
+    _split_manifest_paths,
+    _is_split_manifest_path,
     _validated_component,
 )
 
 
 class PromotionError(ValueError):
-    """formal 昇格の前提条件を満たさない session を示す。"""
+    """formal 昇格の前提条件を満たさない session を示す。
+
+    保存前の拒否理由を CLI と呼び出し側へ伝える。
+    """
 
 
 class PublishError(ValueError):
-    """formal dataset descriptor を安全に発行できない状態を示す。"""
+    """formal dataset descriptor を安全に発行できない状態を示す。
+
+    不完全な artifact 世代を release consumer に渡さない。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,10 +145,15 @@ def promote_session(
     if _sha256_file(manifest.session_path / "frames.jsonl") != manifest.metadata_sha256:
         raise PromotionError("session frames metadata hash mismatch")
 
-    split_path = Path(split_manifest_path).expanduser() if split_manifest_path else root / "capture_split_manifest.json"
-    if not split_path.is_absolute():
-        split_path = root / split_path
-    if split_path.is_file():
+    if split_manifest_path is not None:
+        split_path = Path(split_manifest_path).expanduser()
+        if not split_path.is_absolute():
+            split_path = root / split_path
+        if not _is_split_manifest_path(root, split_path.resolve()):
+            raise PromotionError("split manifest path must match the root-level capture split manifest pattern")
+    for split_path in _split_manifest_paths(root):
+        if not split_path.is_file():
+            continue
         try:
             split = _split_manifest_from_bytes(split_path, split_path.read_bytes())
         except (OSError, ValueError) as exc:
@@ -250,9 +263,9 @@ def _put_file(store: ArtifactStore, logical_id: str, path: Path, media_type: str
 
 
 def _annotation_schema(path: Path) -> str | None:
-    """JSONL annotation の先頭 schema を確認して sha256 を返す。
+    """JSONL annotation の先頭 schema_version を返す。
 
-    空ファイルと未知／破損の formal 行を混同しないため先頭行だけを検査する。
+    空ファイルは None とし、JSON の破損や未知 schema は publish error にする。
     """
     try:
         first = next(line for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
@@ -285,22 +298,52 @@ def _file_binding(ref: Any, manifest_ref: Any) -> dict[str, str]:
     }
 
 
-def _load_windows(path: Path | None) -> tuple[dict[str, Any] | None, str | None, bytes | None]:
-    """evaluation windows の固定 schema と sessions/hash を読む。
+def _validated_window_sessions(value: Any) -> dict[str, list[list[int]]]:
+    """04-18 evaluation_windows.v1 の session 区間を検証する。
 
-    descriptor identity には path を入れず、内容 hash と windows のみ保存する。
+    各 session は一つ以上の非負な閉区間 pair を持つ。
+    """
+    if not isinstance(value, Mapping):
+        raise PublishError("invalid evaluation windows sessions")
+    sessions: dict[str, list[list[int]]] = {}
+    for session_id, windows in value.items():
+        if not isinstance(session_id, str) or not session_id or not isinstance(windows, list) or not windows:
+            raise PublishError(f"invalid evaluation window: {session_id}")
+        validated = []
+        for window in windows:
+            if (
+                not isinstance(window, list)
+                or len(window) != 2
+                or type(window[0]) is not int
+                or type(window[1]) is not int
+                or window[0] < 0
+                or window[1] < window[0]
+            ):
+                raise PublishError(f"invalid evaluation window: {session_id}")
+            validated.append([window[0], window[1]])
+        sessions[session_id] = validated
+    return sessions
+
+
+def _load_windows(
+    path: Path | None,
+) -> tuple[dict[str, list[list[int]]] | None, int | None, str | None, bytes | None]:
+    """evaluation windows の schema、sessions、stride、hash を読む。
+
+    descriptor identity には path を含めず、plan の再現に必要な値だけ保存する。
     """
     if path is None:
-        return None, None, None
+        return None, None, None, None
     content = path.read_bytes()
     wire = json.loads(content)
     if not isinstance(wire, dict) or wire.get("schema_version") != "evaluation_windows.v1":
         raise PublishError("unknown evaluation windows schema")
-    sessions = wire.get("sessions")
+    sessions = _validated_window_sessions(wire.get("sessions"))
+    stride = wire.get("stride")
     plan_hash = wire.get("plan_canonical_hash")
-    if not isinstance(sessions, Mapping) or not isinstance(plan_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", plan_hash):
+    if type(stride) is not int or stride < 1 or not isinstance(plan_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", plan_hash):
         raise PublishError("invalid evaluation windows identity")
-    return dict(sessions), plan_hash, content
+    return sessions, stride, plan_hash, content
 
 
 def publish_capture_dataset(
@@ -338,7 +381,7 @@ def publish_capture_dataset(
     if sealed_units and formal_gates_path is None:
         raise PublishError("formal_gates is required when sealed sessions exist")
 
-    windows, windows_plan_hash, windows_bytes = _load_windows(evaluation_windows_path)
+    windows, windows_stride, windows_plan_hash, windows_bytes = _load_windows(evaluation_windows_path)
     gates_bytes = None
     gates_schema = None
     if formal_gates_path is not None:
@@ -461,10 +504,6 @@ def publish_capture_dataset(
                 "ui_coco_sha256": ui_ref.sha256,
             }
             row_extra.extend((world_ref.sha256, ui_ref.sha256))
-        if windows is not None and unit.session_id in sealed_ids:
-            window = windows[unit.session_id]
-            if not isinstance(window, Mapping):
-                raise PublishError(f"invalid evaluation window: {unit.session_id}")
         session_rows.append((unit.session_id, unit.session_manifest_sha256, annotation_ref.sha256 if annotation_ref else "absent", row_extra))
 
     if len(builds) != 1 or len(profiles) != 1:
@@ -533,7 +572,7 @@ def publish_capture_dataset(
         "coco_bindings": coco_bindings,
         "dataset_exports": dataset_exports,
         "evaluation_windows": (
-            {"sessions": windows, "plan_canonical_hash": windows_plan_hash}
+            {"sessions": windows, "stride": windows_stride, "plan_canonical_hash": windows_plan_hash}
             if windows is not None else None
         ),
         "evaluation_windows_hash": windows_hash,
@@ -686,9 +725,18 @@ def verify_capture_dataset_descriptor(
     windows_binding = identity.get("evaluation_windows")
     windows_hash = identity.get("evaluation_windows_hash")
     if windows_binding is not None:
-        if not isinstance(windows_binding, Mapping) or set(windows_binding) != {"sessions", "plan_canonical_hash"}:
+        if not isinstance(windows_binding, Mapping) or set(windows_binding) != {
+            "sessions", "stride", "plan_canonical_hash"
+        }:
             raise PublishError("evaluation windows binding has wrong shape")
-        if not isinstance(windows_binding["sessions"], Mapping) or not sealed_ids.issubset(windows_binding["sessions"]):
+        sessions_binding = _validated_window_sessions(windows_binding["sessions"])
+        if (
+            not sealed_ids.issubset(sessions_binding)
+            or type(windows_binding["stride"]) is not int
+            or windows_binding["stride"] < 1
+            or not isinstance(windows_binding["plan_canonical_hash"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", windows_binding["plan_canonical_hash"])
+        ):
             raise PublishError("evaluation windows omit a sealed session")
         windows_refs = [ref for ref in descriptor.files if ref.sha256 == windows_hash]
         if len(windows_refs) != 1:
@@ -697,7 +745,10 @@ def verify_capture_dataset_descriptor(
         if (
             not isinstance(windows_wire, Mapping)
             or windows_wire.get("schema_version") != "evaluation_windows.v1"
-            or windows_wire.get("sessions") != windows_binding["sessions"]
+            or _validated_window_sessions(windows_wire.get("sessions")) != sessions_binding
+            or type(windows_wire.get("stride")) is not int
+            or windows_wire["stride"] < 1
+            or windows_wire.get("stride") != windows_binding["stride"]
             or windows_wire.get("plan_canonical_hash") != windows_binding["plan_canonical_hash"]
         ):
             raise PublishError("evaluation windows identity does not match file")

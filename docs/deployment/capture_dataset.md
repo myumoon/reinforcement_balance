@@ -154,6 +154,8 @@ python Tools/Deployment/publish_survivors_capture_dataset.py `
 
 model-only 世代では `--formal-gates` と `--evaluation-windows` を省略できます。publish は descriptor と全 object を発行し、別の空 restore store への復元 verdict を同時に作ります。
 
+`--evaluation-windows` は `evaluation_windows.v1` を使い、`sessions` を `{session_id: [[start_frame_index, end_frame_index], ...]}`、`stride` を正の整数、`plan_canonical_hash` を SHA-256 として指定します。各 frame 区間は両端を含みます。
+
 ## Verification
 
 ```bash
