@@ -1,4 +1,4 @@
-"""formal release metric と threshold の小さな既知例を固定する。"""
+"""formal release の既知値と拒否条件を検証する。\n\npreflight、verdict、artifact release の境界で親 identity が保たれることを確認する。"""
 
 from __future__ import annotations
 
@@ -136,10 +136,7 @@ def test_formal_eval_filters_ground_truth_and_predictions_by_box_center() -> Non
 
 
 def test_world_dataset_preserves_formal_track_and_time_slice_metadata(tmp_path) -> None:
-    """formal validation metadata survives COCO loading into DatasetSample annotations.
-
-    Track switch and late-game gates must not silently lose source annotation fields.
-    """
+    """COCO の正式評価 metadata を DatasetSample annotation に引き継ぐ。\n\ntrack switch と late-game gate が参照する元 field を loader が落とさないことを確認する。"""
     from survivors.vision.world_dataset import WorldDataset
 
     class_map = Path(__file__).parents[2] / "configs" / "world_class_map_v2.yaml"
@@ -195,10 +192,7 @@ def test_formal_preflight_rejects_failed_feasibility_before_opening_dataset(tmp_
 
 
 def test_formal_preflight_rejects_development_or_synthetic_descriptor(tmp_path) -> None:
-    """formal preflight rejects descriptor markers before opening capture or annotation files.
-
-    A source descriptor cannot self-label a development or synthetic export as formal.
-    """
+    """development または synthetic の dataset descriptor を preflight 入口で拒否する。\n\ncapture と annotation file を開く前に自己申告の正式 eligibility を信用しないことを確かめる。"""
     dataset, restore = _dataset_descriptor()
     dataset = ArtifactDescriptor(
         logical_id=dataset.logical_id,
@@ -233,10 +227,7 @@ def test_formal_preflight_rejects_development_or_synthetic_descriptor(tmp_path) 
 
 
 def test_preflight_annotation_hash_rejects_eval_dataset_substitution(tmp_path) -> None:
-    """evaluation annotation file must match the preflight-bound COCO export.
-
-    Replacing model_validation input after training must not change formal verdict parents.
-    """
+    """evaluation annotation file を preflight が束縛した COCO export と照合する。\n\n学習後に model_validation の入力を差し替えても verdict の親 identity が変わらないことを確認する。"""
     raw = b"sealed model validation annotations"
     annotations = tmp_path / "annotations.json"
     annotations.write_bytes(raw)
@@ -440,10 +431,7 @@ def test_formal_eval_parser_exposes_in_process_checkpoint_inputs() -> None:
 
 
 def test_formal_eval_runs_checkpoint_in_process_and_writes_verdict(tmp_path, monkeypatch) -> None:
-    """formal eval reads the checkpoint weight, infers raw scores and binds its verdict.
-
-    External predictions are absent and the detector receives score_threshold=0.0.
-    """
+    """checkpoint weight を in-process 推論し raw score から verdict を作る。\n\n外部 prediction を使わず detector に score_threshold=0.0 を渡すことも確認する。"""
     import cv2
     import torch
     from types import SimpleNamespace
@@ -495,34 +483,19 @@ def test_formal_eval_runs_checkpoint_in_process_and_writes_verdict(tmp_path, mon
         ))
 
     class FakeDataset:
-        """synthetic validation view returning sealed session-bound samples.
-
-        Constructor compatibility matches the WorldDataset eval call.
-        """
+        """sealed session に結び付いた synthetic validation sample を返す。\n\nWorldDataset の eval constructor と同じ呼び方で使用できる。"""
         def __init__(self, *args, **kwargs):
-            """store no paths because frame decoding is supplied by the test.
-
-            The preflight report already fixes the allowed session identifiers.
-            """
+            """test 側で frame を用意するため dataset path を保持しない。\n\n許可する session id は preflight report から固定されている。"""
             pass
 
         def __iter__(self):
-            """yield each model_validation session once.
-
-            Every synthetic sample carries all foreground classes for stable gates.
-            """
+            """model_validation session ごとに sample を一度ずつ返す。\n\n各 sample に全 foreground class を付けて gate の入力を安定させる。"""
             return iter(samples)
 
     class FakeDetector:
-        """return exact synthetic detections while recording the raw-score threshold.
-
-        The fake model exposes the same inference caps as torchvision SSD.
-        """
+        """raw-score threshold を記録しながら synthetic detection を返す。\n\ntorchvision SSD と同じ推論 cap を持つ軽量 detector として使う。"""
         def __init__(self):
-            """initialize the state-dict sink and observable score threshold.
-
-            Runtime inference does not require torchvision model weights in this test.
-            """
+            """state dict の受け口と推論 cap を初期化する。\n\nこのテストでは runtime 用の torchvision weight を読み込まない。"""
             self._model = SimpleNamespace(
                 score_thresh=0.0,
                 topk_candidates=300,
@@ -533,10 +506,7 @@ def test_formal_eval_runs_checkpoint_in_process_and_writes_verdict(tmp_path, mon
             self.thresholds = []
 
         def infer(self, frame, *, score_threshold):
-            """return exact boxes for one synthetic validation frame.
-
-            Record caller threshold to prove the formal path preserves raw scores.
-            """
+            """synthetic validation frame の正解 box をそのまま返す。\n\n呼出元の threshold を記録し formal 経路が raw score を保つことを確認する。"""
             self.thresholds.append(score_threshold)
             return DetectionResult(
                 np.asarray(boxes, dtype=np.float32),
@@ -939,3 +909,547 @@ def test_formal_artifact_envelope_restore_and_session_build_identity(tmp_path) -
     assert resolved["schema_version"] == "world_detector_target_config.v1"
     assert resolved["score_threshold"] == verdict.score_threshold
     assert resolved["restore_verdict_logical_id"] == restore_descriptor.logical_id
+    assert resolved["ignore_regions"] == preflight.resolved_config["input"]["ignore_regions"]
+    assert resolved["verdict_canonical_hash"] == verdict.verdict_canonical_hash
+    assert "validation_verdict_hash" not in resolved
+
+
+def _formal_preflight_inputs(tmp_path, *, mutation: str | None = None) -> dict:
+    """capture store と全 descriptor を共有 API で組み立てる。\n\npreflight の成功入力と一項目だけを壊した反例を同じ経路で用意する。"""
+    import yaml
+    from survivors.capture.captured_frame import CapturedFrame
+    from survivors.capture_dataset import DatasetWriter, SplitFreezer
+    from survivors.artifact_restore_test import run_restore_test
+    from survivors.vision.world_dataset import load_class_map
+
+    profile_hash = "c" * 64
+    build_id = "synthetic-formal-build"
+    session_ids = ["train", "validation-0", "validation-1", "validation-2", "sealed"]
+    capture_root = tmp_path / "capture"
+    frame_paths = {}
+    for session_index, session_id in enumerate(session_ids):
+        writer = DatasetWriter(capture_root, session_id, profile_hash, build_id)
+        pixels = np.zeros((1080, 1920, 4), dtype=np.uint8)
+        pixels[..., 3] = 255
+        pixels[..., 0] = session_index
+        writer.write_frame(CapturedFrame(
+            frame_bgra=pixels,
+            captured_monotonic_ns=1,
+            session_frame_index=0,
+            client_rect_screen_px=(0, 0, 1920, 1080),
+            foreground=True,
+            target_profile_hash=profile_hash,
+            game_build_id=build_id,
+        ))
+        writer.publish()
+        session_manifest_path = capture_root / "capture_sessions" / session_id / "session_manifest.json"
+        session_manifest = json.loads(session_manifest_path.read_text(encoding="utf-8"))
+        session_manifest["formal_dataset_eligible"] = not (
+            mutation == "development-session" and session_id == "validation-0"
+        )
+        # shortcut: DatasetWriter deliberately has no eligibility override; this fixture models the sealed formal exporter output.
+        session_manifest_path.write_text(json.dumps(session_manifest, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        frame_paths[session_id] = capture_root / "capture_sessions" / session_id / "frames" / "00000000.png"
+
+    freezer = SplitFreezer(capture_root)
+    freezer.assign("model_train", ["train"])
+    freezer.assign("model_validation", ["validation-0", "validation-1", "validation-2"])
+    freezer.assign("error_calibration", ["sealed"])
+    split_path = freezer.freeze().path
+    if mutation == "unfrozen-split":
+        split_wire = json.loads(split_path.read_text(encoding="utf-8"))
+        split_wire["frozen"] = False
+        split_path.write_text(json.dumps(split_wire, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+
+    class_map_path = Path(__file__).parents[2] / "configs" / "world_class_map_v2.yaml"
+    class_map = load_class_map(class_map_path)
+    images = []
+    annotations = []
+    image_id = 1
+    annotation_id = 1
+    for session_id in session_ids[:-1]:
+        image_path = frame_paths[session_id]
+        if session_id == "train" and mutation == "sealed-png":
+            image_path = frame_paths["sealed"]
+        elif session_id == "train" and mutation == "external-png":
+            image_path = tmp_path / "outside-session.png"
+            image_path.write_bytes(b"not a captured session frame")
+        image_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
+        image = {
+            "id": image_id,
+            "file_name": str(image_path),
+            "width": 1920,
+            "height": 1080,
+            "session_id": session_id,
+            "frame_id": 0,
+            "object_sha256": "0" * 64 if mutation == "bad-object-sha" and session_id == "train" else image_hash,
+        }
+        images.append(image)
+        for class_index, category in enumerate(class_map.foreground_classes):
+            x = 150 + (class_index % 5) * 300
+            y = 250 + (class_index // 5) * 200
+            annotations.append({
+                "id": annotation_id,
+                "image_id": image_id,
+                "category_id": category["id"],
+                "bbox": [x, y, 40, 40],
+                "session_id": session_id,
+                "track_id": f"{session_id}-{category['id']}",
+                "late_game": True,
+                "time_band": "late",
+            })
+            annotation_id += 1
+        image_id += 1
+    coco_path = tmp_path / "world-coco.json"
+    coco_path.write_text(json.dumps({
+        "images": images,
+        "annotations": annotations,
+        "categories": [{"id": item["id"], "name": item["name"]} for item in class_map.foreground_classes],
+    }, sort_keys=True), encoding="utf-8")
+    agreement_value = 0.4 if mutation == "agreement-below-floor" else 1.0
+    agreement_path = tmp_path / "agreement.json"
+    agreement_path.write_text(json.dumps({
+        "schema_version": "annotation_agreement.v1",
+        "pair_count": 1,
+        "iou_mean": agreement_value,
+        "class_agreement": agreement_value,
+    }, sort_keys=True), encoding="utf-8")
+
+    store = ArtifactStore(tmp_path / "source-store")
+    split_ref = store.put(logical_id="dataset/split-manifest", source_path=split_path, media_type="application/json")
+    session_refs = {}
+    for session_id in session_ids:
+        manifest_path = capture_root / "capture_sessions" / session_id / "session_manifest.json"
+        session_refs[session_id] = store.put(
+            logical_id=f"dataset/session/{session_id}",
+            source_path=manifest_path,
+            media_type="application/json",
+        )
+    coco_ref = store.put(logical_id="dataset/world-coco-model", source_path=coco_path, media_type="application/json")
+    agreement_ref = store.put(logical_id="dataset/annotation-agreement", source_path=agreement_path, media_type="application/json")
+    bindings = {}
+    for session_id in session_ids[:-1]:
+        manifest_path = capture_root / "capture_sessions" / session_id / "session_manifest.json"
+        bindings[session_id] = {
+            "session_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            "session_manifest_logical_id": session_refs[session_id].logical_id,
+        }
+    dataset_descriptor = ArtifactDescriptor(
+        logical_id="dataset/world-formal-test",
+        node_kind="source_descriptor",
+        producer_id="synthetic-fixture",
+        producer_version="world-dataset.v1",
+        identity_metadata={
+            "manifest_logical_id": split_ref.logical_id,
+            "game_build_id": build_id,
+            "build_hash": hashlib.sha256(build_id.encode("utf-8")).hexdigest(),
+            "development_only": False,
+            "model_session_bindings": bindings,
+            "dataset_exports": {
+                "world_coco_model": {"logical_id": coco_ref.logical_id, "sha256": coco_ref.sha256},
+                "annotation_agreement": {"logical_id": agreement_ref.logical_id, "sha256": agreement_ref.sha256},
+            },
+        },
+        files=(split_ref, *session_refs.values(), coco_ref, agreement_ref),
+    )
+    restore_verdict, restore_descriptor = run_restore_test(
+        store,
+        dataset_descriptor,
+        backup_root=tmp_path / "source-backup",
+        restore_root=tmp_path / "source-restore",
+        verdict_logical_id="dataset/restore-verdict",
+    )
+    if mutation == "restore-manifest-mismatch":
+        metadata = restore_descriptor.identity_metadata
+        non_identity = restore_descriptor.non_identity_metadata
+        restore_descriptor = RestoreTestVerdict(
+            logical_id=restore_descriptor.logical_id,
+            subject=dataset_descriptor.node_ref(),
+            manifest_hash="0" * 64,
+            primary_root=non_identity["primary_root"],
+            backup_root=non_identity["backup_root"],
+            verify_mode=metadata["verify_mode"],
+            checked_object_count=metadata["checked_object_count"],
+            passed=metadata["passed"],
+            blocking_reasons=metadata["blocking_reasons"],
+        ).to_descriptor()
+
+    config_path = tmp_path / "world-detector.yaml"
+    config = yaml.safe_load((Path(__file__).parents[2] / "configs" / "world_detector_v2.yaml").read_text(encoding="utf-8"))
+    config["training"]["max_epochs"] = 1
+    config["training"]["preflight"] = {
+        "min_frames": 1,
+        "min_entities": 1,
+        "min_classes": 1,
+        "min_time_bands": 1,
+        "min_frames_per_split": 1,
+        "min_entities_per_split": 1,
+        "min_classes_per_split": 1,
+    }
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    feasibility_path = tmp_path / "feasibility.json"
+    feasibility_path.write_text(json.dumps({
+        "schema_version": "perception_feasibility_verdict.v1",
+        "status": "PASS",
+        "selected_architecture": "ssdlite320",
+    }), encoding="utf-8")
+    minimum_counts = {
+        "min_frames": 1,
+        "min_entities": 1,
+        "min_classes": 1,
+        "min_time_bands": 1,
+        "min_frames_per_split": 1,
+        "min_entities_per_split": 1,
+        "min_classes_per_split": 1,
+        "heavy_effect_slice": 1,
+        "agreement": {"pair_count": 1, "iou_mean": 0.9, "class_agreement": 0.9},
+    }
+    minimum_counts_path = tmp_path / "minimum-counts.json"
+    minimum_counts_path.write_text(json.dumps(minimum_counts), encoding="utf-8")
+    dataset_descriptor_path = tmp_path / "dataset-descriptor.json"
+    dataset_descriptor_path.write_text(json.dumps(dataset_descriptor.to_wire()), encoding="utf-8")
+    restore_descriptor_path = tmp_path / "restore-descriptor.json"
+    restore_descriptor_path.write_text(json.dumps(restore_descriptor.to_wire()), encoding="utf-8")
+    return {
+        "capture_root": capture_root,
+        "dataset_descriptor": dataset_descriptor,
+        "dataset_descriptor_path": dataset_descriptor_path,
+        "restore_descriptor": restore_descriptor,
+        "restore_descriptor_path": restore_descriptor_path,
+        "annotations_path": coco_path,
+        "agreement_path": agreement_path,
+        "feasibility_path": feasibility_path,
+        "config_path": config_path,
+        "class_map_path": class_map_path,
+        "minimum_counts": minimum_counts,
+        "minimum_counts_path": minimum_counts_path,
+        "store": store,
+        "profile_hash": profile_hash,
+        "hardware_id": "synthetic-gpu",
+    }
+
+
+def _run_preflight_fixture(inputs: dict) -> FormalPreflightReport:
+    """fixture が束縛した capture、descriptor、COCO を formal preflight へ渡す。\n\n各 test が同一の入口を通って成功・失敗条件だけを比較する。"""
+    return run_formal_preflight(
+        feasibility_verdict_path=inputs["feasibility_path"],
+        capture_store_root=inputs["capture_root"],
+        dataset_descriptor=inputs["dataset_descriptor"],
+        restore_verdict_descriptor=inputs["restore_descriptor"],
+        annotations_path=inputs["annotations_path"],
+        class_map_path=inputs["class_map_path"],
+        config_path=inputs["config_path"],
+        cli_overrides={},
+        target_profile_hash=inputs["profile_hash"],
+        hardware_id=inputs["hardware_id"],
+        annotation_agreement_path=inputs["agreement_path"],
+        minimum_counts=inputs["minimum_counts"],
+    )
+
+
+def test_formal_preflight_accepts_and_round_trips_a_bound_capture_dataset(tmp_path) -> None:
+    """frozen split と全 formal descriptor を揃えた preflight 成功経路を通す。\n\nreport の split、dataset、config identity が実 artifact と一致して往復することを確認する。"""
+    from survivors.vision.world_formal_release import read_preflight_report, resolved_config_hash
+
+    inputs = _formal_preflight_inputs(tmp_path)
+    report = _run_preflight_fixture(inputs)
+    report_path = report.write(tmp_path / "preflight.json")
+    restored = read_preflight_report(report_path)
+
+    assert restored.split_hash == hashlib.sha256((inputs["capture_root"] / "capture_split_manifest.json").read_bytes()).hexdigest()
+    assert restored.dataset_identity == report.dataset_identity
+    assert restored.config_identity == resolved_config_hash(restored.resolved_config)
+    assert restored.train_sessions == ("train",)
+    assert restored.validation_sessions == ("validation-0", "validation-1", "validation-2")
+    assert restored.restore_verdict_logical_id == inputs["restore_descriptor"].logical_id
+
+
+@pytest.mark.parametrize(("mutation", "message"), [
+    ("unfrozen-split", "split manifest"),
+    ("development-session", "formal eligible"),
+    ("sealed-png", "session frames"),
+    ("external-png", "session frames"),
+    ("bad-object-sha", "session frames"),
+    ("agreement-below-floor", "annotation agreement"),
+    ("restore-manifest-mismatch", "restore verdict must"),
+])
+def test_formal_preflight_rejects_one_broken_bound_input(tmp_path, mutation, message) -> None:
+    """positive fixture の一項目を壊した正式入力を fail-closed で拒否する。\n\nsealed split、session image、agreement、restore verdict の兄弟条件を一つずつ検証する。"""
+    inputs = _formal_preflight_inputs(tmp_path, mutation=mutation)
+
+    with pytest.raises(FormalPreflightError, match=message):
+        _run_preflight_fixture(inputs)
+
+
+def test_formal_error_ci_gates_fail_on_session_concentrated_false_positives(tmp_path) -> None:
+    """default count-error CI ceiling が一 session の偏った誤検出を拒否する。\n\npooled precision が 0.8 を超えても session-cluster 上限で PASS にしない。"""
+    from survivors.vision.world_dataset import load_class_map
+
+    checkpoint, _verdict_path, _config, _class_map, _tracker, preflight = _formal_package_inputs(tmp_path)
+    class_map = load_class_map(_class_map)
+    detections_by_session = {}
+    annotations_by_session = {}
+    for session_index, session_id in enumerate(preflight.validation_sessions):
+        boxes = []
+        labels = []
+        ground_truth = []
+        for class_index, category in enumerate(class_map.foreground_classes):
+            x = 30 + (class_index % 5) * 12
+            y = 30 + (class_index // 5) * 12
+            boxes.append([x, y, x + 5, y + 5])
+            labels.append(category["id"])
+            ground_truth.append({
+                "image_id": session_index,
+                "category_id": category["id"],
+                "bbox": [x, y, 5, 5],
+                "image_width": 100,
+                "image_height": 100,
+                "late_game": True,
+            })
+        if session_index == 0:
+            boxes.extend([[90, 0, 95, 5], [90, 10, 95, 15], [90, 20, 95, 25], [90, 30, 95, 35]])
+            labels.extend([class_map.name_to_id("enemy_normal")] * 4)
+        detections_by_session[session_id] = [{
+            "image_id": session_index,
+            "image_width": 100,
+            "image_height": 100,
+            "boxes_xyxy": np.asarray(boxes, dtype=np.float32),
+            "scores": np.full(len(labels), 0.99, dtype=np.float32),
+            "class_ids": np.asarray(labels, dtype=np.int32),
+        }]
+        annotations_by_session[session_id] = ground_truth
+    manifest_path = checkpoint / "manifest.json"
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    verdict = build_validation_verdict(
+        detections_by_session=detections_by_session,
+        annotations_by_session=annotations_by_session,
+        class_map=class_map,
+        gates={"ci_resamples": 100},
+        latency=GpuLatencyMeasurement(1.0, 100, preflight.hardware_id, "target_gpu", True),
+        preflight=preflight,
+        checkpoint_manifest=manifest_payload,
+        checkpoint_manifest_hash=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        weight_hash=manifest_payload["model_hash"],
+        threshold_rule={"kind": "max_mean_recall_subject_to_precision", "precision_floor": 0.8, "candidates": [0.5]},
+    )
+
+    assert verdict.metrics["instance_pooled_recall"] >= 0.8
+    assert verdict.gates["thresholds"]["density_error_ci_upper_max"] == 0.20
+    assert verdict.gates["thresholds"]["nearest_distance_error_ci_upper_max"] == 0.04
+    assert verdict.gates["results"]["density_error_ci"]["passed"] is False
+    assert verdict.gates["results"]["nearest_distance_error_ci"]["pooled_median"] == 0.0
+    assert verdict.status == "FAIL"
+
+
+def test_formal_publisher_cli_retries_with_fresh_restore_roots(tmp_path, capsys) -> None:
+    """同じ release を異なる空 restore root から二度 publish できる。\n\n各 run の restore verdict logical id と resolved YAML が独立して発行される。"""
+    import yaml
+    from publish_survivors_world_detector_formal import main as publish_main
+
+    checkpoint, verdict_path, config_path, class_map_path, _tracker, preflight = _formal_package_inputs(tmp_path)
+    preflight_path = preflight.write(tmp_path / "preflight.json")
+    dataset = ArtifactDescriptor(
+        logical_id=preflight.dataset_logical_id,
+        node_kind="source_descriptor",
+        producer_id="synthetic-dataset",
+        producer_version="world-dataset.v1",
+        identity_metadata={"dataset_identity_hash": preflight.dataset_identity, "game_build_id": preflight.game_build_id},
+    )
+    dataset_path = tmp_path / "dataset-descriptor.json"
+    dataset_path.write_text(json.dumps(dataset.to_wire()), encoding="utf-8")
+    restore_ids = []
+    for run_index in (1, 2):
+        resolved_path = tmp_path / f"resolved-{run_index}.yaml"
+        result = publish_main([
+            "--verdict", str(verdict_path),
+            "--preflight-report", str(preflight_path),
+            "--checkpoint-dir", str(checkpoint),
+            "--out-root", str(tmp_path / "packages"),
+            "--artifact-store", str(tmp_path / "artifact-store"),
+            "--backup-root", str(tmp_path / f"backup-{run_index}"),
+            "--restore-root", str(tmp_path / f"restore-{run_index}"),
+            "--dataset-descriptor", str(dataset_path),
+            "--logical-prefix", "formal/retry-test",
+            "--resolved-yaml-out", str(resolved_path),
+            "--config", str(config_path),
+            "--class-map", str(class_map_path),
+        ])
+        output = json.loads(capsys.readouterr().out)
+        assert result == 0
+        assert resolved_path.is_file()
+        assert yaml.safe_load(resolved_path.read_text(encoding="utf-8"))["ignore_regions"] == preflight.resolved_config["input"]["ignore_regions"]
+        restore_ids.append(output["restore_verdict_logical_id"])
+
+    assert restore_ids[0] != restore_ids[1]
+
+
+def test_synthetic_formal_preflight_train_eval_publish_restore_envelope_e2e(tmp_path, monkeypatch) -> None:
+    """synthetic capture から preflight、formal CLI、package restore まで一続きで実行する。\n\ntrainer、in-process verdict、publisher envelope、benchmark restore contract を同一 artifact identity で確かめる。"""
+    import yaml
+    import torch
+    import train_survivors_world_detector as training
+    from eval_survivors_world_detector import main as eval_main
+    from publish_survivors_world_detector_formal import main as publish_main
+    from survivors.vision import world_detector as world_detector_module
+    from survivors.vision import world_formal_sampling
+    from survivors.vision.world_dataset import load_class_map
+    from survivors.vision.world_detector import DetectionResult, WorldDetector
+    from survivors.vision.world_detector_package import PackageManifest, restore_package
+    from survivors.vision.world_formal_release import (
+        publish_formal_detector_artifact,
+        read_preflight_report,
+        run_formal_preflight,
+    )
+    from survivors.artifact_restore_test import run_restore_test
+
+    inputs = _formal_preflight_inputs(tmp_path)
+    preflight = _run_preflight_fixture(inputs)
+    checkpoint_dir = tmp_path / "checkpoint"
+    report_path = preflight.write(checkpoint_dir / "preflight.json")
+    class_map = load_class_map(inputs["class_map_path"])
+    train_detector = type("TrainDetector", (), {})()
+    train_detector._model = torch.nn.Linear(1, 1)
+    train_detector.num_classes = class_map.num_classes
+    monkeypatch.setattr(world_detector_module, "_TORCH_AVAILABLE", True)
+    monkeypatch.setattr(WorldDetector, "from_config", staticmethod(lambda *args: train_detector))
+    monkeypatch.setattr(world_formal_sampling, "class_weights", lambda *args, **kwargs: {})
+    monkeypatch.setattr(world_formal_sampling, "attach_weighted_loss", lambda model, weights: model)
+
+    def run_stub(detector, train_ds, validation_ds, cfg, *, max_epochs, selector, out_dir, **kwargs):
+        """formal CLI の出力形式を保ったまま checkpoint を一つ作る。\n\nmodel の forward 学習だけを省き、preflight と checkpoint manifest の実経路を通す。"""
+        checkpoint = out_dir / "epoch_0001.pt"
+        torch.save(detector._model.state_dict(), checkpoint)
+        selector.record(training.CheckpointRecord(1, 1.0, str(checkpoint)))
+        detector._formal_epoch_metrics = [{"epoch": 1, "val_map50_95": 1.0}]
+
+    monkeypatch.setattr(training, "_run_training", run_stub)
+    train_result = training.main([
+        "--annotations", str(inputs["annotations_path"]),
+        "--formal",
+        "--feasibility-verdict", str(inputs["feasibility_path"]),
+        "--capture-store", str(inputs["capture_root"]),
+        "--target-profile-hash", inputs["profile_hash"],
+        "--hardware-id", inputs["hardware_id"],
+        "--dataset-descriptor", str(inputs["dataset_descriptor_path"]),
+        "--restore-verdict", str(inputs["restore_descriptor_path"]),
+        "--annotation-agreement", str(inputs["agreement_path"]),
+        "--minimum-counts", str(inputs["minimum_counts_path"]),
+        "--preflight-report-out", str(report_path),
+        "--config", str(inputs["config_path"]),
+        "--class-map", str(inputs["class_map_path"]),
+        "--output", str(checkpoint_dir),
+        "--epochs", "1",
+    ])
+    assert train_result == 0
+    assert (checkpoint_dir / "run_manifest.json").is_file()
+    trained_preflight = read_preflight_report(report_path)
+    assert trained_preflight.dataset_identity == preflight.dataset_identity
+
+    boxes = []
+    labels = []
+    for class_index, category in enumerate(class_map.foreground_classes):
+        x = 150 + (class_index % 5) * 300
+        y = 250 + (class_index // 5) * 200
+        boxes.append([x, y, x + 40, y + 40])
+        labels.append(category["id"])
+    eval_model = type("EvalModel", (), {
+        "score_thresh": 0.0,
+        "topk_candidates": 300,
+        "detections_per_img": 100,
+        "load_state_dict": lambda self, state, **kwargs: None,
+        "eval": lambda self: None,
+    })()
+    eval_detector = type("EvalDetector", (), {
+        "_model": eval_model,
+        "infer": lambda self, frame, *, score_threshold: DetectionResult(
+            np.asarray(boxes, dtype=np.float32),
+            np.full(len(labels), 0.99, dtype=np.float32),
+            np.asarray(labels, dtype=np.int32),
+            1920,
+            1080,
+        ),
+    })()
+    monkeypatch.setattr(WorldDetector, "from_config", staticmethod(lambda *args: eval_detector))
+    latency_path = tmp_path / "latency.json"
+    latency_path.write_text(json.dumps(GpuLatencyMeasurement(
+        1.0, 100, inputs["hardware_id"], "target_gpu", True,
+    ).to_dict()), encoding="utf-8")
+    gates_path = tmp_path / "gates.yaml"
+    gates_path.write_text(yaml.safe_dump({
+        "ci_resamples": 100,
+        "boss_min_instances": 1,
+        "boss_min_sessions": 3,
+        "hazard_min_instances": 1,
+        "hazard_min_sessions": 3,
+    }), encoding="utf-8")
+    verdict_path = tmp_path / "verdict.json"
+    eval_result = eval_main([
+        "--annotations", str(inputs["annotations_path"]),
+        "--formal",
+        "--preflight-report", str(report_path),
+        "--checkpoint-dir", str(checkpoint_dir),
+        "--latency", str(latency_path),
+        "--gates", str(gates_path),
+        "--config", str(inputs["config_path"]),
+        "--class-map", str(inputs["class_map_path"]),
+        "--verdict-out", str(verdict_path),
+    ])
+    assert eval_result == 0
+    verdict = ValidationVerdict.from_dict(json.loads(verdict_path.read_text(encoding="utf-8")))
+    assert verdict.status == "PASS"
+    assert verdict.preflight_canonical_hash == preflight.preflight_canonical_hash
+
+    resolved_path = tmp_path / "resolved.yaml"
+    publish_result = publish_main([
+        "--verdict", str(verdict_path),
+        "--preflight-report", str(report_path),
+        "--checkpoint-dir", str(checkpoint_dir),
+        "--out-root", str(tmp_path / "packages"),
+        "--artifact-store", str(tmp_path / "artifact-store"),
+        "--backup-root", str(tmp_path / "publish-backup"),
+        "--restore-root", str(tmp_path / "publish-restore"),
+        "--dataset-descriptor", str(inputs["dataset_descriptor_path"]),
+        "--logical-prefix", "formal/world-e2e",
+        "--resolved-yaml-out", str(resolved_path),
+        "--config", str(inputs["config_path"]),
+        "--class-map", str(inputs["class_map_path"]),
+    ])
+    assert publish_result == 0
+    resolved = yaml.safe_load(resolved_path.read_text(encoding="utf-8"))
+    assert resolved["ignore_regions"] == preflight.resolved_config["input"]["ignore_regions"]
+    assert resolved["verdict_canonical_hash"] == verdict.verdict_canonical_hash
+
+    package_manifest_path = next((tmp_path / "packages").glob("*/manifest.json"))
+    package_manifest = PackageManifest.from_dict(json.loads(package_manifest_path.read_text(encoding="utf-8")))
+    assert package_manifest.validation_verdict_hash == hashlib.sha256(
+        (package_manifest_path.parent / "validation_verdict.json").read_bytes()
+    ).hexdigest()
+    restored_package = restore_package(
+        package_manifest_path,
+        np.zeros((1080, 1920, 3), dtype=np.uint8),
+        require_formal=True,
+    )
+    assert restored_package is not None
+
+    store = ArtifactStore(tmp_path / "artifact-store")
+    descriptor = publish_formal_detector_artifact(
+        store,
+        package_dir=package_manifest_path.parent,
+        preflight=trained_preflight,
+        verdict=verdict,
+        dataset_descriptor=inputs["dataset_descriptor"],
+        logical_prefix="formal/world-e2e",
+    )
+    import benchmark_survivors_perception as benchmark
+    manifest_ref = benchmark._manifest_ref(descriptor)
+    envelope = json.loads(store.object_path(manifest_ref.store_uri).read_text(encoding="utf-8"))
+    assert set(envelope) == benchmark._PACKAGE_REQUIRED_FIELDS["detector_package"]
+    assert benchmark._manifest_ref(descriptor) == manifest_ref
+    _, restore_descriptor = run_restore_test(
+        store,
+        descriptor,
+        backup_root=tmp_path / "verify-backup",
+        restore_root=tmp_path / "verify-restore",
+        verdict_logical_id="formal/world-e2e/test-restore-verdict",
+    )
+    benchmark._validate_restore_verdict(descriptor, restore_descriptor)
