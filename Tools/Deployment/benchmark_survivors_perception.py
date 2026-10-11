@@ -1,4 +1,7 @@
-"""ArtifactStore-backed Survivors perception formal benchmark runner。"""
+"""ArtifactStore-backed Survivors perception formal benchmark runner。
+
+事前登録した評価窓と formal gate の識別子を照合し、再開時にも評価条件を保ちます。
+"""
 
 from __future__ import annotations
 
