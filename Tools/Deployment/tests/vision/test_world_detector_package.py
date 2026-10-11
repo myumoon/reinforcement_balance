@@ -2580,6 +2580,7 @@ class TestPublishMappingValidation:
 
     def test_valid_publish_is_restorable(self, tmp_path):
         """valid な publish は PackageManifest.from_dict() で復元できる。"""
+        import hashlib
         import json
         from survivors.vision.world_detector_package import publish_development_package, PackageManifest
         store = tmp_path / "store"
@@ -2595,6 +2596,12 @@ class TestPublishMappingValidation:
         manifest = PackageManifest.from_dict(json.loads(pkg_path.read_text(encoding="utf-8")))
         assert manifest.metrics == {"val_map50_95": 0.42}
         assert manifest.checkpoint_selection == {"metric": "val_map50_95"}
+        legacy_wire = manifest.to_dict()
+        assert "validation_verdict_hash" not in legacy_wire
+        legacy_key = hashlib.sha256(
+            json.dumps(legacy_wire, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        assert pkg_path.parent.name == legacy_key
 
 
 class TestEpochsOverride:
