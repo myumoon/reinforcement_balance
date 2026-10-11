@@ -6,6 +6,7 @@ preflight、verdict、checkpoint の identity が一致した release だけを�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -80,12 +81,15 @@ def main(argv: list[str] | None = None) -> int:
             logical_prefix=args.logical_prefix,
             build_attestation_path=args.build_attestation,
         )
+        restore_roots_hash = hashlib.sha256(
+            f"{Path(args.backup_root).expanduser().resolve()}\0{Path(args.restore_root).expanduser().resolve()}".encode("utf-8")
+        ).hexdigest()[:16]
         _, restore_descriptor = run_restore_test(
             store,
             descriptor,
             backup_root=args.backup_root,
             restore_root=args.restore_root,
-            verdict_logical_id=f"{args.logical_prefix.rstrip('/')}/{descriptor.identity_hash[:16]}/restore-verdict",
+            verdict_logical_id=f"{args.logical_prefix.rstrip('/')}/{descriptor.identity_hash[:16]}/{restore_roots_hash}/restore-verdict",
         )
         resolved_path = emit_resolved_detector_yaml(
             verdict, descriptor, restore_descriptor, preflight, args.resolved_yaml_out,
