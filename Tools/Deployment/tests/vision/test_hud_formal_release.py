@@ -1156,7 +1156,7 @@ def test_development_cli_still_publishes_development_package(tmp_path: Path, mon
     ]) == 0
     output = json.loads(capsys.readouterr().out)
     assert output == {"package_hash": "a" * 64, "all_gates_passed": True}
-    assert published and published[0][0] is calibration_cli.PackageWriter
+    assert published and published[0][0] == package_path and published[0][2] is validation_report
 
 
 def test_changed_python_definitions_have_two_paragraph_japanese_docstrings() -> None:
