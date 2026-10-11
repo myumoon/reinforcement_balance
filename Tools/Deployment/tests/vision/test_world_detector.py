@@ -193,7 +193,7 @@ class TestDetectorInference:
 # ---- checkpoint manifest ----
 
 class TestCheckpointManifest:
-    """checkpoint manifest に必要なハッシュが含まれ、development は formal loader に拒否されることを確認する。"""
+    """checkpoint manifest の hash と formal eligibility を検証する。\n\ndevelopment artifact が正式 loader へ入らないことも確認する。"""
 
     def test_manifest_contains_required_hashes(self, tmp_path):
         manifest = CheckpointManifest(
@@ -316,7 +316,7 @@ class TestCheckpointManifest:
         assert loaded.development_only is True
 
     def test_load_rejects_invalid_training_mode(self, tmp_path):
-        """load() は未知の training_mode だけを拒否する。"""
+        """load() が未知の training_mode を拒否する。\n\ncheckpoint manifest の training mode を許可済み schema に限定する。"""
         payload = {
             "model_hash": "a" * 64,
             "data_hash": "b" * 64,
