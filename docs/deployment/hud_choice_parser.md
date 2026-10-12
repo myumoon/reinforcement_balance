@@ -111,7 +111,7 @@ wire の二キーは必須で、未知キー・欠落キーは従来どおり拒
 
 宝箱の `ack_chest` は開く・終了の両方で返し、青い内側 .90 以上を要求します。定常値は白字を含め約 .930、フェード中の約 .841〜.846 は候補に出しません。y=905〜925 の下枠で段階を判定し、reason に `:open` または `:close` を付けます。開くボタン自身の短い金枠（y≈910）は横幅が .80 の閾値に届かず、実測したパネル下枠 y=954〜962 は `:open`、縮んだ下枠は `:close` です。
 
-両段階の `button_type` は `ack_chest` のままです。reason や ROI を含まない `ui_state_key` は開くと終了で同じ K、発光中の button 無しは別の K0 になります。controller は K の開くを押し、K0 で演出を待ってから K の終了を押します。宝箱訪問の click 上限は4件（各段階で initial と retry が最大1回ずつ）です。valid button が出ないまま進まなければ、既定の `chest_timeout` 60秒で停止します。
+両段階の `button_type` は `ack_chest` のままです。reason や ROI を含まない `ui_state_key` は開くと終了で同じ K、発光中の button 無しは別の K0 になります。controller は K の開くを押し、K0 で演出を待ってから K の終了を押します。宝箱訪問全体の click 上限は4件で、通常は開く／終了の各 initial と retry に相当します。valid button が出ないまま進まなければ、既定の `chest_timeout` 60秒で停止します。
 
 宝箱証拠の後は15 frame の保持を持ち、続く unknown 十四枚を `chest`／.50／`chest_hold` にします。他の既知状態、未対応解像度、空 frame を上書きせず、reset で消えます。空 frame は `unknown`／0.0／`empty_frame` を維持します。controller の宝箱 timeout は実測約21秒の演出に合わせて60秒です。retry は既存の同等性判定が初回・再観測とも confidence .99 以上を要求します。終了とリロールの検出条件を満たしたボタンは、白字を除いた色割合とは分けて confidence 1.0 を返します。ボタン色割合は reason の `blue:...` に残り、宝箱段階 suffix はその後ろに付きます。
 
