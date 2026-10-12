@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
 
+import export_survivors_annotations_coco as export_module
 from export_survivors_annotations_coco import main
 from survivors.vision.world_dataset import WorldDataset, load_class_map
 
@@ -301,3 +304,137 @@ def test_export_writes_weapon_effect_boxes_as_world_categories_12_to_15(tmp_path
         12: "weapon_projectile", 13: "weapon_zone", 14: "weapon_orbit", 15: "weapon_aura",
     }
     assert not any(item["name"].startswith("weapon_") for item in ui["categories"])
+
+
+def test_export_updates_annotation_hours_by_work_root(tmp_path: Path, monkeypatch, capsys) -> None:
+    """checked label の工数を記録し、work-root ごとの行を更新または追加する。
+
+    下書きとの差分・下書きなし・更新時刻を数え、COCO export と同時に session log へ反映する。
+    """
+    store_root = tmp_path / "store"
+    log_path = store_root / "session_logs/session-a/session_log.md"
+    log_path.parent.mkdir(parents=True)
+    root_a = tmp_path / "work-a"
+    session_a = root_a / "session-a"
+    draft_dir = session_a / ".prelabel_drafts"
+    for frame_id in (1, 2, 3):
+        _write_png(session_a / f"{frame_id:08d}.png")
+    _write_label(session_a / "00000001.json", [_shape("gem_blue", [[2, 2], [4, 4]])], checked=True)
+    _write_label(session_a / "00000002.json", [_shape("gem_blue", [[1, 1], [3, 3]])], checked=True)
+    _write_label(session_a / "00000003.json", [], checked=True)
+    draft_dir.mkdir()
+    _write_label(draft_dir / "00000001.json", [_shape("gem_blue", [[1, 1], [2, 2]])], checked=False)
+    _write_label(draft_dir / "00000002.json", [_shape("gem_blue", [[1, 1], [3, 3]])], checked=False)
+    for frame_id, timestamp in ((1, 1_700_000_000), (2, 1_700_000_100), (3, 1_700_000_200)):
+        os.utime(session_a / f"{frame_id:08d}.json", (timestamp, timestamp))
+    root_key = str(root_a.resolve())
+    log_path.write_text(
+        "### annotation 工数\n\n"
+        "| work-root | annotator | start | end | checked frames | edited frames | no draft |\n"
+        "| --- | --- | --- | --- | ---: | ---: | ---: |\n"
+        f"| {root_key} | stale | old | old | 99 | 99 | 99 |\n"
+        "| /other/work | other-user | old | old | 4 | 2 | 0 |\n",
+        encoding="utf-8",
+    )
+    manifest_records = [SimpleNamespace(frame_id=frame_id, object_sha256="a" * 64) for frame_id in (1, 2, 3, 10)]
+    monkeypatch.setattr(
+        export_module.DatasetWriter,
+        "restore",
+        lambda *args, **kwargs: SimpleNamespace(frame_records=manifest_records),
+    )
+    args = ["--work-root", str(root_a), "--store-root", str(store_root), "--session-id", "session-a"]
+
+    assert main(args + ["--output-dir", str(tmp_path / "export-a")]) == 0
+
+    log = log_path.read_text(encoding="utf-8")
+    rows = [line for line in log.splitlines() if line.startswith("| ") and line.count("|") == 8]
+    row_a = next(line for line in rows if line.startswith(f"| {root_key} |"))
+    cells_a = [cell.strip() for cell in row_a.strip("|").split("|")]
+    assert cells_a[1] != "stale"
+    assert cells_a[4:] == ["3", "1", "1"]
+    assert sum(line.startswith(f"| {root_key} |") for line in rows) == 1
+    assert any(line.startswith("| /other/work |") for line in rows)
+
+    root_b = tmp_path / "work-b"
+    session_b = root_b / "session-a"
+    _write_png(session_b / "00000010.png")
+    _write_label(session_b / "00000010.json", [], checked=True)
+    assert main(
+        [
+            "--work-root", str(root_b), "--store-root", str(store_root), "--session-id", "session-a",
+            "--output-dir", str(tmp_path / "export-b"),
+        ]
+    ) == 0
+    log = log_path.read_text(encoding="utf-8")
+    assert f"| {root_key} |" in log
+    assert f"| {root_b.resolve()} |" in log
+    assert "採用画像数: 1" in capsys.readouterr().out
+
+
+def test_export_preserves_legacy_five_column_annotation_rows(tmp_path: Path, monkeypatch, capsys) -> None:
+    """PR #373 の5列工数表にある A/B 行を新形式への更新後も残す。
+
+    行の列数が現行表と異なっても警告なしに消さず、COCO export を続ける。
+    """
+    store_root = tmp_path / "store"
+    log_path = store_root / "session_logs/session-a/session_log.md"
+    log_path.parent.mkdir(parents=True)
+    legacy_rows = (
+        "| A | | | | |\n"
+        "| B（二重 annotation 時。04-08 formal 用は必須、それ以外は任意） | | | | |\n"
+    )
+    log_path.write_text(
+        "### annotation 工数\n\n"
+        "| annotator / work-root | 開始時刻 | 終了時刻 | 対象 frame 数 | 下書きから修正した frame 数 |\n"
+        "|---|---|---|---:|---:|\n"
+        f"{legacy_rows}",
+        encoding="utf-8",
+    )
+    work_root = tmp_path / "work"
+    session_dir = work_root / "session-a"
+    _write_png(session_dir / "00000001.png")
+    _write_label(session_dir / "00000001.json", [], checked=True)
+    monkeypatch.setattr(
+        export_module.DatasetWriter,
+        "restore",
+        lambda *args, **kwargs: SimpleNamespace(
+            frame_records=[SimpleNamespace(frame_id=1, object_sha256="a" * 64)]
+        ),
+    )
+
+    assert main(
+        [
+            "--work-root", str(work_root), "--store-root", str(store_root),
+            "--session-id", "session-a", "--output-dir", str(tmp_path / "export"),
+        ]
+    ) == 0
+
+    updated_log = log_path.read_text(encoding="utf-8")
+    assert all(row in updated_log for row in legacy_rows.splitlines())
+    assert "warning:" not in capsys.readouterr().err
+
+
+def test_export_warns_and_continues_when_session_log_is_missing(tmp_path: Path, monkeypatch, capsys) -> None:
+    """session log が無い session は警告だけを出して COCO export を続ける。
+
+    session_stats 等を後から生成せず、指定された export の成功状態を保つ。
+    """
+    work_root = tmp_path / "work"
+    session_dir = work_root / "session-a"
+    _write_png(session_dir / "00000001.png")
+    _write_label(session_dir / "00000001.json", [], checked=True)
+    monkeypatch.setattr(
+        export_module.DatasetWriter,
+        "restore",
+        lambda *args, **kwargs: SimpleNamespace(frame_records=[SimpleNamespace(frame_id=1, object_sha256="a" * 64)]),
+    )
+
+    result = main(
+        [
+            "--work-root", str(work_root), "--store-root", str(tmp_path / "store"),
+            "--session-id", "session-a", "--output-dir", str(tmp_path / "export"),
+        ]
+    )
+
+    assert result == 0
+    assert "warning:" in capsys.readouterr().err

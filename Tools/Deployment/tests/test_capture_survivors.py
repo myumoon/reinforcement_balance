@@ -14,12 +14,14 @@ import threading
 import time
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 
 import capture_survivors
 from survivors.capture.captured_frame import CapturedFrame
 from survivors.capture.window_locator import TargetWindowForegroundLost, TargetWindowStateError
+from survivors.vision import hud_parser
 
 
 def _frame(
@@ -559,10 +561,14 @@ def test_main_writes_live_session_log_from_start_profile_snapshot(tmp_path, monk
     assert result == 0
     stdout = capsys.readouterr().out
     payload = json.loads(stdout)
+    assert not {
+        "operator", "actual_duration_sec", "run_end_death", "run_end_result",
+        "last_gameplay_timer_seconds", "steam_auto_update_behavior",
+    } & payload.keys()
     log_dir = tmp_path / "session_logs" / "logged-live"
     assert (log_dir / "target_profile.resolved.yaml").read_bytes() == original_profile
     stats = json.loads((log_dir / "session_stats.json").read_text(encoding="utf-8"))
-    assert stats == payload
+    assert {key: stats[key] for key in payload} == payload
     assert payload["status"] == "PUBLISHED"
     assert payload["target_profile_hash"] == "a" * 64
     assert payload["game_build_id"] == "build-v1"
@@ -572,13 +578,68 @@ def test_main_writes_live_session_log_from_start_profile_snapshot(tmp_path, monk
     assert payload["capture_started_at"] == "2026-10-12T01:02:03Z"
     session_log = (log_dir / "session_log.md").read_text(encoding="utf-8")
     assert "| session_id | logged-live |" in session_log
-    assert "| operator | |" in session_log
+    assert f"| operator | {capture_survivors.getpass.getuser()} |" in session_log
     assert "{{" not in session_log
     session_path = tmp_path / "capture_sessions" / "logged-live"
     assert {path.name for path in session_path.iterdir()} == {
         "frames", "frames.jsonl", "session_manifest.json"
     }
     assert {path.name for path in (session_path / "frames").iterdir()} == {"00000000.png"}
+
+
+def test_session_log_records_automatic_capture_and_run_end_details(tmp_path, monkeypatch):
+    """session log に operator、実測長、run 終了状態を自動で記録する。
+
+    終端 10 秒の fake frame だけを parser に渡し、非 Windows の Steam 検出が unknown でも保存を続ける。
+    """
+    session_path = tmp_path / "capture_sessions/session-end"
+    frame_dir = session_path / "frames"
+    frame_dir.mkdir(parents=True)
+    records = []
+    for index, timestamp in enumerate((0, 5_000_000_000, 9_000_000_000, 11_000_000_000)):
+        object_path = f"frames/{index:08d}.png"
+        cv2.imwrite(str(session_path / object_path), np.zeros((2, 2, 4), dtype=np.uint8))
+        records.append(
+            SimpleNamespace(
+                frame_id=index, captured_monotonic_ns=timestamp, object_path=object_path
+            )
+        )
+    monkeypatch.setattr(
+        capture_survivors.DatasetWriter,
+        "restore",
+        lambda *args, **kwargs: SimpleNamespace(frame_records=records, frames=(), session_path=session_path),
+    )
+    monkeypatch.setattr(capture_survivors.getpass, "getuser", lambda: "operator-one")
+    monkeypatch.setattr(capture_survivors.sys, "platform", "linux")
+
+    states = {1: ("gameplay", 29.0), 2: ("death", None), 3: ("result", None)}
+    fake_parser = SimpleNamespace(
+        parse=lambda frame_bgra, *, session_id, frame_index, captured_monotonic_ns: SimpleNamespace(
+            screen_state=states[frame_index][0], timer_seconds=states[frame_index][1]
+        )
+    )
+    monkeypatch.setattr(hud_parser, "HudParser", lambda **kwargs: fake_parser)
+    payload = {
+        "capture_started_at": "2026-10-12T01:02:03Z",
+        "planned_split": None,
+        "planned_at": None,
+        "requested_duration_sec": 20,
+        "resolved_yaml_sha256": "b" * 64,
+        "target_profile_hash": "a" * 64,
+    }
+
+    capture_survivors._write_session_log(tmp_path, "session-end", b"profile", payload)
+
+    stats = json.loads((tmp_path / "session_logs/session-end/session_stats.json").read_text(encoding="utf-8"))
+    assert stats["operator"] == "operator-one"
+    assert stats["actual_duration_sec"] == 11.0
+    assert stats["run_end_death"] == "yes"
+    assert stats["run_end_result"] == "yes"
+    assert stats["last_gameplay_timer_seconds"] == 29.0
+    assert stats["steam_auto_update_behavior"] == "unknown"
+    session_log = (tmp_path / "session_logs/session-end/session_log.md").read_text(encoding="utf-8")
+    assert "operator-one" in session_log
+    assert "11.0" in session_log
 
 
 def test_main_keeps_published_capture_when_session_log_write_fails(tmp_path, monkeypatch, capsys):
