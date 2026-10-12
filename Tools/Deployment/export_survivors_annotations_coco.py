@@ -123,7 +123,7 @@ def _update_session_log_annotation_hours(store_root: Path, work_root: Path, sess
         existing_rows = []
         for existing in lines[table_start + 2:table_end]:
             cells = [cell.strip() for cell in existing.strip("|").split("|")]
-            if len(cells) == 7 and os.path.normcase(os.path.abspath(cells[0])) != normalized_root:
+            if os.path.normcase(os.path.abspath(cells[0])) != normalized_root:
                 existing_rows.append(existing)
         table = [
             "| work-root | annotator | 開始時刻 | 終了時刻 | checked frame 数 | 下書きから修正した frame 数 | 下書きなし frame 数 |",
