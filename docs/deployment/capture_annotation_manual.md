@@ -342,7 +342,7 @@ HUD truth を先に確定してから、session ごとに capture store の hash
 
 sealed session の formal `annotations.jsonl` は `build_survivors_formal_annotations.py` で作ります。`AnnotationWriter.read_annotations()` は旧 schema 専用なので使いません。session ごとの COCO は `<RecordRoot>/coco/<SessionId>/` に置き、現行の evaluation windows と `formal_gates.v1` を使って `publish_survivors_capture_dataset.py` を実行します。publish は descriptor と restore verdict を出力します。backup と restore には別々の空 directory を指定してください。
 
-現行の最小 gate は `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` です。最短 session 長 300 秒、`event:death` 20 回、`event:result` は floor 未満の実測件数を記録して gate にせず、time band は到達 session が2本以上ある場合だけ判定します。sealed session の annotation 前に YAML を確定します。publish CLI が設定と hash を検証するため、session log への転記・照合は不要です。coverage と verdict notes でデータ不足と性能不足を区別します。
+現行の最小 gate は `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` です。最短 session 長 300 秒、`event:death` 20 回、`event:result` は floor 未満の実測件数を記録して gate にせず、time band は到達 session が2本以上ある場合だけ判定します。sealed session の annotation 前に YAML を確定し、annotation 後は変更しません。publish は YAML の `schema_version` を確認し、入力 YAML の SHA-256 を descriptor に記録しますが、事前に確定した値との一致は検証しません。session log への転記・照合は不要です。coverage と verdict notes でデータ不足と性能不足を区別します。
 
 正式 annotation 用 CLI が利用できる時期と画面・HUD truth の運用:
 
