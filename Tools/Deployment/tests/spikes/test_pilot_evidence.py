@@ -12,7 +12,7 @@ import pytest
 
 from reinbalance_survivors_contracts.ui_intent import ContractValidationError
 from spikes.perception_probe import evaluate_probe, load_feasibility_config, make_synthetic_fixture
-from spikes.survivors_vertical_feasibility import _REQUIRED_SLICES, issue_verdict
+from spikes.survivors_vertical_feasibility import GateEvidence, _REQUIRED_SLICES, issue_verdict
 from spikes.pilot_evidence import build_gate_evidence, merge_probe_evaluations
 from survivors.target_profile import CONFIG, TargetProfile, load_target_profile
 
@@ -258,13 +258,34 @@ def test_build_gate_evidence_rejects_unknown_slice_name():
         _build(sessions=sessions)
 
 
-def test_build_gate_evidence_rejects_insufficient_annotators():
-    """independent_annotatorsが1名以下の場合をfail-closedにする。
+def test_build_gate_evidence_one_annotator_without_agreement_issues_fail():
+    """単独 annotator は evidence に記録し、self_repeat が無ければ verdict を FAIL にする。
 
-    2名以上必須という入力形状の不備を、GateEvidence構築前に弾くことを確認する。
+    1 名を形式エラーとして落とさず、品質上の不足を判定理由として残す。
     """
-    with pytest.raises(ContractValidationError):
-        _build(annotators=("alice",))
+    verdict = issue_verdict(_build(annotators=("alice",)), load_feasibility_config())
+
+    assert verdict["status"] == "FAIL"
+    assert verdict["annotation_independence"] is None
+    assert "independent_annotation_reviewer_missing" in verdict["fail_reasons"]
+
+
+def test_gate_evidence_v1_wire_remains_readable():
+    """既存の v1 GateEvidence wire は v2 object として読み直せる。
+
+    2名の旧証拠を independent_pair と解釈し、保存済み pilot evidence を維持する。
+    """
+    wire = GateEvidence.valid_fixture().to_wire()
+    wire["schema_version"] = "perception_gate_evidence.v1"
+    for key in (
+        "annotation_independence", "annotation_gap_hours",
+        "annotation_required_gap_hours", "annotation_blind",
+    ):
+        del wire[key]
+
+    restored = GateEvidence.from_wire(wire)
+
+    assert restored.annotation_independence == "independent_pair"
 
 
 def test_build_gate_evidence_with_non_operator_profile_yields_fail_verdict_not_exception():

@@ -42,8 +42,8 @@ def _load_json(path: Path, label: str) -> Any:
 def build_parser() -> argparse.ArgumentParser:
     """CLIの引数解析器を組み立てる。
 
-    実測pilot入力7種（セッション・probe結果・annotation結果・annotator一覧・
-    代表frame数・target profile・出力先）を受け取る構成にします。
+    実測pilot入力に加え、任意の v1/v2 agreement を受け取る構成にします。
+    annotator 1 名の gate は v2 self_repeat が無ければ FAIL として発行します。
     """
     parser = argparse.ArgumentParser(
         description="実測pilot証拠からPerception実現可能性ゲートの判定を発行する。")
@@ -54,9 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--annotation-results", required=True, type=Path,
                         help="summarize_annotation()の戻り値をJSON化したファイル")
     parser.add_argument("--annotators", required=True, nargs="+",
-                        help="独立annotation実施者の識別子（2名以上必須）")
+                        help="annotation実施者の識別子（1名は有効なself_repeat agreementが必要）")
+    parser.add_argument("--annotation-agreement", type=Path,
+                        help="annotation_agreement.v1/v2 JSON（1名作業の自己一致証拠を含む）")
     parser.add_argument("--representative-frames", required=True, type=int,
-                        help="二重annotationした代表frame数")
+                        help="agreement 対象の代表frame数")
     parser.add_argument("--target-profile", type=Path, default=None,
                         help="TargetProfile YAMLのパス（既定: .env/target_profile.resolved.yaml）")
     parser.add_argument("--output-json", required=True, type=Path,
@@ -77,6 +79,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         sessions = _load_json(args.sessions, "--sessions")
         probe_evaluations = [_load_json(path, "--probe-results") for path in args.probe_results]
         annotation_summary = _load_json(args.annotation_results, "--annotation-results")
+        annotation_agreement = (
+            _load_json(args.annotation_agreement, "--annotation-agreement")
+            if args.annotation_agreement else None
+        )
         target_profile = (load_runtime_profile(args.target_profile) if args.target_profile
                           else load_runtime_profile())
         evidence = build_gate_evidence(
@@ -84,6 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             probe_evaluations=probe_evaluations,
             annotation_summary=annotation_summary,
             annotators=args.annotators,
+            annotation_agreement=annotation_agreement,
             representative_frames=args.representative_frames,
             target_profile=target_profile,
         )

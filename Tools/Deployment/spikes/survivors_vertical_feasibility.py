@@ -18,19 +18,31 @@ from reinbalance_survivors_contracts.canonical_json import canonical_hash, canon
 from reinbalance_survivors_contracts.ui_intent import (
     ContractValidationError, ensure, is_strict_number, require_schema_version,
 )
+from survivors.annotation_agreement import (
+    DEFAULT_SELF_REPEAT_GAP_HOURS, validate_annotation_agreement,
+)
 from .annotation_throughput import DatasetSplitRequest, estimate_dataset_budget
 from .perception_probe import FeasibilityConfig, load_feasibility_config
 from survivors.action_semantics import load_action_contract, validate_golden_fixture
 
-EVIDENCE_VERSION = "perception_gate_evidence.v1"
-_EVIDENCE_KEYS = frozenset({
+EVIDENCE_VERSION = "perception_gate_evidence.v2"
+_EVIDENCE_KEYS_V1 = frozenset({
     "schema_version", "session_ids", "build_ids", "profile_ids", "target_audit_pass",
     "session_minutes", "slice_counts", "representative_frames", "independent_annotators",
     "p10_short_side_px", "late_recall", "heavy_recall", "single_pass_p95_ms",
     "bbox_qa_iou", "class_agreement", "dense_entities_per_hour",
     "architecture_metrics", "unresolved_risks",
 })
+_EVIDENCE_KEYS = frozenset({
+    "schema_version", "session_ids", "build_ids", "profile_ids", "target_audit_pass",
+    "session_minutes", "slice_counts", "representative_frames", "independent_annotators",
+    "p10_short_side_px", "late_recall", "heavy_recall", "single_pass_p95_ms",
+    "bbox_qa_iou", "class_agreement", "dense_entities_per_hour",
+    "architecture_metrics", "unresolved_risks", "annotation_independence",
+    "annotation_gap_hours", "annotation_required_gap_hours", "annotation_blind",
+})
 _REQUIRED_SLICES = ("early", "mid", "late", "heavy", "level_up", "chest", "death_result")
+_SELF_REPEAT_RISK = "1 人作業の自己一致（作業者固有の癖は検出できない）"
 
 
 @dataclass(frozen=True)
@@ -56,6 +68,10 @@ class GateEvidence:
     dense_entities_per_hour: float
     architecture_metrics: Mapping[str, Mapping[str, float]]
     unresolved_risks: tuple[str, ...] = ()
+    annotation_independence: str | None = None
+    annotation_gap_hours: float | None = None
+    annotation_required_gap_hours: float = DEFAULT_SELF_REPEAT_GAP_HOURS
+    annotation_blind: bool = False
     schema_version: str = EVIDENCE_VERSION
 
     def __post_init__(self) -> None:
@@ -63,9 +79,12 @@ class GateEvidence:
 
         呼び出し元の変更が波及しないようコピーしてから妥当性を確かめます。
         """
-        for name in ("session_ids", "build_ids", "profile_ids",
-                     "independent_annotators", "unresolved_risks"):
+        for name in ("session_ids", "build_ids", "profile_ids", "independent_annotators"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+        risks = tuple(self.unresolved_risks)
+        if self.annotation_independence == "self_repeat" and _SELF_REPEAT_RISK not in risks:
+            risks += (_SELF_REPEAT_RISK,)
+        object.__setattr__(self, "unresolved_risks", risks)
         object.__setattr__(self, "session_minutes",
                            MappingProxyType(dict(self.session_minutes)))
         object.__setattr__(self, "slice_counts", MappingProxyType(dict(self.slice_counts)))
@@ -105,6 +124,20 @@ class GateEvidence:
                "slice counts must be known non-negative integers")
         ensure(type(self.representative_frames) is int and self.representative_frames >= 0,
                "representative frames must be a non-negative integer")
+        ensure(self.annotation_independence is None or (
+            isinstance(self.annotation_independence, str)
+            and self.annotation_independence in ("independent_pair", "self_repeat")),
+               "annotation independence mode is invalid")
+        ensure(type(self.annotation_blind) is bool, "annotation blind must be boolean")
+        ensure(not isinstance(self.annotation_required_gap_hours, bool)
+               and is_strict_number(self.annotation_required_gap_hours)
+               and math.isfinite(self.annotation_required_gap_hours)
+               and self.annotation_required_gap_hours >= DEFAULT_SELF_REPEAT_GAP_HOURS,
+               "annotation required gap must be at least 24 hours")
+        ensure(self.annotation_gap_hours is None or (
+            not isinstance(self.annotation_gap_hours, bool)
+            and is_strict_number(self.annotation_gap_hours) and math.isfinite(self.annotation_gap_hours)),
+               "annotation gap must be finite or missing")
         for name, value in {
             "p10 short side": self.p10_short_side_px,
             "single pass latency": self.single_pass_p95_ms,
@@ -150,7 +183,8 @@ class GateEvidence:
         }
         return cls(sessions, ("build-a",), ("profile-a",), True,
                    {s: 10.0 for s in sessions}, slices, 300, ("alice", "bob"),
-                   6.0, .90, .88, 24.0, .85, .97, 400.0, metrics)
+                   6.0, .90, .88, 24.0, .85, .97, 400.0, metrics,
+                   annotation_independence="independent_pair")
 
     def to_wire(self) -> dict[str, Any]:
         """証拠を JSON 保存可能な辞書へ変換する。
@@ -170,6 +204,10 @@ class GateEvidence:
             "dense_entities_per_hour": self.dense_entities_per_hour,
             "architecture_metrics": {k: dict(v) for k, v in self.architecture_metrics.items()},
             "unresolved_risks": list(self.unresolved_risks),
+            "annotation_independence": self.annotation_independence,
+            "annotation_gap_hours": self.annotation_gap_hours,
+            "annotation_required_gap_hours": self.annotation_required_gap_hours,
+            "annotation_blind": self.annotation_blind,
         }
 
     @classmethod
@@ -179,9 +217,27 @@ class GateEvidence:
         スキーマ版と全キーを厳密に確認して取り込みます。
         """
         ensure(isinstance(data, Mapping), "gate evidence must be a mapping")
-        ensure(set(data) == _EVIDENCE_KEYS,
-               f"unknown/missing gate evidence fields: {sorted(set(data) ^ _EVIDENCE_KEYS)}")
-        require_schema_version(data, EVIDENCE_VERSION, "gate evidence")
+        if data.get("schema_version") == "perception_gate_evidence.v1":
+            ensure(set(data) == _EVIDENCE_KEYS_V1,
+                   f"unknown/missing gate evidence fields: {sorted(set(data) ^ _EVIDENCE_KEYS_V1)}")
+            annotators = data["independent_annotators"]
+            independent_pair = (
+                isinstance(annotators, (list, tuple))
+                and all(isinstance(name, str) for name in annotators)
+                and len(set(annotators)) >= 2
+            )
+            data = {
+                **data,
+                "schema_version": EVIDENCE_VERSION,
+                "annotation_independence": "independent_pair" if independent_pair else None,
+                "annotation_gap_hours": None,
+                "annotation_required_gap_hours": DEFAULT_SELF_REPEAT_GAP_HOURS,
+                "annotation_blind": False,
+            }
+        else:
+            ensure(set(data) == _EVIDENCE_KEYS,
+                   f"unknown/missing gate evidence fields: {sorted(set(data) ^ _EVIDENCE_KEYS)}")
+            require_schema_version(data, EVIDENCE_VERSION, "gate evidence")
         ensure(set(data["slice_counts"]) == set(_REQUIRED_SLICES),
                "unknown/missing slice count fields")
         result = cls(tuple(data["session_ids"]), tuple(data["build_ids"]), tuple(data["profile_ids"]),
@@ -192,7 +248,9 @@ class GateEvidence:
                    data["bbox_qa_iou"], data["class_agreement"],
                    data["dense_entities_per_hour"],
                    {k: dict(v) for k, v in data["architecture_metrics"].items()},
-                   tuple(data["unresolved_risks"]))
+                   tuple(data["unresolved_risks"]), data["annotation_independence"],
+                   data["annotation_gap_hours"], data["annotation_required_gap_hours"],
+                   data["annotation_blind"])
         result.validate()
         return result
 
@@ -359,7 +417,17 @@ def _gate_failures(e: GateEvidence, c: FeasibilityConfig) -> list[str]:
         failures.append("missing_required_slices")
     if e.representative_frames < p["min_frames"]:
         failures.append("representative_frames_insufficient")
-    if len(set(e.independent_annotators)) < 2:
+    annotator_count = len(set(e.independent_annotators))
+    self_repeat_valid = (
+        e.annotation_independence == "self_repeat"
+        and annotator_count == 1
+        and e.annotation_blind
+        and e.annotation_gap_hours is not None
+        and e.annotation_gap_hours >= max(DEFAULT_SELF_REPEAT_GAP_HOURS,
+                                          e.annotation_required_gap_hours)
+    )
+    if (annotator_count < 2 and not self_repeat_valid) or (
+            annotator_count >= 2 and e.annotation_independence == "self_repeat"):
         failures.append("independent_annotation_reviewer_missing")
     if set(e.architecture_metrics) != set(c.architectures):
         failures.append("architecture_matrix_incomplete")
@@ -393,9 +461,13 @@ def issue_verdict(evidence: GateEvidence, config: FeasibilityConfig) -> dict[str
         failures.append("architecture_switch_condition_unsatisfied")
     status = "PASS" if not failures else "FAIL"
     rejected = [name for name in config.architectures if name != selected]
+    annotation_independence = evidence.annotation_independence
+    if annotation_independence is None and len(set(evidence.independent_annotators)) >= 2:
+        annotation_independence = "independent_pair"
     return {
         "schema_version": "perception_feasibility_verdict.v1",
         "status": status, "subject_evidence_hash": canonical_hash(evidence.to_wire()),
+        "annotation_independence": annotation_independence,
         "selected_architecture": selected if status == "PASS" else None,
         "provisional_architecture": selected,
         "rejected_alternatives": rejected,
@@ -422,6 +494,7 @@ def render_verdict_markdown(verdict: Mapping[str, Any], budget: Mapping[str, Any
 Status: **{verdict['status']}**
 
 - Selected architecture: `{verdict['selected_architecture']}`
+- Annotation independence: `{verdict['annotation_independence']}`
 - Provisional architecture (diagnostic only on FAIL): `{verdict['provisional_architecture']}`
 - Rejected alternatives: {rejected}
 - Switch conditions: `{json.dumps(verdict['switch_conditions'], sort_keys=True)}`

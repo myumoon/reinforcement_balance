@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,7 @@ import yaml
 from reinbalance_survivors_contracts.artifact_identity import ArtifactDescriptor
 from reinbalance_survivors_contracts.artifact_store import ArtifactStore
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
+from survivors.annotation_agreement import validate_annotation_agreement
 from survivors.annotation_labels import ANNOTATION_ONLY_CLASSES, REGION_LABEL, iter_frame_files, read_label_file
 from survivors.capture_dataset import (
     SPLIT_NAMES,
@@ -404,10 +406,13 @@ def publish_capture_dataset(
             "ui_coco_model": Path(model_exports.ui_coco_model).read_bytes(),
         }
     agreement_bytes = Path(agreement_path).read_bytes() if agreement_path is not None else None
+    agreement_mode = None
     if agreement_bytes is not None:
         agreement = json.loads(agreement_bytes)
-        if not isinstance(agreement, dict) or agreement.get("schema_version") != "annotation_agreement.v1":
-            raise PublishError("unknown annotation agreement schema")
+        try:
+            agreement_mode = validate_annotation_agreement(agreement)
+        except ValueError as exc:
+            raise PublishError(str(exc)) from exc
     generation_tag = canonical_hash({
         "formal_gates": _sha256_bytes_local(gates_bytes) if gates_bytes is not None else "absent",
         "evaluation_windows": _sha256_bytes_local(windows_bytes) if windows_bytes is not None else "absent",
@@ -574,6 +579,7 @@ def publish_capture_dataset(
         "frames_bindings": frames_bindings,
         "coco_bindings": coco_bindings,
         "dataset_exports": dataset_exports,
+        "independence_mode": agreement_mode,
         "evaluation_windows": (
             {"sessions": windows, "stride": windows_stride, "plan_canonical_hash": windows_plan_hash}
             if windows is not None else None
@@ -766,6 +772,8 @@ def verify_capture_dataset_descriptor(
     if ("world_coco_model" in exports) != ("ui_coco_model" in exports):
         raise PublishError("dataset_exports must bind both model COCO files")
     export_hashes: dict[str, str] = {}
+    agreement_mode = None
+    agreement_version = None
     for name in ("world_coco_model", "ui_coco_model", "annotation_agreement"):
         if name not in exports:
             continue
@@ -776,9 +784,20 @@ def verify_capture_dataset_descriptor(
         content = store.object_path(ref.store_uri).read_bytes()
         if name == "annotation_agreement":
             agreement = json.loads(content)
-            if not isinstance(agreement, Mapping) or agreement.get("schema_version") != "annotation_agreement.v1":
-                raise PublishError("unknown annotation agreement schema")
+            agreement_version = agreement.get("schema_version") if isinstance(agreement, Mapping) else None
+            try:
+                agreement_mode = validate_annotation_agreement(agreement)
+            except ValueError as exc:
+                raise PublishError(str(exc)) from exc
         export_hashes[name] = ref.sha256
+    if agreement_mode is not None:
+        recorded_mode = identity.get("independence_mode")
+        if recorded_mode is None and agreement_version == "annotation_agreement.v1":
+            recorded_mode = agreement_mode
+        if recorded_mode != agreement_mode:
+            raise PublishError("descriptor annotation independence mode does not match agreement")
+    elif identity.get("independence_mode") is not None:
+        raise PublishError("descriptor records annotation mode without agreement")
     expected_dataset_hash = canonical_hash({
         "sessions": sorted(session_rows),
         "split_manifest_sha256": split.manifest_sha256,
@@ -833,23 +852,119 @@ def _checked_boxes(work_root: Path, session_id: str) -> dict[int, list[Any]]:
     return boxes_by_frame
 
 
+def _all_label_state(work_root: Path) -> tuple[set[tuple[str, int]], set[tuple[str, int]], list[float]]:
+    """work-root の label frame、checked frame、更新時刻を集める。
+
+    self_repeat の対象束縛と、A 最終更新から B 初回更新までの実測時間に使う。
+    """
+    label_keys: set[tuple[str, int]] = set()
+    checked_keys: set[tuple[str, int]] = set()
+    updates: list[float] = []
+    for session_dir in work_root.iterdir():
+        if not session_dir.is_dir() or session_dir.is_symlink():
+            continue
+        for frame_id, _, label_path in iter_frame_files(session_dir):
+            if label_path is None:
+                continue
+            key = (session_dir.name, frame_id)
+            label_keys.add(key)
+            updates.append(label_path.stat().st_mtime)
+            if read_label_file(label_path)[1]:
+                checked_keys.add(key)
+    return label_keys, checked_keys, updates
+
+
+def _load_self_agreement_manifest(work_root_b: Path, work_root_a: Path) -> dict[str, Any] | None:
+    """M2 manifest が選択 frame と source A root を正しく記録したか確認する。
+
+    manifest が無い B root は通常の independent_pair として扱い、self_repeat では拒否する。
+    """
+    path = work_root_b / "self_agreement_manifest.json"
+    if not path.is_file():
+        return None
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("self_repeat blind manifest is invalid") from exc
+    if (not isinstance(manifest, Mapping)
+            or manifest.get("schema_version") != "survivors_self_agreement.v1"
+            or not isinstance(manifest.get("source_work_root"), str)
+            or Path(manifest["source_work_root"]).expanduser().resolve() != work_root_a
+            or type(manifest.get("seed")) is not int
+            or not isinstance(manifest.get("created_at"), str)
+            or not isinstance(manifest.get("blind"), bool)
+            or not isinstance(manifest.get("selected_frames"), list)
+            or not manifest["selected_frames"]):
+        raise ValueError("self_repeat blind manifest is invalid")
+    try:
+        datetime.fromisoformat(manifest["created_at"].replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("self_repeat blind manifest timestamp is invalid") from exc
+    selected: set[tuple[str, int]] = set()
+    for frame in manifest["selected_frames"]:
+        if (not isinstance(frame, Mapping) or set(frame) != {"session_id", "frame_id", "image_file"}
+                or not isinstance(frame["session_id"], str) or not frame["session_id"].strip()
+                or type(frame["frame_id"]) is not int
+                or frame["image_file"] != f"{frame['frame_id']:08d}.png"):
+            raise ValueError("self_repeat blind manifest selected frame is invalid")
+        key = (frame["session_id"], frame["frame_id"])
+        if key in selected:
+            raise ValueError("self_repeat blind manifest contains duplicate frames")
+        selected.add(key)
+    return {**manifest, "_selected_keys": selected}
+
+
 def build_annotation_agreement(
     work_root_a: str | Path,
     work_root_b: str | Path,
     session_ids: Sequence[str],
     *,
     iou_match: float = 0.5,
+    annotator_a: str | None = None,
+    annotator_b: str | None = None,
+    minimum_gap_hours: float = 24.0,
 ) -> dict[str, Any]:
-    """独立二重 annotation の frame 単位 greedy IoU agreement を集計する。
+    """二人の independent_pair または self_repeat の frame agreement を集計する。
 
-    class ごとに IoU 最大 pair を採り、未対応 box と class mismatch を数える。
+    self_repeat は M2 manifest、同一 annotator、blind、24 時間以上の label 更新 gap を必須にする。
     """
     if not isinstance(iou_match, (int, float)) or isinstance(iou_match, bool) or not 0 < iou_match <= 1:
         raise ValueError("iou_match must be in (0, 1]")
     root_a, root_b = Path(work_root_a).expanduser().resolve(), Path(work_root_b).expanduser().resolve()
     if not root_a.is_dir() or not root_b.is_dir():
         raise ValueError("both work roots must exist")
+    if annotator_a is None and annotator_b is None:
+        annotator_a, annotator_b = "annotator-a", "annotator-b"
+    if annotator_a is None or annotator_b is None:
+        raise ValueError("both annotator IDs must be provided")
+    if any(not isinstance(value, str) or not value.strip() for value in (annotator_a, annotator_b)):
+        raise ValueError("annotator IDs must be non-empty strings")
+    annotator_a, annotator_b = annotator_a.strip(), annotator_b.strip()
+    if (isinstance(minimum_gap_hours, bool) or not isinstance(minimum_gap_hours, (int, float))
+            or not math.isfinite(minimum_gap_hours)
+            or minimum_gap_hours < 24.0):
+        raise ValueError("minimum_gap_hours must be finite and at least 24 hours")
+    independence_mode = "self_repeat" if annotator_a == annotator_b else "independent_pair"
+    blind_manifest = _load_self_agreement_manifest(root_b, root_a)
+    blind = blind_manifest is not None and blind_manifest["blind"] is True
+    _, checked_a, updates_a = _all_label_state(root_a)
+    all_labels_b, _, updates_b = _all_label_state(root_b)
+    measured_gap = (
+        (min(updates_b) - max(updates_a)) / 3600.0
+        if updates_a and updates_b else None
+    )
     session_values = tuple(dict.fromkeys(_validated_component(value, "session_id") for value in session_ids))
+    if independence_mode == "self_repeat":
+        if blind_manifest is None or not blind:
+            raise ValueError("self_repeat requires a blind M2 work-root")
+        selected_keys = blind_manifest["_selected_keys"]
+        selected_sessions = {session_id for session_id, _ in selected_keys}
+        if set(session_values) != selected_sessions:
+            raise ValueError("self_repeat requires all selected sessions")
+        if not selected_keys <= checked_a or not all_labels_b <= selected_keys:
+            raise ValueError("self_repeat labels must match M2 selected checked frames")
+        if measured_gap is None or measured_gap < minimum_gap_hours:
+            raise ValueError("self_repeat requires a sufficient label update gap")
     all_ious: list[float] = []
     all_matches: list[bool] = []
     unmatched_first = unmatched_second = 0
@@ -898,7 +1013,7 @@ def build_annotation_agreement(
             "unmatched_second": session_unmatched_second,
         })
     return {
-        "schema_version": "annotation_agreement.v1",
+        "schema_version": "annotation_agreement.v2",
         "pair_count": len(all_ious),
         "iou_mean": sum(all_ious) / len(all_ious) if all_ious else 0.0,
         "class_agreement": sum(all_matches) / len(all_matches) if all_matches else 0.0,
@@ -913,6 +1028,12 @@ def build_annotation_agreement(
             }
             for name, values in sorted(per_class.items())
         },
+        "independence_mode": independence_mode,
+        "annotator_a": annotator_a,
+        "annotator_b": annotator_b,
+        "min_gap_hours": measured_gap,
+        "required_min_gap_hours": float(minimum_gap_hours),
+        "blind": blind,
     }
 
 

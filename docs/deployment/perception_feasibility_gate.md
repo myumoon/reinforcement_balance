@@ -6,10 +6,16 @@
 
 ## Gate
 
-3～5独立session（各10分以上）、必須slice各2 session、二重annotation 300
-frame以上を必要とする。build/profile/sessionの混在、target audit未合格、slice
-不足、独立した2名のannotation担当不在、比較architecture不足のいずれかで
-FAILとなり、PASSは発行できない。
+3～5独立session（各10分以上）、必須slice各2 session、代表frame 300以上を必要とする。
+annotation は異なる2名の independent_pair、または v2 self_repeat の有効な自己一致を使う。
+build/profile/session の混在、target audit 未合格、slice 不足、比較architecture不足は
+従来どおり FAIL となり、PASS は発行できない。
+
+1人で作業する場合は、A の checked label から `prepare_survivors_self_agreement.py` で
+B root を作り、A の最終 label 更新から24時間以上空けて、A の label と下書きを見ずに
+B を annotation する。`build_survivors_annotation_agreement.py` は v2 の
+`independence_mode: self_repeat`、実測 gap、blind 記録を出し、verdict は
+`annotation_independence: self_repeat` と「作業者固有の癖は検出できない」risk を残す。
 
 320入力のp10 short-sideが4px未満、またはlate/heavy oracle-assisted recallが
 0.85未満ならSSDLite320を却下する。single-pass p95が25msを超えた場合もtileや
@@ -63,12 +69,16 @@ python -m spikes.feasibility_gate_cli \
   戻り値そのもの（`entities_per_hour`/`dense_entities_per_hour`/
   `qa_rework_rate`/`bbox_qa_iou`/`class_agreement`/`annotation_hours`）。
 
-入力の欠損・型不正・schema不一致（未知フィールド）・`--annotators`不足
-（2名未満）は、CLIが非ゼロ終了・原因を含むstderrメッセージでfail-closedに
-拒否する。一方、`--target-profile`のprovenanceが`operator-attested`でない
+`--annotation-agreement` は v1/v2 JSON を任意指定する。`--annotators` が1名で
+agreement が無い場合や v1 の場合は、CLI は終了コード0で FAIL verdict を発行する。
+v2 self_repeat は annotator ID、24時間以上の gap、blind 条件が揃わなければ拒否する。
+2名以上の従来経路と全ての品質閾値は変わらない。
+
+入力の欠損・型不正・schema不一致（未知フィールド）は、CLIが非ゼロ終了・原因を含む
+stderrメッセージでfail-closedに拒否する。一方、`--target-profile`のprovenanceが`operator-attested`でない
 場合や、`--annotators`に重複名がある場合は、CLIは正常終了（終了コード0）した
-うえで判定を`FAIL`として発行する（本文中のtarget audit未合格・独立annotation
-担当不在の既存fail-closed業務仕様に従うため）。
+うえで判定を`FAIL`として発行する（target audit未合格・独立annotation担当不在の
+業務仕様に従うため）。
 
 既知の制約: `merge_probe_evaluations()`のutility変換は
 `utility = utility_per_latency * latency_p95_ms`（`evaluate_probe()`の

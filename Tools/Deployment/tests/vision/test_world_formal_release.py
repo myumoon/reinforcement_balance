@@ -1023,7 +1023,10 @@ def test_formal_artifact_envelope_restore_and_session_build_identity(tmp_path) -
     assert "validation_verdict_hash" not in resolved
 
 
-def _formal_preflight_inputs(tmp_path, *, mutation: str | None = None) -> dict:
+def _formal_preflight_inputs(
+    tmp_path, *, mutation: str | None = None, agreement_mode: str = "independent_pair",
+    agreement_gap_hours: float = 24.0, agreement_blind: bool = True,
+) -> dict:
     """capture store と全 descriptor を共有 API で組み立てる。\n\npreflight の成功入力と一項目だけを壊した反例を同じ経路で用意する。"""
     import yaml
     from survivors.capture.captured_frame import CapturedFrame
@@ -1118,12 +1121,21 @@ def _formal_preflight_inputs(tmp_path, *, mutation: str | None = None) -> dict:
     }, sort_keys=True), encoding="utf-8")
     agreement_value = 0.4 if mutation == "agreement-below-floor" else 1.0
     agreement_path = tmp_path / "agreement.json"
-    agreement_path.write_text(json.dumps({
+    agreement_data = {
         "schema_version": "annotation_agreement.v1",
         "pair_count": 1,
         "iou_mean": agreement_value,
         "class_agreement": agreement_value,
-    }, sort_keys=True), encoding="utf-8")
+    }
+    if agreement_mode == "self_repeat":
+        agreement_data.update({
+            "schema_version": "annotation_agreement.v2",
+            "unmatched_first": 0, "unmatched_second": 0, "sessions": [], "per_class": {},
+            "independence_mode": "self_repeat", "annotator_a": "alice", "annotator_b": "alice",
+            "min_gap_hours": agreement_gap_hours, "required_min_gap_hours": 24.0,
+            "blind": agreement_blind,
+        })
+    agreement_path.write_text(json.dumps(agreement_data, sort_keys=True), encoding="utf-8")
 
     store = ArtifactStore(tmp_path / "source-store")
     split_ref = store.put(logical_id="dataset/split-manifest", source_path=split_path, media_type="application/json")
@@ -1272,6 +1284,30 @@ def test_formal_preflight_accepts_and_round_trips_a_bound_capture_dataset(tmp_pa
     assert restored.train_sessions == ("train",)
     assert restored.validation_sessions == ("validation-0", "validation-1", "validation-2")
     assert restored.restore_verdict_logical_id == inputs["restore_descriptor"].logical_id
+
+
+def test_formal_preflight_accepts_self_repeat_and_records_independence_mode(tmp_path) -> None:
+    """formal preflight は有効な v2 self_repeat を受理し report に mode を記録する。
+
+    agreement 件数の閾値は independent_pair と同じ minimum_counts を通る。
+    """
+    report = _run_preflight_fixture(
+        _formal_preflight_inputs(tmp_path, agreement_mode="self_repeat"))
+
+    assert report.agreement["independence_mode"] == "self_repeat"
+
+
+@pytest.mark.parametrize(("gap", "blind"), [(23.0, True), (24.0, False)])
+def test_formal_preflight_rejects_self_repeat_without_gap_or_blind(tmp_path, gap, blind) -> None:
+    """formal preflight は gap 不足または blind false の self_repeat を拒否する。
+
+    下流の訓練入口が feasibility gate の検査を迂回しても PASS させない。
+    """
+    inputs = _formal_preflight_inputs(
+        tmp_path, agreement_mode="self_repeat", agreement_gap_hours=gap, agreement_blind=blind)
+
+    with pytest.raises(FormalPreflightError, match="self_repeat"):
+        _run_preflight_fixture(inputs)
 
 
 @pytest.mark.parametrize(("mutation", "message"), [

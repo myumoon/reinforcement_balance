@@ -12,6 +12,7 @@ import math
 from typing import Any, Mapping, Sequence
 
 from reinbalance_survivors_contracts.ui_intent import ensure, is_strict_number
+from survivors.annotation_agreement import validate_annotation_agreement
 from spikes.survivors_vertical_feasibility import GateEvidence, _REQUIRED_SLICES
 from survivors.target_profile import TargetProfile
 
@@ -153,26 +154,51 @@ def build_gate_evidence(
     probe_evaluations: Sequence[Mapping[str, Any]],
     annotation_summary: Mapping[str, Any],
     annotators: Sequence[str],
+    annotation_agreement: Mapping[str, Any] | None = None,
     representative_frames: int,
     target_profile: TargetProfile,
     unresolved_risks: Sequence[str] = (),
 ) -> GateEvidence:
     """pilotの実測入力一式を検証し、実行可能な`GateEvidence`を1つに組み立てる。
 
-    pilotセッションmetadata・probe評価・annotation集計・TargetProfileの4種類の
-    入力から、GateEvidenceが要求する全フィールドを導出します。導出したGateEvidenceは
+    pilot session、probe、annotation 集計、annotator 一覧、TargetProfile と任意の
+    agreement から GateEvidence を作ります。導出した証拠は
     構築時に自身の`.validate()`を通るため、ここでは重複するチェックを増やさず、
-    GateEvidence自身では検証できない入力形状（annotator数など）だけを追加で検証します。
+    GateEvidence だけでは確かめられない annotator と agreement の対応も検証します。
     """
     ensure(isinstance(sessions, Sequence) and not isinstance(sessions, (str, bytes)) and sessions,
            "at least one pilot session is required")
     for index, session in enumerate(sessions):
         _validate_session(session, index)
     ensure(isinstance(target_profile, TargetProfile), "target_profile must be a TargetProfile")
-    # independent_annotators の重複（例: alice, alice）はGateEvidence構築後にissue_verdict()が
-    # 判定FAILとして扱う既存の業務仕様（test_perception_probe.pyで確認済み）なのでここでは
-    # 弾かない。ここで弾くのは「そもそも人数が足りない」という入力形状の不備だけ。
-    ensure(len(annotators) >= 2, "at least two independent annotators are required")
+    # 2名の重複は従来どおり verdict 側で FAIL にし、1名は v2 agreement の条件で判定する。
+    # 入力形式が成立する 1 名を早期例外にせず、FAIL verdict として記録できるようにする。
+    ensure(len(annotators) >= 1, "at least one annotator is required")
+    annotator_values = tuple(annotators)
+    annotation_independence = "independent_pair" if len(set(annotator_values)) >= 2 else None
+    annotation_gap_hours = None
+    annotation_required_gap_hours = 24.0
+    annotation_blind = False
+    if annotation_agreement is not None:
+        agreement_mode = validate_annotation_agreement(annotation_agreement)
+        if agreement_mode == "independent_pair":
+            if annotation_agreement.get("schema_version") == "annotation_agreement.v2":
+                report_annotators = {
+                    annotation_agreement["annotator_a"], annotation_agreement["annotator_b"]}
+                if not report_annotators <= set(annotator_values):
+                    if len(set(annotator_values)) >= 2:
+                        raise ValueError("agreement annotators do not match --annotators")
+                    annotation_independence = None
+            elif len(set(annotator_values)) < 2:
+                annotation_independence = None
+        elif (len(set(annotator_values)) != 1
+              or annotator_values[0] != annotation_agreement["annotator_a"]):
+            raise ValueError("self_repeat annotator does not match --annotators")
+        else:
+            annotation_independence = "self_repeat"
+            annotation_gap_hours = annotation_agreement["min_gap_hours"]
+            annotation_required_gap_hours = annotation_agreement["required_min_gap_hours"]
+            annotation_blind = annotation_agreement["blind"]
     _closed(annotation_summary, _ANNOTATION_SUMMARY_KEYS, "annotation summary")
 
     probe_metrics = merge_probe_evaluations(probe_evaluations)
@@ -190,7 +216,7 @@ def build_gate_evidence(
         session_minutes=session_minutes,
         slice_counts=slice_counts,
         representative_frames=representative_frames,
-        independent_annotators=tuple(annotators),
+        independent_annotators=annotator_values,
         p10_short_side_px=probe_metrics["p10_short_side_px"],
         late_recall=probe_metrics["late_recall"],
         heavy_recall=probe_metrics["heavy_recall"],
@@ -200,4 +226,8 @@ def build_gate_evidence(
         dense_entities_per_hour=annotation_summary["dense_entities_per_hour"],
         architecture_metrics=probe_metrics["architecture_metrics"],
         unresolved_risks=tuple(unresolved_risks),
+        annotation_independence=annotation_independence,
+        annotation_gap_hours=annotation_gap_hours,
+        annotation_required_gap_hours=annotation_required_gap_hours,
+        annotation_blind=annotation_blind,
     )
