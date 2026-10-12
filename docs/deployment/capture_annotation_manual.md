@@ -296,7 +296,7 @@ python Tools/Deployment/capture_survivors.py `
 
 `--planned-split` は `model_train`、`model_validation`、`error_calibration`、`final_e2e_test` のいずれかです。用途と `planned_at` は session manifest の `operator_checkpoint` に記録されます。迷ったら `model_train` を明示します。用途を省略した既存 session は model 用として扱い、必要に応じて警告を確認します。
 
-live capture が公開されると、開始時の resolved YAML bytes と SHA-256、`target_profile_hash`、`game_build_id`、`planned_split`、`planned_at`、UTC の収録開始時刻、operator、実測 session 長、run 終了状態を含む JSON が stdout に出て、同じ内容が `session_stats.json` に保存されます。Steam の自動更新設定は Steam appmanifest から検出し、取得できない場合は `unknown` として記録します。`session_log.md` も自動で埋まり、手入力は不要です。
+live capture が公開されると、stdout には PR #373 と同じ収録結果 JSON（resolved YAML SHA-256、`target_profile_hash`、`game_build_id`、`planned_split`、`planned_at`、収録開始時刻など）が出ます。operator、実測 session 長、run 終了状態、Steam の自動更新設定は stdout には含まず、`session_stats.json` と `session_log.md` にだけ自動記録されます。Steam の自動更新設定は Steam appmanifest から検出し、取得できない場合は `unknown` として記録します。`session_log.md` への手入力は不要です。
 
 現行の `perception_session_split.py` は session 長 1800 秒以上を要求します。実行時間は終了 deadline より少し短くなるため、1800 秒要件が適用される収録では `--duration-sec 1800` ちょうどを使わず余裕を取ります。calibration／final 用の新しい session は現行の `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` に定めた最短長に従います。
 

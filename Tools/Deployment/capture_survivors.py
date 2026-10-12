@@ -313,7 +313,7 @@ def _write_session_log(
         "{{steam_auto_update_behavior}}": payload["steam_auto_update_behavior"],
         "{{session_manifest_path}}": str(store_root / "capture_sessions" / session_id / "session_manifest.json"),
         "{{session_stats_path}}": str(session_stats_path),
-        "{{stdout_stats}}": "session_stats.json と同じ JSON",
+        "{{stdout_stats}}": "session_stats.json から session log 用の追加項目を除いた JSON",
         "{{session_profile_path}}": str(session_profile_path),
         "{{resolved_yaml_sha256}}": str(payload["resolved_yaml_sha256"]),
         "{{target_profile_hash}}": str(payload["target_profile_hash"]),
