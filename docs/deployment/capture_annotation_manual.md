@@ -79,6 +79,12 @@ python Tools/Deployment/train_survivors_prelabel_detector.py `
   --work-root "<WorkRoot>"
 ```
 
+bat からは `Tools\Utility\SurvivorsAnnotation\TrainPrelabelDetector.bat` を実行できます。既定の WorkRoot は `.env/survivors_deployment.env` の `SURVIVORS_ARTIFACT_PRIMARY_ROOT\annotation_work` です。別の設定ファイルや WorkRoot を使う場合は引数で指定します。
+
+```cmd
+Tools\Utility\SurvivorsAnnotation\TrainPrelabelDetector.bat -EnvFile "<EnvFile>" -WorkRoot "<WorkRoot>"
+```
+
 - work-root 内の `checked: true` の JSON だけを使い、重みを `<WorkRoot>/prelabel_detector.pt` に保存します（`--output` で変更可）。確認済みフレームが無い場合はエラーで終了します。
 - 初回は pytorch.org から事前学習重み（約 74MB）を自動でダウンロードします。GPU があれば自動で使い、数分で終わります。
 
@@ -88,6 +94,12 @@ python Tools/Deployment/train_survivors_prelabel_detector.py `
 python Tools/Deployment/prelabel_survivors_frames.py `
   --work-root "<WorkRoot>" `
   --session-id "<SessionId>"
+```
+
+WorkRoot 直下の `session-*` をすべて処理する場合は `Tools\Utility\SurvivorsAnnotation\PrelabelAllSessions.bat` を使えます。`_relabel` などのディレクトリは対象外です。`-RefreshUnchecked` を付けると `--refresh-unchecked` を渡します。WorkRoot と env ファイルも必要に応じて指定できます。
+
+```cmd
+Tools\Utility\SurvivorsAnnotation\PrelabelAllSessions.bat -RefreshUnchecked -EnvFile "<EnvFile>" -WorkRoot "<WorkRoot>"
 ```
 
 - 既定で `<WorkRoot>/prelabel_detector.pt` を読みます（`--detector` で変更可）。重みファイルが無い場合は警告を表示し、固定矩形だけの下書きを作ります。
