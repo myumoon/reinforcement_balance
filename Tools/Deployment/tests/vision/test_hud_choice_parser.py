@@ -970,7 +970,7 @@ class TestDetectScreenState:
 class TestMeasuredLayout:
     """実測配置の画面判定と本番 choice 配線を検証する。
 
-    未計測の能力や宝箱を開く操作を候補へ出さず、短い遮蔽だけを保持します。
+    未計測の能力は候補へ出さず、宝箱ボタンは段階 reason を付けて返します。
     """
 
     @pytest.mark.parametrize("count", [1, 2, 3, 4])
@@ -1149,9 +1149,9 @@ class TestMeasuredLayout:
 
     @pytest.mark.parametrize("phase", ["open", "close", "no_button"])
     def test_ack_chest_requires_shortened_panel(self, phase):
-        """縮んだパネルの終了ボタンだけを ack_chest にする。
+        """開くと終了のボタンを ack_chest にし、下枠で段階を記録する。
 
-        開くボタン自身の短い金枠も描き、閾値に届かないことを確かめます。
+        開くボタンの金枠は段階判定へ混ぜず、ボタン面の色で操作可能性を判定します。
         """
         frame = _make_levelup_frame(0)
         if phase != "no_button":
@@ -1160,7 +1160,9 @@ class TestMeasuredLayout:
         if phase == "close":
             frame[914:919, 660:1260, :3] = (102, 203, 255)
         result = ChoiceParser().parse(frame, screen_state="chest")
-        assert [b.button_type for b in result.buttons] == (["ack_chest"] if phase == "close" else [])
+        assert [b.button_type for b in result.buttons] == ([] if phase == "no_button" else ["ack_chest"])
+        if phase != "no_button":
+            assert result.buttons[0].reason.endswith(f":{phase}")
 
     @pytest.mark.parametrize("state", ["death", "result"])
     def test_confirm_uses_only_inner_color(self, state):

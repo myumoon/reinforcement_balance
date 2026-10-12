@@ -138,7 +138,8 @@ def _item_context(
     raw_ids = [card.item_id or f"unknown:{card.slot_index}" for card in cards]
     if len(raw_ids) != len(set(raw_ids)):
         return None, ()
-    # fallback/gold/chicken は fallback_kind フィールドへ。chest は ack_chest ボタンのみで表現。
+    # fallback/gold/chicken は fallback_kind フィールドへまとめます。
+    # chest は開く・終了の両 button を ack_chest として表現します。
     fallback = next(
         (card.item_id or "" for card in cards
          if card.kind == "fallback" or "gold" in (card.item_id or "").casefold()

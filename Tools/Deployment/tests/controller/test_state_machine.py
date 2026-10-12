@@ -1925,13 +1925,10 @@ class TestNoiseInvariantProperty:
                 ):
                     assert "ui_click" not in kinds and "ui_key" not in kinds
 
-                # M4/M15 fix: 同一 UI 訪問(apply ack で attempt が入れ替わっても
-                # 訪問をまたいで累積する StateContext.ui_visit_click_count)あたりの
-                # click は2件まで。attempt 単位のヒューリスティックではなく、
-                # 生産コードが実際に持つカウンタ自身を直接検証する。
-                assert sm.context.ui_visit_click_count <= 2, (
-                    "同一UI訪問(ui_visit_click_count)あたりのclickはinitial+retryの最大2件まで"
-                )
+                # CHEST は open/close の各 initial+retry を許可し、上限は4件です。
+                # その他の UI 訪問では従来どおり2件までに制限します。
+                click_cap = 4 if sm.context.state is ControllerState.CHEST else 2
+                assert sm.context.ui_visit_click_count <= click_cap
 
                 for kind in kinds:
                     if kind == "move":
@@ -1993,10 +1990,10 @@ class TestNoiseInvariantProperty:
 class TestMeasuredModalReplay:
     """録画に近い三十 fps の長い宝箱とカード過渡を再生する。
 
-    開く段階では候補なしで待ち、終了だけをクリックし、読めないカードは timeout で停止します。
+    宝箱の開く・演出・終了を本番解析で再生し、読めないカードは timeout で停止します。
     """
 
-    def _tick(self, sm, state, tick, now, *, buttons=(), candidates=(), stable_key="modal"):
+    def _tick(self, sm, state, tick, now, *, buttons=(), candidates=(), stable_key="modal", ui_state_key=None):
         """新しい撮影時刻と identity で一 tick を進める。
 
         終了ボタンが残る間は UI key を固定し、confidence のフェードだけでは別操作にしません。
@@ -2004,7 +2001,8 @@ class TestMeasuredModalReplay:
         now += 33_333_334
         snapshot = fx.make_perception_snapshot(screen_state=state, snapshot_id=f"replay-{tick}",
                                               frame_id=f"frame-{tick}", captured_ns=now,
-                                              ui_state_key=fx._hash_of(stable_key), buttons=buttons, candidates=candidates,
+                                              ui_state_key=ui_state_key or fx._hash_of(stable_key),
+                                              buttons=buttons, candidates=candidates,
                                               candidate_set_hash=fx._hash_of("replay-candidates"))
         if state == "chest":
             intent = fx.make_button_intent(snapshot, kind=UiIntentKind.ACK_CHEST, semantic_action="ack_chest")
@@ -2035,6 +2033,151 @@ class TestMeasuredModalReplay:
         hud = HudParser(parser_artifact_hash=fx._hash_of("parser_artifact")).parse(
             frame, session_id="chest-replay", frame_index=0, captured_monotonic_ns=0)
         return build_ui_presentation_from_hud(hud, (1920, 1080)).buttons
+
+    def _chest_presentation(self, phase):
+        """本番 parser から宝箱の各段階を作る。
+
+        開くと終了は同じ key、button 無しの演出は異なる key になります。
+        """
+        import numpy as np
+        from survivors.vision.hud_parser import HudParser
+        from survivors.perception_snapshot import build_ui_presentation_from_hud
+
+        frame = np.zeros((1080, 1920, 4), dtype=np.uint8)
+        frame[111:965, 642:1278, :3] = (102, 203, 255)
+        frame[117:959, 648:1272, :3] = (116, 79, 75)
+        if phase in {"open", "close"}:
+            frame[835:902, 822:1098, :3] = (205, 64, 39)
+            frame[858:874, 920:1000, :3] = 255
+            if phase == "open":
+                frame[910:913, 810:1109, :3] = (102, 203, 255)
+            else:
+                frame[914:919, 660:1260, :3] = (102, 203, 255)
+        hud = HudParser(parser_artifact_hash=fx._hash_of("parser_artifact")).parse(
+            frame, session_id="chest-replay", frame_index=0, captured_monotonic_ns=0)
+        assert hud.screen_state == "chest"
+        return build_ui_presentation_from_hud(hud, (1920, 1080))
+
+    def _play_chest(self, sm, tick, now, frames, presentation):
+        """同じ本番 presentation を指定 frame 数だけ観測する。
+
+        その間に発生した click mode と次の tick・時刻を返します。
+        """
+        modes = []
+        for _ in range(frames):
+            now, effects = self._tick(
+                sm, "chest", tick, now, buttons=presentation.buttons,
+                ui_state_key=presentation.ui_state_key,
+            )
+            modes.extend(effect.mode for effect in effects if effect.kind == "ui_click")
+            tick += 1
+        return tick, now, modes
+
+    def test_chest_open_flash_close_clicks_both_buttons(self):
+        """開くを押し、演出後に終了を押して gameplay へ戻る。
+
+        本番 parser の button と key を使い、停止せず二段階を進めることを確かめます。
+        """
+        open_ui = self._chest_presentation("open")
+        flash_ui = self._chest_presentation("glow")
+        close_ui = self._chest_presentation("close")
+        assert len(open_ui.buttons) == len(close_ui.buttons) == 1
+        assert flash_ui.buttons == ()
+        assert open_ui.ui_state_key == close_ui.ui_state_key != flash_ui.ui_state_key
+
+        sm = StateMachine()
+        now, _ = _arm_to_gameplay(sm, 0)
+        tick, now, clicks = self._play_chest(sm, 0, now, 4, open_ui)
+        assert clicks == ["initial"]
+        tick, now, flash_clicks = self._play_chest(sm, tick, now, 640, flash_ui)
+        assert flash_clicks == [] and sm.context.state is ControllerState.CHEST
+        tick, now, close_clicks = self._play_chest(sm, tick, now, 4, close_ui)
+        assert close_clicks == ["initial"]
+        assert sm.context.state is ControllerState.CHEST and sm.context.terminal_reason is None
+        for _ in range(3):
+            now, _ = self._tick(sm, "gameplay", tick, now, stable_key="gameplay-return")
+            tick += 1
+        assert sm.context.state is ControllerState.GAMEPLAY
+
+    def test_chest_dropped_open_retries_then_close_can_retry(self):
+        """捨てられた開くと終了を再送し、訪問内の四 click 上限で停止しない。
+
+        各段階の initial と retry が有効で、button 切り替え後も attempt を解決します。
+        """
+        open_ui = self._chest_presentation("open")
+        flash_ui = self._chest_presentation("glow")
+        close_ui = self._chest_presentation("close")
+        sm = StateMachine()
+        now, _ = _arm_to_gameplay(sm, 0)
+        tick, now, open_clicks = self._play_chest(sm, 0, now, 12, open_ui)
+        assert open_clicks == ["initial", "retry"]
+        tick, now, _ = self._play_chest(sm, tick, now, 640, flash_ui)
+        tick, now, close_clicks = self._play_chest(sm, tick, now, 12, close_ui)
+        assert close_clicks == ["initial", "retry"]
+        assert sm.context.ui_visit_click_count == 4
+        assert sm.context.state is ControllerState.CHEST and sm.context.terminal_reason is None
+
+    def test_chest_close_then_flash_to_gameplay_does_not_click_again(self):
+        """終了後の button 無し key と gameplay への遷移で追加 click を出さない。
+
+        終了操作の後に発光状態が短く続いても、三度目の操作を発生させません。
+        """
+        open_ui = self._chest_presentation("open")
+        flash_ui = self._chest_presentation("glow")
+        close_ui = self._chest_presentation("close")
+        sm = StateMachine()
+        now, _ = _arm_to_gameplay(sm, 0)
+        tick, now, open_clicks = self._play_chest(sm, 0, now, 4, open_ui)
+        tick, now, _ = self._play_chest(sm, tick, now, 640, flash_ui)
+        tick, now, close_clicks = self._play_chest(sm, tick, now, 4, close_ui)
+        tick, now, flash_clicks = self._play_chest(sm, tick, now, 2, flash_ui)
+        assert open_clicks == close_clicks == ["initial"] and flash_clicks == []
+        for _ in range(3):
+            now, effects = self._tick(sm, "gameplay", tick, now, stable_key="gameplay-return")
+            assert all(effect.kind != "ui_click" for effect in effects)
+            tick += 1
+        assert sm.context.state is ControllerState.GAMEPLAY
+
+    def test_chest_two_frame_flash_key_jitter_does_not_start_attempt(self):
+        """button 無し key が二 frame で元へ戻っても再クリックしない。
+
+        debounce 前に元の key へ戻ると、元の attempt のまま待機します。
+        """
+        open_ui = self._chest_presentation("open")
+        flash_ui = self._chest_presentation("glow")
+        sm = StateMachine()
+        now, _ = _arm_to_gameplay(sm, 0)
+        tick, now, clicks = self._play_chest(sm, 0, now, 4, open_ui)
+        tick, now, _ = self._play_chest(sm, tick, now, 2, flash_ui)
+        tick, now, returned_clicks = self._play_chest(sm, tick, now, 1, open_ui)
+        assert clicks == ["initial"] and returned_clicks == []
+        assert sm.context.state is ControllerState.CHEST and sm.context.ui_visit_click_count == 1
+
+    def test_chest_interleaved_keys_stop_at_four_clicks_then_timeout(self):
+        """key の交互変化でも四 click を上限にし、操作せず chest_timeout で止まる。
+
+        上限到達後は valid button が再出現しても click せず、既定 timeout で停止します。
+        """
+        open_ui = self._chest_presentation("open")
+        flash_ui = self._chest_presentation("glow")
+        sm = StateMachine()
+        now, _ = _arm_to_gameplay(sm, 0)
+        tick, now, clicks = self._play_chest(sm, 0, now, 4, open_ui)
+        for _ in range(3):
+            tick, now, _ = self._play_chest(sm, tick, now, 8, flash_ui)
+            tick, now, next_clicks = self._play_chest(sm, tick, now, 1, open_ui)
+            clicks.extend(next_clicks)
+        assert clicks == ["initial"] * 4 and sm.context.ui_visit_click_count == 4
+        tick, now, _ = self._play_chest(sm, tick, now, 8, flash_ui)
+        while sm.context.state is ControllerState.CHEST and tick < 1900:
+            now, effects = self._tick(
+                sm, "chest", tick, now, buttons=flash_ui.buttons, ui_state_key=flash_ui.ui_state_key,
+            )
+            assert all(effect.kind != "ui_click" for effect in effects)
+            tick += 1
+        assert sm.context.state is ControllerState.DISARMED
+        assert sm.context.terminal_reason == "chest_timeout"
+        assert sm.context.ui_visit_click_count == 4
 
     @pytest.mark.parametrize("retry", [False, True])
     def test_chest_waits_twenty_one_seconds_then_closes(self, retry):

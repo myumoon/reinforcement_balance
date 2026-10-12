@@ -24,7 +24,8 @@
   確定し、以後の intent を新規 initial resolve として扱う(reroll/banish
   成功後の次選択や連続 level-up を誤って emergency stop しない一方、
   フェード中の1フレームだけの揺れでは無制限に再クリックしない)。さらに、
-  同一 UI 訪問での送信総数は理由を問わず 2 件までに固定する安全弁を持つ。
+  同一 UI 訪問の送信上限は、宝箱が open/close 各 initial+retry の4件、
+  それ以外は2件に固定する安全弁を持つ。
   それでも変化がなければ input を止めて安全側(emergency stop)へ倒す
   (fail-closed)。
 - unknown は 1s、paused は無期限(input 0 のまま画面変化を待つ)。どちらから
@@ -58,6 +59,8 @@ from typing import TYPE_CHECKING, Literal
 from reinbalance_survivors_contracts.ui_intent import UiIntentKind
 
 from .ui_navigation import Effect, NavigationProfile, resolve_ui_target
+
+_CHEST_VISIT_CLICK_CAP = 4
 
 if TYPE_CHECKING:  # pragma: no cover - 型注釈だけに使い、実行時 import は避ける。
     from reinbalance_survivors_contracts.ui_intent import UiIntentV1
@@ -207,8 +210,7 @@ class StateContext:
     # 同一 UI 訪問(LEVEL_UP/CHEST/TARGET_REACHED へ入ってから抜けるまで)で
     # 実際に送った click/key effect の総数(apply ack で attempt が入れ替わっても
     # 訪問をまたいでは累積し続ける)。M4/M15 fix: apply ack 判定が signature の
-    # 誤検出で繰り返し確定してしまっても、1 訪問あたりの総送信数を機械的に
-    # 2(initial+retry)までへ固定する最後の安全弁。
+    # 誤検出で繰り返し確定しても、CHEST は4件、他は2件までに固定する安全弁。
     ui_visit_click_count: int = 0
 
 
@@ -218,15 +220,17 @@ def _intent_identity(intent: "UiIntentV1") -> tuple:
     やさしい説明: 「同じ意図かどうか」を比較するための短い署名です。
     ``candidate_set_hash`` も含めることで、``choose_card`` が同じ index でも
     別の候補集合を指す状況(reroll による inventory 変化)を別 identity として
-    扱い、二重クリックにならないようにします。
+    扱います。宝箱だけは同じ ack_chest の開く/終了段階を分けるため ui_state_key
+    も含めます。
     """
-    return (
+    identity = (
         intent.kind.value,
         intent.semantic_action,
         intent.target_id,
         intent.target_index,
         intent.candidate_set_hash,
     )
+    return identity + (intent.ui_state_key,) if intent.kind is UiIntentKind.ACK_CHEST else identity
 
 
 def _send_effects(target, *, intent: "UiIntentV1", mode: Literal["initial", "retry"]) -> tuple[Effect, ...]:
@@ -445,9 +449,9 @@ def _dispatch_ui_click(
     8. precondition を満たす newer snapshot だけ、最大1回 retry する。
     9. 上記のいずれの送信経路でも、同一 UI 訪問(``ui_visit_click_count``、
        LEVEL_UP/CHEST/TARGET_REACHED へ入ってから抜けるまで)での総送信数が
-       2件(initial+retry 相当)を超えたら、それ以上は一切送らない(apply ack
-       が繰り返し確定してしまうような未知の経路が残っていても、この上限が
-       最後の安全弁になる)。
+       CHEST は4件(開く/終了の各 initial+retry)、それ以外は2件を超えたら
+       それ以上は一切送らない(apply ack が繰り返し確定する未知の経路があっても
+       この上限が最後の安全弁になる)。
     """
     if decision.kind != "ui" or decision.ui_intent is None:
         return context, ()  # move/no_op は UI 状態中は無視する(movement と競合させない)。
@@ -457,6 +461,7 @@ def _dispatch_ui_click(
     if intent.kind is UiIntentKind.NO_OP:
         return context, ()
 
+    visit_click_cap = _CHEST_VISIT_CLICK_CAP if context.state is ControllerState.CHEST else 2
     identity = _intent_identity(intent)
 
     if context.ui_attempt is not None:
@@ -504,7 +509,7 @@ def _dispatch_ui_click(
             )
 
     if context.ui_attempt is None:
-        if context.ui_visit_click_count >= 2:
+        if context.ui_visit_click_count >= visit_click_cap:
             # 同一 UI 訪問での送信総数の安全弁(M4/M15 fix)。ここに来る場合は
             # apply ack が繰り返し確定してしまった残存経路であり、これ以上は
             # 送らず timeout 側の fail-closed に委ねる。
@@ -535,7 +540,7 @@ def _dispatch_ui_click(
         return context, ()
     if profile.retry_budget < 1:
         return context, ()
-    if context.ui_visit_click_count >= 2:
+    if context.ui_visit_click_count >= visit_click_cap:
         return context, ()  # 同一 UI 訪問での送信総数の安全弁(M4/M15 fix)。
 
     target = resolve_ui_target(
