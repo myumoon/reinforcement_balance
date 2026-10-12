@@ -76,9 +76,9 @@
 | annotator / work-root | 開始時刻 | 終了時刻 | 対象 frame 数 | 下書きから修正した frame 数 |
 |---|---|---|---:|---:|
 | A | | | | |
-| B（04-08 formal 用は必須。1人の場合は準備 CLI → 24時間以上空けて blind annotation → agreement 作成） | | | | |
+| B（04-08 formal 用は必須。1人の場合は A 最終 label 更新から24時間以上後に準備 CLI → blind annotation → agreement 作成） | | | | |
 
-- agreement は 04-10／04-14 では不要、04-08（04-15 の formal world detector 訓練）では必須です。1人の場合は `prepare_survivors_self_agreement.py` で B root を作り、A の最後の label 更新から24時間以上後に、A の label と prelabel を見ずに annotation して `build_survivors_annotation_agreement.py` を実行します。必要件数は `minimum_counts.agreement` で確認してください。
+- agreement は 04-10／04-14 では不要、04-08（04-15 の formal world detector 訓練）では必須です。1人の場合は A の最後の label 更新から設定 gap（既定24時間）以上待って `prepare_survivors_self_agreement.py` を実行し、A の label と prelabel を見ずに B を annotation して `build_survivors_annotation_agreement.py` を実行します。準備から agreement 作成まで A root の label は保存しません。gap は `min(manifest.created_at, B label の最小 mtime) - A label の最大 mtime` で測り、manifest より前の B label は拒否されます。必要件数は `minimum_counts.agreement` で確認してください。
 - B の annotation は別 work-root で実施し、1人の場合は準備済み空 root から A の label と A の frame で学習した prelabel を見ずに作業した: はい / いいえ / 対象外
 - 画面全体を annotation し、sealed window 内で `labeled_region` を使用していない: はい / いいえ / 対象外
 - HUD truth の保存先:
