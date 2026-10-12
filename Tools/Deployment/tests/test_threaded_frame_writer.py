@@ -306,6 +306,9 @@ def test_live_capture_persists_on_worker_and_preserves_output(
         )
     )
     monkeypatch.setattr(capture_survivors, "_start_live_session", lambda: live_session)
+    profile_path = tmp_path / "resolved-target-profile.yaml"
+    profile_path.write_bytes(b"resolved profile")
+    monkeypatch.setattr(capture_survivors, "RESOLVED", profile_path, raising=False)
 
     def fake_capture_live(_session, _duration, _interrupted, _stats):
         """フォアグラウンド待機やdeadline管理を省いた最小限のfake収録ループ。
@@ -313,6 +316,7 @@ def test_live_capture_persists_on_worker_and_preserves_output(
         main()側のframes.close()呼び出しに応答できるよう、通常のgenerator
         (close()を持つ)として1フレームだけyieldする。
         """
+        _stats["capture_started_at_utc"] = "2026-10-12T01:02:03Z"
         yield _frame(0, 100)
 
     monkeypatch.setattr(capture_survivors, "_capture_live", fake_capture_live)
@@ -347,6 +351,12 @@ def test_live_capture_persists_on_worker_and_preserves_output(
     payload = json.loads(capsys.readouterr().out)
     elapsed_sec = payload.pop("elapsed_sec")
     assert isinstance(elapsed_sec, float) and elapsed_sec >= 0
+    assert payload.pop("target_profile_hash") == PROFILE_HASH
+    assert payload.pop("game_build_id") == BUILD_ID
+    assert len(payload.pop("resolved_yaml_sha256")) == 64
+    assert payload.pop("planned_split") is None
+    assert payload.pop("planned_at") is None
+    assert payload.pop("capture_started_at") == "2026-10-12T01:02:03Z"
     assert payload == {
         "status": "PUBLISHED",
         "session_id": "live-session",

@@ -1,19 +1,20 @@
 # D04 セッション記録
 
-> この雛形を Git 管理外の session log 用フォルダーへコピーし、1 session ごとに1枚記入する。save 本体や実機固有の証跡は記録せず、指定欄には SHA-256 と外部保管先だけを書く。
+> live capture がこの雛形を使って `session_log.md` を自動生成します。生成されたファイルの自動記入欄は触らず、残りの空欄だけ記録してください。この雛形を session ごとに手で複製しないでください。save 本体や実機固有の証跡は保存しません。
 
 ## 収録
 
 | 項目 | 記録 |
 |---|---|
-| session_id | |
-| 収録日・開始時刻（ISO 8601） | |
+| session_id | {{session_id}} |
+| 収録日・開始時刻（ISO 8601 UTC） | {{capture_started_at}} |
 | operator | |
-| planned split | `model_train` / `model_validation` / `error_calibration` / `final_e2e_test` |
-| `--duration-sec` | |
-| session manifest の保存先 | |
-| session 統計 JSON | |
-| stdout の統計・最終結果 | |
+| planned split | {{planned_split}} |
+| planned_at | {{planned_at}} |
+| `--duration-sec` | {{duration_sec}} |
+| session manifest の保存先 | {{session_manifest_path}} |
+| session 統計 JSON | {{session_stats_path}} |
+| stdout の統計・最終結果 | {{stdout_stats}} |
 
 ### run 結果
 
@@ -48,10 +49,10 @@
 - session 前に同じ save を復元: はい / いいえ
 - session 前 save SHA-256:
 - session 後 save SHA-256:
-- `.env/target_profile.resolved.yaml` の artifact store 保存先:
+- 開始時に退避した `target_profile.resolved.yaml` の保存先: {{session_profile_path}}
 - 同 YAML の backup volume 保存先:
-- resolved YAML SHA-256:
-- `target_profile_hash`:
+- resolved YAML SHA-256: {{resolved_yaml_sha256}}
+- `target_profile_hash`: {{target_profile_hash}}
 - 収録期間中に `target_resolve` を再実行していない: はい / いいえ
 
 ### 実機確認（監査 D1／D2／D4／D5）
@@ -64,7 +65,7 @@
 ## split・formal gate
 
 - `--planned-split` と `planned_at` を session manifest で確認: はい / いいえ
-- 適用した `formal_gates.v1` YAML（04-18 merge 後のみ）:
+- 適用した `formal_gates.v1` YAML（sealed session のみ）:
 - formal gates YAML SHA-256（annotation 前に確定）:
 - evaluation window plan 保存先（sealed session のみ）:
 - evaluation window plan SHA-256:
@@ -75,13 +76,14 @@
 | annotator / work-root | 開始時刻 | 終了時刻 | 対象 frame 数 | 下書きから修正した frame 数 |
 |---|---|---|---:|---:|
 | A | | | | |
-| B（独立確認時） | | | | |
+| B（二重 annotation 時。04-08 formal 用は必須、それ以外は任意） | | | | |
 
-- 二重 annotation の場合、B は別 work-root を使用し、A の label と A の frame で学習した prelabel を見ていない: はい / いいえ / 対象外
+- agreement は 04-10／04-14 では不要、04-08（04-15 の formal world detector 訓練）では必須。1 人で作業する場合は、時間を空けて別の work-root を使い、prelabel と A の label を見ずに model split の一部 frame を描き直す自己再 annotation を推奨します。必要件数の下限は 04-08 実行時の `minimum_counts.agreement` で確認してください。
+- B の annotation は別 work-root で A の label と A の frame で学習した prelabel を見ずに実施した: はい / いいえ / 対象外
 - 画面全体を annotation し、sealed window 内で `labeled_region` を使用していない: はい / いいえ / 対象外
 - HUD truth の保存先:
 - session 単位 COCO の保存先:
-- 04-16 merge 後の formal annotations 保存先（sealed のみ）:
+- formal annotations 保存先（sealed のみ）:
 
 ## 備考
 
