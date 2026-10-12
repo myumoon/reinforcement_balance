@@ -661,7 +661,9 @@ def test_annotation_agreement_self_repeat_records_measured_gap_and_blindness(tmp
     start = 1_700_000_000
     os.utime(first_label, (start, start))
     os.utime(second_label, (start + 25 * 3600, start + 25 * 3600))
-    _write_self_agreement_manifest(second, first)
+    _write_self_agreement_manifest(
+        second, first,
+        created_at=datetime.fromtimestamp(start + 24 * 3600, timezone.utc).isoformat())
 
     report = build_annotation_agreement(
         first, second, ["session-a"], annotator_a="alice", annotator_b="alice")
@@ -669,12 +671,12 @@ def test_annotation_agreement_self_repeat_records_measured_gap_and_blindness(tmp
     assert report["schema_version"] == "annotation_agreement.v2"
     assert report["independence_mode"] == "self_repeat"
     assert report["annotator_a"] == report["annotator_b"] == "alice"
-    assert report["min_gap_hours"] == 25.0
+    assert report["min_gap_hours"] == 24.0
     assert report["blind"] is True
 
 
 def test_annotation_agreement_rejects_self_repeat_label_resaved_after_one_hour(tmp_path):
-    """B の label を後から再保存しても最初の gap を越えない。 
+    """B の label を後から再保存しても最初の gap を越えない。
 
     M2 manifest 時刻で B の開始時刻を束縛し、24時間未満の再 annotation を拒否する。
     """
@@ -695,8 +697,13 @@ def test_annotation_agreement_rejects_self_repeat_label_resaved_after_one_hour(t
             first, second, ["session-a"], annotator_a="alice", annotator_b="alice")
 
 
-@pytest.mark.parametrize(("gap_hours", "blind"), [(23, True), (25, False)])
-def test_annotation_agreement_rejects_self_repeat_without_gap_or_blindness(tmp_path, gap_hours, blind):
+@pytest.mark.parametrize(
+    ("gap_hours", "blind", "manifest_hours"),
+    [(23, True, 23), (25, False, 24), (25, True, 26)],
+)
+def test_annotation_agreement_rejects_self_repeat_without_gap_or_blindness(
+    tmp_path, gap_hours, blind, manifest_hours,
+):
     """self_repeat は 24 時間未満の gap と blind false を拒否する。
 
     どちらか片方だけを満たす入力も合意度レポートとして発行しない。
@@ -708,7 +715,8 @@ def test_annotation_agreement_rejects_self_repeat_without_gap_or_blindness(tmp_p
     start = 1_700_000_000
     os.utime(first_label, (start, start))
     os.utime(second_label, (start + gap_hours * 3600, start + gap_hours * 3600))
-    _write_self_agreement_manifest(second, first, blind=blind)
+    created_at = datetime.fromtimestamp(start + manifest_hours * 3600, timezone.utc).isoformat()
+    _write_self_agreement_manifest(second, first, blind=blind, created_at=created_at)
 
     with pytest.raises(ValueError, match="self_repeat"):
         build_annotation_agreement(
