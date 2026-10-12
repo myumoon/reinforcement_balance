@@ -333,7 +333,8 @@ def test_export_updates_annotation_hours_by_work_root(tmp_path: Path, monkeypatc
         "| work-root | annotator | start | end | checked frames | edited frames | no draft |\n"
         "| --- | --- | --- | --- | ---: | ---: | ---: |\n"
         f"| {root_key} | stale | old | old | 99 | 99 | 99 |\n"
-        "| /other/work | other-user | old | old | 4 | 2 | 0 |\n",
+        "| /other/work | other-user | old | old | 4 | 2 | 0 |\n"
+        "| /legacy/work | legacy-user | old-start | old-end | 5 |\n",
         encoding="utf-8",
     )
     manifest_records = [SimpleNamespace(frame_id=frame_id, object_sha256="a" * 64) for frame_id in (1, 2, 3, 10)]
@@ -354,6 +355,7 @@ def test_export_updates_annotation_hours_by_work_root(tmp_path: Path, monkeypatc
     assert cells_a[4:] == ["3", "1", "1"]
     assert sum(line.startswith(f"| {root_key} |") for line in rows) == 1
     assert any(line.startswith("| /other/work |") for line in rows)
+    assert "| /legacy/work | legacy-user | old-start | old-end | 5 |" in log
 
     root_b = tmp_path / "work-b"
     session_b = root_b / "session-a"
