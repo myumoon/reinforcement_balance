@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -25,6 +26,7 @@ def prepare_self_agreement(
     *,
     count: int = 300,
     seed: int = 0,
+    minimum_gap_hours: float = 24.0,
 ) -> dict:
     """checked frame を厳密に N 枚選び、画像のみを B root へ配置する。
 
@@ -34,6 +36,9 @@ def prepare_self_agreement(
         raise ValueError("count must be a positive integer")
     if type(seed) is not int:
         raise ValueError("seed must be an integer")
+    if (isinstance(minimum_gap_hours, bool) or not isinstance(minimum_gap_hours, (int, float))
+            or not math.isfinite(minimum_gap_hours) or minimum_gap_hours < 24.0):
+        raise ValueError("minimum_gap_hours must be finite and at least 24 hours")
     root_a = Path(work_root_a).expanduser().resolve()
     root_b = Path(work_root_b).expanduser().resolve()
     if not root_a.is_dir():
@@ -44,10 +49,13 @@ def prepare_self_agreement(
         raise ValueError("work-root-b already contains files")
 
     candidates = []
+    label_updates = []
     for session_dir in sorted(root_a.iterdir()):
         if not session_dir.is_dir() or session_dir.is_symlink():
             continue
         for frame_id, image_path, label_path in iter_frame_files(session_dir):
+            if label_path is not None:
+                label_updates.append(label_path.stat().st_mtime)
             if label_path is None or not read_label_file(label_path)[1]:
                 continue
             if image_path is None or image_path.is_symlink():
@@ -55,12 +63,15 @@ def prepare_self_agreement(
             candidates.append((session_dir.name, frame_id, image_path))
     if len(candidates) < count:
         raise ValueError(f"need {count} checked frames; found {len(candidates)}")
+    prepared_at = datetime.now(timezone.utc)
+    if prepared_at.timestamp() - max(label_updates) < minimum_gap_hours * 3600:
+        raise ValueError("work-root-a labels are inside the minimum gap; wait before preparation")
 
     selected = sorted(random.Random(seed).sample(candidates, count), key=lambda row: (row[0], row[1]))
     manifest = {
         "schema_version": "survivors_self_agreement.v1",
         "source_work_root": str(root_a),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": prepared_at.isoformat(),
         "seed": seed,
         "selected_frames": [
             {"session_id": session_id, "frame_id": frame_id,
@@ -88,7 +99,7 @@ def prepare_self_agreement(
 
 
 def _parser() -> argparse.ArgumentParser:
-    """A root、空の B root、seed、選択枚数を受け取る。
+    """A root、空の B root、seed、選択枚数、最低 gap 時間を受け取る。
 
     B 側にラベルを複製しない用途をコマンド説明に明示する。
     """
@@ -97,6 +108,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--work-root-b", required=True, type=Path)
     parser.add_argument("--count", type=int, default=300)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--minimum-gap-hours", type=float, default=24.0)
     return parser
 
 
@@ -108,7 +120,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         manifest = prepare_self_agreement(
-            args.work_root_a, args.work_root_b, count=args.count, seed=args.seed)
+            args.work_root_a, args.work_root_b, count=args.count, seed=args.seed,
+            minimum_gap_hours=args.minimum_gap_hours)
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
