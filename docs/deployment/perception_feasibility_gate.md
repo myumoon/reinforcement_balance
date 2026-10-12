@@ -11,9 +11,14 @@ annotation は異なる2名の independent_pair、または v2 self_repeat の�
 build/profile/session の混在、target audit 未合格、slice 不足、比較architecture不足は
 従来どおり FAIL となり、PASS は発行できない。
 
-1人で作業する場合は、A の checked label から `prepare_survivors_self_agreement.py` で
-B root を作り、A の最終 label 更新から24時間以上空けて、A の label と下書きを見ずに
-B を annotation する。`build_survivors_annotation_agreement.py` は v2 の
+1人で作業する場合は、A の最終 label 更新から設定 gap（既定24時間）以上待ってから
+`prepare_survivors_self_agreement.py --minimum-gap-hours 24` を実行し、同じ設定値を agreement
+builder の `--minimum-gap-hours` にも渡します。A の label と下書きを
+含まない B root を作ります。準備 CLI は待機時間が不足すると拒否します。準備から
+agreement 作成まで A root の label は一切保存せず、B は manifest 作成後に annotation します。
+`build_survivors_annotation_agreement.py` は gap を
+`min(manifest.created_at, B label の最小 mtime) - A label の最大 mtime` で保守的に測り、
+manifest より前の B label は拒否します。v2 の
 `independence_mode: self_repeat`、実測 gap、blind 記録を出し、verdict は
 `annotation_independence: self_repeat` と「作業者固有の癖は検出できない」risk を残す。
 
