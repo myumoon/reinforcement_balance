@@ -59,7 +59,7 @@ Ctrl+C は 1 回目と 2 回目で挙動が異なる:
 
 画面 annotation は [D04 capture と annotation の手順](capture_annotation_manual.md) の 2-2〜2-7 に従ってください。`annotate_survivors_frames.py` は旧 stdin CLI で、class 定義が world class map v2 と一致しないため正式 annotation に使用しません。
 
-04-08（04-15 の formal world detector 訓練）用 dataset では二重 annotation と agreement が必要です。作業者が1人の場合は、時間を空けて別の work-root で、prelabel と1回目の label を見ずに model split の一部 frame を描き直す自己再 annotation を推奨します。対象件数の下限は 04-08 実行時の `minimum_counts.agreement`（`pair_count`／`iou_mean`／`class_agreement`）に従います。04-10／04-14 では agreement は不要です。
+04-08（04-15 の formal world detector 訓練）用 dataset では agreement が必要です。2人なら independent_pair、1人なら A の最終 label 更新から設定 gap（既定24時間）以上待ってから `prepare_survivors_self_agreement.py` で checked frame の画像だけを B root に置き、A の label と prelabel を見ずに B を annotation して self_repeat を作ります。準備 CLI は待機不足を拒否します。準備から agreement 作成まで A root の label は一切保存しません。04-08 実行時の `minimum_counts.agreement`（`pair_count`／`iou_mean`／`class_agreement`）はどちらも同じで、閾値は変えません。04-10／04-14 では agreement は不要です。
 
 ## Split freeze workflow
 
@@ -96,7 +96,7 @@ python Tools/Deployment/freeze_survivors_capture_split.py `
 
 `--target-profile` は省略できます。省略時は session ごとの `<RecordRoot>/session_logs/<SessionId>/target_profile.resolved.yaml` を読み、`--all-planned` でも各 session の copy を個別に照合します。ファイルが無い場合は昇格を拒否します。別の profile copy を使うときは `--target-profile "<ProfilePath>"` を指定できます。どちらの場合も `target_resolve` を再実行しません。`--all-planned` は checkpoint に用途が入った session をまとめて昇格します。freeze 前なら同じ昇格 CLI の `--planned-split` で用途を変更できます。既存の frozen manifest は上書きせず、sealed session を加える世代には別の `--manifest-path` を使います。
 
-session 単位の COCO export は capture store の pixel hash と split を束縛します。model train/validation の world/UI 出力はそれぞれ2 split を merge します。04-08（04-15 の formal world detector 訓練）用 dataset では agreement JSON も作成します。作業者が1人の場合は、時間を空けて別の work-root で prelabel と1回目の label を見ずに一部 frame を描き直す自己再 annotation を推奨します。必要件数の下限は 04-08 実行時の `minimum_counts.agreement` で確認してください。04-10／04-14 用 dataset では agreement は不要です。
+session 単位の COCO export は capture store の pixel hash と split を束縛します。model train/validation の world/UI 出力はそれぞれ2 split を merge します。04-08（04-15 の formal world detector 訓練）用 dataset では agreement JSON も作成します。1人の場合は A の最終 label 更新から24時間以上経ってから B root を準備し、その後 B を annotation して agreement を作ります。gap は `min(manifest.created_at, B label の最小 mtime) - A label の最大 mtime` で測り、manifest より前の B label は拒否します。必要件数の下限は 04-08 実行時の `minimum_counts.agreement` で確認してください。04-10／04-14 用 dataset では agreement は不要です。
 
 ```powershell
 python Tools/Deployment/export_survivors_annotations_coco.py `
@@ -113,9 +113,14 @@ python Tools/Deployment/merge_survivors_coco.py `
   --ui-train "<DatasetDir>/model_train/ui_coco.json" `
   --ui-validation "<DatasetDir>/model_validation/ui_coco.json" `
   --output-dir "<DatasetDir>/model"
+python Tools/Deployment/prepare_survivors_self_agreement.py `
+  --work-root-a "<WorkRootA>" --work-root-b "<WorkRootB>" `
+  --count 300 --seed 0 --minimum-gap-hours 24
 python Tools/Deployment/build_survivors_annotation_agreement.py `
   --work-root-a "<WorkRootA>" --work-root-b "<WorkRootB>" `
   --session-id "<TrainSession>" --session-id "<ValidationSession>" `
+  --annotator-a "<AnnotatorId>" --annotator-b "<AnnotatorId>" `
+  --minimum-gap-hours 24 `
   --output "<DatasetDir>/annotation_agreement.json"
 ```
 

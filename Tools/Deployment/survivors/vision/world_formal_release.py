@@ -20,6 +20,7 @@ from reinbalance_survivors_contracts.artifact_identity import (
     is_sha256_hex,
 )
 from reinbalance_survivors_contracts.canonical_json import canonical_hash, canonical_json_bytes
+from survivors.annotation_agreement import validate_annotation_agreement
 from survivors.capture_dataset import DatasetWriter, SPLIT_NAMES, load_split_manifest_by_hash
 from survivors.vision.world_dataset import SessionSplit, WorldDataset, load_class_map
 from survivors.vision.session_cluster_ci import cluster_ci_bounds
@@ -448,8 +449,10 @@ def run_formal_preflight(
             raise FormalPreflightError(f"COCO annotation references sealed session: {session_id}")
 
     data = json.loads(agreement_path.read_text(encoding="utf-8"))
-    if data.get("schema_version") != "annotation_agreement.v1":
-        raise FormalPreflightError("unknown annotation agreement schema")
+    try:
+        independence_mode = validate_annotation_agreement(data)
+    except ValueError as exc:
+        raise FormalPreflightError(str(exc)) from exc
     agreement = {key: data.get(key) for key in ("pair_count", "iou_mean", "class_agreement")}
     thresholds = minimum_counts.get("agreement") if isinstance(minimum_counts, Mapping) else None
     if not isinstance(thresholds, Mapping) or set(thresholds) != set(agreement):
@@ -466,6 +469,7 @@ def run_formal_preflight(
                 raise FormalPreflightError(f"annotation agreement {key} is below minimum")
         elif isinstance(actual, bool) or not isinstance(actual, (int, float)) or not math.isfinite(actual) or actual < floor:
             raise FormalPreflightError(f"annotation agreement {key} is below minimum")
+    agreement["independence_mode"] = independence_mode
 
     dataset = WorldDataset(annotations_path, class_map_path, validate_bounds=True, rejected_sessions=sealed_sessions)
     if not isinstance(minimum_counts, Mapping):

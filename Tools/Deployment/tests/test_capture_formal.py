@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -598,7 +600,9 @@ def test_annotation_agreement_matches_boxes_and_ignores_unshared_frames(tmp_path
 
     report = build_annotation_agreement(first, second, ["session-a"])
 
-    assert report["schema_version"] == "annotation_agreement.v1"
+    assert report["schema_version"] == "annotation_agreement.v2"
+    assert report["independence_mode"] == "independent_pair"
+    assert report["annotator_a"] != report["annotator_b"]
     assert report["pair_count"] == 2
     assert report["iou_mean"] == 1.0
     assert report["class_agreement"] == 0.5
@@ -620,6 +624,125 @@ def test_annotation_agreement_empty_second_work_root_returns_zero_pairs(tmp_path
     assert report["pair_count"] == 0
     assert report["iou_mean"] == 0.0
     assert report["class_agreement"] == 0.0
+
+
+def _write_self_agreement_manifest(
+    work_root: Path,
+    source_root: Path,
+    *,
+    blind: bool = True,
+    created_at: str = "2026-01-01T00:00:00+00:00",
+) -> None:
+    """M2 準備 CLI が作る B root の blind 記録を用意する。
+
+    agreement builder が正しい A root と選択 frame を照合する条件を再現する。
+    """
+    (work_root / "self_agreement_manifest.json").write_text(json.dumps({
+        "schema_version": "survivors_self_agreement.v1",
+        "source_work_root": str(source_root.resolve()),
+        "selected_frames": [{
+            "session_id": "session-a", "frame_id": 1, "image_file": "00000001.png",
+        }],
+        "seed": 0,
+        "created_at": created_at,
+        "blind": blind,
+    }), encoding="utf-8")
+
+
+def test_annotation_agreement_self_repeat_records_measured_gap_and_blindness(tmp_path):
+    """同じ annotator の準備済み root は測定 gap と blind を v2 に記録する。
+
+    A の最終更新と B の最初の更新の差が設定値を超えたときだけ作成する。
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    first_label, second_label = first / "session-a" / "00000001.json", second / "session-a" / "00000001.json"
+    _write_label(first_label, [("enemy_normal", 0, 0, 10, 10)])
+    _write_label(second_label, [("enemy_normal", 0, 0, 10, 10)])
+    start = 1_700_000_000
+    os.utime(first_label, (start, start))
+    os.utime(second_label, (start + 25 * 3600, start + 25 * 3600))
+    _write_self_agreement_manifest(
+        second, first,
+        created_at=datetime.fromtimestamp(start + 24 * 3600, timezone.utc).isoformat())
+
+    report = build_annotation_agreement(
+        first, second, ["session-a"], annotator_a="alice", annotator_b="alice")
+
+    assert report["schema_version"] == "annotation_agreement.v2"
+    assert report["independence_mode"] == "self_repeat"
+    assert report["annotator_a"] == report["annotator_b"] == "alice"
+    assert report["min_gap_hours"] == 24.0
+    assert report["blind"] is True
+
+
+def test_annotation_agreement_rejects_self_repeat_label_resaved_after_one_hour(tmp_path):
+    """B の label を後から再保存しても最初の gap を越えない。
+
+    M2 manifest 時刻で B の開始時刻を束縛し、24時間未満の再 annotation を拒否する。
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    first_label, second_label = first / "session-a" / "00000001.json", second / "session-a" / "00000001.json"
+    _write_label(first_label, [("enemy_normal", 0, 0, 10, 10)])
+    _write_label(second_label, [("enemy_normal", 0, 0, 10, 10)], checked=False)
+    start = 1_700_000_000
+    os.utime(first_label, (start, start))
+    os.utime(second_label, (start + 3600, start + 3600))
+    _write_label(second_label, [("enemy_normal", 0, 0, 10, 10)], checked=True)
+    os.utime(second_label, (start + 25 * 3600, start + 25 * 3600))
+    created_at = datetime.fromtimestamp(start + 3600, timezone.utc).isoformat()
+    _write_self_agreement_manifest(second, first, created_at=created_at)
+
+    with pytest.raises(ValueError, match="self_repeat"):
+        build_annotation_agreement(
+            first, second, ["session-a"], annotator_a="alice", annotator_b="alice")
+
+
+@pytest.mark.parametrize(
+    ("gap_hours", "blind", "manifest_hours"),
+    [(23, True, 23), (25, False, 24), (25, True, 26)],
+)
+def test_annotation_agreement_rejects_self_repeat_without_gap_or_blindness(
+    tmp_path, gap_hours, blind, manifest_hours,
+):
+    """self_repeat は 24 時間未満の gap と blind false を拒否する。
+
+    どちらか片方だけを満たす入力も合意度レポートとして発行しない。
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    first_label, second_label = first / "session-a" / "00000001.json", second / "session-a" / "00000001.json"
+    _write_label(first_label, [("enemy_normal", 0, 0, 10, 10)])
+    _write_label(second_label, [("enemy_normal", 0, 0, 10, 10)])
+    start = 1_700_000_000
+    os.utime(first_label, (start, start))
+    os.utime(second_label, (start + gap_hours * 3600, start + gap_hours * 3600))
+    created_at = datetime.fromtimestamp(start + manifest_hours * 3600, timezone.utc).isoformat()
+    _write_self_agreement_manifest(second, first, blind=blind, created_at=created_at)
+
+    with pytest.raises(ValueError, match="self_repeat"):
+        build_annotation_agreement(
+            first, second, ["session-a"], annotator_a="alice", annotator_b="alice")
+
+
+def test_annotation_agreement_cli_accepts_explicit_annotator_ids(tmp_path):
+    """agreement builder CLI は annotator-a/b を v2 report に書く。
+
+    CLI の公開引数を通して independent_pair と作業者 ID が記録されることを確認する。
+    """
+    from build_survivors_annotation_agreement import main
+
+    first, second = tmp_path / "first", tmp_path / "second"
+    _write_label(first / "session-a" / "00000001.json", [("enemy_normal", 0, 0, 10, 10)])
+    _write_label(second / "session-a" / "00000001.json", [("enemy_normal", 0, 0, 10, 10)])
+    output = tmp_path / "agreement.json"
+
+    assert main([
+        "--work-root-a", str(first), "--work-root-b", str(second),
+        "--session-id", "session-a", "--annotator-a", "alice", "--annotator-b", "bob",
+        "--output", str(output),
+    ]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["independence_mode"] == "independent_pair"
+    assert (report["annotator_a"], report["annotator_b"]) == ("alice", "bob")
 
 
 def test_coco_export_binds_capture_frame_hash(tmp_path):
@@ -764,6 +887,7 @@ def test_publish_emits_consumer_bindings_and_passed_restore_verdict(tmp_path):
         "train-session", "validation-session", "validation-unknown"
     }
     assert set(identity["dataset_exports"]) == {"world_coco_model", "ui_coco_model", "annotation_agreement"}
+    assert identity["independence_mode"] == "independent_pair"
     assert verdict.passed is True
     assert verdict_descriptor.identity_metadata["subject_identity_hash"] == descriptor.identity_hash
 

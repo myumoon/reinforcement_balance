@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from spikes import feasibility_gate_cli
@@ -254,15 +255,84 @@ def test_cli_rejects_malformed_target_profile_yaml(tmp_path, capsys):
     assert capsys.readouterr().err
 
 
-def test_cli_rejects_insufficient_annotators(tmp_path, capsys):
-    """--annotatorsが1名だけの場合を非ゼロ終了・原因入りメッセージで拒否する。
+def test_cli_one_annotator_without_agreement_issues_fail_verdict(tmp_path, capsys):
+    """1名で self_repeat の証拠が無ければ gate verdict を FAIL にする。
 
-    2名以上必須という入力形状の不備が、CLI経由でも拒否されることを確認する。
+    CLI は入力を記録しつつ、独立した 2 名も有効な自己一致証拠もない状態を通さない。
     """
     sessions_path, probe_paths, annotation_path = _write_inputs(tmp_path)
     target_profile_path = _operator_attested_profile_path(tmp_path)
     exit_code = feasibility_gate_cli.main(
         _argv(tmp_path, sessions_path, probe_paths, annotation_path, target_profile_path,
              annotators=("alice",)))
-    assert exit_code == 1
-    assert "annotator" in capsys.readouterr().err.lower()
+    assert exit_code == 0
+    verdict = json.loads((tmp_path / "verdict.json").read_text(encoding="utf-8"))
+    assert verdict["status"] == "FAIL"
+    assert "independent_annotation_reviewer_missing" in verdict["fail_reasons"]
+    assert verdict["annotation_independence"] is None
+    assert capsys.readouterr().err == ""
+
+
+def test_cli_one_annotator_with_legacy_v1_agreement_still_fails(tmp_path):
+    """metadata を持たない v1 agreement は 1 名作業を証明できない。
+
+    v1 を independent_pair と読む互換性は保ちつつ、1 名 gate の認証には使わない。
+    """
+    sessions_path, probe_paths, annotation_path = _write_inputs(tmp_path)
+    target_profile_path = _operator_attested_profile_path(tmp_path)
+    agreement = _write_json(tmp_path / "agreement-v1.json", {
+        "schema_version": "annotation_agreement.v1", "pair_count": 300,
+        "iou_mean": 0.9, "class_agreement": 0.97,
+    })
+    args = _argv(tmp_path, sessions_path, probe_paths, annotation_path,
+                 target_profile_path, annotators=("alice",))
+
+    assert feasibility_gate_cli.main([*args, "--annotation-agreement", str(agreement)]) == 0
+    verdict = json.loads((tmp_path / "verdict.json").read_text(encoding="utf-8"))
+    assert verdict["status"] == "FAIL"
+    assert verdict["annotation_independence"] is None
+
+
+def test_cli_one_annotator_with_valid_self_repeat_passes_and_records_risk(tmp_path):
+    """valid v2 self_repeat は gate を通し、1 人作業固有の risk を verdict に残す。
+
+    同一 annotator、実測 24 時間以上、blind true の三条件が全て揃った場合だけ有効。
+    """
+    sessions_path, probe_paths, annotation_path = _write_inputs(tmp_path)
+    target_profile_path = _operator_attested_profile_path(tmp_path)
+    agreement = _write_json(tmp_path / "agreement-v2.json", {
+        "schema_version": "annotation_agreement.v2", "pair_count": 300,
+        "iou_mean": 0.9, "class_agreement": 0.97,
+        "unmatched_first": 0, "unmatched_second": 0, "sessions": [], "per_class": {},
+        "independence_mode": "self_repeat", "annotator_a": "alice", "annotator_b": "alice",
+        "min_gap_hours": 24.0, "required_min_gap_hours": 24.0, "blind": True,
+    })
+    args = _argv(tmp_path, sessions_path, probe_paths, annotation_path,
+                 target_profile_path, annotators=("alice",))
+
+    assert feasibility_gate_cli.main([*args, "--annotation-agreement", str(agreement)]) == 0
+    verdict = json.loads((tmp_path / "verdict.json").read_text(encoding="utf-8"))
+    assert verdict["status"] == "PASS"
+    assert verdict["annotation_independence"] == "self_repeat"
+    assert "1 人作業の自己一致（作業者固有の癖は検出できない）" in verdict["unresolved_risks"]
+
+
+@pytest.mark.parametrize(("gap", "blind"), [(23.0, True), (24.0, False)])
+def test_cli_rejects_self_repeat_with_short_gap_or_missing_blind_record(tmp_path, gap, blind):
+    """self_repeat の v2 agreement は gap 不足と blind false を fail-closed に拒否する。
+
+    片方だけ不足したときも agreement を feasibility evidence に取り込まない。
+    """
+    sessions_path, probe_paths, annotation_path = _write_inputs(tmp_path)
+    target_profile_path = _operator_attested_profile_path(tmp_path)
+    agreement = _write_json(tmp_path / "agreement-v2.json", {
+        "schema_version": "annotation_agreement.v2", "pair_count": 300,
+        "iou_mean": 0.9, "class_agreement": 0.97,
+        "unmatched_first": 0, "unmatched_second": 0, "sessions": [], "per_class": {},
+        "independence_mode": "self_repeat", "annotator_a": "alice", "annotator_b": "alice",
+        "min_gap_hours": gap, "required_min_gap_hours": 24.0, "blind": blind,
+    })
+    args = _argv(tmp_path, sessions_path, probe_paths, annotation_path,
+                 target_profile_path, annotators=("alice",))
+
+    assert feasibility_gate_cli.main([*args, "--annotation-agreement", str(agreement)]) == 1

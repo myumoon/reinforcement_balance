@@ -275,6 +275,8 @@ state = restore_package(pkg_path, frame_bgr)  # TrackedWorldStateV2 を返す
 
 formal 入口は COCO、04-17 dataset descriptor、split manifest、restore verdict、feasibility PASS、annotation agreement を照合する。split manifest の seal と session の `formal_dataset_eligible`、`lossless_png`、build / target identity を確認し、sealed session は学習と評価の COCO に入れない。preflight は code hash と dataset / resolved config / build identity を含む canonical report を出し、学習開始前に失敗した場合は checkpoint を作らない。
 
+agreement v1 は `independent_pair` として後方互換で読み、v2 は `independent_pair` または `self_repeat` を記録する。self_repeat は同一 annotator、設定時間（既定24時間）以上の実測 gap、blind manifest の3条件が必要。A の最終 label 更新から設定時間が経ってから `prepare_survivors_self_agreement.py` を実行し、準備 CLI は不足時に拒否する。gap は `min(manifest.created_at, B label の最小 mtime) - A label の最大 mtime` で保守的に測り、manifest より前の B label は拒否する。準備から agreement 作成まで A root の label を保存しない。preflight report と04-17 descriptorの両方に `independence_mode` が残る。`minimum_counts.agreement` の pair_count、IoU、class agreement は mode によらず同じ閾値を使う。
+
 formal training は descriptor が示す `model_train` / `model_validation` だけを使う。session-balanced sampler、class weights、near-duplicate 抑制、水平反転・scale・HSV augmentation、weighted SSD loss、identity 検査付き resume を有効にする。development の config 既定は sampler=`interleaved`、augmentation と duplicate suppression は disabled のため従来挙動を維持する。
 
 `input.ignore_regions` は normalized `[x1, y1, x2, y2]` で指定し、box center が領域内の検出を全 class で除外する。既定 item HUD 領域は `[0.050, 0.033, 0.203, 0.120]`（1920×1080 で `[96, 36, 390, 130]` px）。formal eval と package restore が同じ filter を tracker より前に適用し、formal GT も同じ中心規則で除外する。
