@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -625,7 +626,13 @@ def test_annotation_agreement_empty_second_work_root_returns_zero_pairs(tmp_path
     assert report["class_agreement"] == 0.0
 
 
-def _write_self_agreement_manifest(work_root: Path, source_root: Path, *, blind: bool = True) -> None:
+def _write_self_agreement_manifest(
+    work_root: Path,
+    source_root: Path,
+    *,
+    blind: bool = True,
+    created_at: str = "2026-01-01T00:00:00+00:00",
+) -> None:
     """M2 準備 CLI が作る B root の blind 記録を用意する。
 
     agreement builder が正しい A root と選択 frame を照合する条件を再現する。
@@ -637,7 +644,7 @@ def _write_self_agreement_manifest(work_root: Path, source_root: Path, *, blind:
             "session_id": "session-a", "frame_id": 1, "image_file": "00000001.png",
         }],
         "seed": 0,
-        "created_at": "2026-01-01T00:00:00+00:00",
+        "created_at": created_at,
         "blind": blind,
     }), encoding="utf-8")
 
@@ -664,6 +671,28 @@ def test_annotation_agreement_self_repeat_records_measured_gap_and_blindness(tmp
     assert report["annotator_a"] == report["annotator_b"] == "alice"
     assert report["min_gap_hours"] == 25.0
     assert report["blind"] is True
+
+
+def test_annotation_agreement_rejects_self_repeat_label_resaved_after_one_hour(tmp_path):
+    """B の label を後から再保存しても最初の gap を越えない。 
+
+    M2 manifest 時刻で B の開始時刻を束縛し、24時間未満の再 annotation を拒否する。
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    first_label, second_label = first / "session-a" / "00000001.json", second / "session-a" / "00000001.json"
+    _write_label(first_label, [("enemy_normal", 0, 0, 10, 10)])
+    _write_label(second_label, [("enemy_normal", 0, 0, 10, 10)], checked=False)
+    start = 1_700_000_000
+    os.utime(first_label, (start, start))
+    os.utime(second_label, (start + 3600, start + 3600))
+    _write_label(second_label, [("enemy_normal", 0, 0, 10, 10)], checked=True)
+    os.utime(second_label, (start + 25 * 3600, start + 25 * 3600))
+    created_at = datetime.fromtimestamp(start + 3600, timezone.utc).isoformat()
+    _write_self_agreement_manifest(second, first, created_at=created_at)
+
+    with pytest.raises(ValueError, match="self_repeat"):
+        build_annotation_agreement(
+            first, second, ["session-a"], annotator_a="alice", annotator_b="alice")
 
 
 @pytest.mark.parametrize(("gap_hours", "blind"), [(23, True), (25, False)])
