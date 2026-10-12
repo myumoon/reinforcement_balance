@@ -130,7 +130,7 @@ python Tools/Deployment/build_survivors_annotation_agreement.py `
 
 現行 plan では、model session は従来の候補選択、sealed session は `plan_survivors_evaluation_windows.py` で固定した window plan に従って窓内の全 frame を annotation します。sealed の窓内 frame は画面全体をラベルして `labeled_region` を使いません。
 
-sealed session の formal `annotations.jsonl` は `build_survivors_formal_annotations.py` で作成します。formal schema は旧 `AnnotationWriter.read_annotations()` では読めません。session ごとの COCO は `<RecordRoot>/coco/<SessionId>/` へ出力します。現行の正式 gate は `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` です。最短 session 長は300秒、`event:death` は20回、`event:result` は floor 未満の実測件数を記録して gate にせず、time band は到達 session が2本以上のときだけ判定します。annotation 前に YAML を確定します。publish CLI が YAML と hash を検証するため、session log への転記・照合は不要です。coverage と verdict notes でデータ不足と性能不足を区別します。
+sealed session の formal `annotations.jsonl` は `build_survivors_formal_annotations.py` で作成します。formal schema は旧 `AnnotationWriter.read_annotations()` では読めません。session ごとの COCO は `<RecordRoot>/coco/<SessionId>/` へ出力します。現行の正式 gate は `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` です。最短 session 長は300秒、`event:death` は20回、`event:result` は floor 未満の実測件数を記録して gate にせず、time band は到達 session が2本以上のときだけ判定します。annotation 前に YAML を確定し、annotation 後は変更しません。publish は YAML の `schema_version` を確認し、入力 YAML の SHA-256 を descriptor に記録しますが、事前に確定した値との一致は検証しません。session log への転記・照合は不要です。coverage と verdict notes でデータ不足と性能不足を区別します。
 
 ```powershell
 python Tools/Deployment/publish_survivors_capture_dataset.py `
