@@ -1,6 +1,6 @@
 # D04 セッション記録
 
-> live capture がこの雛形から `session_log.md` を自動生成する。自動記入欄は触らず、人が書く欄だけを記録する。save 本体や実機固有の証跡は保存しない。
+> live capture がこの雛形を使って `session_log.md` を自動生成します。生成されたファイルの自動記入欄は触らず、残りの空欄だけ記録してください。この雛形を session ごとに手で複製しないでください。save 本体や実機固有の証跡は保存しません。
 
 ## 収録
 
@@ -65,7 +65,7 @@
 ## split・formal gate
 
 - `--planned-split` と `planned_at` を session manifest で確認: はい / いいえ
-- 適用した `formal_gates.v1` YAML（04-18 merge 後のみ）:
+- 適用した `formal_gates.v1` YAML（sealed session のみ）:
 - formal gates YAML SHA-256（annotation 前に確定）:
 - evaluation window plan 保存先（sealed session のみ）:
 - evaluation window plan SHA-256:
@@ -76,13 +76,14 @@
 | annotator / work-root | 開始時刻 | 終了時刻 | 対象 frame 数 | 下書きから修正した frame 数 |
 |---|---|---|---:|---:|
 | A | | | | |
-| B（任意・二重 annotation 実施時） | | | | |
+| B（二重 annotation 時。04-08 formal 用は必須、それ以外は任意） | | | | |
 
-- 二重 annotation は任意。実施する場合、B は別 work-root を使い、A の label と A の frame で学習した prelabel を見ていない: はい / いいえ / 対象外
+- agreement は 04-10／04-14 では不要、04-08（04-15 の formal world detector 訓練）では必須。1 人で作業する場合は、時間を空けて別の work-root を使い、prelabel と A の label を見ずに model split の一部 frame を描き直す自己再 annotation を推奨します。必要件数の下限は 04-08 実行時の `minimum_counts.agreement` で確認してください。
+- B の annotation は別 work-root で A の label と A の frame で学習した prelabel を見ずに実施した: はい / いいえ / 対象外
 - 画面全体を annotation し、sealed window 内で `labeled_region` を使用していない: はい / いいえ / 対象外
 - HUD truth の保存先:
 - session 単位 COCO の保存先:
-- 04-16 merge 後の formal annotations 保存先（sealed のみ）:
+- formal annotations 保存先（sealed のみ）:
 
 ## 備考
 

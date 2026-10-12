@@ -59,8 +59,7 @@ Ctrl+C は 1 回目と 2 回目で挙動が異なる:
 
 画面 annotation は [D04 capture と annotation の手順](capture_annotation_manual.md) の 2-2〜2-7 に従ってください。`annotate_survivors_frames.py` は旧 stdin CLI で、class 定義が world class map v2 と一致しないため正式 annotation に使用しません。
 
-二重 annotation を行う場合は2人目に別の work-root を用意し、1人目の label と、1人目の frame で学習した prelabel を見せません。agreement は2つの work-root を入力にして作成します。
-二重 annotation と agreement は任意です。publish の `--agreement` も省略でき、agreement は 04-10／04-14／04-15 の判定には使いません。
+04-08（04-15 の formal world detector 訓練）用 dataset では二重 annotation と agreement が必要です。作業者が1人の場合は、時間を空けて別の work-root で、prelabel と1回目の label を見ずに model split の一部 frame を描き直す自己再 annotation を推奨します。対象件数の下限は 04-08 実行時の `minimum_counts.agreement`（`pair_count`／`iou_mean`／`class_agreement`）に従います。04-10／04-14 では agreement は不要です。
 
 ## Split freeze workflow
 
@@ -97,7 +96,7 @@ python Tools/Deployment/freeze_survivors_capture_split.py `
 
 `--target-profile` は省略できます。省略時は session ごとの `<RecordRoot>/session_logs/<SessionId>/target_profile.resolved.yaml` を読み、`--all-planned` でも各 session の copy を個別に照合します。ファイルが無い場合は昇格を拒否します。別の profile copy を使うときは `--target-profile "<ProfilePath>"` を指定できます。どちらの場合も `target_resolve` を再実行しません。`--all-planned` は checkpoint に用途が入った session をまとめて昇格します。freeze 前なら同じ昇格 CLI の `--planned-split` で用途を変更できます。既存の frozen manifest は上書きせず、sealed session を加える世代には別の `--manifest-path` を使います。
 
-session 単位の COCO export は capture store の pixel hash と split を束縛します。model train/validation の world/UI 出力はそれぞれ2 split を merge し、二人の独立 annotation の agreement を作ってから publish します。
+session 単位の COCO export は capture store の pixel hash と split を束縛します。model train/validation の world/UI 出力はそれぞれ2 split を merge します。04-08（04-15 の formal world detector 訓練）用 dataset では agreement JSON も作成します。作業者が1人の場合は、時間を空けて別の work-root で prelabel と1回目の label を見ずに一部 frame を描き直す自己再 annotation を推奨します。必要件数の下限は 04-08 実行時の `minimum_counts.agreement` で確認してください。04-10／04-14 用 dataset では agreement は不要です。
 
 ```powershell
 python Tools/Deployment/export_survivors_annotations_coco.py `
@@ -120,9 +119,9 @@ python Tools/Deployment/build_survivors_annotation_agreement.py `
   --output "<DatasetDir>/annotation_agreement.json"
 ```
 
-04-18 merge 済みの現行 plan では、model session は従来の候補選択、sealed session は `plan_survivors_evaluation_windows.py` で固定した window plan に従って窓内の全 frame を annotation します。sealed の窓内 frame は画面全体をラベルして `labeled_region` を使いません。
+現行 plan では、model session は従来の候補選択、sealed session は `plan_survivors_evaluation_windows.py` で固定した window plan に従って窓内の全 frame を annotation します。sealed の窓内 frame は画面全体をラベルして `labeled_region` を使いません。
 
-04-16 merge 後、sealed session の formal `annotations.jsonl` は `build_survivors_formal_annotations.py` で作成します。formal schema は旧 `AnnotationWriter.read_annotations()` では読めません。session ごとの COCO は `<RecordRoot>/coco/<SessionId>/` へ出力します。正式 gate の既定構成 `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` は 04-18 merge 後に使います。最短 session 長は300秒、`event:death` は20回、`event:result` は floor 未満の実測件数を記録して gate にせず、time band は到達 session が2本以上のときだけ判定します。annotation 前に YAML と SHA-256 を session log に記録し、publish descriptor の `formal_gates.sha256` と照合します。coverage と verdict notes でデータ不足と性能不足を区別します。
+sealed session の formal `annotations.jsonl` は `build_survivors_formal_annotations.py` で作成します。formal schema は旧 `AnnotationWriter.read_annotations()` では読めません。session ごとの COCO は `<RecordRoot>/coco/<SessionId>/` へ出力します。現行の正式 gate は `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` です。最短 session 長は300秒、`event:death` は20回、`event:result` は floor 未満の実測件数を記録して gate にせず、time band は到達 session が2本以上のときだけ判定します。annotation 前に YAML と SHA-256 を session log に記録し、publish descriptor の `formal_gates.sha256` と照合します。coverage と verdict notes でデータ不足と性能不足を区別します。
 
 ```powershell
 python Tools/Deployment/publish_survivors_capture_dataset.py `
@@ -135,9 +134,9 @@ python Tools/Deployment/publish_survivors_capture_dataset.py `
   --formal-gates "<formal_gates_minimal_v1.yaml>"
 ```
 
-`--agreement` は二重 annotation をした場合だけ指定する任意引数です。04-10／04-14／04-15 の判定には使いません。model-only 世代では `--formal-gates` と `--evaluation-windows` も省略できます。publish は descriptor と全 object を発行し、別の空 restore store への復元 verdict を同時に作ります。
+`--agreement` は CLI 上は任意引数ですが、04-08（04-15 の formal world detector 訓練）用 dataset の publish では `publish_survivors_capture_dataset.py --agreement <AgreementJson>` を指定してください。formal 訓練では `train_survivors_world_detector.py --formal --annotation-agreement <AgreementJson>` に同じ JSON を渡します。04-10／04-14 用の publish では `--agreement` を省略できます。model-only 世代では `--formal-gates` と `--evaluation-windows` も省略できます。publish は descriptor と全 object を発行し、別の空 restore store への復元 verdict を同時に作ります。
 
-`--evaluation-windows` は publish 時に evaluation windows artifact を指定します。現行の 04-18 merge 済み plan では window plan を annotation 前に保存します。正式 test 用の最短長 300 秒は pinned `formal_gates.v1` の値であり、現行 `perception_session_split.py` の1800秒条件を適用する運用では `--duration-sec 1800` ちょうどを使わず余裕を取ります。
+`--evaluation-windows` は publish 時に evaluation windows artifact を指定します。現行 plan では window plan を annotation 前に保存します。正式 test 用の最短長 300 秒は pinned `formal_gates.v1` の値であり、現行 `perception_session_split.py` の1800秒条件を適用する運用では `--duration-sec 1800` ちょうどを使わず余裕を取ります。
 
 ## Verification
 
