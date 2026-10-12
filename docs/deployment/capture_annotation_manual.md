@@ -185,7 +185,9 @@ python Tools/Deployment/annotate_survivors_hud_truth.py `
 
 カードは上から順に記録します。一枚でも item_id が読めなければ choice 全体が null になるので、`set choice id1|id2|id3`（枚数に合わせる）で全カードを入れてください。所持欄の inventory template とカードの card template は別 entry です。atlas なしではカード枚数と位置だけが読め、名前の下書きは入りません。
 
-次の録画では宝箱で一度、何も押さずに待って自動で開くか確認してください。parser は契約上「開く」を ack_chest にせず、終了ボタンだけを返します。手動で開く必要がある場合、現 controller は60秒で停止します。
+宝箱は何も押さないと開かないため、controller は「開く」を押し、演出後に「終了」も押します。HUD parser は両方を `ack_chest` として検出し、演出中の button 無しは候補を返さず待ちます。
+
+button が認識できず操作が進まない場合は、既定の60秒 `chest_timeout` で停止します。録画の状態・button を確認する際は、開く段階と終了段階の両方を宝箱操作として扱ってください。
 
 #### コマンド早見表
 

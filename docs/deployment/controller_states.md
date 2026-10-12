@@ -19,7 +19,7 @@
 | `RUN_SETUP` | 最初の `GAMEPLAY` 遷移を待つだけの状態。formal campaign ではここは最初の gameplay 開始前だけに使われ、gameplay artifact/evidence を生成しない。 |
 | `GAMEPLAY` | 通常プレイ中。movement decision (`kind="move"`) をそのまま `Effect(kind="move")` へ転送する。 |
 | `LEVEL_UP` | レベルアップの item card / fallback(gold・chicken)選択画面。 |
-| `CHEST` | 宝箱の ack 画面。 |
+| `CHEST` | 宝箱操作。開く／終了を `ack_chest` で押し、発光中は button 無しで待つ。 |
 | `TARGET_REACHED_PENDING_TRANSITION` | 30:00 到達 evidence を観測した直後。ここに入った時点で `success_latched=True` になり、以後は何が起きても最終的に `COMPLETE` に収束する。 |
 | `PAUSED` | 一時停止画面。timeout なし(indefinite)で input を一切送らない。 |
 | `UNKNOWN` | 認識できない画面(未知の screen_state・focus loss)。1 秒(profile 由来)で fail-closed する。input は一切送らない。 |
@@ -92,8 +92,11 @@
   intent identity(`candidate_set_hash`/`target_index` 等を含む)が元の
   attempt と同じなら「選んでいる対象は変わっていないノイズ」と判断し、
   apply ack の候補にしません(UI フェード中の1フレームだけの ui_state_key
-  の揺れで再クリックが繰り返されるのを防ぎます)。intent identity 自体が
-  実際に変わって初めて「game 側の apply ack」の**候補**とみなします(OS への
+  の揺れで再クリックが繰り返されるのを防ぎます)。ただし `ACK_CHEST` は
+  `ui_state_key` を intent identity に含むため、key 変化で identity も変わり、
+  同じ新しい組が後述の debounce と `retry_after_ns` を満たせば apply ack として
+  確定します。intent identity 自体が実際に変わって初めて「game 側の apply
+  ack」の**候補**とみなします(OS への
   送信受理である `ExecutionOutcome.ack` とは別物です)。さらに、同じ新しい
   組(`ui_state_key`/`candidate_set_hash`/`inventory_hash`)が
   `NavigationProfile.debounce_frames` 回**連続**で観測され(signature が
@@ -106,9 +109,10 @@
   確定しないまま intent identity が変わった場合や、retry の precondition を
   満たさない場合は、再送せず emergency stop へ倒します。
 - 上記のどの送信経路でも、同一 UI 訪問(LEVEL_UP/CHEST/TARGET_REACHED へ
-  入ってから抜けるまで)での総送信数は 2 件(initial+retry 相当)を超えたら
-  それ以上送りません。apply ack の再確定が繰り返されるような未知の経路が
-  残っていた場合の最後の安全弁です。
+  入ってから抜けるまで)の送信上限は CHEST が4件(通常は開く／終了の各
+  initial+retry)、それ以外が2件(initial+retry)です。CHEST の上限は訪問全体で
+  共有します。apply ack の再確定が繰り返されるような未知の経路が残っていた
+  場合の最後の安全弁です。
 - `CONFIRM` intent だけ ROI クリックの代わりに `ENTER` キーを使います。それ
   以外(`CHOOSE_CARD`/`CHOOSE_FALLBACK`/`REROLL`/`SKIP`/`BANISH`/`ACK_CHEST`)は
   resolve 済み ROI の中心をクリックします。
@@ -208,7 +212,7 @@ attempt を許可するのは debug restart モードだけ)。
 
 04-22 の実測配置では宝箱のパネル出現から終了ボタンまで約21秒かかるため、`NavigationProfile.chest_timeout_ns` と出荷 YAML の `timeouts_ms.chest` は60秒です。LEVEL_UP の timeout は2秒のままです。atlas がない、または card surface の template がない場合は候補が invalid になり、クリックせず `level_up_timeout` で停止します。
 
-CHEST は「開く」のボタンを出さず、終了ボタンが出るまで待ちます。自動で開くかは録画で未確認で、手動が必要なら60秒で停止します。終了の retry は初回・再観測の target confidence がともに .99 以上の場合だけ可能です。フェード中の初回 target が .99 未満で終了画面が残ると、既存の同等性 gate により `ui_retry_precondition_failed` で停止します。
+本家の宝箱は何も押さないと開かないため、controller は開くボタンを押し、発光演出を待ってから終了ボタンも押します。parser は両段階を `ack_chest` として返し、button 無しの演出では click しません。各段階の retry は初回・再観測の target confidence がともに .99 以上の場合だけ可能です。宝箱の click 上限は訪問全体で4件で、通常は開く／終了の各 initial と retry に相当します。button を認識できないなど進行できない場合は既定の60秒 `chest_timeout` で停止します。フェード中の初回 target が .99 未満で画面が残ると、既存の同等性 gate により `ui_retry_precondition_failed` で停止します。
 
 - 実機での座標解決精度・実際の click 命中率は本ドキュメントの範囲外です
   (D04 capture dataset 以降のキャリブレーション対象)。`Tools/Deployment/configs/ui_navigation_1080p_ja_v1.yaml`

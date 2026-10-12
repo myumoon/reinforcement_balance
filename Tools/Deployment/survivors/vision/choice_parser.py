@@ -8,7 +8,7 @@ unknown item/invalid field として返します。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 import numpy as np
@@ -239,13 +239,15 @@ class ChoiceParser:
         w: int,
         h: int,
     ) -> tuple[ParsedButton, ...]:
-        """下枠が縮んだ終了段階だけを ack_chest にする。
+        """開く/終了の両段階を ack_chest にし、下枠で reason を区別する。
 
-        開くボタンを押すと既存契約では終了を別操作にできないため、長いパネルでは返しません。
+        操作可否は既存の色・confidence 閾値のまま判定し、段階は操作 identity にしません。
         """
-        if not horizontal_border_present(frame_bgra, (905, 925), layout.WINDOW_BORDER_X):
-            return ()
-        return _color_button(frame_bgra, "ack_chest", layout.CHEST_ACK_BUTTON_ROI, layout.CHEST_ACK_INNER_ROI, classify_blue, "blue")
+        phase = "close" if horizontal_border_present(frame_bgra, (905, 925), layout.WINDOW_BORDER_X) else "open"
+        buttons = _color_button(
+            frame_bgra, "ack_chest", layout.CHEST_ACK_BUTTON_ROI, layout.CHEST_ACK_INNER_ROI, classify_blue, "blue"
+        )
+        return tuple(replace(button, reason=f"{button.reason}:{phase}") for button in buttons)
 
     def _parse_confirm_button(self, frame, screen_state):
         """死亡と結果の終了ボタンを confirm として観測する。
