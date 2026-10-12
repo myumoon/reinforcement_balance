@@ -926,7 +926,7 @@ def build_annotation_agreement(
 ) -> dict[str, Any]:
     """二人の independent_pair または self_repeat の frame agreement を集計する。
 
-    self_repeat は M2 manifest、同一 annotator、blind、24 時間以上の label 更新 gap を必須にする。
+    self_repeat は M2 manifest、同一 annotator、blind、24 時間以上の保守的な gap を必須にする。
     """
     if not isinstance(iou_match, (int, float)) or isinstance(iou_match, bool) or not 0 < iou_match <= 1:
         raise ValueError("iou_match must be in (0, 1]")
@@ -949,14 +949,22 @@ def build_annotation_agreement(
     blind = blind_manifest is not None and blind_manifest["blind"] is True
     _, checked_a, updates_a = _all_label_state(root_a)
     all_labels_b, _, updates_b = _all_label_state(root_b)
-    measured_gap = (
-        (min(updates_b) - max(updates_a)) / 3600.0
-        if updates_a and updates_b else None
-    )
+    b_first_update = min(updates_b) if updates_b else None
+    measured_gap = (b_first_update - max(updates_a)) / 3600.0 if updates_a and b_first_update is not None else None
     session_values = tuple(dict.fromkeys(_validated_component(value, "session_id") for value in session_ids))
     if independence_mode == "self_repeat":
         if blind_manifest is None or not blind:
             raise ValueError("self_repeat requires a blind M2 work-root")
+        manifest_created_at = datetime.fromisoformat(blind_manifest["created_at"].replace("Z", "+00:00"))
+        if manifest_created_at.tzinfo is None:
+            manifest_created_at = manifest_created_at.replace(tzinfo=timezone.utc)
+        manifest_created_at_ts = manifest_created_at.timestamp()
+        if b_first_update is not None and b_first_update < manifest_created_at_ts:
+            raise ValueError("self_repeat B labels predate the blind manifest")
+        measured_gap = (
+            (min(manifest_created_at_ts, b_first_update) - max(updates_a)) / 3600.0
+            if updates_a and b_first_update is not None else None
+        )
         selected_keys = blind_manifest["_selected_keys"]
         selected_sessions = {session_id for session_id, _ in selected_keys}
         if set(session_values) != selected_sessions:
