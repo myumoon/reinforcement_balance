@@ -268,6 +268,146 @@ def test_frozen_eligible_noop_matches_direct_and_session_id_calls(tmp_path, monk
     assert manifest_path.read_bytes() == frozen_bytes
 
 
+def test_promote_cli_uses_session_log_profile_by_default(tmp_path, monkeypatch, capsys):
+    """省略した target profile を session log の保存先から読む。
+
+    収録時に自動退避された profile を同じ session の昇格に使えることを確認する。
+    """
+    from types import SimpleNamespace
+
+    import promote_survivors_capture_session as promote_cli
+
+    published = _publish_session(
+        tmp_path,
+        "profile-default",
+        checkpoint="planned_split:model_train|planned_at:2026-10-11T00:00:00Z|capture",
+    )
+    profile_path = tmp_path / "session_logs" / published.session_id / "target_profile.resolved.yaml"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_bytes(b"resolved profile")
+    loaded = []
+
+    def fake_load(path):
+        """実 loader を使わず、CLI が選んだ path を記録して profile を返す。
+
+        CLI の既定 path 選択だけを実際の promotion 経路から切り分けて確認する。
+        """
+        loaded.append(Path(path))
+        return SimpleNamespace(target_hash=PROFILE_HASH, sections={"build": {"build_id": BUILD_ID}})
+
+    monkeypatch.setattr(promote_cli, "load_runtime_profile", fake_load)
+
+    result = promote_cli.main([
+        "--store-root", str(tmp_path), "--session-id", published.session_id,
+        "--operator-id", "operator-01", "--note", "reviewed build",
+    ])
+
+    assert result == 0
+    assert loaded == [profile_path]
+    assert DatasetWriter.restore(tmp_path, published.session_id, metadata_only=True).formal_dataset_eligible
+    assert json.loads(capsys.readouterr().out)["promoted"][0]["session_id"] == published.session_id
+
+
+def test_promote_cli_all_planned_resolves_each_session_profile(tmp_path, monkeypatch, capsys):
+    """--all-planned が各 session の log profile を個別に読み込む。
+
+    異なる session id の profile path を混同せず、両方を昇格することを確認する。
+    """
+    from types import SimpleNamespace
+
+    import promote_survivors_capture_session as promote_cli
+
+    session_ids = ("planned-a", "planned-b")
+    profile_paths = []
+    for session_id in session_ids:
+        _publish_session(
+            tmp_path,
+            session_id,
+            checkpoint="planned_split:model_train|planned_at:2026-10-11T00:00:00Z|capture",
+        )
+        profile_path = tmp_path / "session_logs" / session_id / "target_profile.resolved.yaml"
+        profile_path.parent.mkdir(parents=True)
+        profile_path.write_bytes(session_id.encode("ascii"))
+        profile_paths.append(profile_path)
+    loaded = []
+
+    def fake_load(path):
+        """各 session から選ばれた profile path を記録して同じ test identity を返す。
+
+        2件の昇格で個別の退避先が選択されることを検査するための loader double。
+        """
+        loaded.append(Path(path))
+        return SimpleNamespace(target_hash=PROFILE_HASH, sections={"build": {"build_id": BUILD_ID}})
+
+    monkeypatch.setattr(promote_cli, "load_runtime_profile", fake_load)
+
+    result = promote_cli.main([
+        "--store-root", str(tmp_path), "--all-planned",
+        "--operator-id", "operator-01", "--note", "reviewed build",
+    ])
+
+    assert result == 0
+    assert loaded == profile_paths
+    promoted = json.loads(capsys.readouterr().out)["promoted"]
+    assert {item["session_id"] for item in promoted} == set(session_ids)
+
+
+def test_promote_cli_fails_closed_when_session_log_profile_is_missing(tmp_path, capsys):
+    """既定 profile が無い session は昇格せず、session id 付きで理由を示す。
+
+    missing log の代わりに現在環境の profile を誤用しないことを確認する。
+    """
+    published = _publish_session(
+        tmp_path,
+        "profile-missing",
+        checkpoint="planned_split:model_train|planned_at:2026-10-11T00:00:00Z|capture",
+    )
+
+    import promote_survivors_capture_session as promote_cli
+
+    result = promote_cli.main([
+        "--store-root", str(tmp_path), "--session-id", published.session_id,
+        "--operator-id", "operator-01", "--note", "reviewed build",
+    ])
+
+    assert result == 1
+    assert "missing target profile for session profile-missing" in capsys.readouterr().err
+    assert not DatasetWriter.restore(tmp_path, published.session_id, metadata_only=True).formal_dataset_eligible
+
+
+def test_promote_cli_rejects_session_log_profile_hash_mismatch(tmp_path, monkeypatch, capsys):
+    """退避 profile の hash が capture identity と異なる場合は昇格を拒否する。
+
+    default path の便利さで profile identity の fail-closed gate が弱まらないことを見る。
+    """
+    from types import SimpleNamespace
+
+    import promote_survivors_capture_session as promote_cli
+
+    published = _publish_session(
+        tmp_path,
+        "profile-mismatch",
+        checkpoint="planned_split:model_train|planned_at:2026-10-11T00:00:00Z|capture",
+    )
+    profile_path = tmp_path / "session_logs" / published.session_id / "target_profile.resolved.yaml"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_bytes(b"different profile")
+    monkeypatch.setattr(
+        promote_cli,
+        "load_runtime_profile",
+        lambda _: SimpleNamespace(target_hash="b" * 64, sections={"build": {"build_id": BUILD_ID}}),
+    )
+
+    result = promote_cli.main([
+        "--store-root", str(tmp_path), "--session-id", published.session_id,
+        "--operator-id", "operator-01", "--note", "reviewed build",
+    ])
+
+    assert result == 1
+    assert "does not match expected profile" in capsys.readouterr().err
+    assert not DatasetWriter.restore(tmp_path, published.session_id, metadata_only=True).formal_dataset_eligible
+
+
 def test_promotion_rejects_fixture_build_id(tmp_path):
     """fixture 専用 build id を formal 昇格の trust boundary で拒否する。
 

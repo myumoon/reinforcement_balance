@@ -7,6 +7,7 @@ Ctrl+Cによる部分公開・ABORTED_EMPTY、フォアグラウンド待機の
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import signal
 import threading
@@ -21,10 +22,17 @@ from survivors.capture.captured_frame import CapturedFrame
 from survivors.capture.window_locator import TargetWindowForegroundLost, TargetWindowStateError
 
 
-def _frame(frame_id: int, timestamp_ns: int) -> CapturedFrame:
-    """synthetic分岐のidentityと一致する決定的CapturedFrameを生成する。
+def _frame(
+    frame_id: int,
+    timestamp_ns: int,
+    *,
+    target_profile_hash: str = capture_survivors.SYNTHETIC_PROFILE_HASH,
+    game_build_id: str = capture_survivors.SYNTHETIC_BUILD_ID,
+) -> CapturedFrame:
+    """決定した profile と build identity を持つ CapturedFrame を生成する。
 
-    テストのために画素は全て0で構成し、frame_idとtimestampだけを変える。
+    既定値は synthetic 分岐に合わせ、live 経路の test では identity を指定する。
+    画素を固定することで、保存経路の検証だけに集中できる。
     """
     pixels = np.zeros((1080, 1920, 4), dtype=np.uint8)
     pixels[..., 3] = 255
@@ -34,8 +42,8 @@ def _frame(frame_id: int, timestamp_ns: int) -> CapturedFrame:
         frame_id,
         (0, 0, 1920, 1080),
         True,
-        capture_survivors.SYNTHETIC_PROFILE_HASH,
-        capture_survivors.SYNTHETIC_BUILD_ID,
+        target_profile_hash,
+        game_build_id,
     )
 
 
@@ -462,6 +470,9 @@ def test_main_closes_threaded_writer_and_cleans_tmp_when_live_capture_raises(
     生きたままrmtreeと競合する(過去の回帰)。
     """
     close_calls = []
+    profile_path = tmp_path / "resolved-target-profile.yaml"
+    profile_path.write_bytes(b"resolved profile")
+    monkeypatch.setattr(capture_survivors, "RESOLVED", profile_path, raising=False)
     original_close = capture_survivors.ThreadedFrameWriter.close
 
     def spy_close(self):
@@ -496,3 +507,141 @@ def test_main_closes_threaded_writer_and_cleans_tmp_when_live_capture_raises(
     assert close_calls  # 例外発生後もThreadedFrameWriter.close()が呼ばれた
     tmp_root = tmp_path / ".capture-tmp"
     assert list(tmp_root.iterdir()) == []  # workerがPNG保存を終えてからrmtreeが完了している
+
+
+def _run_fake_live_capture(
+    tmp_path, monkeypatch, session_id, *, planned_split=None, dry_run=False, change_profile=False
+):
+    """実機に依存しない live 経路で capture CLI を実行する。
+
+    resolved profile と capture source だけを差し替え、公開・session log の
+    周辺処理は本物のコードを通して検査する。
+    """
+    profile_path = tmp_path / "resolved-target-profile.yaml"
+    original_profile = b"profile at capture start\n"
+    profile_path.write_bytes(original_profile)
+    monkeypatch.setattr(capture_survivors, "RESOLVED", profile_path, raising=False)
+    session = SimpleNamespace(
+        target=SimpleNamespace(target_profile_hash="a" * 64, game_build_id="build-v1")
+    )
+
+    def fake_capture_live(session, duration_sec, interrupted, stats):
+        """決めた時刻のフレームを返して実機の待機と capture を置き換える。
+
+        収録中の profile 更新も再現できるよう、最初の frame を渡した後で
+        ファイル内容を変える。
+        """
+        stats["capture_started_at_utc"] = "2026-10-12T01:02:03Z"
+        yield _frame(0, 100, target_profile_hash="a" * 64, game_build_id="build-v1")
+        if change_profile:
+            profile_path.write_bytes(b"profile changed during capture\n")
+
+    monkeypatch.setattr(capture_survivors, "_start_live_session", lambda: session)
+    monkeypatch.setattr(capture_survivors, "_capture_live", fake_capture_live)
+    argv = ["--store-root", str(tmp_path), "--session-id", session_id, "--duration-sec", "1"]
+    if planned_split is not None:
+        argv.extend(["--planned-split", planned_split])
+    if dry_run:
+        argv.append("--dry-run")
+    return capture_survivors.main(argv), profile_path, original_profile
+
+
+def test_main_writes_live_session_log_from_start_profile_snapshot(tmp_path, monkeypatch, capsys):
+    """live 公開時に profile snapshot と統計を session log へ保存する。
+
+    収録中に元 YAML が変わっても開始時 bytes を保存し、capture_sessions の
+    公開ファイルには session log を混ぜないことを確認する。
+    """
+    result, _, original_profile = _run_fake_live_capture(
+        tmp_path, monkeypatch, "logged-live", planned_split="model_train", change_profile=True
+    )
+
+    assert result == 0
+    stdout = capsys.readouterr().out
+    payload = json.loads(stdout)
+    log_dir = tmp_path / "session_logs" / "logged-live"
+    assert (log_dir / "target_profile.resolved.yaml").read_bytes() == original_profile
+    stats = json.loads((log_dir / "session_stats.json").read_text(encoding="utf-8"))
+    assert stats == payload
+    assert payload["status"] == "PUBLISHED"
+    assert payload["target_profile_hash"] == "a" * 64
+    assert payload["game_build_id"] == "build-v1"
+    assert payload["resolved_yaml_sha256"] == hashlib.sha256(original_profile).hexdigest()
+    assert payload["planned_split"] == "model_train"
+    assert payload["planned_at"].endswith("Z")
+    assert payload["capture_started_at"] == "2026-10-12T01:02:03Z"
+    session_log = (log_dir / "session_log.md").read_text(encoding="utf-8")
+    assert "| session_id | logged-live |" in session_log
+    assert "| operator | |" in session_log
+    assert "{{" not in session_log
+    session_path = tmp_path / "capture_sessions" / "logged-live"
+    assert {path.name for path in session_path.iterdir()} == {
+        "frames", "frames.jsonl", "session_manifest.json"
+    }
+    assert {path.name for path in (session_path / "frames").iterdir()} == {"00000000.png"}
+
+
+def test_main_keeps_published_capture_when_session_log_write_fails(tmp_path, monkeypatch, capsys):
+    """session log 保存失敗を stdout と終了コードへ伝え、公開済み capture を残す。
+
+    ログ用ディスクの書き込みエラーが capture store の公開結果を取り消さない
+    ことを確認する。
+    """
+
+    def fail_log(*args, **kwargs):
+        """session log の保存エラーを再現する。
+
+        capture 自体の公開処理と log の失敗処理を分けて確認するための double。
+        """
+        raise PermissionError("session log is read-only")
+
+    monkeypatch.setattr(capture_survivors, "_write_session_log", fail_log, raising=False)
+    result, _, _ = _run_fake_live_capture(tmp_path, monkeypatch, "logged-failure")
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert result == 1
+    assert payload["status"] == "PUBLISHED"
+    assert "session log is read-only" in payload["session_log_error"]
+    assert "session log" in captured.err
+    assert (tmp_path / "capture_sessions" / "logged-failure" / "session_manifest.json").is_file()
+
+
+def test_main_does_not_overwrite_existing_session_log_directory(tmp_path, monkeypatch, capsys):
+    """同じ session id の既存 log を保持したまま公開結果を失敗扱いにする。
+
+    既存の証跡を上書きせず、capture 自体は公開済みの状態で残すことを確認する。
+    """
+    existing = tmp_path / "session_logs" / "already-logged"
+    existing.mkdir(parents=True)
+    sentinel = existing / "operator-note.txt"
+    sentinel.write_bytes(b"keep me")
+
+    result, _, _ = _run_fake_live_capture(tmp_path, monkeypatch, "already-logged")
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert payload["status"] == "PUBLISHED"
+    assert "already exists" in payload["session_log_error"]
+    assert sentinel.read_bytes() == b"keep me"
+    assert (tmp_path / "capture_sessions" / "already-logged" / "session_manifest.json").is_file()
+
+
+def test_main_skips_session_logs_for_synthetic_and_dry_run(tmp_path, monkeypatch, capsys):
+    """synthetic と dry-run は session log を作らない。
+
+    session log の用途を実機 live の公開に限定し、検証用経路のファイルを
+    store に混ぜないことを確認する。
+    """
+    assert capture_survivors.main([
+        "--store-root", str(tmp_path), "--session-id", "synthetic-only",
+        "--duration-sec", "0.5", "--synthetic",
+    ]) == 0
+    assert not (tmp_path / "session_logs").exists()
+    capsys.readouterr()
+
+    result, _, _ = _run_fake_live_capture(tmp_path, monkeypatch, "dry-run-only", dry_run=True)
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "DRY_RUN_OK"
+    assert not (tmp_path / "session_logs").exists()

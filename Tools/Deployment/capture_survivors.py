@@ -13,12 +13,14 @@ import argparse
 import contextlib
 import ctypes
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import signal
 import sys
+import tempfile
 import threading
 import time
 
@@ -35,7 +37,7 @@ from survivors.capture import (
     WindowLocator,
 )
 from survivors.capture_dataset import SPLIT_NAMES, DatasetWriter, ThreadedFrameWriter
-from survivors.target_profile import load_runtime_profile
+from survivors.target_profile import RESOLVED, load_runtime_profile
 
 
 _AUTO_SESSION_ID_PATTERN = re.compile(r"^session-(\d{4,})$")
@@ -46,9 +48,16 @@ SYNTHETIC_BUILD_ID = "synthetic-disposable-v1"
 
 
 class FakeCaptureBackend:
-    """Disposable synthetic CapturedFrame source used only by smoke tests."""
+    """合成 CapturedFrame を作る smoke test 用 source。
+
+    実機画面を使わずに capture と保存の経路を確かめるため、固定画素だけを返す。
+    """
 
     def frames(self, duration_sec: float):
+        """指定時間に応じた合成フレームを順に返す。
+
+        smoke test 用の画像なので、ゲーム状態や画面内容は表現しない。
+        """
         count = max(1, int(duration_sec * 2))
         started = time.monotonic_ns()
         for frame_id in range(count):
@@ -120,6 +129,10 @@ def _declare_process_dpi_awareness() -> None:
 
 
 def _start_live_session() -> CaptureSession:
+    """実機 target profile を使って live capture session を準備する。
+
+    対象ゲームの window と monitor を検証してから、対応する capture backend を開く。
+    """
     _declare_process_dpi_awareness()
     profile = load_runtime_profile()
     policy = TargetWindowPolicy(
@@ -226,6 +239,9 @@ def _capture_live(
             return
         session.start()
         stats["started_at"] = time.monotonic()
+        stats["capture_started_at_utc"] = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        ).replace("+00:00", "Z")
         deadline = stats["started_at"] + duration_sec
         was_paused = False
         while time.monotonic() < deadline:
@@ -253,6 +269,55 @@ def _capture_live(
         session.close()
 
 
+def _write_session_log(
+    store_root: Path,
+    session_id: str,
+    profile_bytes: bytes,
+    payload: dict,
+) -> None:
+    """live capture の統計と開始時 profile bytes を session log として保存する。
+
+    一時 directory に全ファイルを用意してから配置し、同じ session id の
+    既存記録を上書きせず、失敗時は中途半端なログを残さない。
+    """
+    logs_root = store_root / "session_logs"
+    logs_root.mkdir(parents=True, exist_ok=True)
+    destination = logs_root / session_id
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(f"session log directory already exists: {destination}")
+
+    session_stats_path = destination / "session_stats.json"
+    session_profile_path = destination / "target_profile.resolved.yaml"
+    template_path = Path(__file__).resolve().parents[2] / "docs" / "deployment" / "templates" / "d04_session_log.md"
+    session_log = template_path.read_text(encoding="utf-8")
+    automatic_values = {
+        "{{session_id}}": session_id,
+        "{{capture_started_at}}": str(payload["capture_started_at"] or ""),
+        "{{planned_split}}": str(payload["planned_split"] or ""),
+        "{{planned_at}}": str(payload["planned_at"] or ""),
+        "{{duration_sec}}": str(payload["requested_duration_sec"]),
+        "{{session_manifest_path}}": str(store_root / "capture_sessions" / session_id / "session_manifest.json"),
+        "{{session_stats_path}}": str(session_stats_path),
+        "{{stdout_stats}}": "session_stats.json と同じ JSON",
+        "{{session_profile_path}}": str(session_profile_path),
+        "{{resolved_yaml_sha256}}": str(payload["resolved_yaml_sha256"]),
+        "{{target_profile_hash}}": str(payload["target_profile_hash"]),
+    }
+    for marker, value in automatic_values.items():
+        session_log = session_log.replace(marker, value)
+
+    with tempfile.TemporaryDirectory(prefix=".session-log-", dir=logs_root) as temporary_dir:
+        staged = Path(temporary_dir)
+        (staged / "target_profile.resolved.yaml").write_bytes(profile_bytes)
+        (staged / "session_stats.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        (staged / "session_log.md").write_text(session_log, encoding="utf-8", newline="\n")
+        os.rename(staged, destination)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI引数に従ってフレームを収録し、公開結果をJSONで返す。
 
@@ -275,6 +340,8 @@ def main(argv: list[str] | None = None) -> int:
     interrupted = threading.Event()  # I6: main()呼び出しごとに毎回新規に作る
     stats: dict = {}
     loop_started_at = time.monotonic()
+    profile_bytes: bytes | None = None
+    planned_at: str | None = None
     try:
         with _graceful_interrupt(interrupted):
             session_id = args.session_id
@@ -284,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
                 frames = FakeCaptureBackend().frames(args.duration_sec)
                 identity = SYNTHETIC_PROFILE_HASH, SYNTHETIC_BUILD_ID
             else:
+                profile_bytes = RESOLVED.read_bytes()
                 live_session = _start_live_session()
                 frames = _capture_live(live_session, args.duration_sec, interrupted, stats)
                 identity = (
@@ -351,19 +419,34 @@ def main(argv: list[str] | None = None) -> int:
                     planned_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
                     checkpoint = f"planned_split:{args.planned_split}|planned_at:{planned_at}|{checkpoint}"
                 manifest = active_writer.publish(operator_checkpoint=checkpoint)
-        print(
-            json.dumps(
+        payload = {
+            "status": "PUBLISHED",
+            "session_id": manifest.session_id,
+            "frame_count": manifest.frame_count,
+            "formal_dataset_eligible": manifest.formal_dataset_eligible,
+            "ended_reason": ended_reason,
+            "requested_duration_sec": args.duration_sec,
+            "elapsed_sec": elapsed_sec,
+        }
+        if profile_bytes is not None:
+            payload.update(
                 {
-                    "status": "PUBLISHED",
-                    "session_id": manifest.session_id,
-                    "frame_count": manifest.frame_count,
-                    "formal_dataset_eligible": manifest.formal_dataset_eligible,
-                    "ended_reason": ended_reason,
-                    "requested_duration_sec": args.duration_sec,
-                    "elapsed_sec": elapsed_sec,
+                    "target_profile_hash": manifest.target_profile_hash,
+                    "game_build_id": manifest.game_build_id,
+                    "resolved_yaml_sha256": hashlib.sha256(profile_bytes).hexdigest(),
+                    "planned_split": args.planned_split,
+                    "planned_at": planned_at,
+                    "capture_started_at": stats.get("capture_started_at_utc"),
                 }
             )
-        )
+            try:
+                _write_session_log(store_root, session_id, profile_bytes, payload)
+            except Exception as exc:
+                print(f"error: failed to write session log: {exc}", file=sys.stderr)
+                payload["session_log_error"] = str(exc)
+                print(json.dumps(payload))
+                return 1
+        print(json.dumps(payload))
         return 0
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

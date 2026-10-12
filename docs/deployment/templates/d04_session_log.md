@@ -1,19 +1,20 @@
 # D04 セッション記録
 
-> この雛形を Git 管理外の session log 用フォルダーへコピーし、1 session ごとに1枚記入する。save 本体や実機固有の証跡は記録せず、指定欄には SHA-256 と外部保管先だけを書く。
+> live capture がこの雛形から `session_log.md` を自動生成する。自動記入欄は触らず、人が書く欄だけを記録する。save 本体や実機固有の証跡は保存しない。
 
 ## 収録
 
 | 項目 | 記録 |
 |---|---|
-| session_id | |
-| 収録日・開始時刻（ISO 8601） | |
+| session_id | {{session_id}} |
+| 収録日・開始時刻（ISO 8601 UTC） | {{capture_started_at}} |
 | operator | |
-| planned split | `model_train` / `model_validation` / `error_calibration` / `final_e2e_test` |
-| `--duration-sec` | |
-| session manifest の保存先 | |
-| session 統計 JSON | |
-| stdout の統計・最終結果 | |
+| planned split | {{planned_split}} |
+| planned_at | {{planned_at}} |
+| `--duration-sec` | {{duration_sec}} |
+| session manifest の保存先 | {{session_manifest_path}} |
+| session 統計 JSON | {{session_stats_path}} |
+| stdout の統計・最終結果 | {{stdout_stats}} |
 
 ### run 結果
 
@@ -48,10 +49,10 @@
 - session 前に同じ save を復元: はい / いいえ
 - session 前 save SHA-256:
 - session 後 save SHA-256:
-- `.env/target_profile.resolved.yaml` の artifact store 保存先:
+- 開始時に退避した `target_profile.resolved.yaml` の保存先: {{session_profile_path}}
 - 同 YAML の backup volume 保存先:
-- resolved YAML SHA-256:
-- `target_profile_hash`:
+- resolved YAML SHA-256: {{resolved_yaml_sha256}}
+- `target_profile_hash`: {{target_profile_hash}}
 - 収録期間中に `target_resolve` を再実行していない: はい / いいえ
 
 ### 実機確認（監査 D1／D2／D4／D5）
@@ -75,9 +76,9 @@
 | annotator / work-root | 開始時刻 | 終了時刻 | 対象 frame 数 | 下書きから修正した frame 数 |
 |---|---|---|---:|---:|
 | A | | | | |
-| B（独立確認時） | | | | |
+| B（任意・二重 annotation 実施時） | | | | |
 
-- 二重 annotation の場合、B は別 work-root を使用し、A の label と A の frame で学習した prelabel を見ていない: はい / いいえ / 対象外
+- 二重 annotation は任意。実施する場合、B は別 work-root を使い、A の label と A の frame で学習した prelabel を見ていない: はい / いいえ / 対象外
 - 画面全体を annotation し、sealed window 内で `labeled_region` を使用していない: はい / いいえ / 対象外
 - HUD truth の保存先:
 - session 単位 COCO の保存先:

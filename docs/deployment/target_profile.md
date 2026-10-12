@@ -4,7 +4,7 @@
 
 ## D04 capture dataset の profile identity
 
-D04 の session 世代では、収録時点の resolved profile hash を dataset identity として固定します。`.env/target_profile.resolved.yaml` の原本を artifact store と backup volume に複製し、その YAML の SHA-256 と `target_profile_hash` を session log に記録してください。`promote_survivors_capture_session.py --target-profile` にはこの backup copy を渡し、収録時の期待 hash をそこから読みます。hash を取り直すために `target_resolve` を再実行しません。
+D04 の session 世代では、収録開始時点の resolved profile bytes と profile hash を dataset identity として固定します。live capture が成功すると `.env/target_profile.resolved.yaml` の開始時 bytes が `<RecordRoot>/session_logs/<SessionId>/target_profile.resolved.yaml` にそのまま退避され、SHA-256、`target_profile_hash`、`game_build_id` は `session_stats.json` と `session_log.md` に自動記録されます。`promote_survivors_capture_session.py` の `--target-profile` は省略でき、省略時は session ごとの退避 copy を読みます。明示指定もできますが、どの場合も収録時の期待 hash と build を照合し、hash を取り直すために `target_resolve` を再実行しません。
 
 現在の `CLOSED_TAXONOMY`（例: `unlocked_items=[whip]`）は実 save の解放状態と一致していません。D04 promotion が確認するのは収録時 profile hash との一致であり、この dataset では taxonomy の意味的な正しさを attestation しません。既存 profile の taxonomy を直して hash を変えると、現在の session は同じ generation として昇格できなくなります。現 generation では profile を変更せず、修正した profile を使う収録は新しい dataset generation として始めてください。
 
