@@ -561,10 +561,14 @@ def test_main_writes_live_session_log_from_start_profile_snapshot(tmp_path, monk
     assert result == 0
     stdout = capsys.readouterr().out
     payload = json.loads(stdout)
+    assert not {
+        "operator", "actual_duration_sec", "run_end_death", "run_end_result",
+        "last_gameplay_timer_seconds", "steam_auto_update_behavior",
+    } & payload.keys()
     log_dir = tmp_path / "session_logs" / "logged-live"
     assert (log_dir / "target_profile.resolved.yaml").read_bytes() == original_profile
     stats = json.loads((log_dir / "session_stats.json").read_text(encoding="utf-8"))
-    assert stats == payload
+    assert {key: stats[key] for key in payload} == payload
     assert payload["status"] == "PUBLISHED"
     assert payload["target_profile_hash"] == "a" * 64
     assert payload["game_build_id"] == "build-v1"

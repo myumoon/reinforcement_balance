@@ -287,6 +287,7 @@ def _write_session_log(
     if destination.exists() or destination.is_symlink():
         raise FileExistsError(f"session log directory already exists: {destination}")
 
+    payload = dict(payload)
     payload.update(_session_log_frame_summary(store_root, session_id))
     payload["steam_auto_update_behavior"] = _detect_steam_auto_update_behavior()
     try:
