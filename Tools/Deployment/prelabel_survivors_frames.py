@@ -126,6 +126,14 @@ def main(argv: list[str] | None = None) -> int:
             if not wrote_label:
                 skipped += 1
                 continue
+            write_label_file(
+                session_dir / ".prelabel_drafts" / (json_path or png_path.with_suffix(".json")).name,
+                boxes,
+                image_width=width,
+                image_height=height,
+                checked=False,
+                overwrite=refresh,
+            )
             created += 1
     except (OSError, ValueError, RuntimeError, cv2.error) as exc:
         print(f"error: {exc}", file=sys.stderr)

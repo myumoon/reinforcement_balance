@@ -111,6 +111,7 @@ def test_prelabel_writes_fixed_and_detected_boxes_and_preserves_existing_json(tm
         ("gem_blue", 20.0, 12.0, 24.0, 16.0),
     ]
     assert all(box.label != "labeled_region" for box in boxes)
+    assert (target / ".prelabel_drafts/00000010.json").read_bytes() == (target / "00000010.json").read_bytes()
     assert {name: (target / name).read_bytes() for name in manual_bytes} == manual_bytes
     assert (target / "README.json").read_text(encoding="utf-8") == "not a frame"
     assert (target / "00000012.json").read_bytes() == unpaired_bytes
@@ -187,7 +188,14 @@ def test_refresh_unchecked_overwrites_stale_drafts_but_protects_checked(tmp_path
     )
     checked_bytes = checked_json.read_bytes()
     _write_image(session_dir / "00000002.png")
-    write_label_file(session_dir / "00000002.json", [], image_width=64, image_height=36, checked=False)
+    unchecked_json = session_dir / "00000002.json"
+    write_label_file(unchecked_json, [], image_width=64, image_height=36, checked=False)
+    draft_dir = session_dir / ".prelabel_drafts"
+    draft_dir.mkdir()
+    checked_draft = draft_dir / checked_json.name
+    checked_draft.write_bytes(checked_bytes)
+    unchecked_draft = draft_dir / unchecked_json.name
+    unchecked_draft.write_bytes(unchecked_json.read_bytes())
 
     result = main(
         ["--work-root", str(work_root), "--session-id", "s1", "--config", str(config_path), "--refresh-unchecked"]
@@ -195,9 +203,11 @@ def test_refresh_unchecked_overwrites_stale_drafts_but_protects_checked(tmp_path
 
     assert result == 0
     assert checked_json.read_bytes() == checked_bytes
+    assert checked_draft.read_bytes() == checked_bytes
     boxes, checked = read_label_file(session_dir / "00000002.json")
     assert checked is False
     assert ("gem_blue", 20.0, 12.0, 24.0, 16.0) in _as_tuples(boxes)
+    assert unchecked_draft.read_bytes() == unchecked_json.read_bytes()
     output = capsys.readouterr().out
     assert "下書き作成数: 1" in output
     assert "既存 JSON スキップ数: 1" in output

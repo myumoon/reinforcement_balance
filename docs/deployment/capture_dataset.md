@@ -1,6 +1,10 @@
 # Capture Dataset
 
-Survivors の frame は、明示した Git 外 store の一時 session へ lossless PNG と JSONL で逐次保存し、完成後に directory rename で publish する。収録時の manifest は `formal_dataset_eligible=false` であり、operator が resolved target profile と build を照合して昇格 CLI を実行した後だけ `true` になる。live capture の成功後は開始時の resolved profile bytes、統計 JSON、記録雛形から埋めた Markdown を `<RecordRoot>/session_logs/<SessionId>/` に保存する。これは `capture_sessions/` の外なので capture hash を変えない。synthetic／dry-run は session log を作らず、log 保存に失敗しても公開済み session は残る。MP4 は目視・ドメイン比較専用で、正式な pixel source にはできない。
+Survivors の frame は、明示した Git 外 store の一時 session へ lossless PNG と JSONL で逐次保存し、完成後に directory rename で publish する。収録時の manifest は `formal_dataset_eligible=false` であり、operator が resolved target profile と build を照合して昇格 CLI を実行した後だけ `true` になる。live capture の成功後は開始時の resolved profile bytes、operator・実測 session 長・run 終了状態を含む統計 JSON、session log を `<RecordRoot>/session_logs/<SessionId>/` に自動保存する。annotation 工数は COCO export 時に同じ log へ自動記録します。これらは `capture_sessions/` の外なので capture hash を変えません。session log に手入力する欄はありません。synthetic／dry-run は session log を作らず、log 保存に失敗しても公開済み session は残ります。MP4 は目視・ドメイン比較専用で、正式な pixel source にはできません。
+
+## 収録前の準備
+
+各 dataset 世代で最初の収録を始める前に一度だけ、ゲーム内のダメージ数値・点滅・言語・UI scale を固定し、その世代の収録中は変更しないでください。Steam Cloud と Steam の自動更新を停止してください。これらの準備を session log に記録する必要はありません。
 
 ## Synthetic smoke
 
@@ -126,7 +130,7 @@ python Tools/Deployment/build_survivors_annotation_agreement.py `
 
 現行 plan では、model session は従来の候補選択、sealed session は `plan_survivors_evaluation_windows.py` で固定した window plan に従って窓内の全 frame を annotation します。sealed の窓内 frame は画面全体をラベルして `labeled_region` を使いません。
 
-sealed session の formal `annotations.jsonl` は `build_survivors_formal_annotations.py` で作成します。formal schema は旧 `AnnotationWriter.read_annotations()` では読めません。session ごとの COCO は `<RecordRoot>/coco/<SessionId>/` へ出力します。現行の正式 gate は `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` です。最短 session 長は300秒、`event:death` は20回、`event:result` は floor 未満の実測件数を記録して gate にせず、time band は到達 session が2本以上のときだけ判定します。annotation 前に YAML と SHA-256 を session log に記録し、publish descriptor の `formal_gates.sha256` と照合します。coverage と verdict notes でデータ不足と性能不足を区別します。
+sealed session の formal `annotations.jsonl` は `build_survivors_formal_annotations.py` で作成します。formal schema は旧 `AnnotationWriter.read_annotations()` では読めません。session ごとの COCO は `<RecordRoot>/coco/<SessionId>/` へ出力します。現行の正式 gate は `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` です。最短 session 長は300秒、`event:death` は20回、`event:result` は floor 未満の実測件数を記録して gate にせず、time band は到達 session が2本以上のときだけ判定します。annotation 前に YAML を確定します。publish CLI が YAML と hash を検証するため、session log への転記・照合は不要です。coverage と verdict notes でデータ不足と性能不足を区別します。
 
 ```powershell
 python Tools/Deployment/publish_survivors_capture_dataset.py `

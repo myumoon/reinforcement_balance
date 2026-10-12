@@ -31,7 +31,7 @@ python Tools/Deployment/capture_survivors.py `
   - 1 回目: 収録を安全に打ち切り、撮れたフレームがあればそのまま公開します。1 枚も撮れていなければ何も公開しません。
   - 2 回目: 直ちに中断し、未公開の一時データを破棄します（全て破棄したい場合のみ使用）。
 - 録画データは `<RecordRoot>/capture_sessions/<SessionId>/` に保存されます。このフォルダは Git 管理対象外です。
-- live capture が成功すると、開始時の `.env/target_profile.resolved.yaml` をそのまま `<RecordRoot>/session_logs/<SessionId>/target_profile.resolved.yaml` に退避し、`session_stats.json` と `session_log.md` も作ります。収録データの hash 検証に影響しないよう、これらは `capture_sessions/` の外に保存されます。`session_log.md` の自動記入欄や YAML の複製・hash 記録は手作業で行わず、残りの空欄だけ記入してください。
+- live capture が成功すると、開始時の `.env/target_profile.resolved.yaml` をそのまま `<RecordRoot>/session_logs/<SessionId>/target_profile.resolved.yaml` に退避し、operator、実測 session 長、run 終了状態、profile 情報を含む `session_stats.json` と `session_log.md` を自動生成します。収録データの hash 検証に影響しないよう、これらは `capture_sessions/` の外に保存されます。session log に手で書く欄はありません。
 - session log の保存に失敗した場合も公開済み capture は残ります。コマンドは終了コード 1 と `session_log_error` を返すので、その session の log 保存先を確認してください。synthetic と dry-run は session log を作りません。
 
 複数セッション分の録画が必要な場合は、`--session-id auto` で同じコマンドを繰り返し実行してください。
@@ -296,7 +296,7 @@ python Tools/Deployment/capture_survivors.py `
 
 `--planned-split` は `model_train`、`model_validation`、`error_calibration`、`final_e2e_test` のいずれかです。用途と `planned_at` は session manifest の `operator_checkpoint` に記録されます。迷ったら `model_train` を明示します。用途を省略した既存 session は model 用として扱い、必要に応じて警告を確認します。
 
-live capture が公開されると、開始時の resolved YAML bytes と SHA-256、`target_profile_hash`、`game_build_id`、`planned_split`、`planned_at`、UTC の収録開始時刻を含む JSON が stdout に出て、同じ内容が `session_stats.json` に保存されます。`session_log.md` の既知情報も自動で入り、operator など人が確認する欄だけが空欄で残ります。YAML の手動複製や hash の転記、雛形のコピーは不要です。
+live capture が公開されると、開始時の resolved YAML bytes と SHA-256、`target_profile_hash`、`game_build_id`、`planned_split`、`planned_at`、UTC の収録開始時刻、operator、実測 session 長、run 終了状態を含む JSON が stdout に出て、同じ内容が `session_stats.json` に保存されます。Steam の自動更新設定は Steam appmanifest から検出し、取得できない場合は `unknown` として記録します。`session_log.md` も自動で埋まり、手入力は不要です。
 
 現行の `perception_session_split.py` は session 長 1800 秒以上を要求します。実行時間は終了 deadline より少し短くなるため、1800 秒要件が適用される収録では `--duration-sec 1800` ちょうどを使わず余裕を取ります。calibration／final 用の新しい session は現行の `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` に定めた最短長に従います。
 
@@ -334,7 +334,7 @@ python Tools/Deployment/prepare_survivors_self_agreement.py `
   --count 300 --seed 0 --minimum-gap-hours 24
 ```
 
-A の最終 label 更新から設定時間が経っていなければ準備 CLI は拒否します。B root の label は空の状態で始まり、作成済み B root にファイルがあると準備 CLI は拒否します。準備から agreement 作成まで A root の label は一切保存せず、選ばれた frame だけを B で annotation します。A の label / 下書きおよび A の frame で作った prelabel は開きません。04-08 の必要件数は `minimum_counts.agreement`（`pair_count`／`iou_mean`／`class_agreement`）に従い、閾値は変えません。04-10／04-14 では agreement は不要です。session ごとの作業開始・終了時刻、frame 数、下書きから修正した frame 数は、必要に応じて `session_log.md` の空欄へ記録します。
+A の最終 label 更新から設定時間が経っていなければ準備 CLI は拒否します。B root の label は空の状態で始まり、作成済み B root にファイルがあると準備 CLI は拒否します。準備から agreement 作成まで A root の label は一切保存せず、選ばれた frame だけを B で annotation します。A の label / 下書きおよび A の frame で作った prelabel は開きません。04-08 の必要件数は `minimum_counts.agreement`（`pair_count`／`iou_mean`／`class_agreement`）に従い、閾値は変えません。04-10／04-14 では agreement は不要です。annotation の開始・終了時刻と frame 数、下書きから修正した frame 数は COCO export 時に session log へ自動記録されます。
 
 現行 plan では、model split は従来の候補選択、sealed session は `plan_survivors_evaluation_windows.py` で固定した窓の全 frame を画面全体で annotation します（`labeled_region` は使いません）。sealed session は prelabel の学習、active learning、候補選びの反復に使いません。窓内 frame の annotation 後、この manual の 2-6 で HUD truth、2-7 で COCO export を行います。
 
@@ -342,7 +342,7 @@ HUD truth を先に確定してから、session ごとに capture store の hash
 
 sealed session の formal `annotations.jsonl` は `build_survivors_formal_annotations.py` で作ります。`AnnotationWriter.read_annotations()` は旧 schema 専用なので使いません。session ごとの COCO は `<RecordRoot>/coco/<SessionId>/` に置き、現行の evaluation windows と `formal_gates.v1` を使って `publish_survivors_capture_dataset.py` を実行します。publish は descriptor と restore verdict を出力します。backup と restore には別々の空 directory を指定してください。
 
-現行の最小 gate は `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` です。最短 session 長 300 秒、`event:death` 20 回、`event:result` は floor 未満の実測件数を記録して gate にせず、time band は到達 session が2本以上ある場合だけ判定します。session log に YAML の SHA-256 を記録し、sealed session の annotation 前に確定してください。publish descriptor の `formal_gates.sha256` と一致することを確認し、事後に緩めません。coverage と verdict notes でデータ不足と性能不足を区別します。
+現行の最小 gate は `Tools/Deployment/configs/formal_gates_minimal_v1.yaml` です。最短 session 長 300 秒、`event:death` 20 回、`event:result` は floor 未満の実測件数を記録して gate にせず、time band は到達 session が2本以上ある場合だけ判定します。sealed session の annotation 前に YAML を確定します。publish CLI が設定と hash を検証するため、session log への転記・照合は不要です。coverage と verdict notes でデータ不足と性能不足を区別します。
 
 正式 annotation 用 CLI が利用できる時期と画面・HUD truth の運用:
 
@@ -350,11 +350,11 @@ sealed session の formal `annotations.jsonl` は `build_survivors_formal_annota
 - level-up／宝箱の選択は通常どおり行い、固定ルールや選択ログは設けません。level-up 画面の段階マークから item level を読み、HUD truth の `expected_slot_levels` に記録します。
 - `expected_screen_state` は parser が使う状態語彙に合わせ、`death` と `result` を分けて記録します。両方の画面を収録・確認します。
 
-live capture が自動生成した `<RecordRoot>/session_logs/<SessionId>/session_log.md` を開き、残りの空欄だけ記入してください。雛形 [`templates/d04_session_log.md`](templates/d04_session_log.md) を Git 外へ複製して session ごとに記録する必要はありません。
+live capture が `<RecordRoot>/session_logs/<SessionId>/session_log.md` を自動生成し、COCO export が annotation 工数を追記します。雛形 [`templates/d04_session_log.md`](templates/d04_session_log.md) の複製や session log への手入力は不要です。
 
 ### 3-4. sealed session の評価窓を annotation する（04-18）
 
-`error_calibration`／`final_e2e_test` に使う sealed session 全件を、annotation を始める前に一つの窓 plan にまとめ、Git 外の session log と artifact store に保存します。plan は時間帯の固定 offset、run tail、development parser の event、development detector の boss 検出から決まり、frame 内容を見て人が選びません。parser/checkpoint hash と閾値も plan の rule に固定します。
+`error_calibration`／`final_e2e_test` に使う sealed session 全件を、annotation を始める前に一つの窓 plan にまとめ、artifact store に保存します。plan は時間帯の固定 offset、run tail、development parser の event、development detector の boss 検出から決まり、frame 内容を見て人が選びません。parser/checkpoint hash と閾値も plan の rule に固定します。
 
 ```powershell
 python Tools/Deployment/plan_survivors_evaluation_windows.py `

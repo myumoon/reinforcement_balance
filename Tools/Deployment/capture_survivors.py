@@ -13,6 +13,7 @@ import argparse
 import contextlib
 import ctypes
 from datetime import datetime, timezone
+import getpass
 import hashlib
 import json
 import os
@@ -286,6 +287,13 @@ def _write_session_log(
     if destination.exists() or destination.is_symlink():
         raise FileExistsError(f"session log directory already exists: {destination}")
 
+    payload.update(_session_log_frame_summary(store_root, session_id))
+    payload["steam_auto_update_behavior"] = _detect_steam_auto_update_behavior()
+    try:
+        payload["operator"] = getpass.getuser() or "unknown"
+    except Exception:
+        payload["operator"] = "unknown"
+
     session_stats_path = destination / "session_stats.json"
     session_profile_path = destination / "target_profile.resolved.yaml"
     template_path = Path(__file__).resolve().parents[2] / "docs" / "deployment" / "templates" / "d04_session_log.md"
@@ -293,9 +301,15 @@ def _write_session_log(
     automatic_values = {
         "{{session_id}}": session_id,
         "{{capture_started_at}}": str(payload["capture_started_at"] or ""),
+        "{{operator}}": payload["operator"],
         "{{planned_split}}": str(payload["planned_split"] or ""),
         "{{planned_at}}": str(payload["planned_at"] or ""),
         "{{duration_sec}}": str(payload["requested_duration_sec"]),
+        "{{actual_duration_sec}}": str(payload["actual_duration_sec"]),
+        "{{run_end_death}}": payload["run_end_death"],
+        "{{run_end_result}}": payload["run_end_result"],
+        "{{last_gameplay_timer_seconds}}": str(payload["last_gameplay_timer_seconds"]),
+        "{{steam_auto_update_behavior}}": payload["steam_auto_update_behavior"],
         "{{session_manifest_path}}": str(store_root / "capture_sessions" / session_id / "session_manifest.json"),
         "{{session_stats_path}}": str(session_stats_path),
         "{{stdout_stats}}": "session_stats.json と同じ JSON",
@@ -316,6 +330,86 @@ def _write_session_log(
         )
         (staged / "session_log.md").write_text(session_log, encoding="utf-8", newline="\n")
         os.rename(staged, destination)
+
+
+def _session_log_frame_summary(store_root: Path, session_id: str) -> dict[str, object]:
+    """収録 timestamp と末尾 HUD を session log 用に要約する。
+
+    判定不能な値は unknown にし、読み取りや HUD 解析の失敗を capture の失敗にしない。
+    """
+    summary: dict[str, object] = {
+        "actual_duration_sec": "unknown",
+        "run_end_death": "unknown",
+        "run_end_result": "unknown",
+        "last_gameplay_timer_seconds": "unknown",
+    }
+    try:
+        restored = DatasetWriter.restore(store_root, session_id, metadata_only=True)
+        records = restored.frame_records
+        if not records:
+            return summary
+        started_ns = records[0].captured_monotonic_ns
+        ended_ns = records[-1].captured_monotonic_ns
+        if ended_ns >= started_ns:
+            summary["actual_duration_sec"] = round((ended_ns - started_ns) / 1_000_000_000, 3)
+
+        recent = [record for record in records[-300:] if record.captured_monotonic_ns >= ended_ns - 10_000_000_000]
+        import cv2
+        from survivors.vision.hud_parser import HudParser
+
+        parser = HudParser(parser_artifact_hash="session-log", icon_matcher=None)
+        observations: list[tuple[str | None, float | None]] = []
+        for record in recent:
+            try:
+                frame = cv2.imread(
+                    str(restored.session_path / record.object_path), cv2.IMREAD_UNCHANGED
+                )
+                if frame is None:
+                    observations.append((None, None))
+                    continue
+                state = parser.parse(
+                    frame,
+                    session_id=session_id,
+                    frame_index=record.frame_id,
+                    captured_monotonic_ns=record.captured_monotonic_ns,
+                )
+                observations.append((state.screen_state, state.timer_seconds))
+            except Exception:
+                observations.append((None, None))
+
+        for event, field in (("death", "run_end_death"), ("result", "run_end_result")):
+            if any(state == event for state, _ in observations):
+                summary[field] = "yes"
+            elif observations and all(state not in {None, "unknown"} for state, _ in observations):
+                summary[field] = "no"
+        last_gameplay = next(
+            ((state, timer) for state, timer in reversed(observations) if state == "gameplay"),
+            None,
+        )
+        if last_gameplay is not None and last_gameplay[1] is not None:
+            summary["last_gameplay_timer_seconds"] = last_gameplay[1]
+    except Exception:
+        pass
+    return summary
+
+
+def _detect_steam_auto_update_behavior() -> str:
+    """Steam の appmanifest から Vampire Survivors の自動更新設定を読む。
+
+    Windows レジストリや manifest が読めない環境では unknown を返し、収録を続ける。
+    """
+    if sys.platform != "win32":
+        return "unknown"
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
+            steam_path, _ = winreg.QueryValueEx(key, "SteamPath")
+        manifest = Path(steam_path) / "steamapps" / "appmanifest_1794680.acf"
+        match = re.search(r'"AutoUpdateBehavior"\s+"([^\"]+)"', manifest.read_text(encoding="utf-8-sig"))
+        return match.group(1) if match else "unknown"
+    except Exception:
+        return "unknown"
 
 
 def main(argv: list[str] | None = None) -> int:

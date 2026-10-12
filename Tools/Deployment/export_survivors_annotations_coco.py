@@ -6,6 +6,8 @@ work-root 内の八桁 frame ファイルを読み、WorldDataset と互換な J
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+import getpass
 import json
 import os
 import sys
@@ -52,6 +54,87 @@ def _image_file_name(image_path: Path, output_dir: Path) -> str:
         return os.path.relpath(image_path.resolve(), output_dir.resolve())
     except ValueError:
         return str(image_path.resolve())
+
+
+def _box_signature(boxes) -> list[tuple[str, float, float, float, float]]:
+    """label と矩形座標だけを比較用の安定した列にする。
+
+    検出スコアや JSON 内の shape 順序は annotation の修正判定に含めない。
+    """
+    return sorted((box.label, box.left, box.top, box.right, box.bottom) for box in boxes)
+
+
+def _update_session_log_annotation_hours(store_root: Path, work_root: Path, session_id: str) -> None:
+    """checked label の工数を session log の work-root 行へ反映する。
+
+    log の欠落や工数情報の読み取り失敗は警告に留め、COCO export を成功させる。
+    """
+    session_log = store_root / "session_logs" / session_id / "session_log.md"
+    if not session_log.is_file():
+        print(f"warning: missing session log: {session_log}", file=sys.stderr)
+        return
+    try:
+        session_dir = work_root / session_id
+        checked_labels = []
+        for _, _, label_path in iter_frame_files(session_dir):
+            if label_path is None:
+                continue
+            boxes, checked = read_label_file(label_path)
+            if checked:
+                checked_labels.append((label_path, boxes))
+
+        modified = no_draft = 0
+        for label_path, boxes in checked_labels:
+            draft_path = session_dir / ".prelabel_drafts" / label_path.name
+            if not draft_path.is_file():
+                no_draft += 1
+            elif _box_signature(boxes) != _box_signature(read_label_file(draft_path)[0]):
+                modified += 1
+        if checked_labels:
+            start = min(path.stat().st_mtime for path, _ in checked_labels)
+            end = max(path.stat().st_mtime for path, _ in checked_labels)
+            started_at = datetime.fromtimestamp(start, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+            ended_at = datetime.fromtimestamp(end, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        else:
+            started_at = ended_at = "unknown"
+        try:
+            annotator = getpass.getuser() or "unknown"
+        except Exception:
+            annotator = "unknown"
+
+        root_path = str(work_root.resolve())
+        row = (
+            f"| {root_path} | {annotator} | {started_at} | {ended_at} | {len(checked_labels)} | "
+            f"{modified} | {no_draft} |"
+        )
+        lines = session_log.read_text(encoding="utf-8").splitlines()
+        heading = next(
+            index for index, line in enumerate(lines)
+            if line.strip() in {"## annotation 工数", "### annotation 工数"}
+        )
+        table_start = next(
+            (index for index in range(heading + 1, len(lines)) if lines[index].startswith("| ")),
+            heading + 1,
+        )
+        table_end = table_start
+        while table_end < len(lines) and lines[table_end].startswith("| "):
+            table_end += 1
+        normalized_root = os.path.normcase(os.path.abspath(root_path))
+        existing_rows = []
+        for existing in lines[table_start + 2:table_end]:
+            cells = [cell.strip() for cell in existing.strip("|").split("|")]
+            if len(cells) == 7 and os.path.normcase(os.path.abspath(cells[0])) != normalized_root:
+                existing_rows.append(existing)
+        table = [
+            "| work-root | annotator | 開始時刻 | 終了時刻 | checked frame 数 | 下書きから修正した frame 数 | 下書きなし frame 数 |",
+            "|---|---|---|---|---:|---:|---:|",
+            *existing_rows,
+            row,
+        ]
+        lines[table_start:table_end] = table
+        session_log.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    except Exception as exc:
+        print(f"warning: failed to update annotation hours in {session_log}: {exc}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -193,6 +276,10 @@ def main(argv: list[str] | None = None) -> int:
             (args.output_dir / filename).write_text(
                 json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
             )
+
+        if args.store_root is not None:
+            for session_id in session_ids:
+                _update_session_log_annotation_hours(args.store_root, args.work_root, session_id)
 
         print(f"採用画像数: {len(world_images)}")
         print(f"未確認でスキップした数: {skipped_unconfirmed}")
