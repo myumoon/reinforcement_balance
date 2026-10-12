@@ -333,8 +333,7 @@ def test_export_updates_annotation_hours_by_work_root(tmp_path: Path, monkeypatc
         "| work-root | annotator | start | end | checked frames | edited frames | no draft |\n"
         "| --- | --- | --- | --- | ---: | ---: | ---: |\n"
         f"| {root_key} | stale | old | old | 99 | 99 | 99 |\n"
-        "| /other/work | other-user | old | old | 4 | 2 | 0 |\n"
-        "| /legacy/work | legacy-user | old-start | old-end | 5 |\n",
+        "| /other/work | other-user | old | old | 4 | 2 | 0 |\n",
         encoding="utf-8",
     )
     manifest_records = [SimpleNamespace(frame_id=frame_id, object_sha256="a" * 64) for frame_id in (1, 2, 3, 10)]
@@ -355,7 +354,6 @@ def test_export_updates_annotation_hours_by_work_root(tmp_path: Path, monkeypatc
     assert cells_a[4:] == ["3", "1", "1"]
     assert sum(line.startswith(f"| {root_key} |") for line in rows) == 1
     assert any(line.startswith("| /other/work |") for line in rows)
-    assert "| /legacy/work | legacy-user | old-start | old-end | 5 |" in log
 
     root_b = tmp_path / "work-b"
     session_b = root_b / "session-a"
@@ -371,6 +369,49 @@ def test_export_updates_annotation_hours_by_work_root(tmp_path: Path, monkeypatc
     assert f"| {root_key} |" in log
     assert f"| {root_b.resolve()} |" in log
     assert "採用画像数: 1" in capsys.readouterr().out
+
+
+def test_export_preserves_legacy_five_column_annotation_rows(tmp_path: Path, monkeypatch, capsys) -> None:
+    """PR #373 の5列工数表にある A/B 行を新形式への更新後も残す。
+
+    行の列数が現行表と異なっても警告なしに消さず、COCO export を続ける。
+    """
+    store_root = tmp_path / "store"
+    log_path = store_root / "session_logs/session-a/session_log.md"
+    log_path.parent.mkdir(parents=True)
+    legacy_rows = (
+        "| A | | | | |\n"
+        "| B（二重 annotation 時。04-08 formal 用は必須、それ以外は任意） | | | | |\n"
+    )
+    log_path.write_text(
+        "### annotation 工数\n\n"
+        "| annotator / work-root | 開始時刻 | 終了時刻 | 対象 frame 数 | 下書きから修正した frame 数 |\n"
+        "|---|---|---|---:|---:|\n"
+        f"{legacy_rows}",
+        encoding="utf-8",
+    )
+    work_root = tmp_path / "work"
+    session_dir = work_root / "session-a"
+    _write_png(session_dir / "00000001.png")
+    _write_label(session_dir / "00000001.json", [], checked=True)
+    monkeypatch.setattr(
+        export_module.DatasetWriter,
+        "restore",
+        lambda *args, **kwargs: SimpleNamespace(
+            frame_records=[SimpleNamespace(frame_id=1, object_sha256="a" * 64)]
+        ),
+    )
+
+    assert main(
+        [
+            "--work-root", str(work_root), "--store-root", str(store_root),
+            "--session-id", "session-a", "--output-dir", str(tmp_path / "export"),
+        ]
+    ) == 0
+
+    updated_log = log_path.read_text(encoding="utf-8")
+    assert all(row in updated_log for row in legacy_rows.splitlines())
+    assert "warning:" not in capsys.readouterr().err
 
 
 def test_export_warns_and_continues_when_session_log_is_missing(tmp_path: Path, monkeypatch, capsys) -> None:
