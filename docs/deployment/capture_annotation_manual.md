@@ -326,19 +326,19 @@ python Tools/Deployment/freeze_survivors_capture_split.py `
 
 ### 3-3. annotation、HUD truth、COCO export
 
-model split は従来の候補選択で飛び飛びの frame を annotation します。04-08（04-15 の formal world detector 訓練）用 dataset では agreement が必要です。1人で作業する場合は、A の checked label から画像だけの B root を準備し、A の label と prelabel を見ずに B を annotation します。
+model split は従来の候補選択で飛び飛びの frame を annotation します。04-08（04-15 の formal world detector 訓練）用 dataset では agreement が必要です。1人で作業する場合は、A の最終 label 更新から設定 gap（既定24時間）以上待ってから画像だけの B root を準備し、A の label と prelabel を見ずに B を annotation します。
 
 ```powershell
 python Tools/Deployment/prepare_survivors_self_agreement.py `
   --work-root-a "<WorkRootA>" --work-root-b "<WorkRootB>" `
-  --count 300 --seed 0
+  --count 300 --seed 0 --minimum-gap-hours 24
 ```
 
-A の最後の label 更新から24時間以上空けて B を描き直してください。B root の label は空の状態で始まり、作成済み B root にファイルがあると準備 CLI は拒否します。準備した frame だけを B で annotation し、A の label / 下書きおよび A の frame で作った prelabel は開きません。04-08 の必要件数は `minimum_counts.agreement`（`pair_count`／`iou_mean`／`class_agreement`）に従い、閾値は変えません。04-10／04-14 では agreement は不要です。session ごとの作業開始・終了時刻、frame 数、下書きから修正した frame 数は、必要に応じて `session_log.md` の空欄へ記録します。
+A の最終 label 更新から設定時間が経っていなければ準備 CLI は拒否します。B root の label は空の状態で始まり、作成済み B root にファイルがあると準備 CLI は拒否します。準備から agreement 作成まで A root の label は一切保存せず、選ばれた frame だけを B で annotation します。A の label / 下書きおよび A の frame で作った prelabel は開きません。04-08 の必要件数は `minimum_counts.agreement`（`pair_count`／`iou_mean`／`class_agreement`）に従い、閾値は変えません。04-10／04-14 では agreement は不要です。session ごとの作業開始・終了時刻、frame 数、下書きから修正した frame 数は、必要に応じて `session_log.md` の空欄へ記録します。
 
 現行 plan では、model split は従来の候補選択、sealed session は `plan_survivors_evaluation_windows.py` で固定した窓の全 frame を画面全体で annotation します（`labeled_region` は使いません）。sealed session は prelabel の学習、active learning、候補選びの反復に使いません。窓内 frame の annotation 後、この manual の 2-6 で HUD truth、2-7 で COCO export を行います。
 
-HUD truth を先に確定してから、session ごとに capture store の hash と split を束縛した COCO を出力します。04-08 用 agreement は `build_survivors_annotation_agreement.py` で作ります。1人の場合は `--annotator-a` と `--annotator-b` に同じ ID を渡し、`--minimum-gap-hours 24` を指定します。label file の更新時刻から A の最終更新と B の最初の更新を測り、blind 条件または24時間 gap を満たさない self_repeat は拒否します。publish 時は `publish_survivors_capture_dataset.py --agreement <AgreementJson>` を指定し、04-15 の formal 訓練では `train_survivors_world_detector.py --formal --annotation-agreement <AgreementJson>` に同じ JSON を渡します。04-10／04-14 用の publish では `--agreement` を省略できます。
+HUD truth を先に確定してから、session ごとに capture store の hash と split を束縛した COCO を出力します。04-08 用 agreement は `build_survivors_annotation_agreement.py` で作ります。1人の場合は `--annotator-a` と `--annotator-b` に同じ ID を渡し、準備 CLI と builder の `--minimum-gap-hours` に同じ値を指定します。gap は `min(manifest.created_at, B label の最小 mtime) - A label の最大 mtime` で測り、manifest より前の B label、blind 条件、設定 gap のいずれかを満たさない self_repeat は拒否します。publish 時は `publish_survivors_capture_dataset.py --agreement <AgreementJson>` を指定し、04-15 の formal 訓練では `train_survivors_world_detector.py --formal --annotation-agreement <AgreementJson>` に同じ JSON を渡します。04-10／04-14 用の publish では `--agreement` を省略できます。
 
 sealed session の formal `annotations.jsonl` は `build_survivors_formal_annotations.py` で作ります。`AnnotationWriter.read_annotations()` は旧 schema 専用なので使いません。session ごとの COCO は `<RecordRoot>/coco/<SessionId>/` に置き、現行の evaluation windows と `formal_gates.v1` を使って `publish_survivors_capture_dataset.py` を実行します。publish は descriptor と restore verdict を出力します。backup と restore には別々の空 directory を指定してください。
 
