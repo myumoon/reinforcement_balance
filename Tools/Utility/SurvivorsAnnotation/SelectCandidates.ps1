@@ -1,4 +1,4 @@
-# 目的: 未配置の収録 session からアノテーション候補を選ぶ。
+﻿# 目的: 未配置の収録 session からアノテーション候補を選ぶ。
 # WorkRoot に配置済みの session は既定で除外し、指定時だけ再実行する。
 [CmdletBinding()]
 param(
