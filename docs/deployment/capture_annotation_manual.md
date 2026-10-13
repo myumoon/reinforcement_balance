@@ -60,6 +60,12 @@ python Tools/Deployment/select_survivors_annotation_candidates.py `
 - 必要なら `--work-root "<WorkRoot>"`、`--count 200`、`--stride 15` を指定して調整できます。
 - 録画した全セッションに対して同様に実行してください。
 
+候補抽出をまとめて行う場合は `Tools\Utility\SurvivorsAnnotation\SelectCandidates.bat` をダブルクリックできます。既定では capture_sessions にあるうち annotation_work にまだ配置されていない session だけを処理します。設定ファイル、WorkRoot、session ID、枚数、stride は引数で指定できます。
+
+```cmd
+Tools\Utility\SurvivorsAnnotation\SelectCandidates.bat -EnvFile "<EnvFile>" -WorkRoot "<WorkRoot>" -SessionId "session-0001,session-0002" -Count 200 -Stride 15
+```
+
 ### 2-3. 自動下書きを作る
 
 固定矩形（player/HUD）と、確認済みラベルで学習した下書き用検出器（Faster R-CNN）の推論結果を使って下書き JSON を生成します。
@@ -96,10 +102,16 @@ python Tools/Deployment/prelabel_survivors_frames.py `
   --session-id "<SessionId>"
 ```
 
-WorkRoot 直下の `session-*` をすべて処理する場合は `Tools\Utility\SurvivorsAnnotation\PrelabelAllSessions.bat` を使えます。`_relabel` などのディレクトリは対象外です。`-RefreshUnchecked` を付けると `--refresh-unchecked` を渡します。WorkRoot と env ファイルも必要に応じて指定できます。
+WorkRoot 直下の `session-*` をすべて処理する場合は `Tools\Utility\SurvivorsAnnotation\PrelabelAllSessions.bat` を使えます。`_relabel` などのディレクトリは対象外です。既定では JSON がまだ無い画像にだけ下書きを作る安全版です。WorkRoot と env ファイルも必要に応じて指定できます。
 
 ```cmd
-Tools\Utility\SurvivorsAnnotation\PrelabelAllSessions.bat -RefreshUnchecked -EnvFile "<EnvFile>" -WorkRoot "<WorkRoot>"
+Tools\Utility\SurvivorsAnnotation\PrelabelAllSessions.bat -EnvFile "<EnvFile>" -WorkRoot "<WorkRoot>"
+```
+
+未確認の下書きを更新するときは、通常版とは別の `Tools\Utility\SurvivorsAnnotation\PrelabelAllSessions_Refresh.bat` を使います。引数なしでダブルクリックでき、別の設定ファイルや WorkRoot は引数で指定できます。
+
+```cmd
+Tools\Utility\SurvivorsAnnotation\PrelabelAllSessions_Refresh.bat -EnvFile "<EnvFile>" -WorkRoot "<WorkRoot>"
 ```
 
 - 既定で `<WorkRoot>/prelabel_detector.pt` を読みます（`--detector` で変更可）。重みファイルが無い場合は警告を表示し、固定矩形だけの下書きを作ります。
@@ -122,7 +134,7 @@ python Tools/Deployment/prelabel_survivors_frames.py `
   --refresh-unchecked
 ```
 
-未確認のまま GUI で手動編集を始めているフレームがある場合、`--refresh-unchecked` を実行すると下書きが編集前の状態に戻ってしまいます。手を付けたフレームは先に確認済みにしてから実行してください。
+GUI で手を付けた未確認フレームは、Refresh 版を実行すると編集前の下書きに戻るため、手動編集したフレームを先に確認済みにしてください。Refresh 版を通常版と分けているのは、この上書きを意図した場合だけ選べるようにするためです。
 
 ### 2-4. X-AnyLabeling で確認・修正する
 
@@ -270,6 +282,12 @@ python Tools/Deployment/export_survivors_annotations_coco.py `
 ```
 
 `checked: true` の画像だけが対象です。model 用 dataset は `model_train` と `model_validation` を別々に export して、混ざらないよう別フォルダーに保存します。
+
+WorkRoot 直下の `session-*` をまとめて出力する場合は `Tools\Utility\SurvivorsAnnotation\ExportCoco.bat` をダブルクリックできます。設定ファイル、WorkRoot、session ID は引数で指定できます。各 session の出力先は `<RecordRoot>/coco/<SessionId>` です。
+
+```cmd
+Tools\Utility\SurvivorsAnnotation\ExportCoco.bat -EnvFile "<EnvFile>" -WorkRoot "<WorkRoot>" -SessionId "session-0001,session-0002"
+```
 
 ```powershell
 python Tools/Deployment/export_survivors_annotations_coco.py `
