@@ -15,3 +15,4 @@ Windows PowerShell の native `python -c '..."key"...'` は内部の二重引用
 - 2026-10-11: Deployment の controller test は単独実行時に controller が top-level package になるため `..vision.conftest` は ImportError。vision fixture を相対 import せず、必要な合成画素を対象 test 内で描く。
 2026-10-11: Codex sandbox の pytest は workspace 内の `--basetemp` でも `WinError 5` で `tmp_path` が失敗するため、指定コマンドを `require_escalated` で実行する。
 - 2026-10-11: sandbox の pytest は TemporaryDirectory cleanup が chmod で WinError 5 になるため、同じ作業ディレクトリ内の write でもテスト cleanup が失敗する。対象テストは承認済みの権限付き実行で確認する。
+Windows PowerShell 5.1 parses .ps1 files without a UTF-8 BOM as ANSI; add a BOM when scripts contain Japanese text to avoid syntax errors.
