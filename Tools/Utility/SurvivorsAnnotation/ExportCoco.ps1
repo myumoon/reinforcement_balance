@@ -1,4 +1,4 @@
-# 目的: annotation_work の session ごとに COCO JSON を出力する。
+﻿# 目的: annotation_work の session ごとに COCO JSON を出力する。
 # 出力先は artifact root 配下の coco フォルダに session ID ごとに分ける。
 [CmdletBinding()]
 param(
