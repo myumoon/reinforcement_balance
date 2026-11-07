@@ -203,6 +203,38 @@ def drop_ignored(boxes: list[LabelBox], regions: tuple[IgnoreRegion, ...]) -> li
     return [box for box in boxes if not ignored(box)]
 
 
+# レベルアップ画面の中央上部パネル（1920x1080 の [y, x] 範囲）と、そのパネルの HSV 色範囲。
+_LEVELUP_Y = (130, 250)
+_LEVELUP_X = (700, 1220)
+_LEVELUP_HSV_LOW = (110, 50, 80)
+_LEVELUP_HSV_HIGH = (135, 160, 190)
+_LEVELUP_MIN_RATIO = 0.4
+LEVELUP_GEM_LABELS = ("gem_blue", "gem_green", "gem_red")
+
+
+def is_levelup_screen(image_bgr: np.ndarray) -> bool:
+    """1920x1080 画像の中央上部パネルの色から、レベルアップ画面かを返す。
+
+    画面上部中央の決まった範囲に、パネル特有の青紫の画素が 4 割以上あれば真にする。
+    通常のプレイ画面ではほとんど 0 割、レベルアップ画面では 9 割台になる。
+    範囲が画像外にはみ出す小さな画像は通常画面として扱い、例外にしない。
+    """
+    (y0, y1), (x0, x1) = _LEVELUP_Y, _LEVELUP_X
+    if image_bgr.ndim != 3 or image_bgr.shape[0] < y1 or image_bgr.shape[1] < x1:
+        return False
+    hsv = cv2.cvtColor(image_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, _LEVELUP_HSV_LOW, _LEVELUP_HSV_HIGH)
+    return float(np.count_nonzero(mask)) / mask.size >= _LEVELUP_MIN_RATIO
+
+
+def drop_levelup_gems(boxes: list[LabelBox]) -> list[LabelBox]:
+    """レベルアップ画面の演出である gem_blue / gem_green / gem_red の矩形を取り除く。
+
+    ジェム 3 種だけを外し、敵や武器など他のクラスはそのまま残す。
+    """
+    return [box for box in boxes if box.label not in LEVELUP_GEM_LABELS]
+
+
 def _check_detector_label(path: Path, where: str, label: object) -> str:
     """下書き検出器で扱えるラベル（WORLD_CLASSES とアノテーション専用クラス）かを検証する。
 
