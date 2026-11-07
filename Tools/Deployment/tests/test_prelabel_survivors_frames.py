@@ -144,6 +144,29 @@ def test_prelabel_drops_detections_in_ignore_regions(tmp_path, monkeypatch, caps
     assert _DETECTED.label in labels
 
 
+def test_prelabel_drops_only_gems_on_levelup_screen(tmp_path, monkeypatch, capsys, fake_detector):
+    """レベルアップ画面のフレームでは gem 3 種だけを下書きに書かず、他クラスと通常画面は従来どおり書く。
+
+    中央上部をパネル色で塗った 1080p 画像では gem が落ち、敵と固定矩形は残る。
+    同じ検出結果でも通常画面のフレームでは gem も書かれる。
+    """
+    work_root, session, config_path = _setup(tmp_path)
+    enemy =LabelBox("enemy_normal", 30, 12, 40, 22, 0.9)
+    monkeypatch.setattr(prelabel_survivors_frames, "predict_boxes", lambda *args, **kwargs: [_DETECTED, enemy])
+    hsv = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    hsv[130:250, 700:1220] = (120, 100, 130)
+    _write_image(session / "00000001.png", cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR))
+    _write_image(session / "00000002.png", np.zeros((1080, 1920, 3), dtype=np.uint8))
+
+    assert main(["--work-root", str(work_root), "--session-id", "s1", "--config", str(config_path)]) == 0
+
+    levelup_labels = [box.label for box in read_label_file(session / "00000001.json")[0]]
+    normal_labels = [box.label for box in read_label_file(session / "00000002.json")[0]]
+    assert "gem_blue" not in levelup_labels
+    assert {"enemy_normal", "player_anchor"} <= set(levelup_labels)
+    assert {"gem_blue", "enemy_normal", "player_anchor"} <= set(normal_labels)
+
+
 def test_prelabel_skips_json_created_after_frame_listing(tmp_path, monkeypatch, capsys, fake_detector):
     """一覧取得後に現れた人手 JSON を置換せず、スキップ数に含める。
 

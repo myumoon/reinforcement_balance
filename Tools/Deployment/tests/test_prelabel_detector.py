@@ -23,6 +23,8 @@ from survivors.prelabel_detector import (
     build_model,
     collect_training_frames,
     drop_ignored,
+    drop_levelup_gems,
+    is_levelup_screen,
     load_config,
     load_detector,
     predict_boxes,
@@ -205,6 +207,42 @@ def test_drop_ignored_removes_only_listed_labels_centered_inside():
     edge = LabelBox("weapon_orbit", 180, 60, 240, 100, 0.99)  # 中心 (210, 80) は範囲外
 
     assert drop_ignored([icon, enemy_inside, orbit_outside, edge], (region,)) == [enemy_inside, orbit_outside, edge]
+
+
+def _panel_image(ratio, *, height=1080, width=1920):
+    """レベルアップ画面のパネル色（色相 120・彩度 100・明度 130）を中央上部へ ratio 割だけ塗った画像を作る。
+
+    判定範囲 [130:250, 700:1220] の先頭の列から ratio の割合ぶんを塗り、残りは黒にする。
+    """
+    hsv = np.zeros((height, width, 3), dtype=np.uint8)
+    columns = round(520 * ratio)
+    hsv[130:250, 700 : 700 + columns] = (120, 100, 130)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+
+def test_is_levelup_screen_by_panel_color_ratio():
+    """パネル色の画素が判定範囲の 4 割以上ならレベルアップ画面、未満なら通常画面とする。
+
+    境界の 0.4 ちょうどは真、わずかに下回れば偽になることも確かめる。
+    """
+    assert is_levelup_screen(_panel_image(0.96))
+    assert is_levelup_screen(_panel_image(0.4))
+    assert not is_levelup_screen(_panel_image(0.39))
+    assert not is_levelup_screen(np.zeros((1080, 1920, 3), dtype=np.uint8))
+
+
+def test_is_levelup_screen_false_for_small_image():
+    """判定範囲が画像外にはみ出す小さな画像は、例外にせず通常画面として扱う。"""
+    assert not is_levelup_screen(np.full((36, 64, 3), 128, dtype=np.uint8))
+    assert not is_levelup_screen(np.full((200, 1920, 3), 128, dtype=np.uint8))
+
+
+def test_drop_levelup_gems_removes_only_gem_labels():
+    """gem_blue / gem_green / gem_red だけを外し、敵や武器は残す。"""
+    gems = [LabelBox(label, 0, 0, 10, 10, 0.9) for label in ("gem_blue", "gem_green", "gem_red")]
+    others = [LabelBox("enemy_normal", 0, 0, 10, 10, 0.9), LabelBox("weapon_orbit", 0, 0, 10, 10, 0.9)]
+
+    assert drop_levelup_gems(gems + others) == others
 
 
 def _write_frame(session_dir, frame_id, boxes, *, checked, png=True):
