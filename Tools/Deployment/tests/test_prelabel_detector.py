@@ -232,13 +232,21 @@ def test_is_levelup_screen_by_panel_color_ratio():
 
 
 def test_is_levelup_screen_false_for_small_image():
-    """判定範囲が画像外にはみ出す小さな画像は、例外にせず通常画面として扱う。"""
+    """判定範囲が画像外にはみ出す小さな画像は、例外にせず通常画面として扱う。
+
+    1920x1080 前提の座標で切り出すため、画像が小さいと範囲が足りなくなる。
+    そのような画像でエラーにならず、レベルアップ画面ではないとみなすことを確かめる。
+    """
     assert not is_levelup_screen(np.full((36, 64, 3), 128, dtype=np.uint8))
     assert not is_levelup_screen(np.full((200, 1920, 3), 128, dtype=np.uint8))
 
 
 def test_drop_levelup_gems_removes_only_gem_labels():
-    """gem_blue / gem_green / gem_red だけを外し、敵や武器は残す。"""
+    """gem_blue / gem_green / gem_red だけを外し、敵や武器は残す。
+
+    レベルアップ画面の演出で出る宝石は下書きに残したくないが、
+    同じ画面にいる敵や武器の検出は今までどおり残す必要がある。
+    """
     gems = [LabelBox(label, 0, 0, 10, 10, 0.9) for label in ("gem_blue", "gem_green", "gem_red")]
     others = [LabelBox("enemy_normal", 0, 0, 10, 10, 0.9), LabelBox("weapon_orbit", 0, 0, 10, 10, 0.9)]
 
